@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Registration stub. GitHub only offers workflow_dispatch for workflows that
+# exist on the default branch, so this file is committed first. The real build
+# pipeline replaces it on the development line; until then it always fails.
+name: Build & Validate
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stub:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Not available yet
+        run: |
+          echo "The build pipeline has not landed on this branch yet." >&2
+          exit 1
