@@ -9,8 +9,43 @@
 export { CONTRACTS, GUARDED as CONTRACT_SOURCES } from "../check-commits.mjs";
 
 /**
+ * JUCE 各模块直接依赖的模块，逐字取自该版本每个 `modules/<模块>/<模块>.h` 模块声明里的 `dependencies:` 行。
+ * 链接一个模块就会编进它依赖闭包里的所有模块，modules-closure 据此要求整个闭包都已登记。
+ * 升级 JUCE 时按新版本的模块头重抄这张表（`.juce-version` 与 version 不一致时 modules-closure 判红）。
+ */
+export const JUCE_MODULE_REQUIRES = {
+    version: "8.0.8",
+    modules: {
+        juce_analytics: ["juce_gui_basics"],
+        juce_animation: ["juce_gui_basics"],
+        juce_audio_basics: ["juce_core"],
+        juce_audio_devices: ["juce_audio_basics", "juce_events"],
+        juce_audio_formats: ["juce_audio_basics"],
+        juce_audio_plugin_client: ["juce_audio_processors"],
+        juce_audio_processors: ["juce_gui_extra", "juce_audio_basics"],
+        juce_audio_utils: ["juce_audio_processors", "juce_audio_formats", "juce_audio_devices"],
+        juce_box2d: ["juce_graphics"],
+        juce_core: [],
+        juce_cryptography: ["juce_core"],
+        juce_data_structures: ["juce_events"],
+        juce_dsp: ["juce_audio_formats"],
+        juce_events: ["juce_core"],
+        juce_graphics: ["juce_events"],
+        juce_gui_basics: ["juce_graphics", "juce_data_structures"],
+        juce_gui_extra: ["juce_gui_basics"],
+        juce_javascript: ["juce_core"],
+        juce_midi_ci: ["juce_audio_basics"],
+        juce_opengl: ["juce_gui_extra"],
+        juce_osc: ["juce_events"],
+        juce_product_unlocking: ["juce_cryptography"],
+        juce_video: ["juce_gui_extra"],
+    },
+};
+
+/**
  * CMake 引入的每个第三方来源，以及它带进二进制或构建的组件。键的写法：
- *   juce::<模块>  target_link_libraries 里的 JUCE 目标；juce_add_plugin 隐含 juce::juce_audio_plugin_client
+ *   juce::<模块>  JUCE 的目标，CMake 里写 juce::juce_x 或不带命名空间的 juce_x 都算；
+ *                 juce_add_plugin 隐含 juce::juce_audio_plugin_client；JUCE 模块按 JUCE_MODULE_REQUIRES 展开依赖
  *   nuget:<包名>  NuGet 包（NEEDS_WEBVIEW2 隐含 WebView2 的包）
  *   fetch:<名字>  FetchContent_Declare 的名字
  * table 是组件在 THIRD-PARTY-NOTICES.md 里所在的表：shipped = 随二进制分发，build = 只用于构建、测试与 CI。
