@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Derived from synchain-oss/scvb; see upstream/ci.json
+# gitleaks 配置：本机 pre-push、gates 与 CI 的 compliance 共用。默认规则全开，不设任何放行；
+# 真有误报时在这里加 [allowlist] 并逐条写明理由，不能靠跳过 hook 绕过。
+title = "Rinne gitleaks config"
+
+[extend]
+useDefault = true

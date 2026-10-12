@@ -1,0 +1,74 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "1699b20ed7587219c3c5606fb8bee6c5c82629b9"
+    }
+  },
+  "files": [
+    {
+      "path": ".clang-format",
+      "source": "scvb-dev",
+      "from": ".clang-format",
+      "fromBlob": "f9a5d0512e466fede68abf17e544e0a5f732a128",
+      "mode": "adapted"
+    },
+    {
+      "path": ".editorconfig",
+      "source": "scvb-dev",
+      "from": ".editorconfig",
+      "fromBlob": "1fe4801fd6d970b9c44b2519a959c21fb9155b97",
+      "mode": "adapted"
+    },
+    {
+      "path": ".gitignore",
+      "source": "scvb-dev",
+      "from": ".gitignore",
+      "fromBlob": "8b50fa1e209b2b5f21af8d19cdfbfa0e652574ac",
+      "mode": "adapted"
+    },
+    {
+      "path": ".gitleaks.toml",
+      "source": "scvb-dev",
+      "from": ".gitleaks.toml",
+      "fromBlob": "bd7e0ce393277d89da9eb71998fac4c01d0baab7",
+      "mode": "adapted"
+    },
+    {
+      "path": ".prettierignore",
+      "source": "scvb-dev",
+      "from": ".prettierignore",
+      "fromBlob": "04708bbde35fc112c82206d4a159caf1386ca6ca",
+      "mode": "adapted"
+    },
+    {
+      "path": "REUSE.toml",
+      "source": "scvb-dev",
+      "from": "REUSE.toml",
+      "fromBlob": "10f374a8962f3e0372a111878cab9c43296a0b3c",
+      "mode": "adapted"
+    },
+    {
+      "path": "scripts/check-privacy.mjs",
+      "source": "scvb-dev",
+      "from": "scripts/check-privacy.mjs",
+      "fromBlob": "4ec7feff2efd4221f5c009fe2a70d14c9c3d028d",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/check-spdx.mjs",
+      "source": "scvb-dev",
+      "from": "scripts/check-spdx.ps1",
+      "fromBlob": "772616fe4d758262098546ad09ac77699d9705d8",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/lib/privacy-needles.mjs",
+      "source": "scvb-dev",
+      "from": "scripts/check-privacy.mjs",
+      "fromBlob": "4ec7feff2efd4221f5c009fe2a70d14c9c3d028d",
+      "mode": "forked"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Python 工具的钉版。装进独立的 venv，不全局安装：
+#   python -m pip install -r requirements-tools.txt
+# Windows 上没有 libmagic，reuse 需要 charset-normalizer 来判断文件编码。
+clang-format==18.1.8
+reuse[charset-normalizer]==6.2.0

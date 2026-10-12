@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Derived from synchain-oss/scvb; see upstream/ci.json
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Markdown 行尾两个空格是硬换行，不能裁掉
+[*.md]
+trim_trailing_whitespace = false
+
+# PowerShell 脚本用 CRLF，与 .gitattributes 一致
+[*.ps1]
+end_of_line = crlf
+
+[*.{yml,yaml,json,toml}]
+indent_size = 2

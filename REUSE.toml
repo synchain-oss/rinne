@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Derived from synchain-oss/scvb; see upstream/ci.json
+#
+# 许可与版权的机读登记（REUSE 3.3）。小节一次建好，以后只往自己负责的那一节里加块；
+# 小节标记由 run-checks 的 reuse 检查核对，不要删改或调换顺序。
+# 同一文件匹配多个块时，后面的块优先，所以兜底块必须放在最前。
+version = 1
+
+# --- section:base ---
+# 兜底：本仓自己写的一切。能写注释的源文件仍须逐个加 SPDX 头，由 check-spdx 把关。
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Synchain"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# --- section:untagged ---
+# 不能带注释头的自有文件：单行钉版文件、JSON、golden 数据。许可与兜底相同，单列出来一眼可查。
+[[annotations]]
+path = [".*-version", ".juce-commit", ".prettierrc.json", "upstream/*.json", "tests/golden/**"]
+SPDX-FileCopyrightText = "2026 Synchain"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# --- section:juce-web-js ---
+# JUCE 自带的前端辅助脚本，随 JUCE 的许可，不加 Synchain 版权。
+[[annotations]]
+path = "web/js/juce/**"
+precedence = "override"
+SPDX-FileCopyrightText = "Raw Material Software Limited"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# --- section:juce-patches ---
+# 对 JUCE 源码的补丁（只在确实需要时才有）：随 JUCE 的许可。补丁入库时在此加块。
+
+# --- section:fonts ---
+# 字体逐文件登记 OFL-1.1，版权行与字体 name 表 nameID 0 逐字一致，不用目录通配：
+# 同目录的说明文件是本仓自己写的，归兜底块。字体入库时每个文件在此加一个块。
+
+# --- section:third-party-notices ---
+# third_party/notices/ 下的上游许可声明原文，每份一个 precedence = "override" 的块：
+# 以块里写的为准，原文里 "Copyright notice:" 一类字样不是版权行。声明入库时在此加块。
+
+# --- section:third-party-src ---
+# 逐字收录的第三方源码，保留上游版权与许可。收录时在此加块。

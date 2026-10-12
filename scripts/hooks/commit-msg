@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# git commit-msg hook. 判据都在同目录的 commit-msg.mjs 里；这里只负责找到钉版 Node：
+# 先 RINNE_NODE，再 git config rinne.node，最后 PATH 上的 node（主版本不对时 .mjs 自己拒绝）。
+node=${RINNE_NODE:-$(git config --get rinne.node)}
+exec "${node:-node}" "$(dirname "$0")/commit-msg.mjs" "$@"
