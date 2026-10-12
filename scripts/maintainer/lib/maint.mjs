@@ -5,6 +5,7 @@
 // 机读尾注、条数核对与上一轮 / 处置汇总的认定（scripts/review-bot.mjs）。输入是文件，输出是一行 JSON。
 //   node scripts/maintainer/lib/maint.mjs text --file <f> [--needles local|ci|ci-optional]
 //        公开文本扫描：通用规则、个人针、AI 署名与任何署名尾注行、卡号；命中只给打码后的片段
+//   node scripts/maintainer/lib/maint.mjs texts --file <字符串 JSON 数组> [--needles …]   同上，一次扫多段
 //   node scripts/maintainer/lib/maint.mjs message --file <f> [--needles …]
 //        squash 提交消息：subject 格式、DCO（恰好一行维护者签名）、只许 Signed-off-by 一种尾注、隐私
 //   node scripts/maintainer/lib/maint.mjs review-state --file <issue comments JSON> --writers <login,…> [--bot claude]
@@ -138,6 +139,13 @@ async function main(argv) {
     const needles = () => loadPersonalNeedles({ mode: needlesMode(rest) }).needles;
     if (cmd === "text") {
         print({ findings: textFindings(plainText(fs.readFileSync(file), "文本"), needles()) });
+    } else if (cmd === "texts") {
+        // 一次扫多段文本（合并核对要复扫 PR 正文与我方全部评论），针只读一次
+        const list = needles();
+        const texts = JSON.parse(fs.readFileSync(file, "utf8"));
+        print({
+            results: texts.map((t, i) => ({ findings: textFindings(plainText(String(t), `文本 ${i + 1}`), list) })),
+        });
     } else if (cmd === "message") {
         const text = plainText(fs.readFileSync(file), "提交消息");
         print(checkMessage(text, { tier: "same", exactlyOne: true, personal: needles() }));
@@ -147,14 +155,23 @@ async function main(argv) {
         print(reviewState(comments, writers, opt("--bot") || "claude"));
     } else if (cmd === "infra") {
         const paths = JSON.parse(fs.readFileSync(file, "utf8"));
-        const m = await import("../../lib/infra-paths.mjs").catch(() => {
-            throw new Error("缺 scripts/lib/infra-paths.mjs（基础设施路径的唯一清单），判不了要不要交维护者批准");
+        const m = await import("../../lib/infra-paths.mjs").catch((e) => {
+            const missing = e.code === "ERR_MODULE_NOT_FOUND" && /infra-paths\.mjs/.test(e.message);
+            throw new Error(
+                missing
+                    ? "缺 scripts/lib/infra-paths.mjs（基础设施路径的唯一清单），判不了要不要交维护者批准"
+                    : `加载 scripts/lib/infra-paths.mjs 失败：${e.message}`,
+            );
         });
         const list = opt("--list");
+        if (typeof m.infraMatcher !== "function" || typeof m.isInfraPath !== "function") {
+            throw new Error("scripts/lib/infra-paths.mjs 没有导出 infraMatcher / isInfraPath");
+        }
         const match = list ? m.infraMatcher(JSON.parse(fs.readFileSync(list, "utf8"))) : m.isInfraPath;
+        if (typeof match !== "function") throw new Error("infraMatcher 没有返回判定函数");
         print({ hits: paths.filter((p) => match(p)) });
     } else {
-        throw new Error("用法见文件头注释：text | message | review-state | infra | signoff");
+        throw new Error("用法见文件头注释：text | texts | message | review-state | infra | signoff");
     }
     return 0;
 }

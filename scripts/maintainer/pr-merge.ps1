@@ -4,18 +4,29 @@
 # 合并子 PR（只进 feature/**，squash）。三步，任何一步失败都停下并打印状态，不重试：
 #   -Check -Pr <n> -Card <卡>     逐条核对「干净」判据，输出一行 JSON：code = ready | not-ready | needs-user
 #                                 （退出码 0 / 1 / 2）；needs-user 带 level（user 进给用户的汇总表，orchestrator 由统筹分诊）
-#   -Merge -Pr <n> -Card <卡> -SummaryFile <f> [-ApprovedByUser]
+#   -Merge -Pr <n> -Card <卡> -SummaryFile <f>
 #                                 重新核对，ready 才合并：squash，钉住审过的 head（sha=…），显式写 subject「<标题> (#n)」
-#                                 与 body（摘要段 + 空行 + 唯一一行签名）。碰基础设施路径的 PR 永远是 needs-user，
-#                                 只有用户批准后由主会话加 -ApprovedByUser 执行，其他 needs-user 不能这样放行
+#                                 与 body（摘要段 + 空行 + 唯一一行签名）
 #   -After -Pr <n> -Card <卡>     回读 squash 提交（DCO、作者与提交者、恰好一行签名）、删远端子支线、持 git 锁移除 worktree
 #   -SelfTest                     用 fixtures/ 里录制的 PR 响应离线跑，对每条判据给反例
-# 只从主 clone 运行（它跟随 origin/feature/v1）：判据脚本取自 feature 线，而不是待合并 PR 自己的版本。
+# 只从主 clone 运行，而且主 clone 必须正好在刚取回的 origin/feature/v1 上、工作树干净：判据取自 feature 线，
+# 而不是待合并 PR 自己的版本。
+#
+# 用户的决定只认豁免记录文件（RINNE_WAIVERS / rinne.waivers 指向的 JSON），每条记录绑定一个完整的 40 位 head，
+# 之后再有推送就作废，要用户对新 head 重新登记：
+#   { "waivers":          { "<pr>": [{ "head": "<sha40>", "red": 0, "important": 1, "deferred": false, "note": "…" }] },
+#     "approvals":        { "<pr>": [{ "head": "<sha40>", "by": "user", "note": "…" }] },
+#     "external-handled": { "<pr>": [{ "head": "<sha40>", "by": "user", "comments": ["<评论编号>"], "note": "…" }] } }
+# waivers 放过尾注里的【红旗】【重要】与判为不改 / 挂账的条目；approvals 是对基础设施改动的批准；
+# external-handled 是用户已处理过的外部评论。
+#
+# 合并后构建（Standard 及以上）跑的是 PR 树里的脚本，所以是最后一道：其他判据全部通过、且没碰基础设施时才跑，
+# 子进程的环境里拿掉凭据与个人针。-Check 在那之前不会执行 PR 里的任何代码。
 
 [CmdletBinding()]
 param(
     [switch]$Check, [switch]$Merge, [switch]$After, [switch]$SelfTest,
-    [int]$Pr, [string]$Card, [string]$SummaryFile, [switch]$ApprovedByUser
+    [int]$Pr, [string]$Card, [string]$SummaryFile
 )
 
 Set-StrictMode -Version Latest
@@ -23,6 +34,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'lib/RinneGh.psm1') -Force
 
 $TierRank = @{ Quick = 1; Standard = 2; Full = 3 }
+$CardPattern = '^(?:RN-\d{2}[a-z]?|K\d+)$'
 $ReviewWorkflows = @('.github/workflows/claude-review.yml', '.github/workflows/review-dispatch.yml')
 # 改到这些路径的子支线合入前要对它的 head 手动 dispatch 一次构建（卡片清单的 needsBranchDispatch 是计划值，这里按实际 diff 再算）
 $DispatchGlobs = @(
@@ -30,14 +42,23 @@ $DispatchGlobs = @(
     '.github/workflows/build.yml', '.github/workflows/release.yml', 'packaging/**', 'scripts/package*'
 )
 
-# ---- 收集事实（联网、读本机文件、跑 git 与 Node 判据） -------------------------------------
+# ---- 收集事实（联网、读本机文件、跑 git 与 Node 判据；不执行 PR 里的代码） ---------------
 
-function Read-Waivers {
+function Read-Records {
     param([int]$Pr)
     $path = Get-RinneSetting -Env 'RINNE_WAIVERS' -GitKey 'rinne.waivers'
-    if (-not $path -or -not (Test-Path -LiteralPath $path)) { return @() }
-    $all = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json -Depth 20
-    Get-RinneProp $all ([string]$Pr)
+    $all = if ($path -and (Test-Path -LiteralPath $path)) { Get-Content -Raw -LiteralPath $path | ConvertFrom-Json -Depth 20 } else { $null }
+    $pick = { param($kind) @(Get-RinneProp (Get-RinneProp $all $kind) ([string]$Pr)) | Where-Object { $_ } }
+    [pscustomobject]@{ Waivers = @(& $pick 'waivers'); Approvals = @(& $pick 'approvals'); ExternalHandled = @(& $pick 'external-handled') }
+}
+
+<# 对这个 head 的记录：head 必须是完整的 40 位并且相等；approvals 与 external-handled 还要求 by = user。 #>
+function Get-HeadRecord {
+    param([object[]]$List, [string]$Head, [switch]$ByUser)
+    @($List) | Where-Object {
+        $_ -and [string](Get-RinneProp $_ 'head') -eq $Head -and $Head -match '^[0-9a-f]{40}$' -and
+        (-not $ByUser -or [string](Get-RinneProp $_ 'by') -eq 'user')
+    } | Select-Object -First 1
 }
 
 function Test-PrText {
@@ -58,30 +79,6 @@ function Test-ContractGuard {
         $argv = @('contract-guard', '--base', 'origin/feature/v1', '--head', "refs/remotes/origin/pr/$Pr", '--body-file', $file)
         Invoke-RinneNodeScript 'scripts/check-commits.mjs' $argv -AllowFail
     } finally { Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue }
-}
-
-<# Standard 及以上：在 <根>/wt/tip 把 PR 合到当前 feature/v1 上做一次增量构建，构建脚本取自合并后的树。 #>
-function Invoke-Premerge {
-    param([int]$Pr)
-    $tip = Join-Path (Get-RinneRoot) 'wt/tip'
-    # 结果写进这张表，不依赖锁函数的返回值（它可能另有输出）
-    $merged = @{ Ok = $false }
-    Invoke-RinneGitLocked {
-        if (-not (Test-Path -LiteralPath $tip)) { Invoke-RinneGit @('worktree', 'add', '--detach', $tip, 'origin/feature/v1') | Out-Null }
-        Invoke-RinneGit @('checkout', '--detach', '--force', 'origin/feature/v1') -Repo $tip | Out-Null
-        $m = Invoke-RinneGit @('merge', '--no-ff', '--no-commit', "refs/remotes/origin/pr/$Pr") -Repo $tip -AllowFail
-        if ($m.Code -ne 0) { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null }
-        $merged.Ok = $m.Code -eq 0
-    } | Out-Null
-    if (-not $merged.Ok) { return @{ Ok = $false; Reason = '与当前 feature/v1 合并有冲突' } }
-    try {
-        $build = Join-Path $tip 'scripts/build.ps1'
-        if (-not (Test-Path -LiteralPath $build)) { return @{ Ok = $false; Reason = '合并后的树里没有 scripts/build.ps1，做不了合并后构建' } }
-        $r = Invoke-RinneExternal pwsh @('-NoProfile', '-File', $build) -Cwd $tip -AllowFail
-        return @{ Ok = ($r.Code -eq 0); Reason = "合并后构建退出码 $($r.Code)" }
-    } finally {
-        Invoke-RinneGitLocked { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null } | Out-Null
-    }
 }
 
 function Get-MergeFacts {
@@ -108,17 +105,22 @@ function Get-MergeFacts {
         Invoke-RinneGit (@('fetch', '--no-tags', 'origin') + $specs) | Out-Null
     } | Out-Null
     $body = [string](Get-RinneProp $pull 'body')
-    $premerge = if ($TierRank[[string]$card.tier] -ge 2) { Invoke-Premerge $Pr } else { $null }
     [pscustomobject]@{
-        Pr = $Pr; Card = $card; Pull = $pull; Head = $head; Files = @($files)
+        Pr = $Pr; Card = $card; Pull = $pull; Head = $head; Files = @($files); Activity = $activity
         State = $state; Items = @(Get-RinneCommentItems -Activity $activity -State $state); Threads = @($activity.Threads)
         Run = $run; Jobs = $jobs; Checks = Get-RinneCheckRuns $head; Required = Get-RinneRequiredChecks
-        Gates = $gates; Waivers = Read-Waivers $Pr
+        Gates = $gates; Records = Read-Records $Pr
+        # 主 clone 的状态在 fetch 之后取：判据脚本必须就是刚取回的 feature 线上的版本
+        MainClone = [pscustomobject]@{
+            Head = (Invoke-RinneGit @('rev-parse', 'HEAD')).Out.Trim()
+            Tip = (Invoke-RinneGit @('rev-parse', 'origin/feature/v1')).Out.Trim()
+            Dirty = (Invoke-RinneGit @('status', '--porcelain')).Out.Trim()
+        }
         PrRef = (Invoke-RinneGit @('rev-parse', "refs/remotes/origin/pr/$Pr")).Out.Trim()
         Dco = [int](Invoke-RinneGit @('rev-list', '--count', 'origin/dev..origin/feature/v1')).Out.Trim()
         Guard = Test-ContractGuard $Pr $body
         PrText = Test-PrText ([string]$pull.title) $body
-        NeedsDispatch = $needsDispatch; DispatchRuns = $dispatchRuns; Premerge = $premerge
+        NeedsDispatch = $needsDispatch; DispatchRuns = $dispatchRuns
     }
 }
 
@@ -128,7 +130,7 @@ function Get-MergeFacts {
 function Get-DeferredSevere {
     param([object[]]$Items)
     $rows = [System.Collections.Generic.List[string]]::new()
-    foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' -and (Get-AgentMarker $_.Body).Kind -eq 'disposition' })) {
+    foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' -and (Get-RinneProp (Get-AgentMarker $_.Body) 'Kind') -eq 'disposition' })) {
         foreach ($line in $i.Body -split "`r?`n") {
             if ($line -notmatch '^\s*\|') { continue }
             $cells = @(($line -replace '\\\|', '') -split '\|' | ForEach-Object { $_.Trim() })
@@ -140,11 +142,6 @@ function Get-DeferredSevere {
     $rows.ToArray()
 }
 
-function Get-Waiver {
-    param($Facts)
-    @($Facts.Waivers) | Where-Object { $_ -and $Facts.Head.StartsWith([string]$_.head) -and ([string]$_.head).Length -ge 7 } | Select-Object -First 1
-}
-
 function Get-MergeVerdict {
     param([Parameter(Mandatory)]$Facts)
     $F = $Facts
@@ -154,6 +151,11 @@ function Get-MergeVerdict {
     $need = { param($level, $kind, $reason) $needs.Add([pscustomobject]@{ Level = $level; Kind = $kind; Reason = $reason }) }
     $p = $F.Pull
     $head = $F.Head
+    $rec = $F.Records
+
+    # 0. 主 clone 正好在刚取回的 origin/feature/v1 上、工作树干净（否则判据可能是旧的）
+    if ($F.MainClone.Head -ne $F.MainClone.Tip) { $fail.Add('主 clone 不在刚取回的 origin/feature/v1 上（先快进），判据可能是旧的') }
+    if ($F.MainClone.Dirty) { $fail.Add('主 clone 的工作树不干净') }
 
     # 1. PR 本身：打开、非 draft、base 是 feature 线、head 是本仓的 feat/ 子支线、可合并
     if ($p.state -ne 'open' -or [bool](Get-RinneProp $p 'merged')) { $fail.Add('PR 不是打开状态') }
@@ -168,7 +170,7 @@ function Get-MergeVerdict {
 
     # 2. bot 结论：最近一条总结审的是当前 head、尾注可用、red=0 且 important=0（或有用户对这个 head 的豁免）
     $s = $F.State.summary
-    $waiver = Get-Waiver $F
+    $waiver = Get-HeadRecord $rec.Waivers $head
     if (-not $s) { $fail.Add('没有 bot 审查总结') }
     else {
         if ($s.head -ne $head) { $fail.Add("最近一条 bot 总结审的是 $(([string]$s.head).Substring(0, [Math]::Min(7, ([string]$s.head).Length)))，不是当前 head") }
@@ -178,8 +180,8 @@ function Get-MergeVerdict {
             if ($sameHead.Count -gt 1) { $fail.Add('当前 head 上有多条 bot 总结且尾注互相矛盾') }
             if ($s.red -gt 0 -or $s.important -gt 0) {
                 if ($waiver -and $s.red -le [int]$waiver.red -and $s.important -le [int]$waiver.important) {
-                    $warn.Add("尾注 red=$($s.red) important=$($s.important)，已有用户豁免：$($waiver.note)")
-                } else { $fail.Add("尾注 red=$($s.red) important=$($s.important)，必须为 0（或有用户豁免）") }
+                    $warn.Add("尾注 red=$($s.red) important=$($s.important)，已有用户对这个 head 的豁免：$($waiver.note)")
+                } else { $fail.Add("尾注 red=$($s.red) important=$($s.important)，必须为 0（或有用户对这个 head 的豁免）") }
             }
         }
     }
@@ -217,11 +219,18 @@ function Get-MergeVerdict {
         if ($x.runId -and @($F.State.dispositionRuns) -notcontains [string]$x.runId) { $fail.Add("运行 $($x.runId) 的 bot 总结没有处置汇总") }
     }
 
-    # 5. 线程与回应：open thread = 0；每条 bot 与人的评论都有回应；外部评论交用户
+    # 5. 线程与回应：open thread = 0；每条 bot 与人的评论都有回应（对比原评论的 updated_at，按 in-reply-to 认）；
+    #    外部评论交用户，用户处理过的（对这个 head 的 external-handled 记录点名了它）放行
     $open = @($F.Threads | Where-Object { -not $_.isResolved }).Count
     if ($open -gt 0) { $fail.Add("还有 $open 个未 resolve 的线程") }
+    $handled = Get-HeadRecord $rec.ExternalHandled $head -ByUser
+    $handledIds = if ($handled) { @(Get-RinneProp $handled 'comments' | ForEach-Object { [string]$_ }) } else { @() }
     foreach ($i in @($F.Items)) {
-        if ($i.Kind -eq 'external') { & $need 'user' 'external' "外部评论 $($i.Source) $($i.Id)（$($i.Author)）" ; continue }
+        if ($i.Kind -eq 'external') {
+            if ($handledIds -contains $i.Id) { $warn.Add("外部评论 $($i.Source) $($i.Id) 已由用户处理：$($handled.note)") }
+            else { & $need 'user' 'external' "外部评论 $($i.Source) $($i.Id)（$($i.Author)）" }
+            continue
+        }
         if (-not (Test-RinneResponded -Item $i -Items $F.Items -State $F.State)) { $fail.Add("没有回应的评论：$($i.Source) $($i.Id)（$($i.Kind)）") }
     }
     $deferred = @(Get-DeferredSevere $F.Items)
@@ -235,7 +244,7 @@ function Get-MergeVerdict {
         if (-not $c -or $c.conclusion -ne 'success') { $fail.Add("check $ctx 在当前 head 上不是 success") }
     }
 
-    # 7. 本地 gates：json 存在、sha = head、档位够、exit=0、fail=0、dirty=false
+    # 7. 本地 gates：json 存在、sha = head、档位够、真跑过（pass ≥ 1）、exit=0、fail=0、dirty=false
     $g = $F.Gates
     if (-not $g) { $fail.Add('缺当前 head 的 gates json') }
     else {
@@ -243,31 +252,38 @@ function Get-MergeVerdict {
         if (-not $TierRank.ContainsKey([string]$g.tier) -or $TierRank[[string]$g.tier] -lt $TierRank[[string]$F.Card.tier]) {
             $fail.Add("gates 档位 $($g.tier) 低于卡片要求的 $($F.Card.tier)")
         }
+        if ([int](Get-RinneProp $g 'pass') -lt 1) { $fail.Add('gates 一项也没通过（pass=0），不算跑过') }
         if ([int]$g.exit -ne 0 -or [int]$g.fail -ne 0) { $fail.Add("gates 没有通过（exit=$($g.exit)，fail=$($g.fail)）") }
         if ([bool]$g.dirty) { $fail.Add('gates 跑在脏工作树上') }
     }
 
     # 8. 文本隐私复扫：PR 标题与正文（标题格式、隐私、AI 署名、末行签名），以及我方发过的每条评论
     if ($F.PrText.Code -ne 0) { $fail.Add("PR 标题或正文没过检查：$(($F.PrText.Out + "`n" + $F.PrText.Err).Trim() -replace '\s+', ' ')") }
-    $pt = Test-PublicText "$($p.title)`n$([string](Get-RinneProp $p 'body'))"
-    if (-not $pt.Ok) { $fail.Add("PR 标题或正文没过公开文本检查：$(@($pt.Findings | ForEach-Object rule) -join '、')") }
-    foreach ($i in @($F.Items | Where-Object Kind -eq 'agent')) {
-        $t = Test-PublicText $i.Body
-        if (-not $t.Ok) { $fail.Add("我方评论 $($i.Id) 没过公开文本检查：$(@($t.Findings | ForEach-Object rule) -join '、')") }
+    $ours = @($F.Items | Where-Object Kind -eq 'agent')
+    $scans = @(Test-PublicTexts (@("$($p.title)`n$([string](Get-RinneProp $p 'body'))") + @($ours | ForEach-Object Body)))
+    if (-not $scans[0].Ok) { $fail.Add("PR 标题或正文没过公开文本检查：$(@($scans[0].Findings | ForEach-Object rule) -join '、')") }
+    for ($k = 0; $k -lt $ours.Count; $k++) {
+        $t = $scans[$k + 1]
+        if (-not $t.Ok) { $fail.Add("我方评论 $($ours[$k].Id) 没过公开文本检查：$(@($t.Findings | ForEach-Object rule) -join '、')") }
     }
 
-    # 9. 范围：改动文件 ⊆ owns + takesOver + sections；碰基础设施路径（清单取自 scripts/lib/infra-paths.mjs）一律交用户批准，不自合
+    # 9. 范围：改动文件（改名的新旧路径都算）⊆ owns + takesOver + sections；
+    #    碰基础设施路径（清单取自 scripts/lib/infra-paths.mjs）交用户批准，只认对这个 head 的批准记录
     $scope = Get-CardScope $F.Card
-    $outside = @($F.Files | Where-Object { -not (Test-GlobMatch $_.filename $scope) } | ForEach-Object filename)
+    $paths = @(foreach ($file in @($F.Files)) { $file.filename; $prev = Get-RinneProp $file 'previous_filename'; if ($prev) { $prev } }) | Select-Object -Unique
+    $outside = @($paths | Where-Object { -not (Test-GlobMatch $_ $scope) })
     if ($outside.Count -gt 0) { & $need 'orchestrator' 'out-of-scope' "越界改动：$($outside -join '、')" }
     $infra = @(Get-InfraTouches -Files $F.Files)
-    if ($infra.Count -gt 0) { & $need 'user' 'infra' "碰到基础设施路径，交用户批准：$($infra -join '、')" }
+    $approval = Get-HeadRecord $rec.Approvals $head -ByUser
+    if ($infra.Count -gt 0) {
+        if ($approval) { $warn.Add("碰到基础设施路径，用户已批准这个 head：$($approval.note)") }
+        else { & $need 'user' 'infra' "碰到基础设施路径，交用户批准（对 head $head 登记批准记录）：$($infra -join '、')" }
+    }
 
-    # 10. 分支 dispatch、合并后构建、契约守卫、DCO 上限
+    # 10. 分支 dispatch、契约守卫、DCO 上限（合并后构建在 Invoke-MergeCheck 里最后做）
     if ($F.NeedsDispatch -and -not @($F.DispatchRuns | Where-Object { $_.conclusion -eq 'success' -and $_.head_sha -eq $head })) {
         $fail.Add('需要分支 dispatch，但当前 head 没有成功的 build 运行')
     }
-    if ($F.Premerge -and -not $F.Premerge.Ok) { $fail.Add("合并后构建没有通过：$($F.Premerge.Reason)") }
     if ($F.Guard.Code -ne 0) { $fail.Add("对当前 origin/feature/v1 重跑契约守卫没有通过：$(($F.Guard.Out + "`n" + $F.Guard.Err).Trim() -replace '\s+', ' ')") }
     if ($F.Dco -ge 200) { & $need 'orchestrator' 'dco' "origin/dev..origin/feature/v1 已有 $($F.Dco) 个提交，暂停合并" }
     elseif ($F.Dco -ge 180) { $warn.Add("origin/dev..origin/feature/v1 已有 $($F.Dco) 个提交（200 暂停合并）") }
@@ -277,9 +293,56 @@ function Get-MergeVerdict {
     [pscustomobject]@{
         Code = $code; Level = $level; Pr = $F.Pr; Head = $head
         Failures = $fail.ToArray(); Needs = $needs.ToArray(); Warnings = $warn.ToArray()
-        OutOfScope = $outside; Infra = $infra; Deferred = $deferred
-        Command = "pwsh scripts/maintainer/pr-merge.ps1 -Merge -Pr $($F.Pr) -Card $($F.Card.id) -SummaryFile <摘要段文件>$(if ($code -eq 'needs-user' -and @($needs | Where-Object Kind -ne 'infra').Count -eq 0) { ' -ApprovedByUser（仅在用户批准后）' })"
+        OutOfScope = $outside; Infra = $infra; Deferred = $deferred; Premerge = $null
+        Command = "pwsh scripts/maintainer/pr-merge.ps1 -Merge -Pr $($F.Pr) -Card $($F.Card.id) -SummaryFile <摘要段文件>"
     }
+}
+
+# ---- 合并后构建（最后一道，跑的是 PR 里的代码） ---------------------------------------------
+
+<# 在 <根>/wt/tip 把 PR 合到当前 feature/v1 上做一次增量构建，构建脚本取自合并后的树，环境里没有凭据与个人针。 #>
+function Invoke-Premerge {
+    param([int]$Pr)
+    $tip = Join-Path (Get-RinneRoot) 'wt/tip'
+    # 结果写进这张表，不依赖锁函数的返回值
+    $merged = @{ Ok = $false }
+    Invoke-RinneGitLocked {
+        if (-not (Test-Path -LiteralPath $tip)) { Invoke-RinneGit @('worktree', 'add', '--detach', $tip, 'origin/feature/v1') | Out-Null }
+        Invoke-RinneGit @('checkout', '--detach', '--force', 'origin/feature/v1') -Repo $tip | Out-Null
+        $m = Invoke-RinneGit @('merge', '--no-ff', '--no-commit', "refs/remotes/origin/pr/$Pr") -Repo $tip -AllowFail
+        if ($m.Code -ne 0) { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null }
+        $merged.Ok = $m.Code -eq 0
+    } | Out-Null
+    if (-not $merged.Ok) { return @{ Ok = $false; Reason = '与当前 feature/v1 合并有冲突' } }
+    try {
+        $build = Join-Path $tip 'scripts/build.ps1'
+        if (-not (Test-Path -LiteralPath $build)) { return @{ Ok = $false; Reason = '合并后的树里没有 scripts/build.ps1，做不了合并后构建' } }
+        $r = Invoke-RinneWithoutSecrets { Invoke-RinneExternal pwsh @('-NoProfile', '-File', $build) -Cwd $tip -AllowFail }
+        return @{ Ok = ($r.Code -eq 0); Reason = "合并后构建退出码 $($r.Code)" }
+    } finally {
+        Invoke-RinneGitLocked { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null } | Out-Null
+    }
+}
+
+<#
+  -Check 与 -Merge 共用的核对：先收集事实、跑全部纯判据；只有判为 ready、卡片档位在 Standard 及以上、
+  而且没碰基础设施时才做合并后构建。碰了基础设施的（即便用户已批准）不在本机跑 PR 里的构建脚本。
+#>
+function Invoke-MergeCheck {
+    param([Parameter(Mandatory)][int]$Pr, [Parameter(Mandatory)][string]$CardId)
+    $facts = Get-MergeFacts $Pr $CardId
+    $v = Get-MergeVerdict $facts
+    if ($v.Code -eq 'ready' -and $TierRank[[string]$facts.Card.tier] -ge 2) {
+        if (@($v.Infra).Count) { $v.Warnings = @($v.Warnings) + @('碰了基础设施，不在本机做合并后构建') }
+        else {
+            $v.Premerge = Invoke-Premerge $Pr
+            if (-not $v.Premerge.Ok) {
+                $v.Failures = @($v.Failures) + @("合并后构建没有通过：$($v.Premerge.Reason)")
+                $v.Code = 'not-ready'
+            }
+        }
+    }
+    $v
 }
 
 # ---- 三个动作 -------------------------------------------------------------------------------
@@ -306,16 +369,16 @@ function New-MergeMessage {
 }
 
 function Invoke-MergeUnlocked {
-    param([int]$Pr, [string]$CardId, [string]$SummaryFile, [switch]$ApprovedByUser)
-    $v = Get-MergeVerdict (Get-MergeFacts $Pr $CardId)
-    $onlyInfra = $v.Code -eq 'needs-user' -and @($v.Needs | Where-Object Kind -ne 'infra').Count -eq 0
-    if (-not ($v.Code -eq 'ready' -or ($onlyInfra -and $ApprovedByUser))) {
+    param([int]$Pr, [string]$CardId, [string]$SummaryFile)
+    $v = Invoke-MergeCheck $Pr $CardId
+    if ($v.Code -ne 'ready') {
         Write-Output (ConvertTo-RinneJsonText $v)
         throw "不能合并：code=$($v.Code)"
     }
     $pull = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
     if ($pull.head.sha -ne $v.Head) { throw '核对之后 PR head 变了，重新核对' }
     $msg = New-MergeMessage -Pull $pull -Summary (Get-Content -Raw -LiteralPath $SummaryFile)
+    # sha 钉住核对过的 head：其间再有推送，GitHub 拒绝合并（批准记录也只对这个 head 有效）
     $body = @{ merge_method = 'squash'; sha = $v.Head; commit_title = $msg.Title; commit_message = $msg.Body }
     $res = Invoke-RinneApiWrite -Method PUT -Path "repos/$(Get-RinneRepo)/pulls/$Pr/merge" -Body $body
     if (-not $res.merged) { throw "合并没有成功：$($res.message)" }
@@ -324,6 +387,8 @@ function Invoke-MergeUnlocked {
 
 function Invoke-AfterUnlocked {
     param([int]$Pr, [string]$CardId)
+    if ($CardId -notmatch $CardPattern) { throw "卡号格式不对：$CardId" }
+    Get-RinneCard $CardId | Out-Null
     $pull = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
     if (-not $pull.merged) { throw "#$Pr 还没有合并" }
     $sha = [string]$pull.merge_commit_sha
@@ -338,11 +403,16 @@ function Invoke-AfterUnlocked {
     $m = Invoke-RinneMaint -Command 'message' -Content $message -Extra @('--needles', 'local')
     if (@($m.errors).Count) { throw "squash 消息回读不通过：$(@($m.errors) -join '；')" }
     if (($message -split "`n")[0] -notmatch "\(#$Pr\)$") { throw "squash subject 没有以 (#$Pr) 结尾" }
+    # worktree 必须就在这条子支线上，免得卡号写错删了别的卡
+    $wt = Join-Path (Get-RinneRoot) "wt/$CardId"
+    if (Test-Path -LiteralPath $wt) {
+        $cur = (Invoke-RinneGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $wt -AllowFail).Out.Trim()
+        if ($cur -ne $branch) { throw "$wt 在分支「$cur」上，不是 #$Pr 的 $branch：卡号对不上，不清理" }
+    }
     # 删远端子支线（pre-push hook 放行 feat/* 的删除），再持锁移除 worktree 与本地分支
     if ((Invoke-RinneGit @('ls-remote', '--exit-code', '--heads', 'origin', $branch) -AllowFail).Code -eq 0) {
         Invoke-RinneGit @('push', 'origin', '--delete', "refs/heads/$branch") | Out-Null
     }
-    $wt = Join-Path (Get-RinneRoot) "wt/$CardId"
     Invoke-RinneGitLocked {
         if (Test-Path -LiteralPath $wt) { Invoke-RinneGit @('worktree', 'remove', $wt) | Out-Null }
         if ((Invoke-RinneGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail).Code -eq 0) {
@@ -354,8 +424,8 @@ function Invoke-AfterUnlocked {
 
 <# -Merge 与 -After 整段持有 merge 锁：同一时间只合一个 PR（核对、合并、回读之间不会插进另一次合并）。 #>
 function Invoke-Merge {
-    param([int]$Pr, [string]$CardId, [string]$SummaryFile, [switch]$ApprovedByUser)
-    Invoke-RinneMergeLocked { Invoke-MergeUnlocked -Pr $Pr -CardId $CardId -SummaryFile $SummaryFile -ApprovedByUser:$ApprovedByUser }
+    param([int]$Pr, [string]$CardId, [string]$SummaryFile)
+    Invoke-RinneMergeLocked { Invoke-MergeUnlocked -Pr $Pr -CardId $CardId -SummaryFile $SummaryFile }
 }
 
 function Invoke-After {
@@ -371,26 +441,29 @@ function Invoke-SelfTest {
     # 假卡号分开拼：源码里不出现完整的卡号形态（隐私规则表会拦）
     $cid = 'RN' + '-99a'
     $cardsFile = Join-Path $tmp 'card-list.json'
+    $recordsFile = Join-Path $tmp 'records.json'
     New-Item -ItemType Directory -Force -Path (Join-Path $tmp "_logs/$cid") | Out-Null
-    $oldRoot = $env:RINNE_ROOT
-    $oldCards = $env:RINNE_CARDS
-    $oldPriv = $env:PRIVACY_NEEDLES
+    $saved = @{ Root = $env:RINNE_ROOT; Cards = $env:RINNE_CARDS; Waivers = $env:RINNE_WAIVERS }
+    $needles = Enter-RinneSelfTestNeedles
     try {
         $env:RINNE_ROOT = $tmp
         $env:RINNE_CARDS = $cardsFile
-        $env:PRIVACY_NEEDLES = 'rinne-selftest-fake-needle-7c1e'
-        Set-RinneNeedlesMode 'ci'
+        $env:RINNE_WAIVERS = $recordsFile
+        Set-Content -LiteralPath $recordsFile -Value '{}'
         Clear-RinnePermCache
         $pull = Read-RinneFixture 'pr3-pull.json'
         $pull.state = 'open'; $pull.merged = $false; $pull.mergeable = $true; $pull.mergeable_state = 'clean'
         # 基线：改动只在卡的 owns 之内、不碰基础设施（PR #3 本身碰了 workflow，换成一份文档）
         $files = @([pscustomobject]@{ filename = 'docs/example.md'; status = 'added' })
         $card = [pscustomobject]@{ id = $cid; owns = @('docs/example.md'); takesOver = @(); sections = @(); tier = 'Quick'; needsBranchDispatch = $false }
-        ConvertTo-Json -InputObject @($card) -Depth 10 | Set-Content -LiteralPath $cardsFile
+        $writeCard = { ConvertTo-Json -InputObject @($card) -Depth 10 | Set-Content -LiteralPath $cardsFile }
+        & $writeCard
         $head = $pull.head.sha
-        @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false } |
-            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tmp "_logs/$cid/gates-$head.json")
+        $gates = @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false }
+        $writeGates = { $gates | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tmp "_logs/$cid/gates-$head.json") }
+        & $writeGates
         $log = [System.Collections.Generic.List[string]]::new()
+        $builds = [System.Collections.Generic.List[object]]::new()
         $routes = [ordered]@{
             'collaborators/DLsnows/permission' = { 'admin' }
             'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
@@ -405,7 +478,18 @@ function Invoke-SelfTest {
             'check-runs'                       = { Read-RinneFixture 'pr3-check-runs.json' }
             '^git .* fetch '                   = { '' }
             '^git .* rev-parse refs/remotes/origin/pr/3' = { $head }
+            '^git .* rev-parse (HEAD|origin/feature/v1)$' = { 'c' * 40 }
+            '^git .* status --porcelain$'      = { '' }
             '^git .* rev-list --count'         = { '12' }
+            # 合并后构建：wt/tip 的 git 操作与构建脚本；构建时记下子进程能看到的凭据
+            '^git .* (checkout --detach|merge --no-ff|merge --abort)' = { '' }
+            '^pwsh -NoProfile -File .*build\.ps1$' = {
+                $builds.Add([pscustomobject]@{
+                        GhToken = [Environment]::GetEnvironmentVariable('GH_TOKEN'); OtherKey = [Environment]::GetEnvironmentVariable('RINNE_SELFTEST_KEY')
+                        Needles = [Environment]::GetEnvironmentVariable('RINNE_PRIVACY_LOCAL'); Plain = [Environment]::GetEnvironmentVariable('RINNE_SELFTEST_PLAIN')
+                    })
+                @{ Code = 0; Out = 'built'; Err = '' }
+            }
             'check-commits\.mjs contract-guard' = { @{ Code = 0; Out = 'check-commits contract-guard：通过'; Err = '' } }
         }
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
@@ -421,17 +505,28 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '合并前 fetch 了 feature/v1、dev 与 PR head' $false (-not ($log | Where-Object { $_ -match 'fetch --no-tags origin .*feature/v1.*dev.*refs/pull/3/head' }))
 
         # 对每条判据给一个反例：改一份事实的拷贝，只动一处
-        $bad = {
-            param([string]$label, [scriptblock]$mutate, [string]$expect = 'not-ready', [scriptblock]$also = { param($r) $true })
+        $copy = {
             $f = [pscustomobject]@{}
             foreach ($prop in $base.PSObject.Properties) { $f | Add-Member -NotePropertyName $prop.Name -NotePropertyValue (Copy-RinneObject $prop.Value) }
             $f.Checks = @{}; foreach ($k in $base.Checks.Keys) { $f.Checks[$k] = Copy-RinneObject $base.Checks[$k] }
             $f.Items = @($base.Items | ForEach-Object { Copy-RinneObject $_ })
+            $f
+        }
+        $bad = {
+            param([string]$label, [scriptblock]$mutate, [string]$expect = 'not-ready', [scriptblock]$also = { param($r) $true })
+            $f = & $copy
             & $mutate $f
             $r = Get-MergeVerdict $f
             if ($env:RINNE_SELFTEST_VERBOSE) { [Console]::Error.WriteLine("$label => $($r.Code) | $(@($r.Failures) + @($r.Needs | ForEach-Object Reason) -join ' ; ')") }
-            Add-RinneCase $cases $label $true ($r.Code -eq $expect -and (& $also $r))
+            Add-RinneCase $cases $label ($expect -ne 'ready') ($(if ($expect -eq 'ready') { $r.Code -ne 'ready' } else { $r.Code -eq $expect -and (& $also $r) }))
         }
+        # 评论表重新从（改过的）原始来源生成，连分类一起测
+        $reitem = { param($f, [scriptblock]$edit) $a = Copy-RinneObject $f.Activity; & $edit $a; $f.Activity = $a; $f.Items = @(Get-RinneCommentItems -Activity $a -State $f.State) }
+        $user = { param($id, $login, $body, $created, $updated) [pscustomobject]@{ id = [long]$id; user = $(if ($login) { [pscustomobject]@{ login = $login; type = 'User' } } else { $null }); author_association = 'NONE'; created_at = $created; updated_at = $updated; body = $body; html_url = "https://github.com/x/y/pull/3#issuecomment-$id" } }
+        $reply = { param($id, $to, $created, $body = '已改。') & $user $id 'DLsnows' "<!-- rinne-agent v1 role=review kind=reply round=3 head=f35523c$(if ($to) { " in-reply-to=$to" }) -->`n$body" $created $created }
+
+        & $bad '主 clone 不在最新的 feature 线上' { param($f) $f.MainClone.Head = 'd' * 40 }
+        & $bad '主 clone 的工作树不干净' { param($f) $f.MainClone.Dirty = ' M scripts/check-commits.mjs' }
         & $bad 'base=dev' { param($f) $f.Pull.base.ref = 'dev' }
         & $bad 'head 不是 feat/' { param($f) $f.Pull.head.ref = 'fix/x' }
         & $bad 'draft' { param($f) $f.Pull.draft = $true }
@@ -456,13 +551,26 @@ function Invoke-SelfTest {
         & $bad '处置汇总引用的不是这次运行' { param($f) $f.State.disposition.botRun = '1' }
         & $bad '有一轮的总结没有处置汇总' { param($f) $f.State.dispositionRuns = @($f.State.dispositionRuns | Select-Object -Skip 1) }
         & $bad '还有未 resolve 的线程' { param($f) $f.Threads[0].isResolved = $false; ($f.Items | Where-Object ThreadId -eq $f.Threads[0].id) | ForEach-Object { $_.Resolved = $false } }
-        & $bad '维护者的评论没有回应' { param($f) $f.Items += [pscustomobject]@{ Source = 'issue'; Id = '999'; Author = 'DLsnows'; Kind = 'user'; Body = '这里再看看'; Created = '2026-10-12T05:00:00Z'; Updated = '2026-10-12T05:00:00Z'; Url = ''; IsNew = $true; ThreadId = $null; Resolved = $null; ReplyTo = '' } }
-        & $bad '外部评论交用户' { param($f) $f.Items += [pscustomobject]@{ Source = 'issue'; Id = '998'; Author = 'someone'; Kind = 'external'; Body = 'lgtm'; Created = '2026-10-12T05:00:00Z'; Updated = '2026-10-12T05:00:00Z'; Url = ''; IsNew = $true; ThreadId = $null; Resolved = $null; ReplyTo = '' } } 'needs-user'
+
+        # 回应：对比原评论的 updated_at、只认 in-reply-to、review 状态
+        & $bad '维护者的评论没有回应' { param($f) & $reitem $f { param($a) $a.Issue += & $user 999 'DLsnows' '这里再看看' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } }
+        & $bad '点名回复过的维护者评论放行' { param($f) & $reitem $f { param($a) $a.Issue += & $user 999 'DLsnows' '这里再看看' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z'; $a.Issue += & $reply 1000 '999' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad '回复之后原评论又改过' { param($f) & $reitem $f { param($a) $a.Issue += & $user 999 'DLsnows' '这里再看看（补充）' '2026-10-12T05:00:00Z' '2026-10-12T06:00:00Z'; $a.Issue += & $reply 1000 '999' '2026-10-12T05:10:00Z' } }
+        & $bad '只是正文里碰巧有这个编号' { param($f) & $reitem $f { param($a) $a.Issue += & $user 995 'DLsnows' '再跑一遍' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z'; $a.Issue += & $reply 1000 $null '2026-10-12T05:10:00Z' '已跑 995 个用例' } }
+        & $bad '维护者 Request changes（空正文）没有回应' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 777; state = 'CHANGES_REQUESTED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' } } }
+        & $bad 'Request changes 之后同一人 APPROVED 放行' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 777; state = 'CHANGES_REQUESTED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' }; $a.Reviews += [pscustomobject]@{ id = 778; state = 'APPROVED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:30:00Z'; html_url = 'u' } } } 'ready'
+        & $bad 'Request changes 有点名回复放行' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 777; state = 'CHANGES_REQUESTED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' }; $a.Issue += & $reply 1000 '777' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad '空正文、没有 inline 评论的 COMMENTED review 没有回应' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 779; state = 'COMMENTED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' } } }
+        & $bad '账号已删除的评论当外部评论' { param($f) & $reitem $f { param($a) $a.Issue += & $user 996 $null '……' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'needs-user' { param($r) $r.Level -eq 'user' }
+        & $bad '外部评论交用户' { param($f) & $reitem $f { param($a) $a.Issue += & $user 998 'someone' 'lgtm' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'needs-user'
+        & $bad '用户对这个 head 登记过已处理的外部评论放行' { param($f) & $reitem $f { param($a) $a.Issue += & $user 998 'someone' 'lgtm' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' }; $f.Records.ExternalHandled = @([pscustomobject]@{ head = $head; by = 'user'; comments = @('998'); note = '已回复' }) } 'ready'
+        & $bad '已处理记录是给别的 head 的' { param($f) & $reitem $f { param($a) $a.Issue += & $user 998 'someone' 'lgtm' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' }; $f.Records.ExternalHandled = @([pscustomobject]@{ head = 'e' * 40; by = 'user'; comments = @('998'); note = '' }) } 'needs-user'
         & $bad '【重要】判为不改' { param($f) $i = $f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' } | Select-Object -First 1; $i.Body += "`n| 9 | bot | 【重要】 | a.mjs:1 | x | 不改 | 理由 |" } 'needs-user'
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
         & $bad '缺 gates json' { param($f) $f.Gates = $null }
         & $bad 'gates 的 sha 不是 head' { param($f) $f.Gates.sha40 = 'e' * 40 }
         & $bad 'gates 档位不够' { param($f) $f.Card.tier = 'Standard' }
+        & $bad 'gates 一项也没通过（pass=0）' { param($f) $f.Gates.pass = 0 }
         & $bad 'gates 没通过' { param($f) $f.Gates.exit = 1 }
         & $bad 'gates 跑在脏工作树上' { param($f) $f.Gates.dirty = $true }
         & $bad 'PR 正文没过检查' { param($f) $f.PrText = @{ Code = 1; Out = '正文最后一行必须是签名'; Err = '' } }
@@ -470,37 +578,79 @@ function Invoke-SelfTest {
         & $bad '我方评论里有本机路径' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`n日志在 C:" + '\Users\someone\x.log' }
         & $bad '我方评论里有个人针' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`nrinne-selftest-fake-needle-7c1e" }
         & $bad '越界改动' { param($f) $f.Files = @($f.Files) + @([pscustomobject]@{ filename = 'src/core/x.cpp'; status = 'added' }) } 'needs-user' { param($r) $r.Level -eq 'orchestrator' -and $r.OutOfScope -contains 'src/core/x.cpp' }
+        & $bad '从范围外改名挪进来也算越界' { param($f) $f.Files = @([pscustomobject]@{ filename = 'docs/example.md'; status = 'renamed'; previous_filename = 'src/core/other/Thing.cpp' }) } 'needs-user' { param($r) $r.OutOfScope -contains 'src/core/other/Thing.cpp' }
         & $bad '非基础设施卡改了 .github/workflows/x.yml' { param($f) $f.Card.owns = @($f.Card.owns) + @('.github/workflows/x.yml'); $f.Files = @($f.Files) + @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' }) } 'needs-user' { param($r) $r.Level -eq 'user' -and $r.Infra.Count -gt 0 }
         & $bad '把 workflow 改名挪走也算' { param($f) $f.Card.owns = @('**'); $f.Files = @([pscustomobject]@{ filename = 'old/x.yml'; status = 'renamed'; previous_filename = '.github/workflows/x.yml' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 }
         & $bad 'PR #3 原样的改动（含 workflow）交用户批准' { param($f) $f.Card.owns = @('**'); $f.Files = Read-RinneFixture 'pr3-files.json' } 'needs-user' { param($r) $r.Level -eq 'user' -and @($r.Infra | Where-Object { $_ -like '.github/workflows/*' }).Count -ge 3 }
         & $bad '改了 scripts/checks.d 下的模块' { param($f) $f.Card.takesOver = @([pscustomobject]@{ path = 'scripts/checks.d/labels.mjs' }); $f.Files = @([pscustomobject]@{ filename = 'scripts/checks.d/labels.mjs'; status = 'modified' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 -and $r.OutOfScope.Count -eq 0 }
+        $infraFile = { param($f) $f.Card.owns = @('scripts/review-bot.mjs'); $f.Files = @([pscustomobject]@{ filename = 'scripts/review-bot.mjs'; status = 'modified' }) }
+        & $bad '基础设施改动有用户对这个 head 的批准' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = $head; by = 'user'; note = '用户看过 diff' }) } 'ready'
+        & $bad '批准是在 H，之后推了 H2' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = 'a' * 40; by = 'user'; note = '批的是上一个 head' }) } 'needs-user' { param($r) $r.Level -eq 'user' }
+        & $bad '批准只写了 7 位 head' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = $head.Substring(0, 7); by = 'user'; note = '' }) } 'needs-user'
+        & $bad '批准不是用户做的' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = $head; by = 'orchestrator'; note = '' }) } 'needs-user'
         & $bad '需要分支 dispatch 却没有成功的运行' { param($f) $f.NeedsDispatch = $true; $f.DispatchRuns = @() }
-        & $bad '合并后构建失败' { param($f) $f.Premerge = @{ Ok = $false; Reason = '构建退出码 1' } }
         & $bad '契约守卫在当前 feature/v1 上失败' { param($f) $f.Guard = @{ Code = 1; Out = '改到冻结契约'; Err = '' } }
         & $bad 'DCO 提交数到 200 暂停' { param($f) $f.Dco = 200 } 'needs-user'
 
-        $w = [pscustomobject]@{}; foreach ($prop in $base.PSObject.Properties) { $w | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value }
-        $w.State = Copy-RinneObject $base.State; $w.State.summary.important = 1
-        $w.Waivers = @([pscustomobject]@{ head = $head.Substring(0, 7); red = 0; important = 1; note = '用户豁免' })
+        $w = & $copy
+        $w.State.summary.important = 1
+        $w.Records.Waivers = @([pscustomobject]@{ head = $head; red = 0; important = 1; note = '用户豁免' })
         Add-RinneCase $cases '尾注 important=1 但有用户对这个 head 的豁免' $false ((Get-MergeVerdict $w).Code -ne 'ready')
-        $w.Waivers = @([pscustomobject]@{ head = 'abcdef1'; red = 0; important = 1; note = '别的 head' })
+        $w.Records.Waivers = @([pscustomobject]@{ head = 'a' * 40; red = 0; important = 1; note = '别的 head' })
         Add-RinneCase $cases '豁免是给别的 head 的不算' $true ((Get-MergeVerdict $w).Code -eq 'not-ready')
-        $w.Dco = 185; $w.Waivers = @(); $w.State = $base.State
+        $w = & $copy
+        $w.Dco = 185
         $vd = Get-MergeVerdict $w
         Add-RinneCase $cases 'DCO 180 只告警' $false ($vd.Code -ne 'ready' -or -not @($vd.Warnings | Where-Object { $_ -match '180|200' }).Count)
 
-        # 合并动作：消息、钉 head、基础设施 PR 只在用户批准后放行
+        # 合并后构建：最后一道；只在其余判据都通过、没碰基础设施时跑；子进程看不到凭据与个人针
+        New-Item -ItemType Directory -Force -Path (Join-Path $tmp 'wt/tip/scripts') | Out-Null
+        Set-Content -LiteralPath (Join-Path $tmp 'wt/tip/scripts/build.ps1') -Value 'exit 0'
+        $card.tier = 'Standard'; & $writeCard
+        $gates.tier = 'Standard'; & $writeGates
+        $saveTok = @{ Gh = $env:GH_TOKEN; Key = $env:RINNE_SELFTEST_KEY; Plain = $env:RINNE_SELFTEST_PLAIN }
+        try {
+            $env:GH_TOKEN = 'tok-selftest'; $env:RINNE_SELFTEST_KEY = 'key-selftest'; $env:RINNE_SELFTEST_PLAIN = 'kept'
+            $vc = Invoke-MergeCheck 3 $cid
+            $b = $builds | Select-Object -Last 1
+            Add-RinneCase $cases '合并后构建：其余都通过时最后才跑' $false (-not ($vc.Code -eq 'ready' -and $builds.Count -eq 1 -and $vc.Premerge.Ok))
+            Add-RinneCase $cases '合并后构建：子进程看不到 GH_TOKEN、*_KEY 与个人针，其他变量照常' $false (-not ($b -and -not $b.GhToken -and -not $b.OtherKey -and -not $b.Needles -and $b.Plain -eq 'kept'))
+            Add-RinneCase $cases '合并后构建：跑完还原环境' $false ($env:GH_TOKEN -ne 'tok-selftest' -or $env:RINNE_SELFTEST_KEY -ne 'key-selftest' -or $env:RINNE_PRIVACY_LOCAL -ne $needles.File)
+            $gates.exit = 1; & $writeGates
+            $n = $builds.Count
+            $vc = Invoke-MergeCheck 3 $cid
+            Add-RinneCase $cases '合并后构建：别的判据没过时不跑 PR 里的代码' $true ($vc.Code -eq 'not-ready' -and $builds.Count -eq $n)
+            $gates.exit = 0; & $writeGates
+            $files = @([pscustomobject]@{ filename = 'scripts/review-bot.mjs'; status = 'modified' })
+            $card.owns = @('scripts/review-bot.mjs'); & $writeCard
+            Set-Content -LiteralPath $recordsFile -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '3' = @(@{ head = $head; by = 'user'; note = '已批准' }) } })
+            $vc = Invoke-MergeCheck 3 $cid
+            Add-RinneCase $cases '合并后构建：基础设施 PR（即便已批准）不跑' $true ($vc.Code -eq 'ready' -and $builds.Count -eq $n -and @($vc.Warnings | Where-Object { $_ -match '不在本机做合并后构建' }).Count)
+            Set-Content -LiteralPath (Join-Path $tmp 'wt/tip/scripts/build.ps1') -Value 'exit 1'
+            Remove-Item -LiteralPath (Join-Path $tmp 'wt/tip/scripts/build.ps1')
+            $files = @([pscustomobject]@{ filename = 'docs/example.md'; status = 'added' })
+            $card.owns = @('docs/example.md'); & $writeCard
+            Set-Content -LiteralPath $recordsFile -Value '{}'
+            $vc = Invoke-MergeCheck 3 $cid
+            Add-RinneCase $cases '合并后构建：树里没有构建脚本时判红' $true ($vc.Code -eq 'not-ready' -and @($vc.Failures | Where-Object { $_ -match 'build\.ps1' }).Count)
+        } finally {
+            $env:GH_TOKEN = $saveTok.Gh; $env:RINNE_SELFTEST_KEY = $saveTok.Key; $env:RINNE_SELFTEST_PLAIN = $saveTok.Plain
+            $card.tier = 'Quick'; & $writeCard
+            $gates.tier = 'Quick'; & $writeGates
+        }
+
+        # 合并动作：消息、钉 head、基础设施 PR 只认对这个 head 的批准记录
         $msg = New-MergeMessage -Pull $pull -Summary '加入示例检查。'
         Add-RinneCase $cases 'squash 消息：subject 带 (#3)、末行唯一签名' $false (-not ($msg.Title -match '\(#3\)$' -and $msg.Body -match "`n`nSigned-off-by: [^\n]+$" -and ([regex]::Matches($msg.Body, 'Signed-off-by')).Count -eq 1))
         Add-RinneCase $cases '摘要段里自带 Co-Authored-By' $true (Test-Throws { New-MergeMessage -Pull $pull -Summary "x`n`nCo-Authored-By: a <a@b.c>" })
         Add-RinneCase $cases '摘要段为空' $true (Test-Throws { New-MergeMessage -Pull $pull -Summary '  ' })
-
-        # -Merge：ready 才合并，钉住 head，显式 subject 与 body；基础设施 PR 只有 -ApprovedByUser 才放行
         $sum = Join-Path $tmp 'summary.txt'
         Set-Content -LiteralPath $sum -Value '加入示例检查。' -Encoding utf8NoBOM
         $put = [System.Collections.Generic.List[object]]::new()
         $routes.Insert(0, 'api -X PUT \S+/pulls/3/merge --input', { param($argv) $put.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); @{ merged = $true; sha = 'f' * 40 } })
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
+        $lockLog.Clear()
+        Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid) | Out-Null
         Add-RinneCase $cases '-Check 只拿 git 锁，不拿 merge 锁' $false ($lockLog -contains 'merge' -or -not ($lockLog -contains 'git'))
         $lockLog.Clear()
         Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null
@@ -510,20 +660,24 @@ function Invoke-SelfTest {
                 $m.merge_method -eq 'squash' -and $m.sha -eq $head -and $m.commit_title -match '\(#3\)$' -and
                 $m.commit_message -match "^加入示例检查。`n`nSigned-off-by: [^\n]+$"))
         $files = @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' })
-        $card.owns = @('.github/workflows/x.yml')
-        ConvertTo-Json -InputObject @($card) -Depth 10 | Set-Content -LiteralPath $cardsFile
+        $card.owns = @('.github/workflows/x.yml'); & $writeCard
         $n = $put.Count
-        Add-RinneCase $cases '-Merge：基础设施 PR 没有用户批准不合' $true ((Test-Throws { Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null }) -and $put.Count -eq $n)
-        Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum -ApprovedByUser | Out-Null
-        Add-RinneCase $cases '-Merge：用户批准后基础设施 PR 可合' $false ($put.Count -ne $n + 1)
+        Add-RinneCase $cases '-Merge：基础设施 PR 没有批准记录不合' $true ((Test-Throws { Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null }) -and $put.Count -eq $n)
+        Set-Content -LiteralPath $recordsFile -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '3' = @(@{ head = 'a' * 40; by = 'user'; note = '批的是 H' }) } })
+        Add-RinneCase $cases '-Merge：批准在 H、现在是 H2，不合' $true ((Test-Throws { Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null }) -and $put.Count -eq $n)
+        Set-Content -LiteralPath $recordsFile -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '3' = @(@{ head = $head; by = 'user'; note = '批的就是当前 head' }) } })
+        Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null
+        Add-RinneCase $cases '-Merge：有对当前 head 的批准记录才合，且 sha 钉在这个 head' $false (-not ($put.Count -eq $n + 1 -and $put[-1].sha -eq $head))
         $pull.mergeable_state = 'dirty'
-        Add-RinneCase $cases '-Merge：not-ready 时 -ApprovedByUser 也不合' $true ((Test-Throws { Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum -ApprovedByUser | Out-Null }) -and $put.Count -eq $n + 1)
+        Add-RinneCase $cases '-Merge：not-ready 时有批准记录也不合' $true ((Test-Throws { Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null }) -and $put.Count -eq $n + 1)
         $pull.mergeable_state = 'clean'
+        Set-Content -LiteralPath $recordsFile -Value '{}'
 
         # -After：回读、删远端子支线、持锁移除 worktree 与本地分支
         $merged = Copy-RinneObject $pull
         $merged.merged = $true; $merged.state = 'closed'; $merged.merge_commit_sha = 'f' * 40
         $sq = "ci(review): 加入评审 bot、PR 模板、标签与 CODEOWNERS (#3)`n`n加入。`n`n$(Get-Signoff)"
+        $wtBranch = 'feat/review-bot'
         $locks = [System.Collections.Generic.List[string]]::new()
         Set-RinneLockImpl { param($name, $sb) $locks.Add($name); & $sb }
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
@@ -532,6 +686,7 @@ function Invoke-SelfTest {
             'merge-base --is-ancestor'       = { '' }
             'check-commits\.mjs commits --range' = { @{ Code = 0; Out = 'check-commits commits：通过'; Err = '' } }
             ' log -1 --format=%B'            = { $sq }
+            ' symbolic-ref --quiet --short HEAD' = { $wtBranch }
             'ls-remote --exit-code'          = { "$('a' * 40)`trefs/heads/feat/review-bot" }
             ' push origin --delete refs/heads/feat/review-bot' = { '' }
             ' worktree remove '              = { param($argv) Remove-Item -Recurse -Force -LiteralPath $argv[-1]; '' }
@@ -545,6 +700,11 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-After：持 merge 锁；回读通过后删远端子支线、持 git 锁移除 worktree 与本地分支' $false (-not (
                 $line -match '已合入 fffffff' -and @($log | Where-Object { $_ -match 'push origin --delete refs/heads/feat/review-bot' }).Count -eq 1 -and
                 @($log | Where-Object { $_ -match 'worktree remove' }).Count -eq 1 -and $locks[0] -eq 'merge' -and @($locks | Where-Object { $_ -eq 'git' }).Count -ge 2))
+        New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
+        $wtBranch = 'feat/other-card'
+        Add-RinneCase $cases '-After：worktree 在别的分支上（卡号写错）不清理' $true ((Test-Throws { Invoke-After -Pr 3 -CardId $cid }) -and (Test-Path -LiteralPath (Join-Path $tmp "wt/$cid")))
+        $wtBranch = 'feat/review-bot'
+        Add-RinneCase $cases '-After：卡号格式不对' $true (Test-Throws { Invoke-After -Pr 3 -CardId '../x' })
         $sq = "ci(review): 加入 (#3)`n`n加入。`n`n$(Get-Signoff)`n$(Get-Signoff)"
         Add-RinneCase $cases '-After：squash 消息有两行签名' $true (Test-Throws { Invoke-After -Pr 3 -CardId $cid })
         $sq = "ci(review): 加入`n`n加入。`n`n$(Get-Signoff)"
@@ -561,6 +721,7 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '范围：外面的路径不算' $true (@($out).Count -eq 0)
         Add-RinneCase $cases '基础设施：gates.ps1、hooks、隐私规则表、CLAUDE.md' $true (@(Get-InfraTouches -Files @('scripts/gates.ps1', 'scripts/hooks/pre-push', 'scripts/lib/privacy-needles.mjs', 'CLAUDE.md', '.github/actions-lock.json' | ForEach-Object { [pscustomobject]@{ filename = $_; status = 'modified' } })).Count -eq 5)
         Add-RinneCase $cases '基础设施：评审 bot 与检查模块（含新增）' $true (@(Get-InfraTouches -Files @('scripts/review-bot.mjs', 'scripts/checks.d/new.mjs', 'scripts/run-checks.mjs', 'REUSE.toml', '.gitleaks-version' | ForEach-Object { [pscustomobject]@{ filename = $_; status = 'added' } })).Count -eq 5)
+        Add-RinneCase $cases '基础设施：合并后构建、压测、打包与 CI 调用的脚本' $true (@(Get-InfraTouches -Files @('scripts/build.ps1', 'scripts/package-macos.sh', 'scripts/stress.ps1', 'scripts/ci/x.ps1' | ForEach-Object { [pscustomobject]@{ filename = $_; status = 'added' } })).Count -eq 4)
         Add-RinneCase $cases '基础设施：src 与 docs 不算' $false (@(Get-InfraTouches -Files @('src/core/x.cpp', 'docs/a.md' | ForEach-Object { [pscustomobject]@{ filename = $_; status = 'modified' } })).Count -gt 0)
         Set-RinneInfraList (Join-Path $tmp 'no-such-list.json')
         Add-RinneCase $cases '基础设施清单取不到时判不了，不放行' $true (Test-Throws { Get-MergeVerdict $base })
@@ -568,10 +729,10 @@ function Invoke-SelfTest {
         Set-RinneFake $null
         Set-RinneLockImpl $null
         Set-RinneInfraList $null
-        Set-RinneNeedlesMode 'local'
-        $env:RINNE_ROOT = $oldRoot
-        $env:RINNE_CARDS = $oldCards
-        $env:PRIVACY_NEEDLES = $oldPriv
+        Exit-RinneSelfTestNeedles $needles
+        $env:RINNE_ROOT = $saved.Root
+        $env:RINNE_CARDS = $saved.Cards
+        $env:RINNE_WAIVERS = $saved.Waivers
         Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
     }
     Complete-RinneSelfTest $cases 'pr-merge'
@@ -579,17 +740,17 @@ function Invoke-SelfTest {
 
 if ($SelfTest) { exit (Invoke-SelfTest) }
 if (@($Check, $Merge, $After | Where-Object { $_ }).Count -ne 1) { throw '用法：-Check | -Merge | -After，三选一（或 -SelfTest）' }
-if ($Pr -le 0 -or -not $Card) { throw '需要 -Pr <n> 与 -Card <卡>' }
+if ($Pr -le 0 -or $Card -notmatch $CardPattern) { throw '需要 -Pr <n> 与 -Card <卡号>' }
 Initialize-RinneIdentity
 Assert-MainClone
 if ($Check) {
-    $v = Get-MergeVerdict (Get-MergeFacts $Pr $Card)
+    $v = Invoke-MergeCheck $Pr $Card
     Write-Output (ConvertTo-RinneJsonText $v)
     exit $(switch ($v.Code) { 'ready' { 0 } 'needs-user' { 2 } default { 1 } })
 }
 if ($Merge) {
     if (-not $SummaryFile) { throw '-Merge 需要 -SummaryFile（squash 提交的摘要段）' }
-    Invoke-Merge -Pr $Pr -CardId $Card -SummaryFile $SummaryFile -ApprovedByUser:$ApprovedByUser
+    Invoke-Merge -Pr $Pr -CardId $Card -SummaryFile $SummaryFile
     exit 0
 }
 Invoke-After -Pr $Pr -CardId $Card

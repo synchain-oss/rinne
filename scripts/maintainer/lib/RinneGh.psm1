@@ -190,6 +190,14 @@ function Test-PublicText {
     [pscustomobject]@{ Ok = ($findings.Count -eq 0); Findings = $findings }
 }
 
+<# 一次扫多段（同一判据），返回与输入同序的 @{ Ok; Findings }。 #>
+function Test-PublicTexts {
+    param([AllowEmptyCollection()][string[]]$Texts = @())
+    if (-not $Texts.Count) { return }
+    $v = Invoke-RinneMaint -Command 'texts' -Content (ConvertTo-RinneJsonText @($Texts)) -Extra @('--needles', $script:NeedlesMode)
+    foreach ($r in @($v.results)) { $f = @($r.findings); [pscustomobject]@{ Ok = ($f.Count -eq 0); Findings = $f } }
+}
+
 function Assert-PublicText {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [string]$Label = '文本')
     $t = Test-PublicText $Text
@@ -228,7 +236,16 @@ function Get-AgentMarker {
     $first = (($Body ?? '') -split "`r?`n", 2)[0]
     $m = [regex]::Match($first, $script:MarkerPattern)
     if (-not $m.Success) { return $null }
-    [pscustomobject]@{ Role = $m.Groups[1].Value; Kind = $m.Groups[2].Value; Round = [int]$m.Groups[3].Value; Head = $m.Groups[4].Value }
+    $extra = @{}
+    foreach ($kv in ($m.Groups[5].Value.Trim() -split '\s+' | Where-Object { $_ })) {
+        $k, $v = $kv -split '=', 2
+        $extra[$k] = $v
+    }
+    $replyTo = if ($extra.ContainsKey('in-reply-to')) { @($extra['in-reply-to'] -split ',' | Where-Object { $_ }) } else { @() }
+    [pscustomobject]@{
+        Role = $m.Groups[1].Value; Kind = $m.Groups[2].Value; Round = [int]$m.Groups[3].Value; Head = $m.Groups[4].Value
+        Extra = $extra; InReplyTo = $replyTo
+    }
 }
 
 <# agent 发出的文本：首行加隐藏标记，整段过公开文本检查。调用方自己写了标记的拒收，免得标记与身份对不上。 #>
@@ -407,8 +424,11 @@ function Get-RinneReviewState {
 
 <#
   把四个来源摊成一张表。Kind：agent（有写权限且首行带 agent 标记）、bot-summary、bot、user（有写权限、没有标记：
-  维护者本人的意见）、external（既不是 bot 也没有写权限）。review comment 带上所在线程与是否已 resolve。
-  IsNew：updated_at 晚于 Since（追踪评论是原地编辑的，按更新时间判新）。
+  维护者本人的意见）、external（既不是 bot 也没有写权限；账号已删除、login 为空的也算）。
+  review comment 带上所在线程、是否已 resolve 与所属 review。review 只收 COMMENTED 与 CHANGES_REQUESTED（正文为空的也收：
+  inline 评论都挂在一个空正文的 COMMENTED review 下，「Request changes」也可以不写正文）；空正文、只装着我方回复的 review
+  算 agent 的。CHANGES_REQUESTED 记下同一作者之后有没有 APPROVED。
+  IsNew：updated_at 晚于 Since（追踪评论是原地编辑的，按更新时间判新）。InReplyTo：agent 标记里 in-reply-to 列出的编号。
 #>
 function Get-RinneCommentItems {
     param([Parameter(Mandatory)]$Activity, $State, [string]$Since)
@@ -419,43 +439,65 @@ function Get-RinneCommentItems {
     }
     $items = [System.Collections.Generic.List[object]]::new()
     $add = {
-        param($source, $c, $created)
-        $login = Get-RinneProp (Get-RinneProp $c 'user') 'login'
+        param($source, $c, $created, $extra)
+        $login = [string](Get-RinneProp (Get-RinneProp $c 'user') 'login')
         $body = [string](Get-RinneProp $c 'body')
         $id = [string]$c.id
-        $kind = if ($login -match '\[bot\]$') {
+        $marker = Get-AgentMarker $body
+        $kind = if (-not $login) { 'external' }
+        elseif ($login -match '\[bot\]$') {
             if ($source -eq 'issue' -and $summaryIds -contains $id) { 'bot-summary' } else { 'bot' }
         } elseif (Test-RepoWriter $login) {
-            if (Get-AgentMarker $body) { 'agent' } else { 'user' }
+            if ($marker) { 'agent' } else { 'user' }
         } else { 'external' }
         $updated = [string](Get-RinneProp $c 'updated_at') ; if (-not $updated) { $updated = $created }
         $thread = if ($source -eq 'review-comment') { $threadOf[$id] } else { $null }
-        $items.Add([pscustomobject]@{
-                Source = $source; Id = $id; Author = $login; Kind = $kind; Body = $body
-                Created = $created; Updated = $updated; Url = [string](Get-RinneProp $c 'html_url')
-                IsNew = (-not $Since) -or ((ConvertTo-RinneUtc $updated) -gt (ConvertTo-RinneUtc $Since))
-                ThreadId = $(if ($thread) { $thread.id } else { $null })
-                Resolved = $(if ($thread) { [bool]$thread.isResolved } else { $null })
-                ReplyTo = [string](Get-RinneProp $c 'in_reply_to_id')
-            })
+        $item = [pscustomobject]@{
+            Source = $source; Id = $id; Author = $(if ($login) { $login } else { '（已删除的账号）' }); Kind = $kind; Body = $body
+            Created = $created; Updated = $updated; Url = [string](Get-RinneProp $c 'html_url')
+            IsNew = (-not $Since) -or ((ConvertTo-RinneUtc $updated) -gt (ConvertTo-RinneUtc $Since))
+            ThreadId = $(if ($thread) { $thread.id } else { $null })
+            Resolved = $(if ($thread) { [bool]$thread.isResolved } else { $null })
+            ReviewId = [string](Get-RinneProp $c 'pull_request_review_id')
+            InReplyTo = $(if ($marker) { @($marker.InReplyTo) } else { @() })
+            State = [string](Get-RinneProp $c 'state'); Comments = @(); ApprovedLater = $false
+        }
+        if ($extra) { foreach ($k in $extra.Keys) { $item.$k = $extra[$k] } }
+        $items.Add($item)
     }
-    foreach ($c in @($Activity.Issue)) { & $add 'issue' $c ([string]$c.created_at) }
-    foreach ($c in @($Activity.Review)) { & $add 'review-comment' $c ([string]$c.created_at) }
-    foreach ($c in @($Activity.Reviews)) {
-        if ([string](Get-RinneProp $c 'body')) { & $add 'review' $c ([string]$c.submitted_at) }
+    foreach ($c in @($Activity.Issue)) { & $add 'issue' $c ([string]$c.created_at) $null }
+    foreach ($c in @($Activity.Review)) { & $add 'review-comment' $c ([string]$c.created_at) $null }
+    $reviews = @($Activity.Reviews)
+    foreach ($c in $reviews) {
+        $state = [string](Get-RinneProp $c 'state')
+        if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $state) { continue }
+        $rid = [string]$c.id
+        $inline = @($items | Where-Object { $_.Source -eq 'review-comment' -and $_.ReviewId -eq $rid })
+        $author = [string](Get-RinneProp (Get-RinneProp $c 'user') 'login')
+        $approved = $state -eq 'CHANGES_REQUESTED' -and @($reviews | Where-Object {
+                (Get-RinneProp $_ 'state') -eq 'APPROVED' -and [string](Get-RinneProp (Get-RinneProp $_ 'user') 'login') -eq $author -and
+                (ConvertTo-RinneUtc $_.submitted_at) -gt (ConvertTo-RinneUtc $c.submitted_at) }).Count -gt 0
+        & $add 'review' $c ([string]$c.submitted_at) @{ Comments = @($inline | ForEach-Object Id); ApprovedLater = $approved }
+        $last = $items[$items.Count - 1]
+        if (-not $last.Body.Trim() -and $inline.Count -and @($inline | Where-Object Kind -ne 'agent').Count -eq 0) { $last.Kind = 'agent' }
     }
     $items.ToArray()
 }
 
 <#
-  一条评论有没有得到我方回应：
+  一条评论有没有得到我方回应。「之后」一律对比原评论的 updated_at：原评论在我方回复之后又改过，就算没回应。
   - agent 自己的、非总结的 bot 通知（/review 的回执之类）：不需要；
   - bot 审查总结：之后有处置汇总引用它的运行编号；
-  - review comment（bot 或人）：所在线程已 resolve，或线程里有我方之后的回复；
-  - issue comment 与 review（人）：之后有我方评论在正文里引用它的编号（回复链接里带编号）。
+  - review comment：线程里有我方回复的，要有一条晚于它的最后一次修改；线程里没有我方回复的，线程已 resolve 也算；
+  - 其余（issue comment、review 正文、CHANGES_REQUESTED）：我方评论的 agent 标记里用 in-reply-to 点名了它
+    （-Reply 自动带上），不认正文里碰巧出现的数字。空正文、只装着 inline 评论的 review 看它那些评论；
+    CHANGES_REQUESTED 也可以由同一作者之后的 APPROVED 解除（驳回的 review 不再出现在表里）。
 #>
 function Test-RinneResponded {
     param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, $State)
+    $edited = ConvertTo-RinneUtc $Item.Updated
+    $explicit = @($Items | Where-Object {
+            $_.Kind -eq 'agent' -and @($_.InReplyTo) -contains $Item.Id -and (ConvertTo-RinneUtc $_.Created) -gt $edited }).Count -gt 0
     switch ($Item.Kind) {
         'agent' { return $true }
         'bot-summary' {
@@ -464,15 +506,22 @@ function Test-RinneResponded {
         }
     }
     if ($Item.Source -eq 'review-comment') {
-        if ($Item.Resolved) { return $true }
-        $later = @($Items | Where-Object {
-                $_.Kind -eq 'agent' -and $_.ThreadId -and $_.ThreadId -eq $Item.ThreadId -and (ConvertTo-RinneUtc $_.Created) -gt (ConvertTo-RinneUtc $Item.Created) })
-        return $later.Count -gt 0
+        $replies = @($Items | Where-Object { $_.Kind -eq 'agent' -and $_.ThreadId -and $_.ThreadId -eq $Item.ThreadId -and $_.Id -ne $Item.Id })
+        if ($replies.Count) { return $explicit -or @($replies | Where-Object { (ConvertTo-RinneUtc $_.Created) -gt $edited }).Count -gt 0 }
+        return $explicit -or [bool]$Item.Resolved
     }
     if ($Item.Kind -eq 'bot') { return $true }
-    $refs = @($Items | Where-Object {
-            $_.Kind -eq 'agent' -and (ConvertTo-RinneUtc $_.Created) -gt (ConvertTo-RinneUtc $Item.Created) -and $_.Body -match "(?<!\d)$($Item.Id)(?!\d)" })
-    return $refs.Count -gt 0
+    if ($Item.Source -eq 'review') {
+        if ($Item.State -eq 'CHANGES_REQUESTED') { return $explicit -or [bool]$Item.ApprovedLater }
+        if (-not $Item.Body.Trim() -and @($Item.Comments).Count) {
+            foreach ($cid in @($Item.Comments)) {
+                $c = $Items | Where-Object { $_.Source -eq 'review-comment' -and $_.Id -eq $cid } | Select-Object -First 1
+                if ($c -and -not (Test-RinneResponded -Item $c -Items $Items -State $State)) { return $false }
+            }
+            return $true
+        }
+    }
+    return $explicit
 }
 
 <# 当前 head 上各个 check 的最新一次结果：name → { status; conclusion; details_url }。 #>
@@ -518,7 +567,50 @@ function Invoke-RinneMergeLocked {
     Invoke-WithRinneLock -Name merge -ScriptBlock $Script
 }
 
+# ---- 不带凭据跑不可信代码 -------------------------------------------------------------------
+
+<#
+  合并后构建跑的是 PR 树里的脚本：子进程启动前从本进程环境里拿掉凭据与个人针（GH_TOKEN、GITHUB_TOKEN、
+  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY），结束后在 finally 里还原。
+  这只挡住环境变量；本机 gh 的登录凭据与 git config 仍在，所以合并后构建只在其他判据都通过、且没碰基础设施时才跑。
+#>
+$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY)$'
+
+function Invoke-RinneWithoutSecrets {
+    param([Parameter(Mandatory)][scriptblock]$Script)
+    $saved = @{}
+    foreach ($name in @([Environment]::GetEnvironmentVariables().Keys)) {
+        if ($name -match $script:SecretEnv) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name)
+            [Environment]::SetEnvironmentVariable($name, $null)
+        }
+    }
+    try { & $Script } finally {
+        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    }
+}
+
 # ---- 自测框架 -------------------------------------------------------------------------------
+
+<# 自测用：个人针改读一份临时的假针文件，不依赖本机配置。返回的状态交给 Exit-RinneSelfTestNeedles 还原。 #>
+function Enter-RinneSelfTestNeedles {
+    $file = [IO.Path]::GetTempFileName()
+    [IO.File]::WriteAllText($file, "rinne-selftest-fake-needle-7c1e`n", [Text.UTF8Encoding]::new($false))
+    $state = [pscustomobject]@{ File = $file; Local = $env:RINNE_PRIVACY_LOCAL; Ci = $env:PRIVACY_NEEDLES; Mode = $script:NeedlesMode }
+    $env:RINNE_PRIVACY_LOCAL = $file
+    $env:PRIVACY_NEEDLES = $null
+    $script:NeedlesMode = 'local'
+    $state
+}
+
+function Exit-RinneSelfTestNeedles {
+    param($State)
+    if (-not $State) { return }
+    $env:RINNE_PRIVACY_LOCAL = $State.Local
+    $env:PRIVACY_NEEDLES = $State.Ci
+    $script:NeedlesMode = $State.Mode
+    Remove-Item -LiteralPath $State.File -ErrorAction SilentlyContinue
+}
 
 function Set-RinneFake { param([scriptblock]$Handler) $script:Fake = $Handler }
 function Set-RinneLockImpl { param([scriptblock]$Impl) $script:LockImpl = $Impl }
@@ -582,6 +674,6 @@ function Complete-RinneSelfTest {
 <# 自测里跑一段代码，抛错算「判出了问题」。 #>
 function Test-Throws { param([scriptblock]$Script) try { & $Script | Out-Null; return $false } catch { return $true } }
 
-Export-ModuleMember -Function *-Rinne*, *-AgentMarker, Format-AgentText, Test-PublicText, Assert-PublicText,
+Export-ModuleMember -Function *-Rinne*, *-AgentMarker, Format-AgentText, Test-PublicText, Test-PublicTexts, Assert-PublicText,
     Test-RepoWriter, ConvertTo-GlobRegex, Test-GlobMatch, Get-InfraTouches, Get-CardScope,
     Initialize-RinneIdentity, Test-Throws, Add-RinneCase, Complete-RinneSelfTest, ConvertTo-RinneJsonText

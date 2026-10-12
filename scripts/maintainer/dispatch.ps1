@@ -26,10 +26,13 @@ $Workflow = 'build.yml'
 function Get-DispatchInputs {
     param([string]$Sha)
     $f = Get-RinneApi "repos/$(Get-RinneRepo)/contents/.github/workflows/$($Workflow)?ref=$Sha"
-    $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($f.content -replace '\s', '')))
-    $m = [regex]::Match($text, '(?ms)^  workflow_dispatch:\s*\n    inputs:\s*\n(.*?)(?=^\S|^  \S)')
-    if (-not $m.Success) { return @() }
-    [regex]::Matches($m.Groups[1].Value, '(?m)^      ([A-Za-z0-9_-]+):') | ForEach-Object { $_.Groups[1].Value }
+    $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($f.content -replace '\s', ''))) -replace "`r`n", "`n"
+    # inputs 块到下一个顶格或两格缩进的键为止，也可能一直到文件末尾
+    $m = [regex]::Match($text, '(?ms)^  workflow_dispatch:[ \t]*\n    inputs:[ \t]*\n(.*?)(?=^\S|^  \S|\z)')
+    $names = if ($m.Success) { @([regex]::Matches($m.Groups[1].Value, '(?m)^      ([A-Za-z0-9_-]+):') | ForEach-Object { $_.Groups[1].Value }) } else { @() }
+    # 不按 sha 触发就对应不到确定的提交：解析不出 ref 输入（写法变了或真的没有）宁可报错，不静默跳过
+    if ($names -notcontains 'ref') { throw "build.yml 在 $($Sha.Substring(0, 7)) 上解析不出 workflow_dispatch 的 ref 输入，不能按 sha 触发" }
+    $names
 }
 
 function Invoke-Dispatch {
@@ -42,7 +45,7 @@ function Invoke-Dispatch {
     if ($tip -ne $Sha) { throw "$Ref 此刻的 tip 是 $($tip.Substring(0, 7))，不是 $($Sha.Substring(0, 7))" }
     $declared = @(Get-DispatchInputs $Sha)
     $inputs = [ordered]@{}
-    if ($declared -contains 'ref') { $inputs['ref'] = $Sha }
+    $inputs['ref'] = $Sha
     if ($Probe) { if ($declared -notcontains 'probe') { throw 'build.yml 在该提交上没有 probe 输入' }; $inputs['probe'] = 'true' }
     if ($KitVersion) { if ($declared -notcontains 'kit-version') { throw 'build.yml 在该提交上没有 kit-version 输入' }; $inputs['kit-version'] = $KitVersion }
     Invoke-RinneApiWrite -Method POST -Path "repos/$repo/actions/workflows/$Workflow/dispatches" -Body @{ ref = $Ref; inputs = $inputs } | Out-Null
@@ -83,14 +86,13 @@ function Invoke-SelfTest {
     $cases = New-RinneCases
     $tip = 'c' * 40
     $posted = [System.Collections.Generic.List[object]]::new()
-    $yml = "on:`n  workflow_dispatch:`n    inputs:`n      ref:`n        type: string`n      probe:`n        type: boolean`npermissions:`n  contents: read`n"
-    $content = @{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($yml)) }
+    $doc = @{ Yml = "on:`n  workflow_dispatch:`n    inputs:`n      ref:`n        type: string`n      probe:`n        type: boolean`npermissions:`n  contents: read`n" }
     $now = [datetime]::UtcNow
     $run = @{ id = 42; head_sha = $tip; created_at = $now.ToString('o'); status = 'completed'; conclusion = 'success'; html_url = 'u' }
     $jobs = @{ jobs = @(@{ name = 'build-win'; status = 'completed'; conclusion = 'success' }, @{ name = 'web-smoke'; status = 'completed'; conclusion = 'success' }) }
     $routes = [ordered]@{
         'branches/feature%2Fv1'   = { @{ commit = @{ sha = $tip } } }
-        'contents/\.github/workflows/build\.yml' = { $content }
+        'contents/\.github/workflows/build\.yml' = { @{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($doc.Yml)) } }
         'api -X POST \S+/dispatches --input' = { param($argv) $posted.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); '' }
         'workflows/build\.yml/runs' = { @{ workflow_runs = @($run) } }
         'actions/runs/42/jobs'    = { $jobs }
@@ -106,6 +108,12 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-Sha 不是分支此刻的 tip' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha ('d' * 40) -Now $now })
         foreach ($bad in 'dev', 'prod', 'v0.9.0-rc.1') { Add-RinneCase $cases "不对 $bad 触发" $true (Test-Throws { Invoke-Dispatch -Ref $bad -Sha $tip -Now $now }) }
         Add-RinneCase $cases 'kit 版本号不像版本' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -KitVersion 'abc' -Now $now })
+        $doc.Yml = "on:`r`n  workflow_dispatch:`r`n    inputs:`r`n      ref:`r`n        type: string`r`n      kit-version:`r`n        type: string"
+        Add-RinneCase $cases 'inputs 块在文件末尾、CRLF 换行也能解析' $false (-not ((@(Get-DispatchInputs $tip) -join ',') -eq 'ref,kit-version'))
+        $doc.Yml = "on:`n  workflow_dispatch:`n    inputs:`n      probe:`n        type: boolean`n"
+        Add-RinneCase $cases '解析不出 ref 输入时报错，不静默跳过' $true (Test-Throws { Get-DispatchInputs $tip })
+        $doc.Yml = "on:`n  workflow_dispatch: {}`n"
+        Add-RinneCase $cases '写法变了（解析不出 inputs）也报错' $true (Test-Throws { Get-DispatchInputs $tip })
         $j = Get-Judgement ([pscustomobject]$run)
         Add-RinneCase $cases '全绿' $false (-not ($j.State -eq 'green' -and $j.Jobs.Count -eq 2))
         $run.conclusion = 'failure'; $jobs.jobs[1].conclusion = 'failure'

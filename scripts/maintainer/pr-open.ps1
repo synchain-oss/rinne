@@ -64,10 +64,8 @@ function Invoke-Open {
 
 function Invoke-SelfTest {
     $cases = New-RinneCases
-    $oldPriv = $env:PRIVACY_NEEDLES
+    $needles = Enter-RinneSelfTestNeedles
     try {
-        $env:PRIVACY_NEEDLES = 'rinne-selftest-fake-needle-7c1e'
-        Set-RinneNeedlesMode 'ci'
         $template = Get-Content -Raw -LiteralPath (Join-Path (Get-RinneRepoRoot) '.github/pull_request_template.md')
         $good = (($template -replace '(?s)<!--.*?-->', '') -replace '(?m)^Signed-off-by: .*$', (Invoke-RinneMaint -Command 'signoff' -Content '').signoff).Trim()
         $sha = 'a' * 40
@@ -108,8 +106,7 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '远端没有这个分支' $true (Test-Throws { Invoke-Open -Head 'feat/missing' -Base 'feature/v1' -Title $title -Body $good -Draft $false -Role impl -Round 0 })
     } finally {
         Set-RinneFake $null
-        Set-RinneNeedlesMode 'local'
-        $env:PRIVACY_NEEDLES = $oldPriv
+        Exit-RinneSelfTestNeedles $needles
     }
     Complete-RinneSelfTest $cases 'pr-open'
 }

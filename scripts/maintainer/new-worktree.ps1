@@ -58,6 +58,7 @@ function Invoke-SelfTest {
         'worktree add'             = { param($argv) New-Item -ItemType Directory -Force -Path $argv[-2] | Out-Null; '' }
         'symbolic-ref'             = { $state.Current }
     }
+    $needles = Enter-RinneSelfTestNeedles
     try {
         $env:RINNE_ROOT = $tmp
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
@@ -81,6 +82,7 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '卡号格式不对' $true (Test-Throws { New-CardWorktree -Card '../x' -Slug 'example' })
     } finally {
         Set-RinneFake $null
+        Exit-RinneSelfTestNeedles $needles
         Set-RinneLockImpl $null
         $env:RINNE_ROOT = $oldRoot
         Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
