@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Derived from synchain-oss/scvb; see upstream/gates.json
 #
-# 本机资源锁。全部是 Local\ 命名互斥体：同一登录会话里的多个 agent 共用，由内核持有，持有进程被杀或崩溃时
-# 必然释放，下一个等待者以 AbandonedMutex 的形式接手。没有 owner 文件，也没有「等超时就抢别人的锁」这条路：
-# 等不到就返回 $null（Invoke-With* 抛错），由调用方决定记 FAIL 还是资源超时，绝不无锁硬跑。
-# 只用 Local\，不设 Global\ 降级：已有的同名 Global\ 对象拒绝当前 token 时退回 Local\，两个进程会各持一把
-# 不同的锁，以为有锁其实没有。
+# 本机资源锁。全部是 Local\ 命名互斥体，由内核持有，持有进程被杀或崩溃时必然释放，下一个等待者以 AbandonedMutex
+# 的形式接手。没有 owner 文件，也没有「等超时就抢别人的锁」这条路：等不到就返回 $null（Invoke-With* 抛错），
+# 由调用方决定记 FAIL 还是资源超时，绝不无锁硬跑。
+# Local\ 只在同一个登录会话里互斥：本机所有 agent 都在维护者的桌面会话里跑，所以够用；从 SSH、计划任务或另一个
+# 用户会话里起的 gates 拿到的是另一组锁，不与这里互斥，不要那样跑。不设 Global\ 降级：已有的同名 Global\ 对象
+# 拒绝当前 token 时退回 Local\，两个进程会各持一把不同的锁，以为有锁其实没有。
 #   build-slot-1、build-slot-2  编译（同时 ≤ 2），Enter-RinneBuildSlot 取其中空着的一把
 #   gui                         GUI pluginval 与无头浏览器冒烟（同时 ≤ 1）
 #   merge                       合并（同时 ≤ 1）
 #   git                         fetch、merge、worktree 这类改动共享 .git 的操作，一律经 Invoke-WithGitLock
 #   ipc-tests                   用真实段名的跨进程测试
+# 取锁顺序固定为 merge → 构建槽 → gui / ipc-tests → git，持着后面的锁时不再取前面的；git 锁只包住单条 git 操作、
+# 里面不再取别的锁。按这个顺序不会互相等成环。
 # 互斥体有线程归属：取与放要在同一线程上，在同一个 pwsh 进程里顺序调用即可。同一线程重复取同一把会重入成功，
 # 所以互斥只在进程之间成立。内存只经 Get-Counter 读。
-# RINNE_LOCK_SCOPE 只给自测用：换一组名字，自测与真在跑的 gates 互不等待。
+# 锁名前缀只能从模块内部改（自测用自己的一组名字，与真在跑的 gates 互不等待），没有环境变量或参数可以换掉它。
 #
 # 用法（导入一定带 -ErrorAction Stop：模块缺失时 Import-Module 默认只写一条非终止错误）：
 #   Import-Module (Join-Path $PSScriptRoot '../lib/Locks.psm1') -ErrorAction Stop
@@ -26,13 +29,12 @@
 # 持锁方被杀后要能马上接着用；git 自己的 *.lock 文件会让残留状态在下一条 git 命令上明确报错。
 
 $script:Names = 'build-slot-1', 'build-slot-2', 'gui', 'merge', 'git', 'ipc-tests'
+$script:Scope = 'Rinne'
 
 function Get-RinneLockName {
     param([Parameter(Mandatory)][string]$Name)
     if ($Name -notin $script:Names) { throw "未知的锁 $Name（只有 $($script:Names -join ' / ')）" }
-    $scope = if ($env:RINNE_LOCK_SCOPE) { $env:RINNE_LOCK_SCOPE } else { 'Rinne' }
-    if ($scope -cnotmatch '^Rinne(?:-[\w-]+)?$') { throw "RINNE_LOCK_SCOPE 只能是 Rinne 或 Rinne-<名字>" }
-    "Local\$scope-$Name"
+    "Local\$script:Scope-$Name"
 }
 
 function New-RinneLockHandle([string]$Full, $Mutex, [double]$Waited) {
@@ -112,10 +114,11 @@ function Wait-RinneMemory {
     }
 }
 
-# 起一个 pwsh 子进程，导入本模块后执行 Command；返回 Process。子进程最多打印一两行，输出接走不读。
+# 起一个 pwsh 子进程，导入本模块、换成与本进程相同的锁名前缀后执行 Command；返回 Process。子进程最多打印一两行，
+# 输出接走不读。
 function Start-LockChild([string]$Command) {
     $psi = [System.Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
-    foreach ($a in '-NoProfile', '-NonInteractive', '-Command', "Import-Module '$PSCommandPath'; $Command") { $psi.ArgumentList.Add($a) }
+    foreach ($a in '-NoProfile', '-NonInteractive', '-Command', "Import-Module '$PSCommandPath'; & (Get-Module Locks) { `$script:Scope = '$script:Scope' }; $Command") { $psi.ArgumentList.Add($a) }
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
@@ -123,10 +126,10 @@ function Start-LockChild([string]$Command) {
     [System.Diagnostics.Process]::Start($psi)
 }
 
-# 自测：返回 { Label; Bad; Passed } 列表（Bad 表示这是一个必须拦住的反例）。用自测专用的锁名。
+# 自测：返回 { Label; Bad; Passed } 列表（Bad 表示这是一个必须拦住的反例）。用自测专用的锁名前缀。
 function Test-RinneLocks {
-    $saved = $env:RINNE_LOCK_SCOPE
-    $env:RINNE_LOCK_SCOPE = "Rinne-selftest-$PID"
+    $saved = $script:Scope
+    $script:Scope = "Rinne-selftest-$PID"
     $out = [System.Collections.Generic.List[object]]::new()
     $add = { param($Label, $Bad, $Passed) $out.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
     $exitOf = { param($Command) $p = Start-LockChild $Command; $p.WaitForExit(); $p.ExitCode }
@@ -167,7 +170,7 @@ function Test-RinneLocks {
     } finally {
         if ($child -and -not $child.HasExited) { $child.Kill() }
         Remove-Item -LiteralPath $ready -ErrorAction SilentlyContinue
-        $env:RINNE_LOCK_SCOPE = $saved
+        $script:Scope = $saved
     }
     $out
 }
