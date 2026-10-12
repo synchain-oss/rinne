@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# 合规（required check：compliance）。工作树：gitleaks、reuse lint、SPDX 头、隐私扫描（先跑全部自测）。
+# 合规（required check：compliance）。工作树：gitleaks、reuse lint、SPDX 头、许可与模块闭包、离线、隐私扫描
+# （先跑全部自测）。
 # PR 上另对 BASE..HEAD 逐提交跑 gitleaks 与隐私扫描：推上来的提交经 refs/pull 已经公开，这一步是事后告警，
 # 命中后关 PR、删分支，由维护者联系 GitHub 清理，换新分支重开。推送到长期分支时按推送兜底档复核新提交。
 # 个人针：同仓 PR 与 push 用 secret（--needles ci，缺了判红）；fork PR 与 dependabot 的 PR 读不到这个 secret，
@@ -63,6 +64,13 @@ jobs:
           node scripts/run-checks.mjs --group compliance --only spdx
           node scripts/run-checks.mjs --group compliance --only reuse
           "$RINNE_GITLEAKS" dir . --no-banner --redact
+      # 只跑 node、只读仓内文件，不需要 secret 也不带它
+      - name: Worktree (license and module closure, offline)
+        run: |
+          set -euo pipefail
+          node scripts/run-checks.mjs --group compliance --only licenses-closure
+          node scripts/run-checks.mjs --group compliance --only modules-closure
+          node scripts/run-checks.mjs --group compliance --only offline
       - name: Worktree privacy
         env:
           PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
