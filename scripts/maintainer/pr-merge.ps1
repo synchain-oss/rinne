@@ -256,11 +256,11 @@ function Get-MergeVerdict {
         if (-not $t.Ok) { $fail.Add("我方评论 $($i.Id) 没过公开文本检查：$(@($t.Findings | ForEach-Object rule) -join '、')") }
     }
 
-    # 9. 范围：改动文件 ⊆ owns + takesOver + sections；碰基础设施路径一律交用户批准，不自合
+    # 9. 范围：改动文件 ⊆ owns + takesOver + sections；碰基础设施路径（清单取自 scripts/lib/infra-paths.mjs）一律交用户批准，不自合
     $scope = Get-CardScope $F.Card
     $outside = @($F.Files | Where-Object { -not (Test-GlobMatch $_.filename $scope) } | ForEach-Object filename)
     if ($outside.Count -gt 0) { & $need 'orchestrator' 'out-of-scope' "越界改动：$($outside -join '、')" }
-    $infra = @(Get-InfraTouches -Files $F.Files -Owns @($F.Card.owns))
+    $infra = @(Get-InfraTouches -Files $F.Files)
     if ($infra.Count -gt 0) { & $need 'user' 'infra' "碰到基础设施路径，交用户批准：$($infra -join '、')" }
 
     # 10. 分支 dispatch、合并后构建、契约守卫、DCO 上限
@@ -372,9 +372,9 @@ function Invoke-SelfTest {
         Clear-RinnePermCache
         $pull = Read-RinneFixture 'pr3-pull.json'
         $pull.state = 'open'; $pull.merged = $false; $pull.mergeable = $true; $pull.mergeable_state = 'clean'
-        # 基线：改动只在卡的 owns 之内、不碰基础设施（PR #3 本身碰了 workflow，换成新增的检查模块）
-        $files = @([pscustomobject]@{ filename = 'scripts/checks.d/example.mjs'; status = 'added' })
-        $card = [pscustomobject]@{ id = $cid; owns = @('scripts/checks.d/example.mjs'); takesOver = @(); sections = @(); tier = 'Quick'; needsBranchDispatch = $false }
+        # 基线：改动只在卡的 owns 之内、不碰基础设施（PR #3 本身碰了 workflow，换成一份文档）
+        $files = @([pscustomobject]@{ filename = 'docs/example.md'; status = 'added' })
+        $card = [pscustomobject]@{ id = $cid; owns = @('docs/example.md'); takesOver = @(); sections = @(); tier = 'Quick'; needsBranchDispatch = $false }
         ConvertTo-Json -InputObject @($card) -Depth 10 | Set-Content -LiteralPath $cardsFile
         $head = $pull.head.sha
         @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false } |
@@ -399,6 +399,8 @@ function Invoke-SelfTest {
         }
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Set-RinneLockImpl { param($sb) & $sb }
+        # 基础设施清单换成 fixture 里的一份（匹配规则仍取自 scripts/lib/infra-paths.mjs）
+        Set-RinneInfraList (Join-Path $PSScriptRoot 'fixtures/infra-paths.json')
         $base = Get-MergeFacts -Pr 3 -CardId $cid
         $v = Get-MergeVerdict $base
         Add-RinneCase $cases '干净的 PR 判 ready' $false ($v.Code -ne 'ready')
@@ -459,7 +461,7 @@ function Invoke-SelfTest {
         & $bad '非基础设施卡改了 .github/workflows/x.yml' { param($f) $f.Card.owns = @($f.Card.owns) + @('.github/workflows/x.yml'); $f.Files = @($f.Files) + @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' }) } 'needs-user' { param($r) $r.Level -eq 'user' -and $r.Infra.Count -gt 0 }
         & $bad '把 workflow 改名挪走也算' { param($f) $f.Card.owns = @('**'); $f.Files = @([pscustomobject]@{ filename = 'old/x.yml'; status = 'renamed'; previous_filename = '.github/workflows/x.yml' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 }
         & $bad 'PR #3 原样的改动（含 workflow）交用户批准' { param($f) $f.Card.owns = @('**'); $f.Files = Read-RinneFixture 'pr3-files.json' } 'needs-user' { param($r) $r.Level -eq 'user' -and @($r.Infra | Where-Object { $_ -like '.github/workflows/*' }).Count -ge 3 }
-        & $bad '改了别的卡建的检查模块' { param($f) $f.Card.takesOver = @([pscustomobject]@{ path = 'scripts/checks.d/labels.mjs' }); $f.Files = @([pscustomobject]@{ filename = 'scripts/checks.d/labels.mjs'; status = 'modified' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 -and $r.OutOfScope.Count -eq 0 }
+        & $bad '改了 scripts/checks.d 下的模块' { param($f) $f.Card.takesOver = @([pscustomobject]@{ path = 'scripts/checks.d/labels.mjs' }); $f.Files = @([pscustomobject]@{ filename = 'scripts/checks.d/labels.mjs'; status = 'modified' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 -and $r.OutOfScope.Count -eq 0 }
         & $bad '需要分支 dispatch 却没有成功的运行' { param($f) $f.NeedsDispatch = $true; $f.DispatchRuns = @() }
         & $bad '合并后构建失败' { param($f) $f.Premerge = @{ Ok = $false; Reason = '构建退出码 1' } }
         & $bad '契约守卫在当前 feature/v1 上失败' { param($f) $f.Guard = @{ Code = 1; Out = '改到冻结契约'; Err = '' } }
@@ -543,10 +545,14 @@ function Invoke-SelfTest {
         $out = @('src/core/engine/OutputEngine.cpp', 'src/core/loopx.cpp', 'src/core/engine/InputEngine.hpp') | Where-Object { Test-GlobMatch $_ $sc }
         Add-RinneCase $cases '范围：外面的路径不算' $true (@($out).Count -eq 0)
         Add-RinneCase $cases '基础设施：gates.ps1、hooks、隐私规则表、CLAUDE.md' $true (@(Get-InfraTouches -Files @('scripts/gates.ps1', 'scripts/hooks/pre-push', 'scripts/lib/privacy-needles.mjs', 'CLAUDE.md', '.github/actions-lock.json' | ForEach-Object { [pscustomobject]@{ filename = $_; status = 'modified' } })).Count -eq 5)
-        Add-RinneCase $cases '基础设施：新增检查模块不算' $false (@(Get-InfraTouches -Files @([pscustomobject]@{ filename = 'scripts/checks.d/new.mjs'; status = 'added' })).Count -gt 0)
+        Add-RinneCase $cases '基础设施：评审 bot 与检查模块（含新增）' $true (@(Get-InfraTouches -Files @('scripts/review-bot.mjs', 'scripts/checks.d/new.mjs', 'scripts/run-checks.mjs', 'REUSE.toml', '.gitleaks-version' | ForEach-Object { [pscustomobject]@{ filename = $_; status = 'added' } })).Count -eq 5)
+        Add-RinneCase $cases '基础设施：src 与 docs 不算' $false (@(Get-InfraTouches -Files @('src/core/x.cpp', 'docs/a.md' | ForEach-Object { [pscustomobject]@{ filename = $_; status = 'modified' } })).Count -gt 0)
+        Set-RinneInfraList (Join-Path $tmp 'no-such-list.json')
+        Add-RinneCase $cases '基础设施清单取不到时判不了，不放行' $true (Test-Throws { Get-MergeVerdict $base })
     } finally {
         Set-RinneFake $null
         Set-RinneLockImpl $null
+        Set-RinneInfraList $null
         Set-RinneNeedlesMode 'local'
         $env:RINNE_ROOT = $oldRoot
         $env:RINNE_CARDS = $oldCards

@@ -1,0 +1,21 @@
+[
+  ".github/**",
+  "scripts/maintainer/**",
+  "scripts/hooks/**",
+  "scripts/gates.ps1",
+  "scripts/gates.d/**",
+  "scripts/lib/**",
+  "scripts/checks.d/**",
+  "scripts/run-checks.mjs",
+  "scripts/check-*.mjs",
+  "scripts/review-bot.mjs",
+  "scripts/lock-actions.mjs",
+  "scripts/sync-labels.mjs",
+  ".gitleaks.toml",
+  "requirements-tools.txt",
+  ".*-version",
+  ".juce-commit",
+  ".sccache-sha256",
+  "REUSE.toml",
+  "CLAUDE.md"
+]

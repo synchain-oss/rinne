@@ -301,32 +301,28 @@ function Test-GlobMatch {
     return $false
 }
 
-<# 基础设施路径：CI、维护者脚本、hooks、gates、规则集与 action 锁、隐私与提交判据、CLAUDE.md。碰到就不自合，交用户批准。 #>
-$script:InfraGlobs = @(
-    '.github/workflows/**', 'scripts/maintainer/**', 'scripts/hooks/**', 'scripts/gates.ps1',
-    '.github/rulesets/**', '.github/required-checks.json', '.github/actions-*.json', '.github/CODEOWNERS',
-    'scripts/lib/privacy-needles.mjs', 'scripts/check-commits.mjs', 'scripts/check-privacy.mjs', 'CLAUDE.md'
-)
-<# 这两类模块新增不算基础设施；改动或删除别的卡建的算（本卡 owns 之内的不算）。 #>
-$script:ModuleGlobs = @('scripts/gates.d/*.ps1', 'scripts/checks.d/*.mjs')
+<#
+  基础设施路径的清单与匹配规则只有一份：scripts/lib/infra-paths.mjs（经 maint.mjs infra 调用）。这里不另写清单：
+  评审 bot 跑的是 PR 自己的 review-bot.mjs，削弱评审逻辑的 PR 能给自己判干净，所以碰到这些路径就不自合。
+  pr-merge 从主 clone 运行，读到的是 feature 线上的清单，而不是待合并 PR 里的版本。
+  自测用 Set-RinneInfraList 换成 fixture 里的一份 glob（匹配规则仍是 infra-paths.mjs 的）。
+#>
+$script:InfraList = $null
 
-function Get-InfraGlobs { $script:InfraGlobs }
+function Set-RinneInfraList { param([string]$Path) $script:InfraList = $Path }
 
 <# files：[{ filename; status; previous_filename? }]。返回碰到的基础设施路径。改名的新旧路径都算。 #>
 function Get-InfraTouches {
-    param([object[]]$Files = @(), [string[]]$Owns = @())
-    $hits = [System.Collections.Generic.List[string]]::new()
-    foreach ($f in $Files) {
-        $paths = @($f.filename)
-        if ($f.PSObject.Properties.Name -contains 'previous_filename' -and $f.previous_filename) { $paths += $f.previous_filename }
-        foreach ($p in $paths) {
-            if (Test-GlobMatch $p $script:InfraGlobs) { $hits.Add($p); continue }
-            if ($f.status -ne 'added' -and (Test-GlobMatch $p $script:ModuleGlobs) -and -not (Test-GlobMatch $p $Owns)) {
-                $hits.Add("$p（改动或删除别的卡建的模块）")
-            }
-        }
-    }
-    $hits | Select-Object -Unique
+    param([object[]]$Files = @())
+    $paths = @(foreach ($f in $Files) {
+            $f.filename
+            $prev = Get-RinneProp $f 'previous_filename'
+            if ($prev) { $prev }
+        }) | Select-Object -Unique
+    if (-not $paths) { return }
+    $extra = if ($script:InfraList) { @('--list', $script:InfraList) } else { @() }
+    $v = Invoke-RinneMaint -Command 'infra' -Content (ConvertTo-RinneJsonText @($paths)) -Extra $extra
+    @($v.hits)
 }
 
 function Get-RinneCard {
@@ -573,5 +569,5 @@ function Complete-RinneSelfTest {
 function Test-Throws { param([scriptblock]$Script) try { & $Script | Out-Null; return $false } catch { return $true } }
 
 Export-ModuleMember -Function *-Rinne*, *-AgentMarker, Format-AgentText, Test-PublicText, Assert-PublicText,
-    Test-RepoWriter, ConvertTo-GlobRegex, Test-GlobMatch, Get-InfraGlobs, Get-InfraTouches, Get-CardScope,
+    Test-RepoWriter, ConvertTo-GlobRegex, Test-GlobMatch, Get-InfraTouches, Get-CardScope,
     Initialize-RinneIdentity, Test-Throws, Add-RinneCase, Complete-RinneSelfTest, ConvertTo-RinneJsonText

@@ -10,6 +10,9 @@
 //   node scripts/maintainer/lib/maint.mjs review-state --file <issue comments JSON> --writers <login,…> [--bot claude]
 //        最近一条 bot 审查总结（head、运行链接、尾注与条数核对）与它之后的处置汇总（作者须在 writers 里）；
 //        另列出全部 bot 总结（尾注、运行编号、逐条意见）与全部处置汇总引用的运行编号，供「每条 bot 总结都有回应」核对
+//   node scripts/maintainer/lib/maint.mjs infra --file <路径 JSON 数组> [--list <glob JSON 数组>]
+//        其中碰到基础设施路径的那些。清单与匹配规则都取自 scripts/lib/infra-paths.mjs（唯一真源）；
+//        --list 只给自测换一份 glob，匹配规则不变
 //   node scripts/maintainer/lib/maint.mjs signoff        维护者的签名行（squash 消息的最后一行）
 
 import fs from "node:fs";
@@ -122,7 +125,7 @@ export function reviewState(comments, writers, bot = "claude") {
     };
 }
 
-function main(argv) {
+async function main(argv) {
     const [cmd, ...rest] = argv;
     const opt = (k) => (rest.includes(k) ? rest[rest.indexOf(k) + 1] : undefined);
     const print = (v) => process.stdout.write(`${JSON.stringify(v)}\n`);
@@ -142,17 +145,28 @@ function main(argv) {
         const comments = JSON.parse(fs.readFileSync(file, "utf8"));
         const writers = (opt("--writers") || "").split(",").filter(Boolean);
         print(reviewState(comments, writers, opt("--bot") || "claude"));
+    } else if (cmd === "infra") {
+        const paths = JSON.parse(fs.readFileSync(file, "utf8"));
+        const m = await import("../../lib/infra-paths.mjs").catch(() => {
+            throw new Error("缺 scripts/lib/infra-paths.mjs（基础设施路径的唯一清单），判不了要不要交维护者批准");
+        });
+        const list = opt("--list");
+        const match = list ? m.infraMatcher(JSON.parse(fs.readFileSync(list, "utf8"))) : m.isInfraPath;
+        print({ hits: paths.filter((p) => match(p)) });
     } else {
-        throw new Error("用法见文件头注释：text | message | review-state | signoff");
+        throw new Error("用法见文件头注释：text | message | review-state | infra | signoff");
     }
     return 0;
 }
 
 if (isMain(import.meta.url)) {
-    try {
-        process.exitCode = main(process.argv.slice(2));
-    } catch (e) {
-        process.stdout.write(`${JSON.stringify({ error: e.message })}\n`);
-        process.exitCode = 2;
-    }
+    main(process.argv.slice(2)).then(
+        (code) => {
+            process.exitCode = code;
+        },
+        (e) => {
+            process.stdout.write(`${JSON.stringify({ error: e.message })}\n`);
+            process.exitCode = 2;
+        },
+    );
 }
