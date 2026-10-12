@@ -40,10 +40,10 @@
 - 长期分支：`dev`（默认分支）与 `prod`；tag 只打在 `prod` 上。本次主支线 `feature/v1`，子支线一律 `feat/<slug>`，名字里不带任何编号。
 - agent 只向 `feature/v1` 开 PR。**永不**向 `dev` 或 `prod` 开 PR、推送或合并，不打 tag，不改仓库设置。`dev`、`prod` 只由维护者本人在 preview 之后合并；tag 只在维护者明确授权后打。
 - 一律从 `origin/feature/v1` 拉子支线；一个 PR 尽量不超过 800 行新写代码。
-- commit 与 PR 标题：`type(scope): 中文描述`，type 取 feat / fix / docs / test / refactor / perf / ci / build / chore / style / revert / harden。
+- commit 与 PR 标题：`type(scope): 中文描述`，type 取 feat / fix / docs / test / refactor / perf / ci / build / chore / style / revert / harden / release / merge。
 - 已推送的分支不 rebase、不 force-push；不用 `--no-verify`，不跳过 hooks。坏 commit 的补救是新分支 cherry-pick 改正、关旧 PR 开新 PR。
 - GitHub 写操作（推送、开 PR、评论、合并、dispatch）只经 `scripts/maintainer/` 的包装脚本，由它们做身份断言、隐私复扫与机读标记。不切换本机的 gh 登录账号。
-- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线。改到下列路径的 PR 不自合，交维护者批准：`.github/workflows/**`、`.github/rulesets/**`、`.github/required-checks.json`、`.github/actions-*.json`、`.github/CODEOWNERS`、`scripts/maintainer/**`、`scripts/hooks/**`、`scripts/gates.ps1`、`scripts/lib/privacy-needles.mjs`、`scripts/check-privacy.mjs`、`scripts/check-commits.mjs`、`CLAUDE.md`。
+- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线。改到基础设施的 PR 不自合，交维护者批准。基础设施是合并判据本身：CI 配置（`.github/**`）、维护者脚本、hooks、gates、检查脚本与它们共用的库、评审 bot、合规配置与工具钉版，以及本文件。逐条路径的唯一真源是 `scripts/lib/infra-paths.mjs`，pr-merge 读的也是它。
 - 外部贡献走 fork → `dev`，见 CONTRIBUTING。
 
 ## §2 评审与评论
@@ -63,7 +63,7 @@
 
 ## §4 CI
 
-- 子 PR（base = `feature/**`）：`branch-gate`、`clang-format`、`docs-truth`、`compliance` 四个 required check，外加 `claude-review`。bot 不是 required check，但合并判据要求它在当前 head 上 success；纯文档 PR 也跑。
+- 子 PR（base = `feature/**`）：`branch-gate`、`clang-format`、`docs-truth`、`compliance` 四个 required check，外加评审 bot 的 `claude-pr-review`。bot 不是 required check，但合并判据要求它在当前 head 上 success；纯文档 PR 也跑。
 - 进 `dev`、`prod` 的 PR 另跑完整构建（`build.yml`）。子 PR 的触发规则是有意如此，不要改。
 - 改到 mac 代码、CMake、CI 或打包脚本的子支线，合入前对该子支线 head 手动 dispatch 一次构建。
 - workflow 加固由 docs-truth 机检：最小 permissions、concurrency、每个 job 有 timeout；不可信文本只经 `env:` 传入；required job 不带 job 级 `if:`，所在 workflow 不设 paths 过滤。
