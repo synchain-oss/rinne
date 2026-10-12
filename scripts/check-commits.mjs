@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { assertNodeVersion, caseResult, git, isMain, j, tempRepo } from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
+import { CONTRACTS, CONTRACT_SOURCES } from "./lib/rules.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 
@@ -145,24 +146,9 @@ export function checkBranch({ head, base, fork = false, personal = [] }) {
     return errors;
 }
 
-export const CONTRACTS = {
-    ipc: "docs/contracts/IPC_CONTRACT.md",
-    params: "docs/contracts/PARAMETERS.md",
-    state: "docs/contracts/STATE_SCHEMA.md",
-};
-// [路径, 所属契约（* = 任一契约冻结即受守）, 只看哪些改动行]。按行判的路径只看 -U0 的改动行：
-// CMake 里经变量间接给身份（set(X Rnni) 再 PLUGIN_CODE ${X}）、或值写在下一行的情形这里抓不到，
-// 由身份 golden 的静态检查兜底。
-const GUARDED = [
-    [/^docs\/contracts\/IPC_CONTRACT\.md$|^src\/core\/ipc\/[^/]*Layout[^/]*\.h$/, "ipc"],
-    [/^tests\/golden\/ipc-layout\.json$/, "ipc"],
-    [/^docs\/contracts\/STATE_SCHEMA\.md$|^src\/core\/state\//, "state"],
-    [/^tests\/golden\/state(?:-schema\.json$|\/)/, "state"],
-    [/^docs\/contracts\/PARAMETERS\.md$|^tests\/golden\/(?:params-input|identity)\.json$/, "params"],
-    [/^src\/input\/ParamTable\.h$/, "params", /\bRINNE_PARAM\b/],
-    [/(?:^|\/)CMakeLists\.txt$|\.cmake$/, "params", /\b(?:PLUGIN_(?:MANUFACTURER_)?CODE|BUNDLE_ID|AU_[A-Z_]+)\b/],
-    [/^docs\/contracts\/|^tests\/golden\//, "*"],
-];
+// 契约文档与冻结契约面的登记在 lib/rules.mjs（CONTRACTS、CONTRACT_SOURCES），这里只放判据
+export { CONTRACTS };
+const GUARDED = CONTRACT_SOURCES;
 const lineFiltered = (p) => !!p && GUARDED.some(([re, , lines]) => lines && re.test(p));
 
 /** 契约文档的 status 行：大小写、引号、强调、引用块都容忍；文档存在却读不出 draft / frozen 时为 invalid。 */
