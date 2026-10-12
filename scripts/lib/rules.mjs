@@ -1,30 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 仓内规则数据的单一真源：冻结契约面、第三方模块登记、镜像文档、顶层条目白名单、体量预算。
-// 这里只放数据，判据在用它的检查里：契约面归 check-commits 的 contract-guard，第三方登记归
-// checks.d/modules-closure，其余由 docs 组的检查读取。改这里就是改判据，同一个 PR 里要让
-// 对应检查的 --self-test 照样全绿。
+// 仓内规则数据：冻结契约面、第三方模块登记、镜像文档、顶层条目白名单、体量预算。
+// 这里只放数据，判据在用它的检查里：第三方登记归 checks.d/modules-closure，其余由 docs 组的检查读取。
+// 改这里就是改判据，同一个 PR 里要让对应检查的 --self-test 照样全绿。
 
-/** 三份冻结契约文档。契约守卫读它们在 base 上的 `status:` 行（draft / frozen）决定是否启用。 */
-export const CONTRACTS = {
-    ipc: "docs/contracts/IPC_CONTRACT.md",
-    params: "docs/contracts/PARAMETERS.md",
-    state: "docs/contracts/STATE_SCHEMA.md",
-};
-
-// 冻结契约面：[路径, 所属契约（* = 任一契约冻结即受守）, 只看哪些改动行]。按行判的路径只看 -U0 的改动行：
-// CMake 里经变量间接给身份（set(X Rnni) 再 PLUGIN_CODE ${X}）、或值写在下一行的情形这里抓不到，
-// 由身份 golden 的静态检查兜底。
-export const CONTRACT_SOURCES = [
-    [/^docs\/contracts\/IPC_CONTRACT\.md$|^src\/core\/ipc\/[^/]*Layout[^/]*\.h$/, "ipc"],
-    [/^tests\/golden\/ipc-layout\.json$/, "ipc"],
-    [/^docs\/contracts\/STATE_SCHEMA\.md$|^src\/core\/state\//, "state"],
-    [/^tests\/golden\/state(?:-schema\.json$|\/)/, "state"],
-    [/^docs\/contracts\/PARAMETERS\.md$|^tests\/golden\/(?:params-input|identity)\.json$/, "params"],
-    [/^src\/input\/ParamTable\.h$/, "params", /\bRINNE_PARAM\b/],
-    [/(?:^|\/)CMakeLists\.txt$|\.cmake$/, "params", /\b(?:PLUGIN_(?:MANUFACTURER_)?CODE|BUNDLE_ID|AU_[A-Z_]+)\b/],
-    [/^docs\/contracts\/|^tests\/golden\//, "*"],
-];
+// 冻结契约文档与冻结契约面的真源留在 check-commits.mjs：它是基础设施路径，改动要维护者批准，
+// 契约守卫的判据因此不会被普通 PR 顺手放宽。这里只转出，供需要读取的检查使用。
+export { CONTRACTS, GUARDED as CONTRACT_SOURCES } from "../check-commits.mjs";
 
 /**
  * CMake 引入的每个第三方来源，以及它带进二进制或构建的组件。键的写法：

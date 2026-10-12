@@ -43,7 +43,7 @@
 - commit 与 PR 标题：`type(scope): 中文描述`，type 取 feat / fix / docs / test / refactor / perf / ci / build / chore / style / revert / harden。
 - 已推送的分支不 rebase、不 force-push；不用 `--no-verify`，不跳过 hooks。坏 commit 的补救是新分支 cherry-pick 改正、关旧 PR 开新 PR。
 - GitHub 写操作（推送、开 PR、评论、合并、dispatch）只经 `scripts/maintainer/` 的包装脚本，由它们做身份断言、隐私复扫与机读标记。不切换本机的 gh 登录账号。
-- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线。改到下列路径的 PR 不自合，交维护者批准：`.github/workflows/**`、`.github/rulesets/**`、`.github/required-checks.json`、`.github/actions-*.json`、`.github/CODEOWNERS`、`scripts/maintainer/**`、`scripts/hooks/**`、`scripts/gates.ps1`、`scripts/lib/privacy-needles.mjs`、`scripts/lib/rules.mjs`、`scripts/check-privacy.mjs`、`scripts/check-commits.mjs`、`CLAUDE.md`。
+- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线。改到下列路径的 PR 不自合，交维护者批准：`.github/workflows/**`、`.github/rulesets/**`、`.github/required-checks.json`、`.github/actions-*.json`、`.github/CODEOWNERS`、`scripts/maintainer/**`、`scripts/hooks/**`、`scripts/gates.ps1`、`scripts/lib/privacy-needles.mjs`、`scripts/check-privacy.mjs`、`scripts/check-commits.mjs`、`CLAUDE.md`。
 - 外部贡献走 fork → `dev`，见 CONTRIBUTING。
 
 ## §2 评审与评论
@@ -70,7 +70,7 @@
 
 ## §5 冻结契约
 
-- 冻结面：`docs/contracts/**`、`tests/golden/**`，以及 `scripts/lib/rules.mjs` 的 `CONTRACT_SOURCES` 列出的源码（IPC 布局头文件、`src/core/state/**`、`src/input/ParamTable.h` 的 `RINNE_PARAM` 行、各 CMake 文件里的插件身份行）。
+- 冻结面：`docs/contracts/**`、`tests/golden/**`，以及 `scripts/check-commits.mjs` 登记的源码（IPC 布局头文件、`src/core/state/**`、`src/input/ParamTable.h` 的 `RINNE_PARAM` 行、各 CMake 文件里的插件身份行；`scripts/lib/rules.mjs` 以 `CONTRACT_SOURCES` 转出）。
 - 每份契约文档有一行 `status: draft` 或 `status: frozen`。frozen 之后，碰到冻结面的 PR 二选一：同一个 PR 新增 `docs/contract-changes/<YYYYMMDD>-<slug>.md`（照 `TEMPLATE.md` 写），或在 PR 正文写一行 `contract-neutral: <理由>`。branch-gate 的 contract-guard 读 base 上的状态，同一个 PR 把 frozen 改回 draft 不能给自己放行。
 - 首个公开 rc 起永久冻结：另加 `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。
 - 永不改：插件身份（PLUGIN_CODE、BUNDLE_ID、AU 三元组）与参数 ID；会合段名永不带 abi；会合段头部前 16 字节与端点槽的 version 字段永不移动；state 读到更高 abi 时拒载并原样回写字节。
