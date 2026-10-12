@@ -30,7 +30,9 @@ jobs:
     timeout-minutes: 5
     env:
       SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      NEEDLES: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'ci' || 'ci-optional' }}
+      # dependabot 的 PR 也算同仓，但它触发的运行拿不到这个 secret，只跑通用规则；PR 作者的 login 伪造不了
+      DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+      NEEDLES: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && 'ci' || 'ci-optional' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,7 +65,14 @@ jobs:
           if [ "$SAME_REPO" = true ]; then tier=same; else tier=fork; fi
           node scripts/check-commits.mjs commits --json "$RUNNER_TEMP/commits.json" --expect "$PR_COMMITS" \
             --tier "$tier" --needles "$NEEDLES"
+          # dependabot 的 PR 标题与正文是上游的发布说明，没有签名行：只有 PR 作者是 dependabot、而且每个提交
+          # 的作者与提交者都对得上（与 check-commits 放行 dependabot 提交同一口径）时才跳过正文检查；
+          # 混进别人的提交就照常检查
+          if [ "$DEPENDABOT" = true ] && node scripts/check-commits.mjs dependabot --json "$RUNNER_TEMP/commits.json"; then
+            echo "DEPENDABOT_VERIFIED=true" >> "$GITHUB_ENV"
+          fi
       - name: PR title and body
+        if: env.DEPENDABOT_VERIFIED != 'true'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
