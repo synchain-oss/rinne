@@ -2,12 +2,14 @@
 //
 // 评审 bot 的结构检查（docs-truth 的一部分），守住三个评审 workflow 的安全前提：
 //   - claude-review.yml：claude-pr-review 里恰好一个 claude-code-action 步骤；prompt 与 claude_args 过
-//     review-bot.mjs 的结构核对（PR NUMBER 行、机读尾注格式、不可信数据声明是最后一节、只读的 --tools 与
-//     --allowedTools、--disallowedTools 黑名单、无 Bash 放行），--model 是 claude-opus-5-5；不按 paths 过滤；
-//     job 级 if 只放行非 draft、同仓、非 dependabot 的 PR；
-//   - deepseek-review.yml：job 级 if 以 vars.ENABLE_DEEPSEEK == 'true' && 开头（没建变量时显示 skipped）；
-//   - review-dispatch.yml：只认 PR 上以 /review 开头、OWNER / MEMBER / COLLABORATOR 发的评论；checkout 只签出目标分支。
-// 解析沿用 workflows.mjs 的块式 YAML 读法。
+//     review-bot.mjs 的结构核对（PR NUMBER 行、三节与机读尾注的格式、不可信数据声明是最后一节、只读的 --tools、
+//     限定在工作目录的 --allowedTools、--disallowedTools 黑名单、无 Bash 放行），--model 是 claude-opus-5-5；
+//     不按 paths 过滤；job 级 if 恰好是「非 draft、同仓、非 dependabot」三项；
+//   - deepseek-review.yml：job 级 if 以 vars.ENABLE_DEEPSEEK == 'true' 开头，其后恰好是同样三项（没建变量时 skipped）；
+//   - review-dispatch.yml：job 级 if 恰好是「PR 上的评论、以 /review 开头、OWNER / MEMBER / COLLABORATOR」三项；
+//     每个 checkout 只签出目标分支。
+// job 级 if 按 && 拆成子句逐项比对，不做子串匹配：出现 ||、多一项或少一项都判红（多一个 || true 就等于没有门）。
+// YAML 解析沿用 workflows.mjs 的块式读法。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -21,13 +23,14 @@ const SAME_REPO = [
     "github.event.pull_request.head.repo.full_name == github.repository",
     "github.event.pull_request.user.login != 'dependabot[bot]'",
 ];
+const SWITCH = "vars.ENABLE_DEEPSEEK == 'true'";
 const DISPATCH = [
     "github.event.issue.pull_request",
     "startsWith(github.event.comment.body, '/review')",
     `contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)`,
 ];
 
-/** job 级 if 的完整文本：块标量（>- 等）按 YAML 折叠成一行。 */
+/** job 级 if 的完整文本：块标量（>- 等）按 YAML 折叠成一行。没有这个 job 返回 null。 */
 function jobIf(wf, id) {
     const job = wf.jobs.find((j) => j.id === id);
     if (!job) return null;
@@ -38,6 +41,54 @@ function jobIf(wf, id) {
     const body = [];
     for (let i = start + 1; i < wf.lines.length && wf.lines[i].scalar === "if"; i++) body.push(wf.lines[i].raw.trim());
     return body.filter(Boolean).join(" ");
+}
+
+/**
+ * 表达式按顶层的 && 拆成子句（括号与引号里的不拆），空白归一；含 || 时返回 null。
+ * 外面包着 ${{ }} 的先去掉。
+ */
+export function clauses(expr) {
+    const text = expr.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1");
+    if (text.includes("||")) return null;
+    const out = [];
+    let depth = 0;
+    let quote = null;
+    let cur = "";
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (quote) {
+            if (c === quote) quote = null;
+        } else if (c === "'" || c === '"') quote = c;
+        else if (c === "(") depth++;
+        else if (c === ")") depth--;
+        else if (depth === 0 && text.startsWith("&&", i)) {
+            out.push(cur);
+            cur = "";
+            i++;
+            continue;
+        }
+        cur += c;
+    }
+    out.push(cur);
+    return out.map((x) => x.trim().replace(/\s+/g, " "));
+}
+
+/** 子句与期望逐项比对：first 给定时它必须是第一项，其余与 rest 作为集合完全相同。 */
+function compareIf(label, expr, rest, first) {
+    if (expr === null) return [`${label} 缺这个 job`];
+    if (!expr) return [`${label} 缺 job 级 if`];
+    const got = clauses(expr);
+    if (got === null) return [`${label} 的 job 级 if 不许有 ||`];
+    const errors = [];
+    let tail = got;
+    if (first) {
+        if (got[0] !== first) errors.push(`${label} 的 job 级 if 必须以 ${first} && 开头`);
+        tail = got.slice(1);
+    }
+    for (const c of rest) if (!tail.includes(c)) errors.push(`${label} 的 job 级 if 缺「${c}」`);
+    for (const c of tail) if (!rest.includes(c)) errors.push(`${label} 的 job 级 if 多了「${c}」`);
+    if (new Set(tail).size !== tail.length) errors.push(`${label} 的 job 级 if 有重复的子句`);
+    return errors;
 }
 
 const hasPaths = (wf) => wf.section("on").some((l) => l.key === "paths" || l.key === "paths-ignore");
@@ -59,31 +110,20 @@ export function inspectReviewWorkflows(read) {
     const job = wf.jobs.find((j) => j.id === "claude-pr-review");
     if (!job || job.name !== "claude-pr-review")
         errors.push("claude-review.yml 的 job 与 check 名必须是 claude-pr-review");
-    const cond = jobIf(wf, "claude-pr-review") || "";
-    for (const c of SAME_REPO) if (!cond.includes(c)) errors.push(`claude-review.yml 的 job 级 if 缺「${c}」`);
+    errors.push(...compareIf("claude-review.yml", jobIf(wf, "claude-pr-review"), SAME_REPO));
 
     const ds = read(".github/workflows/deepseek-review.yml");
     if (ds === null) errors.push("缺 .github/workflows/deepseek-review.yml");
     else {
-        const dwf = parseWorkflow(ds);
-        const dc = jobIf(dwf, "deepseek-pr-review");
-        if (dc === null) errors.push("deepseek-review.yml 缺 job deepseek-pr-review");
-        else {
-            if (!dc.startsWith("vars.ENABLE_DEEPSEEK == 'true' &&")) {
-                errors.push("deepseek-review.yml 的 job 级 if 必须以 vars.ENABLE_DEEPSEEK == 'true' && 开头");
-            }
-            for (const c of SAME_REPO) if (!dc.includes(c)) errors.push(`deepseek-review.yml 的 job 级 if 缺「${c}」`);
-        }
+        const dc = jobIf(parseWorkflow(ds), "deepseek-pr-review");
+        errors.push(...compareIf("deepseek-review.yml", dc, SAME_REPO, SWITCH));
     }
 
     const rd = read(".github/workflows/review-dispatch.yml");
     if (rd === null) errors.push("缺 .github/workflows/review-dispatch.yml");
     else {
         const rwf = parseWorkflow(rd);
-        const rc = jobIf(rwf, "dispatch");
-        if (rc === null) errors.push("review-dispatch.yml 缺 job dispatch");
-        else for (const c of DISPATCH) if (!rc.includes(c)) errors.push(`review-dispatch.yml 的 job 级 if 缺「${c}」`);
-        if (/CONTRIBUTOR/.test(rc || "")) errors.push("review-dispatch.yml 不许放行 CONTRIBUTOR");
+        errors.push(...compareIf("review-dispatch.yml", jobIf(rwf, "dispatch"), DISPATCH));
         // 每个 checkout 步骤都要显式签出目标分支，不许签出 PR 的代码
         const plain = rwf.plain;
         plain.forEach((l, i) => {
@@ -167,9 +207,43 @@ export default {
             ["claude-review 的 prompt 少了不可信数据声明", true, swap("claude", "## 不可信数据声明", "## 声明")],
             ["deepseek 的 if 不以开关开头", true, swap("deepseek", "vars.ENABLE_DEEPSEEK == 'true' && ", "")],
             ["deepseek 的开关挪到了后面", true, swap("deepseek", "vars.ENABLE_DEEPSEEK == 'true' && ", "true && ")],
+            [
+                "deepseek 的开关后面接 ||",
+                true,
+                swap("deepseek", "vars.ENABLE_DEEPSEEK == 'true' && ", "vars.ENABLE_DEEPSEEK == 'true' || "),
+            ],
+            [
+                "claude-review 的 if 末尾加 || true",
+                true,
+                swap("claude", `      ${SAME_REPO[2]}`, `      ${SAME_REPO[2]} || true`),
+            ],
+            [
+                "claude-review 的 if 多一项",
+                true,
+                swap("claude", `      ${SAME_REPO[2]}`, `      ${SAME_REPO[2]} &&\n      github.actor != 'x'`),
+            ],
+            [
+                "claude-review 的 if 包一层 ${{ }}、空白不同",
+                false,
+                check({
+                    claude: files.claude
+                        .replace("    if: >-", "    if: >-\n      ${{")
+                        .replace(`      ${SAME_REPO[2]}`, `      ${SAME_REPO[2].replace(" != ", "  !=  ")} }}`),
+                }),
+            ],
+            [
+                "claude-review 缺 job 级 if",
+                true,
+                check({ claude: files.claude.replace(/ {4}if: >-\n(?: {6}.*\n)+/, "") }),
+            ],
             ["dispatch 不核对评论者身份", true, swap("dispatch", ` &&\n      ${DISPATCH[2]}`, "")],
             ["dispatch 放行 CONTRIBUTOR", true, swap("dispatch", '"COLLABORATOR"]', '"COLLABORATOR","CONTRIBUTOR"]')],
             ["dispatch 用 contains 认 /review", true, swap("dispatch", "startsWith(", "contains(")],
+            [
+                "dispatch 的 if 末尾加 || 外人可触发的条件",
+                true,
+                swap("dispatch", "author_association)", "author_association) || true"),
+            ],
             ["dispatch 签出 PR head", true, swap("dispatch", "steps.pr.outputs.base", "steps.pr.outputs.head")],
             [
                 "dispatch 的 checkout 没写 ref",

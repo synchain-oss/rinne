@@ -42,8 +42,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: node scripts/review-bot.mjs prepare --pr "$PR" --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA" --bot deepseek
+        run: >-
+          node scripts/review-bot.mjs prepare --pr "$PR" --repo "$GITHUB_REPOSITORY"
+          --base "$BASE_SHA" --head "$HEAD_SHA" --bot deepseek
       # prompt 与 claude_args 取自签出的 claude-review.yml：同仓 PR 能改它的人也能直接改本文件，取自 PR 版本不扩大权限。
       - name: Load prompt and claude_args from claude-review.yml
         id: cfg
