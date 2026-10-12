@@ -32,6 +32,7 @@ export const ANCHORS = [
     "scripts/package.ps1",
     "scripts/package-macos.sh",
     "scripts/stress.ps1",
+    "scripts/ci/mac/build.sh",
     ".github/actions/setup-juce/action.yml",
     ".gitleaks.toml",
     "requirements-tools.txt",
@@ -71,6 +72,7 @@ export function selfTest() {
         ["清单不含合并时运行的构建脚本", true, { isInfra: drop("scripts/build.ps1"), claude }],
         ["清单不含打包脚本", true, { isInfra: drop("scripts/package*"), claude }],
         ["清单不含压测脚本", true, { isInfra: drop("scripts/stress.ps1"), claude }],
+        ["清单不含 CI 调用的脚本", true, { isInfra: drop("scripts/ci/**"), claude }],
         ["清单写成一条 **", true, { isInfra: infraMatcher(["**"]), claude }],
         ["CLAUDE.md 不指向清单", true, { isInfra: infraMatcher(INFRA_PATHS), claude: "不自合的路径见下表。" }],
     ].map(([label, bad, args]) => {

@@ -43,7 +43,7 @@
 - commit 与 PR 标题：`type(scope): 中文描述`，type 取 feat / fix / docs / test / refactor / perf / ci / build / chore / style / revert / harden / release / merge。
 - 已推送的分支不 rebase、不 force-push；不用 `--no-verify`，不跳过 hooks。坏 commit 的补救是新分支 cherry-pick 改正、关旧 PR 开新 PR。
 - GitHub 写操作（推送、开 PR、评论、合并、dispatch）只经 `scripts/maintainer/` 的包装脚本，由它们做身份断言、隐私复扫与机读标记。不切换本机的 gh 登录账号。
-- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线。改到基础设施的 PR 不自合，交维护者批准。基础设施是合并判据本身：CI 配置（`.github/**`）、维护者脚本、hooks、gates、检查脚本与它们共用的库、评审 bot、合并时运行的构建与打包脚本、合规配置与工具钉版，以及本文件。逐条路径的唯一真源是 `scripts/lib/infra-paths.mjs`，pr-merge 读的也是它。
+- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线。改到基础设施的 PR 不自合，交维护者批准。基础设施是合并判据本身：CI 配置（`.github/**` 与 CI 调用的 `scripts/ci/**`）、维护者脚本、hooks、gates、检查脚本与它们共用的库、评审 bot、合并时运行的构建与打包脚本、合规配置与工具钉版，以及本文件。逐条路径的唯一真源是 `scripts/lib/infra-paths.mjs`，pr-merge 读的也是它。
 - 外部贡献走 fork → `dev`，见 CONTRIBUTING。
 
 ## §2 评审与评论
