@@ -7,7 +7,7 @@
 //   3. 表里点名的声明文件都存在；third_party/notices/ 下每个文件（来源表 README.md 除外）都被某一行点名；
 //   4. LICENSES/ 下每份全文都被本仓许可或表里某一行引用；
 //   5. 每份声明的许可按 REUSE 的规则取整份 REUSE.toml 里最后一个命中的块：这个块必须在 third-party-notices
-//      小节里，许可必须等于这份声明该有的标识。行里只有一个标识时它的每份声明都是这个标识；有多个标识时，
+//      小节里、写明 precedence = "override"（否则 REUSE 会改用原文里的版权行），许可必须等于这份声明该有的标识。行里只有一个标识时它的每份声明都是这个标识；有多个标识时，
 //      声明文件与标识按顺序一一对应（VST3 SDK 那一行：GPLv3 那份在前，BSD 那份在后），个数对不上判红；
 //   6. NOTICES、REUSE.toml 与许可文件名里不得出现把 JUCE 写成「或更高版本」的标识（JUCE 是 AGPLv3 only）。
 // 表格解析同时导出给 modules-closure 用。
@@ -136,7 +136,8 @@ export function reuseBlocks(toml) {
         const raw = /^path\s*=\s*(\[[^\]]*\]|"[^"]*")/m.exec(part)?.[1] || "";
         const paths = [...raw.matchAll(/"([^"]*)"/g)].map((x) => globRe(x[1]));
         const license = /^SPDX-License-Identifier\s*=\s*"([^"]*)"/m.exec(part)?.[1] || "";
-        blocks.push({ section, paths, license });
+        const precedence = /^precedence\s*=\s*"([^"]*)"/m.exec(part)?.[1] || null;
+        blocks.push({ section, paths, license, precedence });
     }
     return blocks;
 }
@@ -192,8 +193,14 @@ export function checkLicenses({ notices, reuseToml, licenseFiles, noticeFiles })
         if (!hit || hit.section !== "third-party-notices") {
             const by = hit ? `最后命中的是 ${hit.section ?? "小节之外"} 的块` : "没有任何块命中";
             errors.push(`${file} 的 REUSE 登记不在 third-party-notices 小节：${by}`);
-        } else if (wants.length === 1 && hit.license !== wants[0]) {
-            errors.push(`${file} 的 REUSE 许可是 ${hit.license}，按 NOTICES 应为 ${wants[0]}`);
+        } else {
+            if (hit.precedence !== "override") {
+                const was = hit.precedence ? `写的是 ${hit.precedence}` : "没有写，默认是 closest";
+                errors.push(`${file} 的 REUSE 块必须是 precedence = "override"（${was}）`);
+            }
+            if (wants.length === 1 && hit.license !== wants[0]) {
+                errors.push(`${file} 的 REUSE 许可是 ${hit.license}，按 NOTICES 应为 ${wants[0]}`);
+            }
         }
     }
     const orLater = [
@@ -233,10 +240,12 @@ const BUILD = [
     "",
     "## 3. Notes",
 ];
-const block = (p, lic) =>
+// precedence 为 null 时不写这一行
+const block = (p, lic, precedence = "override") =>
     [
         "[[annotations]]",
         `path = ${Array.isArray(p) ? JSON.stringify(p) : `"${p}"`}`,
+        ...(precedence ? [`precedence = "${precedence}"`] : []),
         `SPDX-License-Identifier = "${lic}"`,
     ].join("\n");
 const REUSE_BLOCKS = [
@@ -249,11 +258,11 @@ const REUSE_BLOCKS = [
 const reuse = (blocks = REUSE_BLOCKS, section = true, tail = []) =>
     [
         "# --- section:base ---",
-        block("**", "GPL-3.0-or-later"),
+        block("**", "GPL-3.0-or-later", null),
         ...(section ? ["# --- section:third-party-notices ---"] : []),
-        ...blocks.map(([p, l]) => block(p, l)),
+        ...blocks.map(([p, l, pr]) => block(p, l, pr)),
         "# --- section:third-party-src ---",
-        ...tail.map(([p, l]) => block(p, l)),
+        ...tail.map(([p, l, pr]) => block(p, l, pr)),
     ].join("\n");
 const LICS = ["GPL-3.0-or-later", "AGPL-3.0-only", "GPL-3.0-only", "BSD-3-Clause", "BSL-1.0"].map((l) => `${l}.txt`);
 const NOTS = ["README.md", "juce.LICENSE.md", "vst3sdk.LICENSE.txt", "vst3sdk-base.LICENSE.txt", "catch2.LICENSE.txt"];
@@ -310,6 +319,16 @@ export function selfTest() {
                     l === "GPL-3.0-only" ? [p, "BSD-3-Clause"] : l === "BSD-3-Clause" ? [p, "GPL-3.0-only"] : [p, l],
                 ),
             },
+        ],
+        [
+            "声明的块没写 precedence",
+            true,
+            { blocks: REUSE_BLOCKS.map(([p, l]) => (`${p}`.includes("juce") ? [p, l, null] : [p, l])) },
+        ],
+        [
+            "声明的块 precedence 写成 closest",
+            true,
+            { blocks: REUSE_BLOCKS.map(([p, l]) => (`${p}`.includes("catch2") ? [p, l, "closest"] : [p, l])) },
         ],
         ["后面小节的通配块盖过了声明的块", true, { tail: [["third_party/**", "GPL-3.0-or-later"]] }],
         ["后面小节的块不碰声明", false, { tail: [["third_party/miniz/**", "MIT"]] }],
