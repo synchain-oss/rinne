@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Derived from synchain-oss/scvb; see upstream/ci.json
+
+# 构建产物
+build/
+build-*/
+out/
+dist/
+*_artefacts/
+
+# CMake 与 IDE
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+.vs/
+.vscode/
+.idea/
+*.user
+
+# 依赖与缓存
+node_modules/
+.npm-cache/
+__pycache__/
+*.tsbuildinfo
+
+# 本机日志与验证产物
+*.log
+pluginval-logs/
+web-preview/.shots/
+
+# agent 的本机设置
+.claude/settings.local.json
+
+# 个人信息针表只放在仓外；万一拷进来也不能入库
+privacy-local.txt

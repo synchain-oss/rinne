@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Derived from synchain-oss/scvb; see upstream/ci.json
+# prettier 的范围全部由本文件收窄，CI 与本机用同一条 `prettier --check .`。
+
+# 逐字收录的第三方文本与只读归档：一改写就破坏逐字节一致
+third_party/
+LICENSES/
+web/js/juce/
+docs/design/
+
+# 二进制与生成物
+web/fonts/
+tests/golden/
+build/
+build-*/
+dist/
+node_modules/
+*.min.js
+
+# 不归 prettier 管的格式：Markdown 与 YAML 按手写风格；PowerShell 没有 parser
+*.md
+*.yml
+*.yaml
+*.ps1
+*.psm1
