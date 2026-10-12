@@ -43,7 +43,7 @@ export function git(args, { cwd = ROOT, input, env, allowFail = false, raw = fal
 export const trackedFiles = (root = ROOT) => git(["ls-files", "-z"], { cwd: root }).split("\0").filter(Boolean);
 
 /**
- * 按 BOM 解码：UTF-8（去 BOM）、UTF-16LE、UTF-16BE。没有 BOM 时前 8 KB 内有 NUL 就当二进制
+ * 按 BOM 解码：UTF-8（去 BOM）、UTF-16LE、UTF-16BE。没有 BOM 时前 8000 字节内有 NUL 就当二进制
  * （与 git 的判断一致），返回 null。Windows PowerShell 5.1 的 `>` 与 Out-File 默认写 UTF-16LE。
  */
 export function decodeText(buf) {
@@ -53,7 +53,7 @@ export function decodeText(buf) {
         const le = Buffer.from(buf.subarray(2, buf.length - (buf.length % 2)));
         return le.swap16().toString("utf16le");
     }
-    return buf.subarray(0, 8192).includes(0) ? null : buf.toString("utf8");
+    return buf.subarray(0, 8000).includes(0) ? null : buf.toString("utf8");
 }
 
 /** 读文本文件并按 BOM 解码；二进制或读不到时返回 null。 */

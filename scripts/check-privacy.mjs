@@ -28,6 +28,31 @@ export const formatFinding = (f) =>
     `  ${f.where}${f.line ? `:${f.line}:${f.col}` : "（二进制）"} [${f.rule.id}] ${redact(f)}`;
 const tag = (where, list) => list.map((f) => ({ ...f, where }));
 
+/**
+ * 补丁 +++ 行里的路径：含空格时 git 在末尾补一个 TAB；含引号、反斜杠、控制字符时整段写成
+ * C 风格的带引号字符串（八进制转义按 UTF-8 字节还原）。返回去掉 b/ 前缀的仓内路径。
+ */
+export function patchPath(s) {
+    let p = s.replace(/\t$/, "");
+    if (p.startsWith('"') && p.endsWith('"')) {
+        const bytes = [];
+        const esc = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+        for (let i = 1; i < p.length - 1; i++) {
+            if (p[i] !== "\\") {
+                bytes.push(...Buffer.from(p[i]));
+            } else if (/[0-7]/.test(p[i + 1])) {
+                bytes.push(parseInt(p.slice(i + 1, i + 4), 8));
+                i += 3;
+            } else {
+                bytes.push(esc[p[i + 1]] ?? p.charCodeAt(i + 1));
+                i++;
+            }
+        }
+        p = Buffer.from(bytes).toString("utf8");
+    }
+    return p.replace(/^b\//, "");
+}
+
 export function scanTree(root, personal) {
     const out = [];
     for (const rel of trackedFiles(root)) {
@@ -69,7 +94,7 @@ export function scanCommits(revArgs, cwd, personal, { messages = true } = {}) {
                 header = true;
                 file = null;
             } else if (header && line.startsWith("+++ ")) {
-                file = line === "+++ /dev/null" ? null : line.slice(6);
+                file = line === "+++ /dev/null" ? null : patchPath(line.slice(4));
                 if (file) added.set(file, new Set());
             } else if (line.startsWith("@@")) {
                 header = false;
@@ -88,7 +113,9 @@ export function scanCommits(revArgs, cwd, personal, { messages = true } = {}) {
             if (!buf) continue; // 子模块之类不是 blob 的条目
             const lines = plus === "-" ? null : added.get(rel);
             const hits = scanBlob(buf, { path: rel }, { personal });
-            out.push(...tag(`${s7} ${shown}`, lines ? hits.filter((f) => lines.has(f.line)) : hits));
+            // 二进制视图的命中（line 0）没有行号可对，一律保留
+            const kept = lines ? hits.filter((f) => f.line === 0 || lines.has(f.line)) : hits;
+            out.push(...tag(`${s7} ${shown}`, kept));
         }
     }
     return out;
@@ -150,7 +177,8 @@ export function selfTest() {
         check("UTF-16 针表判红", true, tree({ RINNE_PRIVACY_LOCAL: file("n16.txt", utf16(`${N}\n`)) }).code === 1);
         check("针表含 NUL 判红", true, tree({ RINNE_PRIVACY_LOCAL: file("nnul.txt", `${N}\0\n`) }).code === 1);
         check("--text 拒绝 UTF-16", true, run(["--text", file("t16.md", utf16("干净\n"))], local).code === 1);
-        check("--text 拒绝 NUL", true, run(["--text", file("tnul.md", "干净\0\n")], local).code === 1);
+        const nul = run(["--text", file("tnul.md", "干净\0\n")], local);
+        check("--text 拒绝 NUL 并报出位置", true, nul.code === 1 && nul.out.includes("字节偏移 6"));
         // 经 junction / 符号链接调用时 CLI 照常运行，不会静默什么都不做
         const link = path.join(aux, "scripts-link");
         fs.symlinkSync(path.dirname(SELF), link, process.platform === "win32" ? "junction" : "dir");
@@ -162,11 +190,19 @@ export function selfTest() {
         );
         // 各种藏法：普通文件、UTF-16 文件、二进制文本块、文件名；删掉之后历史里仍要抓到
         const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0]), Buffer.from(`tEXtAuthor\0${N}\0`)]);
+        // 第 8000 字节之后才有 NUL：git 与这里都当文本；gitattributes 让 git 按文本 diff 的二进制：
+        // git 给行号，这里只有二进制视图（line 0），两种情形都不能漏
+        const lateNul = Buffer.concat([Buffer.from(`说明 ${N}\n${"x".repeat(8100)}`), Buffer.from([0, 10])]);
+        const forced = Buffer.concat([Buffer.from([0, 1, 0]), Buffer.from(` ${N} `), Buffer.from([0])]);
+        repo.write(".gitattributes", "*.dat diff\n");
+        commit("ci(test): 属性");
         const leaks = [
             ["普通文件", "docs/leak.md", `说明 ${N}\n`],
             ["UTF-16 文件", "docs/log16.txt", utf16(`路径 ${N}\n`)],
             ["二进制文本块", "docs/shot.png", png],
             ["文件名", `docs/notes-${N}.md`, "x\n"],
+            ["8000 字节后才有 NUL", "docs/late.txt", lateNul],
+            ["按文本 diff 的二进制", "docs/blob.dat", forced],
         ];
         for (const [label, rel, data] of leaks) {
             repo.write(rel, data);
@@ -179,8 +215,25 @@ export function selfTest() {
             check(`${label}：删掉后历史里判红且不回显`, true, h.code === 1 && !h.out.includes(N));
         }
         check("全部删掉后工作树通过", false, tree(local).code === 0);
-        const msg = run(["--root", repo.dir, "--commits", "--no-messages", "HEAD~1..HEAD"], local);
-        check("--no-messages 只扫内容", false, msg.code === 0);
+        // 行号映射：路径带空格时 git 在 +++ 行末补 TAB，也只看新增行
+        const old = `${needles.CASES[0][1]}\n`;
+        repo.write("docs/a b.md", old);
+        commit("ci(test): 旧内容");
+        repo.write("docs/a b.md", `${old}干净的新行\n`);
+        commit("ci(test): 只加一行");
+        check(
+            "带空格的路径只看新增行",
+            false,
+            run(["--root", repo.dir, "--commits", "HEAD~1..HEAD"], local).code === 0,
+        );
+        repo.git(["commit", "-q", "--allow-empty", "-m", `ci(test): ${N}`]);
+        const range = ["--root", repo.dir, "--commits", "HEAD~1..HEAD"];
+        check("提交消息里的针判红", true, run(range, local).code === 1);
+        check("--no-messages 不扫消息", false, run([...range, "--no-messages"], local).code === 0);
+        const t = (label, input, want) => check(label, false, patchPath(input) === want);
+        t("补丁路径：去掉末尾 TAB", "b/a b.md\t", "a b.md");
+        t("补丁路径：C 风格引号", '"b/q\\"x.md"', 'q"x.md');
+        t("补丁路径：八进制转义", '"b/\\346\\226\\207.md"', "文.md");
     } finally {
         repo.cleanup();
         fs.rmSync(aux, { recursive: true, force: true });
