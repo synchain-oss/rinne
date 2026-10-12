@@ -2,7 +2,8 @@
 //
 // 基础设施路径的唯一机读清单。改到这些路径的 PR 不自合，review 干净后交维护者批准；pr-merge 读这一份，
 // CLAUDE.md 只写类别并指向这里。清单覆盖合并判据本身：CI 配置、评审 bot、检查脚本与它们共用的库、
-// hooks、gates、合规配置与工具钉版。本文件在 scripts/lib/** 之内，所以改它也要维护者批准。
+// hooks、gates、合并时运行的构建 / 压测 / 打包脚本、合规配置与工具钉版。本文件在 scripts/lib/** 之内，
+// 所以改它也要维护者批准。
 // glob 写法：** 跨目录，* 不跨 /，路径相对仓根。
 
 export const INFRA_PATHS = [
@@ -18,6 +19,10 @@ export const INFRA_PATHS = [
     "scripts/review-bot.mjs",
     "scripts/lock-actions.mjs",
     "scripts/sync-labels.mjs",
+    // 合并前在集成树上构建、压测与打包时跑的是 PR 自己的这几个脚本
+    "scripts/build.ps1",
+    "scripts/package*",
+    "scripts/stress.ps1",
     ".gitleaks.toml",
     "requirements-tools.txt",
     ".*-version",
