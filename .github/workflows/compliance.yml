@@ -3,22 +3,27 @@
 # 合规（required check：compliance）。工作树：gitleaks、reuse lint、SPDX 头、隐私扫描（先跑全部自测）。
 # PR 上另对 BASE..HEAD 逐提交跑 gitleaks 与隐私扫描：推上来的提交经 refs/pull 已经公开，这一步是事后告警，
 # 命中后关 PR、删分支，由维护者联系 GitHub 清理，换新分支重开。推送到长期分支时按推送兜底档复核新提交。
-# 同仓 PR 与 push 用 secret 里的个人针（--needles ci，缺了判红）；fork PR 读不到 secret，只跑通用规则。
+# 个人针：同仓 PR 与 push 用 secret（--needles ci，缺了判红）；fork PR 与 dependabot 的 PR 读不到这个 secret，
+# 只跑通用规则（ci-optional）。PR 作者的 login 伪造不了，dependabot 的提交本身由 check-commits 按作者与提交者核对。
+# secret 只交给只跑 node 与 git 的步骤；跑 pip 装来的工具（reuse）与 gitleaks 的步骤一律不带它。
 name: Compliance
 
 on:
   pull_request:
     branches: [dev, prod, "feature/**"]
-    types: [opened, synchronize, reopened, ready_for_review]
+    # edited：PR 改了 base 时要按新的 base 重算提交区间（改标题、正文也会重跑一次，无害）
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [dev, prod, "feature/**"]
 
 permissions:
   contents: read
 
+# 同一个 PR 的新运行取代旧运行，可以取消；push 每次复核的是那一次推送带来的提交，取消了那一段就没人再扫，
+# 所以每个推送按自己的提交单独成组，也不取消。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   compliance:
@@ -26,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      NEEDLES: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && 'ci' || 'ci-optional' }}
+      NEEDLES: ${{ (github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && 'ci' || 'ci-optional' }}
       # gitleaks_<版本>_linux_x64.tar.gz 的 sha256，取自该版本官方的 checksums.txt；升版本时一起改
       GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
@@ -48,27 +53,40 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/gitleaks" gitleaks
           echo "RINNE_GITLEAKS=$RUNNER_TEMP/gitleaks/gitleaks" >> "$GITHUB_ENV"
           python3 -m venv "$RUNNER_TEMP/py"
-          "$RUNNER_TEMP/py/bin/pip" install --disable-pip-version-check -q -r requirements-tools.txt
+          "$RUNNER_TEMP/py/bin/pip" install --disable-pip-version-check -q --require-hashes -r requirements-tools.txt
           echo "RINNE_REUSE=$RUNNER_TEMP/py/bin/reuse" >> "$GITHUB_ENV"
       - name: Self-test
         run: node scripts/run-checks.mjs --group compliance --self-test
-      - name: Worktree (privacy, SPDX, REUSE)
+      - name: Worktree (SPDX, REUSE, secrets)
+        run: |
+          set -euo pipefail
+          node scripts/run-checks.mjs --group compliance --only spdx
+          node scripts/run-checks.mjs --group compliance --only reuse
+          "$RINNE_GITLEAKS" dir . --no-banner --redact
+      - name: Worktree privacy
         env:
           PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
-        run: node scripts/run-checks.mjs --group compliance --needles "$NEEDLES"
-      - name: Worktree secrets
-        run: '"$RINNE_GITLEAKS" dir . --no-banner --redact'
-      - name: Pull request commits (secrets and privacy)
+        run: node scripts/run-checks.mjs --group compliance --only privacy --needles "$NEEDLES"
+      - name: Pull request commits (secrets)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: '"$RINNE_GITLEAKS" git . --no-banner --redact --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv"'
+      - name: Pull request commits (privacy)
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
-        run: |
-          set -euo pipefail
-          "$RINNE_GITLEAKS" git . --no-banner --redact --log-opts="$BASE_SHA..$HEAD_SHA --no-ext-diff --no-textconv"
-          node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BASE_SHA..$HEAD_SHA"
-      - name: Pushed commits (fallback tier)
+        run: node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BASE_SHA..$HEAD_SHA"
+      - name: Pushed commits (secrets)
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: '"$RINNE_GITLEAKS" git . --no-banner --redact --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv"'
+      - name: Pushed commits (privacy, fallback tier)
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
         env:
           BEFORE: ${{ github.event.before }}
@@ -76,6 +94,5 @@ jobs:
           PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
         run: |
           set -euo pipefail
-          "$RINNE_GITLEAKS" git . --no-banner --redact --log-opts="$BEFORE..$AFTER --no-ext-diff --no-textconv"
           node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BEFORE..$AFTER"
           node scripts/check-commits.mjs commits --range "$BEFORE..$AFTER" --tier push --needles "$NEEDLES"

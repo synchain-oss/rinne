@@ -35,7 +35,13 @@ export function checkPins(read) {
     if (!new RegExp(`^# clang-format ${cf?.replace(/\./g, "\\.")}\\b`, "m").test(read(".clang-format") || "")) {
         errors.push(".clang-format 头注释里的版本与 .clang-format-version 不一致");
     }
-    const req = (read("requirements-tools.txt") || "").split(/\r?\n/);
+    // 带哈希的写法是「名==版本 \」加若干行「--hash=…」：去掉续行符与哈希，只看「名==版本」
+    const req = (read("requirements-tools.txt") || "").split(/\r?\n/).map((l) =>
+        l
+            .replace(/\s*\\$/, "")
+            .replace(/\s*--hash=\S+/g, "")
+            .trim(),
+    );
     if (!req.includes(`clang-format==${cf}`)) errors.push("requirements-tools.txt 的 clang-format 版本不一致");
     const reuse = /^reuse(?:\[[\w,-]+\])?==\d+\.\d+\.\d+$/;
     if (!req.some((l) => reuse.test(l))) errors.push("requirements-tools.txt 须钉住 reuse 的版本");
@@ -75,6 +81,17 @@ export default {
             ["缺钉版文件", true, with_({ ".actionlint-version": null })],
             ["clang-format 两处版本不一致", true, with_(req("18.1.7", "reuse==6.2.0"))],
             ["reuse 未钉版", true, with_(req("18.1.8", "reuse"))],
+            [
+                "带哈希的写法",
+                false,
+                with_(
+                    req(
+                        "18.1.8 \\\n    --hash=sha256:aa \\\n    --hash=sha256:bb",
+                        "reuse==6.2.0 \\\n    --hash=sha256:cc",
+                    ),
+                ),
+            ],
+            ["带哈希时 clang-format 版本不一致", true, with_(req("18.1.7 \\\n    --hash=sha256:aa", "reuse==6.2.0"))],
             ["JUCE 提交号不是 40 位", true, with_({ ".juce-commit": "d6181bde\n" })],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
         return caseResult(cases);
