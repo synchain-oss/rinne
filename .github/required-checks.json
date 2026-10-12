@@ -1,0 +1,38 @@
+{
+  "feature-lines": {
+    "ruleset": "feature-lines",
+    "status": "required",
+    "strict": false,
+    "contexts": ["branch-gate", "clang-format", "docs-truth", "compliance"]
+  },
+  "dev": {
+    "ruleset": "dev",
+    "status": "pending",
+    "strict": true,
+    "contexts": [
+      "branch-gate",
+      "clang-format",
+      "docs-truth",
+      "compliance",
+      "web-smoke",
+      "build-win",
+      "build-mac",
+      "core-sanitizers"
+    ]
+  },
+  "prod": {
+    "ruleset": "prod",
+    "status": "pending",
+    "strict": false,
+    "contexts": [
+      "branch-gate",
+      "clang-format",
+      "docs-truth",
+      "compliance",
+      "web-smoke",
+      "build-win",
+      "build-mac",
+      "core-sanitizers"
+    ]
+  }
+}

@@ -8,6 +8,7 @@
 //   branch          --head <名> [--base <名>] [--fork]；按 base 分命名规则，名字里不得有私有编号与个人针
 //   contract-guard  --base <ref> [--head <ref>] [--body-file <f>]；改到冻结契约面时，要求正文写
 //                   contract-neutral: <理由>，或同 PR 新增 docs/contract-changes/<YYYYMMDD>-<slug>.md
+//   dependabot      --json <PR 提交列表>；每个提交都是 dependabot 的（作者与提交者都对得上）时退出 0，否则 1
 //   --needles local|ci|ci-optional（个人针来源，见 privacy-needles.mjs）  --self-test
 // 提交分三档：same 同仓（维护者身份、签名逐字一致）；fork 外部贡献（DCO 本义：有与作者一致的签名，
 // AI 署名只告警）；push 推送后兜底（提交者可以是 GitHub 网页合并，作者不在白名单时按 fork 判）。
@@ -88,13 +89,16 @@ export function checkMessage(message, opts = {}) {
     return { errors, warns };
 }
 
+/** dependabot 的提交：作者邮箱可以伪造，所以提交者也要是 GitHub。 */
+export const isDependabot = (c) =>
+    c.author.email.toLowerCase() === DEPENDABOT && c.committer.email.toLowerCase() === WEB_FLOW;
+
 /** 一个提交：c = { sha, parents, author: {name, email}, committer: {name, email}, message }。 */
 export function checkCommit(c, { tier = "same", personal = [] } = {}) {
     const ae = c.author.email.toLowerCase();
     const ce = c.committer.email.toLowerCase();
-    // dependabot：作者邮箱可以伪造，所以提交者也要是 GitHub；只免 subject 与签名，隐私规则照扫
-    if (ae === DEPENDABOT && ce === WEB_FLOW && tier !== "fork")
-        return textFindings(c.message, { fork: true, personal });
+    // dependabot 只免 subject 与签名，隐私规则照扫
+    if (isDependabot(c) && tier !== "fork") return textFindings(c.message, { fork: true, personal });
     const errors = [];
     if (tier === "same" && !SAME_AUTHORS.includes(ae)) errors.push("作者邮箱不在同仓白名单");
     if (tier !== "fork" && !COMMITTERS.includes(ce)) errors.push("提交者邮箱不在白名单");
@@ -120,7 +124,12 @@ export function checkPrText({ title, body, fork = false, authors = [], personal 
 
 const LONG_LIVED = /^(?:dev|prod|staging|main|master|feature\/.*)$/;
 export function checkBranch({ head, base, fork = false, personal = [] }) {
-    if (fork) return LONG_LIVED.test(head) ? ["fork 的分支不得使用长期分支名"] : [];
+    if (fork) {
+        // 外部贡献只进 dev：feature 主支线与 prod 都只收本仓的分支
+        const errors = base === "dev" ? [] : ["fork 的 PR 只能开到 dev"];
+        if (LONG_LIVED.test(head)) errors.push("fork 的分支不得使用长期分支名");
+        return errors;
+    }
     const want =
         !base || base.startsWith("feature/")
             ? /^feat\/[a-z0-9][a-z0-9-]*$/
@@ -353,6 +362,8 @@ export function selfTest() {
     b("分支：主支线到 dev", false, { head: "feature/v1", base: "dev" });
     b("分支：fork 用长期分支名", true, { head: "dev", base: "dev", fork: true });
     b("分支：fork 普通分支", false, { head: "patch-1", base: "dev", fork: true });
+    b("分支：fork 开到 prod", true, { head: "patch-1", base: "prod", fork: true });
+    b("分支：fork 开到主支线", true, { head: "patch-1", base: "feature/v1", fork: true });
 
     const body = (...l) => ["## 做了什么", "加入检查脚本。【重要】项已清零。", "", ...l].join("\n");
     const pr = (label, bad, args) => t(label, bad, checkPrText({ title: "ci(checks): 加入检查", ...args }).errors);
@@ -435,6 +446,9 @@ export function selfTest() {
     t("提交列表：一行一个对象", false, parseCommitList(ndjson).length === 2 ? [] : ["x"]);
     throws("提交列表：截断的 JSON", () => parseCommitList(page("a").slice(0, -2)));
     throws("提交列表：条目缺字段", () => parseCommitList('[{"sha":"a"}]'));
+    const botCommit = { author: BOT, committer: WEB };
+    t("dependabot：作者与提交者都对得上", false, isDependabot(botCommit) ? [] : ["没认出"]);
+    t("dependabot：提交者不是 GitHub 不算", true, isDependabot({ ...botCommit, committer: ME }) ? [] : ["x"]);
 
     // 端到端，经真实的 contract-guard 子命令复现卡死：坏 status 行先被挡住；
     // 若 base 上已经是坏行，修它的 PR 凭 contract-neutral 能合进去
@@ -523,6 +537,12 @@ function main(argv) {
                 : []),
         ];
         ({ errors, warns } = checkPrText({ title, body: body(), fork: has("--fork"), authors, personal: personal() }));
+    } else if (cmd === "dependabot") {
+        // 只回答「是不是纯 dependabot 的 PR」，不输出别的：给 workflow 决定要不要跳过正文签名检查
+        const list = parseCommitList(fs.readFileSync(opt("--json"), "utf8"));
+        const all = list.length > 0 && list.every((c) => isDependabot(c.commit));
+        console.log(`check-commits dependabot：${all ? "全部提交都是 dependabot 的" : "不是纯 dependabot 的 PR"}`);
+        return all ? 0 : 1;
     } else if (cmd === "branch") {
         errors = checkBranch({
             head: opt("--head") || "",
