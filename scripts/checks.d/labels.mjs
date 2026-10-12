@@ -6,7 +6,8 @@
 //     （维护者脚本会给 PR 与 issue 打标签）。认的写法：表达式里按 labels 的 name 比较、gh 的 label 类参数
 //     （空格、等号或参数数组的写法），YAML 文件另认 labels: 键（行内列表或块式列表）。
 //     没登记的标签会被 dependabot 或 gh 自己建出来，真源就失效了。
-//     含 $ 的引用是运行时才定的值，不查；以 # 或 // 开头的注释行不查。
+//     含 $ 的引用是运行时才定的值，不查；注释不查：以 # 或 // 开头的行，脚本里的 /* … */、<# … #> 块与
+//     JSDoc 的 ` * ` 续行。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -55,8 +56,22 @@ export function labelRefs(text, { yaml = true } = {}) {
         }
     };
     const lines = text.split(/\r?\n/);
+    let block = null; // 脚本里的块注释：/* … */ 或 PowerShell 的 <# … #>
     lines.forEach((l, i) => {
         const no = i + 1;
+        if (!yaml) {
+            if (block) {
+                if (l.includes(block)) block = null;
+                return;
+            }
+            const open = /^\s*(\/\*|<#)/.exec(l);
+            if (open) {
+                const close = open[1] === "/*" ? "*/" : "#>";
+                if (!l.slice(l.indexOf(open[1]) + 2).includes(close)) block = close;
+                return;
+            }
+            if (/^\s*\*(?:\s|\/|$)/.test(l)) return; // JSDoc 的续行 ` * …` 与结尾 ` */`
+        }
         if (/^\s*(?:#|\/\/)/.test(l)) return;
         for (const m of l.matchAll(/labels\.\*\.name\s*,\s*'([^']+)'/g)) add(m[1], no);
         for (const m of l.matchAll(/label\.name\s*[!=]=\s*'([^']+)'/g)) add(m[1], no);
@@ -199,6 +214,12 @@ export default {
         t("gh 标签已登记", false, refs(wf(`gh issue create ${FLAG}=bug`)));
         t("运行时才定的标签不查", false, refs(wf(`gh pr edit "$PR" ${ADD} "$LABEL"`)));
         t("注释行不查", false, refs(`# gh pr edit ${ADD} triage`, false));
+        const jsdoc = `/**\n * 例：gh pr edit "$PR" ${ADD} triage\n */\nconst x = 1;`;
+        t("JSDoc 块里的 * 续行不查", false, refs(jsdoc, false));
+        t("单行 /* */ 注释不查", false, refs(`/* ${FLAG} triage */`, false));
+        const block = `/*\ngh issue create ${FLAG} triage\n*/\ngh issue create ${FLAG} later`;
+        t("块注释结束后照常查", true, refs(block, false));
+        t("PowerShell 的 <# #> 块不查", false, refs(`<#\n  gh pr edit $Pr ${ADD} triage\n#>`, false));
         const dependabot = (items) => `updates:\n  - package-ecosystem: github-actions\n    labels:\n${items}`;
         t("dependabot 块式列表已登记", false, refs(dependabot("      - dependencies\n    schedule:\n")));
         t("dependabot 块式列表有没登记的", true, refs(dependabot("      - dependencies\n      - ci # 注释\n")));
