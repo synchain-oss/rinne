@@ -59,12 +59,35 @@ export function workflowLines(text) {
             key: m ? m[3] : null,
             value: m ? (m[4] || "").trim() : code.trim(),
             comment,
+            code,
             raw,
         };
+        line.bad = unsupported(line, m);
         if (m && /^[|>][+-]?\d*$/.test(line.value)) block = { indent: keyIndent, key: line.key };
         out.push(line);
     });
     return out;
+}
+
+/**
+ * 解析器认不了、也就核不了的写法：流式映射 `{…}`、装着映射的流式序列、写成流式的 steps / jobs、
+ * 带引号的键、锚点 / 别名 / 标签，以及其他任何既不是「键: 值」也不是「- 标量」的行。
+ * 这些写法里藏的 uses、if、permissions 本检查看不见，所以一律判红（空的 {} 与 [] 不藏东西，放行）。
+ */
+function unsupported(line, m) {
+    const v = line.value;
+    if (!m) {
+        if (/^\s*(?:-\s+)?(["']).*?\1\s*:/.test(line.code)) return "不支持带引号的键";
+        const item = /^\s*-\s+(.+)$/.exec(line.code);
+        if (!item) return "认不出的写法";
+        return /^[{[&*!]/.test(item[1].trim()) ? "列表项不支持流式集合、锚点、别名与标签" : null;
+    }
+    if (v === "{}" || v === "[]") return null;
+    if (/^[{&*!]/.test(v)) return "不支持流式映射、锚点、别名与标签";
+    if (v.startsWith("[") && (/[{:]/.test(v) || line.key === "steps" || line.key === "jobs")) {
+        return "流式序列里只能放标量";
+    }
+    return null;
 }
 
 const unquote = (v) => v.replace(/^(["'])(.*)\1$/, "$2");
@@ -121,6 +144,11 @@ export function inspectWorkflow(file, text, { required = new Set(), allowlist })
     const errors = [];
     const err = (no, msg) => errors.push(`${file}:${no} ${msg}`);
     const { lines, plain, top, section, jobs } = parseWorkflow(text);
+    for (const l of plain) if (l.bad) err(l.no, `${l.bad}：本检查只认块式 YAML，认不出的写法一律判红`);
+    // 交叉核对：源码里出现的 uses 键数（含带引号的写法）必须等于解析出来的个数，不许有漏看的
+    const raw = plain.reduce((n, l) => n + (l.code.match(/\buses\s*["']?\s*:/g) || []).length, 0);
+    const parsed = plain.filter((l) => l.key === "uses").length;
+    if (raw !== parsed) err(1, `源码里有 ${raw} 处 uses，解析出 ${parsed} 处：有写法没被认出`);
     for (const l of plain) {
         if (/\b(?:pull_request_target|workflow_run)\b/.test(`${l.key || ""} ${l.value}`)) {
             err(l.no, "不允许 pull_request_target / workflow_run 触发");
@@ -138,6 +166,10 @@ export function inspectWorkflow(file, text, { required = new Set(), allowlist })
     if (!jobs.length) err(1, "没有找到任何 job");
     for (const job of jobs) {
         if (!job.get("timeout-minutes") && !job.get("uses")) err(job.no, `job ${job.id} 缺 timeout-minutes`);
+        const jobPerm = job.get("permissions");
+        if (jobPerm && /^(?:read|write)-all$/.test(unquote(jobPerm.value))) {
+            err(jobPerm.no, `job ${job.id} 的 permissions 要逐项写最小权限`);
+        }
         if (required.has(job.name)) {
             const cond = job.get("if");
             if (cond && !/^(?:\$\{\{\s*)?!cancelled\(\)(?:\s*\}\})?$/.test(unquote(cond.value))) {
@@ -250,7 +282,11 @@ export default {
         const allowlist = { github_owned_allowed: true, patterns_allowed: ["anthropics/claude-code-action@*"] };
         const required = new Set(["gate"]);
         const check = (text) => inspectWorkflow("f.yml", text, { required, allowlist });
-        const swap = (a, b) => GOOD.replace(a, b);
+        const swap = (a, b) => {
+            if (!GOOD.includes(a)) throw new Error(`自测夹具里找不到要替换的片段：${a}`);
+            return GOOD.replace(a, b);
+        };
+        const checkout = `      - uses: actions/checkout@${PIN} # v7.0.1`;
         const cases = [
             ["加固齐全的 workflow", false, check(GOOD)],
             ["pull_request_target 触发", true, check(swap("  pull_request:", "  pull_request_target:"))],
@@ -301,6 +337,30 @@ export default {
                 check(swap('          echo "$TITLE"', "          echo ${{ github.event.pull_request.title }}")),
             ],
             ["本地 uses 越出 .github", true, check(swap(`actions/checkout@${PIN} # v7.0.1`, "./scripts/x"))],
+            // 解析器认不了的写法：评审时用来绕过检查的四种，加上锚点
+            ["流式映射写的步骤", true, check(swap(checkout, "      - { uses: softprops/action-gh-release@v2 }"))],
+            ["带引号的 uses 键", true, check(swap(checkout, '      - "uses": qodo-ai/pr-agent@main'))],
+            [
+                "流式序列写的 steps",
+                true,
+                check(swap(`    steps:\n${checkout}`, "    steps: [{uses: softprops/action-gh-release@v2}]")),
+            ],
+            [
+                "required job 的 if 键带引号",
+                true,
+                check(swap("    timeout-minutes: 5", `    timeout-minutes: 5\n    "if": x`)),
+            ],
+            ["锚点", true, check(swap("    runs-on: ubuntu-latest", "    runs-on: &os ubuntu-latest"))],
+            [
+                "job 级 permissions 写成 write-all",
+                true,
+                check(swap("    timeout-minutes: 5", "    timeout-minutes: 5\n    permissions: write-all")),
+            ],
+            [
+                "空的 permissions 与标量流式序列",
+                false,
+                check(swap("permissions:\n  contents: read", "permissions: {}")),
+            ],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
         return caseResult(cases);
     },
