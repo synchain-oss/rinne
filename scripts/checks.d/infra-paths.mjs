@@ -21,12 +21,15 @@ export const ANCHORS = [
     "scripts/hooks/pre-push",
     "scripts/gates.ps1",
     "scripts/gates.d/10-static.ps1",
+    "scripts/bootstrap-tools.ps1",
     "scripts/lib/privacy-needles.mjs",
     "scripts/lib/check-kit.mjs",
     "scripts/checks.d/workflows.mjs",
     "scripts/run-checks.mjs",
     "scripts/check-commits.mjs",
     "scripts/check-privacy.mjs",
+    "scripts/check-ctest-timeouts.ps1",
+    "scripts/check-font-names.py",
     "scripts/review-bot.mjs",
     "scripts/lock-actions.mjs",
     "scripts/sync-labels.mjs",
@@ -71,11 +74,22 @@ export function selfTest() {
     const claude = `改到基础设施路径的 PR 不自合，唯一真源是 \`${SELF}\`。`;
     const drop = (g) => infraMatcher(INFRA_PATHS.filter((x) => x !== g));
     const dropAll = (gs) => infraMatcher(INFRA_PATHS.filter((x) => !gs.includes(x)));
+    const swap = (from, to) => infraMatcher(INFRA_PATHS.map((x) => (x === from ? to : x)));
     const cases = [
         ["当前清单", false, { isInfra: infraMatcher(INFRA_PATHS), claude }],
         ["清单不含 scripts/lib/**（连它自己也不在）", true, { isInfra: drop("scripts/lib/**"), claude }],
         ["清单不含检查脚本目录", true, { isInfra: drop("scripts/checks.d/**"), claude }],
         ["清单不含评审 bot", true, { isInfra: drop("scripts/review-bot.mjs"), claude }],
+        [
+            "清单不含工具引导脚本（sha256 清单与 hooks 预检）",
+            true,
+            { isInfra: drop("scripts/bootstrap-tools.ps1"), claude },
+        ],
+        [
+            "检查脚本只认 .mjs，漏掉 PowerShell 与 Python 写的",
+            true,
+            { isInfra: swap("scripts/check-*", "scripts/check-*.mjs"), claude },
+        ],
         ["清单不含工具钉版文件", true, { isInfra: drop(".*-version"), claude }],
         ["清单不含合并时运行的构建脚本", true, { isInfra: drop("scripts/build.ps1"), claude }],
         ["清单不含打包脚本", true, { isInfra: drop("scripts/package*"), claude }],
