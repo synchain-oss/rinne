@@ -1,0 +1,83 @@
+{
+  "total_count": 6,
+  "check_runs": [
+    {
+      "id": 114662436286,
+      "name": "deepseek-pr-review",
+      "status": "completed",
+      "conclusion": "skipped",
+      "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+      "details_url": "https://github.com/synchain-oss/rinne/actions/runs/38203700250/job/114662436286",
+      "started_at": "2026-10-12T04:25:16Z",
+      "completed_at": "2026-10-12T04:25:09Z",
+      "app": {
+        "slug": "github-actions"
+      }
+    },
+    {
+      "id": 114662424022,
+      "name": "compliance",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+      "details_url": "https://github.com/synchain-oss/rinne/actions/runs/38203700224/job/114662424022",
+      "started_at": "2026-10-12T04:25:14Z",
+      "completed_at": "2026-10-12T04:25:31Z",
+      "app": {
+        "slug": "github-actions"
+      }
+    },
+    {
+      "id": 114662412921,
+      "name": "claude-pr-review",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+      "details_url": "https://github.com/synchain-oss/rinne/actions/runs/38203700274/job/114662412921",
+      "started_at": "2026-10-12T04:25:11Z",
+      "completed_at": "2026-10-12T04:26:28Z",
+      "app": {
+        "slug": "github-actions"
+      }
+    },
+    {
+      "id": 114662412834,
+      "name": "branch-gate",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+      "details_url": "https://github.com/synchain-oss/rinne/actions/runs/38203700226/job/114662412834",
+      "started_at": "2026-10-12T04:25:11Z",
+      "completed_at": "2026-10-12T04:25:17Z",
+      "app": {
+        "slug": "github-actions"
+      }
+    },
+    {
+      "id": 114662412832,
+      "name": "docs-truth",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+      "details_url": "https://github.com/synchain-oss/rinne/actions/runs/38203700245/job/114662412832",
+      "started_at": "2026-10-12T04:25:12Z",
+      "completed_at": "2026-10-12T04:25:17Z",
+      "app": {
+        "slug": "github-actions"
+      }
+    },
+    {
+      "id": 114662412632,
+      "name": "clang-format",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+      "details_url": "https://github.com/synchain-oss/rinne/actions/runs/38203700245/job/114662412632",
+      "started_at": "2026-10-12T04:25:11Z",
+      "completed_at": "2026-10-12T04:25:21Z",
+      "app": {
+        "slug": "github-actions"
+      }
+    }
+  ]
+}

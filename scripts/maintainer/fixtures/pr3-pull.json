@@ -1,0 +1,27 @@
+{
+  "number": 3,
+  "state": "closed",
+  "draft": false,
+  "merged": true,
+  "title": "ci(review): 加入评审 bot、PR 模板、标签与 CODEOWNERS",
+  "body": "## 做了什么\n评审 bot、PR 模板、标签与 CODEOWNERS。本 PR 自证：它自己的 `claude-pr-review` 要跑绿，并发出一条最后一行是机读尾注的审查总结。\n\n- **claude-review**（check `claude-pr-review`，不是 required）：`anthropics/claude-code-action` 钉 v1.0.248 的 40 位 SHA，`--model claude-opus-5-5`；内置工具经 `--tools` 收窄到 Read / Glob / Grep，`--allowedTools` 只放限定在工作目录的 `Read(./**)` 加 inline comment，`--disallowedTools` 兜底（Bash、编辑、联网、子 agent，以及 `.git/`、`/proc`、runner 目录等读取路径）。触发：任意 base、非 draft、同仓、非 dependabot，不设 paths 过滤。job 只有 `contents: read` 加评论两项写权限，不给 `id-token`、`actions`。\n- **prompt** 按 Rinne 重写：实时线程、D ≥ 最大块长（`D_min = max(N_prep, N_obs)`）、NaN / DC / 限制器 / 失控 / Panic、反馈默认值、state abi、IPC 契约、配对、公开仓卫生；dev / prod 用里程碑模式。另加三条：【红旗】【重要】只用于本 PR 引入的问题；第 2 轮起先读上一轮「评审处置汇总」、只审新改动；最终回复末尾恰好一行 `<!-- rinne-review v1 red=N important=N suggest=N -->`。最后一节是不可信数据声明。\n- **尾注的保证**：不用 action 的进度评论（agent 模式），审查总结由 `scripts/review-bot.mjs post` 从 `execution_file` 取出代发。尾注的三个数要与正文 `## 【红旗】`、`## 【重要】`、`## 【建议】` 三节顶格列表项的条数一致；不符、缺节、尾注缺失或多行互相矛盾时，含尾注的行一律换成占位后照发、注明结论不可用并判红，run 没有成功结束也判红。多行相同的尾注合并成一行并挪到最后，评论末尾不留换行；模型文字里的 `<!--` 一律在 `<` 与 `!` 之间插零宽连接符拆开（不再构成注释，代码里看起来不变）。形似凭据的内容一律不发。\n- **增量审查的材料**：`review-bot.mjs prepare` 在模型开跑前写好 `.rinne-review/`：pr.diff（钉在 base...head 上取）、pr.json、round.json；第 2 轮起另有上一轮总结、在它之后的最近一条处置汇总（只认对本仓有写权限的人发的，按权限接口查，不看 author_association：组织成员身份不公开时它是 NONE）。只有上一轮的 head 是当前 head 的祖先、且新提交里没有合并提交时，才另写上一轮 head 到当前 head 的 incremental.diff，否则退回全量并写明原因。上一轮由总结首行的隐藏标记 `<!-- rinne-review-head sha=… bot=… -->` 定位。签出的代码里有被跟踪的符号链接就判红、不审。\n- **deepseek-review**：job 级 `if:` 以 `vars.ENABLE_DEEPSEEK == 'true' &&` 开头，本仓没建这个变量，所以显示 skipped。走 DeepSeek 的 Anthropic 兼容网关，与 Claude 共用同一份 prompt 和同一套脚本（`review-bot.mjs config` 从 claude-review.yml 取 prompt 与 claude_args，只换 `--model`）。不用 pr-agent。\n- **review-dispatch**：只认 PR 上以 `/review` 开头、OWNER / MEMBER / COLLABORATOR 发的评论；base 与 head 只解析一次，文件列表与 diff 都取自同一对提交，发总结前再核一次 head；PR 改了（含改名挪走）`.github/workflows/` 或 `.github/actions/` 下的文件就中止并回帖；只签出目标分支，不签出 PR 代码，脚本与 prompt 也取自目标分支。issue_comment 用默认分支上的文件，所以 v1 进 dev 后才生效。\n- **docs-truth 新增两项检查**：`review-bot`（上面这些结构前提：模型、只读工具与限定路径的放行规则、不可信数据声明在最后、无 paths 过滤；三个 job 级 if 按子句逐项比对，出现 `||` 或多一项、少一项都判红）；`labels`（labels.json 格式；workflow、dependabot、issue 模板与 scripts/ 下脚本引用的标签都已登记，没登记就判红）。\n- **标签**：`.github/labels.json` 20 个（GitHub 默认的 9 个加流程用的 11 个）。`scripts/sync-labels.mjs --dry-run | --apply [--prune]` 以 DLsnows 身份调 gh，先核对 token 归属；`--apply` 后回读核对，`--prune` 才删除真源外的标签。本 PR 没有执行任何同步。\n- **模板**：PR 模板含全部栏目、末行 `Signed-off-by:`；issue 模板（缺陷、功能建议、宿主实测报告，安全漏洞走私有报告）；CODEOWNERS 只作提示；dependabot 只管 GitHub Actions，月更，PR 开到 dev。\n- `.github/actions-lock.json` 补上 claude-code-action 与它嵌套的 `oven-sh/setup-bun`（也钉 40 位 SHA，自身没有嵌套 uses）。\n\n## 来源 SHA\n不涉及：参照 synchain-oss/scvb dev@f80e1c9 的 claude-review、review-dispatch、deepseek-review、dependabot 的做法重写，没有逐字复制文件，不登记 upstream。\n\n## 冻结契约自查\n- [ ] 参数 ID / 顺序 / 范围 / 默认值\n- [ ] 共享段名 / 布局（abi）\n- [ ] state schema\n- [ ] 桥契约\n- [ ] D 合约\n\n不涉及：只改 CI、模板与检查脚本，没有碰任何契约文件。\n\n## 实时 / 安全自查\n不涉及：没有 C++ 改动。\n\n## 验证\n本地 gates 运行器尚未入库，按同一组检查逐项跑 @f35523c：\n- `run-checks --self-test` PASS 11 / FAIL 0；`run-checks` PASS 9 / FAIL 0 / SKIP 2（hooks 只在本机 commit / push 时跑；commits 属 pr 组，另跑 `check-commits commits --range d476371..HEAD` 通过）\n- prettier 3.9.6 `--check .` 通过；actionlint 1.7.12（`-shellcheck= -pyflakes=`）通过；gitleaks 工作树与 `d476371..HEAD` 零命中；`check-privacy --commits d476371..HEAD` 零命中；reuse lint 通过\n- `lock-actions --check` 一致；`review-bot.mjs config` 对本仓 claude-review.yml 实取一遍；`review-bot.mjs prepare` 对已合并的 #2 与本 PR 只读实跑（diff 与 `gh pr diff` 逐字节一致）；本 PR 第 1 轮的真实总结过新的条数核对\n- 本 PR 上预期：4 个轻档 check success；`claude-pr-review` success 并发出审查总结，最后一行匹配 `^<!-- rinne-review v1 red=\\d+ important=\\d+ suggest=\\d+ -->$`；`deepseek-pr-review` skipped\n\n## 宿主实测（可选）\n不涉及。\n\n## 三语截图（UI 改动）\n不涉及。\n\n## DCO\n- [x] 所有 commit 均用 `git commit -s` 签名，且无 AI 署名\n\nSigned-off-by: DLsnows <noreply@synchain.ca>\n",
+  "html_url": "https://github.com/synchain-oss/rinne/pull/3",
+  "mergeable": null,
+  "mergeable_state": "unknown",
+  "merge_commit_sha": "f672d5bb4c4cddf6bd7df2ac8afcc5168b160d59",
+  "user": {
+    "login": "DLsnows",
+    "type": "User"
+  },
+  "head": {
+    "ref": "feat/review-bot",
+    "sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+    "repo": {
+      "full_name": "synchain-oss/rinne"
+    }
+  },
+  "base": {
+    "ref": "feature/v1",
+    "sha": "d476371901b493ab0ee66bd3ce58f3a2925f16de"
+  }
+}

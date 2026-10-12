@@ -1,0 +1,12 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 114662412921,
+      "name": "claude-pr-review",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c"
+    }
+  ]
+}

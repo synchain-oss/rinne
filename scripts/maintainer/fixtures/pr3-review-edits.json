@@ -1,0 +1,96 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviews": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpO0MjAyNi0xMC0xMlQwNDoyNzozNFq0MjAyNi0xMC0xMlQwNDoyNzozNFrPAAAAAUcGFnc="
+          },
+          "nodes": [
+            {
+              "databaseId": 5486375486,
+              "updatedAt": "2026-10-12T03:51:17Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486375750,
+              "updatedAt": "2026-10-12T03:51:22Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486375965,
+              "updatedAt": "2026-10-12T03:51:25Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486501266,
+              "updatedAt": "2026-10-12T04:16:48Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486501517,
+              "updatedAt": "2026-10-12T04:16:50Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486501673,
+              "updatedAt": "2026-10-12T04:16:52Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486543279,
+              "updatedAt": "2026-10-12T04:26:14Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486543523,
+              "updatedAt": "2026-10-12T04:26:17Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486547528,
+              "updatedAt": "2026-10-12T04:27:17Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486547737,
+              "updatedAt": "2026-10-12T04:27:20Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486547890,
+              "updatedAt": "2026-10-12T04:27:22Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486548032,
+              "updatedAt": "2026-10-12T04:27:24Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486548158,
+              "updatedAt": "2026-10-12T04:27:27Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486548291,
+              "updatedAt": "2026-10-12T04:27:29Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486548450,
+              "updatedAt": "2026-10-12T04:27:32Z",
+              "lastEditedAt": null
+            },
+            {
+              "databaseId": 5486548599,
+              "updatedAt": "2026-10-12T04:27:34Z",
+              "lastEditedAt": null
+            }
+          ]
+        }
+      }
+    }
+  }
+}

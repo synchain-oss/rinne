@@ -1,0 +1,14 @@
+{
+  "id": 38203700274,
+  "name": "Claude PR Review",
+  "path": ".github/workflows/claude-review.yml",
+  "event": "pull_request",
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+  "head_branch": "feat/review-bot",
+  "run_started_at": "2026-10-12T04:25:09Z",
+  "created_at": "2026-10-12T04:25:09Z",
+  "updated_at": "2026-10-12T04:26:29Z",
+  "html_url": "https://github.com/synchain-oss/rinne/actions/runs/38203700274"
+}

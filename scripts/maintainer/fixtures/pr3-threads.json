@@ -1,0 +1,264 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0xMlQwNDoyNjoxN1rOq1QdVQ=="
+          },
+          "nodes": [
+            {
+              "id": "PRRT_kwDOVFUkFs6rUpqI",
+              "isResolved": true,
+              "isOutdated": true,
+              "path": "scripts/review-bot.mjs",
+              "line": null,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244522703,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【重要】三点 compare 在 force-push / rebase 之后照样能取到 diff（旧 head 的对象在 GitHub 上仍然可达），但这时它是 merge-base(旧 head, 新 head)→新 head 的差，会混进 rebase 带进来的整段 base 改动。可脚本仍然把 `incremental` 写成 true，和 prompt 里「上一轮的 head 已不在分支历史上 → incremental=false、退回审整个 pr.diff」的约定对不上，bot 会把一大片无关改动当成新改动来审。\n\n建议同时取 `.status`，只有 `ahead`（旧 head 是新 head 的祖先）才算增量，`diverged` / `behind` 一律按非增量处理。例如：\n```js\nconst out = gh([\"api\", api, \"--jq\", `.status, (.files | ${PATCHES})`], { allowFail: true });\n// 第一行是 status，!== \"ahead\" 就不写 incremental.diff\n```\n另外 compare 接口最多返回 300 个文件。超过时也应留个标记（类似 DIFF_PARTIAL），否则增量 diff 会被悄悄截短。顺手补一条自测：status 为 diverged 时 incremental=false。",
+                    "createdAt": "2026-10-12T03:51:17Z",
+                    "updatedAt": "2026-10-12T03:51:17Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244522703"
+                  },
+                  {
+                    "databaseId": 4244678073,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n已修复（d62c5dc）：只有 compare 为 ahead 且区间内没有合并提交时才做增量审查，否则退回全量并写明原因；300 个文件时留截断标记。",
+                    "createdAt": "2026-10-12T04:27:17Z",
+                    "updatedAt": "2026-10-12T04:27:17Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244678073"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOVFUkFs6rUptC",
+              "isResolved": true,
+              "isOutdated": true,
+              "path": "scripts/review-bot.mjs",
+              "line": null,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244522975,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【重要】尾注不可用时直接用 `summary.trimEnd()` 原样发出。如果是「多行尾注彼此不同」，而模型最后一行恰好是合法尾注（比如前面写 `red=1`、末行写 `red=0`），这条评论的最后一行仍然能匹配 `FOOTER`。只看「最近一条总结最后一行」的消费方（合并判据、编排脚本）会读到一个看似有效、实际自相矛盾的结论。现在只靠这一步失败让 check 变红来兜底，评论本身仍有误导。自测里只覆盖了「缺尾注」这一种情况。\n\n建议在不可用分支里把匹配 `FOOTER` 的行去掉或改写（例如替换成 `（已移除不可用的尾注）`），并补一条自测：两行尾注不同时，`body` 里不再出现任何 `rinne-review v1` 行。",
+                    "createdAt": "2026-10-12T03:51:22Z",
+                    "updatedAt": "2026-10-12T03:51:22Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244522975"
+                  },
+                  {
+                    "databaseId": 4244678265,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n已修复（d62c5dc）：尾注不可用时所有尾注行都替换为占位，并加了尾注与正文条数的核对。",
+                    "createdAt": "2026-10-12T04:27:20Z",
+                    "updatedAt": "2026-10-12T04:27:20Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244678265"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOVFUkFs6rUpux",
+              "isResolved": true,
+              "isOutdated": true,
+              "path": ".github/workflows/review-dispatch.yml",
+              "line": null,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244523156,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【建议】这里核对的是「此刻」的 PR 文件列表，下一步才单独去取 `headRefOid`，之后 `prepare` 的 `gh pr diff` 拿的又是当时最新的 diff。三次读取之间如果有人推送，就可能出现「检查时没碰 workflow、审的却是改了 workflow 的版本」，或 diff 与 `HEAD_SHA` 对不上。本 job 不执行 PR 代码，这只是纵深防御上的缺口，所以不算阻断。\n\n建议先解析出 head，再用 `repos/$GITHUB_REPOSITORY/compare/<base>...<head>` 拿文件列表与 diff，全部钉在同一个 head 上；或者在 Post 之前再取一次 `headRefOid`，不一致就判红并回帖。",
+                    "createdAt": "2026-10-12T03:51:25Z",
+                    "updatedAt": "2026-10-12T03:51:25Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244523156"
+                  },
+                  {
+                    "databaseId": 4244678404,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n已修复（d62c5dc）：先一次解析出 base 与 head，文件列表和 diff 都取自同一对提交，发总结前再核一次 head。",
+                    "createdAt": "2026-10-12T04:27:22Z",
+                    "updatedAt": "2026-10-12T04:27:22Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244678404"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOVFUkFs6rU76b",
+              "isResolved": true,
+              "isOutdated": true,
+              "path": ".github/workflows/review-dispatch.yml",
+              "line": null,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244637034,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【建议】（既有）compare 的 `files[].filename` 对重命名只给新路径。把 `.github/workflows/x.yml` 挪到 `.github/workflows/` 以外的 PR（等于停用一个 workflow）拦不住。建议把旧路径一起列出来：\n\n```suggestion\n          files=$(gh api \"repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA\" --jq '.files[] | .filename, (.previous_filename // empty)')\n```\n注意：这样 `n` 可能超过实际文件数。300 的上限要改成按 `.files | length` 判断。",
+                    "createdAt": "2026-10-12T04:16:47Z",
+                    "updatedAt": "2026-10-12T04:16:48Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244637034"
+                  },
+                  {
+                    "databaseId": 4244678542,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n已修复（496b483）：文件列表同时取 previous_filename，300 的上限按 files 数量判断。",
+                    "createdAt": "2026-10-12T04:27:24Z",
+                    "updatedAt": "2026-10-12T04:27:24Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244678542"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOVFUkFs6rU78k",
+              "isResolved": true,
+              "isOutdated": true,
+              "path": "scripts/review-bot.mjs",
+              "line": null,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244637227,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【建议】在行内代码和围栏代码块里，GitHub 不解码实体，转义后会原样显示成 `&lt;!--`，代码引用里的 HTML 注释就读不清了。可以改成插入零宽字符，比如 `<!--`。这样同样破坏注释语法，渲染时也不可见。另外补一条代码块内的自测。",
+                    "createdAt": "2026-10-12T04:16:50Z",
+                    "updatedAt": "2026-10-12T04:16:50Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244637227"
+                  },
+                  {
+                    "databaseId": 4244678663,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n已修复（496b483）：改为在 < 与 ! 之间插零宽连接符，代码里显示不变，也构不成注释。",
+                    "createdAt": "2026-10-12T04:27:26Z",
+                    "updatedAt": "2026-10-12T04:27:27Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244678663"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOVFUkFs6rU7-V",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "scripts/checks.d/labels.mjs",
+              "line": 75,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244637393,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【建议】这里只跳过以 `#` 或 `//` 开头的注释行。脚本里的 JSDoc 或块注释行（以 ` * ` 开头，例如示例里写着 `gh pr edit 加标签参数 x`）仍会被当成引用，docs-truth 会误判红。可以把 `\\*` 和 `/*` 也算作注释行开头，并补一条自测。",
+                    "createdAt": "2026-10-12T04:16:51Z",
+                    "updatedAt": "2026-10-12T04:16:52Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244637393"
+                  },
+                  {
+                    "databaseId": 4244678770,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n已修复（f35523c）：脚本里的块注释、PowerShell 注释块与 JSDoc 行都会跳过，块结束后恢复检查。",
+                    "createdAt": "2026-10-12T04:27:29Z",
+                    "updatedAt": "2026-10-12T04:27:29Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244678770"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOVFUkFs6rVBy1",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "scripts/review-bot.mjs",
+              "line": 353,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244674095,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【建议】`allowFail: true` 把几种情况都当成「没有写权限」：404（不是协作者），以及限流、5xx、token 缺权限这类接口失败。后一种会让维护者的处置汇总被静默丢掉，症状和第 2 轮漏掉 `disposition.md` 一样，日志里也看不出原因。建议 `gh` 失败时（非 404）先 `console.error` 记一行 login 和 stderr 首行再判 false；或者给 prepare 输出加一条「有带标记的处置汇总，但作者权限核对失败」的提示，交给 round.json 或 workflow 日志。",
+                    "createdAt": "2026-10-12T04:26:14Z",
+                    "updatedAt": "2026-10-12T04:26:14Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244674095"
+                  },
+                  {
+                    "databaseId": 4244678904,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n挂账，见 #4。",
+                    "createdAt": "2026-10-12T04:27:32Z",
+                    "updatedAt": "2026-10-12T04:27:32Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244678904"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOVFUkFs6rVB1V",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "scripts/checks.d/labels.mjs",
+              "line": 72,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 4244674336,
+                    "author": {
+                      "login": "github-actions"
+                    },
+                    "body": "【建议】块注释的开头行和结束行会整行跳过。所以 `/* x */ gh([\"pr\", \"edit\", pr, \"加标签参数\", \"y\"])` 这种单行注释后面跟代码的写法，还有 `*/ gh ... 加标签参数 y` 这种结束行后面跟代码的写法，后半段的引用都不会被查到，会漏报。这种写法少见，但它放宽的是门禁。建议注释结束后从 `close` 之后的部分接着查，不要直接 `return`，例如把 `l` 换成 `l.slice(l.indexOf(close) + 2)` 再走下面的匹配，并补一条「单行 /* */ 后跟未登记标签」的自测。",
+                    "createdAt": "2026-10-12T04:26:17Z",
+                    "updatedAt": "2026-10-12T04:26:17Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244674336"
+                  },
+                  {
+                    "databaseId": 4244679050,
+                    "author": {
+                      "login": "DLsnows"
+                    },
+                    "body": "<!-- rinne-agent v1 role=orchestrator kind=reply round=3 head=f35523c -->\n挂账，见 #4。",
+                    "createdAt": "2026-10-12T04:27:34Z",
+                    "updatedAt": "2026-10-12T04:27:34Z",
+                    "url": "https://github.com/synchain-oss/rinne/pull/3#discussion_r4244679050"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

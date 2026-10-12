@@ -1,0 +1,74 @@
+[
+  {
+    "id": 6117417714,
+    "author_association": "NONE",
+    "created_at": "2026-10-12T03:51:36Z",
+    "updated_at": "2026-10-12T03:51:36Z",
+    "body": "<!-- rinne-review-head sha=c477293db4a8de7a2a41b49f55cc8dd9720c1138 bot=claude -->\n_审查对象：`c477293` · [运行记录](https://github.com/synchain-oss/rinne/actions/runs/38201290926)_\n\n## 结论\n本 PR 只改 CI、模板和检查脚本，没有 C++ 改动，实时、D 合约、反馈安全、IPC 这几项不涉及。没有【红旗】，但增量审查和尾注处理各有一处正确性问题，建议先修再合。\n\n`CLAUDE.md`、`docs/ARCHITECTURE.md`、`docs/contracts/*`、`docs/UI_BRIDGE.md`、`docs/adr/` 在 base 上都还没有：这些文档尚未建立，本项未比对。\n\nworkflow 卫生已核过，没有发现问题：\n- 不可信上下文只经 env 传入，没有插值进 `run`。\n- 远程 action 都钉了 40 位 SHA，`actions-lock.json` 里也补上了嵌套的 setup-bun。\n- 写权限只有评论两项，`contents: read`。\n- dispatch 只认 OWNER / MEMBER / COLLABORATOR，只签出目标分支。\n- 新文件都有 SPDX 头；JSON 文件由 `REUSE.toml` 的 `**` 覆盖。\n\n## 【红旗】\n无\n\n## 【重要】\n- `scripts/review-bot.mjs:267`：force-push 或 rebase 之后，三点 compare 照样返回 diff，但里面混进了 base 的改动，脚本却仍然写 `incremental=true`，和 prompt 里「旧 head 不在分支历史上就退回全量审查」的约定矛盾。改法：同时取 compare 的 `.status`，只有 `ahead` 才算增量；文件数超过 300 时留截断标记；补一条自测。\n- `scripts/review-bot.mjs:75`：尾注不可用时总结原样发出。如果是多行尾注互相矛盾，而末行恰好是一条合法尾注，评论最后一行仍能匹配 `FOOTER`，只看末行的消费方会读到一个看似有效的结论。改法：不可用分支里去掉或改写所有尾注行，并补「两行尾注不同」的自测。\n\n## 【建议】\n- `.github/workflows/review-dispatch.yml:60`：查文件列表、取 head、取 diff 是三次分开的读取，中间有人推送就会对不上，可能漏掉对 workflow 改动的拦截，或让 diff 与 `HEAD_SHA` 不一致。改法：先定下 head，再用 `compare/<base>...<head>` 拿文件列表和 diff；或者在 Post 之前再取一次 head，不一致就判红并回帖。\n\n<!-- rinne-review v1 red=0 important=2 suggest=1 -->",
+    "html_url": "https://github.com/synchain-oss/rinne/pull/3#issuecomment-6117417714",
+    "user": {
+      "login": "github-actions[bot]",
+      "type": "Bot"
+    }
+  },
+  {
+    "id": 6117635288,
+    "author_association": "MEMBER",
+    "created_at": "2026-10-12T04:15:18Z",
+    "updated_at": "2026-10-12T04:15:18Z",
+    "body": "<!-- rinne-agent v1 role=review kind=disposition round=1 head=ca052fd bot-run=38201290926 -->\n## 评审处置汇总 · 第 1 轮（head ca052fd）\n\n| # | 来源 | 级别 | 位置 | 摘要 | 处置（采纳 / 不改 / 挂账） | commit 或理由 / issue |\n|---|---|---|---|---|---|---|\n| 1 | bot | 【重要】 | scripts/review-bot.mjs:267 | force-push / rebase 之后 compare 仍记为增量；compare 300 个文件的上限会悄悄截短 | 采纳 | d62c5dc：只有 compare `status=ahead` 且新提交里没有合并提交才按增量审，否则退回全量，并在 round.json 写明 `incrementalReason`；文件达到 300 个时留 `INCREMENTAL_PARTIAL` 标记；补了 diverged、合并提交、提交数超限、300 个文件的自测 |\n| 2 | bot | 【重要】 | scripts/review-bot.mjs:75 | 尾注不可用时照发原文，末行仍可能像一条合法尾注 | 采纳 | d62c5dc：不可用时含 `rinne-review v1` 的行一律换成占位再发，评论里不再有任何尾注行；补了「两行尾注不同」「条数不符」「缺尾注」的自测 |\n| 3 | bot | 【建议】 | .github/workflows/review-dispatch.yml:60 | 文件列表、head、diff 分三次读取，中间有推送就对不上 | 采纳 | d62c5dc：一次 API 调用解析 base、base sha 与 head；文件列表与 diff 都取自 `compare/<base sha>...<head>`（列满 300 个文件时按改了 workflow 中止）；发总结前再核一次 head，有新推送就作废并回帖。claude-review 与 deepseek-review 的 diff 也改为钉在事件的 base.sha...head.sha 上取 |\n| 4 | 独立评审 | 【重要】 | scripts/review-bot.mjs:51-61、:292-313 | 机读尾注按原样采信，正文列了【红旗】而尾注写 red=0 也能通过 | 采纳 | d62c5dc：post 逐节数 `## 【红旗】`、`## 【重要】`、`## 【建议】` 里顶格的列表项（跳过代码块与缩进子项，「无」不算），与尾注三个数核对；不符、缺节、某节重复时去掉尾注照发、注明结论不可用并判红；prompt 写明这条规则。自测含「列了红旗、尾注却写 red=0」「缺一节」。已用第 1 轮的真实总结验证：三节 0 / 2 / 1 与尾注一致 |\n| 5 | 独立评审 | 【建议】 | .github/workflows/claude-review.yml:178-180 | 不限路径的 Read / Glob / Grep 放行规则让 deny 名单成了唯一防线；inline comment 不过凭据过滤 | 采纳 | d62c5dc：`--allowedTools` 只剩 `Read(./**)` 与 inline comment 工具，不再放行不带路径的 Read / Glob / Grep；deny 名单补上 `/home/runner/runners/**`；结构检查拒绝不带路径或越出工作目录的放行规则。语法依据 Claude Code 权限文档（CLI 规则以工作目录为锚，工作目录外的只读调用需要批准、无人值守时被拒），运行时行为未在本机验证，以本轮 bot run 的 `permission_denials_count` 与审查是否正常完成为准。inline comment 的凭据过滤未做：它由 action 内的 MCP 工具直接发出，脚本拦不到 |\n| 6 | 独立评审 | 【建议】 | scripts/review-bot.mjs:73-80 | 不可用分支照发原始尾注 | 采纳 | 同 #2，d62c5dc |\n| 7 | 独立评审 | 【建议】 | scripts/review-bot.mjs:264-272、:93-95 | 增量材料可能误导：合进 base 带来别的改动、diverged、300 文件截断、处置汇总过期 | 采纳 | d62c5dc：同 #1；另外处置汇总必须发在上一轮 bot 总结之后，更早的不再写进 disposition.md。「只保留当前 PR 文件列表里的文件」未另做：排除合并提交后，增量里只有本 PR 自己的线性提交 |\n| 8 | 独立评审 | 【建议】 | 合并判据 | 只凭 github-actions[bot] 作者身份认总结，同仓 PR 的其他 workflow 可以伪造 | 挂账 | 转给后续的合并脚本实现：只认 head 标记等于当前 head、运行记录指向 claude-review（或 review-dispatch）且该 run 的 head_sha 一致、claude-pr-review 结论为 success 的总结 |\n| 9 | 独立评审 | 【建议】 | scripts/checks.d/review-bot.mjs:63、:75、:85 | 结构检查按子串比对，追加 `\\|\\| true` 照样通过 | 采纳 | d62c5dc：job 级 if 按顶层 && 拆成子句逐项比对，出现 `\\|\\|`、多一项、少一项或重复都判红；deepseek 的开关必须是第一项。补了 `\\|\\| true`、多一项、包一层表达式、缺 if 的自测 |\n| 10 | 独立评审 | 【建议】 | scripts/checks.d/labels.mjs:82-90 | 标签检查不扫 scripts/ | 采纳 | ca052fd：scripts/ 下的脚本也扫；另认参数数组写法，脚本里的 `labels:` 属性不当 YAML 读，注释行不查 |\n\n本轮 gates：本地运行器尚未入库，等价检查 @ca052fd：run-checks PASS 9 / FAIL 0 / SKIP 2（hooks、commits 另跑通过），self-test PASS 11 / FAIL 0；prettier、actionlint、gitleaks、check-privacy、check-commits 全部通过，EXIT=0\n",
+    "html_url": "https://github.com/synchain-oss/rinne/pull/3#issuecomment-6117635288",
+    "user": {
+      "login": "DLsnows",
+      "type": "User"
+    }
+  },
+  {
+    "id": 6117650778,
+    "author_association": "NONE",
+    "created_at": "2026-10-12T04:17:00Z",
+    "updated_at": "2026-10-12T04:17:00Z",
+    "body": "<!-- rinne-review-head sha=ca052fdd1baa4aa6df272c4a12e8a8b787b1de74 bot=claude -->\n_审查对象：`ca052fd` · [运行记录](https://github.com/synchain-oss/rinne/actions/runs/38203045966)_\n\n## 结论\n第 2 轮是增量审查，只看 `c477293..ca052fd` 的新改动。上一轮的三条意见都已修好：\n- 增量审查现在只认 compare 的 `status=ahead`，有合并提交时退回全量，文件到 300 个会留截断标记。\n- 尾注不可用时，所有尾注行都会换成占位，另外加了条数核对。\n- `/review` 把 base 和 head 钉在同一对提交上，发总结前会再核一次 head。\n\n本轮没有找到 `disposition.md`，处置情况按 `previous-review.md` 和新代码判断。新改动里没有【红旗】或【重要】问题。未发现严重问题，可合并。\n\n## 【红旗】\n无\n\n## 【重要】\n无\n\n## 【建议】\n- `.github/workflows/review-dispatch.yml:81`：（既有）`.files[].filename` 对重命名只给新路径，把 workflow 挪出 `.github/workflows/` 的 PR（等于停用一个 workflow）拦不住。改法：jq 里加上 `.previous_filename // empty`，300 的上限改按 `.files | length` 判断。\n- `scripts/review-bot.mjs:133`：`&lt;!--` 转成 `&lt;!--` 之后，在行内代码和代码块里会原样显示成实体，代码引用就读不清了。改法：插入零宽字符来破坏注释语法，并补一条代码块内的自测。\n- `scripts/checks.d/labels.mjs:60`：注释行只跳过以 `#` 和 `//` 开头的。脚本 JSDoc 或块注释里（以 ` * ` 开头的行）写的 gh 加标签示例仍会被当成引用，docs-truth 会误判红。改法：把 `*` 和 `/*` 开头的行也当注释跳过，并补一条自测。\n\n<!-- rinne-review v1 red=0 important=0 suggest=3 -->",
+    "html_url": "https://github.com/synchain-oss/rinne/pull/3#issuecomment-6117650778",
+    "user": {
+      "login": "github-actions[bot]",
+      "type": "Bot"
+    }
+  },
+  {
+    "id": 6117724484,
+    "author_association": "MEMBER",
+    "created_at": "2026-10-12T04:24:55Z",
+    "updated_at": "2026-10-12T04:24:55Z",
+    "body": "<!-- rinne-agent v1 role=review kind=disposition round=2 head=f35523c bot-run=38203045966 -->\n## 评审处置汇总 · 第 2 轮（head f35523c）\n\n| # | 来源 | 级别 | 位置 | 摘要 | 处置（采纳 / 不改 / 挂账） | commit 或理由 / issue |\n|---|---|---|---|---|---|---|\n| 1 | 统筹（第 2 轮 run 实测） | 缺陷 | scripts/review-bot.mjs:153-170 | 第 2 轮没有生成 disposition.md：第 1 轮的处置汇总（维护者发、在上一轮总结之后、标记在首行）被当成外人的评论 | 采纳 | 496b483。原因：维护者的组织成员身份不公开，用 GITHUB_TOKEN（与匿名）读到的 `author_association` 是 `NONE`，而判据只认 OWNER / MEMBER / COLLABORATOR。标记解析、时间先后、分页都没问题（用这条 PR 的真实评论回放过）。改为只对带标记的候选评论查作者对本仓的权限（`collaborators/<login>/permission` 为 admin 或 write；本 job 的 GITHUB_TOKEN 能读到，action 自己的权限检查也用这个接口），bot 发的不算。自测用那条评论的原样（association 为 NONE、标记里的 head 是新 head），并覆盖「只看 association 会漏掉」「没有写权限的人」「bot 发的」 |\n| 2 | bot | 【建议】 | .github/workflows/review-dispatch.yml:81 | 改名只给新路径，把 workflow 挪出 `.github/workflows/` 拦不住；300 的上限应按 `.files` 条数判断 | 采纳 | 496b483：compare 结果写成文件，用 `.files[] \\| .filename, (.previous_filename // empty)` 取文件列表，上限按 `.files \\| length` 判断；逐文件 patch 的 `a/` 一侧也用改名前的路径 |\n| 3 | bot | 【建议】 | scripts/review-bot.mjs:133 | `<!--` 转成 `&lt;!--` 后，在行内代码和代码块里原样显示成实体 | 采纳 | 496b483：改为在 `<` 与 `!` 之间插零宽连接符（源码里写成转义，不放不可见字符），不再构成注释，代码里看起来与原文一样；自测含代码块与行内代码，断言评论里没有 `&lt;`，且真正的 `<!--` 只剩首行 head 标记与末行尾注 |\n| 4 | bot | 【建议】 | scripts/checks.d/labels.mjs:60 | 只跳过 `#`、`//` 开头的注释行，JSDoc 与块注释里的示例会误判红 | 采纳 | f35523c：脚本里的 `/* … */`、PowerShell 的 `<# … #>` 块与 JSDoc 的 ` * ` 续行都不查，块注释结束后照常查；补了对应自测 |\n\n本轮 gates：本地运行器尚未入库，等价检查 @f35523c：run-checks PASS 9 / FAIL 0 / SKIP 2（hooks、commits 另跑通过），self-test PASS 11 / FAIL 0；prettier、actionlint、gitleaks、check-privacy、check-commits 全部通过，EXIT=0\n",
+    "html_url": "https://github.com/synchain-oss/rinne/pull/3#issuecomment-6117724484",
+    "user": {
+      "login": "DLsnows",
+      "type": "User"
+    }
+  },
+  {
+    "id": 6117738666,
+    "author_association": "NONE",
+    "created_at": "2026-10-12T04:26:26Z",
+    "updated_at": "2026-10-12T04:26:26Z",
+    "body": "<!-- rinne-review-head sha=f35523c4b3c4feabf1c62a0d8a35846350b7121c bot=claude -->\n_审查对象：`f35523c` · [运行记录](https://github.com/synchain-oss/rinne/actions/runs/38203700274)_\n\n## 结论\n第 3 轮是增量审查，只看 `ca052fd..f35523c` 的新改动。`disposition.md` 读到了，第 2 轮的 4 条处置都已采纳，逐条核过修复本身。\n\n上一轮的意见已经全部修好：\n- 处置汇总改为按作者对本仓的实际权限认。\n- 改名后的 workflow 也会被拦。\n- `<\u200d!--` 改为插零宽连接符拆开，不再构成注释。\n- labels 检查跳过块注释。\n\n新改动里没有【红旗】或【重要】问题，只有 2 条【建议】，分别是权限核对失败时的日志，和块注释同一行代码的漏查。本 PR 只改 CI、模板与脚本，没有碰 C++ 或契约文件，实时、D 合约、IPC 等重点不涉及。未发现严重问题，可合并。\n\n## 【红旗】\n无\n\n## 【重要】\n无\n\n## 【建议】\n- `scripts/review-bot.mjs:353`：`canWrite` 用 `allowFail: true`，把 404 和限流、5xx、token 缺权限这类接口失败一律当成「没有写权限」。接口失败时，维护者的处置汇总会被静默丢掉，症状和第 2 轮一样，日志里也看不出原因。改法：非 404 的失败先 `console.error` 记一行 login 和 stderr 首行再判 false，或者在 prepare 的输出里加一条「有带标记的处置汇总，但作者权限核对失败」的提示。\n- `scripts/checks.d/labels.mjs:63-72`：块注释的开头行和结束行会整行跳过。`/* x */ gh(... \"加标签参数\", \"y\")` 这种单行注释后面跟代码的写法，还有 `*/ gh ... 加标签参数 y` 这种结束行后面跟代码的写法，后半段的引用都会漏查，放宽的是门禁。改法：注释在本行结束时，只把 `close` 之前的部分当注释，之后的部分照常匹配，并补一条「单行 /* */ 后跟未登记标签」的自测。\n\n<!-- rinne-review v1 red=0 important=0 suggest=2 -->",
+    "html_url": "https://github.com/synchain-oss/rinne/pull/3#issuecomment-6117738666",
+    "user": {
+      "login": "github-actions[bot]",
+      "type": "Bot"
+    }
+  },
+  {
+    "id": 6117750583,
+    "author_association": "MEMBER",
+    "created_at": "2026-10-12T04:27:45Z",
+    "updated_at": "2026-10-12T04:27:45Z",
+    "body": "<!-- rinne-agent v1 role=orchestrator kind=disposition round=3 head=f35523c bot-run=38203700274 -->\n## 评审处置汇总 · 第 3 轮（head f35523c）\n\n| # | 来源 | 级别 | 位置 | 摘要 | 处置 | 依据 |\n|---|---|---|---|---|---|---|\n| 1 | bot 第 3 轮 | 建议 | `scripts/review-bot.mjs:353` | 权限接口失败时处置汇总被静默丢掉 | 挂账 | #4 |\n| 2 | bot 第 3 轮 | 建议 | `scripts/checks.d/labels.mjs:72` | 块注释同一行之后的代码漏查 | 挂账 | #4 |\n\n前两轮 bot 与独立评审提出的意见均已修复（见第 1、2 轮处置汇总）；全部行内讨论已回复并关闭。本轮 bot 结论：红旗 0、重要 0、建议 2；6 项检查通过（deepseek 按设计跳过）。\n",
+    "html_url": "https://github.com/synchain-oss/rinne/pull/3#issuecomment-6117750583",
+    "user": {
+      "login": "DLsnows",
+      "type": "User"
+    }
+  }
+]

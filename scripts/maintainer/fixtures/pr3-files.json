@@ -1,0 +1,66 @@
+[
+  {
+    "filename": ".github/CODEOWNERS",
+    "status": "added"
+  },
+  {
+    "filename": ".github/ISSUE_TEMPLATE/bug.yml",
+    "status": "added"
+  },
+  {
+    "filename": ".github/ISSUE_TEMPLATE/config.yml",
+    "status": "added"
+  },
+  {
+    "filename": ".github/ISSUE_TEMPLATE/feature.yml",
+    "status": "added"
+  },
+  {
+    "filename": ".github/ISSUE_TEMPLATE/host-report.yml",
+    "status": "added"
+  },
+  {
+    "filename": ".github/actions-lock.json",
+    "status": "modified"
+  },
+  {
+    "filename": ".github/dependabot.yml",
+    "status": "added"
+  },
+  {
+    "filename": ".github/labels.json",
+    "status": "added"
+  },
+  {
+    "filename": ".github/pull_request_template.md",
+    "status": "added"
+  },
+  {
+    "filename": ".github/workflows/claude-review.yml",
+    "status": "added"
+  },
+  {
+    "filename": ".github/workflows/deepseek-review.yml",
+    "status": "added"
+  },
+  {
+    "filename": ".github/workflows/review-dispatch.yml",
+    "status": "added"
+  },
+  {
+    "filename": "scripts/checks.d/labels.mjs",
+    "status": "added"
+  },
+  {
+    "filename": "scripts/checks.d/review-bot.mjs",
+    "status": "added"
+  },
+  {
+    "filename": "scripts/review-bot.mjs",
+    "status": "added"
+  },
+  {
+    "filename": "scripts/sync-labels.mjs",
+    "status": "added"
+  }
+]
