@@ -12,7 +12,8 @@
 #   -SelfTest                     用 fixtures/ 里录制的 PR 响应离线跑，对每条判据给反例
 # 只从主 clone 运行，而且主 clone 必须正好在刚取回的 origin/feature/v1 上、工作树干净：判据取自 feature 线，
 # 而不是待合并 PR 自己的版本。gates 的结果 json 是自报的：最低档按 PR 的文件清单与卡片在这里重算（定档规则取自
-# 主 clone 的 scripts/lib/Tiers.psm1），json 的 baseSha 必须就是当前 origin/feature/v1，feature 线动过就要重跑 gates。
+# 主 clone 的 scripts/lib/Tiers.psm1）；json 的 baseSha 必须是 PR head 与当前 origin/feature/v1 的共同祖先，
+# 对不上就要在 PR head 上重跑 gates。
 #
 # 用户的决定只认记录文件：主 clone 的 git config rinne.waivers（--local，不认环境变量与命令行注入的配置）指向的 JSON；
 # RINNE_WAIVERS 只在 -SelfTest 下用。每条记录都要 "by": "user"，绑定一个完整的 40 位 head，之后再有推送就作废，
@@ -307,7 +308,7 @@ function Get-MergeVerdict {
         if (-not $c -or $c.conclusion -ne 'success') { $fail.Add("check $ctx 在当前 head 上不是 success") }
     }
 
-    # 7. 本地 gates：json 存在、sha = head、档位够、基线是当前 feature 线、真跑过（pass ≥ 1）、exit=0、fail=0、dirty=false。
+    # 7. 本地 gates：json 存在、sha = head、档位够、基线对、真跑过（pass ≥ 1）、exit=0、fail=0、dirty=false。
     #    json 是自报的：最低档按 PR 的文件清单（改名的新旧路径都算）与卡片的档在这里重算，规则取自主 clone 的 Tiers.psm1
     $paths = @(Get-RinneChangedPaths $F.Files)
     $tier = Resolve-RinneTierFloor -Files $paths -CardTier ([string]$F.Card.tier)
@@ -321,13 +322,14 @@ function Get-MergeVerdict {
             $auto = [string](Get-RinneProp $g 'autoTier')
             $fail.Add("gates 跑的是 $($g.tier)，低于按改动重算的最低档 $($tier.Min)（按文件 $($tier.Auto)，卡片 $($F.Card.tier)$(if ($auto) { "；json 自报按文件 $auto" })）")
         }
+        # baseSha 是 gates 算 diff 用的共同祖先：必须等于 PR head 与当前 feature 线的共同祖先（现在重跑 gates 会写出的值）。
+        # feature 线往前走、子支线没同步时它不变，不必为此重跑；与 PR 合并后的树由合并后构建（Standard 及以上）覆盖
         $baseSha = [string](Get-RinneProp $g 'baseSha')
-        $tip = $F.MainClone.Tip
         $short = { param($s) if ($s) { $s.Substring(0, [Math]::Min(7, $s.Length)) } else { '（无）' } }
         if (-not $baseSha) { $fail.Add('gates json 没有 baseSha，请用新版 gates 重跑') }
-        elseif ($baseSha -ne $tip) {
-            if ($F.PrBase -eq $tip) { $fail.Add("gates 基于旧的 feature/v1（json $(& $short $baseSha)，现在 $(& $short $tip)），请重跑") }
-            else { $fail.Add("gates 基于旧的 feature/v1（json $(& $short $baseSha)，现在 $(& $short $tip)）：子支线还没包含当前 feature/v1，先合入它，再重跑 gates") }
+        elseif (-not $F.PrBase) { $fail.Add('取不到 PR head 与当前 origin/feature/v1 的共同祖先，核对不了 gates 的基线') }
+        elseif ($baseSha -ne $F.PrBase) {
+            $fail.Add("gates 的基线 $(& $short $baseSha) 不是 PR head 与当前 origin/feature/v1 的共同祖先 $(& $short $F.PrBase)：请在 PR head 上重跑 gates")
         }
         if ([int](Get-RinneProp $g 'pass') -lt 1) { $fail.Add('gates 一项也没通过（pass=0），不算跑过') }
         if ([int]$g.exit -ne 0 -or [int]$g.fail -ne 0) { $fail.Add("gates 没有通过（exit=$($g.exit)，fail=$($g.fail)）") }
@@ -561,7 +563,7 @@ function Invoke-SelfTest {
         $writeCard = { ConvertTo-Json -InputObject @($card) -Depth 10 | Set-Content -LiteralPath $cardsFile }
         & $writeCard
         $head = $pull.head.sha
-        # feature 线的 tip 在自测里是 c…c；gates 的基线就是它
+        # 自测里 feature 线的 tip 是 c…c，PR head 与它的共同祖先也是 c…c；gates 的基线就是这个共同祖先
         $tipSha = 'c' * 40
         $gates = @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false; base = 'origin/feature/v1'; baseSha = $tipSha; autoTier = 'Quick' }
         $writeGates = { $gates | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tmp "_logs/$cid/gates-$head.json") }
@@ -796,8 +798,13 @@ function Invoke-SelfTest {
         & $bad 'web/ 改动要 Full，gates 跑的是 Standard' { param($f) & $srcChange $f 'web/app/main.js'; $f.Gates.tier = 'Standard' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '最低档 Full' }).Count -eq 1 }
         & $bad 'gates json 的档位不认识' { param($f) $f.Gates.tier = 'quick' }
         & $bad 'gates json 没有 baseSha' { param($f) $f.Gates.PSObject.Properties.Remove('baseSha') } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '没有 baseSha' }).Count -eq 1 }
-        & $bad 'gates 基于旧的 feature/v1（子支线已包含当前 tip）' { param($f) $f.Gates.baseSha = 'e' * 40 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '^gates 基于旧的 feature/v1（json eeeeeee，现在 ccccccc），请重跑$' }).Count -eq 1 }
-        & $bad 'gates 基于旧的 feature/v1（子支线还没合入当前 tip）' { param($f) $f.Gates.baseSha = 'e' * 40; $f.PrBase = 'e' * 40 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '先合入它，再重跑 gates' }).Count -eq 1 }
+        # 基线：baseSha 必须等于 PR head 与当前 feature 线的共同祖先（$F.PrBase），不要求等于 feature 线的 tip
+        & $bad 'gates 的基线与共同祖先对不上' { param($f) $f.Gates.baseSha = 'e' * 40 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '^gates 的基线 eeeeeee 不是 PR head 与当前 origin/feature/v1 的共同祖先 ccccccc：请在 PR head 上重跑 gates$' }).Count -eq 1 }
+        & $bad 'feature/v1 往前走了、子支线没同步，共同祖先没变，gates 不必重跑' { param($f) $f.MainClone.Head = 'd' * 40; $f.MainClone.Tip = 'd' * 40 } 'ready'
+        & $bad 'feature/v1 往前走了，gates 却按新的 tip 自报基线' { param($f) $f.MainClone.Head = 'd' * 40; $f.MainClone.Tip = 'd' * 40; $f.Gates.baseSha = 'd' * 40 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '请在 PR head 上重跑 gates' }).Count -eq 1 }
+        & $bad '子支线同步过 feature/v1，gates 也在同步后重跑' { param($f) $f.MainClone.Head = 'd' * 40; $f.MainClone.Tip = 'd' * 40; $f.PrBase = 'd' * 40; $f.Gates.baseSha = 'd' * 40 } 'ready'
+        & $bad '子支线同步过 feature/v1，gates 还是同步前跑的' { param($f) $f.MainClone.Head = 'd' * 40; $f.MainClone.Tip = 'd' * 40; $f.PrBase = 'd' * 40 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '请在 PR head 上重跑 gates' }).Count -eq 1 }
+        & $bad '取不到 PR head 与 feature/v1 的共同祖先' { param($f) $f.PrBase = '' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '核对不了 gates 的基线' }).Count -eq 1 }
         & $bad 'gates 一项也没通过（pass=0）' { param($f) $f.Gates.pass = 0 }
         & $bad 'gates 没通过' { param($f) $f.Gates.exit = 1 }
         & $bad 'gates 跑在脏工作树上' { param($f) $f.Gates.dirty = $true }
