@@ -30,8 +30,14 @@ export const SHA_PINNING = "deferred";
 
 export function loadRepo(root = ROOT) {
     const checks = readJson(root, ".github/required-checks.json");
+    // 全部 ruleset 都登记在 .github/rulesets/，不只是带 required checks 的那几个
+    const dir = path.join(root, ".github", "rulesets");
     const rulesets = Object.fromEntries(
-        Object.values(checks).map((s) => [s.ruleset, readJson(root, `.github/rulesets/${s.ruleset}.json`)]),
+        fs
+            .readdirSync(dir)
+            .filter((f) => f.endsWith(".json"))
+            .map((f) => readJson(root, `.github/rulesets/${f}`))
+            .map((r) => [r.name, r]),
     );
     const jobNames = workflowFiles(root).flatMap((f) =>
         parseWorkflow(fs.readFileSync(path.join(root, f), "utf8")).jobs.map((j) => j.name),
@@ -102,13 +108,20 @@ export const normalize = (r) =>
         rules: [...(r.rules || [])].sort((a, b) => (a.type < b.type ? -1 : 1)),
     });
 
-/** live：{ rulesets: { 名: GET 结果 }, selected, permissions, checkRuns?: [名] }。 */
+/**
+ * live：{ rulesets: { 名: GET 结果 }, listed: [{ name, source_type }]（作用于本仓的全部 ruleset，含 org 级），
+ * selected, permissions, checkRuns?: [名] }。
+ */
 export function compareLive(repo, live, { shaPinning = SHA_PINNING } = {}) {
     const errors = [];
     const notes = [];
     for (const [name, mine] of Object.entries(repo.rulesets)) {
         if (!live.rulesets[name]) errors.push(`ruleset ${name} 在 GitHub 上不存在`);
         else if (normalize(live.rulesets[name]) !== normalize(mine)) errors.push(`ruleset ${name} 与仓内 JSON 不一致`);
+    }
+    // 仓内没登记的 ruleset（例如带 bypass 的）同样会改变合并门槛
+    for (const r of live.listed || []) {
+        if (!repo.rulesets[r.name]) errors.push(`GitHub 上多了仓内没有登记的 ruleset ${r.name}（${r.source_type}）`);
     }
     const a = repo.allowlist;
     const s = live.selected;
@@ -139,12 +152,14 @@ function fetchLive(repo, nwo, sha) {
         if (r.status !== 0) throw new Error(`gh api ${p} 失败：${(r.stderr || "").trim().split("\n")[0]}`);
         return JSON.parse(r.stdout);
     };
-    const ids = Object.fromEntries(gh(`repos/${nwo}/rulesets`).map((r) => [r.name, r.id]));
+    const listed = gh(`repos/${nwo}/rulesets?includes_parents=true&per_page=100`);
+    const ids = Object.fromEntries(listed.map((r) => [r.name, r.id]));
     const rulesets = {};
     for (const name of Object.keys(repo.rulesets))
         if (ids[name]) rulesets[name] = gh(`repos/${nwo}/rulesets/${ids[name]}`);
     return {
         rulesets,
+        listed: listed.map((r) => ({ name: r.name, source_type: r.source_type })),
         selected: gh(`repos/${nwo}/actions/permissions/selected-actions`),
         permissions: gh(`repos/${nwo}/actions/permissions`),
         checkRuns: sha ? gh(`repos/${nwo}/commits/${sha}/check-runs?per_page=100`).check_runs.map((c) => c.name) : null,
@@ -239,6 +254,24 @@ export function selfTest() {
             }).errors,
         ],
         ["提交上缺 required check run", true, compareLive(good, live(good, { checkRuns: ["b"] })).errors],
+        [
+            "GitHub 上多了未登记的 ruleset",
+            true,
+            compareLive(
+                good,
+                live(good, {
+                    listed: [
+                        { name: "x", source_type: "Repository" },
+                        { name: "bypass", source_type: "Repository" },
+                    ],
+                }),
+            ).errors,
+        ],
+        [
+            "列出的 ruleset 都已登记",
+            false,
+            compareLive(good, live(good, { listed: [{ name: "x", source_type: "Repository" }] })).errors,
+        ],
     ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
     const note = compareLive(good, live(good)).notes.some((n) => n.includes("q/two@*"));
     cases.push({ label: "org 继承项出现在注记里", bad: false, passed: note });
