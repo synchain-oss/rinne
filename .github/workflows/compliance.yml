@@ -7,6 +7,10 @@
 # 个人针：同仓 PR 与 push 用 secret（--needles ci，缺了判红）；fork PR 与 dependabot 的 PR 读不到这个 secret，
 # 只跑通用规则（ci-optional）。PR 作者的 login 伪造不了，dependabot 的提交本身由 check-commits 按作者与提交者核对。
 # secret 只交给只跑 node 与 git 的步骤；跑 pip 装来的工具（reuse）与 gitleaks 的步骤一律不带它。
+# 前面的步骤能写 $GITHUB_ENV / $GITHUB_PATH，从而影响后面带 secret 的步骤，所以在它们之前运行的代码只有三类：钉了 sha256 的
+# gitleaks；按哈希装的 Python 包（reuse 只有源码包，它的构建后端 poetry-core 也钉哈希、先单独装好再关掉构建隔离，
+# 其余各项只收 wheel，见 requirements-tools.txt 头注）；本 PR 自己的 node 脚本，它们在带 secret 的步骤里本来就会运行，
+# fork PR 拿不到 secret。没有未钉哈希的代码能在 secret 之前改写环境。
 name: Compliance
 
 on:
@@ -54,7 +58,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/gitleaks" gitleaks
           echo "RINNE_GITLEAKS=$RUNNER_TEMP/gitleaks/gitleaks" >> "$GITHUB_ENV"
           python3 -m venv "$RUNNER_TEMP/py"
-          "$RUNNER_TEMP/py/bin/pip" install --disable-pip-version-check -q --require-hashes -r requirements-tools.txt
+          # 两步装，与本机 bootstrap-tools.ps1 相同：先按哈希装 reuse 的构建后端，再关掉构建隔离、除 reuse 外只收 wheel
+          awk '/^poetry-core==/{p=1} p{print; if (substr($0, length($0)) != "\\") exit}' requirements-tools.txt \
+            > "$RUNNER_TEMP/build-backend.txt"
+          "$RUNNER_TEMP/py/bin/pip" install --disable-pip-version-check -q --require-hashes --no-deps --only-binary=:all: \
+            -r "$RUNNER_TEMP/build-backend.txt"
+          "$RUNNER_TEMP/py/bin/pip" install --disable-pip-version-check -q --require-hashes --no-build-isolation \
+            --only-binary=:all: --no-binary=reuse -r requirements-tools.txt
           echo "RINNE_REUSE=$RUNNER_TEMP/py/bin/reuse" >> "$GITHUB_ENV"
       - name: Self-test
         run: node scripts/run-checks.mjs --group compliance --self-test

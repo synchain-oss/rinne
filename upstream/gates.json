@@ -1,0 +1,32 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "f80e1c99271db1c7a85d2a300a8b154b2d45d2a7"
+    }
+  },
+  "files": [
+    {
+      "path": "scripts/gates.ps1",
+      "source": "scvb-dev",
+      "from": "scripts/gates.ps1",
+      "fromBlob": "2b8eb9ede8c6788362a5401bbc6b6bd9a6d1f950",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/lib/Locks.psm1",
+      "source": "scvb-dev",
+      "from": "scripts/gates.ps1",
+      "fromBlob": "2b8eb9ede8c6788362a5401bbc6b6bd9a6d1f950",
+      "mode": "adapted"
+    },
+    {
+      "path": "scripts/lib/Locks.psm1",
+      "source": "scvb-dev",
+      "from": "scripts/with-ipc-lock.ps1",
+      "fromBlob": "20086232324e65b9ed3fee5504b0fb2f0c6c16a9",
+      "mode": "adapted"
+    }
+  ]
+}
