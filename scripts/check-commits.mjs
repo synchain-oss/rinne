@@ -13,8 +13,12 @@
 // AI 署名只告警）；push 推送后兜底（提交者可以是 GitHub 网页合并，作者不在白名单时按 fork 判）。
 
 import fs from "node:fs";
-import { assertNodeVersion, caseResult, git, isMain, j } from "./lib/check-kit.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { assertNodeVersion, caseResult, git, isMain, j, tempRepo } from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
+
+const SELF = fileURLToPath(import.meta.url);
 
 const { FAKE_NEEDLE, mask, plainText, redact, scan } = needles;
 
@@ -161,29 +165,34 @@ export function parseStatus(text) {
 
 /**
  * changes: [{ status: "A"|"M"|"D"|"R…", path, oldPath?, lines?: 改动行（只有按行判的路径需要） }]；
- * statusOf(契约文档) 返回 base 上该文档的状态：frozen / draft / invalid，文档不存在时为 null。
+ * statusOf(契约文档) 返回 base 上该文档的状态，headStatusOf 返回本 PR 改完之后的状态：
+ * frozen / draft / invalid，文档不存在时为 null。
+ * - 本 PR 新增或改动的契约文档，status 行必须读得出来，否则判红：坏行一旦合进去，后面谁都绕不过。
+ * - base 上读不出 status 的按冻结处理：contract-neutral 理由或变更说明照样能放行修它的 PR。
  */
-export function contractGuard({ changes, statusOf, body = "" }) {
-    const errors = new Set();
+export function contractGuard({ changes, statusOf, headStatusOf = () => null, body = "" }) {
+    const errors = [];
     const touched = [];
+    const contractDocs = Object.values(CONTRACTS);
     for (const ch of changes) {
+        if (contractDocs.includes(ch.path) && !/^D/.test(ch.status) && headStatusOf(ch.path) === "invalid") {
+            errors.push(`${ch.path} 改完后的 status 行无法解析（应为 status: draft 或 status: frozen）`);
+        }
         for (const p of [ch.path, ch.oldPath].filter(Boolean)) {
             const g = GUARDED.find(([re]) => re.test(p));
             if (!g) continue;
             // 按行判的路径被改名或删除时整份算改动
             if (g[2] && !/^[RD]/.test(ch.status) && !(ch.lines || []).some((l) => g[2].test(l))) continue;
-            const docs = g[1] === "*" ? Object.values(CONTRACTS) : [CONTRACTS[g[1]]];
-            const states = docs.map((doc) => [doc, statusOf(doc)]);
-            for (const [doc, s] of states)
-                if (s === "invalid") errors.add(`${doc} 的 status 行无法解析（应为 draft 或 frozen）`);
-            if (states.some(([, s]) => s === "frozen")) touched.push(`  ${p}`);
+            const docs = g[1] === "*" ? contractDocs : [CONTRACTS[g[1]]];
+            const states = docs.map(statusOf);
+            if (states.some((s) => s === "frozen" || s === "invalid")) touched.push(`  ${p}`);
         }
     }
     const neutral = /^contract-neutral:[ \t]*(?!<)\S/m.test(body);
     const doc = changes.some((c) => c.status === "A" && /^docs\/contract-changes\/\d{8}-[a-z0-9-]+\.md$/.test(c.path));
-    if (!touched.length || neutral || doc) return [...errors];
+    if (!touched.length || neutral || doc) return errors;
     const how = "PR 正文写 contract-neutral: <理由>，或同 PR 新增 docs/contract-changes/<YYYYMMDD>-<slug>.md";
-    return [...errors, `改到已冻结的契约面：${how}`, ...touched];
+    return [...errors, `改到已冻结（或 status 读不出来、按冻结处理）的契约面：${how}`, ...touched];
 }
 
 function gitChanges(base, head, cwd) {
@@ -369,7 +378,28 @@ export function selfTest() {
     g("契约：改名来的说明不算", true, [layout, renamed]);
     g("契约：仍是 draft 时放行", false, [layout], { statusOf: () => "draft" });
     g("契约：文档尚未建立时放行", false, [layout], { statusOf: () => null });
-    g("契约：status 读不出来判红", true, [layout], { statusOf: (d) => (d === CONTRACTS.ipc ? "invalid" : "draft") });
+    const badBase = { statusOf: (d) => (d === CONTRACTS.ipc ? "invalid" : "draft") };
+    g("契约：base 上 status 读不出来，按冻结处理", true, [layout], badBase);
+    g("契约：base 上 status 读不出来，contract-neutral 照样放行", false, [layout], {
+        ...badBase,
+        body: "contract-neutral: 只改注释",
+    });
+    const fixDoc = { status: "M", path: CONTRACTS.ipc };
+    const fixed = { ...badBase, headStatusOf: () => "frozen" };
+    g("契约：修 status 行的 PR 没有理由判红", true, [fixDoc], fixed);
+    g(
+        "契约：修 status 行的 PR 带变更说明放行",
+        false,
+        [fixDoc, { status: "A", path: "docs/contract-changes/20261101-fix.md" }],
+        fixed,
+    );
+    const addBad = { statusOf: () => null, headStatusOf: (d) => (d === CONTRACTS.ipc ? "invalid" : null) };
+    g("契约：新增的契约文档 status 读不出来判红", true, [{ status: "A", path: CONTRACTS.ipc }], addBad);
+    g("契约：改坏 status 行即使有理由也判红", true, [fixDoc], {
+        statusOf: () => "frozen",
+        headStatusOf: () => "invalid",
+        body: "contract-neutral: 冻结改回草案",
+    });
     g("契约：把冻结文件改名移走", true, [{ status: "R090", oldPath: "tests/golden/ipc-layout.json", path: "x.json" }]);
     g("契约：其余 golden 在任一契约冻结时受守", true, [{ status: "M", path: "tests/golden/curve.json" }]);
     const frozenParams = { statusOf: (doc) => (doc === CONTRACTS.params ? "frozen" : null) };
@@ -405,6 +435,45 @@ export function selfTest() {
     t("提交列表：一行一个对象", false, parseCommitList(ndjson).length === 2 ? [] : ["x"]);
     throws("提交列表：截断的 JSON", () => parseCommitList(page("a").slice(0, -2)));
     throws("提交列表：条目缺字段", () => parseCommitList('[{"sha":"a"}]'));
+
+    // 端到端，经真实的 contract-guard 子命令复现卡死：坏 status 行先被挡住；
+    // 若 base 上已经是坏行，修它的 PR 凭 contract-neutral 能合进去
+    const repo = tempRepo();
+    const nf = `${repo.dir}-needles.txt`;
+    const bf = `${repo.dir}-body.md`;
+    try {
+        fs.writeFileSync(nf, `${FAKE_NEEDLE}\n`);
+        const save = (m) => {
+            repo.git(["add", "-A"]);
+            repo.git(["commit", "-q", "-m", m]);
+        };
+        const guard = (text) => {
+            fs.writeFileSync(bf, `${text}\n\n${SIGNOFF}\n`);
+            const args = [SELF, "contract-guard", "--base", "main", "--body-file", bf];
+            const env = { ...repo.env, RINNE_PRIVACY_LOCAL: nf };
+            return spawnSync(process.execPath, args, { cwd: repo.dir, env, encoding: "utf8" }).status;
+        };
+        const e2e = (label, bad, code) =>
+            cases.push({ label: `契约端到端：${label}`, bad, passed: code === (bad ? 1 : 0) });
+        repo.write("README.md", "x\n");
+        save("init");
+        repo.git(["checkout", "-q", "-b", "add-doc"]);
+        repo.write(CONTRACTS.ipc, "# IPC\n\n状态：frozen\n");
+        save("docs: 加契约");
+        e2e("新增的契约文档 status 读不出来判红", true, guard("说明"));
+        // 模拟坏行已经在 base 上（例如来自这道检查之前）
+        repo.git(["checkout", "-q", "main"]);
+        repo.git(["merge", "-q", "--ff-only", "add-doc"]);
+        repo.git(["checkout", "-q", "-b", "fix"]);
+        repo.write(CONTRACTS.ipc, "# IPC\n\nstatus: frozen\n");
+        save("docs: 修 status 行");
+        e2e("base 上是坏行，修复 PR 没有理由判红", true, guard("说明"));
+        e2e("base 上是坏行，修复 PR 凭 contract-neutral 放行", false, guard("contract-neutral: 只修 status 行"));
+    } finally {
+        repo.cleanup();
+        fs.rmSync(nf, { force: true });
+        fs.rmSync(bf, { force: true });
+    }
     return caseResult(cases);
 }
 
@@ -464,15 +533,18 @@ function main(argv) {
     } else if (cmd === "contract-guard") {
         const base = opt("--base");
         if (!base) throw new Error("contract-guard 需要 --base");
-        // 冻结状态取 base 上的契约文档：同一个 PR 把 frozen 改回 draft 不能顺带给自己放行
-        const statusOf = (doc) => {
-            const text = git(["show", `${base}:${doc}`], { cwd, allowFail: true });
+        const head = opt("--head") || "HEAD";
+        // 冻结状态取 base 上的契约文档：同一个 PR 把 frozen 改回 draft 不能顺带给自己放行；
+        // head 上的版本只用来确认 status 行读得出来
+        const statusAt = (ref) => (doc) => {
+            const text = git(["show", `${ref}:${doc}`], { cwd, allowFail: true });
             return text === null ? null : parseStatus(text);
         };
-        const changes = gitChanges(base, opt("--head") || "HEAD", cwd);
+        const changes = gitChanges(base, head, cwd);
         // 输出里有路径：路径里的个人针与私有编号同样打码
         const list = personal();
-        errors = contractGuard({ changes, statusOf, body: body() }).map((e) => mask(e, list));
+        const args = { changes, statusOf: statusAt(base), headStatusOf: statusAt(head), body: body() };
+        errors = contractGuard(args).map((e) => mask(e, list));
     } else {
         console.error("用法见文件头注释：commits | pr-text | branch | contract-guard | --self-test");
         return 1;
