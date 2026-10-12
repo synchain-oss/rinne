@@ -656,6 +656,45 @@ function Invoke-RinneBuildSlotLocked {
     Invoke-WithRinneLock -Name $Slot -ScriptBlock $Script -TimeoutSeconds $TimeoutSeconds
 }
 
+# ---- 定档与工作区状态 -----------------------------------------------------------------------
+
+<#
+  定档规则与判定只有一份：本地 gates 的 scripts/lib/Tiers.psm1 与 tier-rules.json（取主 clone 里、也就是 feature 线上的
+  版本，不区分大小写）。gates 的结果 json 是自报的，档位够不够以合并时按 PR 文件清单重算的为准。
+  自测用 Set-RinneTiersImpl 换成假实现：@{ Resolve = { param($files, $card) }; Rank = { param($tier) }; TreeState = { param($root) } }。
+#>
+$script:TiersImpl = $null
+
+function Set-RinneTiersImpl { param($Impl) $script:TiersImpl = $Impl }
+
+function Import-RinneTiers {
+    Import-Module (Join-Path $script:RepoRoot 'scripts/lib/Tiers.psm1') -ErrorAction Stop -Global
+}
+
+<# 这些文件（改名的新旧路径都要给）加上卡片规定的档，最低要跑哪一档：{ Auto（只按文件）; Min（与卡片取高） }。 #>
+function Resolve-RinneTierFloor {
+    param([AllowEmptyCollection()][string[]]$Files = @(), [string]$CardTier = '')
+    if ($script:TiersImpl) { return & $script:TiersImpl.Resolve $Files $CardTier }
+    Import-RinneTiers
+    Resolve-RinneTier -Files $Files -CardTier $CardTier
+}
+
+<# 档位的序号（Quick 0、Standard 1、Full 2）；不认识的档位抛错。 #>
+function Get-RinneTierOrder {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Tier)
+    if ($script:TiersImpl) { return & $script:TiersImpl.Rank $Tier }
+    Import-RinneTiers
+    Get-RinneTierRank $Tier
+}
+
+<# 仓库的 HEAD 与工作区是否干净（改动、未跟踪的文件，以及被忽略却会被构建读到的文件都算不干净）：{ Sha; Dirty; Ignored }。 #>
+function Get-RinneCloneState {
+    param([string]$Root = $script:RepoRoot)
+    if ($script:TiersImpl) { return & $script:TiersImpl.TreeState $Root }
+    Import-RinneTiers
+    Get-RinneTreeState -Root $Root
+}
+
 # ---- 不带凭据跑不可信代码 -------------------------------------------------------------------
 
 <#

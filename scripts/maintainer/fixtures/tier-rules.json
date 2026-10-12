@@ -1,0 +1,15 @@
+{
+  "about": "pr-merge 自测用的定档规则子集，形状与 scripts/lib/tier-rules.json 相同；真的规则与判定在 scripts/lib/Tiers.psm1，合并时 pr-merge 用的是主 clone 里的那一份。",
+  "tiers": ["Quick", "Standard", "Full"],
+  "default": "Standard",
+  "quick": [
+    "^docs/",
+    "^(?!(?:src|tests|web)/).*\\.md$",
+    "^scripts/(?:hooks|maintainer|checks\\.d|lib)/",
+    "^scripts/[^/]+\\.mjs$"
+  ],
+  "rules": [
+    { "tier": "Standard", "re": "^(?:src|tests|cmake)/" },
+    { "tier": "Full", "re": "^web/" }
+  ]
+}

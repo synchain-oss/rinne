@@ -11,7 +11,8 @@
 #                                 与 wt/tip-<n>
 #   -SelfTest                     用 fixtures/ 里录制的 PR 响应离线跑，对每条判据给反例
 # 只从主 clone 运行，而且主 clone 必须正好在刚取回的 origin/feature/v1 上、工作树干净：判据取自 feature 线，
-# 而不是待合并 PR 自己的版本。
+# 而不是待合并 PR 自己的版本。gates 的结果 json 是自报的：最低档按 PR 的文件清单与卡片在这里重算（定档规则取自
+# 主 clone 的 scripts/lib/Tiers.psm1），json 的 baseSha 必须就是当前 origin/feature/v1，feature 线动过就要重跑 gates。
 #
 # 用户的决定只认记录文件：主 clone 的 git config rinne.waivers（--local，不认环境变量与命令行注入的配置）指向的 JSON；
 # RINNE_WAIVERS 只在 -SelfTest 下用。每条记录都要 "by": "user"，绑定一个完整的 40 位 head，之后再有推送就作废，
@@ -41,7 +42,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'lib/RinneGh.psm1') -Force
 
-$TierRank = @{ Quick = 1; Standard = 2; Full = 3 }
 $PremergeTimeoutSeconds = 2700
 $SlotWaitSeconds = 2700
 $CardPattern = '^(?:RN-\d{2}[a-z]?|K\d+)$'
@@ -140,18 +140,22 @@ function Get-MergeFacts {
         Invoke-RinneGit (@('fetch', '--no-tags', 'origin') + $specs) | Out-Null
     } | Out-Null
     $body = [string](Get-RinneProp $pull 'body')
+    # 主 clone 的状态在 fetch 之后取：判据脚本必须就是刚取回的 feature 线上的版本
+    $clone = Get-RinneCloneState
+    $mergeBase = Invoke-RinneGit @('merge-base', 'origin/feature/v1', "refs/remotes/origin/pr/$Pr") -AllowFail
     [pscustomobject]@{
         Pr = $Pr; Card = $card; Pull = $pull; Head = $head; Files = @($files); Activity = $activity
         State = $state; Items = @(Get-RinneCommentItems -Activity $activity -State $state); Threads = @($activity.Threads)
         Run = $run; Jobs = $jobs; Checks = Get-RinneCheckRuns $head; Required = Get-RinneRequiredChecks
         Gates = $gates; Records = Read-Records $Pr
-        # 主 clone 的状态在 fetch 之后取：判据脚本必须就是刚取回的 feature 线上的版本
         MainClone = [pscustomobject]@{
-            Head = (Invoke-RinneGit @('rev-parse', 'HEAD')).Out.Trim()
+            Head = [string]$clone.Sha
             Tip = (Invoke-RinneGit @('rev-parse', 'origin/feature/v1')).Out.Trim()
-            Dirty = (Invoke-RinneGit @('status', '--porcelain')).Out.Trim()
+            Dirty = [bool]$clone.Dirty; Ignored = @($clone.Ignored)
         }
         PrRef = (Invoke-RinneGit @('rev-parse', "refs/remotes/origin/pr/$Pr")).Out.Trim()
+        # PR head 与当前 feature 线的共同祖先：等于 feature 线的 tip 时，子支线已经包含了它
+        PrBase = $(if ($mergeBase.Code -eq 0) { $mergeBase.Out.Trim() } else { '' })
         Dco = [int](Invoke-RinneGit @('rev-list', '--count', 'origin/dev..origin/feature/v1')).Out.Trim()
         Guard = Test-ContractGuard $Pr $body
         PrText = Test-PrText ([string]$pull.title) $body
@@ -193,7 +197,10 @@ function Get-MergeVerdict {
 
     # 0. 主 clone 正好在刚取回的 origin/feature/v1 上、工作树干净（否则判据可能是旧的）
     if ($F.MainClone.Head -ne $F.MainClone.Tip) { $fail.Add('主 clone 不在刚取回的 origin/feature/v1 上（先快进），判据可能是旧的') }
-    if ($F.MainClone.Dirty) { $fail.Add('主 clone 的工作树不干净') }
+    if ($F.MainClone.Dirty) {
+        $ign = @($F.MainClone.Ignored | Where-Object { $_ })
+        $fail.Add("主 clone 的工作树不干净$(if ($ign.Count) { "（被忽略却会被构建读到：$($ign -join '、')）" })")
+    }
 
     # 1. PR 本身：打开、非 draft、base 是 feature 线、head 是本仓的 feat/ 子支线、可合并
     if ($p.state -ne 'open' -or [bool](Get-RinneProp $p 'merged')) { $fail.Add('PR 不是打开状态') }
@@ -294,13 +301,27 @@ function Get-MergeVerdict {
         if (-not $c -or $c.conclusion -ne 'success') { $fail.Add("check $ctx 在当前 head 上不是 success") }
     }
 
-    # 7. 本地 gates：json 存在、sha = head、档位够、真跑过（pass ≥ 1）、exit=0、fail=0、dirty=false
+    # 7. 本地 gates：json 存在、sha = head、档位够、基线是当前 feature 线、真跑过（pass ≥ 1）、exit=0、fail=0、dirty=false。
+    #    json 是自报的：最低档按 PR 的文件清单（改名的新旧路径都算）与卡片的档在这里重算，规则取自主 clone 的 Tiers.psm1
+    $paths = @(Get-RinneChangedPaths $F.Files)
+    $tier = Resolve-RinneTierFloor -Files $paths -CardTier ([string]$F.Card.tier)
     $g = $F.Gates
     if (-not $g) { $fail.Add('缺当前 head 的 gates json') }
     else {
         if ($g.sha40 -ne $head) { $fail.Add('gates json 的 sha 不是当前 head') }
-        if (-not $TierRank.ContainsKey([string]$g.tier) -or $TierRank[[string]$g.tier] -lt $TierRank[[string]$F.Card.tier]) {
-            $fail.Add("gates 档位 $($g.tier) 低于卡片要求的 $($F.Card.tier)")
+        $ran = try { Get-RinneTierOrder ([string]$g.tier) } catch { -1 }
+        if ($ran -lt 0) { $fail.Add("gates json 的档位不认识：$($g.tier)") }
+        elseif ($ran -lt (Get-RinneTierOrder $tier.Min)) {
+            $auto = [string](Get-RinneProp $g 'autoTier')
+            $fail.Add("gates 跑的是 $($g.tier)，低于按改动重算的最低档 $($tier.Min)（按文件 $($tier.Auto)，卡片 $($F.Card.tier)$(if ($auto) { "；json 自报按文件 $auto" })）")
+        }
+        $baseSha = [string](Get-RinneProp $g 'baseSha')
+        $tip = $F.MainClone.Tip
+        $short = { param($s) if ($s) { $s.Substring(0, [Math]::Min(7, $s.Length)) } else { '（无）' } }
+        if (-not $baseSha) { $fail.Add('gates json 没有 baseSha，请用新版 gates 重跑') }
+        elseif ($baseSha -ne $tip) {
+            if ($F.PrBase -eq $tip) { $fail.Add("gates 基于旧的 feature/v1（json $(& $short $baseSha)，现在 $(& $short $tip)），请重跑") }
+            else { $fail.Add("gates 基于旧的 feature/v1（json $(& $short $baseSha)，现在 $(& $short $tip)）：子支线还没包含当前 feature/v1，先合入它，再重跑 gates") }
         }
         if ([int](Get-RinneProp $g 'pass') -lt 1) { $fail.Add('gates 一项也没通过（pass=0），不算跑过') }
         if ([int]$g.exit -ne 0 -or [int]$g.fail -ne 0) { $fail.Add("gates 没有通过（exit=$($g.exit)，fail=$($g.fail)）") }
@@ -320,7 +341,6 @@ function Get-MergeVerdict {
     # 9. 范围：改动文件（改名的新旧路径都算）⊆ owns + takesOver + sections；
     #    碰基础设施路径（清单取自 scripts/lib/infra-paths.mjs）交用户批准，只认对这个 head 的批准记录
     $scope = Get-CardScope $F.Card
-    $paths = @(Get-RinneChangedPaths $F.Files)
     $outside = @($paths | Where-Object { -not (Test-GlobMatch $_ $scope) })
     if ($outside.Count -gt 0) { & $need 'orchestrator' 'out-of-scope' "越界改动：$($outside -join '、')" }
     $infra = @(Get-InfraTouches -Files $F.Files)
@@ -343,7 +363,7 @@ function Get-MergeVerdict {
     [pscustomobject]@{
         Code = $code; Level = $level; Pr = $F.Pr; Head = $head
         Failures = $fail.ToArray(); Needs = $needs.ToArray(); Warnings = $warn.ToArray(); ReliedOn = $relied.ToArray()
-        OutOfScope = $outside; Infra = $infra; Deferred = $deferred; Premerge = $null
+        OutOfScope = $outside; Infra = $infra; Deferred = $deferred; Tier = $tier; Premerge = $null
         Command = "pwsh scripts/maintainer/pr-merge.ps1 -Merge -Pr $($F.Pr) -Card $($F.Card.id) -SummaryFile <摘要段文件>"
     }
 }
@@ -397,14 +417,14 @@ function Invoke-Premerge {
 }
 
 <#
-  -Check 与 -Merge 共用的核对：先收集事实、跑全部纯判据；只有判为 ready、卡片档位在 Standard 及以上、
-  而且没碰基础设施时才做合并后构建。碰了基础设施的（即便用户已批准）不在本机跑 PR 里的构建脚本。
+  -Check 与 -Merge 共用的核对：先收集事实、跑全部纯判据；只有判为 ready、重算的最低档（按改动与卡片取高）在
+  Standard 及以上、而且没碰基础设施时才做合并后构建。碰了基础设施的（即便用户已批准）不在本机跑 PR 里的构建脚本。
 #>
 function Invoke-MergeCheck {
     param([Parameter(Mandatory)][int]$Pr, [Parameter(Mandatory)][string]$CardId)
     $facts = Get-MergeFacts $Pr $CardId
     $v = Get-MergeVerdict $facts
-    if ($v.Code -eq 'ready' -and $TierRank[[string]$facts.Card.tier] -ge 2) {
+    if ($v.Code -eq 'ready' -and (Get-RinneTierOrder $v.Tier.Min) -ge (Get-RinneTierOrder 'Standard')) {
         if (@($v.Infra).Count) { $v.Warnings = @($v.Warnings) + @('碰了基础设施，不在本机做合并后构建') }
         else {
             $v.Premerge = Invoke-Premerge $Pr
@@ -535,7 +555,9 @@ function Invoke-SelfTest {
         $writeCard = { ConvertTo-Json -InputObject @($card) -Depth 10 | Set-Content -LiteralPath $cardsFile }
         & $writeCard
         $head = $pull.head.sha
-        $gates = @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false }
+        # feature 线的 tip 在自测里是 c…c；gates 的基线就是它
+        $tipSha = 'c' * 40
+        $gates = @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false; base = 'origin/feature/v1'; baseSha = $tipSha; autoTier = 'Quick' }
         $writeGates = { $gates | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tmp "_logs/$cid/gates-$head.json") }
         & $writeGates
         $log = [System.Collections.Generic.List[string]]::new()
@@ -569,7 +591,8 @@ function Invoke-SelfTest {
             'check-runs'                       = { Read-RinneFixture 'pr3-check-runs.json' }
             '^git .* fetch '                   = { '' }
             '^git .* rev-parse refs/remotes/origin/pr/3' = { $head }
-            '^git .* rev-parse (HEAD|origin/feature/v1)$' = { 'c' * 40 }
+            '^git .* rev-parse (HEAD|origin/feature/v1)$' = { $tipSha }
+            '^git .* merge-base origin/feature/v1 refs/remotes/origin/pr/3$' = { $tipSha }
             '^git .* status --porcelain$'      = { '' }
             '^git .* rev-list --count'         = { '12' }
             # 合并后构建：wt/tip-<n> 的 git 操作与构建脚本；记下当时持有的锁、目录、超时与子进程能看到的凭据
@@ -600,6 +623,25 @@ function Invoke-SelfTest {
         }
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Set-RinneLockImpl { param($name, $sb) $lockLog.Add($name); $held.Add($name); try { & $sb } finally { $held.RemoveAt($held.Count - 1) } }
+        # 定档：本地 gates 的 Tiers.psm1 还不在 feature 线上，先用照它的接口写的假实现与 fixture 里的规则子集
+        # （不区分大小写，Min = max(按文件, 卡片)）；主 clone 的工作区状态由 $tree 给出
+        $tierRules = Read-RinneFixture 'tier-rules.json'
+        $tree = @{ Sha = $tipSha; Dirty = $false; Ignored = @() }
+        $rankOf = { param($t) if (-not $t) { return -1 }; $i = [array]::IndexOf([string[]]$tierRules.tiers, $t); if ($i -lt 0) { throw "未知档位 $t" }; $i }
+        Set-RinneTiersImpl @{
+            Rank      = $rankOf
+            Resolve   = {
+                param($files, $cardTier)
+                $rank = 0
+                foreach ($p in @($files)) {
+                    $r = if (@($tierRules.quick | Where-Object { $p -match $_ }).Count) { 0 } else { & $rankOf $tierRules.default }
+                    foreach ($x in $tierRules.rules) { if ($p -match $x.re) { $r = [Math]::Max($r, (& $rankOf $x.tier)) } }
+                    $rank = [Math]::Max($rank, $r)
+                }
+                [pscustomobject]@{ Auto = $tierRules.tiers[$rank]; Min = $tierRules.tiers[[Math]::Max($rank, (& $rankOf $cardTier))] }
+            }
+            TreeState = { param($root) [pscustomobject]$tree }
+        }
         # 基础设施清单换成 fixture 里的一份（匹配规则仍取自 scripts/lib/infra-paths.mjs）
         Set-RinneInfraList (Join-Path $PSScriptRoot 'fixtures/infra-paths.json')
         $base = Get-MergeFacts -Pr 3 -CardId $cid
@@ -645,7 +687,8 @@ function Invoke-SelfTest {
         $reply = { param($id, $to, $created, $body = '已改。') & $user $id 'DLsnows' "<!-- rinne-agent v1 role=review kind=reply round=3 head=f35523c$(if ($to) { " in-reply-to=$to" }) -->`n$body" $created $created }
 
         & $bad '主 clone 不在最新的 feature 线上' { param($f) $f.MainClone.Head = 'd' * 40 }
-        & $bad '主 clone 的工作树不干净' { param($f) $f.MainClone.Dirty = ' M scripts/check-commits.mjs' }
+        & $bad '主 clone 的工作树不干净' { param($f) $f.MainClone.Dirty = $true }
+        & $bad '主 clone 有被忽略却会被构建读到的文件' { param($f) $f.MainClone.Dirty = $true; $f.MainClone.Ignored = @('CMakeUserPresets.json') } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'CMakeUserPresets\.json' }).Count -eq 1 }
         & $bad 'base=dev' { param($f) $f.Pull.base.ref = 'dev' }
         & $bad 'head 不是 feat/' { param($f) $f.Pull.head.ref = 'fix/x' }
         & $bad 'draft' { param($f) $f.Pull.draft = $true }
@@ -731,6 +774,18 @@ function Invoke-SelfTest {
         & $bad '缺 gates json' { param($f) $f.Gates = $null }
         & $bad 'gates 的 sha 不是 head' { param($f) $f.Gates.sha40 = 'e' * 40 }
         & $bad 'gates 档位不够' { param($f) $f.Card.tier = 'Standard' }
+        # 档位按 PR 的文件清单重算，不信 json 自报的；基线必须是当前 feature 线
+        $srcChange = { param($f, $name = 'src/core/loop/Ring.cpp', $prev = $null) $f.Card.owns = @('**'); $f.Files = @([pscustomobject]@{ filename = $name; status = $(if ($prev) { 'renamed' } else { 'modified' }); previous_filename = $prev }) }
+        & $bad 'gates 自报 Quick，改的却是 src/' { param($f) & $srcChange $f } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '低于按改动重算的最低档 Standard' }).Count -eq 1 }
+        & $bad 'gates 自报 Quick，改的是大小写混写的 Src/' { param($f) & $srcChange $f 'Src/Core/Loop/Ring.cpp' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '最低档 Standard' }).Count -eq 1 }
+        & $bad 'gates 自报 Quick，把 src/ 的文件改名挪进 docs/' { param($f) & $srcChange $f 'docs/Ring.md' 'src/core/loop/Ring.cpp' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '最低档 Standard' }).Count -eq 1 }
+        & $bad 'src/ 改动、gates 跑的是 Standard 放行' { param($f) & $srcChange $f; $f.Gates.tier = 'Standard' } 'ready'
+        & $bad 'Src/ 改动、gates 跑的是 Standard 放行' { param($f) & $srcChange $f 'Src/Core/Loop/Ring.cpp'; $f.Gates.tier = 'Standard' } 'ready'
+        & $bad 'web/ 改动要 Full，gates 跑的是 Standard' { param($f) & $srcChange $f 'web/app/main.js'; $f.Gates.tier = 'Standard' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '最低档 Full' }).Count -eq 1 }
+        & $bad 'gates json 的档位不认识' { param($f) $f.Gates.tier = 'quick' }
+        & $bad 'gates json 没有 baseSha' { param($f) $f.Gates.PSObject.Properties.Remove('baseSha') } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '没有 baseSha' }).Count -eq 1 }
+        & $bad 'gates 基于旧的 feature/v1（子支线已包含当前 tip）' { param($f) $f.Gates.baseSha = 'e' * 40 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '^gates 基于旧的 feature/v1（json eeeeeee，现在 ccccccc），请重跑$' }).Count -eq 1 }
+        & $bad 'gates 基于旧的 feature/v1（子支线还没合入当前 tip）' { param($f) $f.Gates.baseSha = 'e' * 40; $f.PrBase = 'e' * 40 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '先合入它，再重跑 gates' }).Count -eq 1 }
         & $bad 'gates 一项也没通过（pass=0）' { param($f) $f.Gates.pass = 0 }
         & $bad 'gates 没通过' { param($f) $f.Gates.exit = 1 }
         & $bad 'gates 跑在脏工作树上' { param($f) $f.Gates.dirty = $true }
@@ -738,11 +793,11 @@ function Invoke-SelfTest {
         & $bad 'PR 正文含 Co-Authored-By' { param($f) $f.Pull.body = ($f.Pull.body -replace '(?m)^## DCO', "## DCO`nCo-Authored-By: a <a@b.c>") }
         & $bad '我方评论里有本机路径' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`n日志在 C:" + '\Users\someone\x.log' }
         & $bad '我方评论里有个人针' { param($f) $i = $f.Items | Where-Object Kind -eq 'agent' | Select-Object -First 1; $i.Body += "`nrinne-selftest-fake-needle-7c1e" }
-        & $bad '越界改动' { param($f) $f.Files = @($f.Files) + @([pscustomobject]@{ filename = 'src/core/x.cpp'; status = 'added' }) } 'needs-user' { param($r) $r.Level -eq 'orchestrator' -and $r.OutOfScope -contains 'src/core/x.cpp' }
-        & $bad '从范围外改名挪进来也算越界' { param($f) $f.Files = @([pscustomobject]@{ filename = 'docs/example.md'; status = 'renamed'; previous_filename = 'src/core/other/Thing.cpp' }) } 'needs-user' { param($r) $r.OutOfScope -contains 'src/core/other/Thing.cpp' }
-        & $bad '非基础设施卡改了 .github/workflows/x.yml' { param($f) $f.Card.owns = @($f.Card.owns) + @('.github/workflows/x.yml'); $f.Files = @($f.Files) + @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' }) } 'needs-user' { param($r) $r.Level -eq 'user' -and $r.Infra.Count -gt 0 }
-        & $bad '把 workflow 改名挪走也算' { param($f) $f.Card.owns = @('**'); $f.Files = @([pscustomobject]@{ filename = 'old/x.yml'; status = 'renamed'; previous_filename = '.github/workflows/x.yml' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 }
-        & $bad 'PR #3 原样的改动（含 workflow）交用户批准' { param($f) $f.Card.owns = @('**'); $f.Files = Read-RinneFixture 'pr3-files.json' } 'needs-user' { param($r) $r.Level -eq 'user' -and @($r.Infra | Where-Object { $_ -like '.github/workflows/*' }).Count -ge 3 }
+        & $bad '越界改动' { param($f) $f.Gates.tier = 'Standard'; $f.Files = @($f.Files) + @([pscustomobject]@{ filename = 'src/core/x.cpp'; status = 'added' }) } 'needs-user' { param($r) $r.Level -eq 'orchestrator' -and $r.OutOfScope -contains 'src/core/x.cpp' }
+        & $bad '从范围外改名挪进来也算越界' { param($f) $f.Gates.tier = 'Standard'; $f.Files = @([pscustomobject]@{ filename = 'docs/example.md'; status = 'renamed'; previous_filename = 'src/core/other/Thing.cpp' }) } 'needs-user' { param($r) $r.OutOfScope -contains 'src/core/other/Thing.cpp' }
+        & $bad '非基础设施卡改了 .github/workflows/x.yml' { param($f) $f.Gates.tier = 'Standard'; $f.Card.owns = @($f.Card.owns) + @('.github/workflows/x.yml'); $f.Files = @($f.Files) + @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' }) } 'needs-user' { param($r) $r.Level -eq 'user' -and $r.Infra.Count -gt 0 }
+        & $bad '把 workflow 改名挪走也算' { param($f) $f.Gates.tier = 'Standard'; $f.Card.owns = @('**'); $f.Files = @([pscustomobject]@{ filename = 'old/x.yml'; status = 'renamed'; previous_filename = '.github/workflows/x.yml' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 }
+        & $bad 'PR #3 原样的改动（含 workflow）交用户批准' { param($f) $f.Gates.tier = 'Standard'; $f.Card.owns = @('**'); $f.Files = Read-RinneFixture 'pr3-files.json' } 'needs-user' { param($r) $r.Level -eq 'user' -and @($r.Infra | Where-Object { $_ -like '.github/workflows/*' }).Count -ge 3 }
         & $bad '改了 scripts/checks.d 下的模块' { param($f) $f.Card.takesOver = @([pscustomobject]@{ path = 'scripts/checks.d/labels.mjs' }); $f.Files = @([pscustomobject]@{ filename = 'scripts/checks.d/labels.mjs'; status = 'modified' }) } 'needs-user' { param($r) $r.Infra.Count -gt 0 -and $r.OutOfScope.Count -eq 0 }
         $infraFile = { param($f) $f.Card.owns = @('scripts/review-bot.mjs'); $f.Files = @([pscustomobject]@{ filename = 'scripts/review-bot.mjs'; status = 'modified' }) }
         & $bad '基础设施改动有用户对这个 head 的批准' { param($f) & $infraFile $f; $f.Records.Approvals = @([pscustomobject]@{ head = $head; by = 'user'; note = '用户看过 diff' }) } 'ready'
@@ -846,6 +901,14 @@ function Invoke-SelfTest {
             $tipMergeCode = 0
             Add-RinneCase $cases '合并后构建：与 feature/v1 合并有冲突时判红、abort、不构建' $true ($vc.Code -eq 'not-ready' -and $builds.Count -eq $n -and
                 @($vc.Failures | Where-Object { $_ -match '冲突' }).Count -eq 1 -and @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -ge 1)
+            # 卡片标的是 Quick，但改了 src/：重算的最低档是 Standard，合并后构建照样要跑
+            $card.tier = 'Quick'; $card.owns = @('**'); & $writeCard
+            $files = @([pscustomobject]@{ filename = 'src/core/loop/Ring.cpp'; status = 'modified' })
+            $n = $builds.Count
+            $vc = Invoke-MergeCheck 3 $cid
+            Add-RinneCase $cases '合并后构建：卡片标 Quick、改了 src/ 也跑（按重算的最低档）' $false (-not ($vc.Code -eq 'ready' -and $builds.Count -eq $n + 1 -and $vc.Tier.Min -eq 'Standard'))
+            $files = @([pscustomobject]@{ filename = 'docs/example.md'; status = 'added' })
+            $card.tier = 'Standard'; $card.owns = @('docs/example.md'); & $writeCard
             Remove-Item -LiteralPath (Join-Path $tip 'scripts/build.ps1')
             $vc = Invoke-MergeCheck 3 $cid
             Add-RinneCase $cases '合并后构建：树里没有构建脚本时判红' $true ($vc.Code -eq 'not-ready' -and @($vc.Failures | Where-Object { $_ -match 'build\.ps1' }).Count)
@@ -875,8 +938,10 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-Merge：squash、sha=审过的 head、subject (#3)、body 末行唯一签名' $false (-not (
                 $m.merge_method -eq 'squash' -and $m.sha -eq $head -and $m.commit_title -match '\(#3\)$' -and
                 $m.commit_message -match "^加入示例检查。`n`nSigned-off-by: [^\n]+$"))
+        # workflow 按规则至少是 Standard：gates 也按 Standard 跑过（基础设施 PR 不在本机做合并后构建）
         $files = @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' })
         $card.owns = @('.github/workflows/x.yml'); & $writeCard
+        $gates.tier = 'Standard'; & $writeGates
         $n = $put.Count
         Add-RinneCase $cases '-Merge：基础设施 PR 没有批准记录不合' $true ((Test-Throws { Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null }) -and $put.Count -eq $n)
         Set-Content -LiteralPath $recordsFile -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '3' = @(@{ head = 'a' * 40; by = 'user'; note = '批的是 H' }) } })
@@ -889,6 +954,7 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-Merge：not-ready 时有批准记录也不合' $true ((Test-Throws { Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null }) -and $put.Count -eq $n + 1)
         $pull.mergeable_state = 'clean'
         Set-Content -LiteralPath $recordsFile -Value '{}'
+        $gates.tier = 'Quick'; & $writeGates
 
         # -After：回读、删远端子支线、持锁移除 worktree 与本地分支
         $merged = Copy-RinneObject $pull
@@ -949,6 +1015,7 @@ function Invoke-SelfTest {
     } finally {
         Set-RinneFake $null
         Set-RinneLockImpl $null
+        Set-RinneTiersImpl $null
         Set-RinneInfraList $null
         Exit-RinneSelfTestNeedles $needles
         $env:RINNE_ROOT = $saved.Root
