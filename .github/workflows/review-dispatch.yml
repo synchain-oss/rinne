@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 维护者在 PR 上评论 /review，显式触发一次 Claude 审查（check 名 dispatch）。这是 fork PR 唯一的 AI 审查通道：
+# claude-review.yml 只跑同仓 PR，而向 fork PR 供密的事件触发一律不用。
+# issue_comment 事件用的永远是默认分支（dev）上的这份文件，所以 v1 合进 dev 之后才生效，改这里也要合到 dev 才算数。
+#
+# 本 job 带着 secret 跑，所以全程不签出 PR 的代码：工作区是 PR 的目标分支（本仓分支，只有维护者能写），
+# 脚本、prompt 与 claude_args 也都取自目标分支；PR 的改动只以文本交给模型当数据读。
+# PR 一旦改了 .github/workflows/ 或 .github/actions/ 就中止，改由维护者本地人工审：改 workflow 的 PR
+# 不该只凭一次 AI 审查放行（本 job 不执行 PR 里的 workflow，这是纵深防御）。
+name: Review Dispatch
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+# 只有「会真的跑审查」的评论共用一个组；其他评论（bot 回帖、普通讨论）各占一个组。若所有评论共用一个组，
+# 审查跑着的时候 PR 上任何一条新评论都会把它取消：被 if 跳过的 run 一样占组、一样触发 cancel-in-progress。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}-${{ (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) && 'review' || github.event.comment.id }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    name: dispatch
+    # 三条缺一不可，否则这条通道会变成任意外部用户可触发的供密面：
+    #   1. 必须是 PR 上的评论（issue_comment 在普通 issue 上也触发）；
+    #   2. 评论以 /review 开头（startsWith，不用 contains：引用这个字符串的普通评论会误触）；
+    #   3. 评论者是 OWNER / MEMBER / COLLABORATOR。显式排除 CONTRIBUTOR：它只表示「曾有提交被合入」，
+    #      fork PR 的作者第二次提 PR 时就是它。
+    # 上面 concurrency 的组名抄了同一组条件，改这里要一起改。
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/review') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Ack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+        run: gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "已收到 /review，开始审查。"
+
+      # 文件列表走 API（最多 3000 个文件），比 gh pr diff --name-only 更不容易因 diff 过大而失败；取不到就判红。
+      # 回帖成功后留标记文件，末尾的失败回帖见到它就不再重复。
+      - name: Abort if the PR touches workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" --jq '.[].filename')
+          printf '%s\n' "$files"
+          if printf '%s\n' "$files" | grep -qE '^\.github/(workflows|actions)/'; then
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" \
+              --body "该 PR 修改了 .github/workflows/ 或 .github/actions/，按安全策略不能通过 /review 审查，请维护者本地拉分支人工审。" &&
+              touch "$RUNNER_TEMP/review-dispatch-reported"
+            exit 1
+          fi
+
+      # 目标分支名与 head 都来自 API：baseRefName 一定是本仓的分支，下一步签出它，不是 PR head。
+      - name: Resolve PR base and head
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          base=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
+          head=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+          [ -n "$base" ] || { echo "::error::cannot resolve the base branch of PR #$PR"; exit 1; }
+          case "$head" in *[!0-9a-f]* | '') echo "::error::unexpected head sha: '$head'"; exit 1 ;; esac
+          [ "${#head}" = 40 ] || { echo "::error::unexpected head sha: '$head'"; exit 1; }
+          { echo "base=$base"; echo "head=$head"; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pr.outputs.base }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      # 必须排在 checkout 之后（checkout 会清掉工作区里未跟踪的文件）。符号链接检查这里查的是目标分支的索引：
+      # PR 自带的链接不会落到磁盘上，只以文本出现在 pr.diff 里。
+      - name: Prepare PR context for the reviewer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+        run: node scripts/review-bot.mjs prepare --pr "$PR" --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA"
+
+      # prompt 与 claude_args 取自刚签出的目标分支上的 claude-review.yml，并在最前面加上「本次不签出 PR 代码」的前提。
+      # 结构核对不过（缺不可信数据声明、--tools 白名单、--disallowedTools 黑名单，或有 Bash 放行规则）就判红。
+      - name: Load prompt and claude_args from claude-review.yml
+        id: cfg
+        env:
+          PR: ${{ github.event.issue.number }}
+          BASE: ${{ steps.pr.outputs.base }}
+        run: node scripts/review-bot.mjs config --pr "$PR" --repo "$GITHUB_REPOSITORY" --dispatch-base "$BASE" --output "$GITHUB_OUTPUT"
+
+      # 不开 track_progress：在 issue_comment 上它会把 action 切到 tag 模式，而 tag 模式会自己签出 PR head、
+      # 追加改文件与 git 的工具，正是这里要避开的。给了 prompt 就是 agent 模式，不切分支。
+      # base_branch：action 从这个分支还原 CLAUDE.md、.claude/ 等配置，不传就取默认分支，会和上面签出的目标分支对不上。
+      - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        id: review
+        timeout-minutes: 17
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          base_branch: ${{ steps.pr.outputs.base }}
+          classify_inline_comments: "false"
+          prompt: ${{ steps.cfg.outputs.prompt }}
+          claude_args: ${{ steps.cfg.outputs.args }}
+
+      - name: Post the review summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          node scripts/review-bot.mjs post --pr "$PR" --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA"
+          --exec "$EXEC_FILE" --run-url "$RUN_URL"
+
+      # 任何一步红了（含审查那一步超时）或 job 被取消（包括被新的 /review 顶掉），PR 上都要有下文：
+      # 否则 Ack 之后再无动静，与「审过、没问题」无从区分。
+      - name: Report failure on the PR
+        if: failure() || cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ ! -e "$RUNNER_TEMP/review-dispatch-reported" ] || exit 0
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" \
+            --body "/review 未完成：本次审查失败、超时或被取消（例如又发了一次 /review），PR 上没有审查结论不代表没有问题。日志：$RUN_URL"
