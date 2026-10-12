@@ -25,6 +25,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 与 gates.ps1 一致：G1 以子进程调 -CheckHooks 并按 UTF-8 读它的输出
+try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ }
 $Root = Split-Path -Parent $PSScriptRoot
 
 $Manifest = [ordered]@{
