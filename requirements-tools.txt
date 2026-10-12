@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Python 工具的钉版。装进独立的 venv，不全局安装，并校验哈希：
-#   python -m pip install --require-hashes -r requirements-tools.txt
+# Python 工具的钉版。装进独立的 venv，不全局安装，并校验哈希。分两步装（compliance.yml 与 bootstrap-tools.ps1 相同）：
+#   1. 只取下面 poetry-core 那一条写进临时文件：
+#      pip install --require-hashes --no-deps --only-binary=:all: -r <临时文件>
+#   2. pip install --require-hashes --no-build-isolation --only-binary=:all: --no-binary=reuse -r requirements-tools.txt
+# reuse 只发了源码包（另一个 wheel 只适用于 CPython 3.10 / Linux，用不上），要在本机构建。它的构建后端 poetry-core 也钉
+# 哈希、先单独装好，再关掉构建隔离：否则 pip 会不核哈希地另下一份构建后端。除 reuse 外一律只收 wheel，
+# 所以第 2 步里不会再有别的包从源码构建。poetry-core 的条目必须紧挨着写（版本一行，哈希行以 \ 续接）。
 # Windows 上没有 libmagic，reuse 需要 charset-normalizer 来判断文件编码。
 # 依赖闭包整个钉住并带 sha256，只收 CI 的 Linux x86_64 / CPython 3.12、本机的 Windows x64 / CPython 3.10、
 # 通用 wheel 与源码包；升级任何一项时重新生成整份清单。
+# reuse 的构建后端
+poetry-core==2.5.0 \
+    --hash=sha256:98ee465b66f7e14bb9fbe68fb5e00d0cff184f036993ec94610ae4b5612f3add
 clang-format==18.1.8 \
     --hash=sha256:065ddb7fdd0cb329976115fa03500dd560d9753dd50c25a269776648e6e6bf35 \
     --hash=sha256:2de122b8aa78ba49e326f974131caab2c79f4ae877c227cd4e3e5d82a98d21e5 \
