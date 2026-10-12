@@ -2,13 +2,15 @@
 //
 // 标签检查（docs-truth 的一部分）。.github/labels.json 是标签的唯一真源，scripts/sync-labels.mjs 按它同步到 GitHub：
 //   - labels.json 本身：名字不重复（GitHub 按大小写不敏感比较）、≤ 50 字符，颜色是 6 位十六进制，说明 ≤ 100 字符；
-//   - 引用到的标签都已登记：workflow 与本地 action（labels.*.name 比较、gh 的 --label / --add-label / --remove-label、
-//     labels: 键）、dependabot.yml 与 issue 模板的 labels:。没登记的标签会被 dependabot 或 gh 自己建出来，真源就失效了。
-//     含 ${{ }} 或 $ 的引用是运行时才定的值，不查。
+//   - 引用到的标签都已登记。查的地方：workflow 与本地 action、dependabot.yml、issue 模板，以及 scripts/ 下的脚本
+//     （维护者脚本会给 PR 与 issue 打标签）。认的写法：表达式里按 labels 的 name 比较、gh 的 label 类参数
+//     （空格、等号或参数数组的写法），YAML 文件另认 labels: 键（行内列表或块式列表）。
+//     没登记的标签会被 dependabot 或 gh 自己建出来，真源就失效了。
+//     含 $ 的引用是运行时才定的值，不查；以 # 或 // 开头的注释行不查。
 
 import fs from "node:fs";
 import path from "node:path";
-import { caseResult } from "../lib/check-kit.mjs";
+import { caseResult, j } from "../lib/check-kit.mjs";
 import { workflowFiles } from "./workflows.mjs";
 
 /** labels.json 的格式问题。 */
@@ -43,8 +45,8 @@ const clean = (v) =>
         .trim();
 const dynamic = (v) => v.includes("$");
 
-/** 一个文件里引用的标签：[{ label, line }]。 */
-export function labelRefs(text) {
+/** 一个文件里引用的标签：[{ label, line }]。yaml：是否另认 labels: 键（脚本里同名的对象属性不是标签）。 */
+export function labelRefs(text, { yaml = true } = {}) {
     const out = [];
     const add = (raw, line) => {
         for (const part of raw.split(",")) {
@@ -55,9 +57,14 @@ export function labelRefs(text) {
     const lines = text.split(/\r?\n/);
     lines.forEach((l, i) => {
         const no = i + 1;
+        if (/^\s*(?:#|\/\/)/.test(l)) return;
         for (const m of l.matchAll(/labels\.\*\.name\s*,\s*'([^']+)'/g)) add(m[1], no);
         for (const m of l.matchAll(/label\.name\s*[!=]=\s*'([^']+)'/g)) add(m[1], no);
+        // gh pr edit --add-label x、--label=x、--label a,b
         for (const m of l.matchAll(/--(?:add-|remove-)?label(?:=|\s+)("[^"]*"|'[^']*'|[^\s"'\\]+)/g)) add(m[1], no);
+        // 参数数组：["--add-label", "x"]、@('--label', 'x')；值不带引号的是变量，不查
+        for (const m of l.matchAll(/--(?:add-|remove-)?label["']\s*,\s*("[^"]*"|'[^']*')/g)) add(m[1], no);
+        if (!yaml) return;
         const key = /^(\s*)(?:-\s+)?labels:\s*(.*)$/.exec(l);
         if (!key) return;
         const value = key[2].replace(/\s+#.*$/, "").trim();
@@ -78,7 +85,22 @@ export function labelRefs(text) {
     return out;
 }
 
-/** 要核对的文件：workflow 与本地 action、dependabot、issue 模板（仓内相对路径）。 */
+/** scripts/ 下的全部文件（仓内相对路径）。 */
+function scriptFiles(root) {
+    const out = [];
+    const walk = (rel) => {
+        const abs = path.join(root, rel);
+        if (!fs.existsSync(abs)) return;
+        for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+            if (e.isDirectory()) walk(`${rel}/${e.name}`);
+            else if (e.isFile()) out.push(`${rel}/${e.name}`);
+        }
+    };
+    walk("scripts");
+    return out.sort();
+}
+
+/** 要核对的文件：[{ rel, yaml }]。workflow 与本地 action、dependabot、issue 模板按 YAML 读，scripts/ 下的按脚本读。 */
 export function referencingFiles(root) {
     const out = [...workflowFiles(root)];
     if (fs.existsSync(path.join(root, ".github", "dependabot.yml"))) out.push(".github/dependabot.yml");
@@ -86,14 +108,14 @@ export function referencingFiles(root) {
     if (fs.existsSync(tpl)) {
         for (const f of fs.readdirSync(tpl).sort()) if (/\.ya?ml$/.test(f)) out.push(`.github/ISSUE_TEMPLATE/${f}`);
     }
-    return out;
+    return [...out.map((rel) => ({ rel, yaml: true })), ...scriptFiles(root).map((rel) => ({ rel, yaml: false }))];
 }
 
-/** 引用了却没登记的标签。files：[{ rel, text }]。 */
+/** 引用了却没登记的标签。files：[{ rel, text, yaml }]。 */
 export function unknownRefs(files, labels) {
     const known = new Set(labels.map((l) => l.name));
-    return files.flatMap(({ rel, text }) =>
-        labelRefs(text)
+    return files.flatMap(({ rel, text, yaml = true }) =>
+        labelRefs(text, { yaml })
             .filter((r) => !known.has(r.label))
             .map((r) => `${rel}:${r.line} 引用的标签「${r.label}」不在 .github/labels.json 里`),
     );
@@ -123,6 +145,11 @@ const LABELS = [
     { name: "bug", color: "d73a4a", description: "缺陷" },
     { name: "dependencies", color: "0366d6", description: "依赖更新" },
 ];
+// 夹具里的引用写法分开拼：本文件也在 scripts/ 下，整段写出来会被自己扫到
+const BY_NAME = j("labels.*", ".name");
+const ADD = j("--add-", "label");
+const FLAG = j("--", "label");
+const ONE = j("label", ".name");
 
 export default {
     name: "labels",
@@ -139,13 +166,14 @@ export default {
         }
         const errors = validateLabels(json);
         if (errors.length) return { ok: false, lines: errors };
-        const files = referencingFiles(ctx.root).map((rel) => ({
+        const files = referencingFiles(ctx.root).map(({ rel, yaml }) => ({
             rel,
+            yaml,
             text: fs.readFileSync(path.join(ctx.root, rel), "utf8"),
         }));
         const unknown = unknownRefs(files, json.labels);
         if (unknown.length) return { ok: false, lines: unknown };
-        const refs = files.reduce((n, f) => n + labelRefs(f.text).length, 0);
+        const refs = files.reduce((n, f) => n + labelRefs(f.text, { yaml: f.yaml }).length, 0);
         return { ok: true, lines: [`${json.labels.length} 个标签；${files.length} 个文件里 ${refs} 处引用都已登记`] };
     },
     selfTest() {
@@ -157,28 +185,30 @@ export default {
         t("颜色带 #", true, v([{ name: "x", color: "#d73a4a", description: "" }]));
         t("说明超过 100 字符", true, v([{ name: "x", color: "d73a4a", description: "长".repeat(101) }]));
         t("缺 labels 数组", true, validateLabels({}));
-        const refs = (text) => unknownRefs([{ rel: "f.yml", text }], LABELS);
+        const refs = (text, yaml = true) => unknownRefs([{ rel: "f", text, yaml }], LABELS);
         const wf = (line) => `jobs:\n  a:\n    steps:\n      - run: ${line}\n`;
-        t(
-            "workflow 按已登记的标签判断",
-            false,
-            refs("    if: contains(github.event.pull_request.labels.*.name, 'bug')"),
-        );
+        t("workflow 按已登记的标签判断", false, refs(`    if: contains(github.event.pull_request.${BY_NAME}, 'bug')`));
         t(
             "workflow 按没登记的标签判断",
             true,
-            refs("    if: contains(github.event.pull_request.labels.*.name, 'ci-skip')"),
+            refs(`    if: contains(github.event.pull_request.${BY_NAME}, 'ci-skip')`),
         );
-        t("label.name 比较没登记的标签", true, refs("    if: github.event.label.name == 'release'"));
-        t("gh --add-label 没登记的标签", true, refs(wf('gh pr edit "$PR" --add-label "needs-review"')));
-        t("gh --label 逗号列表里有一个没登记", true, refs(wf("gh issue create --label bug,triage")));
-        t("gh --label 已登记", false, refs(wf("gh issue create --label bug")));
-        t("运行时才定的标签不查", false, refs(wf('gh pr edit "$PR" --add-label "$LABEL"')));
+        t("label.name 比较没登记的标签", true, refs(`    if: github.event.${ONE} == 'release'`));
+        t("gh 加没登记的标签", true, refs(wf(`gh pr edit "$PR" ${ADD} "needs-review"`)));
+        t("gh 标签逗号列表里有一个没登记", true, refs(wf(`gh issue create ${FLAG} bug,triage`)));
+        t("gh 标签已登记", false, refs(wf(`gh issue create ${FLAG}=bug`)));
+        t("运行时才定的标签不查", false, refs(wf(`gh pr edit "$PR" ${ADD} "$LABEL"`)));
+        t("注释行不查", false, refs(`# gh pr edit ${ADD} triage`, false));
         const dependabot = (items) => `updates:\n  - package-ecosystem: github-actions\n    labels:\n${items}`;
         t("dependabot 块式列表已登记", false, refs(dependabot("      - dependencies\n    schedule:\n")));
         t("dependabot 块式列表有没登记的", true, refs(dependabot("      - dependencies\n      - ci # 注释\n")));
         t("issue 模板行内列表有没登记的", true, refs('name: x\nlabels: ["bug", "triage"]\nbody: []\n'));
         t("issue 模板行内列表已登记", false, refs("name: x\nlabels: [bug]\n"));
+        // 脚本：参数数组的写法要认，对象属性 labels: 不是标签，不带引号的值是变量
+        t("脚本参数数组里没登记的标签", true, refs(`gh(["pr", "edit", pr, "${ADD}", "review-later"]);`, false));
+        t("PowerShell 参数数组里没登记的标签", true, refs(`gh pr edit $Pr @('${FLAG}', 'later')`, false));
+        t("脚本参数数组里的变量不查", false, refs(`gh(["pr", "edit", pr, "${ADD}", name]);`, false));
+        t("脚本里的 labels: 属性不当 YAML 读", false, refs("    labels: json.labels,", false));
         const p = planLabels(
             [
                 { name: "bug", color: "d73a4a", description: "缺陷" },
