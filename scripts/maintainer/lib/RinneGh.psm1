@@ -7,7 +7,7 @@
 # - 本机配置只从环境变量或 git config 读（与 hooks 相同），脚本里没有任何本机路径：
 #   RINNE_ROOT / rinne.root（工作区根，含 wt/、_logs/、plan/）、RINNE_NODE / rinne.node、
 #   RINNE_CARDS / rinne.cards（卡片清单 JSON：每张卡的 owns、takesOver、sections、tier 等）、
-#   RINNE_WAIVERS / rinne.waivers（用户豁免记录 JSON，没配置就是没有豁免）、
+#   rinne.waivers（用户记录 JSON，没配置就是没有记录；pr-merge 真跑只认主 clone 的 git config，RINNE_WAIVERS 只给自测用）、
 #   RINNE_GITLEAKS / rinne.gitleaks；个人针由 Node 判据自己读（RINNE_PRIVACY_LOCAL / rinne.privacyLocal）。
 # - 判据不在这里重写：隐私、提交消息、尾注与处置汇总都经 lib/maint.mjs 调用仓内已有的 Node 判据。
 # - gh、git、node 都经 Invoke-RinneExternal 一处调用；-SelfTest 用 Set-RinneFake 换成读 fixture 的假实现。
@@ -48,14 +48,16 @@ function Get-RinneRoot {
 # ---- 外部命令 -------------------------------------------------------------------------------
 
 <#
-  运行 gh / git / node，返回 @{ Code; Out; Err }。自测时 $script:Fake 先接手：返回 $null 表示放行给真实命令
-  （Node 判据在自测里照常真跑）。非零退出码默认抛错，-AllowFail 时原样返回。
+  运行 gh / git / node，返回 @{ Code; Out; Err }。自测时 $script:Fake 先接手（第三个参数带上 Cwd 与 TimeoutSeconds）：
+  返回 $null 表示放行给真实命令（Node 判据在自测里照常真跑）。非零退出码默认抛错，-AllowFail 时原样返回。
+  -TimeoutSeconds 大于 0 时到点结束整棵进程树，返回 Code = -1、TimedOut = $true。
 #>
 function Invoke-RinneExternal {
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [switch]$AllowFail)
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [switch]$AllowFail, [int]$TimeoutSeconds = 0)
     $r = $null
-    if ($script:Fake) { $r = & $script:Fake $Exe $Arguments }
-    if ($null -eq $r) {
+    if ($script:Fake) { $r = & $script:Fake $Exe $Arguments ([pscustomobject]@{ Cwd = $Cwd; TimeoutSeconds = $TimeoutSeconds }) }
+    if ($null -eq $r -and $TimeoutSeconds -gt 0) { $r = Invoke-RinneTimed -Exe $Exe -Arguments $Arguments -Cwd $Cwd -TimeoutSeconds $TimeoutSeconds }
+    elseif ($null -eq $r) {
         $errFile = [IO.Path]::GetTempFileName()
         $pushed = $false
         try {
@@ -73,6 +75,32 @@ function Invoke-RinneExternal {
         throw "$Exe $(@($Arguments | Select-Object -First 2) -join ' ') 失败（退出码 $($r.Code)）：$first"
     }
     return $r
+}
+
+<# 带超时跑一个进程：输出异步读（免得管道写满卡住），到点 Kill 整棵进程树（构建会起编译器子进程）。 #>
+function Invoke-RinneTimed {
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
+    foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    if ($Cwd) { $psi.WorkingDirectory = $Cwd }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    try {
+        $out = $p.StandardOutput.ReadToEndAsync()
+        $err = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            # 恰好在这之间自己退出了，Kill 会抛错；照样按超时算
+            try { $p.Kill($true) } catch [InvalidOperationException] { }
+            $p.WaitForExit()
+            return @{ Code = -1; Out = $out.Result; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true }
+        }
+        $p.WaitForExit()
+        @{ Code = $p.ExitCode; Out = $out.Result.TrimEnd(); Err = $err.Result; TimedOut = $false }
+    } finally {
+        $p.Dispose()
+    }
 }
 
 function Invoke-RinneGh {
@@ -328,14 +356,20 @@ $script:InfraList = $null
 
 function Set-RinneInfraList { param([string]$Path) $script:InfraList = $Path }
 
-<# files：[{ filename; status; previous_filename? }]。返回碰到的基础设施路径。改名的新旧路径都算。 #>
-function Get-InfraTouches {
+<# files：[{ filename; status; previous_filename? }] 涉及的全部路径：改名的新旧路径都算（挪走一个文件也是改了它）。 #>
+function Get-RinneChangedPaths {
     param([object[]]$Files = @())
-    $paths = @(foreach ($f in $Files) {
+    @(foreach ($f in $Files) {
             $f.filename
             $prev = Get-RinneProp $f 'previous_filename'
             if ($prev) { $prev }
         }) | Select-Object -Unique
+}
+
+<# 返回碰到的基础设施路径。 #>
+function Get-InfraTouches {
+    param([object[]]$Files = @())
+    $paths = @(Get-RinneChangedPaths $Files)
     if (-not $paths) { return }
     $extra = if ($script:InfraList) { @('--list', $script:InfraList) } else { @() }
     $v = Invoke-RinneMaint -Command 'infra' -Content (ConvertTo-RinneJsonText @($paths)) -Extra $extra
@@ -393,14 +427,56 @@ function Get-RinneReviewThreads {
     $nodes.ToArray()
 }
 
-<# issue comments、review comments、reviews、GraphQL reviewThreads，各取全部。 #>
+$script:ReviewEditsQuery = @'
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { databaseId updatedAt lastEditedAt }
+      }
+    }
+  }
+}
+'@
+
+<# REST 的 review 对象没有 updated_at：改过的 review 正文要从 GraphQL 的 lastEditedAt / updatedAt 取。返回 id → 两者中较晚的一个。 #>
+function Get-RinneReviewEdits {
+    param([Parameter(Mandatory)][int]$Pr)
+    $owner, $name = $script:Repo.Split('/')
+    $edits = @{}
+    $after = $null
+    do {
+        $vars = @{ owner = $owner; name = $name; number = $Pr; after = $after }
+        $page = (Invoke-RinneGraphQL -Query $script:ReviewEditsQuery -Variables $vars).data.repository.pullRequest.reviews
+        foreach ($n in @($page.nodes)) {
+            $times = @($n.updatedAt, (Get-RinneProp $n 'lastEditedAt')) | Where-Object { $_ } | Sort-Object { ConvertTo-RinneUtc $_ }
+            $edits[[string]$n.databaseId] = [string]($times | Select-Object -Last 1)
+        }
+        $after = $page.pageInfo.endCursor
+    } while ($page.pageInfo.hasNextPage)
+    $edits
+}
+
+<#
+  issue comments、review comments、reviews、GraphQL reviewThreads，各取全部。review 补上 updated_at：
+  提交时间与 GraphQL 修改时间中较晚的一个（回复之后又改过正文的 review 要重新回应）。
+#>
 function Get-RinnePrActivity {
     param([Parameter(Mandatory)][int]$Pr)
     $r = $script:Repo
+    $reviews = @(Get-RinneApi "repos/$r/pulls/$Pr/reviews?per_page=100" -Paginate)
+    $edits = Get-RinneReviewEdits $Pr
+    foreach ($rv in $reviews) {
+        $id = [string]$rv.id
+        if (-not $edits.ContainsKey($id)) { throw "GraphQL 里没有 review $id 的修改时间，判不了它改没改过" }
+        $updated = @([string]$rv.submitted_at, $edits[$id]) | Where-Object { $_ } | Sort-Object { ConvertTo-RinneUtc $_ } | Select-Object -Last 1
+        $rv | Add-Member -NotePropertyName updated_at -NotePropertyValue $updated -Force
+    }
     [pscustomobject]@{
         Issue   = Get-RinneApi "repos/$r/issues/$Pr/comments?per_page=100" -Paginate
         Review  = Get-RinneApi "repos/$r/pulls/$Pr/comments?per_page=100" -Paginate
-        Reviews = Get-RinneApi "repos/$r/pulls/$Pr/reviews?per_page=100" -Paginate
+        Reviews = $reviews
         Threads = Get-RinneReviewThreads $Pr
     }
 }
@@ -488,7 +564,8 @@ function Get-RinneCommentItems {
   一条评论有没有得到我方回应。「之后」一律对比原评论的 updated_at：原评论在我方回复之后又改过，就算没回应。
   - agent 自己的、非总结的 bot 通知（/review 的回执之类）：不需要；
   - bot 审查总结：之后有处置汇总引用它的运行编号；
-  - review comment：线程里有我方回复的，要有一条晚于它的最后一次修改；线程里没有我方回复的，线程已 resolve 也算；
+  - review comment：线程里有我方回复的，要有一条晚于它的最后一次修改；维护者本人的 inline 评论必须有这样一条回复，
+    只 resolve 不算；bot 的 inline 评论在处置汇总里逐条处置过，线程里没有我方回复的，线程已 resolve 也算；
   - 其余（issue comment、review 正文、CHANGES_REQUESTED）：我方评论的 agent 标记里用 in-reply-to 点名了它
     （-Reply 自动带上），不认正文里碰巧出现的数字。空正文、只装着 inline 评论的 review 看它那些评论；
     CHANGES_REQUESTED 也可以由同一作者之后的 APPROVED 解除（驳回的 review 不再出现在表里）。
@@ -507,7 +584,8 @@ function Test-RinneResponded {
     }
     if ($Item.Source -eq 'review-comment') {
         $replies = @($Items | Where-Object { $_.Kind -eq 'agent' -and $_.ThreadId -and $_.ThreadId -eq $Item.ThreadId -and $_.Id -ne $Item.Id })
-        if ($replies.Count) { return $explicit -or @($replies | Where-Object { (ConvertTo-RinneUtc $_.Created) -gt $edited }).Count -gt 0 }
+        $later = @($replies | Where-Object { (ConvertTo-RinneUtc $_.Created) -gt $edited }).Count -gt 0
+        if ($replies.Count -or $Item.Kind -ne 'bot') { return $explicit -or $later }
         return $explicit -or [bool]$Item.Resolved
     }
     if ($Item.Kind -eq 'bot') { return $true }
@@ -546,8 +624,9 @@ function Get-RinneRequiredChecks {
 <#
   锁由本地 gates 的 scripts/lib/Locks.psm1 提供（Local\ 命名互斥体，在 finally 里释放；超时抛 TimeoutException）：
   - git 锁：所有 fetch / merge / worktree 操作包在 Invoke-WithGitLock 里；
-  - merge 锁：pr-merge 的 -Merge 与 -After 整段持有 Invoke-WithRinneLock -Name merge，同一时间只合一个 PR。
-  先 merge 后 git，顺序固定。块里的 git 失败由 Invoke-RinneGit 自己按退出码抛错。
+  - merge 锁：pr-merge 的 -Merge 与 -After 整段持有 Invoke-WithRinneLock -Name merge，同一时间只合一个 PR；
+  - 构建槽：合并后构建（建树、清理、合并、构建、abort）整段持有一把 build-slot-1 / build-slot-2，与 gates 的编译共用。
+  顺序固定为 merge → 构建槽 → git；gates 持构建槽时不取 git 锁，所以不会互等。块里的 git 失败由 Invoke-RinneGit 自己按退出码抛错。
 #>
 function Import-RinneLocks {
     Import-Module (Join-Path $PSScriptRoot '../../lib/Locks.psm1') -ErrorAction Stop -Global
@@ -567,14 +646,25 @@ function Invoke-RinneMergeLocked {
     Invoke-WithRinneLock -Name merge -ScriptBlock $Script
 }
 
+function Invoke-RinneBuildSlotLocked {
+    param(
+        [Parameter(Mandatory)][ValidateSet('build-slot-1', 'build-slot-2')][string]$Slot,
+        [Parameter(Mandatory)][scriptblock]$Script, [double]$TimeoutSeconds = 2700
+    )
+    if ($script:LockImpl) { return & $script:LockImpl $Slot $Script }
+    Import-RinneLocks
+    Invoke-WithRinneLock -Name $Slot -ScriptBlock $Script -TimeoutSeconds $TimeoutSeconds
+}
+
 # ---- 不带凭据跑不可信代码 -------------------------------------------------------------------
 
 <#
   合并后构建跑的是 PR 树里的脚本：子进程启动前从本进程环境里拿掉凭据与个人针（GH_TOKEN、GITHUB_TOKEN、
-  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY），结束后在 finally 里还原。
-  这只挡住环境变量；本机 gh 的登录凭据与 git config 仍在，所以合并后构建只在其他判据都通过、且没碰基础设施时才跑。
+  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY、*_SECRET、*_PASSWORD），
+  结束后在 finally 里还原。这只挡住环境变量；本机 gh 的登录凭据与 git config 仍在，所以合并后构建只在其他判据都通过、
+  且没碰基础设施时才跑。
 #>
-$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY)$'
+$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY|.+_SECRET|.+_PASSWORD)$'
 
 function Invoke-RinneWithoutSecrets {
     param([Parameter(Mandatory)][scriptblock]$Script)
@@ -628,19 +718,19 @@ function Copy-RinneObject {
 }
 
 <#
-  假的外部命令：routes 是有序表，键是对整条命令行（「exe 参数…」）的正则，值是 scriptblock，参数为 argv，
-  返回对象（转成 JSON）、字符串或 @{ Code; Out; Err }。没有命中的 node 命令与读本机 git config 的命令放行给真实命令
-  （都不联网）；其余没有命中的一律失败，自测里能看出漏录了哪条。log 记录每条命令。
+  假的外部命令：routes 是有序表，键是对整条命令行（「exe 参数…」）的正则，值是 scriptblock，参数为 argv 与
+  opts（Cwd、TimeoutSeconds），返回对象（转成 JSON）、字符串或 @{ Code; Out; Err }。没有命中的 node 命令与读本机
+  git config 的命令放行给真实命令（都不联网）；其余没有命中的一律失败，自测里能看出漏录了哪条。log 记录每条命令。
 #>
 function New-RinneFake {
     param([Parameter(Mandatory)][System.Collections.Specialized.OrderedDictionary]$Routes, [System.Collections.Generic.List[string]]$Log)
     return {
-        param($exe, $argv)
+        param($exe, $argv, $opts)
         $line = "$exe $($argv -join ' ')"
         if ($null -ne $Log) { $Log.Add($line) }
         foreach ($k in $Routes.Keys) {
             if ($line -match $k) {
-                $v = & $Routes[$k] $argv
+                $v = & $Routes[$k] $argv $opts
                 if ($v -is [hashtable] -and $v.ContainsKey('Code')) { return $v }
                 $out = if ($v -is [string]) { $v } elseif ($null -eq $v) { '' } else { ConvertTo-Json -InputObject $v -Depth 100 -Compress }
                 if ($argv -contains '--slurp') { $out = "[$out]" }

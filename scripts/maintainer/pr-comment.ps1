@@ -265,6 +265,7 @@ function Invoke-SelfTest {
                     $num = if ($q.variables.thread -eq 'PRRT_other') { 5 } else { 3 }
                     return @{ data = @{ node = @{ id = $q.variables.thread; pullRequest = @{ number = $num; repository = @{ nameWithOwner = 'synchain-oss/rinne' } }; comments = @{ nodes = @(@{ databaseId = 4244522703 }) } } } }
                 }
+                if ($q.query -match 'reviews\(') { return Read-RinneFixture 'pr3-review-edits.json' }
                 Read-RinneFixture 'pr3-threads.json'
             }
             'check-runs'                       = { $checks }
