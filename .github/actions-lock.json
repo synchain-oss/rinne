@@ -9,6 +9,16 @@
       "version": "v7.1.0",
       "using": "node24",
       "nested": []
+    },
+    "anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc": {
+      "version": "v1.0.248",
+      "using": "composite",
+      "nested": ["oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"]
+    },
+    "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6": {
+      "version": "https://github.com/oven-sh/setup-bun/releases/tag/v2.2.0",
+      "using": "node24",
+      "nested": []
     }
   }
 }

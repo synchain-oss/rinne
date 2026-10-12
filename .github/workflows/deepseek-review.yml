@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# DeepSeek 代码审查（check 名 deepseek-pr-review），默认关闭：job 级 if 以 vars.ENABLE_DEEPSEEK 开头，
+# 没建这个变量时 job 显示为 skipped。永不 required。走 DeepSeek 的 Anthropic 兼容网关与按量计费的 key。
+# 启用三步：确认余额 → gh secret set DEEPSEEK_KEY → gh variable set ENABLE_DEEPSEEK -b true（都在 synchain-oss/rinne）。
+#
+# 与 claude-review.yml 同一套做法，不另写第二份 prompt：材料准备、prompt 与 claude_args（只换 --model）、
+# 总结代发都经 scripts/review-bot.mjs，工具边界与理由见 claude-review.yml。不用 pr-agent。
+# 两个 bot 的总结各带自己的 head 标记（bot=deepseek / bot=claude），增量审查各找各的上一轮。
+name: DeepSeek PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deepseek-pr-review:
+    name: deepseek-pr-review
+    if: vars.ENABLE_DEEPSEEK == 'true' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Prepare PR context for the reviewer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          node scripts/review-bot.mjs prepare --pr "$PR" --repo "$GITHUB_REPOSITORY"
+          --base "$BASE_SHA" --head "$HEAD_SHA" --bot deepseek
+      # prompt 与 claude_args 取自签出的 claude-review.yml：同仓 PR 能改它的人也能直接改本文件，取自 PR 版本不扩大权限。
+      - name: Load prompt and claude_args from claude-review.yml
+        id: cfg
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          MODEL: deepseek-flash
+        run: node scripts/review-bot.mjs config --pr "$PR" --repo "$GITHUB_REPOSITORY" --model "$MODEL" --output "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        id: review
+        timeout-minutes: 25
+        env:
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          # 换模型时这三行与上一步的 MODEL 一起改
+          ANTHROPIC_MODEL: deepseek-flash
+          ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-flash
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-flash
+        with:
+          anthropic_api_key: ${{ secrets.DEEPSEEK_KEY }}
+          github_token: ${{ github.token }}
+          classify_inline_comments: "false"
+          prompt: ${{ steps.cfg.outputs.prompt }}
+          claude_args: ${{ steps.cfg.outputs.args }}
+      - name: Post the review summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          node scripts/review-bot.mjs post --pr "$PR" --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA"
+          --exec "$EXEC_FILE" --run-url "$RUN_URL" --bot deepseek
