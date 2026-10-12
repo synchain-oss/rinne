@@ -43,8 +43,9 @@ are accepted under the project licence, GPL-3.0-or-later: what comes in goes out
   `master`, `feature/...`), and open the pull request against **`dev`**.
 - While v1 is being built, issues and pull requests are limited to collaborators. The limit is lifted when v1 reaches
   `dev`.
-- Workflows on fork pull requests run only after a maintainer approves them, and only the checks that need no
-  secrets. The AI review runs when a maintainer comments `/review`.
+- Fork pull requests run only the checks that need no secrets. Workflows from first-time contributors wait for a
+  maintainer's approval; before the interaction limit is lifted this will be tightened to every outside contributor.
+  The AI review runs when a maintainer comments `/review`.
 - For anything bigger than a fix, open an issue first so the design can be agreed before you write the code.
 - Commit subjects use `type(scope): description`, for example `fix(dsp): clamp the limiter ceiling`.
 - Security problems: do not open a public issue; see [SECURITY.md](SECURITY.md).
