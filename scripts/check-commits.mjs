@@ -153,7 +153,7 @@ export const CONTRACTS = {
 // [路径, 所属契约（* = 任一契约冻结即受守）, 只看哪些改动行]。按行判的路径只看 -U0 的改动行：
 // CMake 里经变量间接给身份（set(X Rnni) 再 PLUGIN_CODE ${X}）、或值写在下一行的情形这里抓不到，
 // 由身份 golden 的静态检查兜底。
-const GUARDED = [
+export const GUARDED = [
     [/^docs\/contracts\/IPC_CONTRACT\.md$|^src\/core\/ipc\/[^/]*Layout[^/]*\.h$/, "ipc"],
     [/^tests\/golden\/ipc-layout\.json$/, "ipc"],
     [/^docs\/contracts\/STATE_SCHEMA\.md$|^src\/core\/state\//, "state"],
