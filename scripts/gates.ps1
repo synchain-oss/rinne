@@ -67,14 +67,6 @@ function New-Result([string]$Id, [string]$Name, [string]$Status, [string]$Reason
     [pscustomobject]@{ Id = $Id; Name = $Name; Status = $Status; Reason = $Reason; Lines = @($Lines); Resource = $Resource; Seconds = $Seconds }
 }
 
-# HEAD 与工作区：未跟踪的文件、以及 ignoredInputs 里被忽略却会被构建读到的文件，都算不干净；git 失败也算。
-function Get-TreeState {
-    $sha = "$(git -C $Root rev-parse HEAD 2>$null)".Trim(); $ok = $LASTEXITCODE -eq 0
-    $status = @(git -C $Root status --porcelain --untracked-files=normal 2>$null); $ok = $ok -and $LASTEXITCODE -eq 0
-    $ignored = @($Rules.ignoredInputs | Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) })
-    [pscustomobject]@{ Sha = $sha; Dirty = (-not $ok) -or $status.Count -gt 0 -or $ignored.Count -gt 0; Ignored = $ignored }
-}
-
 function Import-GateModules([string]$Dir) {
     foreach ($f in Get-ChildItem -LiteralPath $Dir -Filter '*.ps1' -File | Sort-Object Name) {
         try {
@@ -253,7 +245,7 @@ if ($Fetch -and $baseOk) {
     try { Invoke-WithGitLock { git -C $Root fetch --quiet origin ($Base -replace '^origin/', ''); if ($LASTEXITCODE) { throw "git fetch 退出码 $LASTEXITCODE" } } }
     catch { & $add (New-Result 'G0' '定档' 'FAIL' "fetch $Base 失败：$($_.Exception.Message)") }
 }
-$s0 = Get-TreeState
+$s0 = Get-RinneTreeState $Root $Rules
 $d = $baseOk ? (Get-RinneDiff -Root $Root -Base $Base) : [pscustomobject]@{ Ok = $false; Files = @(); BaseSha = ''; Error = "基线只能是 origin/feature/*，不能是 $Base" }
 $asked = if ($Full) { 'Full' } elseif ($Standard) { 'Standard' } elseif ($Quick) { 'Quick' } else { '' }
 $t = Resolve-RinneTier -Files $d.Files -CardTier $CardTier -Asked $asked -Rules $Rules
@@ -277,7 +269,7 @@ if ($deferred) {
     foreach ($g in $reg.Valid | Where-Object { (Get-RinneTierRank $_.Tier $Rules) -le $rank }) { & $add (Invoke-Gate $g $ctx) }
     foreach ($m in @(Get-MissingGates $reg.Seen $rank $d.BaseSha)) { & $add $m }
 }
-$s1 = Get-TreeState
+$s1 = Get-RinneTreeState $Root $Rules
 if ($s1.Sha -cne $s0.Sha -or ($s1.Dirty -and -not $s0.Dirty)) { & $add (New-Result 'G0' '收尾复核' 'FAIL' '跑的过程中 HEAD 或工作区变了，结果不算数') }
 
 $finished, $count = (Get-Date), @{ PASS = 0; FAIL = 0; SKIP = 0; FLAKY = 0 }
