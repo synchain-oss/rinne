@@ -6,7 +6,9 @@
 //      （只用于构建、又不带声明的行除外：它们不随二进制分发，仓里也没有文件引用那份全文）；
 //   3. 表里点名的声明文件都存在；third_party/notices/ 下每个文件（来源表 README.md 除外）都被某一行点名；
 //   4. LICENSES/ 下每份全文都被本仓许可或表里某一行引用；
-//   5. 每份声明在 REUSE.toml 的 third-party-notices 小节里有块，块里的许可是点名它的那一行的标识之一；
+//   5. 每份声明的许可按 REUSE 的规则取整份 REUSE.toml 里最后一个命中的块：这个块必须在 third-party-notices
+//      小节里，许可必须等于这份声明该有的标识。行里只有一个标识时它的每份声明都是这个标识；有多个标识时，
+//      声明文件与标识按顺序一一对应（VST3 SDK 那一行：GPLv3 那份在前，BSD 那份在后），个数对不上判红；
 //   6. NOTICES、REUSE.toml 与许可文件名里不得出现把 JUCE 写成「或更高版本」的标识（JUCE 是 AGPLv3 only）。
 // 表格解析同时导出给 modules-closure 用。
 
@@ -119,19 +121,24 @@ const globRe = (g) =>
             .replace(/\0/g, ".*")}$`,
     );
 
-/** REUSE.toml 里某一小节的块：[{ paths: [正则], license }]，顺序与文件一致（后面的块优先）。 */
-export function reuseBlocks(toml, section) {
-    const m = new RegExp(`^# --- section:${section} ---$([\\s\\S]*?)(?=^# --- section:|(?![\\s\\S]))`, "m").exec(toml);
-    if (!m) return null;
-    return m[1]
-        .split(/^\[\[annotations\]\]\s*$/m)
-        .slice(1)
-        .map((b) => {
-            const raw = /^path\s*=\s*(\[[^\]]*\]|"[^"]*")/m.exec(b)?.[1] || "";
-            const paths = [...raw.matchAll(/"([^"]*)"/g)].map((x) => globRe(x[1]));
-            const license = /^SPDX-License-Identifier\s*=\s*"([^"]*)"/m.exec(b)?.[1] || "";
-            return { paths, license };
-        });
+/**
+ * REUSE.toml 的全部块，按文件顺序：[{ section, paths: [正则], license }]。section 是块所在的小节
+ * （第一个小节标记之前为 null）。REUSE 对一个文件取最后一个命中的块，所以判定要看整份文件。
+ */
+export function reuseBlocks(toml) {
+    const blocks = [];
+    let section = null;
+    // 切在每个小节标记与每个 [[annotations]] 之前：每一段以其中之一开头（第一段是文件头）
+    for (const part of toml.split(/^(?=# --- section:[a-z0-9-]+ ---$|\[\[annotations\]\]\s*$)/m)) {
+        const mark = /^# --- section:([a-z0-9-]+) ---$/.exec(part.split(/\r?\n/)[0]);
+        if (mark) section = mark[1];
+        if (!/^\[\[annotations\]\]/.test(part)) continue;
+        const raw = /^path\s*=\s*(\[[^\]]*\]|"[^"]*")/m.exec(part)?.[1] || "";
+        const paths = [...raw.matchAll(/"([^"]*)"/g)].map((x) => globRe(x[1]));
+        const license = /^SPDX-License-Identifier\s*=\s*"([^"]*)"/m.exec(part)?.[1] || "";
+        blocks.push({ section, paths, license });
+    }
+    return blocks;
 }
 
 /**
@@ -143,7 +150,7 @@ export function checkLicenses({ notices, reuseToml, licenseFiles, noticeFiles })
     if (!shipped.length) errors.push("Shipped 表没有任何一行");
     const have = new Set(licenseFiles.filter((f) => f.endsWith(".txt")).map((f) => f.slice(0, -4)));
     const referenced = new Set([PROJECT_LICENSE]);
-    const named = new Map(); // 声明文件 → 点名它的行
+    const named = new Map(); // 声明文件 → [{ where, license }]：点名它的行与它该有的标识
     for (const [kind, rows] of [
         ["Shipped", shipped],
         ["Build", build],
@@ -152,29 +159,41 @@ export function checkLicenses({ notices, reuseToml, licenseFiles, noticeFiles })
             const where = `${kind} 表「${r.component}」`;
             if (!r.spdx.length) errors.push(`${where} 没有 SPDX 标识`);
             if (kind === "Shipped" && !r.notices.length) errors.push(`${where} 没有点名上游声明文件`);
+            if (r.spdx.length > 1 && r.notices.length && r.notices.length !== r.spdx.length) {
+                errors.push(
+                    `${where} 有 ${r.spdx.length} 个标识、${r.notices.length} 份声明：多个标识时两者按顺序一一对应`,
+                );
+            }
             r.spdx.forEach((id) => referenced.add(id));
             if (kind === "Shipped" || r.notices.length) {
                 for (const id of r.spdx) if (!have.has(id)) errors.push(`${where} 用了 ${id}，LICENSES/ 里没有全文`);
             }
-            for (const p of r.notices) {
+            r.notices.forEach((p, i) => {
                 const rel = p.slice(NOTICE_DIR.length);
                 if (!noticeFiles.includes(rel)) errors.push(`${where} 点名的 ${p} 不存在`);
-                named.set(rel, [...(named.get(rel) || []), r]);
-            }
+                const license = r.spdx.length === 1 ? r.spdx[0] : r.spdx[i];
+                named.set(rel, [...(named.get(rel) || []), { where, license }]);
+            });
         }
     }
     for (const f of noticeFiles) {
         if (f !== "README.md" && !named.has(f)) errors.push(`${NOTICE_DIR}${f} 没有被 NOTICES 的任何一行点名`);
     }
     for (const id of have) if (!referenced.has(id)) errors.push(`LICENSES/${id}.txt 没有被本仓许可或 NOTICES 引用`);
-    const blocks = reuseBlocks(reuseToml, "third-party-notices");
-    if (!blocks) errors.push("REUSE.toml 缺 third-party-notices 小节");
-    for (const [rel, rows] of named) {
-        if (!blocks || !noticeFiles.includes(rel)) continue;
-        const hit = blocks.filter((b) => b.paths.some((re) => re.test(`${NOTICE_DIR}${rel}`))).at(-1);
-        if (!hit) errors.push(`${NOTICE_DIR}${rel} 在 REUSE.toml 的 third-party-notices 小节里没有块`);
-        else if (rows.some((r) => !r.spdx.includes(hit.license))) {
-            errors.push(`${NOTICE_DIR}${rel} 的 REUSE 许可 ${hit.license} 与 NOTICES 那一行的标识不符`);
+    const blocks = reuseBlocks(reuseToml);
+    if (!blocks.some((b) => b.section === "third-party-notices"))
+        errors.push("REUSE.toml 的 third-party-notices 小节没有块");
+    for (const [rel, uses] of named) {
+        if (!noticeFiles.includes(rel)) continue;
+        const file = `${NOTICE_DIR}${rel}`;
+        const wants = [...new Set(uses.map((u) => u.license).filter(Boolean))];
+        if (wants.length > 1) errors.push(`${file} 被几行点名，该有的标识互相矛盾：${wants.join("、")}`);
+        const hit = blocks.filter((b) => b.paths.some((re) => re.test(file))).at(-1);
+        if (!hit || hit.section !== "third-party-notices") {
+            const by = hit ? `最后命中的是 ${hit.section ?? "小节之外"} 的块` : "没有任何块命中";
+            errors.push(`${file} 的 REUSE 登记不在 third-party-notices 小节：${by}`);
+        } else if (wants.length === 1 && hit.license !== wants[0]) {
+            errors.push(`${file} 的 REUSE 许可是 ${hit.license}，按 NOTICES 应为 ${wants[0]}`);
         }
     }
     const orLater = [
@@ -226,13 +245,15 @@ const REUSE_BLOCKS = [
     [["third_party/notices/vst3sdk-base.*"], "BSD-3-Clause"],
     ["third_party/notices/catch2.*", "BSL-1.0"],
 ];
-const reuse = (blocks = REUSE_BLOCKS, section = true) =>
+// tail 是放在声明小节之后（third-party-src 小节里）的块
+const reuse = (blocks = REUSE_BLOCKS, section = true, tail = []) =>
     [
         "# --- section:base ---",
         block("**", "GPL-3.0-or-later"),
         ...(section ? ["# --- section:third-party-notices ---"] : []),
         ...blocks.map(([p, l]) => block(p, l)),
         "# --- section:third-party-src ---",
+        ...tail.map(([p, l]) => block(p, l)),
     ].join("\n");
 const LICS = ["GPL-3.0-or-later", "AGPL-3.0-only", "GPL-3.0-only", "BSD-3-Clause", "BSL-1.0"].map((l) => `${l}.txt`);
 const NOTS = ["README.md", "juce.LICENSE.md", "vst3sdk.LICENSE.txt", "vst3sdk-base.LICENSE.txt", "catch2.LICENSE.txt"];
@@ -248,7 +269,7 @@ function fixture(o = {}) {
         ...(o.drop === "build" ? [] : BUILD),
         ...extra,
     ].join("\n");
-    return { notices, reuseToml: reuse(blocks, !o.noSection), licenseFiles: lic, noticeFiles: not };
+    return { notices, reuseToml: reuse(blocks, !o.noSection, o.tail), licenseFiles: lic, noticeFiles: not };
 }
 
 export function selfTest() {
@@ -280,6 +301,25 @@ export function selfTest() {
             "声明的 REUSE 许可与表里不符",
             true,
             { blocks: REUSE_BLOCKS.map(([p, l]) => [p, p.includes("juce") ? "GPL-3.0-or-later" : l]) },
+        ],
+        [
+            "vst3sdk 与 vst3sdk-base 的 REUSE 许可对调",
+            true,
+            {
+                blocks: REUSE_BLOCKS.map(([p, l]) =>
+                    l === "GPL-3.0-only" ? [p, "BSD-3-Clause"] : l === "BSD-3-Clause" ? [p, "GPL-3.0-only"] : [p, l],
+                ),
+            },
+        ],
+        ["后面小节的通配块盖过了声明的块", true, { tail: [["third_party/**", "GPL-3.0-or-later"]] }],
+        ["后面小节的块不碰声明", false, { tail: [["third_party/miniz/**", "MIT"]] }],
+        [
+            "多个标识但声明份数对不上",
+            true,
+            {
+                shipped: swap(", `third_party/notices/vst3sdk-base.LICENSE.txt` |", " |"),
+                not: without(NOTS, "vst3sdk-base.LICENSE.txt"),
+            },
         ],
     ].map(([label, bad, opts]) => {
         const errors = checkLicenses(fixture(opts));

@@ -39,6 +39,13 @@ SPDX-License-Identifier = "AGPL-3.0-only"
 # third_party/notices/ 下的上游许可声明原文，每份一个 precedence = "override" 的块：
 # 以块里写的为准，原文里 "Copyright notice:" 一类字样不是版权行。声明入库时在此加块。
 # 同目录的 README.md 是本仓写的来源表，归兜底块，所以这里按文件名前缀逐个登记，不用目录通配。
+# THIRD-PARTY-NOTICES.md 是本仓自己写的，但正文引用了上游的版权行；用 override 让 REUSE 不把引文当成它的版权。
+[[annotations]]
+path = "THIRD-PARTY-NOTICES.md"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Synchain"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
 [[annotations]]
 path = "third_party/notices/juce.*"
 precedence = "override"
