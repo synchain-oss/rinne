@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 离线：插件不联网。src/ 的 C/C++/Objective-C 源码里不得出现网络 API。判据按名字认会取数的接口，
+// 离线：插件不联网。src/ 的 C/C++/Objective-C 源码里不得出现网络 API，也不得让 WebView 打开外部页面
+// （goToURL 只能指向本地资源提供器）。判据按名字认会取数的接口，
 // 所以 juce::URL 本身不判：用户点击后用 launchInDefaultBrowser 把链接交给系统浏览器是唯一的正当用法，
 // 同一行再取数照样判红。web/ 里不得加载外部 http(s) 资源，
 // 也不得在 WebView 里直接打开外链（外链一律经桥交给 C++ 打开浏览器）。JUCE 资源提供器的地址
@@ -14,12 +15,17 @@ const SRC_FILE = /^src\/.*\.(?:c|cc|cpp|cxx|h|hpp|m|mm)$/;
 const WEB_FILE = /^web\/.*\.(?:html?|css|js|mjs|svg)$/;
 const LOCAL_HOSTS = ["juce.backend"];
 
-/** C/C++ 里的网络 API：JUCE 的网络类与 URL 取数方法、系统的 HTTP 与 socket 接口。 */
+// 外部地址：http(s)、ws(s) 或协议相对的 //host，主机不是本地资源提供器（主机名后面可以直接是行尾）
+const LOCAL = LOCAL_HOSTS.map((h) => h.replace(/\./g, "\\.")).join("|");
+const EXT = `(?:(?:https?|wss?):)?\\/\\/(?!(?:${LOCAL})(?:[/:"'\`\\s)]|$))`;
+
+/** C/C++ 里的网络 API：JUCE 的网络类与 URL 取数方法、WebView 打开外部页面、系统的 HTTP 与 socket 接口。 */
 const NATIVE = [
     [
         "JUCE URL 取数",
-        /\b(?:InputStreamOptions|WebInputStream|DownloadTask)\b|\.(?:readEntire(?:Text|Binary)Stream|downloadToFile)\s*\(/,
+        /\b(?:InputStreamOptions|WebInputStream|DownloadTask)\b|\.(?:readEntire(?:Text|Binary|Xml)Stream|downloadToFile)\s*\(/,
     ],
+    ["WebView 打开外部页面", new RegExp(`\\bgoToURL\\s*\\([^;]*?"${EXT}`)],
     ["JUCE socket", /\b(?:StreamingSocket|DatagramSocket)\b|\b(?:connectToSocket|beginWaitingForSocket)\s*\(/],
     ["本机网络信息", /\b(?:IPAddress|MACAddress)::/],
     [
@@ -34,8 +40,6 @@ const NATIVE = [
     ["其他网络接口", /\b(?:curl_easy_\w+|getaddrinfo|gethostbyname)\b/],
 ];
 
-// 外部地址：http(s)、ws(s) 或协议相对的 //host，主机不是本地资源提供器
-const EXT = `(?:(?:https?|wss?):)?\\/\\/(?!(?:${LOCAL_HOSTS.map((h) => h.replace(/\./g, "\\.")).join("|")})[/:"'\`\\s)])`;
 /** web/ 里会让 WebView 自己去取外部内容或离开插件页面的写法。 */
 const WEB = [
     [
@@ -51,8 +55,18 @@ const WEB = [
         "JS 外部请求",
         new RegExp(`\\b(?:fetch|import|importScripts|EventSource|WebSocket|sendBeacon|open)\\s*\\(\\s*["'\`]${EXT}`),
     ],
+    ["XHR 外部请求", new RegExp(`\\.open\\s*\\(\\s*["'\`][A-Za-z]+["'\`]\\s*,\\s*["'\`]${EXT}`)],
+    [
+        "HTML 自动跳转",
+        new RegExp(`<meta\\b[^>]*http-equiv\\s*=\\s*["']?refresh[^>]*\\burl\\s*=\\s*["']?\\s*${EXT}`, "i"),
+    ],
     ["JS 外部模块", new RegExp(`\\bfrom\\s*["']${EXT}`)],
-    ["JS 页面跳转", new RegExp(`\\blocation(?:\\.href)?\\s*=\\s*["'\`]${EXT}`)],
+    [
+        "JS 页面跳转",
+        new RegExp(
+            `\\blocation(?:\\.href)?\\s*=\\s*["'\`]${EXT}|\\blocation\\.(?:assign|replace)\\s*\\(\\s*["'\`]${EXT}`,
+        ),
+    ],
     ["WebSocket", /\bnew\s+WebSocket\b/],
 ];
 
@@ -126,6 +140,9 @@ export function selfTest() {
         ["URL 取数", true, cpp("auto s = url.createInputStream (juce::URL::InputStreamOptions (p));")],
         ["字符串里的 // 之后的代码照扫", true, cpp('auto s = juce::URL ("https://x.example").readEntireTextStream();')],
         ["读整段文本", true, cpp("auto s = url.readEntireTextStream();")],
+        ["读整段 XML", true, cpp("auto xml = url.readEntireXmlStream();")],
+        ["WebView 打开外部页面", true, cpp('browser.goToURL ("https://example.com/ui");')],
+        ["WebView 打开本地资源提供器", false, cpp('browser.goToURL ("https://juce.backend/index.html");')],
         ["socket", true, cpp("juce::StreamingSocket sock;")],
         ["读网卡地址", true, cpp("auto all = juce::MACAddress::getAllAddresses();")],
         ["WinHTTP", true, cpp('auto h = WinHttpOpen (L"x", 0, nullptr, nullptr, 0);')],
@@ -139,6 +156,7 @@ export function selfTest() {
             web('<link rel="stylesheet" href="../shared/base.css"><script src="app.js"></script>'),
         ],
         ["JUCE 资源提供器", false, web('fetch("https://juce.backend/state.json");', "web/shared/bridge.js")],
+        ["本地资源提供器的主机名写到行尾", false, web("<script src=https://juce.backend\n></script>")],
         [
             "只是字符串里的地址",
             false,
@@ -164,6 +182,11 @@ export function selfTest() {
         ["JS fetch 外部", true, web('fetch("https://api.example.com/v1");', "web/shared/x.js")],
         ["JS 外部模块", true, web('import x from "https://esm.example.com/x.js";', "web/shared/x.js")],
         ["JS 页面跳转", true, web('location.href = "https://synchain.ca";', "web/shared/x.js")],
+        ["location.assign 外部地址", true, web("window.location.assign('https://synchain.ca');", "web/shared/x.js")],
+        ["location.replace 外部地址", true, web('location.replace("https://synchain.ca");', "web/shared/x.js")],
+        ["XHR 外部请求", true, web("xhr.open('GET', 'https://api.example.com/v1');", "web/shared/x.js")],
+        ["XHR 本地请求", false, web("xhr.open('GET', 'https://juce.backend/state.json');", "web/shared/x.js")],
+        ["meta 自动跳转", true, web('<meta http-equiv="refresh" content="0;url=https://synchain.ca">')],
         ["WebSocket", true, web("const ws = new WebSocket(url);", "web/shared/x.js")],
     ].map(([label, bad, files]) => {
         const hits = checkOffline(files);
