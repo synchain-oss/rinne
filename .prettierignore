@@ -17,7 +17,9 @@ dist/
 node_modules/
 *.min.js
 
-# 不归 prettier 管的格式：Markdown 与 YAML 按手写风格；PowerShell 没有 parser
+# 不归 prettier 管的格式：Markdown 与 YAML 按手写风格；PowerShell 没有 parser；
+# .clang-format 是 clang-format 的配置，prettier 会把它当 YAML 改写
+.clang-format
 *.md
 *.yml
 *.yaml

@@ -43,14 +43,14 @@
       "mode": "adapted"
     },
     {
-      "path": "scripts/check-privacy.mjs",
+      "path": "REUSE.toml",
       "source": "scvb-dev",
-      "from": "scripts/check-privacy.mjs",
-      "fromBlob": "4ec7feff2efd4221f5c009fe2a70d14c9c3d028d",
-      "mode": "forked"
+      "from": "REUSE.toml",
+      "fromBlob": "10f374a8962f3e0372a111878cab9c43296a0b3c",
+      "mode": "adapted"
     },
     {
-      "path": "scripts/lib/privacy-needles.mjs",
+      "path": "scripts/check-privacy.mjs",
       "source": "scvb-dev",
       "from": "scripts/check-privacy.mjs",
       "fromBlob": "4ec7feff2efd4221f5c009fe2a70d14c9c3d028d",
@@ -61,6 +61,13 @@
       "source": "scvb-dev",
       "from": "scripts/check-spdx.ps1",
       "fromBlob": "772616fe4d758262098546ad09ac77699d9705d8",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/lib/privacy-needles.mjs",
+      "source": "scvb-dev",
+      "from": "scripts/check-privacy.mjs",
+      "fromBlob": "4ec7feff2efd4221f5c009fe2a70d14c9c3d028d",
       "mode": "forked"
     }
   ]
