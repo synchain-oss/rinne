@@ -69,9 +69,13 @@ function Test-Hooks {
     $have = $set ? [IO.Path]::GetFullPath($set, $Root).TrimEnd('\', '/') : ''
     $same = $IsWindows ? ($have -ieq $want) : ($have -ceq $want)
     $rows.Add(@($same, ($same ? 'core.hooksPath 指向主 clone 的 scripts/hooks' : ($set ? 'core.hooksPath 没有指向主 clone 的 scripts/hooks' : '没有设置 core.hooksPath'))))
-    foreach ($h in 'commit-msg', 'pre-push') { $rows.Add(@((Test-Path -LiteralPath (Join-Path $want $h) -PathType Leaf), "主 clone 的 scripts/hooks/$h 存在")) }
+    foreach ($h in 'commit-msg', 'pre-push') {
+        $ok = Test-Path -LiteralPath (Join-Path $want $h) -PathType Leaf
+        $rows.Add(@($ok, ($ok ? "主 clone 有 scripts/hooks/$h" : "主 clone 缺 scripts/hooks/$h")))
+    }
     $needles = Get-Setting 'RINNE_PRIVACY_LOCAL' 'rinne.privacyLocal'
-    $rows.Add(@(($needles -and (Test-Path -LiteralPath $needles -PathType Leaf)), ($needles ? '个人针文件存在' : '没有配置个人针文件（RINNE_PRIVACY_LOCAL 或 git config rinne.privacyLocal）')))
+    $ok = $needles -and (Test-Path -LiteralPath $needles -PathType Leaf)
+    $rows.Add(@($ok, ($ok ? '个人针文件存在' : ($needles ? '配置的个人针文件不存在' : '没有配置个人针文件（RINNE_PRIVACY_LOCAL 或 git config rinne.privacyLocal）'))))
     foreach ($r in $rows) { Write-Host "[$($r[0] ? 'ok' : 'FAIL')] $($r[1])" }
     @($rows | Where-Object { -not $_[0] }).Count
 }
@@ -82,9 +86,19 @@ function Get-PinVersion($Spec) {
     $Spec.Default
 }
 
+# 跑一次 --version 之类的命令，输出里要有这个版本号。用 Process 而不是 &：pluginval 是 GUI 子系统的程序，
+# & 调它不等退出、也拿不到输出。
 function Test-Installed([string]$Exe, [string[]]$Arguments, [string]$Version, [string]$Node) {
-    $out = if ($Node) { & $Node $Exe @Arguments 2>&1 } else { & $Exe @Arguments 2>&1 }
-    ($LASTEXITCODE -eq 0) -and ("$out" -match "(?<![\d.])$([regex]::Escape($Version))(?![\d.])")
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($Node ? $Node : $Exe)
+    foreach ($a in @($Node ? @($Exe) : @()) + $Arguments) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return $false }
+    $out = $p.StandardOutput.ReadToEndAsync()
+    $err = $p.StandardError.ReadToEnd()
+    $p.WaitForExit()
+    ($p.ExitCode -eq 0) -and ("$($out.Result)$err" -match "(?<![\d.])$([regex]::Escape($Version))(?![\d.])")
 }
 
 # 下载、核对、解开一个包；返回入口文件的路径。
@@ -135,19 +149,20 @@ function Install-PyTools {
     $tag = (Get-FileHash -LiteralPath $req -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()
     $dest = Join-Path $ToolsDir "pytools-$tag"
     $bin = Join-Path $dest ($IsWindows ? 'Scripts' : 'bin')
+    $ext = $IsWindows ? '.exe' : ''
     $text = Get-Content -LiteralPath $req -Raw
     $want = @{ 'clang-format' = [regex]::Match($text, '(?m)^clang-format==(\S+)').Groups[1].Value; reuse = [regex]::Match($text, '(?m)^reuse(?:\[[^\]]*\])?==(\S+)').Groups[1].Value }
     if (-not (Test-Path -LiteralPath $dest)) {
         & $Python -m venv $dest
         if ($LASTEXITCODE -ne 0) { throw "用 $Python 建 venv 失败" }
-        & (Join-Path $bin 'python') -m pip install --disable-pip-version-check -q --require-hashes -r $req
+        & (Join-Path $bin "python$ext") -m pip install --disable-pip-version-check -q --require-hashes -r $req
         if ($LASTEXITCODE -ne 0) { throw 'pip 安装失败：哈希不符，或 requirements-tools.txt 没有这个 Python 版本的 wheel' }
     }
     foreach ($n in $want.Keys) {
-        if (-not (Test-Installed (Join-Path $bin $n) @('--version') $want[$n] '')) { throw "pytools-$tag 里的 $n 核对不过版本 $($want[$n])；不覆盖，请先手动移走该目录" }
+        if (-not (Test-Installed (Join-Path $bin "$n$ext") @('--version') $want[$n] '')) { throw "pytools-$tag 里的 $n 核对不过版本 $($want[$n])；不覆盖，请先手动移走该目录" }
     }
     Write-Host "[就绪] clang-format $($want['clang-format'])、reuse $($want.reuse)"
-    [ordered]@{ 'rinne.clangFormat' = (Join-Path $bin 'clang-format'); 'rinne.reuse' = (Join-Path $bin 'reuse') }
+    [ordered]@{ 'rinne.clangFormat' = (Join-Path $bin "clang-format$ext"); 'rinne.reuse' = (Join-Path $bin "reuse$ext") }
 }
 
 if ($CheckHooks) {
@@ -158,6 +173,8 @@ if ($CheckHooks) {
 if (-not $ToolsDir) { throw '需要 -ToolsDir 或环境变量 RINNE_TOOLS_DIR' }
 if (-not $IsWindows) { throw '清单里目前只登记了 Windows x64 的包' }
 $all = @($Manifest.Keys) + 'pytools'
+# pwsh -File 把 a,b,c 当成一个字符串传进来
+$Tools = @($Tools | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if (-not $Tools.Count) { $Tools = @($all | Where-Object { $_ -notin 'ninja', 'pluginval' -or ($Manifest[$_].Pin -and (Test-Path -LiteralPath (Join-Path $Root $Manifest[$_].Pin))) }) }
 $unknown = @($Tools | Where-Object { $_ -notin $all })
 if ($unknown.Count) { throw "不认识的工具：$($unknown -join '、')（可选 $($all -join '、')）" }
