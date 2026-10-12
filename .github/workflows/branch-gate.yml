@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 分支与 PR 卫生（required check：branch-gate）。判据都在 scripts/check-commits.mjs，这里只从事件里取数据，
+# 经 env 交给脚本：PR 标题、正文、分支名这些不可信文本一律不插值进 run。
+#   - 分支命名按 base 分规则，名字里不得有私有编号与个人针（fork 只拒绝长期分支名）
+#   - 提交：DCO、只允许 Signed-off-by 一种尾注、AI 署名、subject 格式、作者与提交者邮箱；提交列表与 PR
+#     报告的提交数核对，到 250 个（列表接口的上限）直接判红
+#   - PR 标题与正文：隐私规则、AI 署名、正文末行签名
+#   - 冻结契约守卫；base 是 prod 时，prod 上不得有 dev 之外的非合并提交
+# 同仓 PR 用 secret 里的个人针（--needles ci，缺了判红）；fork PR 读不到 secret，只跑通用规则（ci-optional）。
+name: Branch Gate
+
+on:
+  pull_request:
+    branches: [dev, prod, "feature/**"]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  branch-gate:
+    name: branch-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      NEEDLES: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'ci' || 'ci-optional' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Self-test
+        run: node scripts/check-commits.mjs --self-test
+      - name: Branch name
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: |
+          fork=()
+          if [ "$SAME_REPO" != true ]; then fork=(--fork); fi
+          node scripts/check-commits.mjs branch --head "$HEAD_REF" --base "$BASE_REF" "${fork[@]}" --needles "$NEEDLES"
+      - name: Commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" > "$RUNNER_TEMP/commits.json"
+          if [ "$SAME_REPO" = true ]; then tier=same; else tier=fork; fi
+          node scripts/check-commits.mjs commits --json "$RUNNER_TEMP/commits.json" --expect "$PR_COMMITS" \
+            --tier "$tier" --needles "$NEEDLES"
+      - name: PR title and body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: |
+          fork=()
+          if [ "$SAME_REPO" != true ]; then fork=(--fork --commits-json "$RUNNER_TEMP/commits.json"); fi
+          node scripts/check-commits.mjs pr-text "${fork[@]}" --needles "$NEEDLES"
+      - name: Frozen contracts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}
+        run: node scripts/check-commits.mjs contract-guard --base "$BASE_SHA" --head "$HEAD_SHA" --needles "$NEEDLES"
+      - name: prod only takes what dev already has
+        if: github.base_ref == 'prod'
+        run: |
+          set -euo pipefail
+          extra=$(git rev-list --no-merges origin/prod --not origin/dev | head -n 5)
+          if [ -n "$extra" ]; then
+            echo "::error::prod 上有 dev 之外的非合并提交：$extra"
+            exit 1
+          fi

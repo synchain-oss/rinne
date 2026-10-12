@@ -1,0 +1,6 @@
+{
+  "github_owned_allowed": true,
+  "verified_allowed": false,
+  "patterns_allowed": ["anthropics/claude-code-action@*", "oven-sh/setup-bun@*"],
+  "org_inherited_unused": ["qodo-ai/pr-agent@*", "softprops/action-gh-release@*"]
+}
