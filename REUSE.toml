@@ -38,6 +38,109 @@ SPDX-License-Identifier = "AGPL-3.0-only"
 # --- section:third-party-notices ---
 # third_party/notices/ 下的上游许可声明原文，每份一个 precedence = "override" 的块：
 # 以块里写的为准，原文里 "Copyright notice:" 一类字样不是版权行。声明入库时在此加块。
+# 同目录的 README.md 是本仓写的来源表，归兜底块，所以这里按文件名前缀逐个登记，不用目录通配。
+# THIRD-PARTY-NOTICES.md 是本仓自己写的，但正文引用了上游的版权行；用 override 让 REUSE 不把引文当成它的版权。
+[[annotations]]
+path = "THIRD-PARTY-NOTICES.md"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Synchain"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+path = "third_party/notices/juce.*"
+precedence = "override"
+SPDX-FileCopyrightText = "Raw Material Software Limited"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = "third_party/notices/vst3sdk.*"
+precedence = "override"
+SPDX-FileCopyrightText = "2024 Steinberg Media Technologies GmbH"
+SPDX-License-Identifier = "GPL-3.0-only"
+
+[[annotations]]
+path = "third_party/notices/vst3sdk-base.*"
+precedence = "override"
+SPDX-FileCopyrightText = "2024 Steinberg Media Technologies GmbH"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = "third_party/notices/audiounitsdk.*"
+precedence = "override"
+SPDX-FileCopyrightText = "2000-2021 Apple Inc."
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "third_party/notices/zlib.*"
+precedence = "override"
+SPDX-FileCopyrightText = "1995-2022 Jean-loup Gailly and Mark Adler"
+SPDX-License-Identifier = "Zlib"
+
+[[annotations]]
+path = "third_party/notices/libpng.*"
+precedence = "override"
+SPDX-FileCopyrightText = [
+  "1995-2019 The PNG Reference Library Authors",
+  "2018-2019 Cosmin Truta",
+  "2000-2002, 2004, 2006-2018 Glenn Randers-Pehrson",
+  "1996-1997 Andreas Dilger",
+  "1995-1996 Guy Eric Schalnat, Group 42, Inc.",
+]
+SPDX-License-Identifier = "libpng-2.0"
+
+[[annotations]]
+path = "third_party/notices/libjpeg.*"
+precedence = "override"
+SPDX-FileCopyrightText = "1991-1998 Thomas G. Lane"
+SPDX-License-Identifier = "IJG"
+
+[[annotations]]
+path = "third_party/notices/harfbuzz.*"
+precedence = "override"
+SPDX-FileCopyrightText = "HarfBuzz authors (full list in third_party/notices/harfbuzz.COPYING)"
+SPDX-License-Identifier = "MIT-Modern-Variant"
+
+[[annotations]]
+path = "third_party/notices/sheenbidi.*"
+precedence = "override"
+SPDX-FileCopyrightText = "2014-2022 Muhammad Tayyab Akram"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "third_party/notices/unicode.*"
+precedence = "override"
+SPDX-FileCopyrightText = "1991-2026 Unicode, Inc."
+SPDX-License-Identifier = "Unicode-3.0"
+
+[[annotations]]
+path = "third_party/notices/webview2.*"
+precedence = "override"
+SPDX-FileCopyrightText = "Microsoft Corporation"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = "third_party/notices/catch2.*"
+precedence = "override"
+SPDX-FileCopyrightText = "Catch2 Authors"
+SPDX-License-Identifier = "BSL-1.0"
+
+[[annotations]]
+path = "third_party/notices/space-grotesk.*"
+precedence = "override"
+SPDX-FileCopyrightText = "2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = ["third_party/notices/ibm-plex-sans.*", "third_party/notices/ibm-plex-mono.*"]
+precedence = "override"
+SPDX-FileCopyrightText = "2017 IBM Corp."
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "third_party/notices/noto-sans-sc.*"
+precedence = "override"
+SPDX-FileCopyrightText = "2014-2021 Adobe (http://www.adobe.com/)"
+SPDX-License-Identifier = "OFL-1.1"
 
 # --- section:third-party-src ---
 # 逐字收录的第三方源码，保留上游版权与许可。收录时在此加块。
