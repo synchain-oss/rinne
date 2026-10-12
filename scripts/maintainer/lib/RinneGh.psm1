@@ -350,7 +350,7 @@ function Test-GlobMatch {
   基础设施路径的清单与匹配规则只有一份：scripts/lib/infra-paths.mjs（经 maint.mjs infra 调用）。这里不另写清单：
   评审 bot 跑的是 PR 自己的 review-bot.mjs，削弱评审逻辑的 PR 能给自己判干净，所以碰到这些路径就不自合。
   pr-merge 从主 clone 运行，读到的是 feature 线上的清单，而不是待合并 PR 里的版本。
-  自测用 Set-RinneInfraList 换成 fixture 里的一份 glob（匹配规则仍是 infra-paths.mjs 的）。
+  Set-RinneInfraList 换一份 glob 清单（匹配规则仍是 infra-paths.mjs 的），自测用它核对「清单取不到时不放行」。
 #>
 $script:InfraList = $null
 
@@ -632,18 +632,30 @@ function Import-RinneLocks {
     Import-Module (Join-Path $PSScriptRoot '../../lib/Locks.psm1') -ErrorAction Stop -Global
 }
 
+<#
+  持一把锁跑一段代码：git 锁经 Invoke-WithGitLock，其余（merge、build-slot-1/2）经 Invoke-WithRinneLock。
+  自测用 Set-RinneLockImpl 挂一个观察者：它拿到锁名与「持真锁跑这段代码」的块，记下顺序后照样执行，锁还是真的锁
+  （自测期间换成自测专用的一组锁名，与真在跑的 gates、合并互不等待）。
+#>
+function Invoke-RinneLocked {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][scriptblock]$Script, [double]$TimeoutSeconds = 0)
+    Import-RinneLocks
+    $opts = @{ ScriptBlock = $Script }
+    if ($TimeoutSeconds -gt 0) { $opts.TimeoutSeconds = $TimeoutSeconds }
+    $real = if ($Name -eq 'git') { { Invoke-WithGitLock @opts }.GetNewClosure() }
+    else { $opts.Name = $Name; { Invoke-WithRinneLock @opts }.GetNewClosure() }
+    if ($script:LockImpl) { return & $script:LockImpl $Name $real }
+    & $real
+}
+
 function Invoke-RinneGitLocked {
     param([Parameter(Mandatory)][scriptblock]$Script)
-    if ($script:LockImpl) { return & $script:LockImpl 'git' $Script }
-    Import-RinneLocks
-    Invoke-WithGitLock -ScriptBlock $Script
+    Invoke-RinneLocked -Name git -Script $Script
 }
 
 function Invoke-RinneMergeLocked {
     param([Parameter(Mandatory)][scriptblock]$Script)
-    if ($script:LockImpl) { return & $script:LockImpl 'merge' $Script }
-    Import-RinneLocks
-    Invoke-WithRinneLock -Name merge -ScriptBlock $Script
+    Invoke-RinneLocked -Name merge -Script $Script
 }
 
 function Invoke-RinneBuildSlotLocked {
@@ -651,9 +663,7 @@ function Invoke-RinneBuildSlotLocked {
         [Parameter(Mandatory)][ValidateSet('build-slot-1', 'build-slot-2')][string]$Slot,
         [Parameter(Mandatory)][scriptblock]$Script, [double]$TimeoutSeconds = 2700
     )
-    if ($script:LockImpl) { return & $script:LockImpl $Slot $Script }
-    Import-RinneLocks
-    Invoke-WithRinneLock -Name $Slot -ScriptBlock $Script -TimeoutSeconds $TimeoutSeconds
+    Invoke-RinneLocked -Name $Slot -Script $Script -TimeoutSeconds $TimeoutSeconds
 }
 
 # ---- 定档与工作区状态 -----------------------------------------------------------------------
@@ -661,20 +671,19 @@ function Invoke-RinneBuildSlotLocked {
 <#
   定档规则与判定只有一份：本地 gates 的 scripts/lib/Tiers.psm1 与 tier-rules.json（取主 clone 里、也就是 feature 线上的
   版本，不区分大小写）。gates 的结果 json 是自报的，档位够不够以合并时按 PR 文件清单重算的为准。
-  自测用 Set-RinneTiersImpl 换成假实现：@{ Resolve = { param($files, $card) }; Rank = { param($tier) }; TreeState = { param($root) } }。
+  自测只换掉「主 clone 的工作区状态」（Set-RinneCloneStateImpl），定档照常用真的 Tiers.psm1 与规则。
 #>
-$script:TiersImpl = $null
+$script:CloneStateImpl = $null
 
-function Set-RinneTiersImpl { param($Impl) $script:TiersImpl = $Impl }
+function Set-RinneCloneStateImpl { param([scriptblock]$Impl) $script:CloneStateImpl = $Impl }
 
 function Import-RinneTiers {
-    Import-Module (Join-Path $script:RepoRoot 'scripts/lib/Tiers.psm1') -ErrorAction Stop -Global
+    Import-Module (Join-Path $PSScriptRoot '../../lib/Tiers.psm1') -ErrorAction Stop -Global
 }
 
-<# 这些文件（改名的新旧路径都要给）加上卡片规定的档，最低要跑哪一档：{ Auto（只按文件）; Min（与卡片取高） }。 #>
+<# 这些文件（改名的新旧路径都要给）加上卡片规定的档，最低要跑哪一档：{ Auto（只按文件）; Min（与卡片取高）; … }。 #>
 function Resolve-RinneTierFloor {
     param([AllowEmptyCollection()][string[]]$Files = @(), [string]$CardTier = '')
-    if ($script:TiersImpl) { return & $script:TiersImpl.Resolve $Files $CardTier }
     Import-RinneTiers
     Resolve-RinneTier -Files $Files -CardTier $CardTier
 }
@@ -682,7 +691,6 @@ function Resolve-RinneTierFloor {
 <# 档位的序号（Quick 0、Standard 1、Full 2）；不认识的档位抛错。 #>
 function Get-RinneTierOrder {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Tier)
-    if ($script:TiersImpl) { return & $script:TiersImpl.Rank $Tier }
     Import-RinneTiers
     Get-RinneTierRank $Tier
 }
@@ -690,7 +698,7 @@ function Get-RinneTierOrder {
 <# 仓库的 HEAD 与工作区是否干净（改动、未跟踪的文件，以及被忽略却会被构建读到的文件都算不干净）：{ Sha; Dirty; Ignored }。 #>
 function Get-RinneCloneState {
     param([string]$Root = $script:RepoRoot)
-    if ($script:TiersImpl) { return & $script:TiersImpl.TreeState $Root }
+    if ($script:CloneStateImpl) { return & $script:CloneStateImpl $Root }
     Import-RinneTiers
     Get-RinneTreeState -Root $Root
 }
@@ -742,7 +750,22 @@ function Exit-RinneSelfTestNeedles {
 }
 
 function Set-RinneFake { param([scriptblock]$Handler) $script:Fake = $Handler }
-function Set-RinneLockImpl { param([scriptblock]$Impl) $script:LockImpl = $Impl }
+<#
+  挂上锁的观察者时，Locks.psm1 的锁名换成自测专用的一组（和它自己的自测一样，在模块内部改前缀；没有环境变量能换），
+  与真在跑的 gates、合并互不等待；摘掉时还原。
+#>
+$script:SavedLockScope = $null
+function Set-RinneLockImpl {
+    param([scriptblock]$Impl)
+    if ($Impl -and -not $script:LockImpl) {
+        Import-RinneLocks
+        $script:SavedLockScope = & (Get-Module Locks) { $script:Scope }
+        & (Get-Module Locks) { param($s) $script:Scope = $s } "Rinne-selftest-$PID"
+    } elseif (-not $Impl -and $script:LockImpl) {
+        & (Get-Module Locks) { param($s) $script:Scope = $s } $script:SavedLockScope
+    }
+    $script:LockImpl = $Impl
+}
 
 function Read-RinneFixture {
     param([Parameter(Mandatory)][string]$Name)

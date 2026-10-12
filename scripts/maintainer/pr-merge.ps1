@@ -44,6 +44,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib/RinneGh.psm1') -Force
 
 $PremergeTimeoutSeconds = 2700
 $SlotWaitSeconds = 2700
+$MergeablePoll = @{ Tries = 5; Seconds = 2 }
 $CardPattern = '^(?:RN-\d{2}[a-z]?|K\d+)$'
 $ReviewWorkflows = @('.github/workflows/claude-review.yml', '.github/workflows/review-dispatch.yml')
 # 改到这些路径的子支线合入前要对它的 head 手动 dispatch 一次构建（卡片清单的 needsBranchDispatch 是计划值，这里按实际 diff 再算）
@@ -121,6 +122,11 @@ function Get-MergeFacts {
     $repo = Get-RinneRepo
     $card = Get-RinneCard $CardId
     $pull = Get-RinneApi "repos/$repo/pulls/$Pr"
+    # mergeable 由 GitHub 惰性计算：base 动过之后第一次读常是 null（mergeable_state=unknown），稍等再读几次
+    for ($k = 0; $k -lt $MergeablePoll.Tries -and $null -eq (Get-RinneProp $pull 'mergeable'); $k++) {
+        Start-Sleep -Seconds $MergeablePoll.Seconds
+        $pull = Get-RinneApi "repos/$repo/pulls/$Pr"
+    }
     $head = [string]$pull.head.sha
     $activity = Get-RinnePrActivity $Pr
     $state = Get-RinneReviewState $activity
@@ -565,6 +571,9 @@ function Invoke-SelfTest {
         $tipOps = [System.Collections.Generic.List[object]]::new()
         $buildResult = @{ Code = 0; Out = 'built'; Err = '' }
         $tipMergeCode = 0
+        $pullState = @{ Nulls = 0 }
+        # 路由里的块按调用时的作用域找变量：被测函数自己也有 $pull，所以这里用别的名字指向同一个对象
+        $prFixture = $pull
         # GraphQL 的 review 修改时间可以按 id 改写（造「回复之后又改过」）
         $reviewEdits = @{}
         # 锁的假实现记下持有顺序与当前持有的锁，构建与 wt/tip-<n> 的 git 操作据此断言自己在哪些锁里
@@ -576,7 +585,10 @@ function Invoke-SelfTest {
             'pulls/3/files'                    = { $files }
             'pulls/3/comments'                 = { Read-RinneFixture 'pr3-review-comments.json' }
             'pulls/3/reviews'                  = { Read-RinneFixture 'pr3-reviews.json' }
-            'pulls/3$'                         = { $pull }
+            'pulls/3$'                         = {
+                if ($pullState.Nulls -gt 0) { $pullState.Nulls--; $p = Copy-RinneObject $prFixture; $p.mergeable = $null; $p.mergeable_state = 'unknown'; return $p }
+                $prFixture
+            }
             'issues/3/comments'                = { Read-RinneFixture 'pr3-issue-comments.json' }
             'api -X POST graphql'              = {
                 param($argv)
@@ -623,34 +635,34 @@ function Invoke-SelfTest {
         }
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Set-RinneLockImpl { param($name, $sb) $lockLog.Add($name); $held.Add($name); try { & $sb } finally { $held.RemoveAt($held.Count - 1) } }
-        # 定档：本地 gates 的 Tiers.psm1 还不在 feature 线上，先用照它的接口写的假实现与 fixture 里的规则子集
-        # （不区分大小写，Min = max(按文件, 卡片)）；主 clone 的工作区状态由 $tree 给出
-        $tierRules = Read-RinneFixture 'tier-rules.json'
+        # 定档用仓里真的 scripts/lib/Tiers.psm1 与 tier-rules.json；只有主 clone 的工作区状态由 $tree 给出
         $tree = @{ Sha = $tipSha; Dirty = $false; Ignored = @() }
-        $rankOf = { param($t) if (-not $t) { return -1 }; $i = [array]::IndexOf([string[]]$tierRules.tiers, $t); if ($i -lt 0) { throw "未知档位 $t" }; $i }
-        Set-RinneTiersImpl @{
-            Rank      = $rankOf
-            Resolve   = {
-                param($files, $cardTier)
-                $rank = 0
-                foreach ($p in @($files)) {
-                    $r = if (@($tierRules.quick | Where-Object { $p -match $_ }).Count) { 0 } else { & $rankOf $tierRules.default }
-                    foreach ($x in $tierRules.rules) { if ($p -match $x.re) { $r = [Math]::Max($r, (& $rankOf $x.tier)) } }
-                    $rank = [Math]::Max($rank, $r)
-                }
-                [pscustomobject]@{ Auto = $tierRules.tiers[$rank]; Min = $tierRules.tiers[[Math]::Max($rank, (& $rankOf $cardTier))] }
-            }
-            TreeState = { param($root) [pscustomobject]$tree }
-        }
-        # 基础设施清单换成 fixture 里的一份（匹配规则仍取自 scripts/lib/infra-paths.mjs）
-        Set-RinneInfraList (Join-Path $PSScriptRoot 'fixtures/infra-paths.json')
+        Set-RinneCloneStateImpl { param($root) [pscustomobject]$tree }
+        # 基础设施清单与匹配规则都用仓里真的 scripts/lib/infra-paths.mjs
         $base = Get-MergeFacts -Pr 3 -CardId $cid
+        # mergeable 先读到 null（GitHub 还在算）：稍等再读；一直是 null 就判不可合并
+        $MergeablePoll.Seconds = 0
+        $pullState.Nulls = 2
+        $vm = Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid)
+        Add-RinneCase $cases 'mergeable 先是 null、再读到 true 放行' $false (-not ($vm.Code -eq 'ready' -and $pullState.Nulls -eq 0))
+        $pullState.Nulls = 99
+        $vm = Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid)
+        $pullState.Nulls = 0
+        Add-RinneCase $cases 'mergeable 一直是 null 判不可合并' $true ($vm.Code -eq 'not-ready' -and @($vm.Failures | Where-Object { $_ -match '不可合并' }).Count -eq 1)
         $v = Get-MergeVerdict $base
         Add-RinneCase $cases '干净的 PR 判 ready' $false ($v.Code -ne 'ready')
         if ($v.Code -ne 'ready') { [Console]::Error.WriteLine((ConvertTo-RinneJsonText $v)) }
         Add-RinneCase $cases '契约守卫对当前 origin/feature/v1 重跑' $false (-not ($log | Where-Object { $_ -match 'contract-guard --base origin/feature/v1 --head refs/remotes/origin/pr/3' }))
         Add-RinneCase $cases '合并前 fetch 了 feature/v1、dev 与 PR head' $false (-not ($log | Where-Object { $_ -match 'fetch --no-tags origin .*feature/v1.*dev.*refs/pull/3/head' }))
         Add-RinneCase $cases '没有用到用户记录时 ReliedOn 为空' $false (@($v.ReliedOn).Count -gt 0)
+        # 用的是真的模块：定档取自仓里的 scripts/lib/Tiers.psm1；锁是 Locks.psm1 的真锁（自测专用的一组名字）
+        $repoLib = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../lib'))
+        $tiersMod = @(Get-Module Tiers | Where-Object { [IO.Path]::GetDirectoryName($_.Path) -eq $repoLib })
+        Add-RinneCase $cases '定档用的是仓里的 scripts/lib/Tiers.psm1' $false ($tiersMod.Count -ne 1)
+        $lockName = "Local\Rinne-selftest-$PID-git"
+        $probe = { $m = $null; $ok = [System.Threading.Mutex]::TryOpenExisting($lockName, [ref]$m); if ($m) { $m.Dispose() }; $ok }
+        $inside = Invoke-RinneGitLocked { & $probe }
+        Add-RinneCase $cases 'git 锁是 Locks.psm1 的真锁（块里能看到持有的互斥体，块外没有）' $false (-not ($inside -eq $true -and -not (& $probe)))
         # review 的 updated_at：REST 没有这一项，取 GraphQL 修改时间与提交时间中较晚的一个
         $rv = @($base.Activity.Reviews | Where-Object { [string]$_.id -eq '5486375750' })[0]
         Add-RinneCase $cases 'review 的 updated_at 取 GraphQL 的 updatedAt（晚于提交时间时）' $false ((Get-RinneProp $rv 'updated_at') -ne '2026-10-12T03:51:22Z')
@@ -1015,7 +1027,7 @@ function Invoke-SelfTest {
     } finally {
         Set-RinneFake $null
         Set-RinneLockImpl $null
-        Set-RinneTiersImpl $null
+        Set-RinneCloneStateImpl $null
         Set-RinneInfraList $null
         Exit-RinneSelfTestNeedles $needles
         $env:RINNE_ROOT = $saved.Root
