@@ -68,7 +68,8 @@ jobs:
           done
           { echo "base=$base"; echo "base_sha=$base_sha"; echo "head=$head"; } >> "$GITHUB_OUTPUT"
 
-      # 文件列表取自钉住的 base...head；compare 接口最多列 300 个文件，列满时核对不完，按「改了 workflow」处理。
+      # 文件列表取自钉住的 base...head，改名的文件连原路径一起查（把 workflow 挪出 .github/ 也算改了 workflow）。
+      # compare 接口最多列 300 个文件：按 .files 的条数判断，列满时核对不完，按「改了 workflow」处理。
       # 文件名是 PR 可控的文本，回显时停掉 workflow 命令解析。回帖成功后留标记文件，末尾的失败回帖见到它就不再重复。
       - name: Abort if the PR touches workflows
         env:
@@ -78,12 +79,14 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head }}
         run: |
           set -euo pipefail
-          files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[].filename')
+          cmp="$RUNNER_TEMP/compare.json"
+          gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$HEAD_SHA" > "$cmp"
+          n=$(jq '.files | length' "$cmp")
+          files=$(jq -r '.files[] | .filename, (.previous_filename // empty)' "$cmp")
           stop=$(openssl rand -hex 16)
           echo "::stop-commands::$stop"
           printf '%s\n' "$files"
           echo "::$stop::"
-          n=$(printf '%s\n' "$files" | grep -c . || true)
           reason=""
           if [ "$n" -ge 300 ]; then
             reason="该 PR 改动的文件达到比较接口能列出的上限（300 个），核对不了有没有改 workflow"
