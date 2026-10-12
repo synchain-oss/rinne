@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# 标签必须是 .github/labels.json 里登记过的（labels 检查核对）。
+name: 宿主实测报告 · Host report
+description: Rinne 在你的 DAW 里实测的结果，能用也欢迎报 · How Rinne behaves in your DAW, working or not
+labels:
+  - host-report
+body:
+  - type: markdown
+    attributes:
+      value: |
+        实测结果会汇总进 DAW 兼容性文档。出了问题请另提缺陷报告，这里只记结果。
+        Results feed the DAW compatibility page. For problems, please also open a bug report.
+  - type: input
+    id: version
+    attributes:
+      label: Rinne 版本 · Version
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统 · OS
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS（Apple Silicon）
+        - 其他 · Other
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: 宿主与版本 · Host (DAW) and version
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: 插件格式 · Plugin format
+      options:
+        - VST3
+        - AU
+    validations:
+      required: true
+  - type: input
+    id: audio
+    attributes:
+      label: 采样率与缓冲区 · Sample rate and buffer size
+      placeholder: 48 kHz / 256
+  - type: checkboxes
+    id: results
+    attributes:
+      label: 结果（勾上正常的项） · Results (tick what works)
+      options:
+        - label: 两端能配对，状态带显示已连接 · The two plugins pair and show connected
+        - label: 实时播放时回送正常 · Feedback works during playback
+        - label: 离线导出与实时播放一致 · Offline export matches playback
+        - label: 旁路 Rinne Input 或 Rinne Output 时回送按说明停止 · Bypassing either plugin stops the feedback as documented
+        - label: 保存并重开工程后设置还在 · Settings survive saving and reopening the project
+  - type: textarea
+    id: notes
+    attributes:
+      label: 备注 · Notes
+      description: 放置位置、宿主设置（例如 ASIO-Guard、延迟补偿）、任何异常 · Placement, host settings, anything unusual

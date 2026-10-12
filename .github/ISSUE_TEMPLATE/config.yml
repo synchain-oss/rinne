@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞 · Security vulnerability
+    url: https://github.com/synchain-oss/rinne/security/advisories/new
+    about: 私有漏洞报告，请不要公开提 issue · Report privately; please do not open a public issue

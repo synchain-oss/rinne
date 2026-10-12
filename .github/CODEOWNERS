@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 只起提示作用：rulesets 不要求 approval，CODEOWNERS 不构成合并防护。合并防护见 .github/rulesets/ 与 required checks。
+# 后面的规则优先；单列出来的是改动时要格外小心的路径：CI 与评审 bot、检查脚本与 hooks、冻结契约。
+* @DLsnows
+/.github/ @DLsnows
+/scripts/ @DLsnows
+/docs/contracts/ @DLsnows

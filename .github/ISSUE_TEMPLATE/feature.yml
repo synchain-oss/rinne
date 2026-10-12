@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# 标签必须是 .github/labels.json 里登记过的（labels 检查核对）。
+name: 功能建议 · Feature request
+description: 新功能或改进 · Suggest an idea
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题 · Problem
+      description: 你在做什么、现在卡在哪里 · What you are trying to do and what gets in the way
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的做法 · Proposal
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的其他做法 · Alternatives considered
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全 · Safety
+      options:
+        - label: 这个建议不需要削弱默认安全（反馈默认 0、限制器、失控保护等） · It does not require weakening the default safety (feedback at 0, limiter, runaway guard)

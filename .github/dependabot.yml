@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# dependabot 只管 GitHub Actions 的钉版；其余工具的钉版文件是单一真源，手动升级。
+# 配置从默认分支（dev）读取，PR 也开到 dev：v1 合进 dev 之前 dev 上没有本文件，所以那之后才生效。
+# 它只改 workflow 里的 SHA 与版本注释，不会更新 .github/actions-lock.json：docs-truth 会在它的 PR 上变红，
+# 由维护者在该分支上跑 node scripts/lock-actions.mjs 补上锁文件（嵌套的 uses 也要一起核对）。
+# 标签必须是 .github/labels.json 里登记过的（labels 检查核对），否则 dependabot 会自己建出不在真源里的标签。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - dependencies
+      - github_actions

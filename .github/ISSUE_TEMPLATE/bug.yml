@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# 标签必须是 .github/labels.json 里登记过的（labels 检查核对）。
+name: 缺陷报告 · Bug report
+description: 出错、崩溃、爆音，或行为与说明不符 · Something is broken
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **安全漏洞请不要在这里提**，改用私有漏洞报告（见 SECURITY.md）。
+        Please report security vulnerabilities privately (see SECURITY.md), not here.
+
+        听到啸叫或失控时，先旁路 Rinne Input 或点紧急切断，再调低监听音量。
+        If you hear runaway feedback, bypass Rinne Input or hit Panic first, then turn your monitors down.
+  - type: input
+    id: version
+    attributes:
+      label: Rinne 版本 · Version
+      description: 关于面板里的版本号 · From the About panel
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统 · OS
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS（Apple Silicon）
+        - 其他 · Other
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: 宿主与版本 · Host (DAW) and version
+      placeholder: Cubase 15
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: 插件格式 · Plugin format
+      options:
+        - VST3
+        - AU
+    validations:
+      required: true
+  - type: input
+    id: audio
+    attributes:
+      label: 采样率与缓冲区 · Sample rate and buffer size
+      placeholder: 48 kHz / 256
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 · What happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 · Steps to reproduce
+      description: 两个插件分别放在哪条轨道的哪一格、用的哪个组 · Where each plugin sits, and which group
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望的行为 · Expected behaviour
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 状态与诊断 · Status and diagnostics
+      description: 状态带上的配对状态与提示；开了诊断日志就附上（先删掉个人信息） · Pairing status shown, and the diagnostics log if enabled (remove personal info first)
+      render: text
