@@ -61,7 +61,7 @@ function Invoke-SelfTest {
     try {
         $env:RINNE_ROOT = $tmp
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
-        Set-RinneLockImpl { param($sb) $locked.Add('lock'); & $sb }
+        Set-RinneLockImpl { param($name, $sb) $locked.Add('lock'); & $sb }
         $r = New-CardWorktree -Card $cid -Slug 'example-card'
         $add = @($log | Where-Object { $_ -match 'worktree add' })
         $wt = Join-Path $tmp "wt/$cid"

@@ -62,7 +62,7 @@ function Invoke-SelfTest {
     try {
         $env:RINNE_GITLEAKS = 'gitleaks-fake'
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
-        Set-RinneLockImpl { param($sb) & $sb }
+        Set-RinneLockImpl { param($name, $sb) & $sb }
         $r = Invoke-Push -Repo 'wt'
         $push = @($log | Where-Object { $_ -match ' push ' })
         Add-RinneCase $cases '新分支：先 gitleaks 扫 origin/feature/v1..HEAD，再推 HEAD:refs/heads/feat/<slug>' $false (-not (

@@ -492,16 +492,30 @@ function Get-RinneRequiredChecks {
     (Get-Content -Raw -LiteralPath $f | ConvertFrom-Json -Depth 20).'feature-lines'.contexts
 }
 
-# ---- git 锁 ---------------------------------------------------------------------------------
+# ---- 锁 -------------------------------------------------------------------------------------
 
-<# 所有 fetch / merge / worktree 操作包在本地 gates 提供的 Invoke-WithGitLock 里（scripts/lib/Locks.psm1）。 #>
+<#
+  锁由本地 gates 的 scripts/lib/Locks.psm1 提供（Local\ 命名互斥体，在 finally 里释放；超时抛 TimeoutException）：
+  - git 锁：所有 fetch / merge / worktree 操作包在 Invoke-WithGitLock 里；
+  - merge 锁：pr-merge 的 -Merge 与 -After 整段持有 Invoke-WithRinneLock -Name merge，同一时间只合一个 PR。
+  先 merge 后 git，顺序固定。块里的 git 失败由 Invoke-RinneGit 自己按退出码抛错。
+#>
+function Import-RinneLocks {
+    Import-Module (Join-Path $PSScriptRoot '../../lib/Locks.psm1') -ErrorAction Stop -Global
+}
+
 function Invoke-RinneGitLocked {
     param([Parameter(Mandatory)][scriptblock]$Script)
-    if ($script:LockImpl) { return & $script:LockImpl $Script }
-    $locks = Join-Path $script:RepoRoot 'scripts/lib/Locks.psm1'
-    if (-not (Test-Path -LiteralPath $locks)) { throw '需要 scripts/lib/Locks.psm1 的 Invoke-WithGitLock（本地 gates 入库后才有）' }
-    Import-Module $locks -Force -Global
-    Invoke-WithGitLock $Script
+    if ($script:LockImpl) { return & $script:LockImpl 'git' $Script }
+    Import-RinneLocks
+    Invoke-WithGitLock -ScriptBlock $Script
+}
+
+function Invoke-RinneMergeLocked {
+    param([Parameter(Mandatory)][scriptblock]$Script)
+    if ($script:LockImpl) { return & $script:LockImpl 'merge' $Script }
+    Import-RinneLocks
+    Invoke-WithRinneLock -Name merge -ScriptBlock $Script
 }
 
 # ---- 自测框架 -------------------------------------------------------------------------------

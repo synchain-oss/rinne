@@ -305,7 +305,7 @@ function New-MergeMessage {
     @{ Title = $title; Body = "$text`n`n$(Get-Signoff)" }
 }
 
-function Invoke-Merge {
+function Invoke-MergeUnlocked {
     param([int]$Pr, [string]$CardId, [string]$SummaryFile, [switch]$ApprovedByUser)
     $v = Get-MergeVerdict (Get-MergeFacts $Pr $CardId)
     $onlyInfra = $v.Code -eq 'needs-user' -and @($v.Needs | Where-Object Kind -ne 'infra').Count -eq 0
@@ -322,7 +322,7 @@ function Invoke-Merge {
     Write-Output "已合并 #$Pr → $($res.sha)"
 }
 
-function Invoke-After {
+function Invoke-AfterUnlocked {
     param([int]$Pr, [string]$CardId)
     $pull = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
     if (-not $pull.merged) { throw "#$Pr 还没有合并" }
@@ -350,6 +350,17 @@ function Invoke-After {
         }
     } | Out-Null
     Write-Output "#$Pr 已合入 $($sha.Substring(0, 7))「$($pull.title)」；回读通过，远端子支线与 worktree 已清理"
+}
+
+<# -Merge 与 -After 整段持有 merge 锁：同一时间只合一个 PR（核对、合并、回读之间不会插进另一次合并）。 #>
+function Invoke-Merge {
+    param([int]$Pr, [string]$CardId, [string]$SummaryFile, [switch]$ApprovedByUser)
+    Invoke-RinneMergeLocked { Invoke-MergeUnlocked -Pr $Pr -CardId $CardId -SummaryFile $SummaryFile -ApprovedByUser:$ApprovedByUser }
+}
+
+function Invoke-After {
+    param([int]$Pr, [string]$CardId)
+    Invoke-RinneMergeLocked { Invoke-AfterUnlocked -Pr $Pr -CardId $CardId }
 }
 
 # ---- 自测 -----------------------------------------------------------------------------------
@@ -398,7 +409,8 @@ function Invoke-SelfTest {
             'check-commits\.mjs contract-guard' = { @{ Code = 0; Out = 'check-commits contract-guard：通过'; Err = '' } }
         }
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
-        Set-RinneLockImpl { param($sb) & $sb }
+        $lockLog = [System.Collections.Generic.List[string]]::new()
+        Set-RinneLockImpl { param($name, $sb) $lockLog.Add($name); & $sb }
         # 基础设施清单换成 fixture 里的一份（匹配规则仍取自 scripts/lib/infra-paths.mjs）
         Set-RinneInfraList (Join-Path $PSScriptRoot 'fixtures/infra-paths.json')
         $base = Get-MergeFacts -Pr 3 -CardId $cid
@@ -489,7 +501,10 @@ function Invoke-SelfTest {
         $put = [System.Collections.Generic.List[object]]::new()
         $routes.Insert(0, 'api -X PUT \S+/pulls/3/merge --input', { param($argv) $put.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); @{ merged = $true; sha = 'f' * 40 } })
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
+        Add-RinneCase $cases '-Check 只拿 git 锁，不拿 merge 锁' $false ($lockLog -contains 'merge' -or -not ($lockLog -contains 'git'))
+        $lockLog.Clear()
         Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null
+        Add-RinneCase $cases '-Merge 整段持有 merge 锁（先 merge 后 git）' $false (-not ($lockLog.Count -ge 2 -and $lockLog[0] -eq 'merge' -and $lockLog -contains 'git'))
         $m = $put[-1]
         Add-RinneCase $cases '-Merge：squash、sha=审过的 head、subject (#3)、body 末行唯一签名' $false (-not (
                 $m.merge_method -eq 'squash' -and $m.sha -eq $head -and $m.commit_title -match '\(#3\)$' -and
@@ -510,7 +525,7 @@ function Invoke-SelfTest {
         $merged.merged = $true; $merged.state = 'closed'; $merged.merge_commit_sha = 'f' * 40
         $sq = "ci(review): 加入评审 bot、PR 模板、标签与 CODEOWNERS (#3)`n`n加入。`n`n$(Get-Signoff)"
         $locks = [System.Collections.Generic.List[string]]::new()
-        Set-RinneLockImpl { param($sb) $locks.Add('lock'); & $sb }
+        Set-RinneLockImpl { param($name, $sb) $locks.Add($name); & $sb }
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
         $after = [ordered]@{
             'pulls/3$'                       = { $merged }
@@ -527,9 +542,9 @@ function Invoke-SelfTest {
         $log.Clear()
         Set-RinneFake (New-RinneFake -Routes $after -Log $log)
         $line = Invoke-After -Pr 3 -CardId $cid
-        Add-RinneCase $cases '-After：回读通过后删远端子支线、持锁移除 worktree 与本地分支' $false (-not (
+        Add-RinneCase $cases '-After：持 merge 锁；回读通过后删远端子支线、持 git 锁移除 worktree 与本地分支' $false (-not (
                 $line -match '已合入 fffffff' -and @($log | Where-Object { $_ -match 'push origin --delete refs/heads/feat/review-bot' }).Count -eq 1 -and
-                @($log | Where-Object { $_ -match 'worktree remove' }).Count -eq 1 -and $locks.Count -ge 2))
+                @($log | Where-Object { $_ -match 'worktree remove' }).Count -eq 1 -and $locks[0] -eq 'merge' -and @($locks | Where-Object { $_ -eq 'git' }).Count -ge 2))
         $sq = "ci(review): 加入 (#3)`n`n加入。`n`n$(Get-Signoff)`n$(Get-Signoff)"
         Add-RinneCase $cases '-After：squash 消息有两行签名' $true (Test-Throws { Invoke-After -Pr 3 -CardId $cid })
         $sq = "ci(review): 加入`n`n加入。`n`n$(Get-Signoff)"
