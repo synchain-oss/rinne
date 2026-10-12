@@ -55,7 +55,7 @@ const GOOD = {
 export default {
     name: "pins",
     group: "docs",
-    inputs: Object.keys(PINS),
+    inputs: [], // 钉版文件缺失在 checkPins 里直接判红，不能变成 SKIP
     run(ctx) {
         const read = (rel) => {
             const abs = path.join(ctx.root, rel);

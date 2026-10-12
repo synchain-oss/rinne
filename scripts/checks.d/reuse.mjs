@@ -43,8 +43,11 @@ const GOOD = ["version = 1", ...SECTIONS.flatMap((s, i) => [`# --- section:${s} 
 export default {
     name: "reuse",
     group: "compliance",
-    inputs: ["REUSE.toml", "LICENSES"],
+    inputs: [],
     run(ctx) {
+        // 必须存在的文件不交给 inputs（缺了会被当成 SKIP），在这里直接判红
+        const missing = ["REUSE.toml", "LICENSES"].filter((p) => !fs.existsSync(path.join(ctx.root, p)));
+        if (missing.length) return { ok: false, lines: missing.map((p) => `缺 ${p}`) };
         const toml = fs.readFileSync(path.join(ctx.root, "REUSE.toml"), "utf8");
         const errors = checkReuseToml(toml, fs.readdirSync(path.join(ctx.root, "LICENSES")));
         if (errors.length) return { ok: false, lines: errors };
