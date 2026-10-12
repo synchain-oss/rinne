@@ -258,9 +258,10 @@ $asked = if ($Full) { 'Full' } elseif ($Standard) { 'Standard' } elseif ($Quick)
 $t = Resolve-Tier $files $CardTier $asked
 $cardNote = $CardTier ? "，卡片要求 $CardTier" : ''
 $results = [System.Collections.Generic.List[object]]::new()
-if (-not $diffOk) { $results.Add((New-Result 'G0' '定档' 'FAIL' "算不出 $Base...HEAD 的 diff（先 fetch 基线）")) }
-elseif ($t.Lowered) { $results.Add((New-Result 'G0' '定档' 'FAIL' "所选 $($t.Run) 低于最低档 $($t.Min)（按 diff 是 $($t.Auto)$cardNote）")) }
+$add = { param($R) $results.Add($R); Write-ResultLine $R }
 Write-Host "定档：$($files.Count) 个文件变动，按 diff 是 $($t.Auto)$cardNote，本次跑 $($t.Run)"
+if (-not $diffOk) { & $add (New-Result 'G0' '定档' 'FAIL' "算不出 $Base...HEAD 的 diff（先 fetch 基线）") }
+elseif ($t.Lowered) { & $add (New-Result 'G0' '定档' 'FAIL' "所选 $($t.Run) 低于最低档 $($t.Min)（按 diff 是 $($t.Auto)$cardNote）") }
 if ($env:RINNE_LOCK_SCOPE) { Write-Host "[WARN] RINNE_LOCK_SCOPE=$env:RINNE_LOCK_SCOPE：锁名换成了自测用的一组，与别的 gates 不互斥" }
 
 $marker = $env:RINNE_USER_TESTING_MARKER
@@ -271,11 +272,11 @@ if ($deferred) {
     Write-Host "USER_TESTING 标记存在：用户正在上机测试，$($t.Run) 档暂停（DEFER）"
 } else {
     $reg = Test-Registrations @(Import-GateModules $GatesDir)
-    foreach ($p in $reg.Problems) { $results.Add((New-Result 'G0' '模块注册' 'FAIL' $p)) }
+    foreach ($p in $reg.Problems) { & $add (New-Result 'G0' '模块注册' 'FAIL' $p) }
     $ctx = [pscustomobject]@{ Root = $Root; Base = $Base; Tier = $t.Run; Sha = $sha; Files = $files; BuildDir = $BuildDir; JucePath = $JucePath
         Jobs = 2; Setting = ${function:Get-RinneSetting} }
-    foreach ($g in $reg.Valid | Where-Object { (Get-TierRank $_.Tier) -le (Get-TierRank $t.Run) }) { $r = Invoke-Gate $g $ctx; $results.Add($r); Write-ResultLine $r }
-    foreach ($m in @(Get-MissingGates $reg.Seen (Get-TierRank $t.Run))) { $results.Add($m); Write-ResultLine $m }
+    foreach ($g in $reg.Valid | Where-Object { (Get-TierRank $_.Tier) -le (Get-TierRank $t.Run) }) { & $add (Invoke-Gate $g $ctx) }
+    foreach ($m in @(Get-MissingGates $reg.Seen (Get-TierRank $t.Run))) { & $add $m }
 }
 
 $finished, $count = (Get-Date), @{ PASS = 0; FAIL = 0; SKIP = 0; FLAKY = 0 }

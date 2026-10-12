@@ -14,6 +14,16 @@
 # 互斥体有线程归属：取与放要在同一线程上，在同一个 pwsh 进程里顺序调用即可。同一线程重复取同一把会重入成功，
 # 所以互斥只在进程之间成立。内存只经 Get-Counter 读。
 # RINNE_LOCK_SCOPE 只给自测用：换一组名字，自测与真在跑的 gates 互不等待。
+#
+# 用法（导入一定带 -ErrorAction Stop：模块缺失时 Import-Module 默认只写一条非终止错误）：
+#   Import-Module (Join-Path $PSScriptRoot '../lib/Locks.psm1') -ErrorAction Stop
+#   Invoke-WithGitLock { git fetch --quiet origin feature/v1 }            # 默认最多等 600 秒
+#   Invoke-WithRinneLock -Name merge -TimeoutSeconds 1800 { … }
+#   $lock = Enter-RinneLock gui -TimeoutSeconds 60; if (-not $lock) { … }; try { … } finally { Exit-RinneLock $lock }
+# 脚本块的输出原样返回；块里原生命令的非 0 退出码不会变成异常，由调用方看 $LASTEXITCODE。
+# 等不到锁时 Invoke-With* 抛 TimeoutException、块不执行；锁名不认识、互斥体建不出来也都抛错。
+# 上一个持有者被杀（AbandonedMutex）时照常接手并打印一行提示，这是有意的：内核已经把所有权交给了等待者，
+# 持锁方被杀后要能马上接着用；git 自己的 *.lock 文件会让残留状态在下一条 git 命令上明确报错。
 
 $script:Names = 'build-slot-1', 'build-slot-2', 'gui', 'merge', 'git', 'ipc-tests'
 
