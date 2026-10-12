@@ -4,8 +4,10 @@
 # G2–G5 与 CI 的 format、compliance、branch-gate 三个 workflow 调用同一批命令、同样的参数，判据逐条对应。不同只有：
 #   - 个人针读仓外的针表文件（--needles 缺省为 local），CI 读 secret；
 #   - 提交区间是 <Base>..HEAD，CI 是 PR 的 base..head；
-#   - 工作树的 gitleaks 扫 HEAD 的导出：CI 的 checkout 里只有入库的文件，本机工作树里还可能有被忽略的构建产物；
+#   - 工作树的 gitleaks 扫 HEAD 里每个跟踪文件的导出（checkout-index，不受 export-ignore 影响）：CI 的 checkout 里只有
+#     入库的文件，本机工作树里还可能有被忽略的构建产物；
 #   - PR 标题与正文由 pr-open 在发出前检查，这里没有 PR。
+# G3 跑的 --only 清单由 Test-RinneGates 对着 compliance.yml 原文核对，workflow 加了检查而这里没跟上时自测变红。
 # 工具先找环境变量，再找 git config（主 clone 的本地配置对它的所有 worktree 生效），最后退回 PATH；键名见 $Tools。
 # prettier 配成 prettier.cjs 这类脚本时用钉版 node 运行。版本由 G1 对着钉版文件逐个核对。
 
@@ -147,16 +149,24 @@ function Invoke-Prettier($Ctx) {
     Invoke-Steps $Ctx @(Step 'prettier --check .' (Get-ToolCommand $Ctx prettier) @('--check', '.'))
 }
 
-# 把 HEAD 的树导出到一个新建的临时目录，返回导出的目录。
+# 把 HEAD 里每个跟踪文件导出到一个新建的临时目录，返回导出的目录。用临时索引加 checkout-index，不用 git archive：
+# 仓内任何一层 .gitattributes 写个 export-ignore 就能让 archive 漏掉文件。
 function Export-Head([string]$Root, [string]$Dir) {
-    $tar = Join-Path $Dir 'head.tar'
     $tree = Join-Path $Dir 'tree'
     $null = New-Item -ItemType Directory -Path $tree
-    git -C $Root archive --format=tar -o $tar HEAD
-    if ($LASTEXITCODE -ne 0) { throw 'git archive HEAD 失败' }
-    [System.Formats.Tar.TarFile]::ExtractToDirectory($tar, $tree, $false)
+    $saved = $env:GIT_INDEX_FILE
+    try {
+        $env:GIT_INDEX_FILE = Join-Path $Dir 'index'
+        git -C $Root read-tree HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'git read-tree HEAD 失败' }
+        git -C $Root checkout-index --all --force "--prefix=$($tree -replace '\\', '/')/"
+        if ($LASTEXITCODE -ne 0) { throw 'git checkout-index 失败' }
+    } finally { $env:GIT_INDEX_FILE = $saved }
     $tree
 }
+
+# 与 compliance.yml 里 run-checks 的 --only 一一对应，顺序也相同；Test-RinneGates 拿 workflow 原文核对。
+$script:ComplianceOnly = 'spdx', 'reuse', 'licenses-closure', 'modules-closure', 'offline', 'privacy'
 
 function Invoke-Compliance($Ctx) {
     $node, $gl, $range = (Get-ToolCommand $Ctx node), (Get-ToolCommand $Ctx gitleaks), "$($Ctx.Base)..HEAD"
@@ -166,14 +176,28 @@ function Invoke-Compliance($Ctx) {
         $tree = Export-Head $Ctx.Root $tmp
         Invoke-Steps $Ctx @(
             (Step '自测（compliance 组）' $node @($rc, '--group', 'compliance', '--self-test'))
-            (Step 'SPDX' $node @($rc, '--group', 'compliance', '--only', 'spdx'))
-            (Step 'REUSE' $node @($rc, '--group', 'compliance', '--only', 'reuse'))
+            foreach ($only in $script:ComplianceOnly) { Step $only $node @($rc, '--group', 'compliance', '--only', $only) }
             (Step 'gitleaks 工作树' $gl @('dir', '.', '--no-banner', '--redact') $tree)
-            (Step '隐私 工作树' $node @($rc, '--group', 'compliance', '--only', 'privacy'))
             (Step 'gitleaks 提交' $gl @('git', '.', '--no-banner', '--redact', "--log-opts=$range --no-ext-diff --no-textconv"))
             (Step '隐私 提交' $node @('scripts/check-privacy.mjs', '--commits', '--no-messages', $range))
         )
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# workflow 里 run-checks 的 compliance 组用到的 --only，按出现顺序。
+function Get-WorkflowOnly([string]$Yaml) {
+    @([regex]::Matches($Yaml, 'run-checks\.mjs --group compliance --only ([\w-]+)') | ForEach-Object { $_.Groups[1].Value })
+}
+
+# 自测（运行器传入仓根）：G3 的 --only 清单与 compliance.yml 一致；workflow 多一项或少一项都要被认出来。
+function Test-RinneGates([string]$Root) {
+    $yml = Get-Content -LiteralPath (Join-Path $Root '.github/workflows/compliance.yml') -Raw
+    $same = { param($a, $b) (@($a) -join ',') -ceq (@($b) -join ',') }
+    $real = Get-WorkflowOnly $yml
+    $extra = Get-WorkflowOnly ($yml + "`n          node scripts/run-checks.mjs --group compliance --only newcheck")
+    [pscustomobject]@{ Label = 'G3 的 --only 清单与 compliance.yml 逐项一致'; Bad = $false; Passed = $real.Count -gt 0 -and (& $same $real $script:ComplianceOnly) }
+    [pscustomobject]@{ Label = 'compliance.yml 新增一项检查时 G3 对不上'; Bad = $true; Passed = -not (& $same $extra $script:ComplianceOnly) }
+    [pscustomobject]@{ Label = 'G3 少跑一项时对不上'; Bad = $true; Passed = -not (& $same $real @($script:ComplianceOnly | Select-Object -SkipLast 1)) }
 }
 
 function Invoke-Commits($Ctx) {
