@@ -1,0 +1,104 @@
+{
+  "about": "本地 gates 的定档规则，由 scripts/gates.ps1 读取。rules：git diff <Base>...HEAD 里每个文件取命中规则的最高档，没有命中的是 Quick（文档与脚本）；卡片规定的档只能往上抬。re 是区分大小写的 .NET 正则，对仓内相对路径（正斜杠）匹配。gates：各档必须有的 gate；档里的条目没有 gates.d 模块注册时，requires 列的文件都在就判 FAIL，缺任何一个就记 SKIP 并写明原因。cases：gates.ps1 -SelfTest 的表驱动用例；want 是最低档，ask 是本次选的档，fail 表示所选档低于最低档、必须判 FAIL。",
+  "tiers": ["Quick", "Standard", "Full"],
+  "rules": [
+    { "tier": "Standard", "re": "^(?:src|tests|cmake|tools)/", "why": "C++ 源码、测试、CMake 模块与工具" },
+    { "tier": "Standard", "re": "(?:^|/)CMakeLists\\.txt$|\\.cmake$", "why": "任何 CMake 文件" },
+    { "tier": "Standard", "re": "^\\.(?:juce-commit|pluginval-version)$", "why": "构建与 pluginval 的钉版" },
+    { "tier": "Standard", "re": "^scripts/gates\\.d/[23]\\d-", "why": "构建、ctest、pluginval 的 gate 模块" },
+    { "tier": "Full", "re": "^(?:web|web-preview|packaging)/", "why": "前端、页面预览与打包" },
+    { "tier": "Full", "re": "^src/plugin-common/", "why": "两个插件共用的壳与编辑器底座" },
+    { "tier": "Full", "re": "^src/.*Editor[^/]*$", "why": "编辑器" },
+    {
+      "tier": "Full",
+      "re": "^scripts/(?:gates\\.d/[4-9]\\d-|package)",
+      "why": "压测、页面冒烟、打包的 gate 模块与打包脚本"
+    }
+  ],
+  "gates": [
+    { "id": "G1", "tier": "Quick", "what": "预检：工作区干净、gh 账号、仓内身份、remote、hooks、工具版本" },
+    { "id": "G1-juce", "tier": "Quick", "what": "JUCE 的 HEAD 与 .juce-commit 一致" },
+    { "id": "G2-cxx", "tier": "Quick", "what": "clang-format" },
+    { "id": "G2-prettier", "tier": "Quick", "what": "prettier" },
+    { "id": "G3", "tier": "Quick", "what": "compliance：gitleaks、reuse、SPDX、隐私" },
+    { "id": "G4", "tier": "Quick", "what": "commits：提交卫生、分支名、冻结契约守卫" },
+    { "id": "G5", "tier": "Quick", "what": "docs-truth（run-checks 的 docs 组，web 单测也注册在这一组）" },
+    {
+      "id": "G6",
+      "tier": "Standard",
+      "what": "构建（Ninja，零 warning）",
+      "by": "gates.d/20-*.ps1",
+      "requires": ["CMakeLists.txt"]
+    },
+    {
+      "id": "G7",
+      "tier": "Standard",
+      "what": "ctest（含 IPC 命名空间生效自检）",
+      "by": "gates.d/20-*.ps1",
+      "requires": ["CMakeLists.txt"]
+    },
+    {
+      "id": "G8",
+      "tier": "Standard",
+      "what": "pluginval（无 GUI）",
+      "by": "gates.d/30-*.ps1",
+      "requires": ["CMakeLists.txt"]
+    },
+    {
+      "id": "G8-gui",
+      "tier": "Full",
+      "what": "pluginval（GUI）",
+      "by": "gates.d/30-*.ps1",
+      "requires": ["CMakeLists.txt"]
+    },
+    {
+      "id": "stress",
+      "tier": "Full",
+      "what": "压测",
+      "by": "gates.d/40-stress.ps1",
+      "requires": ["scripts/gates.d/40-stress.ps1"]
+    },
+    { "id": "G9-web", "tier": "Full", "what": "页面冒烟", "by": "gates.d/50-*.ps1", "requires": ["web-preview"] },
+    { "id": "G9-pkg", "tier": "Full", "what": "打包", "by": "gates.d/60-*.ps1", "requires": ["packaging"] }
+  ],
+  "cases": [
+    { "files": [], "want": "Quick" },
+    { "files": ["README.md", "docs/adr/0001-two-binaries.md", "CHANGELOG.md"], "want": "Quick" },
+    { "files": ["scripts/gates.ps1", "scripts/gates.d/10-static.ps1", "scripts/lib/Locks.psm1"], "want": "Quick" },
+    { "files": [".github/workflows/build.yml", ".gitleaks-version", "requirements-tools.txt"], "want": "Quick" },
+    {
+      "files": ["docs/src/notes.md", "srcx/a.cpp", "docs/web/x.md", "webx/a.js", "scripts/tests/x.mjs"],
+      "want": "Quick"
+    },
+    { "files": ["src/core/ipc/Naming.cpp"], "want": "Standard" },
+    { "files": ["tests/core/test_naming.cpp"], "want": "Standard" },
+    { "files": ["cmake/RinneMac.cmake"], "want": "Standard" },
+    { "files": ["CMakeLists.txt"], "want": "Standard" },
+    { "files": ["docs/CMakeLists.txt"], "want": "Standard" },
+    { "files": ["tools/rinne_nulltest.cpp"], "want": "Standard" },
+    { "files": [".juce-commit"], "want": "Standard" },
+    { "files": ["scripts/gates.d/20-build.ps1"], "want": "Standard" },
+    {
+      "files": ["src/input/InputProcessor.cpp", "src/output/OutputPluginEntry.cpp", "src/core/mac/Seg.mm"],
+      "want": "Standard"
+    },
+    { "files": ["README.md", "src/core/a.h"], "want": "Standard" },
+    { "files": ["web/shared/tokens.css"], "want": "Full" },
+    { "files": ["web-preview/serve.mjs"], "want": "Full" },
+    { "files": ["src/plugin-common/RinneProcessorBase.cpp"], "want": "Full" },
+    { "files": ["src/input/InputEditor.cpp"], "want": "Full" },
+    { "files": ["packaging/INSTALL.txt"], "want": "Full" },
+    { "files": ["scripts/gates.d/40-stress.ps1"], "want": "Full" },
+    { "files": ["scripts/package.ps1"], "want": "Full" },
+    { "files": ["src/core/a.cpp", "web/input/app.js", "README.md"], "want": "Full" },
+    { "files": ["docs/a.md"], "card": "Standard", "want": "Standard" },
+    { "files": ["src/core/a.cpp"], "card": "Full", "want": "Full" },
+    { "files": ["web/x.js"], "card": "Quick", "want": "Full" },
+    { "files": ["src/core/a.cpp"], "ask": "Standard", "want": "Standard" },
+    { "files": ["src/core/a.cpp"], "ask": "Full", "want": "Standard" },
+    { "files": ["src/core/a.cpp"], "ask": "Quick", "want": "Standard", "fail": true },
+    { "files": ["web/x.js"], "ask": "Standard", "want": "Full", "fail": true },
+    { "files": ["README.md"], "card": "Standard", "ask": "Quick", "want": "Standard", "fail": true },
+    { "files": ["README.md"], "card": "Full", "ask": "Standard", "want": "Full", "fail": true }
+  ]
+}
