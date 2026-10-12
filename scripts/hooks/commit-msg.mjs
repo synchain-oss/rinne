@@ -18,9 +18,12 @@ export const HOOKS = path.dirname(fileURLToPath(import.meta.url));
 export function checkCommitMsg(raw, { authorIdent, committerIdent, personal = [] }) {
     const kept = [];
     const comments = [];
-    for (const line of raw.split(/\r?\n/)) {
-        if (/^# -+ >8 -+$/.test(line)) break; // --verbose 时剪刀线以下是 diff，不属于消息
-        (line.startsWith("#") ? comments : kept).push(line);
+    const lines = raw.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+        // 只有 git 自己写的剪刀线（下一行是它的注释说明）才截断：--verbose 时线下是 diff，不属于消息；
+        // -m 给的消息里即使有同样的一行，git 也会原样保留，所以不能截
+        if (/^# -+ >8 -+$/.test(lines[i]) && (lines[i + 1] || "").startsWith("#")) break;
+        (lines[i].startsWith("#") ? comments : kept).push(lines[i]);
     }
     const errors = [];
     if (!authorIdent.startsWith(`${MAINTAINER} `) || !committerIdent.startsWith(`${MAINTAINER} `)) {
@@ -43,7 +46,12 @@ export function selfTest() {
     const good = `ci(hooks): 加入钩子\n\n说明。\n\n${SIGNOFF}\n`;
     t("好消息", false, `${good}# Please enter the commit message\n`);
     const scissors = "# ------------------------ >8 ------------------------";
-    t("剪刀线以下不算消息", false, `${good}${scissors}\n+${j("R", "N-12")}\n`);
+    t(
+        "git 写的剪刀线以下不算消息",
+        false,
+        `${good}${scissors}\n# Do not modify or remove the line above.\n+${j("R", "N-12")}\n`,
+    );
+    t("-m 里的剪刀线不截断", true, `${good}${scissors}\n${j("R", "N-12")}\n`);
     t("缺签名", true, "ci(hooks): 加入钩子\n");
     t("两行签名", true, `${good}${SIGNOFF}\n`);
     t("签名身份不对", true, "ci(hooks): 加入钩子\n\nSigned-off-by: Someone <s@example.com>\n");
@@ -59,8 +67,9 @@ export function selfTest() {
     const env = { ...repo.env, RINNE_NODE: process.execPath, RINNE_PRIVACY_LOCAL: nf };
     try {
         repo.git(["config", "core.hooksPath", HOOKS]);
-        const c = (label, bad, flags, gitOpts = []) => {
-            const ok = repo.git([...gitOpts, "commit", "-q", "--allow-empty", ...flags], { env, allowFail: true });
+        const c = (label, bad, flags, gitOpts = [], more = {}) => {
+            const args = [...gitOpts, "commit", "-q", "--allow-empty", ...flags];
+            const ok = repo.git(args, { env: { ...env, ...more }, allowFail: true });
             cases.push({ label: `端到端：${label}`, bad, passed: bad ? ok === null : ok !== null });
         };
         c("好提交", false, ["-s", "-m", "ci(test): 好提交"]);
@@ -68,6 +77,8 @@ export function selfTest() {
         c("卡号", true, ["-s", "-m", `ci(test): ${j("R", "N-01a")}`]);
         c("个人针", true, ["-s", "-m", `ci(test): ${FAKE_NEEDLE}`]);
         c("作者不是维护者", true, ["-s", "-m", "ci(test): 换人"], ["-c", "user.email=other@example.com"]);
+        const ci = { RINNE_PRIVACY_LOCAL: "", CI: "true", GITHUB_ACTIONS: "true" };
+        c("没有个人针时 CI=true 也不放行", true, ["-s", "-m", "ci(test): 无针"], [], ci);
     } finally {
         repo.cleanup();
         fs.rmSync(nf, { force: true });
@@ -90,7 +101,7 @@ function main(argv) {
         errors = checkCommitMsg(fs.readFileSync(argv[0], "utf8"), {
             authorIdent: ident("GIT_AUTHOR_IDENT"),
             committerIdent: ident("GIT_COMMITTER_IDENT"),
-            personal: loadPersonalNeedles({ cwd }).needles,
+            personal: loadPersonalNeedles({ cwd, mode: "local" }).needles,
         });
     } catch (e) {
         errors = [e.message];
