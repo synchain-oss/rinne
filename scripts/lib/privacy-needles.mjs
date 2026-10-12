@@ -63,22 +63,29 @@ export const RULES = [
     rule("upstream-adr", j(L, "AD", "R-?\\d{3}", R), "", V),
     rule("upstream-w", j(L, "W", "\\d{1,2}", R), "", V),
     rule("erratum", j(L, "E", "-\\d{2}", R), "", V),
-    // 括号里的私有编号；字母只取计划包实际用到的几个，仓内公开的场景号 S01、冻结条件 F1、音名 A4 都放行
+    // 括号里的私有编号；字母只取计划包实际用到的几个。仓内公开的编号都放行：场景号 S01、冻结条件 F1、
+    // 音名 A4，以及本机 gates 的档名 G1–G9（会写成「Quick（G1–G5）」「[G1] 预检通过」）
     rule(
         "bracket-id",
-        j("[\\[(（][^\\])）\\n]{0,10}?", L, "[JGDURWTM]\\d{1,3}", "[a-z]?(?=[\\s、,，/–\\-\\])）])"),
+        j("[\\[(（][^\\])）\\n]{0,10}?", L, "[JDURWTM]\\d{1,3}", "[a-z]?(?=[\\s、,，/–\\-\\])）])"),
         "",
         VC,
     ),
     rule("section", j("§", "\\s?\\d+(?:\\.\\d+)*"), "", { ...V, allow: sectionAllowed }),
     rule("plan-section", j("\\b\\d{2}\\s?", "§\\s?\\d"), "", V),
     rule("decision", j("(?:决", "策|裁", "决)\\s*[A-Z]?\\d"), ""),
+    // 私有计划包的文件：编号文档（前面不是路径或日期，避免误伤 docs/01-overview.md、2026-11-05-x.md）、
+    // plan/ 下的任何文件、状态与交接文件
     rule(
         "plan-file",
         j(
+            "(?<![\\w/\\\\-])0\\d-[a-z][a-z-]*\\.md|",
             L,
-            "0[1-6]-(?:architecture-ipc-loop|dsp-params-tests-probe|repo-ci-process|",
-            "execution|ui-spec|docs-compliance-launch)\\.md",
+            "(?:pl",
+            "an[\\\\/][\\w.-]+\\.(?:md|json|js|mjs)|CHECK",
+            "POINT\\.md|CLAUDE-DESIGN-HAND",
+            "OFF\\.md|car",
+            "ds\\.json)",
         ),
         "",
     ),
@@ -125,44 +132,69 @@ const personalRule = (needles) => ({
     needles,
 });
 
-/** C/C++：只保留注释与字符串、字符字面量，其余字符换成空格，列号不变；块注释跨行。 */
+/**
+ * C/C++：只保留注释、字符串与字符字面量（含跨行的原始字符串 R"x(…)x"），其余字符换成空格，列号不变；
+ * 块注释跨行。#error / #warning 的文字与 #if 0 … #endif 整段原样保留：那里写的是给人看的文字，不是代码。
+ */
 export function cVisible(text) {
     let state = "code";
+    let rawEnd = "";
+    let if0 = 0; // #if 0 区段内的嵌套深度
     return text.split(/\r?\n/).map((line) => {
-        if (state !== "block") state = "code"; // 字符串不跨行
+        if (if0) {
+            if (/^\s*#\s*if/.test(line)) if0++;
+            else if (/^\s*#\s*endif\b/.test(line)) if0--;
+            else if (if0 === 1 && /^\s*#\s*(?:else|elif)\b/.test(line)) if0 = 0;
+            return line;
+        }
+        if (state === "str" || state === "chr") state = "code"; // 普通字符串不跨行
+        if (state === "code" && /^\s*#\s*(?:if\s+0\b|error\b|warning\b)/.test(line)) {
+            if (/^\s*#\s*if/.test(line)) if0 = 1;
+            return line;
+        }
         let out = "";
         for (let i = 0; i < line.length; i++) {
             const c = line[i];
-            const two = line.slice(i, i + 2);
-            let keep = state !== "code";
-            if (state === "block") {
-                if (two === "*/") {
-                    out += two;
-                    i++;
+            if (state === "block" || state === "raw") {
+                const end = state === "block" ? "*/" : rawEnd;
+                if (line.startsWith(end, i)) {
+                    out += end;
+                    i += end.length - 1;
                     state = "code";
-                    continue;
+                } else {
+                    out += c;
                 }
-            } else if (state === "str" || state === "chr") {
+                continue;
+            }
+            if (state === "str" || state === "chr") {
                 if (c === "\\" && i + 1 < line.length) {
                     out += line.slice(i, i + 2);
                     i++;
                     continue;
                 }
                 if (c === (state === "str" ? '"' : "'")) state = "code";
-            } else if (two === "//") {
-                out += line.slice(i);
-                break;
-            } else if (two === "/*") {
-                out += two;
-                i++;
-                state = "block";
+                out += c;
                 continue;
-            } else if (c === '"' || (c === "'" && !/\w/.test(line[i - 1] || ""))) {
-                // 数字分隔符 1'000 前面是数字，不当字符字面量
-                state = c === '"' ? "str" : "chr";
-                keep = true;
             }
-            out += keep ? c : " ";
+            const rest = line.slice(i);
+            const afterWord = /\w/.test(line[i - 1] || "");
+            const raw = afterWord ? null : /^(?:u8|[uUL])?R"([^()\\\s]{0,16})\(/.exec(rest);
+            if (rest.startsWith("//")) {
+                out += rest;
+                break;
+            } else if (rest.startsWith("/*") || raw) {
+                const open = raw ? raw[0] : "/*";
+                out += open;
+                i += open.length - 1;
+                state = raw ? "raw" : "block";
+                rawEnd = raw ? `)${raw[1]}"` : "";
+            } else if (c === '"' || (c === "'" && !afterWord)) {
+                // 数字分隔符 1'000 前面是数字，不当字符字面量
+                out += c;
+                state = c === '"' ? "str" : "chr";
+            } else {
+                out += " ";
+            }
         }
         return out;
     });
@@ -256,8 +288,16 @@ export function plainText(buf, label) {
     if ((b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff)) {
         throw new Error(`${label} 是 UTF-16，先转成 UTF-8`);
     }
-    const text = (b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? b.subarray(3) : b).toString("utf8");
-    if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) throw new Error(`${label} 含 NUL 或控制字符`);
+    const bom = b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0;
+    const text = b.subarray(bom).toString("utf8");
+    const bad = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.exec(text);
+    if (bad) {
+        // 只报位置与字符码，不回显内容（终端里粘过来的 ANSI 颜色码就是常见的来源）
+        const before = text.slice(0, bad.index);
+        const code = bad[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0");
+        const where = `第 ${before.split("\n").length} 行，字节偏移 ${bom + Buffer.byteLength(before)}`;
+        throw new Error(`${label} 含控制字符 U+${code}（${where}）`);
+    }
     return text;
 }
 
@@ -315,7 +355,7 @@ const SAMPLES = {
     "upstream-adr": j("AD", "R-011 定的"),
     "upstream-w": j("W", "15 设 secret"),
     erratum: j("06 勘误 E", "-07"),
-    "bracket-id": j("说明（G", "1）"),
+    "bracket-id": j("说明（D", "4）"),
     section: j("详见 §", "4.2 的说明"),
     "plan-section": j("见 0", "6 §", "3"),
     decision: j("按决", "策 R5"),
@@ -367,21 +407,35 @@ export const CASES = [
     ["bracket-id", j("[B 线 M", "10]")],
     [null, "格式 (VST3)、架构 (x64)、已知问题 (KI-6)、(ADR-0007)、(#12)"],
     [null, "冻结条件（F1）、场景（S01–S25）、用例 (S01, S02)、(A4 = 440 Hz)、中央 C (C4)、按 (F5) 刷新、(P1)"],
-    ["bracket-id", j("见（G", "1）"), "docs/USER_GUIDE.md"],
+    ["bracket-id", j("见（D", "4）"), "docs/USER_GUIDE.md"],
     ["bracket-id", j("<!--\n  见（W", "1）\n-->"), "web/output/index.html"],
     ["bracket-id", j("<#\n  按（D", "4）\n#>"), "scripts/x.ps1"],
-    ["bracket-id", j('label: "失控保护（G', '1）",'), "web/shared/i18n.js"],
-    ["bracket-id", j("<p>失控保护（G", "1）已触发</p>"), "docs/design/Rinne.dc.html"],
-    ["bracket-id", j("// 失控保护（G", "1）"), "src/core/dsp/Guard.h"],
-    ["bracket-id", j("/*\n   失控保护（G", "1）\n*/"), "src/core/dsp/Guard.h"],
-    ["bracket-id", j('const char* k = "失控保护（G', '1）";'), "src/core/dsp/Guard.cpp"],
-    [null, j("return biquad(B0, B1, A1) + gain(G", "1, G", "2);"), "src/core/dsp/Biquad.h"],
+    ["bracket-id", j('label: "失控保护（D', '4）",'), "web/shared/i18n.js"],
+    ["bracket-id", j("<p>失控保护（D", "4）已触发</p>"), "docs/design/Rinne.dc.html"],
+    ["bracket-id", j("// 失控保护（D", "4）"), "src/core/dsp/Guard.h"],
+    ["bracket-id", j("/*\n   失控保护（D", "4）\n*/"), "src/core/dsp/Guard.h"],
+    // C/C++ 里给人看的文字：跨行原始字符串、#error / #warning、#if 0 区段；之后的代码照常不看
+    ["bracket-id", j('auto html = R"html(\n<p>失控保护（D', '4）</p>\n)html";'), "src/core/Ui.cpp"],
+    ["bracket-id", j("#error 不要用（D", "4）"), "src/core/Guard.h"],
+    ["bracket-id", j("#if 0\n#ifdef X\n#endif\n  旧说明（D", "4）\n#endif"), "src/core/Guard.h"],
+    [null, j('auto s = R"x(a)x" + f(D', "1, D", "2);\n#if 0\n#else\nint y = f(D", "1, D", "2);"), "src/core/Mix.cpp"],
+    // 本机 gates 的档名是公开词汇，带括号也放行
+    [null, "Quick 档（G1–G5）；[G1] 预检通过；(G6 构建、G7 ctest、G8 pluginval)"],
+    [null, 'Write-Host "[G1] 预检通过"\n# Quick (G1-G5): 预检与静态检查', "scripts/gates.ps1"],
+    ["bracket-id", j('const char* k = "失控保护（D', '4）";'), "src/core/dsp/Guard.cpp"],
+    [null, j("return biquad(B0, B1, A1) + gain(D", "1, D", "2);"), "src/core/dsp/Biquad.h"],
     // 章节号与文件名
     [null, "按 GPLv3 §6(d) 提供对应源码；JUCE 部分适用 AGPLv3（GPLv3 §13）；IEC 61672 §5.2"],
     [null, j("## §", "3 分支\n见 §", "3 的说明"), "CLAUDE.md"],
     [null, "docs/validation/2026-11-05-probe-luna-macos.md 与 docs/01-overview.md"],
     [null, ".gap-12 { margin: 0; }", "web/shared/base.css"],
     ["private-name/plan-repo", j("scvb_master", "plan")],
+    ["private-name/plan-repo", j("scvb-master", "_plan")],
+    ["plan-file", j("见 CHECK", "POINT.md")],
+    ["plan-file", j("CLAUDE-DESIGN-HAND", "OFF.md")],
+    ["plan-file", j("见 car", "ds.json")],
+    ["plan-file", j("见 0", "7-roadmap.md")],
+    ["plan-file", j("pl", "an/04-execution.md")],
     ["private-name/workspace", j("loop", "back", "\\", "plan", "\\", "x")],
     [null, "audio loopback device"],
     // 本机路径
