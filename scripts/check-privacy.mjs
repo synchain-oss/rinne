@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Derived from synchain-oss/scvb; see upstream/ci.json
 //
-// 公开仓隐私门禁：privacy-needles.mjs 的通用规则加上仓外个人针，扫三种对象。
-//   node scripts/check-privacy.mjs [--root <dir>]      git 跟踪的工作树（内容与路径）
-//   node scripts/check-privacy.mjs --commits <rev-list 参数…>
-//        区间内每个提交的消息、新增行与路径。推上去的提交经 refs/pull 永久公开，
-//        工作树干净不代表历史干净，所以推送前与 PR 上都要逐提交扫。
-//   node scripts/check-privacy.mjs --text <文件|->     一段公开文本（PR 标题与正文、评论草稿）
-//   --self-test（规则夹具 + 端到端假针）  --mutation-check  --list-rules
-// 只打印位置与打码片段，个人针只打印序号。退出码：0 干净；1 有命中、配置缺失或自测失败。
+// 公开仓隐私门禁：privacy-needles.mjs 的通用规则加上个人针，扫三种对象。
+//   node scripts/check-privacy.mjs [--root <dir>]      git 跟踪的工作树（内容与路径；UTF-16 与二进制也扫）
+//   node scripts/check-privacy.mjs --commits <rev-list 参数…> [--no-messages]
+//        区间内每个提交的消息、新增行与新路径。推上去的提交经 refs/pull 永久公开，
+//        工作树干净不代表历史干净。--no-messages 不扫提交消息（消息归 check-commits 按档位判）。
+//   node scripts/check-privacy.mjs --text <文件|->     一段公开文本（PR 标题与正文、评论草稿），只收 UTF-8
+//   --needles local|ci|ci-optional  个人针来源，见 privacy-needles.mjs；默认 local
+//   --self-test（规则夹具 + 端到端）  --mutation-check  --list-rules
+// 只打印位置与打码片段；个人针只打印序号，路径里的命中也打码。退出码：0 干净；1 有命中、配置缺失或自测失败。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -17,64 +18,77 @@ import { fileURLToPath } from "node:url";
 import * as kit from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
 
-const { ROOT, caseResult, git, readText, tempRepo, trackedFiles } = kit;
-
-const { scan, redact, headingsOf } = needles;
+const { ROOT, caseResult, git, tempRepo, trackedFiles } = kit;
+const { mask, redact, scan, scanBlob } = needles;
 const SELF = fileURLToPath(import.meta.url);
+// 本机的 diff.external 与 textconv 驱动会改写补丁内容，扫描时一律关掉
+const DIFF = ["--no-renames", "--no-ext-diff", "--no-textconv"];
 
-export const formatFinding = (f) => `  ${f.where}:${f.line}:${f.col} [${f.rule.id}] ${redact(f)}`;
+export const formatFinding = (f) =>
+    `  ${f.where}${f.line ? `:${f.line}:${f.col}` : "（二进制）"} [${f.rule.id}] ${redact(f)}`;
 const tag = (where, list) => list.map((f) => ({ ...f, where }));
 
 export function scanTree(root, personal) {
     const out = [];
     for (const rel of trackedFiles(root)) {
-        out.push(...tag(`${rel}（路径）`, scan(rel, {}, { personal })));
-        const text = readText(path.join(root, rel));
-        if (text !== null) out.push(...tag(rel, scan(text, { path: rel, headings: headingsOf(text) }, { personal })));
+        const shown = mask(rel, personal);
+        out.push(...tag(`${shown}（路径）`, scan(rel, {}, { personal })));
+        let buf;
+        try {
+            buf = fs.readFileSync(path.join(root, rel));
+        } catch {
+            continue; // 已删除、子模块等
+        }
+        out.push(...tag(shown, scanBlob(buf, { path: rel }, { personal })));
     }
     return out;
 }
 
-/** 逐提交扫消息（可关）、新增行与新路径；合并提交看相对第一父提交带进来的全部内容。 */
+/**
+ * 逐提交扫消息（可关）、新路径与新内容。内容取提交后的整份文件来扫（这样 C/C++ 的块注释、
+ * 同文件的章节标题都在上下文里），只保留落在新增行上的命中；二进制与 UTF-16 文件没有行级补丁，
+ * 整份报告。合并提交看相对第一父提交带进来的全部内容。
+ */
 export function scanCommits(revArgs, cwd, personal, { messages = true } = {}) {
     const out = [];
-    for (const sha of git(["rev-list", ...revArgs], { cwd }).split("\n").filter(Boolean)) {
+    for (const sha of git(["rev-list", ...revArgs], { cwd })
+        .split("\n")
+        .filter(Boolean)) {
         const s7 = sha.slice(0, 7);
         const [parents, msg] = git(["log", "-1", "--format=%P%x00%B", sha], { cwd }).split("\0");
         if (messages) out.push(...tag(`${s7} 提交消息`, scan(msg, {}, { personal })));
-        // 合并提交用 diff 对第一父提交，普通提交用 show（根提交也适用）
         const diff = (...opts) =>
             parents.trim().includes(" ")
-                ? git(["diff", "--no-renames", ...opts, `${sha}^1`, sha], { cwd })
-                : git(["show", "--no-renames", "--format=", ...opts, sha], { cwd });
-        // 路径单独列：二进制文件和空文件在补丁里没有 +++ 行
-        for (const file of diff("--name-only", "-z", "--diff-filter=AMT").split("\0").filter(Boolean)) {
-            out.push(...tag(`${s7} ${file}（路径）`, scan(file, {}, { personal })));
-        }
-        const patch = diff("--no-color", "-U0", "--src-prefix=a/", "--dst-prefix=b/");
-        let ctx = null;
+                ? git(["diff", ...DIFF, ...opts, `${sha}^1`, sha], { cwd })
+                : git(["show", ...DIFF, "--format=", ...opts, sha], { cwd });
+        const added = new Map(); // 路径 → 新增行号
+        let file = null;
         let header = false;
-        let lineNo = 0;
-        for (const line of patch.split("\n")) {
+        for (const line of diff("--no-color", "-U0", "--src-prefix=a/", "--dst-prefix=b/").split("\n")) {
             if (line.startsWith("diff --git ")) {
                 header = true;
-                ctx = null;
+                file = null;
             } else if (header && line.startsWith("+++ ")) {
-                const file = line === "+++ /dev/null" ? null : line.slice(6);
-                ctx = file && {
-                    path: file,
-                    get headings() {
-                        return (this.h ??= headingsOf(git(["show", `${sha}:${file}`], { cwd, allowFail: true }) || ""));
-                    },
-                };
+                file = line === "+++ /dev/null" ? null : line.slice(6);
+                if (file) added.set(file, new Set());
             } else if (line.startsWith("@@")) {
                 header = false;
-                lineNo = Number(/\+(\d+)/.exec(line)?.[1] ?? 0);
-            } else if (ctx && !header && line.startsWith("+")) {
-                const hits = scan(line.slice(1), ctx, { personal }).map((f) => ({ ...f, line: lineNo }));
-                out.push(...tag(`${s7} ${ctx.path}`, hits));
-                lineNo++;
+                const [, start, count = "1"] = /\+(\d+)(?:,(\d+))?/.exec(line) || [];
+                for (let k = 0; file && k < Number(count); k++) added.get(file).add(Number(start) + k);
             }
+        }
+        // 路径与是否二进制取 --numstat -z（路径不转义）；补丁里找不到的路径按整份文件报告
+        for (const entry of diff("--numstat", "-z", "--diff-filter=AMT").split("\0")) {
+            const [plus, , ...rest] = entry.replace(/^\n+/, "").split("\t");
+            const rel = rest.join("\t");
+            if (!rel) continue;
+            const shown = mask(rel, personal);
+            out.push(...tag(`${s7} ${shown}（路径）`, scan(rel, {}, { personal })));
+            const buf = git(["cat-file", "blob", `${sha}:${rel}`], { cwd, raw: true, allowFail: true });
+            if (!buf) continue; // 子模块之类不是 blob 的条目
+            const lines = plus === "-" ? null : added.get(rel);
+            const hits = scanBlob(buf, { path: rel }, { personal });
+            out.push(...tag(`${s7} ${shown}`, lines ? hits.filter((f) => lines.has(f.line)) : hits));
         }
     }
     return out;
@@ -88,65 +102,102 @@ function report(findings, notes) {
     }
     console.error(`check-privacy 失败：${findings.length} 处命中`);
     for (const f of findings) console.error(formatFinding(f));
-    console.error("规则见 --list-rules。确属误报就改写句子；只有逐字第三方目录有豁免，个人针没有豁免。");
+    console.error("规则见 --list-rules。确属误报就改写句子；逐字第三方目录只豁免邮箱与编号，个人针没有豁免。");
     return 1;
 }
 
-/** 规则夹具，加上端到端：假针写进临时仓的跟踪文件，必须判红且输出里不出现针的明文。 */
+/** 规则夹具，加上端到端：假针藏进临时仓的各种地方，必须判红且输出里不出现针的明文。 */
 export function selfTest() {
     const cases = needles.runCases();
+    const N = needles.FAKE_NEEDLE;
     const repo = tempRepo();
-    const nf = path.join(repo.dir, "..", `${path.basename(repo.dir)}-needles.txt`);
+    const aux = fs.mkdtempSync(`${repo.dir}-aux`);
+    const file = (name, data) => {
+        const p = path.join(aux, name);
+        fs.writeFileSync(p, data);
+        return p;
+    };
+    const utf16 = (s) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(s, "utf16le")]);
     const base = kit.isolatedEnv();
     for (const k of ["RINNE_PRIVACY_LOCAL", "PRIVACY_NEEDLES", "GITHUB_ACTIONS", "CI"]) delete base[k];
-    const run = (args, env) => {
-        const r = spawnSync(process.execPath, [SELF, "--root", repo.dir, ...args], {
+    const run = (args, env = {}, self = SELF) => {
+        const r = spawnSync(process.execPath, [self, ...args], {
             cwd: repo.dir,
             env: { ...base, ...env },
             encoding: "utf8",
         });
         return { code: r.status, out: `${r.stdout}${r.stderr}` };
     };
-    const check = (label, bad, ok) => cases.push({ label, bad, passed: !!ok });
+    const check = (label, bad, ok) => cases.push({ label: `端到端：${label}`, bad, passed: !!ok });
+    const commit = (msg) => {
+        repo.git(["add", "-A"]);
+        repo.git(["commit", "-q", "-m", msg]);
+    };
     try {
-        fs.writeFileSync(nf, `# 自测\n${needles.FAKE_NEEDLE}\n`);
+        const nf = file("needles.txt", `# 自测\n${N}\n`);
+        const local = { RINNE_PRIVACY_LOCAL: nf };
+        const tree = (env, ...extra) => run(["--root", repo.dir, ...extra], env);
         repo.write("docs/clean.md", "干净的文本\n");
-        repo.git(["add", "."]);
-        repo.git(["commit", "-q", "-m", "ci(test): 干净"]);
-        let r = run([], { RINNE_PRIVACY_LOCAL: nf });
-        check("端到端：干净的树通过", false, r.code === 0);
-        r = run([], { GITHUB_ACTIONS: "true" });
-        check("端到端：CI 缺 secret 时注记并只跑通用规则", false, r.code === 0 && r.out.includes("PRIVACY_NEEDLES"));
-        r = run([], {});
-        check("端到端：本机未配置个人针判红", true, r.code === 1);
-        r = run([], { RINNE_PRIVACY_LOCAL: `${nf}.missing` });
-        check("端到端：个人针文件缺失判红", true, r.code === 1);
-        repo.write("docs/leak.md", `说明 ${needles.FAKE_NEEDLE}\n`);
-        repo.git(["add", "."]);
-        repo.git(["commit", "-q", "-m", "ci(test): 夹带"]);
-        r = run([], { RINNE_PRIVACY_LOCAL: nf });
-        check("端到端：跟踪文件含假针判红且不回显", true, r.code === 1 && !r.out.includes(needles.FAKE_NEEDLE));
-        r = run([], { GITHUB_ACTIONS: "true", PRIVACY_NEEDLES: `x-unused\n${needles.FAKE_NEEDLE}` });
-        check("端到端：CI 经 PRIVACY_NEEDLES 判红", true, r.code === 1);
-        repo.git(["rm", "-q", "docs/leak.md"]);
-        repo.git(["commit", "-q", "-m", "ci(test): 删掉"]);
-        r = run([], { RINNE_PRIVACY_LOCAL: nf });
-        check("端到端：删掉后工作树通过", false, r.code === 0);
-        r = run(["--commits", "HEAD"], { RINNE_PRIVACY_LOCAL: nf });
-        check("端到端：历史里仍有假针，--commits 判红", true, r.code === 1);
+        commit("ci(test): 干净");
+        check("干净的树通过", false, tree(local).code === 0);
+        // 个人针的来源必须显式给出，不看环境变量猜
+        check("本机未配置个人针判红", true, tree({}).code === 1);
+        check("本机模式不因 CI=true 放行", true, tree({ CI: "true", GITHUB_ACTIONS: "true" }).code === 1);
+        check("个人针文件缺失判红", true, tree({ RINNE_PRIVACY_LOCAL: `${nf}.missing` }).code === 1);
+        check("同仓 PR 缺 secret 判红", true, tree({}, "--needles", "ci").code === 1);
+        const fork = tree({}, "--needles", "ci-optional");
+        check("fork PR 缺 secret：注记并只跑通用规则", false, fork.code === 0 && fork.out.includes("PRIVACY_NEEDLES"));
+        check("UTF-16 针表判红", true, tree({ RINNE_PRIVACY_LOCAL: file("n16.txt", utf16(`${N}\n`)) }).code === 1);
+        check("针表含 NUL 判红", true, tree({ RINNE_PRIVACY_LOCAL: file("nnul.txt", `${N}\0\n`) }).code === 1);
+        check("--text 拒绝 UTF-16", true, run(["--text", file("t16.md", utf16("干净\n"))], local).code === 1);
+        check("--text 拒绝 NUL", true, run(["--text", file("tnul.md", "干净\0\n")], local).code === 1);
+        // 经 junction / 符号链接调用时 CLI 照常运行，不会静默什么都不做
+        const link = path.join(aux, "scripts-link");
+        fs.symlinkSync(path.dirname(SELF), link, process.platform === "win32" ? "junction" : "dir");
+        const card = file("card.md", `${needles.CASES[0][1]}\n`);
+        check(
+            "经链接调用照样判红",
+            true,
+            run(["--text", card], local, path.join(link, "check-privacy.mjs")).code === 1,
+        );
+        // 各种藏法：普通文件、UTF-16 文件、二进制文本块、文件名；删掉之后历史里仍要抓到
+        const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0]), Buffer.from(`tEXtAuthor\0${N}\0`)]);
+        const leaks = [
+            ["普通文件", "docs/leak.md", `说明 ${N}\n`],
+            ["UTF-16 文件", "docs/log16.txt", utf16(`路径 ${N}\n`)],
+            ["二进制文本块", "docs/shot.png", png],
+            ["文件名", `docs/notes-${N}.md`, "x\n"],
+        ];
+        for (const [label, rel, data] of leaks) {
+            repo.write(rel, data);
+            commit("ci(test): 夹带");
+            const r = tree(local);
+            check(`${label}：工作树判红且不回显`, true, r.code === 1 && !r.out.includes(N));
+            repo.git(["rm", "-q", rel]);
+            commit("ci(test): 删掉");
+            const h = run(["--root", repo.dir, "--commits", "HEAD~2..HEAD"], local);
+            check(`${label}：删掉后历史里判红且不回显`, true, h.code === 1 && !h.out.includes(N));
+        }
+        check("全部删掉后工作树通过", false, tree(local).code === 0);
+        const msg = run(["--root", repo.dir, "--commits", "--no-messages", "HEAD~1..HEAD"], local);
+        check("--no-messages 只扫内容", false, msg.code === 0);
     } finally {
         repo.cleanup();
-        fs.rmSync(nf, { force: true });
+        fs.rmSync(aux, { recursive: true, force: true });
     }
     return caseResult(cases);
 }
 
+const OWN = { "--root": 1, "--needles": 1, "--text": 1, "--no-messages": 0, "--commits": 0 };
+
 function main(argv) {
     kit.assertNodeVersion();
-    const at = (flag) => argv.indexOf(flag);
     if (argv.includes("--list-rules")) {
-        for (const r of needles.RULES) console.log(`  ${r.id}${r.verbatimOk ? "（逐字第三方目录豁免）" : ""}`);
-        console.log(`  personal（仓外个人针，无豁免）\n逐字第三方目录：${needles.VERBATIM_DIRS.join(" ")}`);
+        for (const r of needles.RULES) {
+            const flags = [r.verbatimOk && "逐字目录豁免", r.commentsOnly && "C/C++ 只看注释", r.binary && "扫二进制"];
+            console.log(`  ${r.id}${flags.some(Boolean) ? `（${flags.filter(Boolean).join("、")}）` : ""}`);
+        }
+        console.log(`  personal（个人针，无豁免，扫二进制）\n逐字第三方目录：${needles.VERBATIM_DIRS.join(" ")}`);
         return 0;
     }
     if (argv.includes("--self-test")) {
@@ -161,23 +212,32 @@ function main(argv) {
         console.log(`check-privacy --mutation-check：${r.total} 个变异，存活 ${r.survived.length}`);
         return r.survived.length ? 1 : 0;
     }
-    const root = at("--root") >= 0 ? path.resolve(argv[at("--root") + 1]) : ROOT;
-    let personal;
-    try {
-        personal = needles.loadPersonalNeedles({ cwd: root });
-    } catch (e) {
-        console.error(`check-privacy：${e.message}`);
-        return 1;
+    const opts = {};
+    const free = [];
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] in OWN) opts[argv[i]] = OWN[argv[i]] ? argv[++i] : true;
+        else free.push(argv[i]);
     }
-    if (at("--commits") >= 0) {
-        return report(scanCommits(argv.slice(at("--commits") + 1), root, personal.needles), personal.notes);
+    if (free.length && !opts["--commits"]) throw new Error(`无法识别的参数：${free.join(" ")}`);
+    const root = opts["--root"] ? path.resolve(opts["--root"]) : ROOT;
+    const personal = needles.loadPersonalNeedles({ cwd: root, mode: needles.needlesMode(argv) });
+    if (opts["--commits"]) {
+        const found = scanCommits(free, root, personal.needles, { messages: !opts["--no-messages"] });
+        return report(found, personal.notes);
     }
-    if (at("--text") >= 0) {
-        const src = argv[at("--text") + 1];
-        const text = fs.readFileSync(src === "-" ? 0 : src, "utf8");
+    if (opts["--text"]) {
+        const src = opts["--text"];
+        const text = needles.plainText(fs.readFileSync(src === "-" ? 0 : src), "--text 的输入");
         return report(tag("文本", scan(text, {}, { personal: personal.needles })), personal.notes);
     }
     return report(scanTree(root, personal.needles), personal.notes);
 }
 
-if (kit.isMain(import.meta.url)) process.exitCode = main(process.argv.slice(2));
+if (kit.isMain(import.meta.url)) {
+    try {
+        process.exitCode = main(process.argv.slice(2));
+    } catch (e) {
+        console.error(`check-privacy：${e.message}`);
+        process.exitCode = 1;
+    }
+}

@@ -7,42 +7,62 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** 片段拼接。规则与夹具都用它拼，源码里不出现任何完整的禁用形态。 */
 export const j = (...parts) => parts.join("");
 
-/** 当前模块是否被直接 `node <file>` 执行（被 import 时不跑 CLI）。 */
-export const isMain = (url) => !!process.argv[1] && url === pathToFileURL(path.resolve(process.argv[1])).href;
+/**
+ * 当前模块是否被直接 `node <file>` 执行（被 import 时不跑 CLI）。两边都取真实路径：
+ * 经符号链接或 junction 调用时 argv 是链接路径，而 import.meta.url 已被解析成真实路径。
+ */
+export function isMain(url) {
+    try {
+        return !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(url));
+    } catch {
+        return false;
+    }
+}
 
-/** 运行 git，返回 stdout。失败时抛错；allowFail 时返回 null。 */
-export function git(args, { cwd = ROOT, input, env, allowFail = false } = {}) {
+/** 运行 git，返回 stdout（raw 时返回 Buffer）。失败时抛错；allowFail 时返回 null。 */
+export function git(args, { cwd = ROOT, input, env, allowFail = false, raw = false } = {}) {
     const r = spawnSync("git", ["-c", "core.quotepath=false", ...args], {
         cwd,
         input,
         env,
-        encoding: "utf8",
+        encoding: raw ? "buffer" : "utf8",
         maxBuffer: 256 * 1024 * 1024,
     });
     if (r.status === 0) return r.stdout;
     if (allowFail) return null;
-    throw new Error(`git ${args[0]} 失败（退出码 ${r.status}）：${(r.stderr || "").trim()}`);
+    throw new Error(`git ${args[0]} 失败（退出码 ${r.status}）：${String(r.stderr || "").trim()}`);
 }
 
-export const trackedFiles = (root = ROOT) =>
-    git(["ls-files", "-z"], { cwd: root }).split("\0").filter(Boolean);
+export const trackedFiles = (root = ROOT) => git(["ls-files", "-z"], { cwd: root }).split("\0").filter(Boolean);
 
-/** 读文本文件；二进制（前 8 KB 内有 NUL，与 git 的判断一致）或读不到时返回 null。 */
+/**
+ * 按 BOM 解码：UTF-8（去 BOM）、UTF-16LE、UTF-16BE。没有 BOM 时前 8 KB 内有 NUL 就当二进制
+ * （与 git 的判断一致），返回 null。Windows PowerShell 5.1 的 `>` 与 Out-File 默认写 UTF-16LE。
+ */
+export function decodeText(buf) {
+    if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return buf.subarray(3).toString("utf8");
+    if (buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le");
+    if (buf[0] === 0xfe && buf[1] === 0xff) {
+        const le = Buffer.from(buf.subarray(2, buf.length - (buf.length % 2)));
+        return le.swap16().toString("utf16le");
+    }
+    return buf.subarray(0, 8192).includes(0) ? null : buf.toString("utf8");
+}
+
+/** 读文本文件并按 BOM 解码；二进制或读不到时返回 null。 */
 export function readText(abs) {
-    let buf;
     try {
-        buf = fs.readFileSync(abs);
+        return decodeText(fs.readFileSync(abs));
     } catch {
         return null;
     }
-    return buf.subarray(0, 8192).includes(0) ? null : buf.toString("utf8");
 }
 
 /**

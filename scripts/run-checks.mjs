@@ -2,14 +2,18 @@
 //
 // 静态检查注册表的运行器。每项检查是 scripts/checks.d/<name>.mjs，默认导出
 //   { name, group, inputs, run(ctx), selfTest(ctx), mutationCheck?(ctx) }
-// 文件入库即生效；inputs 里有路径缺失时该项 SKIP 并写明原因。后续检查只新增文件，不改本运行器。
+// 文件入库即生效。inputs 只放「还没建立就不该检查」的可选输入，缺失时该项 SKIP 并写明原因；
+// 必须存在的文件由 run() 自己判红。后续检查只新增文件，不改本运行器。
 // run 返回 { ok, skip?, lines? }；selfTest 另须返回 bad、good 两个计数，坏样例与正例都不能为 0。
-//   node scripts/run-checks.mjs [--group <组>] [--only <名>] [--self-test | --mutation-check | --list]
+//   node scripts/run-checks.mjs [--group <组>] [--only <名>] [--needles local|ci|ci-optional]
+//                               [--self-test | --mutation-check | --list]
+// --needles 是个人针来源，原样交给需要它的检查（见 privacy-needles.mjs），默认 local。
 
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ROOT, assertNodeVersion } from "./lib/check-kit.mjs";
+import { needlesMode } from "./lib/privacy-needles.mjs";
 
 export const GROUPS = ["compliance", "docs", "pr", "release", "links"];
 const DIR = path.join(ROOT, "scripts", "checks.d");
@@ -17,7 +21,10 @@ const DIR = path.join(ROOT, "scripts", "checks.d");
 /** 读出全部注册项；形状不对的不会被悄悄跳过，而是作为一条 FAIL 留在结果里。 */
 async function load() {
     const out = [];
-    for (const file of fs.readdirSync(DIR).filter((f) => f.endsWith(".mjs")).sort()) {
+    for (const file of fs
+        .readdirSync(DIR)
+        .filter((f) => f.endsWith(".mjs"))
+        .sort()) {
         const name = file.slice(0, -4);
         try {
             const m = (await import(pathToFileURL(path.join(DIR, file)).href)).default;
@@ -76,7 +83,7 @@ async function main(argv) {
         for (const c of checks) console.log(`${c.name}\t${c.group ?? "?"}\t${(c.inputs || []).join(" ")}`);
         return 0;
     }
-    const ctx = { root: ROOT, env: process.env };
+    const ctx = { root: ROOT, env: process.env, needles: needlesMode(argv) };
     const count = { PASS: 0, FAIL: 0, SKIP: 0 };
     for (const c of checks) {
         const r = await runOne(c, mode, ctx);

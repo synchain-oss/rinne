@@ -8,9 +8,9 @@ import { loadPersonalNeedles, mutationCheck } from "../lib/privacy-needles.mjs";
 export default {
     name: "privacy",
     group: "compliance",
-    inputs: ["scripts/lib/privacy-needles.mjs"],
+    inputs: [],
     run(ctx) {
-        const { needles, notes } = loadPersonalNeedles({ env: ctx.env, cwd: ctx.root });
+        const { needles, notes } = loadPersonalNeedles({ env: ctx.env, cwd: ctx.root, mode: ctx.needles });
         const hits = scanTree(ctx.root, needles);
         return { ok: hits.length === 0, lines: [...notes, ...hits.map(formatFinding)] };
     },
