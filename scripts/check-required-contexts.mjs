@@ -8,8 +8,8 @@
 //        do_not_enforce_on_create，否则新主支线建不出来；pending 的 ruleset 还不带 required_status_checks。
 //   node scripts/check-required-contexts.mjs --live [--sha <提交>] [--repo <owner/name>]
 //        只读回读 GitHub（需要 gh 与 DLsnows 的 GH_TOKEN）：rulesets 与仓内 JSON 逐项一致；selected-actions
-//        与 actions-allowlist.json 一致，org 继承来的、计划不用的放行项只报注记；sha_pinning_required 为 true；
-//        给了 --sha 时，该提交上 check run 的真名覆盖全部 required context。
+//        与 actions-allowlist.json 一致，org 继承来的、计划不用的放行项只报注记；sha_pinning_required 按
+//        SHA_PINNING 判（暂缓期只报注记）；给了 --sha 时，该提交上 check run 的真名覆盖全部 required context。
 //   --self-test
 
 import fs from "node:fs";
@@ -20,6 +20,13 @@ import { parseWorkflow, readJson, workflowFiles } from "./checks.d/workflows.mjs
 
 /** GitHub Actions 这个 app 的 id：context 带上它，别的 app 报同名 status 不能顶替。 */
 export const ACTIONS_APP = 15368;
+
+/**
+ * 仓库级「action 必须钉 SHA」开关的预期：required = 必须开启，没开判红；deferred = 暂缓，没开只报注记。
+ * 暂缓的原因：评审 bot 的 action 若有没钉 SHA 的嵌套 uses，开关一开它就跑不起来，要等 bot 实跑验证过再开。
+ * 仓内的 workflows 检查照样要求每个 uses 钉 SHA，不受这个开关影响。
+ */
+export const SHA_PINNING = "deferred";
 
 export function loadRepo(root = ROOT) {
     const checks = readJson(root, ".github/required-checks.json");
@@ -96,7 +103,7 @@ export const normalize = (r) =>
     });
 
 /** live：{ rulesets: { 名: GET 结果 }, selected, permissions, checkRuns?: [名] }。 */
-export function compareLive(repo, live) {
+export function compareLive(repo, live, { shaPinning = SHA_PINNING } = {}) {
     const errors = [];
     const notes = [];
     for (const [name, mine] of Object.entries(repo.rulesets)) {
@@ -113,8 +120,10 @@ export function compareLive(repo, live) {
         if ((a.org_inherited_unused || []).includes(p)) notes.push(`org 继承、计划不用：${p}（仓内检查拒绝它）`);
         else errors.push(`selected-actions 多放行了清单里没有的 ${p}`);
     }
-    if (live.permissions.sha_pinning_required !== true)
-        errors.push("actions/permissions 的 sha_pinning_required 不是 true");
+    if (live.permissions.sha_pinning_required !== true) {
+        if (shaPinning === "required") errors.push("actions/permissions 的 sha_pinning_required 不是 true");
+        else notes.push("sha_pinning_required 没开：暂缓，等评审 bot 实跑验证过再开");
+    }
     if (live.checkRuns) {
         for (const spec of Object.values(repo.checks).filter((x) => x.status === "required")) {
             for (const c of spec.contexts)
@@ -216,14 +225,30 @@ export function selfTest() {
             ).errors,
         ],
         [
-            "live 没开 SHA 钉版强制",
+            "要求 SHA 钉版强制时，live 没开判红",
             true,
-            compareLive(good, live(good, { permissions: { sha_pinning_required: false } })).errors,
+            compareLive(good, live(good, { permissions: { sha_pinning_required: false } }), {
+                shaPinning: "required",
+            }).errors,
+        ],
+        [
+            "暂缓期 live 没开只报注记",
+            false,
+            compareLive(good, live(good, { permissions: { sha_pinning_required: false } }), {
+                shaPinning: "deferred",
+            }).errors,
         ],
         ["提交上缺 required check run", true, compareLive(good, live(good, { checkRuns: ["b"] })).errors],
     ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
     const note = compareLive(good, live(good)).notes.some((n) => n.includes("q/two@*"));
     cases.push({ label: "org 继承项出现在注记里", bad: false, passed: note });
+    const off = { permissions: { sha_pinning_required: false } };
+    const deferred = compareLive(good, live(good, off), { shaPinning: "deferred" }).notes;
+    cases.push({
+        label: "暂缓期的注记写明原因",
+        bad: false,
+        passed: deferred.some((n) => n.includes("sha_pinning_required")),
+    });
     return caseResult(cases);
 }
 
