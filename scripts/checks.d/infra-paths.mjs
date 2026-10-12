@@ -50,6 +50,11 @@ export const ANCHORS = [
     ".gitleaks-version",
     "REUSE.toml",
     "CLAUDE.md",
+    // 只差大小写的写法：在不区分大小写的文件系统上检出后就是上面的文件
+    "Scripts/hooks/pre-push.mjs",
+    ".GITHUB/workflows/x.yml",
+    "CLAUDE.MD",
+    "SCRIPTS/LIB/infra-paths.mjs",
 ];
 /** 不该算基础设施的路径：清单写得太宽（例如一条 **）时这里会变红。 */
 export const NOT_INFRA = [
@@ -97,6 +102,11 @@ export function selfTest() {
         ["清单不含 CI 调用的脚本", true, { isInfra: drop("scripts/ci/**"), claude }],
         ["清单不含格式配置", true, { isInfra: dropAll(FORMAT_CONFIGS), claude }],
         ["清单不含 .gitattributes", true, { isInfra: drop(".gitattributes"), claude }],
+        [
+            "匹配区分大小写（Scripts/hooks/ 漏掉）",
+            true,
+            { isInfra: infraMatcher(INFRA_PATHS, { ignoreCase: false }), claude },
+        ],
         ["清单写成一条 **", true, { isInfra: infraMatcher(["**"]), claude }],
         ["CLAUDE.md 不指向清单", true, { isInfra: infraMatcher(INFRA_PATHS), claude: "不自合的路径见下表。" }],
     ].map(([label, bad, args]) => {
