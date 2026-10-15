@@ -86,8 +86,10 @@ function readSpec(root) {
 export default {
     name: "probe-analysis",
     group: "docs",
-    inputs: [SCRIPT],
+    // 分析器本身不放进 inputs：它被删掉时本检查要变红，而不是 SKIP
+    inputs: [],
     run(ctx) {
+        if (!fs.existsSync(path.join(ctx.root, SCRIPT))) return { ok: false, lines: [`缺 ${SCRIPT}`] };
         if (!findPython()) {
             return inCI(ctx.env)
                 ? { ok: false, lines: ["找不到 Python 3（python3 / python / py -3）"] }

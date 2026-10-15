@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import sys
 import tempfile
@@ -430,14 +431,6 @@ class Session:
             for s in segs:
                 s.gaps += 1
 
-    def prepare_max(self, seg, t):
-        """seg 所在日志里，时刻 t 之前最近一次 prepare 声明的最大块长；没有则 None。"""
-        best = None
-        for e in seg.log.events:
-            if e["name"] == "prepare" and e["t_ns"] <= t and (best is None or e["t_ns"] >= best[0]):
-                best = (e["t_ns"], e["b"])
-        return None if best is None else best[1]
-
 
 # ---------------------------------------------------------------------------------------------------
 # 判据
@@ -510,8 +503,9 @@ def judge_a2(s):
         for seg in cell["I"]:
             ts = sorted(e["t_ns"] for e in seg.events if e["name"] in TOGGLES)
             per_case[key[0]] = per_case.get(key[0], 0) + len(ts)
-            if seg.gaps:
-                parts.append(("INCOMPLETE", f"{key_label(key)} 序号缺口 {seg.gaps} 处"))
+            bad, why = _usable(seg)
+            if bad:
+                parts.append((bad, why))
                 continue
             worst = 0
             for i, t in enumerate(ts):
@@ -558,14 +552,20 @@ def judge_a4(s):
         if seg.gaps:
             parts.append(("INCOMPLETE", f"{key_label(seg.key)} {seg.role} 序号缺口 {seg.gaps} 处"))
             continue
-        first = min(b["mono_ns"] for b in seg.blocks)
-        pmax = s.prepare_max(seg, first)
-        if pmax is None:
-            parts.append(("INCOMPLETE", f"{key_label(seg.key)} {seg.role} 没有 prepare 事件"))
+        # 每块对照它之前最近一次 prepare 声明的最大块长：中途改缓冲会重新 prepare
+        preps = sorted((e["t_ns"], e["b"]) for e in seg.log.events if e["name"] == "prepare")
+        times = [t for t, _ in preps]
+
+        def limit(b):
+            i = bisect_right(times, b["mono_ns"]) - 1
+            return preps[i][1] if i >= 0 else None
+
+        if any(limit(b) is None for b in seg.blocks):
+            parts.append(("INCOMPLETE", f"{key_label(seg.key)} {seg.role} 有块早于任何 prepare 事件"))
             continue
-        over = sum(1 for b in seg.blocks if b["n"] > pmax or b["n"] > b["n_decl"])
+        over = sum(1 for b in seg.blocks if b["n"] > limit(b) or b["n"] > b["n_decl"])
         ns = [b["n"] for b in seg.blocks]
-        msg = f"{key_label(seg.key)} {seg.role} n∈[{min(ns)},{max(ns)}]，prepare max {pmax}，超限 {over}"
+        msg = f"{key_label(seg.key)} {seg.role} n∈[{min(ns)},{max(ns)}]，prepare 共 {len(preps)} 次，超限 {over}"
         parts.append(("FAIL" if over else "PASS", msg))
     return fold("A4", parts, cover)
 
@@ -646,8 +646,11 @@ def judge_a7(s):
         pairs = _pairs(i.blocks, o.blocks)
         playing = [b for sg in (i, o) for b in sg.blocks if b["playing"]]
         valid = sum(b["host_ns_valid"] for b in playing)
-        if not playing or valid / len(playing) < 0.99:
-            parts.append(("FAIL", f"{key_label(key)} hostNs 有效率 {valid}/{len(playing)}，顺序判据降为无法判断"))
+        if not playing:
+            parts.append(("INCOMPLETE", f"{key_label(key)} 两端都没有播放中的块"))
+            continue
+        if valid / len(playing) < 0.99:
+            parts.append(("FAIL", f"{key_label(key)} hostNs 有效率 {valid}/{len(playing)}，不足 99%"))
             continue
         both = [(a[2], b[2]) for a, b in pairs if a[2]["host_ns_valid"] and b[2]["host_ns_valid"]]
         mismatch = sum(1 for a, b in both if a["host_ns"] != b["host_ns"])
@@ -713,7 +716,7 @@ def freeze_f1(s, items):
             missing.append(f"{case} 无数据")
         elif any(g.gaps for g in segs):
             missing.append(f"{case} 有序号缺口")
-    for it in items[:8]:  # P-1…P-9 对应 A1…A8；A9 是 P-10，不阻断 F1
+    for it in items[:8]:  # A1-A8 必须有结论；A9（工程恢复）不阻断 F1
         if it["verdict"] == "INCOMPLETE":
             missing.append(f"{it['id']} 数据不全")
     return {"ok": not missing, "missing": missing}
@@ -782,11 +785,22 @@ def render_md(res):
         out.append(f"| {it['id']} | {it['name']}（{cover}） | {VERDICT_ZH[it['verdict']]} | {why} |")
     f1 = res["f1"]
     out += ["", "## 冻结条件", ""]
-    out.append("- F1 数据齐全、P-1…P-9 有结论：" + ("满足" if f1["ok"] else "未满足（" + "；".join(f1["missing"]) + "）"))
+    out.append("- F1 数据齐全、A1-A8 有结论：" + ("满足" if f1["ok"] else "未满足（" + "；".join(f1["missing"]) + "）"))
     out += ["- F2 无需改布局：人工确认", "- F3 Win/mac 测试与压测全绿：以 gates 与 dispatch 结果为准", "- F4 用户已过目：人工确认"]
     if res["extras"]:
         out += ["", "## 附加记录", ""] + [f"- {x}" for x in res["extras"]]
     return "\n".join(out) + "\n"
+
+
+def _scrub_result(res):
+    """JSON 只清洗自由文本的值；键、编号和 PASS / FAIL 之类的枚举不动，免得与用户名撞词后机读输出损坏。"""
+    res = json.loads(json.dumps(res))
+    for it in res["items"]:
+        it["notes"] = [scrub(x) for x in it["notes"]]
+        it["cover"] = [scrub(x) for x in it["cover"]]
+    res["f1"]["missing"] = [scrub(x) for x in res["f1"]["missing"]]
+    res["extras"] = [scrub(x) for x in res["extras"]]
+    return res
 
 
 def run(argv, out, err):
@@ -837,7 +851,10 @@ def run(argv, out, err):
     except OSError:
         err.write("读取日志目录失败\n")
         return 2
-    out.write(scrub(json.dumps(res, ensure_ascii=False, indent=2) + "\n" if as_json else render_md(res)))
+    if as_json:
+        out.write(json.dumps(_scrub_result(res), ensure_ascii=False, indent=2) + "\n")
+    else:
+        out.write(scrub(render_md(res)))
     return 0 if all(it["verdict"] == "PASS" for it in res["items"]) else 1
 
 
@@ -910,6 +927,14 @@ def _mutations_of(text):
 
 
 def self_test():
+    tmp = tempfile.mkdtemp(prefix="rinne-probe-selftest-")
+    try:
+        return _self_test(tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _self_test(tmp):
     ps = _synth()
     lines, bad, good = [], 0, 0
 
@@ -921,7 +946,6 @@ def self_test():
             lines.append(f"失败：{label}")
         return ok
 
-    tmp = tempfile.mkdtemp(prefix="rinne-probe-selftest-")
     salt = b"selftest"
     # 1. 夹具矩阵：每个判据的通过 / 不通过 / 数据不全
     tree, expect = ps.fixtures()
@@ -1002,6 +1026,22 @@ def self_test():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+    # 3b. 用户名与枚举撞词（USERNAME=pass）时，JSON 的枚举不能被清洗坏
+    saved = os.environ.get("USERNAME")
+    os.environ["USERNAME"] = "pass"
+    try:
+        _, so, _ = _cli([os.path.join(tmp, "full-pass"), "--json"])
+        ok = False
+        try:
+            ok = [it["verdict"] for it in json.loads(so)["items"]] == ["PASS"] * 9
+        except ValueError:
+            pass
+        check("用户名撞上枚举时 JSON 仍可解析且枚举完好", ok, True)
+    finally:
+        if saved is None:
+            os.environ.pop("USERNAME", None)
+        else:
+            os.environ["USERNAME"] = saved
     # 4. 命令行
     check("目录不存在退出码 2", _cli([os.path.join(tmp, "nope")])[0] == 2, True)
     check("全部通过退出码 0", _cli([os.path.join(tmp, "full-pass")])[0] == 0, False)

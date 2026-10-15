@@ -253,6 +253,27 @@ def full_pass():
     return out
 
 
+def extra_cells():
+    """补充的边界夹具：{目录名: (文件, {判据: 期望})}。"""
+
+    def bufchange(r, k, row):
+        row["n"] = 256 if k < 20 else 1024
+        row["n_decl"] = row["n"]
+
+    li, lo = pair("CB-10", "bufchange", 256, "low", hook=bufchange, pid=4400)
+    for lg in (li, lo):  # 播放中改缓冲：第 20 块之前重新 prepare 成 1024
+        lg.event(T_START + 20 * PERIOD - 1000, "prepare", 48000, 1024)
+    li2, lo2 = pair("CB-02", "toggle", 256, "low", blocks=False, pid=4500)
+    for i in range(10):  # 有 10 次切换，却没有任何块记录
+        li2.event(T_START + i * PERIOD, "monitor_toggle", i % 2)
+    still = pair("CB-03", "guard-out", 256, "low", hook=lambda r, k, row: row.update(playing=0), pid=4600)
+    return {
+        "a4-pass-bufchange": (files_of(li, lo), {"A4": "PASS"}),
+        "a2-incomplete-noblocks": (files_of(li2, lo2), {"A2": "INCOMPLETE"}),
+        "a7-incomplete-notplaying": (files_of(*still), {"A7": "INCOMPLETE"}),
+    }
+
+
 def fixtures():
     """{目录名: {文件名: 文本}} 与 expect.json 的内容。"""
     tree = {}
@@ -261,6 +282,9 @@ def fixtures():
         for st in STATES:
             tree[f"{item.lower()}-{st}"] = SCENARIOS[item](st)
             expect[f"{item.lower()}-{st}"] = {item: st.upper()}
+    for d, (files, want) in extra_cells().items():
+        tree[d] = files
+        expect[d] = {k: v.upper() for k, v in want.items()}
     tree["full-pass"] = full_pass()
     return tree, expect
 

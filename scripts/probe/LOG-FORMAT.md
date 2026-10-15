@@ -72,7 +72,31 @@
 
 ## 测试格
 
-`case` 取值：`CB-01` 至 `CB-12`（Cubase 一轮）与 `LU-01` 至 `LU-09`（LUNA 一轮）。编号含义见 p0 清单；其中 `LU-09` 是「保存重开」。
+`case` 取值与含义：
+
+| case | 测什么 |
+|---|---|
+| `CB-01` | Cubase：缓冲 64 / 256 / 1024 乘 ASIO-Guard 关 / 低 / 常规 / 高，每格稳态播放 30 s |
+| `CB-02` | Cubase：同一条轨反复开关输入监听 |
+| `CB-03` | Cubase：只对 In、只对 Out、对两者关闭 ASIO-Guard |
+| `CB-04` | Cubase：实时与离线导出、Freeze、Render in Place、Direct Offline Processing |
+| `CB-05` | Cubase：旁路、停用、禁用轨道 |
+| `CB-06` | Cubase：Smart Plug-in Processing 下的静音段 |
+| `CB-07` | Cubase：复制轨道、保存重开、轨道预设、FX Chain 预设、删除撤销、改轨道名与颜色 |
+| `CB-08` | Cubase：错放（Out 在 In 前、Out 跨轨、Out 在推子后） |
+| `CB-09` | Cubase：单声道轨 |
+| `CB-10` | Cubase：播放中改缓冲、改采样率 |
+| `CB-11` | Cubase：Constrain Delay Compensation |
+| `CB-12` | Cubase：同时开两个工程并切换 |
+| `LU-01` | LUNA：解除隔离与签名后扫描、加载 AU 与 VST3 |
+| `LU-02` | LUNA：AU 一对、VST3 一对、AU In 配 VST3 Out |
+| `LU-03` | LUNA：缓冲 64 / 512 / 2048 乘录音使能开关 |
+| `LU-04` | LUNA：离线与实时 Export Mixdown、Bounce、Freeze |
+| `LU-05` | LUNA：旁路与停用 |
+| `LU-06` | LUNA：轨道名与颜色，AU 与 VST3 各一次 |
+| `LU-07` | LUNA：Core Audio 模式下的可用性 |
+| `LU-08` | LUNA：沙盒宿主下的进程隔离（可选） |
+| `LU-09` | LUNA：保存重开 |
 
 `variant` 取值，`-` 表示不区分：
 
@@ -105,7 +129,7 @@
 | A1 | 稳态对齐：播放中 `m` 恒为 0，首块之后 `rs` 为 0，`off` 恒定。不通过即停工 | CB-01 CB-03 LU-03 |
 | A2 | 切换切片：每次切换后 2 s 内重同步不超过 1 次，`d` 不变，至少 10 次切换 | CB-02 LU-03 |
 | A3 | 导出一致：离线与实时逐位相同或残差不高于 -120 dBFS | CB-04 LU-04 |
-| A4 | 块长：`n` 不超过 `prepare` 声明的最大块长与 `n_decl` | 所有带块记录的格 |
+| A4 | 块长：每块的 `n` 不超过它之前最近一次 `prepare` 声明的最大块长，也不超过 `n_decl` | 所有带块记录的格 |
 | A5 | 进程与后端：两端同 pid、已配对、无 `shm_denied`，三种格式组合齐全 | LU-02 |
 | A6 | 轨道信息：两端都收到非空轨道名 | CB-07 LU-06 |
 | A7 | hostNs：同一回调两端相等，逐回调递增，有效率不低于 99% | 所有两端都有块的格 |
