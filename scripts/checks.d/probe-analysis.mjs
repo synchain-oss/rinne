@@ -82,13 +82,33 @@ export function docProblems(spec, doc) {
         }
     }
     for (const g of spec.guards) need("guard", tick(g));
-    for (const c of spec.cases) need("case", tick(c));
+    // case 按表格行逐个核对，不能靠别处碰巧出现的反引号
+    for (const c of spec.cases) {
+        if (!lines.some((l) => l.startsWith(`| ${tick(c)} |`))) missing.push(`case 表缺 ${tick(c)} 一行`);
+    }
     need("比对表头", spec.compare_head);
+    // 阈值与上界必须写在指定的判据行 / 句子里，按整句匹配，免得被别处的数字碰巧满足
     const t = spec.thresholds;
-    const nums = [t.min_steady_blocks, t.min_toggles, t.min_slice_blocks, t.residual_limit_dbfs];
-    for (const n of nums) need("阈值", String(n));
-    for (const ms of [t.slice_ms, t.stall_ms]) need("阈值", `${ms / 1000} s`);
-    for (const [k, v] of Object.entries(spec.limits)) need(`上界 ${k}`, String(v));
+    const inRow = (id, label, phrase) => {
+        const row = lines.find((l) => l.startsWith(`| ${id} |`)) ?? "";
+        if (!row.includes(phrase)) missing.push(`${id} 行缺${label}：${phrase}`);
+    };
+    inRow("A1", "块数阈值", `至少 ${t.min_steady_blocks} 块`);
+    inRow("A2", "切换次数阈值", `至少 ${t.min_toggles} 次切换`);
+    inRow("A2", "窗口块数阈值", `至少 ${t.min_slice_blocks} 块`);
+    inRow("A2", "窗口长度", `${t.slice_ms / 1000} s 内`);
+    inRow("A3", "残差阈值", `${t.residual_limit_dbfs} dBFS`);
+    inRow("A8", "摘要间隔阈值", `不超过 ${t.stall_ms / 1000} s`);
+    const L = spec.limits;
+    const limitPhrases = {
+        buf: `不超过 ${L.buf}`,
+        sr: `不超过 ${L.sr}`,
+        block: `不超过 ${L.block}`,
+        d: `不超过 ${L.d}`,
+        pid: `不超过 ${L.pid}`,
+        name_bytes: `编码前至多 ${L.name_bytes} 字节`,
+    };
+    for (const [k, phrase] of Object.entries(limitPhrases)) need(`上界 ${k}`, phrase);
     for (const code of Object.keys(spec.exit_codes)) need("退出码", `| ${code} |`);
     return missing;
 }
@@ -142,7 +162,7 @@ export default {
             variants: ["-"],
             variant_rules: { "-": ["A1", "成对满块", "两端各至少 32 块"] },
             guards: ["off"],
-            cases: ["CB-01", "CB-02", "LU-01", "LU-09"],
+            cases: ["CB-01", "CB-02"],
             compare_head: "h1,h2",
             thresholds: {
                 min_steady_blocks: 32,
@@ -152,15 +172,21 @@ export default {
                 stall_ms: 5000,
                 residual_limit_dbfs: -120,
             },
-            limits: { buf: 65536 },
+            limits: { buf: 65536, sr: 768000, block: 1048576, d: 2147483648, pid: 4294967295, name_bytes: 200 },
             exit_codes: { 0: "ok", 3: "incomplete" },
         };
         const full = [
-            "m,1 `ev_a` `off` `CB-01` `CB-02` `LU-01` `LU-09` h1,h2 `I` `O`",
+            "m,1 `ev_a` `off` h1,h2 `I` `O`",
+            "| `CB-01` | 测什么 |",
+            "| `CB-02` | 测什么 |",
             "| `-` | 不区分 | A1 | 成对满块 | 两端各至少 32 块 |",
             "| `H` | 实例头 | `role` `format` |",
             "| `B` | 逐块 | `seq` `n` |",
-            "32 10 8 2 s 5 s -120 65536",
+            "| A1 | 稳态：各自至少 32 块 |",
+            "| A2 | 切换：2 s 内，每个窗口至少 8 块，至少 10 次切换 |",
+            "| A3 | 导出：不高于 -120 dBFS |",
+            "| A8 | 稳定：摘要间隔不超过 5 s |",
+            "不超过 65536 不超过 768000 不超过 1048576 不超过 2147483648 不超过 4294967295 编码前至多 200 字节",
             "| 0 | 全过 |",
             "| 3 | 数据不全 |",
         ].join("\n");
@@ -169,13 +195,24 @@ export default {
             ["文档齐全", false, docProblems(spec, full).length === 0],
             ["文档缺一个事件", true, docProblems(spec, full.replace("`ev_a`", "")).length > 0],
             ["文档缺魔数", true, docProblems(spec, full.replace("m,1", "")).length > 0],
-            ["文档缺 case 编号", true, docProblems(spec, full.replace("`CB-02`", "")).length > 0],
+            ["文档的 case 表缺一行", true, docProblems(spec, full.replace("| `CB-02` | 测什么 |", "")).length > 0],
+            [
+                "case 只在别处出现不算",
+                true,
+                docProblems(spec, full.replace("| `CB-02` | 测什么 |", "提到 `CB-02`")).length > 0,
+            ],
+            [
+                "阈值被别处的数字满足不算",
+                true,
+                docProblems(spec, full.replace("各自至少 32 块", "各自 32").replace("| A8 |", "至少 32 块 | A8 |"))
+                    .length > 0,
+            ],
             ["文档里列序写反", true, docProblems(spec, full.replace("`seq` `n`", "`n` `seq`")).length > 0],
             ["文档缺一个列名", true, docProblems(spec, full.replace("`format`", "")).length > 0],
             ["文档缺 H 枚举取值", true, docProblems(spec, full.replace("`O`", "")).length > 0],
             ["文档里 variant 的要求写错", true, docProblems(spec, full.replace("成对满块", "单端可")).length > 0],
-            ["文档缺阈值", true, docProblems(spec, full.replace("-120", "")).length > 0],
-            ["文档缺取值上界", true, docProblems(spec, full.replace("65536", "")).length > 0],
+            ["文档缺阈值", true, docProblems(spec, full.replace("-120 dBFS", "")).length > 0],
+            ["文档缺取值上界", true, docProblems(spec, full.replace("不超过 65536", "")).length > 0],
             ["文档缺退出码", true, docProblems(spec, full.replace("| 3 | 数据不全 |", "")).length > 0],
             ["模板齐全", false, templateProblems(tpl).length === 0],
             ["模板缺 A5", true, templateProblems(tpl.replace("A5", "")).length > 0],

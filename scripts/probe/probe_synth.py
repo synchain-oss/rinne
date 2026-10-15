@@ -272,7 +272,7 @@ SCENARIOS = {
 }  # fmt: skip
 
 
-def full_pass(skip_cell=None):
+def full_pass(skip_cell=None, cb05_blocks=True):
     """所有判据都通过，且 F1 要求的七个 case 与两张矩阵都齐。每个场景用自己的 pid，文件名不冲突。"""
     out = {}
     cb01 = [c for c in _matrix("CB-01") if c != skip_cell]
@@ -286,7 +286,7 @@ def full_pass(skip_cell=None):
     def bypass(r, k, row):
         row["bypassed"] = 1 if k >= 20 else 0
 
-    out.update(files_of(*pair("CB-05", "bypass-out", hook=bypass, pid=4200)))
+    out.update(files_of(*pair("CB-05", "bypass-out", hook=bypass, pid=4200, blocks=cb05_blocks)))
     return out
 
 
@@ -373,6 +373,7 @@ def extra_cells():
         "a7-incomplete-fewplaying": (files_of(*fewplaying), {"A7": "INCOMPLETE"}),
         "a8-fail-broken-file": (broken, {"A8": "FAIL"}),
         "a9-pass-early": (scen_a9("pass", pid=4790, early=True), {"A9": "PASS"}),
+        "f1-cb05-no-blocks": (full_pass(cb05_blocks=False), {}),
         "f1-missing-cell": (full_pass(skip_cell=("CB-01", "steady", 256, "low")), {}),
         "orphan-blocks": (files_of(*pair("CB-01", "steady", 256, "low", pid=4800, pre_blocks=2)), {}),
         "a4-pass-bufchange": (files_of(li, lo), {"A4": "PASS"}),

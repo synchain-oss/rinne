@@ -6,7 +6,7 @@
     python analyze-probe.py --mutation-check         # 逐条屏蔽判据与脱敏，每条都必须让自测变红
     python analyze-probe.py --spec                   # 以 JSON 打印日志格式的机读规格
 
-退出码：0 = A1-A9 全部通过；1 = 有不通过；3 = 无不通过但有数据不全；2 = 输入不合格式或用法错误；4 = 内部错误。
+退出码：0 = A1-A9 全部通过且 F1 满足；1 = 有不通过；3 = 无不通过但有数据不全或 F1 未满足；2 = 输入不合格式或用法错误；4 = 内部错误。
 `--json` 的 `stop` 字段为真表示 A1 不通过，要停工上报。输出固定为 UTF-8。
 
 输出会被公开粘贴，所以只由枚举、整数、case 编号和 8 位散列拼成：不含路径、用户名、主机名，
@@ -178,7 +178,7 @@ SPEC = {  # noqa: E501
         "min_steady_blocks": MIN_STEADY_BLOCKS, "min_toggles": MIN_TOGGLES, "min_slice_blocks": MIN_SLICE_BLOCKS,
         "slice_ms": SLICE_NS // 1_000_000, "residual_limit_dbfs": RESIDUAL_LIMIT_DB, "stall_ms": STALL_NS // 1_000_000,
     },
-    "exit_codes": {"0": "A1-A9 全部通过", "1": "有不通过", "2": "格式或用法错误", "3": "无不通过但有数据不全", "4": "内部错误"},
+    "exit_codes": {"0": "A1-A9 全部通过且 F1 满足", "1": "有不通过", "2": "格式或用法错误", "3": "无不通过但有数据不全或 F1 未满足", "4": "内部错误"},
 }
 
 # ---------------------------------------------------------------------------------------------------
@@ -1146,7 +1146,10 @@ def _run(argv, out, err):
     else:
         out.write(scrub(render_md(res)))
     verdicts = {it["verdict"] for it in res["items"]}
-    return 1 if "FAIL" in verdicts else 3 if "INCOMPLETE" in verdicts else 0
+    if "FAIL" in verdicts:
+        return 1
+    # 退出码 0 才表示可以冻结：F1 因缺数据没满足也只能给 3
+    return 0 if not verdicts - {"PASS"} and res["f1"]["ok"] else 3
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1389,6 +1392,9 @@ def _self_test(tmp):
     # 5. F1：缺矩阵格、块早于第一个 C 行都要被指出
     res = analyze(os.path.join(tmp, "f1-missing-cell"), salt)
     check("缺一格 CB-01 时 F1 指出矩阵缺格", (not res["f1"]["ok"]) and any("矩阵缺格" in m for m in res["f1"]["missing"]), True)
+    res = analyze(os.path.join(tmp, "f1-cb05-no-blocks"), salt)
+    check("CB-05 只有 C 行时 F1 指出无数据", (not res["f1"]["ok"]) and "CB-05 无数据" in res["f1"]["missing"], True)
+    check("A1-A9 过了但 F1 没满足时退出码是 3", _cli([os.path.join(tmp, "f1-missing-cell")])[0] == 3, True)
     res = analyze(os.path.join(tmp, "orphan-blocks"), salt)
     check("块早于第一个 C 行时给出提示", any("第一个 C 行" in w for w in res["warnings"]) and not res["f1"]["ok"], True)
     return {"ok": not lines, "bad": bad, "good": good, "lines": lines}
