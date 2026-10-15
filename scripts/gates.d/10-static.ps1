@@ -123,7 +123,8 @@ function Get-CxxFiles([string]$Root) {
 
 function Test-CxxTree($Ctx, [string]$Root) {
     if (-not (Test-Path -LiteralPath (Join-Path $Root 'src') -PathType Container)) { return @{ Status = 'SKIP'; Reason = '尚无 C++ 源（没有 src/）' } }
-    $files = Get-CxxFiles $Root
+    # 函数返回的单元素数组会被 PowerShell 展开成字符串，再按下标取就成了取字符：必须重新包成数组
+    $files = @(Get-CxxFiles $Root)
     if (-not $files.Count) { return @{ Status = 'FAIL'; Reason = 'src/ 存在，却没有列出任何 C++ 源文件' } }
     $cf = Get-ToolCommand $Ctx clangFormat
     $steps = for ($i = 0; $i -lt $files.Count; $i += 100) {
@@ -141,6 +142,11 @@ function Invoke-ClangFormat($Ctx) {
         git -C $fx init -q *>$null
         git -C $fx add -A *>$null
         if ((Test-CxxTree $Ctx $fx).Status -ne 'FAIL') { return @{ Status = 'FAIL'; Reason = '自测失败：src/ 下没有 C++ 源的夹具没有判红' } }
+        # 恰好一个 C++ 文件：单元素数组被展开成字符串时，clang-format 会被调用在一个字符的路径上而失败
+        Set-Content -LiteralPath (Join-Path $fx 'src/one.h') -Value '#pragma once'
+        git -C $fx add -A *>$null
+        $one = Test-CxxTree $Ctx $fx
+        if ($one.Status -ne 'PASS') { return @{ Status = 'FAIL'; Reason = "自测失败：恰好一个 C++ 文件的夹具没有通过（$($one.Status)：$($one.Reason)）" } }
     } finally { Remove-Item -LiteralPath $fx -Recurse -Force -ErrorAction SilentlyContinue }
     Test-CxxTree $Ctx $Ctx.Root
 }

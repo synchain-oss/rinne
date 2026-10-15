@@ -1,0 +1,1134 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Derived from synchain-oss/scvb; see upstream/web.json */
+/* =============================================================================
+   Rinne：基础排版与通用组件层
+   -----------------------------------------------------------------------------
+   依赖：必须在本文件之前引入 web/shared/tokens.css。
+   纪律（检查脚本与人工评审都按此查）：
+   - 本文件不写裸色值：一切颜色写成 var(--x) 或 rgba(var(--分量), a)。新增颜色先进 tokens.css，
+     不得在这里就地取色。唯一例外是 tokens.css 里 data-URI 内部的编码色。
+   - 命名统一前缀 .sc-，块内元素 .sc-块__元素，变体 .sc-块--变体；开关态一律走 data-* 属性
+     （data-on、data-tone、data-disabled 等），方便 JS 直接改属性而不拼 class 字符串。
+   - 只做与状态无关的外观。布局骨架（grid、flex）、视口锁死（html、body 的 overflow）和缩放 zoom
+     由各页面自己定；本文件只给基础 reset，不锁滚动。
+   - 组件的实时几何量走内联 CSS 变量（--lv 电平、--pk 峰值、--vol 卡箍位、--ang 旋钮角），
+     由 JS 写在元素的 style 上；本文件只给默认值，不产生 style 字符串拼接。
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- 基础 reset */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+}
+
+body {
+    font-family: var(--ff-sans);
+    font-size: var(--fs-120);
+    color: var(--txt-2);
+    /* 外圈色：.sc-shell 几乎铺满窗口，肉眼能看到的只有它圆角之外的那一圈和投影落下的那个面，取深色。
+     它不是开窗占位（占位是原生侧的色标数组和 index.html 的 head 内联，是浅色渐变）。
+     两个角色的边界写在 tokens.css 的对应条目处。 */
+    background: var(--page-backdrop);
+    /* 排版精修：抗锯齿走灰阶（更清透，配玻璃拟态）；禁止伪粗、伪斜合成。每个拉丁字体族只内嵌单一字重，
+     缺字重时宁可字体栈回退也不合成，避免 8.5 到 10px 的 mono 小字发糊。 */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-synthesis: none;
+    font-feature-settings:
+        "kern" 1,
+        "liga" 1,
+        "calt" 1;
+}
+
+a {
+    color: var(--acc-link);
+    text-decoration: none;
+}
+
+a:hover {
+    color: var(--acc-link-hover);
+}
+
+input::placeholder {
+    color: var(--txt-placeholder);
+}
+
+::selection {
+    background: var(--selection-bg);
+}
+
+/* 宽度真源是 tokens.css 的 --scrollbar-w。它是布局量：凡是「滚动容器内与容器外要对齐」的排布都得减掉它。
+   写死在这里的话，改宽度就得靠人记得去改另外几处。 */
+*::-webkit-scrollbar {
+    width: var(--scrollbar-w);
+    height: var(--scrollbar-w);
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb);
+    border-radius: var(--r-pill);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: var(--scroll-thumb-hover);
+    background-clip: padding-box;
+}
+
+/* ------------------------------------------------------------------- 关键帧 */
+/* 窗口入场；状态点脉冲（2.4s）。脉冲用 opacity 加 scale，不用 box-shadow：
+   密排行里阴影脉冲会互相叠加成一片糊光。 */
+@keyframes vbUp {
+    from {
+        opacity: 0;
+        transform: translateY(16px) scale(0.985);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes livePulse {
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    50% {
+        opacity: 0.45;
+        transform: scale(0.82);
+    }
+}
+
+/* 冲突反馈：占用失败时卡片或组胶囊抖动，并弹出红色 toast。
+   抖动是两个插件共用的反馈，放在共享层，避免两个页面各写一份（直接用 .sc-shake）。 */
+@keyframes shakeX {
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+    20% {
+        transform: translateX(-5px);
+    }
+    40% {
+        transform: translateX(5px);
+    }
+    60% {
+        transform: translateX(-3px);
+    }
+    80% {
+        transform: translateX(3px);
+    }
+}
+
+/* 加载转圈。 */
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* --------------------------------------------------------------- 工具类 */
+/* 实时数值一律等宽衬线:dB/通道号/角度/计时跳动时列宽稳定、基线对齐,读起来像硬件仪表。 */
+.sc-num {
+    font-variant-numeric: tabular-nums lining-nums;
+}
+
+.sc-mono {
+    font-family: var(--ff-mono);
+    font-variant-numeric: tabular-nums lining-nums;
+    letter-spacing: var(--mono-ls);
+}
+
+/* mono eyebrow 小标:大写 + 宽字距,用于卡片/分区标题上方的一行小字。 */
+.sc-eyebrow {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-85);
+    letter-spacing: var(--eyebrow-ls);
+    text-transform: uppercase;
+    color: var(--txt-3);
+    white-space: nowrap;
+}
+
+.sc-eyebrow--wide {
+    font-size: var(--fs-100);
+    letter-spacing: var(--eyebrow-ls-wide);
+}
+
+.sc-eyebrow--dark {
+    color: var(--txt-dark-mono);
+}
+
+.sc-hint {
+    font-size: var(--fs-95);
+    line-height: 1.5;
+    color: var(--txt-4);
+    text-wrap: pretty;
+}
+
+/* 视觉隐藏但可被辅助技术读到（无字列头或图标控件的实文本） */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+.sc-divider {
+    width: 1px;
+    align-self: stretch;
+    background: rgba(var(--wh), 0.26);
+}
+
+/* 抖动反馈：占用失败时 JS 打 data-shake="1"，animationend 时清掉即可重放。
+   卡片与组胶囊两处都要抖，所以做成属性钩子，而不是绑在某个组件上。 */
+[data-shake="1"] {
+    animation: shakeX var(--dur-shake) var(--ease);
+}
+
+/* 转圈：进行态用。颜色走 currentColor（由所在语义色上下文决定），
+   直径由使用方写 --sz，默认 11px。 */
+.sc-spinner {
+    width: var(--sz, 11px);
+    height: var(--sz, 11px);
+    flex: none;
+    border-radius: 50%;
+    border: 1.6px solid currentColor;
+    border-top-color: transparent;
+    animation: spin var(--dur-spin) linear infinite;
+}
+
+/* ------------------------------------------------------- 玻璃配方(四种面) */
+/* 1) 卡片外壳:设计盒本体,页面唯一一层,承载页面渐变 + 五层边缘手法。 */
+.sc-shell {
+    position: relative;
+    overflow: hidden;
+    /* 光晕 z-index:-1 的收容边界:不开 isolation,负 z 会穿到页面背景之下
+       (光晕直接消失);开了则按栈序画在壳背景之上、内容之下。 */
+    isolation: isolate;
+    border-radius: var(--r-shell);
+    background: var(--page-gradient);
+    border: 1px solid var(--shell-border);
+    box-shadow: var(--shell-shadow);
+}
+
+/* 外壳顶缘 angel-eye:中间最亮、两端消失的一条 1px 高光。 */
+.sc-shell::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 22%;
+    right: 22%;
+    height: 1px;
+    background: var(--hl-angel);
+    z-index: 5;
+    pointer-events: none;
+}
+
+/* 外壳背后的柔光球（3 到 4 个）。位置由页面定，尺寸、模糊和颜色在此定死。
+   z-index 为 0 的定位元素会画在后续未定位内容之上，62% 不透明度的光晕会把顶部横幅和文字整体洗淡，
+   所以降到 -1（.sc-shell 已开 isolation 收容），光晕回到「壳背景之上、内容之下」。 */
+.sc-halo {
+    position: absolute;
+    width: var(--halo-size);
+    height: var(--halo-size);
+    border-radius: 50%;
+    filter: blur(var(--halo-blur));
+    pointer-events: none;
+    z-index: -1;
+}
+
+.sc-halo--1 {
+    background: var(--halo-1);
+}
+
+.sc-halo--2 {
+    background: var(--halo-2);
+}
+
+.sc-halo--3 {
+    background: var(--halo-3);
+}
+
+/* 2) 玻璃面板：五层配方（低 blur 的清透路线，不得改成高 blur 的磨砂白板）。 */
+.sc-glass {
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--r-shell);
+    box-shadow: var(--glass-inset);
+}
+
+/* 3) 玻璃数据卡:面板内部装读数的小卡(底 .10 + 描边 .24 + 内高光 .42)。 */
+.sc-card {
+    padding: var(--card-pad);
+    border-radius: var(--r-lg);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-inset);
+}
+
+/* 4) 深色雕刻窗:精密可视化的底,浅色玻璃海洋里仅有的深色区域之一。 */
+.sc-dark {
+    position: relative;
+    overflow: hidden;
+    border-radius: var(--r-lg);
+    background: var(--dark-window);
+    -webkit-backdrop-filter: var(--dark-window-blur);
+    backdrop-filter: var(--dark-window-blur);
+    border: 1px solid var(--dark-window-border);
+    box-shadow: var(--dark-window-shadow);
+    color: var(--txt-dark-2);
+}
+
+/* 4b) 深色玻璃模态(缩放确认 / 复制版本覆盖确认)+ 其遮罩。 */
+.sc-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--dark-scrim);
+    -webkit-backdrop-filter: var(--dark-scrim-blur);
+    backdrop-filter: var(--dark-scrim-blur);
+}
+
+.sc-modal {
+    padding: var(--sp-24);
+    border-radius: var(--r-shell);
+    background-color: var(--dark-solid);
+    background-image: var(--dark-modal);
+    border: 1px solid rgba(var(--wh), 0.16);
+    box-shadow: var(--dark-modal-shadow);
+    color: var(--txt-dark-2);
+}
+
+.sc-modal__title {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-170);
+    color: var(--txt-dark-1);
+}
+
+.sc-modal__body {
+    font-size: var(--fs-125);
+    line-height: 1.6;
+    color: var(--txt-dark-3);
+    text-wrap: pretty;
+}
+
+/* -------------------------------------------------- 状态胶囊 pill(三态 + 红) */
+/* 三态取语义色：绿表示在线或运行，琥珀表示等待或警告，灰表示离线；红为错误变体。 */
+.sc-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-6);
+    padding: var(--sp-4) var(--sp-10);
+    border-radius: var(--r-pill);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-100);
+    letter-spacing: var(--mono-ls-pill);
+    white-space: nowrap;
+    background: rgba(var(--sem-gray), 0.16);
+    border: 1px solid rgba(var(--sem-gray), 0.42);
+    color: var(--sem-gray-ink);
+}
+
+.sc-pill--lg {
+    gap: var(--sp-7);
+    padding: var(--sp-5) var(--sp-12);
+    font-size: var(--fs-105);
+}
+
+.sc-pill[data-tone="green"] {
+    background: rgba(var(--sem-green), 0.16);
+    border-color: rgba(var(--sem-green), 0.42);
+    color: var(--sem-green-ink);
+}
+
+.sc-pill[data-tone="amber"] {
+    background: rgba(var(--sem-amber), 0.16);
+    border-color: rgba(var(--sem-amber), 0.42);
+    color: var(--sem-amber-ink);
+}
+
+.sc-pill[data-tone="red"] {
+    background: rgba(var(--sem-red), 0.16);
+    border-color: rgba(var(--sem-red), 0.45);
+    color: var(--sem-red-ink);
+}
+
+.sc-pill__dot,
+.sc-dot {
+    width: var(--sp-6);
+    height: var(--sp-6);
+    border-radius: 50%;
+    flex: none;
+    background: rgb(var(--sem-gray));
+}
+
+.sc-pill[data-tone="green"] .sc-pill__dot,
+.sc-dot[data-tone="green"] {
+    background: rgb(var(--sem-green));
+}
+
+.sc-pill[data-tone="amber"] .sc-pill__dot,
+.sc-dot[data-tone="amber"] {
+    background: rgb(var(--sem-amber));
+}
+
+.sc-pill[data-tone="red"] .sc-pill__dot,
+.sc-dot[data-tone="red"] {
+    background: rgba(var(--sem-red), 0.95);
+}
+
+/* 中性态(挂起 / 乐句间隙):灰蓝,刻意与 amber、red 拉开 —— 它说的是「这会儿没在出数据」,
+   不是「出问题了」。取的是既有的 --sem-gray 系,不引新色。 */
+.sc-dot[data-tone="slate"] {
+    background: rgba(var(--sem-gray), 0.85);
+}
+
+/* 活跃(心跳新鲜)才脉冲;其余状态静态,避免密排下满屏闪。 */
+.sc-pill[data-pulse="1"] .sc-pill__dot,
+.sc-dot[data-pulse="1"] {
+    animation: livePulse var(--pulse-dur) ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------ Toggle */
+/* 26×15 胶囊。ON 轨道走语义绿 rgb(120,176,142)；把手用 ::after，不额外建 DOM。 */
+.sc-toggle {
+    position: relative;
+    width: var(--toggle-w);
+    height: var(--toggle-h);
+    border-radius: var(--r-pill);
+    flex: none;
+    cursor: pointer;
+    background: rgba(var(--wh), 0.16);
+    border: 1px solid rgba(var(--wh), 0.28);
+    box-shadow: inset 0 1px 0 rgba(var(--wh), 0.35);
+    transition:
+        background var(--dur-1) var(--ease),
+        border-color var(--dur-1) var(--ease);
+}
+
+.sc-toggle::after {
+    content: "";
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: rgba(var(--wh), 0.9);
+    box-shadow: var(--sh-sm);
+    transition: transform var(--dur-1) var(--ease);
+}
+
+.sc-toggle[data-on="1"] {
+    background: rgba(var(--sem-green), 0.55);
+    border-color: rgba(var(--sem-green), 0.7);
+}
+
+.sc-toggle[data-on="1"]::after {
+    transform: translateX(11px);
+}
+
+.sc-toggle[data-disabled="1"] {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* -------------------------------------------------------- 段选 segmented */
+/* 选中态白底 .92。小号变体给卡内语言切换一类窄位。 */
+.sc-seg {
+    display: inline-flex;
+    gap: var(--sp-2);
+    padding: var(--sp-3);
+    border-radius: var(--r-pill);
+    background: rgba(var(--wh), 0.14);
+    border: 1px solid rgba(var(--wh), 0.28);
+}
+
+.sc-seg__item {
+    padding: var(--sp-7) var(--sp-16);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-120);
+    color: var(--txt-4);
+    background: transparent;
+    border: 0;
+    transition:
+        background var(--dur-1) var(--ease),
+        color var(--dur-1) var(--ease);
+}
+
+.sc-seg__item[aria-selected="true"] {
+    background: var(--seg-on-bg);
+    color: var(--acc-ink);
+}
+
+.sc-seg--sm .sc-seg__item {
+    padding: var(--sp-3) var(--sp-9);
+    font-family: var(--ff-sans);
+    font-size: var(--fs-100);
+    color: var(--txt-3);
+}
+
+.sc-seg--sm .sc-seg__item[aria-selected="true"] {
+    background: rgba(var(--wh), 0.85);
+    color: var(--txt-1);
+}
+
+/* -------------------------------------------------------- 主 tab 条(四页) */
+/* 滑块 .sc-tabs__slate 由 JS 写 left/width;文字只换色与字重,不换底,避免跳动。 */
+.sc-tabs {
+    position: relative;
+    display: flex;
+    padding: var(--sp-3);
+    border-radius: var(--r-md);
+    background: var(--w-10);
+    border: 1px solid var(--card-border);
+    box-shadow: inset 0 1px 0 rgba(var(--wh), 0.4);
+    flex: none;
+}
+
+.sc-tabs__slate {
+    position: absolute;
+    z-index: 1;
+    top: var(--sp-3);
+    bottom: var(--sp-3);
+    border-radius: var(--r-tab);
+    background: var(--slate-bg);
+    border: 1px solid var(--slate-border);
+    box-shadow: var(--slate-shadow);
+    transition: left var(--dur-slate) var(--ease);
+}
+
+.sc-tabs__item {
+    position: relative;
+    z-index: 2;
+    text-align: center;
+    padding: var(--sp-8) 0;
+    border-radius: var(--r-tab);
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    font-family: var(--ff-sans);
+    font-size: var(--fs-125);
+    font-weight: 500;
+    color: var(--txt-3);
+    transition: color var(--dur-1) var(--ease);
+}
+
+.sc-tabs__item[aria-selected="true"] {
+    font-weight: 600;
+    color: var(--txt-1);
+}
+
+/* ------------------------------------------------------------- 下拉 select */
+/* 去原生外观，内嵌 chevron data-URI。 */
+.sc-select {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls-ui);
+    line-height: 1.2;
+    color: var(--txt-2);
+    background-color: rgba(var(--wh), 0.34);
+    border: 1px solid rgba(var(--wh), 0.5);
+    border-radius: var(--r-micro);
+    padding: var(--sp-3) var(--sp-20) var(--sp-3) var(--sp-7);
+    cursor: pointer;
+    outline: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background-image: var(--chevron);
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+}
+
+.sc-select:hover {
+    background-color: rgba(var(--wh), 0.5);
+}
+
+.sc-select:focus-visible {
+    border-color: rgba(var(--acc), 0.85);
+    background-color: rgba(var(--wh), 0.68);
+}
+
+/* --------------------------------------------------------------- 原生滑杆 */
+input[type="range"] {
+    accent-color: var(--acc-slider);
+    height: 5px;
+    width: 100%;
+    cursor: pointer;
+}
+
+/* 自绘滑杆(需要读数刻度/曲线示意时用):轨 + 已走过段 + 圆把手。 */
+.sc-slider {
+    position: relative;
+    height: 5px;
+    border-radius: var(--r-pill);
+    background: rgba(var(--wh), 0.22);
+    cursor: pointer;
+    touch-action: none;
+}
+
+.sc-slider__fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--v, 0%);
+    border-radius: var(--r-pill);
+    background: var(--acc-slider-fill);
+}
+
+.sc-slider__knob {
+    position: absolute;
+    top: 50%;
+    left: var(--v, 0%);
+    width: var(--sp-13);
+    height: var(--sp-13);
+    margin: -6.5px 0 0 -6.5px;
+    border-radius: 50%;
+    background: rgb(var(--wh));
+    box-shadow: var(--sh-xs);
+}
+
+/* ------------------------------------------------------------------ 按钮 */
+.sc-btn {
+    position: relative;
+    overflow: hidden;
+    padding: var(--sp-5) var(--sp-11);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: var(--ff-sans);
+    font-size: var(--fs-105);
+    color: var(--txt-2);
+    background: rgba(var(--wh), 0.3);
+    border: 1px solid rgba(var(--wh), 0.5);
+    transition: scale var(--dur-1) var(--ease);
+}
+
+.sc-btn:hover {
+    scale: 1.02;
+}
+
+.sc-btn[data-disabled="1"] {
+    opacity: 0.4;
+    cursor: not-allowed;
+    scale: 1;
+}
+
+/* CTA：主行动按钮。浅紫实心底（--acc-cta）上压深字（--acc-ink），一屏最多一枚。
+   这里不维护「谁还在用这枚底色」的清单：这类全称断言要维持为真需要全仓穷举，
+   而没有任何检查守着它，下一个加按钮的人不会回来改这行。要知道还有谁在用，现查：
+   grep 'var(--acc-cta)' web/；指路不会过期，枚举会。 */
+.sc-btn--cta {
+    background: var(--acc-cta);
+    border-color: transparent;
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    color: var(--acc-ink);
+    box-shadow: 0 4px 12px var(--acc-cta-shadow);
+}
+
+.sc-btn--cta-lg {
+    padding: var(--sp-9) var(--sp-20);
+    font-size: var(--fs-120);
+    box-shadow: 0 6px 18px var(--acc-cta-shadow-lg);
+}
+
+/* 深色浮层(toast/模态)内的次按钮。 */
+.sc-btn--dark {
+    background: rgba(var(--wh), 0.08);
+    border-color: rgba(var(--wh), 0.18);
+    color: var(--txt-dark-btn);
+}
+
+/* ------------------------------------------------------- 警告 banner(两系) */
+/* 琥珀 = 等待/警告(可继续),红 = 错误/阻断。图标色走 --sem-*-icon。 */
+.sc-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-10);
+    flex: none;
+    padding: var(--sp-10) var(--sp-13);
+    border-radius: var(--r-banner);
+    font-size: var(--fs-115);
+    /* 字重 400 到 500，与 --sem-amber-ink 加深同批；横幅是警示面，可读性优先。 */
+    font-weight: 500;
+    line-height: 1.45;
+    text-wrap: pretty;
+    background: rgba(var(--sem-amber), 0.18);
+    border: 1px solid rgba(var(--sem-amber), 0.5);
+    color: var(--sem-amber-ink);
+}
+
+.sc-banner__icon {
+    flex: none;
+    stroke: var(--sem-amber-icon);
+}
+
+/* 建议类横幅右端的关闭钮。
+   只挂建议类：它们的数据来自段表、状态和宿主快照，不是错误码；持续性条件的横幅不可手动关闭，
+   给它们加这枚钮就是改行为面，所以不加。
+
+   颜色走 color: inherit：几个色系（琥珀、红、紫）的 ink 都在 .sc-banner 那一层，继承下来即可，
+   不必为每系各写一条。
+
+   几何是贴着横幅自己的内边距量出来的，不是随手取的数：
+   .sc-banner 的 padding 是 10px（--sp-10）与 13px（--sp-13），行高 11.5 乘 1.45 约 16.7px。
+     - 钮面 16px 高，与那一行文字等高，加了这枚钮横幅一个像素都不长（长了就会顶到固定设计盒里下面的 tab 条）；
+     - ::after 的四个方向各自扩到横幅的边框为止：上下 -10px 等于上下内边距，左右 -17px 与 -13px。
+       于是命中区约 48 乘 36 CSS px，纵向恰好等于横幅自己的盒。
+   为什么纵向不再撑到 48（小靶件在 0.5 档要不少于 24 物理 px，即不少于 48 CSS px）：两条建议横幅可以
+   同时在场，之间只隔 9px（--sp-9），纵向再扩就会盖住相邻横幅的同名钮，那正是 hit.js 头注禁止的
+   「靠抢邻件的事件来凑靶区」。所以横轴达标、纵轴只有 36 CSS px（18 物理 px），这是一处明知的欠达标，
+   不是忘了；要补只能先把横幅整体加高，那是版式改动。 */
+.sc-banner__dismiss {
+    flex: none;
+    position: relative;
+    margin-left: auto;
+    min-width: 18px;
+    height: 16px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-tag);
+    background: none;
+    color: inherit;
+    font-family: inherit;
+    font-size: var(--fs-115);
+    line-height: 1;
+    opacity: 0.6;
+    cursor: pointer;
+}
+
+.sc-banner__dismiss:hover {
+    opacity: 1;
+}
+
+.sc-banner__dismiss::after {
+    content: "";
+    position: absolute;
+    left: -17px;
+    right: -13px;
+    top: -10px;
+    bottom: -10px;
+}
+
+.sc-banner--red {
+    background: rgba(var(--sem-red), 0.15);
+    border-color: rgba(var(--sem-red), 0.42);
+    color: var(--sem-red-ink);
+}
+
+.sc-banner--red .sc-banner__icon {
+    stroke: var(--sem-red-icon);
+}
+
+/* 薰衣草紫面。与 --red 同结构，只换三个 token：底是渐变，字色独立。 */
+.sc-banner--violet {
+    background: var(--sem-violet-surface);
+    border-color: var(--sem-violet-border);
+    color: var(--sem-violet-ink);
+}
+
+.sc-banner--violet .sc-banner__icon {
+    stroke: var(--sem-violet-icon);
+}
+
+/* 行内确认条:与 banner 同色系,但圆角更小、按钮贴右,表示「此处需要一个决定」。 */
+.sc-confirm {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-9);
+    padding: var(--sp-9) var(--sp-11);
+    border-radius: var(--r-md);
+    font-size: var(--fs-105);
+    line-height: 1.4;
+    text-wrap: pretty;
+    background: rgba(var(--sem-amber), 0.15);
+    border: 1px solid rgba(var(--sem-amber), 0.42);
+    color: var(--sem-amber-ink);
+}
+
+/* -------------------------------------------------------------------- toast */
+.sc-toast {
+    position: absolute;
+    z-index: 9;
+    max-width: 330px;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-10);
+    padding: var(--sp-11) var(--sp-13);
+    border-radius: var(--r-toast);
+    background: var(--dark-toast);
+    border: 1px solid rgba(var(--wh), 0.16);
+    box-shadow: var(--dark-toast-shadow);
+    font-size: var(--fs-115);
+    line-height: 1.5;
+    color: var(--txt-dark-2);
+    text-wrap: pretty;
+    animation: vbUp var(--dur-2) var(--ease);
+}
+
+.sc-toast__dot {
+    flex: none;
+    margin-top: var(--sp-5);
+    width: var(--sp-6);
+    height: var(--sp-6);
+    border-radius: 50%;
+    background: rgb(var(--sem-amber));
+}
+
+.sc-toast__close {
+    flex: none;
+    margin-top: var(--sp-3);
+    cursor: pointer;
+    stroke: rgba(var(--wh), 0.55);
+}
+
+/* ------------------------------------------------------------- badge / chip */
+/* badge = 只读小标(ST 等);chip = 可交互/带值的小块(配对、预设)。 */
+.sc-badge {
+    flex: none;
+    padding: 1px var(--sp-3);
+    border-radius: var(--r-tag);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-75);
+    letter-spacing: var(--mono-ls-tag);
+    white-space: nowrap;
+    background: var(--w-24);
+    color: var(--txt-3);
+}
+
+.sc-badge--amber {
+    padding: 1px var(--sp-5);
+    font-family: var(--ff-sans);
+    font-size: var(--fs-80);
+    letter-spacing: normal;
+    background: rgba(var(--sem-amber), 0.22);
+    border: 1px solid rgba(var(--sem-amber), 0.45);
+    color: var(--sem-amber-ink);
+}
+
+.sc-badge--red {
+    padding: var(--sp-5) var(--sp-13);
+    border-radius: var(--r-pill);
+    font-size: var(--fs-95);
+    letter-spacing: var(--mono-ls);
+    background: rgba(var(--sem-red), 0.2);
+    border: 1px solid rgba(var(--sem-red), 0.45);
+    color: var(--sem-red-ink);
+}
+
+.sc-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-5);
+    flex: none;
+    padding: var(--sp-3) var(--sp-6);
+    border-radius: var(--r-xs);
+    background: rgba(var(--wh), 0.08);
+    border: 1px solid var(--card-border);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-100);
+    color: var(--txt-4);
+}
+
+.sc-chip[data-set="1"] {
+    background: var(--w-20);
+    color: var(--txt-1);
+}
+
+.sc-chip__dot {
+    width: var(--sp-6);
+    height: var(--sp-6);
+    border-radius: 50%;
+    background: var(--acc-strong);
+}
+
+/* 步进器 −n+(优先级一类小整数)。 */
+.sc-stepper {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-6);
+    padding: var(--sp-2) var(--sp-6);
+    border-radius: var(--r-micro);
+    background: rgba(var(--wh), 0.12);
+    border: 1px solid var(--glass-border);
+    font-size: var(--fs-110);
+    color: var(--txt-3);
+}
+
+.sc-stepper__val {
+    font-family: var(--ff-mono);
+    font-variant-numeric: tabular-nums lining-nums;
+    color: var(--txt-1);
+}
+
+/* --------------------------------------------------------------- 旋钮 knob */
+/* 指针角度由 JS 写 --ang(度)。自动态(引擎驱动)指针变淡并慢速追随,手动态实心可拖。 */
+.sc-knob {
+    position: relative;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    flex: none;
+    background: rgba(var(--wh), 0.3);
+    box-shadow:
+        var(--sh-sm),
+        inset 0 1px 0 rgba(var(--wh), 0.55);
+    cursor: grab;
+}
+
+.sc-knob__needle {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 1.6px;
+    height: 11px;
+    margin: -11px 0 0 -0.8px;
+    border-radius: 1px;
+    background: var(--txt-1);
+    transform-origin: 50% 100%;
+    transform: rotate(var(--ang, 0deg));
+}
+
+.sc-knob[data-live="1"] {
+    background: rgba(var(--wh), 0.14);
+    cursor: default;
+}
+
+.sc-knob[data-live="1"] .sc-knob__needle {
+    background: rgba(var(--txt-1-rgb), 0.45);
+    transition: transform var(--dur-3) var(--ease);
+}
+
+.sc-knob[data-disabled="1"] {
+    background: rgba(var(--wh), 0.06);
+    box-shadow: none;
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* ------------------------------------------- 电平表：通行三色（通行电平表） */
+/* 渐变铺满整轨，用 clip-path 裁切显示：渐变按轨道整宽固定、不随填充拉伸。
+   若改回 width 动画，渐变会被压扁，红段在低电平时就出现，属规范违例。
+   --lv 由 JS 弹道（rAF）写入，本文件不定义弹道常数（见 tokens.css 第 16 组的注释）。 */
+.sc-meter {
+    position: relative;
+    height: 10px;
+    border-radius: var(--r-pill);
+    overflow: hidden;
+    background: rgba(var(--wh), 0.12);
+    border: 1px solid rgba(var(--wh), 0.32);
+}
+
+.sc-meter__fill {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--meter-gradient);
+    clip-path: inset(0 calc(100% - var(--lv, 0%)) 0 0);
+    transition: clip-path var(--dur-meter) linear;
+}
+
+/* 与 .sc-tube__peak 同一处偏移：left 定位的是内侧边，线体外沿才是「峰值到过这里」。
+   本组（.sc-meter*）保留 transition，因为它眼下在 web 侧没有任何使用方，没有驱动就量不出
+   「柱头够不够得着白线」，盲改等于没有验证的改动。但它与 .sc-tube 是同一套几何，同一个问题多半也在：
+   接线那天先用预览测试里的 peakline-render 量尺，照同一套方法量一遍，再决定要不要把
+   .sc-meter__fill 的 clip-path 与本条的 left 一起去掉 transition。fill 走的是 clip-path，
+   机理与 width 不同，不得照抄 .sc-tube 的结论。 */
+.sc-meter__peak {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--pk, 0%) - var(--meter-peak-w));
+    width: var(--meter-peak-w);
+    /* **不用胶囊圆角**：2px 宽的盒子套 999px 半径会被画成一颗两端收圆的点，视觉重心落在盒子中线附近而不是外沿，
+       于是即使几何对齐，看上去仍比柱顶高出半个线宽。峰线是一条刻线，要的就是齐头齐尾。 */
+    border-radius: 0;
+    background: var(--meter-peak);
+    transition: left var(--dur-meter) linear;
+}
+
+.sc-meter__peak[data-alert="1"] {
+    background: var(--meter-peak-alert);
+}
+
+/* ------------------------- 玻璃管电平表 · 「音量 / 电平」合成件(结构四层) */
+/* 玻璃管电平表：一根横向玻璃管同时承担两职。管内液柱是实时电平（只读），骑在管上的卡箍是音量推子的
+   把手（可拖）。液柱走 tokens.css 第 17 组的薰衣草单色渐变，本件是三色渐变的唯一特例；
+   其余电平表仍用 .sc-meter。
+   四层：tube（槽）、slot（裁切层）加 liquid（液柱）与 peak（峰线）、gloss（顶高光）、collar（卡箍）。
+   拖拽命中区只在 collar 本体加命中半径内，管体其余部分不接受拖拽，以防误改音量。
+   卡箍必须在液柱之上：电平满幅时仍要清晰可辨。该层序由下面几条 z-index 固化，不靠模板里 DOM 的书写顺序：
+   顺序写反的话，满幅液柱会盖住推子手柄，而格式、词条和设计盒三道检查都查不出来。 */
+.sc-tube {
+    position: relative;
+    width: var(--t2-tube-w);
+    height: var(--t2-tube-h);
+    flex: none;
+    border-radius: var(--r-pill);
+    background: var(--t2-tube-bg);
+    border: 1px solid var(--t2-tube-border);
+    box-shadow: var(--t2-tube-inset);
+}
+
+.sc-tube__slot {
+    position: absolute;
+    inset: 2px;
+    border-radius: var(--r-pill);
+    overflow: hidden;
+}
+
+/* 液柱与峰线走一个事件间隔的过渡（--dur-meter-tube 为 33ms，约等于 30Hz 一发），
+   渲染在两帧内追平弹道模型。
+   曾经的现象：柱头从来没有到达过白线的高度。病根不在弹道模型：上行时液柱与峰线取的是同一个未平滑的
+   目标（上行瞬时跟随，不做 attack 平滑），新极大值那一帧模型上恒有 lv 等于 pk。病在渲染层：液柱的
+   width 原先走 .18s 的 transition，而白线此刻已经在位不动，柱头要爬 180ms 才够得着；可状态事件每 33ms
+   就来一发，柱头永远在追、永远差一截。.18s 是事件间隔的 5.4 倍：它不是补间，是叠在 JS 弹道之上的
+   第二条更慢的弹道。
+   无头实测（真 tokens 与 base.css、真电平渲染器、30Hz 事件、60fps rAF；量尺是预览测试里的
+   peakline-render，1 dB 为 4.37px）：
+     变体        阶跃滞后    渲染触线%（模型约 12%）   「该触线」帧的渲染差 均值/P90
+     .18s        181.8ms     4.90%                      11.74px / 29.06px
+     无过渡      0.0ms       12.95%                     0.00px / 0.00px
+     33ms        36.4ms      11.70%                     6.00px / 中位 0.00px
+   无过渡时渲染与模型一致，最干净，但上行是单帧跃迁（中位 89.9px 每帧），观感偏硬。取 33ms：
+   柱头仍能触线（中位差 0.00px），而上行摊到 2 帧（中位 11.2px 每帧），起跳软下来。
+   不回 .18s 的理由：33ms 正是一个事件间隔，做的就是「帧间补间」；.18s 跨 5.4 个事件，补的是早已过期的目标。
+   两处必须成对：只改液柱一边会得到反向的问题，柱头反冲到白线外侧（最多 -16.2px），
+   因为白线换向时轮到它滞后一整个过渡时长。 */
+.sc-tube__liquid {
+    position: absolute;
+    z-index: 1;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--lv, 0%);
+    border-radius: var(--r-pill) 3px 3px var(--r-pill);
+    background: var(--t2-meter-liquid);
+    box-shadow: var(--t2-meter-liquid-hl);
+    transition: width var(--dur-meter-tube) linear;
+}
+
+/* 峰线的 left 定位的是内侧边，线体从那里再向外长 --meter-peak-w，于是 pk 等于 lv 时整条白线整个落在
+   液柱之外，视觉上恒高出柱顶一个线宽。往回让一个线宽：线体占 [pk - w, pk)，外沿正好与柱顶重合，
+   读成骑在柱顶的盖帽。顺带治好满幅：旧写法 pk 为 100% 时线体整根落在 slot 的 overflow:hidden 之外，
+   0 dBFS 反而没有峰线。
+   本条的过渡曾是 var(--dur-meter)（.18s），当时的说法是「与液柱同步插值，瞬态不再裂开一道缝」。
+   这句话不成立：同步的是时长，不是到达时刻。linear transition 在固定时长内走完各自的距离，液柱要跑几十上百
+   px、白线常常一步不动，两者恒不同时到位，缝照裂，柱头也就永远够不着白线。现取 --dur-meter-tube（33ms，
+   一个事件间隔），时长必须与 .sc-tube__liquid 逐字相同：两边不等长会让某一侧在换向时单独滞后，
+   实测就是柱头反冲到白线外侧。 */
+.sc-tube__peak {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--pk, 0%) - var(--meter-peak-w));
+    width: var(--meter-peak-w);
+    /* **不用胶囊圆角**：2px 宽的盒子套 999px 半径会被画成一颗两端收圆的点，视觉重心落在盒子中线附近而不是外沿，
+       于是即使几何对齐，看上去仍比柱顶高出半个线宽。峰线是一条刻线，要的就是齐头齐尾。 */
+    border-radius: 0;
+    background: var(--meter-peak);
+    transition: left var(--dur-meter-tube) linear;
+}
+
+/* peak > .86 转警戒红 —— 单色化之后唯一保留的色警戒信号,由 JS 打 data-alert。 */
+.sc-tube__peak[data-alert="1"] {
+    background: var(--meter-peak-alert);
+}
+
+.sc-tube__gloss {
+    position: absolute;
+    z-index: 3;
+    left: var(--sp-8);
+    right: var(--sp-8);
+    top: 2px;
+    height: 3px;
+    border-radius: var(--r-pill);
+    background: var(--t2-tube-gloss);
+    pointer-events: none;
+}
+
+.sc-tube__collar {
+    position: absolute;
+    z-index: 4;
+    top: calc(-1 * var(--t2-collar-out));
+    bottom: calc(-1 * var(--t2-collar-out));
+    left: var(--vol, 0%);
+    width: var(--t2-collar-w);
+    margin-left: calc(-0.5 * var(--t2-collar-w));
+    border-radius: var(--r-tag);
+    cursor: grab;
+    background: var(--t2-collar-auto);
+    border: 1px solid var(--t2-collar-border);
+    box-shadow: var(--sh-collar);
+}
+
+/* vol 冻结 = 手动可拖,卡箍实心高亮;未冻结 = 引擎驱动,半透明(拖拽走一次性确认)。 */
+.sc-tube__collar[data-frozen="1"] {
+    background: var(--t2-collar-frozen);
+}
+
+.sc-tube__collar[data-disabled="1"] {
+    cursor: not-allowed;
+}
+
+/* -------------------------------------------------------- 光标发光(可点击面) */
+/* document 级单监听把 --mx 与 --my 写到根，元素只读不算：密排的行里不能每行挂监听。
+   --glow-o 由 JS 在 pointerenter 与 pointerleave 上写 1 或 0。 */
+[data-glow] {
+    position: relative;
+}
+
+[data-glow]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: var(--glow);
+    opacity: var(--glow-o, 0);
+    transition: opacity var(--dur-1) ease;
+    z-index: 6;
+}
+
+/* 表格行的跟随光:范围更大、更淡,直接铺在行底,不叠 ::after 以免压住卡箍。 */
+.sc-row-glow {
+    background-image: var(--glow-row);
+}

@@ -1,0 +1,165 @@
+{
+  "sources": {
+    "scvb-macos-au": {
+      "repo": "synchain-oss/scvb",
+      "ref": "feature/macos-au",
+      "sha": "b81142fe16646acdbef3cdfced269bac3e6d30fa"
+    }
+  },
+  "files": [
+    {
+      "path": "web/shared/tokens.css",
+      "source": "scvb-macos-au",
+      "from": "web/shared/tokens.css",
+      "fromBlob": "b9d0d14f683d64086631e1ed3b03684a7d2307e6",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/base.css",
+      "source": "scvb-macos-au",
+      "from": "web/shared/base.css",
+      "fromBlob": "44141d6f3d8b973a24ba11598bacf67c7ddc6cd0",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/bridge.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/bridge.js",
+      "fromBlob": "22064944303e17ba86eaf58250f55db51b44b067",
+      "mode": "forked"
+    },
+    {
+      "path": "web/shared/design-box.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/design-box.js",
+      "fromBlob": "a89c1f79ea39307723d10e9462b57b222dc4ce1e",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/shell-fit.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/shell-fit.js",
+      "fromBlob": "31879ce0f90e19f6dc2a036ebb2e0d491e0ec763",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/hit.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/hit.js",
+      "fromBlob": "a6b6f53dd748077cc4ed9ac5794e3050b14109f4",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/wheel.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/wheel.js",
+      "fromBlob": "ccca69e5e529863bf9819c63254918cabce93c61",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/alt-menu.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/alt-menu.js",
+      "fromBlob": "31c6cc832a4f32bbe13916791c20abe18d20f513",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/context-menu.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/context-menu.js",
+      "fromBlob": "c726a2ec1bcf6a699dc19dcb6236f1c485edd72d",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/lang-start.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/lang-start.js",
+      "fromBlob": "90339b3932e351660a51fefab87d45f48ce82d3b",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/tour-paint.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/tour-paint.js",
+      "fromBlob": "ed18cf525bb72d8968d39fbe31b4b643eba97c38",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/shared/i18n.js",
+      "source": "scvb-macos-au",
+      "from": "web/shared/i18n.js",
+      "fromBlob": "ee2a5f0e7b176c79055d06973a34f5de384aa242",
+      "mode": "forked"
+    },
+    {
+      "path": "web/shared/scale-ui.js",
+      "source": "scvb-macos-au",
+      "from": "web/input/app.js",
+      "fromBlob": "cae1e1c4f3ca555c2cde131631b99b0327259a34",
+      "mode": "forked"
+    },
+    {
+      "path": "web/shared/logo.png",
+      "source": "scvb-macos-au",
+      "from": "web/shared/logo.png",
+      "fromBlob": "7163cd69a06e106f8f2ac4efe661911ff5ecf1e4",
+      "mode": "adapted"
+    },
+    {
+      "path": "web/input/index.html",
+      "source": "scvb-macos-au",
+      "from": "web/input/index.html",
+      "fromBlob": "e56ad207d05bbbd3cff2bfe71a4f4d41b445b598",
+      "mode": "forked"
+    },
+    {
+      "path": "web/output/index.html",
+      "source": "scvb-macos-au",
+      "from": "web/input/index.html",
+      "fromBlob": "e56ad207d05bbbd3cff2bfe71a4f4d41b445b598",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/fetch_fonts.py",
+      "source": "scvb-macos-au",
+      "from": "scripts/fetch_fonts.py",
+      "fromBlob": "44e10980bec58e4ef16f40c0be8f15beb066c95f",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/check-font-coverage.py",
+      "source": "scvb-macos-au",
+      "from": "scripts/check-font-coverage.py",
+      "fromBlob": "a20181c3f441077e6b3a4c59d995013265869149",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/check-font-names.py",
+      "source": "scvb-macos-au",
+      "from": "scripts/check-font-names.py",
+      "fromBlob": "65a3822ff55406dd93325398bc812ed0cf6ed3d8",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/check-i18n.mjs",
+      "source": "scvb-macos-au",
+      "from": "scripts/check-i18n.mjs",
+      "fromBlob": "9dcd8973574083d3873dd3ea861c115aa3c6c59b",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/gen-design-box.py",
+      "source": "scvb-macos-au",
+      "from": "scripts/gen-design-box.py",
+      "fromBlob": "78e9392bed12a0c07e9545afd148cc5ac8cca5eb",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/check-design-box.mjs",
+      "source": "scvb-macos-au",
+      "from": "scripts/check-design-box.mjs",
+      "fromBlob": "9b3b8c42c72b75ee4663551a49dbe177c77b55ea",
+      "mode": "forked"
+    }
+  ]
+}

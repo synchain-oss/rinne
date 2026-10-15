@@ -1,0 +1,177 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Derived from synchain-oss/scvb; see upstream/web.json -->
+<!doctype html>
+<html lang="zh">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <title>Rinne Output</title>
+        <!--
+          占位页：只有下面三件套和一个空白外壳。真实页面由后续的页面实现替换，
+          但三件套要保留，宿主侧的开窗遮挡闸与启动看门狗依赖它们。
+
+          一、开窗占位渐变。内联、字面量，不依赖任何外链请求的结果；必须是字面量，
+          因为自定义属性都定义在 tokens.css 里，写成 var() 就又回到「等外链」那条路上。
+          色标与 tokens.css 的 --page-gradient 同一组（157deg），让「加载中的占位」与「打开后的底」同形，
+          开窗切到内容时没有明暗差；原生侧的占位色标数组与这里逐字相同，由预览测试对拍。
+          min-height 与 background-attachment 两行是兜路的另一半：background 简写会把 background-color
+          重置成 transparent，根元素的背景图按根元素自身的盒定尺寸，外链样式缺席时没有这两行，
+          图会塌成内容高甚至不绘制，兜路反而露白。
+        -->
+        <style>
+            html {
+                background: linear-gradient(157deg, #b5acc9 0%, #ccbfd5 32%, #e3d2e0 64%, #fde8ed 100%);
+                min-height: 100%;
+                background-attachment: fixed;
+            }
+        </style>
+        <!--
+          二、boot 守卫：前端起不来时主动告诉原生侧，别让宿主干等看门狗超时。
+          必须是 head 里的普通 script（不是 module），并且排在所有资源之前：module 自身解析或加载失败时，
+          module 里的 try/catch 一行都跑不到，只有先注册的全局监听接得住。
+          通道是 JUCE 内建的 window.__JUCE__.postMessage（JUCE 在文档创建前注入，不经 bridge.js）；
+          事件名与原生侧 WebViewHost 的 kBootErrorEventId 相同，两边在同一个提交里一起改。
+          守卫只在首帧信号发出之前有效，之后的运行期异常不上报。
+          浏览器预览下没有 __JUCE__，report 静默返回。
+        -->
+        <script>
+            (function () {
+                var sent = false;
+                function report(stage, detail) {
+                    // 只报第一条：后面多半是同一次失败的连锁反应。首帧信号发出之后页面已经起来了，
+                    // 运行期的小错不再当成启动失败上报，免得原生侧把它放大成「界面起不来」。
+                    if (sent || window.__rinneBooted) return;
+                    sent = true;
+                    try {
+                        var juce = window.__JUCE__;
+                        if (!juce || typeof juce.postMessage !== "function") return;
+                        juce.postMessage(
+                            JSON.stringify({
+                                eventId: "__rinne__bootError",
+                                payload: { stage: stage, detail: String(detail).slice(0, 300) },
+                            }),
+                        );
+                    } catch (e) {
+                        // 上报本身失败就沉默：此时还能兜底的只剩原生侧的看门狗
+                    }
+                }
+                // 捕获阶段：资源级失败（script 或 link 取不到、MIME 不对）不冒泡，只有捕获阶段收得到。
+                // 只认 SCRIPT 和 LINK，图片之类的失败不该把整个界面换成兜底面板。
+                window.addEventListener(
+                    "error",
+                    function (e) {
+                        var t = e && e.target;
+                        if (t && t !== window && (t.src || t.href)) {
+                            if (t.tagName === "SCRIPT" || t.tagName === "LINK") report("resource", t.src || t.href);
+                            return;
+                        }
+                        report("script", (e && e.message) || "unknown error");
+                    },
+                    true,
+                );
+                window.addEventListener("unhandledrejection", function (e) {
+                    var r = e && e.reason;
+                    report("promise", (r && (r.stack || r.message)) || r || "unhandled rejection");
+                });
+                window.__rinneReportBootError = report;
+            })();
+        </script>
+        <!--
+          三、首帧信号：「页面已经画过一帧」的上行信号，是开窗遮挡闸的放行路。
+          原生侧在导航开始后把 WebView 子窗口挪出宿主可视区、铺占位底色，收到这条信号后再放回来；
+          信号丢了的代价是每次开窗多等一段超时（原生侧还有超时兜底）。机理细节写在原生侧的遮挡闸头注里，
+          这里不复述。通道与上面的 boot 守卫相同；事件名与原生侧的 kFirstFrameEventId 相同，同一个提交里一起改。
+          触发条件是 paint 记录到达（页面真的画过一帧），不是 DOMContentLoaded：两层 rAF 并不保证已经画过。
+          两层 rAF 仍然保留，再等一拍让已画的那一帧提交给合成器。
+          保险是一个 2.5 秒的 setTimeout，排在 try 之前，让三条路（paint、回落、保险自己）都被同一张网兜住；
+          它不绕两层 rAF，因为合成停摆（窗口最小化、被完全遮挡、宿主弹模态框）时 rAF 也不回调。
+          网只在信号真的发出去的那一刻才撤，sent 兼做去重。
+          浏览器预览下没有 __JUCE__，静默返回。
+        -->
+        <script>
+            (function () {
+                // paint 记录到达时记下它的 startTime，信号发出时算差值；-1 表示这一次没有 paint 记录。
+                // 送差值而不是绝对时刻：页面的 performance 时间轴与原生侧的计时不共享原点。
+                var paintStartMs = -1;
+                var sent = false;
+                var armed = false;
+                var guard = null;
+                function signal() {
+                    if (sent) return;
+                    try {
+                        var juce = window.__JUCE__;
+                        if (!juce || typeof juce.postMessage !== "function") return;
+                        var p = {};
+                        if (paintStartMs >= 0) p.paintDeltaMs = Math.round(performance.now() - paintStartMs);
+                        juce.postMessage(JSON.stringify({ eventId: "__rinne__firstFrame", payload: p }));
+                        // 撤网必须落在 postMessage 之后：撤在它之前的话，__JUCE__ 缺席时上面的 return
+                        // 会在网已经撤了、信号却没真的发出去的状态下退出，保险彻底空转。
+                        sent = true;
+                        // 占位页没有页面模块，首帧即视为起来了。接入页面模块的实现要把这个标志改成由主模块
+                        // 初始化完成后再置位（例如入口末尾）：占位底色可能在模块加载失败之前就已经画出来，
+                        // 绑在首帧上会让这类失败不再被上报。
+                        window.__rinneBooted = true;
+                        if (guard !== null) {
+                            clearTimeout(guard);
+                            guard = null;
+                        }
+                    } catch (e) {
+                        // 发不出去也不许卡住：原生侧还有超时兜底。
+                        // 若 postMessage 在载荷已经投递之后才抛，这里吞掉异常、sent 仍是 false，
+                        // 保险会把信号重发一次；原生侧对重复信号是幂等的，所以选「可能重发」而不是「可能丢失」。
+                    }
+                }
+                function arm() {
+                    if (typeof window.requestAnimationFrame !== "function") {
+                        signal();
+                        return;
+                    }
+                    window.requestAnimationFrame(function () {
+                        window.requestAnimationFrame(signal);
+                    });
+                }
+                function armOnce() {
+                    if (armed) return;
+                    armed = true;
+                    arm();
+                }
+                // 保险的 2.5 秒与原生侧的超时兜底不共享时间原点：原生侧从导航开始起算，这里从这段脚本执行起算。
+                guard = setTimeout(function () {
+                    signal();
+                }, 2500);
+                try {
+                    var po = new PerformanceObserver(function (list) {
+                        if (list.getEntries().length === 0) return;
+                        paintStartMs = list.getEntries()[0].startTime;
+                        try {
+                            po.disconnect();
+                        } catch (e) {}
+                        armOnce();
+                    });
+                    // buffered：paint 记录可能在本脚本跑之前就产生了
+                    po.observe({ type: "paint", buffered: true });
+                } catch (e) {
+                    // 没有 PerformanceObserver：回落到 DOMContentLoaded 触发，不许变成永不放行。
+                    // 有 PerformanceObserver 但不报 paint 记录不会抛异常，那一档落在上面的保险上。
+                    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", armOnce);
+                    else armOnce();
+                }
+            })();
+        </script>
+        <link rel="stylesheet" href="../shared/tokens.css" />
+        <link rel="stylesheet" href="../shared/base.css" />
+        <style>
+            html,
+            body {
+                overflow: hidden;
+            }
+            #shell {
+                width: 100%;
+                height: 100%;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="sc-shell" id="shell"></div>
+    </body>
+</html>

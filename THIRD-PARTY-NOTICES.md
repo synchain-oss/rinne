@@ -163,8 +163,21 @@ Not linked into the plugins and not distributed with them.
   | IBM Plex Mono (Rinne Mono) | `Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"` |
   | Noto Sans SC | `Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'` |
 
-- The copyright line in each subset file's `name` table (name ID 0) is recorded here and in `REUSE.toml` when the
-  font files are added.
+- The font files are built by `scripts/fetch_fonts.py` from the upstream files in google/fonts at commit
+  `bd8f81ddb5c74d5c8897b36ad88b440266245103` (the script checks each source file's SHA-256). Changes made to the
+  upstream fonts: subsetting to the characters the interface uses plus common Chinese characters and the Latin-1 and
+  Latin Extended-A blocks; fixing the variable axes of Space Grotesk (weight 600) and IBM Plex Sans (weight 400, width
+  100) and narrowing the weight axis of Noto Sans SC to 300–700; renaming IBM Plex Sans and IBM Plex Mono as above;
+  mapping U+202F (narrow no-break space) to the thin-space or no-break-space glyph in the fonts that lack it.
+- The copyright line in each subset file's `name` table (name ID 0) is recorded in `REUSE.toml`, one block per file
+  (`check-font-names.py` compares them):
+
+  | File | Name ID 0 |
+  | --- | --- |
+  | `web/fonts/SpaceGrotesk.woff2` | `Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)` |
+  | `web/fonts/RinneSans.woff2` | `Copyright 2019 IBM Corp. All rights reserved.` |
+  | `web/fonts/RinneMono.woff2` | `Copyright 2017 IBM Corp. All rights reserved.` |
+  | `web/fonts/NotoSansSC.woff2` | `(c) 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.` |
 
 <!-- /section:fonts -->
 
