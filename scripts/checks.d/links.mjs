@@ -131,7 +131,7 @@ export function linkProblems({ md, all, stable, scan }) {
     }
 
     for (const [file, text] of Object.entries(scan)) {
-        if (BLOB_EXEMPT.has(file)) continue;
+        if (BLOB_EXEMPT.has(file) || !BLOB_SCOPE.test(file)) continue;
         for (const m of text.matchAll(BLOB_RE)) {
             const key = `${(m[2] ?? "").replace(/^\//, "")}${m[3] ?? ""}`;
             if (m[1] !== "prod") out.push(`${file}：blob 链接要写 blob/prod/，现在是 blob/${m[1]}/`);
@@ -139,7 +139,7 @@ export function linkProblems({ md, all, stable, scan }) {
                 out.push(`${file}：blob/prod 链接 ${key || "（根）"} 没有登记在 ${STABLE}`);
         }
     }
-    return out;
+    return out.sort();
 }
 
 export function selfTest() {
@@ -186,6 +186,22 @@ export function selfTest() {
         ["同文件锚点不存在", true, { ...base, md: { ...base.md, "docs/b.md": "# B\n\n[s](#c)\n" } }],
         ["锁定的锚点被删", true, { ...base, md: { ...base.md, "docs/a.md": "# 标题 One\n" } }],
         ["锁定的文件被删", true, { ...base, stable: "docs/gone.md\n" }],
+        [
+            "docs/INSTALL.md 里的 blob/dev",
+            true,
+            { ...base, scan: { "docs/INSTALL.md": "github.com/synchain-oss/rinne/blob/dev/x" } },
+        ],
+        [
+            "scripts/package 脚本里的 blob/dev",
+            true,
+            { ...base, scan: { "scripts/package-win.ps1": "github.com/synchain-oss/rinne/blob/dev/x" } },
+        ],
+        ["src 里的 blob/dev", true, { ...base, scan: { "src/x.cpp": "github.com/synchain-oss/rinne/blob/dev/x" } }],
+        [
+            "范围外的文件不查 blob",
+            false,
+            { ...base, scan: { "docs/USER_GUIDE.zh-CN.md": "github.com/synchain-oss/rinne/blob/dev/x" } },
+        ],
         ["blob/dev 链接", true, blob("https://github.com/synchain-oss/rinne/blob/dev/docs/a.md#同名")],
         ["blob/prod 但没登记", true, blob("https://github.com/synchain-oss/rinne/blob/prod/docs/b.md")],
     ].map(([label, bad, input]) => ({

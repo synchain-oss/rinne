@@ -67,7 +67,7 @@ export function structureProblems({ paths, files }) {
         if (SUMMARY_SCOPE.test(file) && firstH2(text) !== "## Summary (EN)")
             out.push(`${file} 的第一个二级标题应为 ## Summary (EN)`);
     }
-    return out;
+    return out.sort();
 }
 
 export function selfTest() {

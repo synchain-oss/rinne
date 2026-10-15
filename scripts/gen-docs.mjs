@@ -92,7 +92,7 @@ function markdownFiles(root) {
         }
     };
     walk("");
-    return out;
+    return out.sort();
 }
 
 /** 全量检查，返回问题数组；空数组即通过。 */
