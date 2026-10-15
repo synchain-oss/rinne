@@ -88,54 +88,61 @@ A3_JUDGED = ("export-offline", "bounce")
 A3_REQUIRED = {"CB-04": ("export-offline",), "LU-04": ("export-offline", "bounce")}
 MIN_SLICE_BLOCKS = 8
 CLONE_VARIANTS = ("rip", "freeze")  # 宿主可能克隆实例：同键出现多个实例是预期内的
-MULTI_OK = ("rip", "freeze", "dup", "undo")  # 同键出现多对实例是预期内的
+MULTI_OK = ("rip", "freeze", "dup", "undo", "twoproj")  # 同键出现多对实例是预期内的
 
-# variant → (喂给哪些判据, 对两端与块数的要求, 本格自己必须有的证据)。分析器与 LOG-FORMAT 读同一张表，run-checks 对拍。
-# 要求的写法：成对满块 = 两端各恰一个实例、各至少 MIN_STEADY_BLOCKS 块；单端可 = 单端或块少是按设计如此；
-# 允许多实例 = 同键多对实例是预期；不要求块 = 本格靠事件或别的判据下结论。
-_PAIRED = "成对满块"
-_EV_STEADY = "两端各至少 32 块"
-VARIANT_RULES = {
-    "-": ("A1 A4 A7", _PAIRED, _EV_STEADY),
-    "steady": ("A1 A4 A7", _PAIRED, _EV_STEADY),
-    "toggle": ("A2 A4 A7", _PAIRED, "两端各至少 32 块，每次切换后的窗口里至少 8 块"),
-    "guard-in": ("A1 A4 A7", _PAIRED, _EV_STEADY),
-    "guard-out": ("A1 A4 A7", _PAIRED, _EV_STEADY),
-    "guard-both": ("A1 A4 A7", _PAIRED, _EV_STEADY),
-    "mono": ("A4 A7", _PAIRED, _EV_STEADY),
-    "bufchange": ("A4 A7", _PAIRED, _EV_STEADY),
-    "constrain": ("A4 A7", _PAIRED, _EV_STEADY),
-    "twoproj": ("A4 A7", _PAIRED, _EV_STEADY),
-    "coreaudio": ("A4 A7", _PAIRED, _EV_STEADY),
-    "deactivate": ("A4", "单端可", "至少一端 32 块，且有 set_processing（a 为 0）或 release 事件"),
-    "disable-track": ("A4", "单端可", "至少一端 32 块，且有 set_processing（a 为 0）或 release 事件"),
-    "bypass-in": ("A4", "单端可", "至少一端 32 块，且有 bypassed 为 1 的块"),
-    "bypass-out": ("A4", "单端可", "至少一端 32 块，且有 bypassed 为 1 的块"),
-    "smart": ("A4", "单端可", "至少一端有块"),
-    "preset": ("A4", "单端可", "至少一端有块"),
-    "fxchain": ("A4", "单端可", "至少一端有块"),
-    "misplaced-order": ("A4", "单端可", "至少一端有块"),
-    "misplaced-track": ("A4", "单端可", "至少一端有块"),
-    "misplaced-post": ("A4", "单端可", "至少一端有块"),
-    "dup": ("A4", "允许多实例", "每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid"),
-    "undo": ("A4", "允许多实例", "每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid"),
-    "rip": ("A3 A4", "允许多实例", "导出比对行见 A3；各实例的块只查块长"),
-    "freeze": ("A3 A4", "允许多实例", "导出比对行见 A3；各实例的块只查块长"),
-    "dop": ("A3 A4", "不要求块", "导出比对行见 A3；有块则查块长"),
-    "export-rt": ("A3", "不要求块", "导出比对行见 A3"),
-    "export-offline": ("A3", "不要求块", "导出比对行见 A3"),
-    "bounce": ("A3", "不要求块", "导出比对行见 A3"),
-    "reopen": ("A9", "不要求块", "set_state 之后出现 paired"),
-    "rename": ("A6", "不要求块", "两端都收到非空轨道名"),
-    "au-au": ("A5", "不要求块", "同 pid、已配对、无 shm_denied"),
-    "vst3-vst3": ("A5", "不要求块", "同 pid、已配对、无 shm_denied"),
-    "au-vst3": ("A5", "不要求块", "同 pid、已配对、无 shm_denied"),
-}
-assert set(VARIANT_RULES) == set(VARIANTS), "VARIANT_RULES 必须覆盖全部 variant"
+# 规则表：(case, variant) → (类别, 喂给哪些判据, 本格自己的证据)。分析器与 LOG-FORMAT 读同一张表，run-checks 逐行对拍；
+# 表外的组合在解析时判格式错。类别 1 = 成对满块：两端各恰一个实例、各至少 MIN_STEADY_BLOCKS 块，缺了判数据不全；
+# 类别 2 = 各自证据：不要求成对和块数，但必须有表里写的证据，一条都没有就判数据不全；类别 3 = 只记录，不阻断。
+CAT_LABEL = {1: "1 成对满块", 2: "2 各自证据", 3: "3 只记录"}
+RULES = {}
 
 
-def is_paired(variant):
-    return VARIANT_RULES[variant][1] == _PAIRED
+def _r(cases, variants, cat, feeds, evidence):
+    for c in cases.split():
+        for v in variants.split():
+            RULES[(c, v)] = (cat, feeds, evidence)
+
+
+_STEADY = "两端各至少 32 块"
+_EXPORT = "导出比对行见 A3；块只查块长上限，不进 A7"
+_DEACT = "至少一端 32 块，且有 set_processing（a 为 0）或 release 事件"
+_PAIRED_EV = "每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid"
+_r("CB-01 LU-03", "steady", 1, "A1 A4 A7", _STEADY)
+_r("CB-02 LU-03", "toggle", 1, "A2 A4 A7", "两端各至少 32 块，每次切换后的窗口里至少 8 块")
+_r("CB-03", "guard-in guard-out guard-both", 1, "A1 A4 A7", _STEADY)
+_r("CB-09", "mono", 1, "A4 A7", _STEADY)
+_r("CB-11", "constrain", 1, "A4 A7", _STEADY)
+_r("CB-10", "bufchange", 1, "A4", _STEADY)
+_r("CB-04", "export-rt export-offline dop freeze rip", 2, "A3 A4", _EXPORT)
+_r("LU-04", "export-rt export-offline bounce freeze", 2, "A3 A4", _EXPORT)
+_r("CB-05 LU-05", "bypass-in bypass-out", 2, "格观察", "至少一端 32 块，且有 bypassed 为 1 的块")
+_r("CB-05 LU-05", "deactivate", 2, "格观察", _DEACT)
+_r("CB-05", "disable-track", 2, "格观察", _DEACT)
+_r("CB-06", "smart", 2, "格观察", "至少两条 ping 事件（前后各一次）")
+_r("CB-07 LU-09", "reopen", 2, "A9", "set_state 之后出现 paired")
+_r("CB-07 LU-06", "rename", 2, "A6", "每个实例都收到非空轨道名")
+_r("CB-07", "dup undo", 2, "格观察", _PAIRED_EV)
+_r("CB-07", "preset fxchain", 3, "格观察", "只记录，不阻断")
+_r("CB-08", "misplaced-order misplaced-track misplaced-post", 2, "格观察", "至少一端有记录；paired 有无见格观察")
+_r("CB-12", "twoproj", 2, "格观察", "按 paired 的对端 pid 逐对检查：每个 In 都配到本格内的 Out，每个 Out 都被配到")
+_r("LU-01 LU-08", "-", 3, "格观察", "只记录，不阻断")
+_r("LU-02", "au-au vst3-vst3 au-vst3", 2, "A5", "同 pid、已配对、无 shm_denied")
+_r("LU-07", "coreaudio", 2, "格观察", "有 backend 事件或任一事件，不要求块")
+assert {c for c, _ in RULES} == set(CASES) and {v for _, v in RULES} == set(VARIANTS), "规则表必须覆盖全部 case 与 variant"
+
+
+def _rule(key):
+    return RULES[(key[0], key[1])]
+
+
+def is_cat1(key):
+    return _rule(key)[0] == 1
+
+
+def feeds_of(key):
+    return _rule(key)[1].split()
+
+
 MATRIX = {
     "CB-01": [("steady", b, g) for b in (64, 256, 1024) for g in ("off", "low", "normal", "high")],
     "LU-03": [("steady", b, "na") for b in (64, 512, 2048)],
@@ -165,7 +172,7 @@ SPEC = {  # noqa: E501
     "events": sorted(EVENTS),
     "cases": list(CASES),
     "variants": list(VARIANTS),
-    "variant_rules": {v: list(r) for v, r in VARIANT_RULES.items()},
+    "rules": [[c, v, CAT_LABEL[r[0]], r[1], r[2]] for (c, v), r in sorted(RULES.items())],
     "guards": list(GUARDS),
     "compare_head": COMPARE_HEAD,
     "h_enums": {
@@ -433,6 +440,8 @@ def parse_log(raw, label):
         if kind == "H":
             lg.header = row
         elif kind == "C":
+            if (row["case"], row["variant"]) not in RULES:
+                raise FormatError(label, ln, "case 与 variant 的组合不在规则表内")
             lg.cases.append(row)
         elif kind == "S":
             lg.summaries.append(row)
@@ -468,6 +477,8 @@ def parse_compare(raw, label):
         if len(f) != len(cols):
             raise FormatError(label, ln, f"应有 {len(cols)} 列")
         row = _convert(label, ln, "比对", cols, vs, f)
+        if (row["case"], row["variant"]) not in RULES:
+            raise FormatError(label, ln, "case 与 variant 的组合不在规则表内")
         if (row["bit_exact"] == 1) != (row["residual_dbfs"] == float("-inf")):
             raise FormatError(label, ln, "bit_exact 与残差不自洽（逐位相同时残差须为 -inf，反之亦然）")
         rows.append(row)
@@ -714,64 +725,31 @@ def _length_parts(s, key, segs, need):
     return parts
 
 
-def _cell_evidence(key, cell):
-    """不要求成对满块的格，仍须有本格自己的证据；一条都没有就是数据不全，不能只当说明。"""
-    v, segs = key[1], cell["I"] + cell["O"]
-    label = key_label(key)
-    if any(g.gaps for g in segs):
-        return [("INCOMPLETE", f"{label} 序号缺口")]
-    full = [g for g in segs if len(g.blocks) >= MIN_STEADY_BLOCKS]
-    if v in ("deactivate", "disable-track"):
-        life = any((e["name"] == "set_processing" and e["a"] == 0) or e["name"] == "release"
-                   for g in segs for e in g.events + g.log.pre_events)  # fmt: skip
-        if not full:
-            return [("INCOMPLETE", f"{label} 没有一端达到 {MIN_STEADY_BLOCKS} 块")]
-        if not life:
-            return [("INCOMPLETE", f"{label} 缺停用的生命周期事件")]
-        return [("PASS", f"{label} 单端 {len(full)} 个实例有块，停用事件在")]
-    if v in ("bypass-in", "bypass-out"):
-        if not full:
-            return [("INCOMPLETE", f"{label} 没有一端达到 {MIN_STEADY_BLOCKS} 块")]
-        if not any(b["bypassed"] for g in full for b in g.blocks):
-            return [("INCOMPLETE", f"{label} 没有 bypassed 为 1 的块")]
-        return [("PASS", f"{label} 旁路块在")]
-    if v in ("smart", "preset", "fxchain", "misplaced-order", "misplaced-track", "misplaced-post"):
-        if not any(g.blocks for g in segs):
-            return [("INCOMPLETE", f"{label} 两端都没有块")]
-        return [("PASS", "")]
-    if v in ("dup", "undo"):
-        o_pids = {g.log.header["pid"] for g in cell["O"]}
-        if not cell["I"]:
-            return [("INCOMPLETE", f"{label} 没有 In 实例")]
-        unpaired = sum(
-            1 for g in cell["I"]
-            if not any(e["name"] == "paired" and e["a"] in o_pids for e in g.events + g.log.pre_events)
-        )  # fmt: skip
-        if unpaired:
-            return [("INCOMPLETE", f"{label} 有 {unpaired} 个 In 实例缺指向本格 Out 的 paired 事件")]
-        return [("PASS", f"{label} {len(cell['I'])} 个 In 实例都已配对")]
-    return []
-
-
 def judge_a4(s):
-    parts, cover = [], []
+    """A4 只判块长。成对满块的格给通过 / 不通过；其余格只能给不通过或说明，不能单独撑出通过。"""
+    parts, cover, concluded = [], [], False
     for key, cell in _cells(s):
         has_blocks = any(g.blocks for g in cell["I"] + cell["O"])
-        if is_paired(key[1]):
-            if not has_blocks:
+        if is_cat1(key):
+            if "A4" not in feeds_of(key) or not has_blocks:
                 continue
             cover.append(key[0])
             i, o, why = _cell_pair(key, cell)
             if why:
                 parts.append(("INCOMPLETE", why))
                 continue
-            parts += _length_parts(s, key, [i, o], None)
-        else:
-            ev = _cell_evidence(key, cell)
-            if ev or has_blocks:
-                cover.append(key[0])
-            parts += ev
-            parts += _length_parts(s, key, cell["I"] + cell["O"], 1)  # 单端或克隆的实例各查各的，不要求块数
+            for st, note in _length_parts(s, key, [i, o], None):
+                parts.append((st, note))
+                concluded = concluded or st in ("PASS", "FAIL")
+        elif has_blocks:
+            cover.append(key[0])
+            for st, note in _length_parts(s, key, cell["I"] + cell["O"], 1):  # 单端或克隆的实例各查各的
+                if st == "FAIL":
+                    parts.append((st, note))
+                elif st == "INCOMPLETE":
+                    parts.append(("NOTE", note))
+    if not concluded and not any(st == "FAIL" for st, _ in parts):
+        parts.append(("INCOMPLETE", "没有任何成对满块的格得出块长结论"))
     return fold("A4", parts, cover)
 
 
@@ -806,26 +784,31 @@ def judge_a6(s, salt=b"x"):
     for key, cell in _cells(s):
         if key[0] not in A6_CASES or key[1] != "rename":
             continue
-        ends = {}
-        for seg in cell["I"] + cell["O"]:
-            props = [e for e in seg.events if e["name"] == "track_props"]
-            if props:
-                ends.setdefault(seg.role, []).append(props[-1])
-        if not ends:
+        segs = cell["I"] + cell["O"]
+        last = []
+        for g in segs:
+            props = [e for e in g.events if e["name"] == "track_props"]
+            last.append(max(props, key=lambda e: e["t_ns"]) if props else None)
+        if not any(last):
             continue
         cover.append(key[0])
-        if set(ends) != {"I", "O"}:
-            parts.append(("INCOMPLETE", f"{key_label(key)} 只有一端记录了轨道信息"))
+        label = key_label(key)
+        # 逐实例检查：一个好实例不能掩盖坏实例
+        empty = sum(1 for e in last if e is not None and not e["a"])
+        if empty:
+            parts.append(("FAIL", f"{label} 有 {empty} 个实例没有收到轨道名"))
+        if any(e is None for e in last) or {g.role for g in segs} != {"I", "O"}:
+            parts.append(("INCOMPLETE", f"{label} 有实例没有记录轨道信息"))
             continue
-        if any(len(v) > 1 for v in ends.values()):
-            parts.append(("INCOMPLETE", f"{key_label(key)} 同键重复记录，旧文件须挪走后重采"))
+        if len(cell["I"]) > 1 or len(cell["O"]) > 1:
+            parts.append(("INCOMPLETE", f"{label} 同键重复记录，旧文件须挪走后重采"))
             continue
-        ends = {r: v[0] for r, v in ends.items()}
-        got = all(e["a"] for e in ends.values())
+        if empty:
+            continue
+        ends = {g.role: e for g, e in zip(segs, last)}
         verdict, h = name_verdict(ends["I"]["a"], ends["O"]["a"], salt)
         colour = "有" if all(e["b"] for e in ends.values()) else "缺"
-        msg = f"{key_label(key)} 名字送达 {int(got)}（{verdict}" + (f"，散列 {h}" if h else "") + f"），颜色{colour}"
-        parts.append(("PASS" if got else "FAIL", msg))
+        parts.append(("PASS", f"{label} 名字送达 1（{verdict}" + (f"，散列 {h}" if h else "") + f"），颜色{colour}"))
     return fold("A6", parts, cover)
 
 
@@ -845,7 +828,7 @@ def _pairs(i_blocks, o_blocks):
 def judge_a7(s):
     parts, cover = [], []
     for key, cell in _cells(s):
-        if not is_paired(key[1]) or not any(g.blocks for g in cell["I"] + cell["O"]):
+        if not (is_cat1(key) and "A7" in feeds_of(key)) or not any(g.blocks for g in cell["I"] + cell["O"]):
             continue
         cover.append(key[0])
         i, o, why = _cell_pair(key, cell)
@@ -954,7 +937,7 @@ def _matrix_missing(s, case):
     return out
 
 
-def freeze_f1(s, items):
+def freeze_f1(s, items, obs):
     missing = []
     for case in F1_CASES:
         segs = [g for g in s.segments if g.case["case"] == case]
@@ -969,9 +952,12 @@ def freeze_f1(s, items):
             missing.append(f"{case} 矩阵缺格：{shown}")
     if s.orphans:
         missing.append(f"有 {s.orphans} 个块不属于任何测试格")
-    f1_dups = [k for k in s.dups if k[0] in F1_CASES and is_paired(k[1])]
+    f1_dups = [k for k in s.dups if k[0] in F1_CASES and is_cat1(k)]
     if f1_dups:
         missing.append(f"{len(f1_dups)} 个格同键重复记录")
+    for case in F1_CASES:  # 格观察里本格证据缺失的格，所在 case 在 F1 里就是缺数据
+        if any(c["state"] == "INCOMPLETE" and c["case"] == case for c in obs["cells"]):
+            missing.append(f"{case} 格观察数据不全")
     for it in items[:8]:  # A1-A8 必须有结论；A9（工程恢复）不阻断 F1
         if it["verdict"] == "INCOMPLETE":
             missing.append(f"{it['id']} 数据不全")
@@ -989,6 +975,135 @@ def warnings_of(s):
     lost = sum(1 for lg in s.logs if max([x["dropped"] for x in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0]))
     if lost:
         out.append(f"{lost} 个实例的探针报告过丢弃记录，相关格按数据不全处理")
+    return out
+
+
+def _cell_evidence(key, cell):
+    """类别 2 / 3 的格自己的证据。类别 2 一条都没有就是数据不全；类别 3 只留一条说明。返回 [(状态, 说明)]。"""
+    v, segs = key[1], cell["I"] + cell["O"]
+    label = key_label(key)
+    cat = _rule(key)[0]
+    if cat == 3:
+        return [("NOTE", f"{label} 只记录：{sum(len(g.blocks) for g in segs)} 块、{sum(len(g.events) for g in segs)} 个事件")]
+    if v not in ("deactivate", "disable-track", "bypass-in", "bypass-out", "smart", "dup", "undo", "twoproj",
+                 "coreaudio") and not v.startswith("misplaced-"):  # fmt: skip
+        return []  # 其余格的证据由 A3、A5、A6、A9 各自下结论
+    if any(g.gaps for g in segs):
+        return [("INCOMPLETE", f"{label} 序号缺口")]
+    full = [g for g in segs if len(g.blocks) >= MIN_STEADY_BLOCKS]
+    evs = [e for g in segs for e in g.events + g.log.pre_events]
+    if v in ("deactivate", "disable-track"):
+        life = any((e["name"] == "set_processing" and e["a"] == 0) or e["name"] == "release" for e in evs)
+        if not full:
+            return [("INCOMPLETE", f"{label} 没有一端达到 {MIN_STEADY_BLOCKS} 块")]
+        if not life:
+            return [("INCOMPLETE", f"{label} 缺停用的生命周期事件")]
+        return [("PASS", f"{label} 单端 {len(full)} 个实例有块，停用事件在")]
+    if v in ("bypass-in", "bypass-out"):
+        if not full:
+            return [("INCOMPLETE", f"{label} 没有一端达到 {MIN_STEADY_BLOCKS} 块")]
+        if not any(b["bypassed"] for g in full for b in g.blocks):
+            return [("INCOMPLETE", f"{label} 没有 bypassed 为 1 的块")]
+        return [("PASS", f"{label} 旁路块在")]
+    if v == "smart":
+        pings = sum(1 for e in evs if e["name"] == "ping")
+        if pings < 2:
+            return [("INCOMPLETE", f"{label} 只有 {pings} 条 ping，前后各一次需要 2 条")]
+        return [("PASS", f"{label} ping {pings} 条")]
+    if v == "coreaudio":
+        if not evs:
+            return [("INCOMPLETE", f"{label} 没有任何事件")]
+        return [("PASS", f"{label} 有 {len(evs)} 个事件")]
+    if v.startswith("misplaced-"):
+        if not any(g.blocks or g.events for g in segs):
+            return [("INCOMPLETE", f"{label} 两端都没有记录")]
+        return [("PASS", f"{label} 有记录，paired 事件 {sum(1 for e in evs if e['name'] == 'paired')} 条")]
+    # dup / undo / twoproj：逐个 In 实例检查，一个配好的实例不能掩盖没配好的
+    o_pids = {g.log.header["pid"] for g in cell["O"]}
+    if not cell["I"]:
+        return [("INCOMPLETE", f"{label} 没有 In 实例")]
+    reached, unpaired = set(), 0
+    for g in cell["I"]:
+        hit = {e["a"] for e in g.events + g.log.pre_events if e["name"] == "paired" and e["a"] in o_pids}
+        reached |= hit
+        unpaired += 0 if hit else 1
+    stray = len(o_pids - reached) if v == "twoproj" else 0
+    if unpaired or stray:
+        return [("INCOMPLETE", f"{label} 有 {unpaired} 个 In 实例缺指向本格 Out 的 paired 事件，{stray} 个 Out 没被任何 In 配到")]
+    return [("PASS", f"{label} {len(cell['I'])} 个 In 实例都已配对")]
+
+
+def _gap_ms(blocks):
+    ts = sorted(b["mono_ns"] for b in blocks)
+    return max([(b - a) // 1_000_000 for a, b in zip(ts, ts[1:])] + [0])
+
+
+def observations(s):
+    """格观察：不带 A 编号、不阻断。逐格给本格证据，并把采到的数据算出来（同通道顺序、旁路、Smart、错放）。"""
+    cells, bypass, smart, misplaced = [], [], [], []
+    pairs_total = first_total = 0
+    for key, cell in _cells(s):
+        label = key_label(key)
+        segs = cell["I"] + cell["O"]
+        if is_cat1(key):
+            if len(cell["I"]) == 1 and len(cell["O"]) == 1:
+                pr = _pairs(cell["I"][0].blocks, cell["O"][0].blocks)
+                pairs_total += len(pr)
+                first_total += sum(1 for a, _ in pr if a[1] == "I")
+        else:
+            cells += [{"case": key[0], "cell": label, "state": st, "note": n} for st, n in _cell_evidence(key, cell)]
+        v = key[1]
+        if v in ("bypass-in", "bypass-out"):
+            stalls = regress = 0
+            for g in cell["O"]:
+                w = [b["w"] for b in sorted(g.blocks, key=lambda b: b["seq"])]
+                stalls += sum(1 for x, y in zip(w, w[1:]) if y == x)
+                regress += sum(1 for x, y in zip(w, w[1:]) if y < x)
+            byp = {r: sum(b["bypassed"] for g in segs if g.role == r for b in g.blocks) for r in ("I", "O")}
+            bypass.append({"cell": label, "bypassed_blocks": byp, "o_w_stalls": stalls, "o_w_regress": regress})
+        elif v == "smart":
+            blocks = [b for g in cell["I"] for b in g.blocks]
+            smart.append({
+                "cell": label, "max_gap_ms": _gap_ms(blocks), "resync_total": sum(b["rs"] for b in blocks),
+                "pings": sum(1 for g in segs for e in g.events + g.log.pre_events if e["name"] == "ping"),
+            })  # fmt: skip
+        elif v.startswith("misplaced-"):
+            ib, ob = [b for g in cell["I"] for b in g.blocks], [b for g in cell["O"] for b in g.blocks]
+            if not ib or not ob:
+                misplaced.append({"cell": label, "verdict": "无法判断"})
+                continue
+            pr = _pairs(ib, ob)
+            misplaced.append({
+                "cell": label, "verdict": "两端都在", "pairs": len(pr),
+                "in_first": sum(1 for a, _ in pr if a[1] == "I"),
+                "host_ns_equal": sum(1 for a, b in pr if a[2]["host_ns_valid"] and b[2]["host_ns_valid"] and a[2]["host_ns"] == b[2]["host_ns"]),
+                "off_in": sorted({b["off"] for b in ib}), "off_out": sorted({b["off"] for b in ob}),
+            })  # fmt: skip
+    bad = any(c["state"] == "INCOMPLETE" for c in cells)
+    return {
+        "status": "INCOMPLETE" if bad else "PASS",
+        "order": {"pairs": pairs_total, "in_first": first_total},
+        "cells": cells, "bypass": bypass, "smart": smart, "misplaced": misplaced,
+    }
+
+
+def render_observations(obs):
+    o = obs["order"]
+    out = ["", "## 格观察", "", "不带判据编号、不阻断；本格证据缺失的格记「数据不全」。", ""]
+    out.append(f"- 同通道顺序：成对满块的格里，按 call_seq 是 In 先于 Out 的回调 {o['in_first']}/{o['pairs']}")
+    for c in obs["cells"]:
+        out.append(f"- [{VERDICT_ZH.get(c['state'], '说明')}] {c['note']}")
+    for b in obs["bypass"]:
+        out.append(f"- 旁路 {b['cell']}：旁路块 In {b['bypassed_blocks']['I']}、Out {b['bypassed_blocks']['O']}；"
+                   f"Out 的 w 停滞 {b['o_w_stalls']} 次、回退 {b['o_w_regress']} 次")  # fmt: skip
+    for m in obs["smart"]:
+        out.append(f"- Smart {m['cell']}：最长回调间隙 {m['max_gap_ms']} ms，重同步 {m['resync_total']} 次（含 stall_resume），ping {m['pings']} 条")
+    for m in obs["misplaced"]:
+        if m["verdict"] == "无法判断":
+            out.append(f"- 错放 {m['cell']}：只有一端有块，无法判断")
+        else:
+            out.append(f"- 错放 {m['cell']}：成对 {m['pairs']}，In 先于 Out {m['in_first']}，hostNs 相等 {m['host_ns_equal']}；"
+                       f"off In {m['off_in']}、Out {m['off_out']}")  # fmt: skip
     return out
 
 
@@ -1036,7 +1151,8 @@ def analyze(path, salt):
     logs, compares, broken = load_dir(path)
     s = Session(logs, compares, broken)
     items = [(fn(s, salt) if iid == "A6" else fn(s)) for iid, fn in JUDGES]
-    f1 = freeze_f1(s, items)
+    obs = observations(s)
+    f1 = freeze_f1(s, items, obs)
     roles = [lg.header["role"] for lg in logs]
     return {
         "inputs": {
@@ -1048,6 +1164,7 @@ def analyze(path, salt):
         "stop": items[0]["verdict"] == "FAIL",
         "extras": extras(s),
         "warnings": warnings_of(s),
+        "observations": obs,
     }
 
 
@@ -1065,6 +1182,7 @@ def render_md(res):
     out += ["", "## 冻结条件", ""]
     out.append("- F1 数据齐全、A1-A8 有结论：" + ("满足" if f1["ok"] else "未满足（" + "；".join(f1["missing"]) + "）"))
     out += ["- F2 无需改布局：人工确认", "- F3 Win/mac 测试与压测全绿：以 gates 与 dispatch 结果为准", "- F4 用户已过目：人工确认"]
+    out += render_observations(res["observations"])
     if res["warnings"]:
         out += ["", "## 提示", ""] + [f"- {x}" for x in res["warnings"]]
     if res["extras"]:
@@ -1081,6 +1199,12 @@ def _scrub_result(res):
     res["f1"]["missing"] = [scrub(x) for x in res["f1"]["missing"]]
     res["extras"] = [scrub(x) for x in res["extras"]]
     res["warnings"] = [scrub(x) for x in res["warnings"]]
+    ob = res["observations"]
+    for c in ob["cells"]:
+        c["cell"], c["note"] = scrub(c["cell"]), scrub(c["note"])
+    for k in ("bypass", "smart", "misplaced"):
+        for m in ob[k]:
+            m["cell"] = scrub(m["cell"])
     return res
 
 
@@ -1217,6 +1341,7 @@ def _mutations_of(text):
     yield "行中间的空行", "\n".join(lines[:b] + [""] + lines[b:])
     yield "Z 行之后还有内容", text + lines[b] + "\n"
     yield "H 行 pid 含路径", edit(1, 6, "x:" + "\\" + "dir")
+    yield "case 与 variant 的组合不在表内", edit(c, 3, "deactivate")
     yield "buf 超上界", edit(c, 4, "99999999")
     yield "pid 超上界", edit(1, 6, "99999999999")
     yield "n 超上界", edit(b, 4, "99999999")
@@ -1250,6 +1375,7 @@ def _self_test(tmp):
         _write_tree(base, files)
         res = analyze(base, salt)
         got = {it["id"]: it["verdict"] for it in res["items"]}
+        got["OBS"] = res["observations"]["status"]
         want = expect[d] if d in expect else {i: "PASS" for i in ps.ITEMS}
         for item, v in want.items():
             check(f"{d}：{item} 应为 {v}，实为 {got[item]}", got[item] == v, v != "PASS")
@@ -1389,6 +1515,17 @@ def _self_test(tmp):
     check("全部通过退出码 0", _cli([os.path.join(tmp, "full-pass")])[0] == 0, False)
     check("有不通过退出码 1", _cli([os.path.join(tmp, "a1-fail")])[0] == 1, True)
     check("只有数据不全退出码 3", _cli([os.path.join(tmp, "a1-incomplete")])[0] == 3, True)
+    # 4b. 格观察的数字：正常值与异常值各一组
+    ob = analyze(os.path.join(tmp, "obs-normal"), salt)["observations"]
+    check("正常：同通道顺序全是 In 先", ob["order"] == {"pairs": 40, "in_first": 40}, False)
+    check("正常：旁路块与 w 连续", ob["bypass"][0]["bypassed_blocks"] == {"I": 20, "O": 20} and ob["bypass"][0]["o_w_stalls"] == 0 and ob["bypass"][0]["o_w_regress"] == 0, False)
+    check("正常：Smart 间隙小、ping 两条", ob["smart"][0]["max_gap_ms"] < 10 and ob["smart"][0]["pings"] == 2, False)
+    check("正常：错放两端都在时给先后与 off", ob["misplaced"][0]["verdict"] == "两端都在" and ob["misplaced"][0]["in_first"] == 0 and ob["misplaced"][0]["pairs"] == 40 and ob["misplaced"][0]["off_in"] == [480], False)
+    ob = analyze(os.path.join(tmp, "obs-abnormal"), salt)["observations"]
+    check("异常：Out 先于 In 的回调被数出来", ob["order"] == {"pairs": 40, "in_first": 30}, True)
+    check("异常：w 停滞 3 次、回退 1 次", ob["bypass"][0]["o_w_stalls"] == 3 and ob["bypass"][0]["o_w_regress"] == 1, True)
+    check("异常：Smart 最长间隙大于 1 s 且 ping 不足", ob["smart"][0]["max_gap_ms"] >= 1200 and ob["status"] == "INCOMPLETE", True)
+    check("异常：错放只有一端时写无法判断", ob["misplaced"][0]["verdict"] == "无法判断", True)
     # 5. F1：缺矩阵格、块早于第一个 C 行都要被指出
     res = analyze(os.path.join(tmp, "f1-missing-cell"), salt)
     check("缺一格 CB-01 时 F1 指出矩阵缺格", (not res["f1"]["ok"]) and any("矩阵缺格" in m for m in res["f1"]["missing"]), True)

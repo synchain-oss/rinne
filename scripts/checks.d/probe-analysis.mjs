@@ -68,23 +68,25 @@ export function docProblems(spec, doc) {
     }
     for (const [name, vals] of Object.entries(spec.h_enums)) for (const v of vals) need(`H.${name}`, tick(v));
     for (const e of spec.events) need("事件", tick(e));
-    for (const v of spec.variants) {
-        const line = lines.find((l) => l.startsWith(`| ${tick(v)} |`));
-        const rule = spec.variant_rules[v];
+    // (case, variant) 规则表：每一行的类别、喂给、证据都要与分析器一致
+    for (const [c, v, cat, feeds, evidence] of spec.rules) {
+        const line = lines.find((l) => l.startsWith(`| ${tick(c)} | ${tick(v)} |`));
         if (!line) {
-            missing.push(`variant ${tick(v)}`);
+            missing.push(`规则表缺 ${tick(c)} ${tick(v)} 一行`);
             continue;
         }
-        const cells = line.split("|").map((c) => c.trim());
-        // | 取值 | 用在 | 喂给 | 要求 | 证据 |
-        if (cells[3] !== rule[0] || cells[4] !== rule[1] || cells[5] !== rule[2]) {
-            missing.push(`variant ${tick(v)} 的「喂给 / 要求 / 证据」应与 variant_rules 一致`);
+        const cells = line.split("|").map((x) => x.trim());
+        // | case | variant | 类别 | 喂给 | 证据 |
+        if (cells[3] !== cat || cells[4] !== feeds || cells[5] !== evidence) {
+            missing.push(`规则表 ${tick(c)} ${tick(v)} 的「类别 / 喂给 / 证据」应与分析器一致`);
         }
     }
+    for (const v of spec.variants) need("variant", tick(v));
     for (const g of spec.guards) need("guard", tick(g));
     // case 按表格行逐个核对，不能靠别处碰巧出现的反引号
     for (const c of spec.cases) {
-        if (!lines.some((l) => l.startsWith(`| ${tick(c)} |`))) missing.push(`case 表缺 ${tick(c)} 一行`);
+        const row = lines.find((l) => l.startsWith(`| ${tick(c)} |`) && !l.startsWith(`| ${tick(c)} | \``));
+        if (!row) missing.push(`case 表缺 ${tick(c)} 一行`);
     }
     need("比对表头", spec.compare_head);
     // 阈值与上界必须写在指定的判据行 / 句子里，按整句匹配，免得被别处的数字碰巧满足
@@ -160,7 +162,7 @@ export default {
             h_enums: { role: ["I", "O"] },
             events: ["ev_a"],
             variants: ["-"],
-            variant_rules: { "-": ["A1", "成对满块", "两端各至少 32 块"] },
+            rules: [["CB-01", "-", "1 成对满块", "A1", "两端各至少 32 块"]],
             guards: ["off"],
             cases: ["CB-01", "CB-02"],
             compare_head: "h1,h2",
@@ -179,7 +181,7 @@ export default {
             "m,1 `ev_a` `off` h1,h2 `I` `O`",
             "| `CB-01` | 测什么 |",
             "| `CB-02` | 测什么 |",
-            "| `-` | 不区分 | A1 | 成对满块 | 两端各至少 32 块 |",
+            "| `CB-01` | `-` | 1 成对满块 | A1 | 两端各至少 32 块 |",
             "| `H` | 实例头 | `role` `format` |",
             "| `B` | 逐块 | `seq` `n` |",
             "| A1 | 稳态：各自至少 32 块 |",
@@ -210,7 +212,13 @@ export default {
             ["文档里列序写反", true, docProblems(spec, full.replace("`seq` `n`", "`n` `seq`")).length > 0],
             ["文档缺一个列名", true, docProblems(spec, full.replace("`format`", "")).length > 0],
             ["文档缺 H 枚举取值", true, docProblems(spec, full.replace("`O`", "")).length > 0],
-            ["文档里 variant 的要求写错", true, docProblems(spec, full.replace("成对满块", "单端可")).length > 0],
+            [
+                "规则表缺一行",
+                true,
+                docProblems(spec, full.replace("| `CB-01` | `-` | 1 成对满块 | A1 | 两端各至少 32 块 |", "| `-` |"))
+                    .length > 0,
+            ],
+            ["文档里规则表的类别写错", true, docProblems(spec, full.replace("1 成对满块", "2 各自证据")).length > 0],
             ["文档缺阈值", true, docProblems(spec, full.replace("-120 dBFS", "")).length > 0],
             ["文档缺取值上界", true, docProblems(spec, full.replace("不超过 65536", "")).length > 0],
             ["文档缺退出码", true, docProblems(spec, full.replace("| 3 | 数据不全 |", "")).length > 0],

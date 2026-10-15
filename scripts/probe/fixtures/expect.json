@@ -2,6 +2,9 @@
   "a1-fail": {
     "A1": "FAIL"
   },
+  "a1-fail-guard-variant": {
+    "A1": "FAIL"
+  },
   "a1-fail-spurious-toggle": {
     "A1": "FAIL"
   },
@@ -41,7 +44,7 @@
   "a3-incomplete": {
     "A3": "INCOMPLETE"
   },
-  "a3-incomplete-bounce-only": {
+  "a3-incomplete-export-rt-only": {
     "A3": "INCOMPLETE"
   },
   "a3-pass": {
@@ -55,6 +58,10 @@
   },
   "a4-incomplete-fewblocks": {
     "A4": "INCOMPLETE"
+  },
+  "a4-incomplete-only-cat2": {
+    "A4": "INCOMPLETE",
+    "OBS": "PASS"
   },
   "a4-pass": {
     "A4": "PASS"
@@ -78,6 +85,9 @@
     "A5": "PASS"
   },
   "a6-fail": {
+    "A6": "FAIL"
+  },
+  "a6-fail-multi-instance": {
     "A6": "FAIL"
   },
   "a6-incomplete": {
@@ -132,21 +142,32 @@
     "A9": "PASS"
   },
   "cb05-deactivate-no-blocks": {
-    "A4": "INCOMPLETE"
+    "OBS": "INCOMPLETE"
   },
   "cb05-deactivate-no-event": {
-    "A4": "INCOMPLETE"
+    "OBS": "INCOMPLETE"
   },
   "cb05-deactivate-single-end": {
-    "A4": "PASS"
+    "OBS": "PASS"
+  },
+  "cb07-dup-one-bad": {
+    "OBS": "INCOMPLETE"
   },
   "cb07-dup-two-pairs": {
-    "A4": "PASS"
+    "OBS": "PASS"
   },
   "cb07-dup-unpaired": {
-    "A4": "INCOMPLETE"
+    "OBS": "INCOMPLETE"
+  },
+  "cb12-twoproj-two-pairs": {
+    "OBS": "PASS"
+  },
+  "cb12-twoproj-unpaired": {
+    "OBS": "INCOMPLETE"
   },
   "f1-cb05-no-blocks": {},
   "f1-missing-cell": {},
+  "obs-abnormal": {},
+  "obs-normal": {},
   "orphan-blocks": {}
 }

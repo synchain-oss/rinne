@@ -97,6 +97,7 @@ def pair(case, variant="-", buf="-", guard="na", *, count=40, hook=None, fmt=("v
                 if hook:
                     hook(lg.role, k, row)
                 drop = row.pop("_drop", False)
+                cs = row.pop("_cs", cs)
                 lg.block(cs, row.pop("mono_ns"), drop=drop, **row)
     for lg in (li, lo):
         lg.summary(T_START + 1_000_000_000, blocks=count if blocks else 0)
@@ -297,6 +298,46 @@ def _matrix(case):
     return [("LU-03", "steady", b, "na") for b in (64, 512, 2048)]
 
 
+def obs_fixtures():
+    """格观察的数字：正常值一组、异常值一组。"""
+
+    def byp(r, k, row):
+        row["bypassed"] = 1 if k >= 20 else 0
+
+    def out_first(r, k, row):
+        row["_cs"] = 2 * k + 1 if r == "I" else 2 * k
+
+    def some_out_first(r, k, row):
+        if k % 4 == 0:
+            out_first(r, k, row)
+
+    def w_bad(r, k, row):
+        byp(r, k, row)
+        if r == "O":
+            row["w"] = 4800 + (24 if k in (25, 26, 27) else k) * 256  # 停滞三次
+            if k == 30:
+                row["w"] = 100  # 回退一次
+
+    def late(r, k, row):
+        if k >= 20:
+            row["mono_ns"] += 1_200_000_000  # 回调中间断了 1.2 s
+
+    steady = pair("CB-01", "steady", 256, "low", pid=4900)
+    bypass = pair("CB-05", "bypass-out", hook=byp, pid=4901)
+    smart = pair("CB-06", "smart", pid=4902)
+    for t in (1000, 2000):
+        smart[0].event(T_START + t, "ping", 9600)
+    mis = pair("CB-08", "misplaced-order", pid=4903, hook=out_first)
+    normal = files_of(*steady, *bypass, *smart, *mis)
+    steady2 = pair("CB-01", "steady", 256, "low", pid=4910, hook=some_out_first)
+    bypass2 = pair("CB-05", "bypass-in", hook=w_bad, pid=4911)
+    smart2 = pair("CB-06", "smart", pid=4912, hook=late)
+    smart2[0].event(T_START + 1000, "ping", 9600)
+    mis2 = pair("CB-08", "misplaced-post", pid=4913)[0]  # 只有 In 一端
+    abnormal = files_of(*steady2, *bypass2, *smart2, mis2)
+    return {"obs-normal": (normal, {}), "obs-abnormal": (abnormal, {})}
+
+
 def extra_cells():
     """补充的边界夹具：{目录名: (文件, {判据: 期望})}。"""
 
@@ -353,18 +394,46 @@ def extra_cells():
     for li_, lo_ in (dup1, dup2):
         li_.event(T_START + 20, "paired", lo_.pid, "A")
     undup = pair("CB-07", "dup", blocks=False, pid=4830)
+    def drift2(r, k, row):
+        if r == "I" and k >= 20:
+            row["m"] = 3
+
+    tp1, tp2, tp3 = (pair("CB-12", "twoproj", blocks=False, pid=4860 + n, tok=(f"d{n}01", f"d{n}02")) for n in range(3))
+    tp_ok = []
+    for li_, lo_ in (tp1, tp2):
+        li_.event(T_START + 20, "paired", lo_.pid, "A")
+        tp_ok += [li_, lo_]
+    bad_dup = pair("CB-07", "dup", blocks=False, pid=4890, tok=("a9b8", "c7d6"))
+    dup_good = pair("CB-07", "dup", blocks=False, pid=4891)
+    dup_good[0].event(T_START + 20, "paired", dup_good[1].pid, "A")
+    cat2_only = pair("CB-05", "deactivate", pid=4870)
+    cat2_only[1].event(T_START + 10, "set_processing", 0)
+    guard_fail = pair("CB-03", "guard-in", 256, "low", hook=drift2, pid=4872)
+    names_a = pair("LU-06", "rename", host_kind="luna", os_name="mac", blocks=False, pid=4880)
+    names_b = pair("LU-06", "rename", host_kind="luna", os_name="mac", blocks=False, pid=4881, tok=("a9b8", "c7d6"))
+    for lg in names_a:
+        lg.event(T_START + 5, "track_props", "Track%201", "ff8800")
+    names_b[0].event(T_START + 5, "track_props", "Track%202", "ff8800")
+    names_b[1].event(T_START + 5, "track_props", "", "")  # 第二个实例没收到，第一个实例的好数据不能掩盖它
     return {
-        "cb05-deactivate-single-end": (files_of(*one_end(pid=4800)), {"A4": "PASS"}),
-        "cb05-deactivate-no-blocks": (files_of(dead_a, dead_b), {"A4": "INCOMPLETE"}),
-        "cb05-deactivate-no-event": (files_of(*one_end(pid=4840, event=False)), {"A4": "INCOMPLETE"}),
-        "cb07-dup-two-pairs": (files_of(*dup1, *dup2), {"A4": "PASS"}),
-        "cb07-dup-unpaired": (files_of(*undup), {"A4": "INCOMPLETE"}),
+        "cb12-twoproj-two-pairs": (files_of(*tp_ok), {"OBS": "PASS"}),
+        "cb12-twoproj-unpaired": (files_of(*tp_ok, *tp3), {"OBS": "INCOMPLETE"}),
+        "cb07-dup-one-bad": (files_of(*dup_good, *bad_dup), {"OBS": "INCOMPLETE"}),
+        "a4-incomplete-only-cat2": (files_of(*cat2_only), {"A4": "INCOMPLETE", "OBS": "PASS"}),
+        "a1-fail-guard-variant": (files_of(*guard_fail), {"A1": "FAIL"}),
+        "a6-fail-multi-instance": (files_of(*names_a, *names_b), {"A6": "FAIL"}),
+        **obs_fixtures(),
+        "cb05-deactivate-single-end": (files_of(*one_end(pid=4800)), {"OBS": "PASS"}),
+        "cb05-deactivate-no-blocks": (files_of(dead_a, dead_b), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-no-event": (files_of(*one_end(pid=4840, event=False)), {"OBS": "INCOMPLETE"}),
+        "cb07-dup-two-pairs": (files_of(*dup1, *dup2), {"OBS": "PASS"}),
+        "cb07-dup-unpaired": (files_of(*undup), {"OBS": "INCOMPLETE"}),
         "a1-fail-spurious-toggle": (files_of(*sp), {"A1": "FAIL"}),
         "a1-incomplete-in-only": (files_of(only_in), {"A1": "INCOMPLETE"}),
         "a1-incomplete-dup": (files_of(*dup_a, *dup_b), {"A1": "INCOMPLETE"}),
         "a2-incomplete-emptywindows": (files_of(*windows), {"A2": "INCOMPLETE"}),
         "a3-fail-lag": ({"compare-1.csv": compare_text("CB-04,export-offline,1,-inf,-inf,480")}, {"A3": "FAIL"}),
-        "a3-incomplete-bounce-only": ({"compare-1.csv": compare_text("CB-04,bounce,1,-inf,-inf,0")}, {"A3": "INCOMPLETE"}),
+        "a3-incomplete-export-rt-only": ({"compare-1.csv": compare_text("LU-04,export-rt,1,-inf,-inf,0")}, {"A3": "INCOMPLETE"}),
         "a4-incomplete-fewblocks": (files_of(*few), {"A4": "INCOMPLETE"}),
         "a5-pass-early": (scen_a5("pass", pid=7100, early=True), {"A5": "PASS"}),
         "a5-fail-early-denied": (scen_a5("pass", pid=7200, early=True, early_denied=True), {"A5": "FAIL"}),
