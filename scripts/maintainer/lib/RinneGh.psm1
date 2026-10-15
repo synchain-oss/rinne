@@ -24,6 +24,12 @@ $script:LockImpl = $null
 $script:PermCache = @{}
 $script:NeedlesMode = 'local'
 
+# ConvertFrom-Json -DateKind（时间保持原样的字符串）从 PowerShell 7.5 起才有，更低的版本会在半路报找不到参数：导入时先拦下
+function Test-RinnePwshVersion { param([int]$Major, [int]$Minor) $Major -gt 7 -or ($Major -eq 7 -and $Minor -ge 5) }
+if (-not (Test-RinnePwshVersion $PSVersionTable.PSVersion.Major $PSVersionTable.PSVersion.Minor)) {
+    throw "维护者脚本需要 PowerShell 7.5 或更高（用到 ConvertFrom-Json -DateKind），当前是 $($PSVersionTable.PSVersion)"
+}
+
 function Get-RinneRepo { $script:Repo }
 function Get-RinneMaintainer { $script:Maintainer }
 function Get-RinneRepoRoot { $script:RepoRoot }
