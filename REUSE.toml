@@ -144,3 +144,9 @@ SPDX-License-Identifier = "OFL-1.1"
 
 # --- section:third-party-src ---
 # 逐字收录的第三方源码，保留上游版权与许可。收录时在此加块。
+
+[[annotations]]
+path = "third_party/github-slugger/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2015 Dan Flettre"
+SPDX-License-Identifier = "ISC"

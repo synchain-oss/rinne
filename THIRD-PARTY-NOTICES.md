@@ -183,8 +183,9 @@ Not linked into the plugins and not distributed with them.
 ### github-slugger
 
 - The documentation link check computes GitHub heading anchors with the slug rules of github-slugger (ISC licence).
-  The rules are vendored into `third_party/github-slugger/` together with `LICENSES/ISC.txt`; they are not part of the
-  plugins. Not vendored yet.
+  The rules (github-slugger 2.0.0, npm tarball sha256 in `third_party/github-slugger/README.md`) are vendored into
+  `third_party/github-slugger/` together with `LICENSES/ISC.txt`; they are not part of the plugins. Copyright line, from
+  the upstream licence file: `Copyright (c) 2015, Dan Flettre`.
 
 <!-- /section:github-slugger -->
 
