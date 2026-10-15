@@ -30,7 +30,9 @@
 #
 # 主 clone 的判据本身：-Check 断言 core.hooksPath 指向主 clone 的 scripts/hooks、rinne.waivers 指向一份存在的记录文件，
 # 而且它不在主 clone 与 <根>/wt/ 之下。wt/tip-<n> 与主 clone 共用 .git，PR 里的构建脚本与 CMake 配置期执行的代码都写得到
-# 这些文件，所以合并后构建前后各取一次 .git/config、hooks 目录里每个文件与记录文件的 sha256，任一项变了就判红。
+# 这些文件，所以合并后构建前后各取一次 .git/config、用户级 git 配置、hooks 目录里每个文件与记录文件的 sha256，任一项
+# 变了就判红。这只防构建期间直接改这几类文件，不是隔离：脱离进程树的后台进程可以等核对之后再改。彻底的做法是独立 clone，
+# 或者换一个账户、容器来跑构建。
 #
 # 合并后构建（Standard 及以上）跑的是 PR 树里的脚本，所以是最后一道：其他判据全部通过、且没碰基础设施时才跑，
 # 子进程的环境里拿掉凭据与个人针。-Check 在那之前不会执行 PR 里的任何代码。每个 PR 用自己的 <根>/wt/tip-<n>，
@@ -396,7 +398,10 @@ function Get-CloneIntegrityTargets {
     if ($script:IntegrityTargets) { return $script:IntegrityTargets }
     $git = (Invoke-RinneGit @('rev-parse', '--path-format=absolute', '--git-common-dir')).Out.Trim()
     $hooks = (Invoke-RinneGit @('config', '--local', '--get', 'core.hooksPath') -AllowFail).Out.Trim()
-    [pscustomobject]@{ Root = (Get-RinneRepoRoot); Config = (Join-Path $git 'config'); Hooks = $hooks; Records = (Get-RecordsPath) }
+    # 用户级的 git 配置对主 clone 同样生效（--local 里没设的键都从这里取）
+    $xdg = $env:XDG_CONFIG_HOME ? $env:XDG_CONFIG_HOME : (Join-Path $HOME '.config')
+    $user = [ordered]@{ '~/.gitconfig' = (Join-Path $HOME '.gitconfig'); 'XDG 的 git/config' = (Join-Path $xdg 'git/config') }
+    [pscustomobject]@{ Root = (Get-RinneRepoRoot); Config = (Join-Path $git 'config'); UserConfigs = $user; Hooks = $hooks; Records = (Get-RecordsPath) }
 }
 
 <# 每个判据文件的 sha256（hooks 目录里的逐个列出）；文件不在时记「（不存在）」，这样删掉也算变了。 #>
@@ -404,6 +409,7 @@ function Get-CloneFingerprint {
     param([Parameter(Mandatory)]$Targets)
     $sha = { param($p) ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) ? (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash : '（不存在）' }
     $h = [ordered]@{ '.git/config' = (& $sha $Targets.Config); '记录文件' = (& $sha $Targets.Records) }
+    foreach ($k in @($Targets.UserConfigs.Keys)) { $h["用户级 git 配置 $k"] = & $sha $Targets.UserConfigs[$k] }
     if ($Targets.Hooks -and (Test-Path -LiteralPath $Targets.Hooks -PathType Container)) {
         $base = [IO.Path]::GetFullPath($Targets.Hooks)
         foreach ($f in Get-ChildItem -LiteralPath $base -File -Recurse | Sort-Object FullName) {
@@ -425,9 +431,12 @@ function Test-CloneIntegrity {
     $full = { param($p) [IO.Path]::GetFullPath($p).TrimEnd('\', '/') }
     $under = { param($p, $dir) (& $full $p).StartsWith((& $full $dir) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) }
     $want = Join-Path $Targets.Root 'scripts/hooks'
+    # 相对路径按各自工作树的根解析：在 wt/tip-<n> 里跑 git 时会指到 PR 树里的那一份，所以一律要求绝对路径
     if (-not $Targets.Hooks) { '主 clone 没有设 core.hooksPath（应指向主 clone 的 scripts/hooks）' }
+    elseif (-not [IO.Path]::IsPathRooted($Targets.Hooks)) { "core.hooksPath 必须是绝对路径（相对路径在 wt/tip-<n> 里会指到 PR 树里的 hooks）：$($Targets.Hooks)" }
     elseif ((& $full $Targets.Hooks) -ine (& $full $want)) { "core.hooksPath 应指向主 clone 的 scripts/hooks，现在是 $($Targets.Hooks)" }
     if (-not $Targets.Records) { '主 clone 没有设 rinne.waivers（git config --local）' }
+    elseif (-not [IO.Path]::IsPathRooted($Targets.Records)) { "rinne.waivers 必须是绝对路径：$($Targets.Records)" }
     elseif (-not (Test-Path -LiteralPath $Targets.Records -PathType Leaf)) { "rinne.waivers 指向的记录文件不存在：$($Targets.Records)" }
     elseif ((& $under $Targets.Records $Targets.Root) -or (& $under $Targets.Records (Join-Path $WorkRoot 'wt'))) {
         "记录文件必须在主 clone 与 wt/ 之外：$($Targets.Records)"
@@ -623,7 +632,9 @@ function Invoke-SelfTest {
         New-Item -ItemType Directory -Force -Path (Join-Path $fakeClone '.git'), (Join-Path $fakeClone 'scripts/hooks'), (Join-Path $tmp 'wt') | Out-Null
         Set-Content -LiteralPath (Join-Path $fakeClone '.git/config') -Value '[core]'
         Set-Content -LiteralPath (Join-Path $fakeClone 'scripts/hooks/pre-push') -Value '#!/bin/sh'
-        $integrity = [pscustomobject]@{ Root = $fakeClone; Config = (Join-Path $fakeClone '.git/config'); Hooks = (Join-Path $fakeClone 'scripts/hooks'); Records = $recordsFile }
+        Set-Content -LiteralPath (Join-Path $tmp 'user.gitconfig') -Value '[user]'
+        $integrity = [pscustomobject]@{ Root = $fakeClone; Config = (Join-Path $fakeClone '.git/config'); UserConfigs = [ordered]@{ '~/.gitconfig' = (Join-Path $tmp 'user.gitconfig') }
+            Hooks = (Join-Path $fakeClone 'scripts/hooks'); Records = $recordsFile }
         $script:IntegrityTargets = $integrity
         # 假构建脚本要不要顺手改一样判据文件：'' / config / hook
         $tamper = @{ What = '' }
@@ -707,6 +718,7 @@ function Invoke-SelfTest {
                     })
                 switch ($tamper.What) {
                     'config' { Add-Content -LiteralPath $integrity.Config '[remote "x"]' }
+                    'user' { Add-Content -LiteralPath $integrity.UserConfigs['~/.gitconfig'] '[core]' }
                     'hook' { Add-Content -LiteralPath (Join-Path $integrity.Hooks 'pre-push') 'exit 0' }
                 }
                 $buildResult
@@ -721,10 +733,12 @@ function Invoke-SelfTest {
         # 基础设施清单与匹配规则都用仓里真的 scripts/lib/infra-paths.mjs
         $base = Get-MergeFacts -Pr 3 -CardId $cid
         # 主 clone 的判据文件在预期位置：hooksPath 指向主 clone 的 scripts/hooks，记录文件存在、在主 clone 与 wt/ 之外
-        $ti = { param($patch) $t = [pscustomobject]@{ Root = $integrity.Root; Config = $integrity.Config; Hooks = $integrity.Hooks; Records = $integrity.Records }
+        $ti = { param($patch) $t = [pscustomobject]@{ Root = $integrity.Root; Config = $integrity.Config; UserConfigs = $integrity.UserConfigs; Hooks = $integrity.Hooks; Records = $integrity.Records }
             foreach ($k in $patch.Keys) { $t.$k = $patch[$k] }; @(Test-CloneIntegrity $t $tmp) }
         Add-RinneCase $cases '判据文件位置：hooksPath 与记录文件都对' $false (@(& $ti @{}).Count -ne 0)
         Add-RinneCase $cases '判据文件位置：hooksPath 指到别处' $true ((@(& $ti @{ Hooks = $tmp }) -match 'core\.hooksPath').Count -eq 1)
+        Add-RinneCase $cases '判据文件位置：hooksPath 是相对路径' $true ((@(& $ti @{ Hooks = 'scripts/hooks' }) -match '绝对路径').Count -eq 1)
+        Add-RinneCase $cases '判据文件位置：rinne.waivers 是相对路径' $true ((@(& $ti @{ Records = 'records.json' }) -match '绝对路径').Count -eq 1)
         Add-RinneCase $cases '判据文件位置：没设 rinne.waivers' $true ((@(& $ti @{ Records = $null }) -match 'rinne\.waivers').Count -eq 1)
         Add-RinneCase $cases '判据文件位置：记录文件不存在' $true ((@(& $ti @{ Records = (Join-Path $tmp 'missing.json') }) -match '不存在').Count -eq 1)
         Set-Content -LiteralPath (Join-Path $tmp 'wt/records.json') -Value '{}'
@@ -1025,8 +1039,11 @@ function Invoke-SelfTest {
             $vt = Invoke-MergeCheck 3 $cid
             $tamper.What = 'hook'
             $vk = Invoke-MergeCheck 3 $cid
+            $tamper.What = 'user'
+            $vg = Invoke-MergeCheck 3 $cid
             $tamper.What = ''
             Add-RinneCase $cases '合并后构建：构建改了主 clone 的 .git/config，判红并写明' $true ($vt.Code -eq 'not-ready' -and @($vt.Failures | Where-Object { $_ -match '判据文件：\.git/config（' }).Count -eq 1)
+            Add-RinneCase $cases '合并后构建：构建改了用户级 git 配置，判红并写明' $true ($vg.Code -eq 'not-ready' -and @($vg.Failures | Where-Object { $_ -match '判据文件：用户级 git 配置 ~/\.gitconfig（' }).Count -eq 1)
             Add-RinneCase $cases '合并后构建：构建改了 hooks 目录里的文件，判红并写明' $true ($vk.Code -eq 'not-ready' -and @($vk.Failures | Where-Object { $_ -match '判据文件：hooks/pre-push（' }).Count -eq 1)
             $vu = Invoke-MergeCheck 3 $cid
             Add-RinneCase $cases '合并后构建：没改判据文件时照常通过' $false ($vu.Code -ne 'ready')
