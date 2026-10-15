@@ -1,0 +1,53 @@
+{
+  "sources": {
+    "scvb-macos-au": {
+      "repo": "synchain-oss/scvb",
+      "ref": "feature/macos-au",
+      "sha": "b81142fe16646acdbef3cdfced269bac3e6d30fa"
+    }
+  },
+  "files": [
+    {
+      "path": "CMakeLists.txt",
+      "source": "scvb-macos-au",
+      "from": "CMakeLists.txt",
+      "fromBlob": "f24661f7525c4a4397629767dfcebf8ec2f25c07",
+      "mode": "adapted"
+    },
+    {
+      "path": "cmake/RinneDeps.cmake",
+      "source": "scvb-macos-au",
+      "from": "CMakeLists.txt",
+      "fromBlob": "f24661f7525c4a4397629767dfcebf8ec2f25c07",
+      "mode": "forked"
+    },
+    {
+      "path": "src/input/CMakeLists.txt",
+      "source": "scvb-macos-au",
+      "from": "src/output/CMakeLists.txt",
+      "fromBlob": "41f1d2ff367a0f6296c04db3dbabda0553c7e0a2",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/output/CMakeLists.txt",
+      "source": "scvb-macos-au",
+      "from": "src/output/CMakeLists.txt",
+      "fromBlob": "41f1d2ff367a0f6296c04db3dbabda0553c7e0a2",
+      "mode": "adapted"
+    },
+    {
+      "path": "scripts/build.ps1",
+      "source": "scvb-macos-au",
+      "from": "scripts/build.ps1",
+      "fromBlob": "61bdeee0cb6641be01cfb3e9d13bdbf50bb0dde0",
+      "mode": "forked"
+    },
+    {
+      "path": ".github/workflows/build.yml",
+      "source": "scvb-macos-au",
+      "from": ".github/workflows/build-vst3.yml",
+      "fromBlob": "414b13a6834cafecce9cda1826959907c679b0a7",
+      "mode": "adapted"
+    }
+  ]
+}

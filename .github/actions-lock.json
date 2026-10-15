@@ -1,5 +1,10 @@
 {
   "actions": {
+    "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": {
+      "version": "v6.1.0",
+      "using": "node24",
+      "nested": []
+    },
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1": {
       "version": "v7.0.1",
       "using": "node24",
@@ -7,6 +12,11 @@
     },
     "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1": {
       "version": "v7.1.0",
+      "using": "node24",
+      "nested": []
+    },
+    "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9": {
+      "version": "v7.0.2",
       "using": "node24",
       "nested": []
     },
