@@ -9,8 +9,8 @@ IBM Plex 的保留字体名是 "Plex"。子集化算 Modified Version，按 OFL-
 
 判据：
   1. 四个 woff2 都存在、能打开；
-  2. 改名的两款：nameID 1、3、4、6、16、17 与 fetch_fonts.OUTPUTS 登记的名字一致，
-     且署名之外的所有 name 记录都不含保留字体名（大小写不敏感）；
+  2. 有登记名的字体（四款都有）：nameID 1、4、6、16、17 与 fetch_fonts.OUTPUTS 登记的名字一致（非 RIBBI 样式的 nameID 1 为「族名 样式」）；
+     改名的两款另要求署名之外的所有 name 记录（含 nameID 3）都不含保留字体名（大小写不敏感）；
   3. 所有字体：nameID 0、13、14 存在且非空；族名记录（1、4、6、16）不含该家族的保留字体名；
   4. REUSE.toml 里每个字体文件都有一个块，版权行与 nameID 0 去掉 "Copyright"、"(c)"、"©" 前缀后逐字相同。
   5. check-text-fit.py 里手抄的 U+202F 前进宽度与字体里的真实值一致（容差 0.005 em）。
