@@ -1,31 +1,206 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Derived from synchain-oss/scvb; see upstream/build.json
 #
-# Registration stub. GitHub only offers workflow_dispatch for workflows that
-# exist on the default branch, so this file is committed first. The real build
-# pipeline replaces it on the development line; until then it always fails.
+# 完整构建（dev / prod 的 required check：build-win）。三种模式共用这一套 job，只按 MODE 分支：
+#   pr        PR → dev / prod。子 PR（→ feature/**）不跑本 workflow，这是有意的：子 PR 的编译门是本机 gates
+#   dispatch  workflow_dispatch：ref = 要构建的 40 位提交（scripts/maintainer/dispatch.ps1 按 sha 触发），probe = 另出探针身份
+#   release   被 release.yml 以 workflow_call 调用，构建 release-tag 指向的提交
+# build-win 的配置、构建与验证都调 scripts/build.ps1，与本机 gates、合并后构建同一份配方：MSVC 环境、第一方零 warning、
+# 恰好两个插件（按名字，探针身份另算）、ctest、pluginval strictness 5 无 GUI；另外断言 cache 里的段名前缀是默认值。
+# 钉版：JUCE 按 .juce-version 的 tag 浅克隆，CMake 守卫再断言它就是 .juce-commit；ninja 与 pluginval 由 bootstrap-tools.ps1
+# 按 sha256 装；sccache 按 .sccache-version 与 .sccache-sha256 装；WebView2 包由 CMake 按 sha256 取。
+# artifact：Rinne-win64-{pr<N>|dispatch}-<sha40>（release 为 Rinne-release-win64-<tag>），两个插件在顶层，tools-bin 下有
+# 可执行文件时放进 tools/；探针另传 Rinne-probe-win64-<sha40>。<sha40> 一律是实际检出、构建的那个提交。
+# concurrency：PR 按 PR 号分组、新推送取消旧的；dispatch 与 release 按提交分组、不取消，每次运行都对应确定的一次提交。
 name: Build & Validate
 
 on:
+  pull_request:
+    branches: [dev, prod]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref to build
+        description: 要构建的提交（40 位 sha）；空着就构建所选分支的 tip
         required: false
+        type: string
+      probe:
+        description: 另外构建探针身份并上传
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      release-tag:
+        description: 要构建的 tag
+        required: true
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: false
+  group: build-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.pull_request.number) || inputs.ref || inputs.release-tag || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  stub:
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
+  build-win:
+    name: build-win
+    runs-on: windows-2022
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      JUCE_DIR: ${{ github.workspace }}\JUCE
+      SCCACHE_DIR: ${{ github.workspace }}\.sccache
+      # 一次冷编的缓存约 100 MiB；上限给大了它就长到多大，挤掉别的缓存条目
+      SCCACHE_CACHE_SIZE: 1G
     steps:
-      - name: Not available yet
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || inputs.release-tag || '' }}
+          persist-credentials: false
+
+      - name: Mode and names
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          WANT_REF: ${{ inputs.ref }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
         run: |
-          echo "The build pipeline has not landed on this branch yet." >&2
-          exit 1
+          $sha = "$(git rev-parse HEAD)".Trim()
+          if ($sha -notmatch '^[0-9a-f]{40}$') { Write-Error '取不到检出的提交'; exit 1 }
+          # ref 只收 40 位提交号：分支名、tag、短 sha 都会变，构建与 concurrency 组就对应不到确定的提交
+          if ($env:WANT_REF -and $env:WANT_REF -notmatch '^[0-9a-f]{40}$') { Write-Error 'ref 必须是 40 位提交号（空着就构建所选分支的 tip）'; exit 1 }
+          if ($env:WANT_REF -and $env:WANT_REF -ne $sha) { Write-Error "检出的是 $sha，不是要构建的 $env:WANT_REF"; exit 1 }
+          if ($env:RELEASE_TAG) {
+            if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { Write-Error 'release-tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1 }
+            $mode, $name, $keep = 'release', "Rinne-release-win64-$($env:RELEASE_TAG)", 7
+          } elseif ($env:EVENT_NAME -eq 'pull_request') {
+            if ($env:PR_NUMBER -notmatch '^\d+$') { Write-Error '取不到 PR 号'; exit 1 }
+            $mode, $name, $keep = 'pr', "Rinne-win64-pr$($env:PR_NUMBER)-$sha", 14
+          } else {
+            $mode, $name, $keep = 'dispatch', "Rinne-win64-dispatch-$sha", 30
+          }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msvc = (Get-Content "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
+          if ($msvc -notmatch '^[\d.]+$') { Write-Error "取不到 MSVC 工具集版本：$msvc"; exit 1 }
+          Write-Host "mode=$mode sha=$sha artifact=$name msvc=$msvc"
+          @("MODE=$mode", "BUILT_SHA=$sha", "ARTIFACT=$name", "RETENTION=$keep", "PROBE_ARTIFACT=Rinne-probe-win64-$sha",
+            "JUCE_TAG=$((Get-Content .juce-version -Raw).Trim())", "MSVC_VER=$msvc") | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Restore JUCE
+        id: juce-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.JUCE_DIR }}
+          key: juce-${{ runner.os }}-${{ hashFiles('.juce-commit') }}
+
+      - name: Clone JUCE (pinned tag)
+        if: steps.juce-cache.outputs.cache-hit != 'true'
+        run: git clone --quiet --depth 1 --branch "$env:JUCE_TAG" https://github.com/juce-framework/JUCE.git "$env:JUCE_DIR"
+
+      - name: Restore WebView2 package
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/packages
+          key: webview2-${{ hashFiles('cmake/RinneDeps.cmake') }}
+
+      - name: Install pinned ninja and pluginval
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'rinne-tools'
+          pwsh -NoProfile -File scripts/bootstrap-tools.ps1 -ToolsDir $dir -Tools ninja,pluginval
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $ninja = Get-ChildItem -LiteralPath $dir -Filter ninja.exe -File -Recurse | Select-Object -First 1
+          $pv = Get-ChildItem -LiteralPath $dir -Filter pluginval.exe -File -Recurse | Select-Object -First 1
+          if (-not $ninja -or -not $pv) { Write-Error '装好后找不到 ninja.exe 或 pluginval.exe'; exit 1 }
+          @("RINNE_NINJA=$($ninja.FullName)", "RINNE_PLUGINVAL=$($pv.FullName)") | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install pinned sccache
+        run: |
+          $ver = (Get-Content .sccache-version -Raw).Trim()
+          $want = (Get-Content .sccache-sha256 -Raw).Trim().ToLowerInvariant()
+          $name = "sccache-v$ver-x86_64-pc-windows-msvc"
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest "https://github.com/mozilla/sccache/releases/download/v$ver/$name.zip" -OutFile $zip
+          $got = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($got -ne $want) { Write-Error "sccache 的 sha256 不符：期望 $want，实际 $got"; exit 1 }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
+          $exe = Join-Path $env:RUNNER_TEMP "sccache\$name\sccache.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { Write-Error '解开后没有 sccache.exe'; exit 1 }
+          New-Item -ItemType Directory -Force -Path $env:SCCACHE_DIR | Out-Null
+          "RINNE_SCCACHE=$exe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # 键里带 MSVC 工具集与构建脚本的哈希：换了它们旧对象多半不命中，换一把键重新长。键尾的 run_id 让每次都写回，
+      # 下一次靠 restore-keys 的前缀捞到上一次的那份。
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-${{ runner.os }}-${{ env.MSVC_VER }}-${{ hashFiles('.juce-commit', 'CMakeLists.txt', 'cmake/*.cmake', 'src/**/CMakeLists.txt', 'src/**/sources-*.cmake') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ env.MSVC_VER }}-${{ hashFiles('.juce-commit', 'CMakeLists.txt', 'cmake/*.cmake', 'src/**/CMakeLists.txt', 'src/**/sources-*.cmake') }}-
+            sccache-${{ runner.os }}-${{ env.MSVC_VER }}-
+
+      - name: Build
+        run: pwsh -NoProfile -File scripts/build.ps1 -Ci -JucePath "$env:JUCE_DIR" -Launcher "$env:RINNE_SCCACHE"
+
+      - name: Shared-memory prefix is the default
+        run: pwsh -NoProfile -File scripts/build.ps1 -CheckCache
+
+      # sccache 失效时是静默的零命中，CI 照样绿、只是慢回冷编；打印命中率，顺手停掉服务让索引落盘
+      - name: Compiler cache stats
+        if: always()
+        run: |
+          if (-not $env:RINNE_SCCACHE -or -not (Test-Path -LiteralPath $env:RINNE_SCCACHE)) { Write-Host 'sccache 没有装上'; exit 0 }
+          & $env:RINNE_SCCACHE --show-stats
+          & $env:RINNE_SCCACHE --stop-server | Out-Host
+          exit 0
+
+      - name: ctest
+        run: pwsh -NoProfile -File scripts/build.ps1 -Ci -NoBuild -Test
+
+      - name: pluginval (strictness 5, no GUI)
+        run: pwsh -NoProfile -File scripts/build.ps1 -Ci -NoBuild -Validate
+
+      - name: Stage
+        run: pwsh -NoProfile -File scripts/build.ps1 -Ci -NoBuild -Stage (Join-Path $env:RUNNER_TEMP 'dist')
+
+      - name: Upload plugins
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          retention-days: ${{ env.RETENTION }}
+
+      - name: Build probe identity
+        if: inputs.probe
+        run: |
+          pwsh -NoProfile -File scripts/build.ps1 -Ci -Probe -JucePath "$env:JUCE_DIR" -Launcher "$env:RINNE_SCCACHE"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File scripts/build.ps1 -CheckCache -Probe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File scripts/build.ps1 -Ci -Probe -NoBuild -Validate -Stage (Join-Path $env:RUNNER_TEMP 'dist-probe')
+
+      - name: Upload probe plugins
+        if: inputs.probe
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PROBE_ARTIFACT }}
+          path: ${{ runner.temp }}/dist-probe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Rinne-win64-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/logs
+            build-probe/logs
+          if-no-files-found: ignore
+          retention-days: 7

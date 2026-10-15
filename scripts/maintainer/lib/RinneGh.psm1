@@ -24,6 +24,12 @@ $script:LockImpl = $null
 $script:PermCache = @{}
 $script:NeedlesMode = 'local'
 
+# ConvertFrom-Json -DateKind（时间保持原样的字符串）从 PowerShell 7.5 起才有，更低的版本会在半路报找不到参数：导入时先拦下
+function Test-RinnePwshVersion { param([int]$Major, [int]$Minor) $Major -gt 7 -or ($Major -eq 7 -and $Minor -ge 5) }
+if (-not (Test-RinnePwshVersion $PSVersionTable.PSVersion.Major $PSVersionTable.PSVersion.Minor)) {
+    throw "维护者脚本需要 PowerShell 7.5 或更高（用到 ConvertFrom-Json -DateKind），当前是 $($PSVersionTable.PSVersion)"
+}
+
 function Get-RinneRepo { $script:Repo }
 function Get-RinneMaintainer { $script:Maintainer }
 function Get-RinneRepoRoot { $script:RepoRoot }
@@ -77,9 +83,13 @@ function Invoke-RinneExternal {
     return $r
 }
 
-<# 带超时跑一个进程：输出异步读（免得管道写满卡住），到点 Kill 整棵进程树（构建会起编译器子进程）。 #>
+<#
+  带超时跑一个进程，到点 Kill 整棵进程树（构建会起编译器子进程）。两条输出流在本线程上轮询着读（免得管道写满卡住），
+  读到的随时可用。进程退出后读管道最多再等 DrainSeconds：它留下的常驻子进程（编译器的 PDB 服务、编译缓存的服务）
+  继承了管道时，EOF 要等它们退出才来，不设上限的话超时就形同虚设。等不到时用已经读到的输出，并在 Err 里注明。
+#>
 function Invoke-RinneTimed {
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds)
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds, [int]$DrainSeconds = 10)
     $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
     foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }
     $psi.UseShellExecute = $false
@@ -88,19 +98,65 @@ function Invoke-RinneTimed {
     if ($Cwd) { $psi.WorkingDirectory = $Cwd }
     $p = [System.Diagnostics.Process]::Start($psi)
     try {
-        $out = $p.StandardOutput.ReadToEndAsync()
-        $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
-            # 恰好在这之间自己退出了，Kill 会抛错；照样按超时算
-            try { $p.Kill($true) } catch [InvalidOperationException] { }
-            $p.WaitForExit()
-            return @{ Code = -1; Out = $out.Result; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true }
+        $pumps = @((New-RinneStreamPump $p.StandardOutput), (New-RinneStreamPump $p.StandardError))
+        $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $timedOut = $false
+        while (-not $p.HasExited) {
+            foreach ($q in $pumps) { Step-RinneStreamPump $q }
+            if ([datetime]::UtcNow -ge $deadline) {
+                # 恰好在这之间自己退出了，Kill 会抛错；照样按超时算
+                try { $p.Kill($true) } catch [InvalidOperationException] { }
+                $null = $p.WaitForExit(5000)
+                $timedOut = $true
+                break
+            }
+            Start-Sleep -Milliseconds 50
         }
-        $p.WaitForExit()
-        @{ Code = $p.ExitCode; Out = $out.Result.TrimEnd(); Err = $err.Result; TimedOut = $false }
+        $drainEnd = [datetime]::UtcNow.AddSeconds($DrainSeconds)
+        while (@($pumps | Where-Object { -not $_.Done }).Count -and [datetime]::UtcNow -lt $drainEnd) {
+            foreach ($q in $pumps) { Step-RinneStreamPump $q }
+            Start-Sleep -Milliseconds 50
+        }
+        $out, $err = (Get-RinnePumpText $pumps[0]), (Get-RinnePumpText $pumps[1])
+        if ($timedOut) { return @{ Code = -1; Out = $out; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true } }
+        $note = @($pumps | Where-Object { -not $_.Done }).Count ? "`n（进程已退出，留下的子进程还握着输出管道，$DrainSeconds 秒后不再等）" : ''
+        @{ Code = $p.ExitCode; Out = $out.TrimEnd(); Err = $err + $note; TimedOut = $false }
     } finally {
         $p.Dispose()
     }
+}
+
+<# 一条输出流的读取器：同一时刻只挂一个 ReadAsync，由 Step-RinneStreamPump 在调用方线程上收结果；Text 是目前读到的
+   输出，超过 PumpMaxChars 时只留后面的部分（Truncated）。 #>
+$script:PumpMaxChars = 4MB
+function New-RinneStreamPump {
+    param([Parameter(Mandatory)][IO.StreamReader]$Reader)
+    [pscustomobject]@{ Reader = $Reader; Buffer = [char[]]::new(8192); Text = [Text.StringBuilder]::new(); Task = $null; Done = $false; Truncated = $false }
+}
+
+<# 把已经读完的块收进 Text，再挂下一次读；读到 EOF 或流出错时 Done。不阻塞，每次最多收 MaxChunks 块：子进程一直刷屏、
+   每次读都立刻完成时，也要按时回到调用方去查超时。 #>
+function Step-RinneStreamPump {
+    param([Parameter(Mandatory)]$Pump, [int]$MaxChunks = 64)
+    for ($i = 0; $i -lt $MaxChunks -and -not $Pump.Done; $i++) {
+        if (-not $Pump.Task) { $Pump.Task = $Pump.Reader.ReadAsync($Pump.Buffer, 0, $Pump.Buffer.Length) }
+        if (-not $Pump.Task.IsCompleted) { return }
+        $n = if ($Pump.Task.IsCompletedSuccessfully) { $Pump.Task.Result } else { 0 }
+        $Pump.Task = $null
+        if ($n -le 0) { $Pump.Done = $true; return }
+        $null = $Pump.Text.Append($Pump.Buffer, 0, $n)
+        # 超出上限时一次砍到一半，免得每块都挪一遍
+        if ($Pump.Text.Length -gt $script:PumpMaxChars) {
+            $null = $Pump.Text.Remove(0, $Pump.Text.Length - [int]($script:PumpMaxChars / 2))
+            $Pump.Truncated = $true
+        }
+    }
+}
+
+<# 读取器里的输出；截断过的在前面注明。 #>
+function Get-RinnePumpText {
+    param([Parameter(Mandatory)]$Pump)
+    ($Pump.Truncated ? "（输出过长，只保留最后一段）`n" : '') + $Pump.Text.ToString()
 }
 
 function Invoke-RinneGh {
@@ -707,11 +763,11 @@ function Get-RinneCloneState {
 
 <#
   合并后构建跑的是 PR 树里的脚本：子进程启动前从本进程环境里拿掉凭据与个人针（GH_TOKEN、GITHUB_TOKEN、
-  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY、*_SECRET、*_PASSWORD），
+  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY、*_SECRET、*_PASSWORD、*_PAT），
   结束后在 finally 里还原。这只挡住环境变量；本机 gh 的登录凭据与 git config 仍在，所以合并后构建只在其他判据都通过、
   且没碰基础设施时才跑。
 #>
-$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY|.+_SECRET|.+_PASSWORD)$'
+$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY|.+_SECRET|.+_PASSWORD|.+_PAT)$'
 
 function Invoke-RinneWithoutSecrets {
     param([Parameter(Mandatory)][scriptblock]$Script)

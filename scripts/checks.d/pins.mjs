@@ -16,7 +16,14 @@ export const PINS = {
     ".actionlint-version": SEMVER,
     ".node-version": SEMVER,
 };
-const OPTIONAL = { ".juce-commit": /^[0-9a-f]{40}$/, ".pluginval-version": /^v?\d+\.\d+\.\d+$/ };
+// 构建用的钉版：构建骨架入库之前没有，缺失不算错
+const OPTIONAL = {
+    ".juce-commit": /^[0-9a-f]{40}$/,
+    ".juce-version": SEMVER,
+    ".pluginval-version": /^v?\d+\.\d+\.\d+$/,
+    ".sccache-version": SEMVER,
+    ".sccache-sha256": /^[0-9a-f]{64}$/,
+};
 
 /** read(rel) 返回文件文本或 null。 */
 export function checkPins(read) {
@@ -93,6 +100,22 @@ export default {
             ],
             ["带哈希时 clang-format 版本不一致", true, with_(req("18.1.7 \\\n    --hash=sha256:aa", "reuse==6.2.0"))],
             ["JUCE 提交号不是 40 位", true, with_({ ".juce-commit": "d6181bde\n" })],
+            [
+                "构建钉版齐全且合法",
+                false,
+                with_({
+                    ".juce-version": "8.0.8\n",
+                    ".pluginval-version": "v1.0.4\n",
+                    ".sccache-version": "0.17.0\n",
+                    ".sccache-sha256": `${"e9".repeat(32)}\n`,
+                }),
+            ],
+            ["JUCE 提交号是大写", true, with_({ ".juce-commit": `${"D6181BDE".repeat(5)}\n` })],
+            ["JUCE 版本不是 x.y.z", true, with_({ ".juce-version": "8.0\n" })],
+            ["pluginval 版本不是 x.y.z", true, with_({ ".pluginval-version": "latest\n" })],
+            ["sccache 版本带 v 前缀", true, with_({ ".sccache-version": "v0.17.0\n" })],
+            ["sccache 的 sha256 是大写", true, with_({ ".sccache-sha256": `${"E9".repeat(32)}\n` })],
+            ["sccache 的 sha256 少一位", true, with_({ ".sccache-sha256": `${"e".repeat(63)}\n` })],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
         return caseResult(cases);
     },

@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 构建信息。本文件是模板：src/core/CMakeLists.txt 配置时生成 <构建目录>/src/core/generated/util/RinneVersion.h，生成物不要手改。
+// 版本只有一个真源，就是根 CMakeLists.txt 的 project(Rinne VERSION …)，这里不写任何字面量。
+// 构建标签每次出包都不同，不放进头文件：放进来，每个 include 它的编译单元都要跟着重编。它只编在 RinneVersion.cpp 里。
+#pragma once
+
+namespace rinne::build
+{
+
+inline constexpr int kVersionMajor = @Rinne_VERSION_MAJOR@;
+inline constexpr int kVersionMinor = @Rinne_VERSION_MINOR@;
+inline constexpr int kVersionPatch = @Rinne_VERSION_PATCH@;
+inline constexpr const char* kVersion = "@Rinne_VERSION@";
+
+// 共享内存段名前缀：根 CMakeLists.txt 只放行正式版、本机 gates（带 D）、探针（带 P）三个值
+inline constexpr const char* kShmPrefix = "@RINNE_SHM_PREFIX@";
+inline constexpr bool kProbeBuild = @RINNE_PROBE_BUILD_VALUE@;
+
+// 出包时给的构建标签（例如 kit 版本加短 sha）；没给时是空串
+const char* buildLabel() noexcept;
+
+} // namespace rinne::build
