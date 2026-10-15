@@ -27,7 +27,7 @@
 
 `C` 的取值：`case` 与 `variant` 取下面两张表里的值；`buf` 是缓冲区大小（样本，不超过 65536）或 `-`；`guard` ∈ `off` `low` `normal` `high` `na`（ASIO-Guard 档位，不适用写 `na`）；`sr` 是不超过 768000 的采样率。
 
-**格与同键重复。** 同一个 `(case, variant, buf, guard)` 叫一个「格」，In 与 Out 两端对同一个格各写一段，分析器靠这个键把两端配起来。一个实例可以在一个文件里连续写很多格（每格一个 `C` 行）。同一个键下不得出现第二份记录：某格做坏了，就记下来，等该实例整体重采一遍（关掉插件再开，生成新文件），并把旧文件挪走。分析器遇到同键重复（`rip` 与 `freeze` 除外，宿主克隆实例是预期内的）时不会静默挑一份，而是把相关判据判为数据不全、在输出的「提示」里列出，并让 F1 不满足。
+**格与同键重复。** 同一个 `(case, variant, buf, guard)` 叫一个「格」，In 与 Out 两端对同一个格各写一段，分析器靠这个键把两端配起来。一个实例可以在一个文件里连续写很多格（每格一个 `C` 行）。同一个键下不得出现第二份记录：某格做坏了，就记下来，等该实例整体重采一遍（关掉插件再开，生成新文件），并把旧文件挪走。分析器遇到同键重复（`rip`、`freeze`、`dup`、`undo` 除外，这几种会多出实例是预期内的）时不会静默挑一份，而是把相关判据判为数据不全、在输出的「提示」里列出，并让 F1 不满足。
 
 **快照。** 配对、后端、状态恢复这类事件往往发生在用户选 case 之前。分析器把第一个 `C` 行之前的事件归为实例级，A5 与 A9 会同时看实例级与分段内的事件。为了让每一格自含，探针在每个 `C` 行之后立即补写一遍当前状态的快照：`prepare`、`backend`、`paired`、`shm_denied`（如发生过）、`set_state`（如发生过）、`track_props`。从未发生过的就不写，只有 `track_props` 例外：从未送达则写 `a` 与 `b` 都为空的一条。第一个 `C` 之前出现的 `B` 行无法归入任何格，分析器计数、列入「提示」并让 F1 不满足，所以探针应当在第一个 `C` 行之后才开始写块。
 
@@ -105,19 +105,44 @@
 | `LU-08` | LUNA：沙盒宿主下的进程隔离（可选） |
 | `LU-09` | LUNA：保存重开 |
 
-`variant` 取值，`-` 表示不区分：
+`variant` 取值，`-` 表示不区分。**一格要不要两端成对、各至少 32 块，取决于它喂给的判据是否需要两端的稳态块数据，而不是按 case 一刀切**，下表就是这条规则，分析器读同一张表（`--spec` 的 `variant_rules`），run-checks 逐行对拍。「成对满块」的格是 A1、A2、A4、A7 用到的稳态格：两端各恰有一个实例、各至少 32 块，缺了判数据不全。其余的格不要求成对和块数，但「不要求」不等于「没数据也算过」：每种格仍须有表中写的本格自己的证据，一条都没有就判数据不全并列出（归在 A4 名下，因为它们喂给的判据没有别的位置可放），而不是只记一条说明。说明（NOTE）只用于「按设计缺一端、块少」这类情形。`dup`、`undo`、`rip`、`freeze` 允许同键多对实例；F1 的同键重复只看 F1 所列 case 里「成对满块」的格。
 
-| 取值 | 用在 |
-|---|---|
-| `-` `steady` | 稳态播放 |
-| `toggle` | 监听或录音使能反复切换 |
-| `reopen` `dup` `preset` `fxchain` `undo` `rename` | 保存重开、复制轨道、轨道预设、FX Chain、删除撤销、改名与颜色 |
-| `export-rt` `export-offline` `bounce` `freeze` `rip` `dop` | 实时导出、离线导出、Bounce、Freeze、Render in Place、Direct Offline Processing |
-| `bypass-in` `bypass-out` `deactivate` `disable-track` `smart` | 旁路、停用、禁用轨道、Smart Plug-in Processing |
-| `guard-in` `guard-out` `guard-both` | 只对 In、只对 Out、对两者关闭 ASIO-Guard |
-| `misplaced-order` `misplaced-track` `misplaced-post` | 错放：Out 在 In 前、Out 跨轨、Out 在推子后 |
-| `mono` `bufchange` `constrain` `twoproj` `coreaudio` | 单声道轨、播放中改缓冲、Constrain Delay Compensation、两个工程、Core Audio 模式 |
-| `au-au` `vst3-vst3` `au-vst3` | LU-02 的三种配对组合（In 格式在前） |
+| 取值 | 用在 | 喂给 | 对两端与块数的要求 | 本格自己的证据 |
+|---|---|---|---|---|
+| `-` | 不区分 | A1 A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `steady` | 稳态播放 | A1 A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `toggle` | 监听或录音使能反复切换 | A2 A4 A7 | 成对满块 | 两端各至少 32 块，每次切换后的窗口里至少 8 块 |
+| `reopen` | 保存重开 | A9 | 不要求块 | set_state 之后出现 paired |
+| `dup` | 复制轨道 | A4 | 允许多实例 | 每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid |
+| `preset` | 轨道预设 | A4 | 单端可 | 至少一端有块 |
+| `fxchain` | FX Chain 预设 | A4 | 单端可 | 至少一端有块 |
+| `undo` | 删除后撤销 | A4 | 允许多实例 | 每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid |
+| `rename` | 改轨道名与颜色 | A6 | 不要求块 | 两端都收到非空轨道名 |
+| `export-rt` | 实时导出 | A3 | 不要求块 | 导出比对行见 A3 |
+| `export-offline` | 离线导出 | A3 | 不要求块 | 导出比对行见 A3 |
+| `bounce` | Bounce | A3 | 不要求块 | 导出比对行见 A3 |
+| `freeze` | Freeze | A3 A4 | 允许多实例 | 导出比对行见 A3；各实例的块只查块长 |
+| `rip` | Render in Place | A3 A4 | 允许多实例 | 导出比对行见 A3；各实例的块只查块长 |
+| `dop` | Direct Offline Processing | A3 A4 | 不要求块 | 导出比对行见 A3；有块则查块长 |
+| `bypass-in` | 旁路 In | A4 | 单端可 | 至少一端 32 块，且有 bypassed 为 1 的块 |
+| `bypass-out` | 旁路 Out | A4 | 单端可 | 至少一端 32 块，且有 bypassed 为 1 的块 |
+| `deactivate` | 停用（电源键） | A4 | 单端可 | 至少一端 32 块，且有 set_processing（a 为 0）或 release 事件 |
+| `disable-track` | 禁用轨道 | A4 | 单端可 | 至少一端 32 块，且有 set_processing（a 为 0）或 release 事件 |
+| `smart` | Smart Plug-in Processing | A4 | 单端可 | 至少一端有块 |
+| `guard-in` | 只对 In 关闭 ASIO-Guard | A1 A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `guard-out` | 只对 Out 关闭 ASIO-Guard | A1 A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `guard-both` | 对两者关闭 ASIO-Guard | A1 A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `misplaced-order` | 错放：Out 在 In 前 | A4 | 单端可 | 至少一端有块 |
+| `misplaced-track` | 错放：Out 跨轨 | A4 | 单端可 | 至少一端有块 |
+| `misplaced-post` | 错放：Out 在推子后 | A4 | 单端可 | 至少一端有块 |
+| `mono` | 单声道轨 | A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `bufchange` | 播放中改缓冲 | A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `constrain` | Constrain Delay Compensation | A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `twoproj` | 两个工程 | A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `coreaudio` | Core Audio 模式 | A4 A7 | 成对满块 | 两端各至少 32 块 |
+| `au-au` | LU-02：AU 配 AU | A5 | 不要求块 | 同 pid、已配对、无 shm_denied |
+| `vst3-vst3` | LU-02：VST3 配 VST3 | A5 | 不要求块 | 同 pid、已配对、无 shm_denied |
+| `au-vst3` | LU-02：AU In 配 VST3 Out | A5 | 不要求块 | 同 pid、已配对、无 shm_denied |
 
 ## 文本字段与隐私
 
@@ -138,16 +163,16 @@
 | A1 | 稳态对齐：每个稳态格（variant 不是 `toggle`）两端都在，且各自至少 32 块；播放中 `m` 恒为 0，首块之后 `rs` 为 0，`off` 恒定。不通过即停工。variant 为 `toggle` 的格归 A2，输出里会说明有几格未计入 | CB-01 CB-03 LU-03 |
 | A2 | 切换切片：variant 为 `toggle` 的格，每次切换后 2 s 内（或到下一次切换为止）重同步不超过 1 次，`d` 不变；每个窗口至少 8 块，每个 case 至少 10 次切换 | CB-02 LU-03 |
 | A3 | 导出一致：离线与实时逐位相同或残差不高于 -120 dBFS，且 `lag_samples` 为 0 | CB-04 LU-04 |
-| A4 | 块长：每块的 `n` 不超过它之前最近一次 `prepare` 声明的最大块长，也不超过 `n_decl`；每格两端都在、各至少 32 块（`rip`、`freeze` 的克隆实例不要求成对和块数） | 所有带块记录的格 |
+| A4 | 块长：每块的 `n` 不超过它之前最近一次 `prepare` 声明的最大块长，也不超过 `n_decl`；「成对满块」的格两端都在、各至少 32 块，其余格单个实例各查各的，并另核对上表的本格证据 | 所有带块记录的格，与需要本格证据的格 |
 | A5 | 进程与后端：两端同 pid、已配对、无 `shm_denied`，三种格式组合齐全 | LU-02 |
-| A6 | 轨道信息：两端都收到非空轨道名 | CB-07 LU-06 |
+| A6 | 轨道信息：variant 为 `rename` 的格，两端都收到非空轨道名 | CB-07 LU-06 |
 | A7 | hostNs：同一回调两端相等，逐回调递增，有效率不低于 99%；两端交错成对且都在播放、hostNs 有效的回调至少 32 个 | 所有两端都有块的格 |
 | A8 | 稳定性：每个实例都正常收尾、摘要间隔不超过 5 s、无跳闸；不完整的日志文件记不通过 | 全部 |
 | A9 | 工程恢复：`reopen` 格里 `set_state` 之后出现 `paired`（实例级事件也算） | CB-07 LU-09 |
 
 任何一项里，用到的段有序号缺口、块数不足 32、同键重复或缺必需的数据，该项判「数据不全」；可信数据里出现的不通过压过别处的数据不全。
 
-**冻结条件 F1** 要求：`CB-01`、`CB-02`、`CB-04`、`CB-05`、`LU-02`、`LU-03`、`LU-04` 都有能下结论的数据且无缺口（`CB-04`、`LU-04` 可只靠导出比对行，`LU-02` 看配对与后端事件，其余要有块）；`CB-01` 的 12 格与 `LU-03` 的 3 格稳态矩阵一格不缺；没有无法归格的块、没有同键重复；A1 至 A8 都有结论。F2 至 F4 由人确认。
+**冻结条件 F1** 要求：`CB-01`、`CB-02`、`CB-04`、`CB-05`、`LU-02`、`LU-03`、`LU-04` 都有能下结论的数据且无缺口（`CB-04`、`LU-04` 可只靠导出比对行，`LU-02` 看配对与后端事件，其余要有块）；`CB-01` 的 12 格与 `LU-03` 的 3 格稳态矩阵一格不缺；没有无法归格的块、没有同键重复（只看上述 case 里「成对满块」的格）；A1 至 A8 都有结论。F2 至 F4 由人确认。
 
 ## 退出码与机读字段
 

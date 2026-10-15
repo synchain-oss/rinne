@@ -338,7 +338,27 @@ def extra_cells():
         lg.event(T_START + 5, "track_props", name, "ff8800")
     broken = scen_a8("pass", pid=4780)
     broken["probe-I-9999-dead.csv"] = ""  # 实例刚创建就崩溃：0 字节
+    def one_end(**kw):
+        a, b = pair("CB-05", "deactivate", pid=kw["pid"], blocks=kw.get("blocks", True))
+        b.lines = [ln for ln in b.lines if not ln.startswith("B,")]  # Out 被停用，没有块
+        if kw.get("event", True):
+            b.event(T_START + 10, "set_processing", 0)
+        return a, b
+
+    dead_a, dead_b = pair("CB-05", "deactivate", pid=4810, blocks=False)
+    for lg in (dead_a, dead_b):
+        lg.event(T_START + 10, "set_processing", 0)
+    dup1 = pair("CB-07", "dup", blocks=False, pid=4820)
+    dup2 = pair("CB-07", "dup", blocks=False, pid=4821, tok=("a9b8", "c7d6"))
+    for li_, lo_ in (dup1, dup2):
+        li_.event(T_START + 20, "paired", lo_.pid, "A")
+    undup = pair("CB-07", "dup", blocks=False, pid=4830)
     return {
+        "cb05-deactivate-single-end": (files_of(*one_end(pid=4800)), {"A4": "PASS"}),
+        "cb05-deactivate-no-blocks": (files_of(dead_a, dead_b), {"A4": "INCOMPLETE"}),
+        "cb05-deactivate-no-event": (files_of(*one_end(pid=4840, event=False)), {"A4": "INCOMPLETE"}),
+        "cb07-dup-two-pairs": (files_of(*dup1, *dup2), {"A4": "PASS"}),
+        "cb07-dup-unpaired": (files_of(*undup), {"A4": "INCOMPLETE"}),
         "a1-fail-spurious-toggle": (files_of(*sp), {"A1": "FAIL"}),
         "a1-incomplete-in-only": (files_of(only_in), {"A1": "INCOMPLETE"}),
         "a1-incomplete-dup": (files_of(*dup_a, *dup_b), {"A1": "INCOMPLETE"}),

@@ -131,6 +131,21 @@
   "a9-pass-early": {
     "A9": "PASS"
   },
+  "cb05-deactivate-no-blocks": {
+    "A4": "INCOMPLETE"
+  },
+  "cb05-deactivate-no-event": {
+    "A4": "INCOMPLETE"
+  },
+  "cb05-deactivate-single-end": {
+    "A4": "PASS"
+  },
+  "cb07-dup-two-pairs": {
+    "A4": "PASS"
+  },
+  "cb07-dup-unpaired": {
+    "A4": "INCOMPLETE"
+  },
   "f1-missing-cell": {},
   "orphan-blocks": {}
 }

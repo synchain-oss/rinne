@@ -68,7 +68,19 @@ export function docProblems(spec, doc) {
     }
     for (const [name, vals] of Object.entries(spec.h_enums)) for (const v of vals) need(`H.${name}`, tick(v));
     for (const e of spec.events) need("事件", tick(e));
-    for (const v of spec.variants) need("variant", tick(v));
+    for (const v of spec.variants) {
+        const line = lines.find((l) => l.startsWith(`| ${tick(v)} |`));
+        const rule = spec.variant_rules[v];
+        if (!line) {
+            missing.push(`variant ${tick(v)}`);
+            continue;
+        }
+        const cells = line.split("|").map((c) => c.trim());
+        // | 取值 | 用在 | 喂给 | 要求 | 证据 |
+        if (cells[3] !== rule[0] || cells[4] !== rule[1] || cells[5] !== rule[2]) {
+            missing.push(`variant ${tick(v)} 的「喂给 / 要求 / 证据」应与 variant_rules 一致`);
+        }
+    }
     for (const g of spec.guards) need("guard", tick(g));
     for (const c of spec.cases) need("case", tick(c));
     need("比对表头", spec.compare_head);
@@ -128,6 +140,7 @@ export default {
             h_enums: { role: ["I", "O"] },
             events: ["ev_a"],
             variants: ["-"],
+            variant_rules: { "-": ["A1", "成对满块", "两端各至少 32 块"] },
             guards: ["off"],
             cases: ["CB-01", "CB-02", "LU-01", "LU-09"],
             compare_head: "h1,h2",
@@ -143,7 +156,8 @@ export default {
             exit_codes: { 0: "ok", 3: "incomplete" },
         };
         const full = [
-            "m,1 `ev_a` `-` `off` `CB-01` `CB-02` `LU-01` `LU-09` h1,h2 `I` `O`",
+            "m,1 `ev_a` `off` `CB-01` `CB-02` `LU-01` `LU-09` h1,h2 `I` `O`",
+            "| `-` | 不区分 | A1 | 成对满块 | 两端各至少 32 块 |",
             "| `H` | 实例头 | `role` `format` |",
             "| `B` | 逐块 | `seq` `n` |",
             "32 10 8 2 s 5 s -120 65536",
@@ -159,6 +173,7 @@ export default {
             ["文档里列序写反", true, docProblems(spec, full.replace("`seq` `n`", "`n` `seq`")).length > 0],
             ["文档缺一个列名", true, docProblems(spec, full.replace("`format`", "")).length > 0],
             ["文档缺 H 枚举取值", true, docProblems(spec, full.replace("`O`", "")).length > 0],
+            ["文档里 variant 的要求写错", true, docProblems(spec, full.replace("成对满块", "单端可")).length > 0],
             ["文档缺阈值", true, docProblems(spec, full.replace("-120", "")).length > 0],
             ["文档缺取值上界", true, docProblems(spec, full.replace("65536", "")).length > 0],
             ["文档缺退出码", true, docProblems(spec, full.replace("| 3 | 数据不全 |", "")).length > 0],
