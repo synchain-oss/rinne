@@ -31,13 +31,16 @@
           module 里的 try/catch 一行都跑不到，只有先注册的全局监听接得住。
           通道是 JUCE 内建的 window.__JUCE__.postMessage（JUCE 在文档创建前注入，不经 bridge.js）；
           事件名与原生侧 WebViewHost 的 kBootErrorEventId 相同，两边在同一个提交里一起改。
+          守卫只在首帧信号发出之前有效，之后的运行期异常不上报。
           浏览器预览下没有 __JUCE__，report 静默返回。
         -->
         <script>
             (function () {
                 var sent = false;
                 function report(stage, detail) {
-                    if (sent) return; // 只报第一条：后面多半是同一次失败的连锁反应
+                    // 只报第一条：后面多半是同一次失败的连锁反应。首帧信号发出之后页面已经起来了，
+                    // 运行期的小错不再当成启动失败上报，免得原生侧把它放大成「界面起不来」。
+                    if (sent || window.__rinneBooted) return;
                     sent = true;
                     try {
                         var juce = window.__JUCE__;
@@ -104,6 +107,7 @@
                         // 撤网必须落在 postMessage 之后：撤在它之前的话，__JUCE__ 缺席时上面的 return
                         // 会在网已经撤了、信号却没真的发出去的状态下退出，保险彻底空转。
                         sent = true;
+                        window.__rinneBooted = true;
                         if (guard !== null) {
                             clearTimeout(guard);
                             guard = null;

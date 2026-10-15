@@ -191,6 +191,106 @@ export async function scaleUiCases(root = ROOT) {
             left === CONFIRM_SECONDS && calls.at(-1)?.join() === "set,1",
         );
     }
+    // 桥调用的返回时刻由测试控制：覆盖「预览还没返回时又选档位、保存、取消」的交错
+    const deferredRig = ({ scale = 1 } = {}) => {
+        const calls = [];
+        const pending = [];
+        const timers = fakeTimers();
+        const errors = [];
+        const bridge = {
+            setUiScale(f) {
+                calls.push(["set", f]);
+                return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+            },
+            commitUiScale() {
+                calls.push(["commit"]);
+            },
+        };
+        const ui = createScaleUi({
+            role: "input",
+            bridge,
+            timers,
+            getScale: () => scale,
+            onError: (e) => errors.push(e),
+        });
+        return { ui, calls, pending, timers, errors };
+    };
+    {
+        const { ui, calls, pending, timers } = deferredRig({ scale: 1 });
+        const a = ui.preview(1.5);
+        const b = ui.preview(2);
+        pending[0].resolve({ ok: true });
+        pending[1].resolve({ ok: true });
+        const results = [await a, await b];
+        timers.tick(CONFIRM_SECONDS);
+        await flush();
+        add(
+            "两次预览交叠：只有最后一次起倒计时，回退目标仍是最初的档位",
+            false,
+            results.join() === "false,true" &&
+                calls.at(-1)?.join() === "set,1" &&
+                ui.state().prev === 1 &&
+                timers.count() === 0,
+        );
+    }
+    {
+        const { ui, calls, pending, timers } = deferredRig();
+        const p = ui.preview(1.5);
+        await ui.keep();
+        pending[0].resolve({ ok: true });
+        const started = await p;
+        timers.tick(CONFIRM_SECONDS * 2);
+        await flush();
+        add(
+            "预览未返回时保存：之后不起倒计时，也不会把保存的档位撤掉",
+            false,
+            started === false && timers.count() === 0 && calls.map((c) => c[0]).join() === "set,commit",
+        );
+    }
+    {
+        const { ui, calls, pending, timers } = deferredRig({ scale: 2 });
+        const p = ui.preview(0.5);
+        const r = ui.revert();
+        pending[0].resolve({ ok: true });
+        pending[1].resolve({ ok: true });
+        await Promise.all([p, r]);
+        timers.tick(CONFIRM_SECONDS);
+        await flush();
+        add(
+            "预览未返回时取消：回到选档前的档位，不起倒计时",
+            false,
+            calls.at(-1)?.join() === "set,2" && timers.count() === 0 && !ui.state().confirming,
+        );
+    }
+    {
+        const { ui, calls, pending, timers } = deferredRig();
+        const first = ui.preview(1.5);
+        pending[0].resolve({ ok: true });
+        await first;
+        timers.tick(3);
+        const second = ui.preview(2);
+        pending[1].resolve({ ok: false });
+        await second;
+        add(
+            "后一次预览被拒：前一次的倒计时继续，仍会回退",
+            false,
+            ui.state().confirming && timers.count() === 1 && calls.length === 2,
+        );
+    }
+    {
+        const { ui, pending, timers, errors } = deferredRig();
+        const p = ui.preview(1.5);
+        pending[0].resolve({ ok: true });
+        await p;
+        timers.tick(CONFIRM_SECONDS);
+        pending[1].reject(new TypeError("setUiScale 未登记"));
+        await flush();
+        add(
+            "倒计时回退时桥调用失败：交给 onError，不产生未处理的 rejection",
+            false,
+            errors.length === 1 && !ui.state().confirming,
+        );
+    }
     {
         const o = rig("input").ui.options();
         const p = rig("output").ui.options();

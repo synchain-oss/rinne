@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 字体门禁：字符覆盖（check-font-coverage.py）与名称、署名（check-font-names.py）。
-// 两个脚本都要 fontTools 与 brotli。缺依赖时跳过并写明原因：本机 gates 的 Python 装了它们；
-// CI 的 docs-truth 任务要先装好这两个包才会真正检查，否则只是跳过。
+// 两个脚本都要 fontTools 与 brotli。缺依赖时：本机（非 CI）判红，因为本机 gates 必须真的检查，缺依赖判绿是假绿；
+// CI 的 docs-truth 任务要先装好这两个包才会真正检查，装好之前只能放行并在输出里写明没有检查，
+// 因为运行器的自测模式没有 SKIP 这个状态，而运行器是基础设施，不在这里改。
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { ROOT } from "../lib/check-kit.mjs";
+import { ROOT, inCI } from "../lib/check-kit.mjs";
 
 const SCRIPTS = ["check-font-coverage.py", "check-font-names.py"];
 
@@ -30,7 +31,10 @@ export default {
     inputs: ["web/fonts/RinneSans.woff2"],
     run(ctx) {
         const python = findPython(ctx.env);
-        if (!python) return { skip: "没有装 fontTools 与 brotli 的 Python 3（pip install fonttools brotli）" };
+        if (!python) {
+            const why = "没有装 fontTools 与 brotli 的 Python 3（pip install fonttools brotli），字体检查没有运行";
+            return inCI(ctx.env) ? { skip: why } : { ok: false, lines: [why] };
+        }
         const results = SCRIPTS.map((s) => run(python, s, []));
         return { ok: results.every((r) => r.ok), lines: results.flatMap((r) => (r.ok ? [] : r.lines)) };
     },

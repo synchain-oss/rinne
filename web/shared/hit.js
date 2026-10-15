@@ -5,15 +5,15 @@
 //
 // 口径有三条，出处不同，不要混用：
 //   - 一般控件：命中半径不小于 12 设计 px；
-//   - 段边界竖线：±6 设计 px（边界排得更密，半径大了会串）；
-//   - 小靶件（选区 chip 的叉、窄手柄等）：最小缩放档 0.5 下命中区仍须不小于 24×24 物理 px，
+//   - 紧邻的竖线（边界、分隔线）：±6 设计 px（排得更密，半径大了会串）；
+//   - 小靶件（chip 的关闭叉、窄手柄等）：最小缩放档 0.5 下命中区仍须不小于 24×24 物理 px，
 //     用透明扩展区补足，视觉尺寸不变。
 // 命中测试一律用 CSS 坐标（getBoundingClientRect 结果按 zoom 校正）。
 
 /** 一般控件命中半径（设计 px）。 */
 export const HIT_RADIUS_PX = 12;
 
-/** 段边界竖线命中半径（设计 px）。 */
+/** 紧邻竖线的命中半径（设计 px）。 */
 export const BOUNDARY_HIT_PX = 6;
 
 /** 命中区的物理下限（px）。 */
@@ -31,17 +31,17 @@ export function withinRadius(x, target, r = HIT_RADIUS_PX) {
     return Math.abs(num(x, NaN) - num(target, NaN)) <= r;
 }
 
-/** 边界竖线命中（±6 设计 px 专用口径）。 */
+/** 紧邻竖线命中（±6 设计 px 专用口径）。 */
 export function hitsBoundary(x, boundaryX) {
     return withinRadius(x, boundaryX, BOUNDARY_HIT_PX);
 }
 
 /**
- * 在升序竖线表里找命中的下标（边界拖拽与吸附共用）。
+ * 在升序竖线表里找命中的下标（拖拽与吸附共用）。
  * 命中多条时取最近的一条；无命中返回 -1。
  * @param {number} x 指针 x（CSS px）
  * @param {number[]} xs 升序竖线位置表
- * @param {number} [r] 半径，缺省为边界口径 ±6
+ * @param {number} [r] 半径，缺省为紧邻竖线口径 ±6
  */
 export function nearestHit(x, xs, r = BOUNDARY_HIT_PX) {
     let best = -1;
