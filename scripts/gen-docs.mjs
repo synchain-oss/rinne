@@ -81,6 +81,20 @@ function validateOf(mod, ctx) {
     }
 }
 
+/** 仓根与 docs/ 下的 Markdown（相对路径），用来找没有对应块模块的生成块标记。 */
+function markdownFiles(root) {
+    const out = [];
+    const walk = (rel) => {
+        for (const e of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
+            const p = rel ? `${rel}/${e.name}` : e.name;
+            if (e.isDirectory() && p.startsWith("docs")) walk(p);
+            else if (e.isFile() && p.endsWith(".md")) out.push(p);
+        }
+    };
+    walk("");
+    return out;
+}
+
 /** 全量检查，返回问题数组；空数组即通过。 */
 export async function checkAll(root = ROOT, mods) {
     const ctx = { root };
@@ -95,7 +109,7 @@ export async function checkAll(root = ROOT, mods) {
         }
         for (const s of mod.surfaces) {
             files.add(s.file);
-            declared.add(blockName(mod, s.id));
+            declared.add(`${s.file}|${blockName(mod, s.id)}`);
         }
         if (broken) continue; // 真源有问题时渲染没有意义
         for (const s of mod.surfaces) {
@@ -109,10 +123,11 @@ export async function checkAll(root = ROOT, mods) {
             }
         }
     }
-    for (const f of files) {
+    for (const f of new Set([...files, ...markdownFiles(root)])) {
         const text = readRepoText(root, f);
         for (const n of text === null ? [] : generatedMarkerNames(text)) {
-            if (!declared.has(n)) out.push(`${f} 里的标记 ${n} 没有对应的块模块（拼写错误？）`);
+            if (!declared.has(`${f}|${n}`))
+                out.push(`${f} 里的标记 ${n} 不是任何块模块声明的落地面（拼写或路径错误？）`);
         }
     }
     return out;

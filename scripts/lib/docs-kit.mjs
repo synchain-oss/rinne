@@ -153,6 +153,9 @@ export function sourceProblems(src, i18n) {
     }
     const fr = i18n.frReview;
     if (!fr || !["pending", "reviewed"].includes(fr.status)) out.push("frReview.status 应为 pending 或 reviewed");
+    else if (fr.status === "reviewed" && fr.reviewedZhSha256 !== h.combined) {
+        out.push("frReview 已标 reviewed，但 reviewedZhSha256 不等于当前中文的合并哈希：审校记录已过期");
+    }
     return out;
 }
 

@@ -47,7 +47,7 @@ function plain(md) {
     return md
         .split("\n")
         .flatMap((line) => {
-            if (/^\s*```/.test(line)) {
+            if (/^\s*(```|~~~)/.test(line)) {
                 fence = !fence;
                 return [];
             }

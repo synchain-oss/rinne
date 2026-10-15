@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { checkAll, writeAll } from "../gen-docs.mjs";
 import { ROOT, caseResult } from "../lib/check-kit.mjs";
-import { I18N_FILE, INSTALL_FILE, SOURCE_FILE } from "../lib/docs-kit.mjs";
+import { I18N_FILE, INSTALL_FILE, SOURCE_FILE, loadSource, zhHashes } from "../lib/docs-kit.mjs";
 
 const SURFACES = {
     "README.md": ["safety-warning:en", "hard-rules:en"],
@@ -37,6 +37,12 @@ async function scenario(root, mutate) {
         fs.rmSync(dir, { recursive: true, force: true });
     }
 }
+
+const reviewed = (sha) => (t) => {
+    const j = JSON.parse(t);
+    j.frReview = { status: "reviewed", reviewedBy: "x", reviewedZhSha256: sha, approvalUrl: "https://example.com/x" };
+    return JSON.stringify(j, null, 2);
+};
 
 const swap = (from, to) => (t) => {
     if (!t.includes(from)) throw new Error(`自测夹具里找不到 ${from}`);
@@ -69,6 +75,24 @@ export async function selfTest(root = ROOT) {
             true,
             (c) => c.edit(SOURCE_FILE, swap("反馈可能", "反馈有可能")),
             (p) => p.some((x) => x.includes("译文过期")),
+        ],
+        [
+            "标记放在没有声明的文件里",
+            true,
+            (c) => c.put("docs/NOTES.md", "<!-- BEGIN gen:hard-rules:en -->\n<!-- END gen:hard-rules:en -->\n"),
+            (p) => p.some((x) => x.includes("docs/NOTES.md")),
+        ],
+        [
+            "frReview 标 reviewed 且哈希对得上",
+            false,
+            (c) => c.edit(I18N_FILE, reviewed(zhHashes(loadSource(c.dir)).combined)),
+            (p) => p.length === 0,
+        ],
+        [
+            "frReview 标 reviewed 但中文已变",
+            true,
+            (c) => c.edit(I18N_FILE, reviewed("0".repeat(64))),
+            (p) => p.some((x) => x.includes("审校记录已过期")),
         ],
         [
             "标记拼错",

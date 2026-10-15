@@ -57,10 +57,16 @@ function anchorsOf(markdown) {
     return set;
 }
 
+// 链接文本允许含一层 [..](..)，即徽章写法 [![alt](img)](target)
+const LINK = /!?\[((?:[^[\]\\]|\\.|!?\[[^\]]*\]\([^)]*\))*)\]\(\s*(<[^>]*>|[^)\s]*)(?:\s+"[^"]*")?\s*\)/g;
+
 function linksOf(markdown) {
     const { text } = strip(markdown);
     const out = [];
-    for (const m of text.matchAll(/!?\[(?:[^\]\\]|\\.)*\]\(\s*(<[^>]*>|[^)\s]*)(?:\s+"[^"]*")?\s*\)/g)) out.push(m[1]);
+    for (const m of text.matchAll(LINK)) {
+        out.push(m[2]);
+        if (m[1].includes("](")) out.push(...linksOf(m[1])); // 里层的目标也要查
+    }
     for (const m of text.matchAll(/^ {0,3}\[[^\]]+\]:\s*(\S+)/gm)) out.push(m[1]);
     return out.map((t) => t.replace(/^<|>$/g, "")).filter((t) => t && !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(t));
 }
@@ -154,6 +160,11 @@ export function selfTest() {
         ["相对链接和 CJK 锚点", false, withLink("a.md#标题-one")],
         ["重名标题的 -1 后缀", false, withLink("a.md#同名-1")],
         ["含行内代码与链接的标题", false, withLink("a.md#code-and-link")],
+        [
+            "徽章式嵌套链接两层都查",
+            false,
+            { ...base, md: { ...base.md, "docs/b.md": "[![x](b.md)](a.md#标题-one)\n" } },
+        ],
         ["外链与 mailto 不查", false, withLink("https://example.com/x#y")],
         ["同文件锚点", false, { ...base, md: { ...base.md, "docs/b.md": "# B\n\n[s](#b)\n" } }],
         [
@@ -167,6 +178,8 @@ export function selfTest() {
             false,
             { ...base, scan: { "web/shared/links.js": "github.com/synchain-oss/rinne/blob/dev/x" } },
         ],
+        ["嵌套链接的外层目标不存在", true, { ...base, md: { ...base.md, "docs/b.md": "[![x](a.md)](nope.md)\n" } }],
+        ["嵌套链接的里层目标不存在", true, { ...base, md: { ...base.md, "docs/b.md": "[![x](nope.png)](a.md)\n" } }],
         ["链接目标文件不存在", true, withLink("nope.md")],
         ["锚点不存在", true, withLink("a.md#没有这个")],
         ["围栏代码里的标题不算锚点", true, withLink("a.md#围栏里的")],
