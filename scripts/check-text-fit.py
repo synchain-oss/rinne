@@ -64,6 +64,9 @@ TABLES = {"sans": _expand(SANS_GROUPS), "grotesk": _expand(GROTESK_GROUPS)}
 FALLBACK_EM = {"sans": 0.62, "grotesk": 0.66, "mono": 0.6}
 WEIGHT_FACTOR = {300: 0.99, 400: 1.0, 500: 1.02, 600: 1.04, 700: 1.06}
 NBSP = "\u00a0"
+# 窄不换行空格 U+202F：取自 Rinne Sans 与 Space Grotesk 里该字形的真实前进宽度（em）；等宽字体里它指向不换行空格的字形
+NNBSP = "\u202f"
+NNBSP_EM = {"sans": 0.118, "grotesk": 0.185}
 
 # 占位符的最坏情况样例值：看的是设计盒里的像素宽度，不追求真实。
 PLACEHOLDER_SAMPLES = {
@@ -103,6 +106,8 @@ def char_advance_px(ch, fit):
         ch = " "
     if font == "mono":
         em = 0.6
+    elif ch == NNBSP:
+        em = NNBSP_EM[font]
     else:
         em = TABLES[font].get(ch, FALLBACK_EM[font])
         em *= WEIGHT_FACTOR.get(int(fit.get("weight", 400)), 1.0)
@@ -261,6 +266,8 @@ def self_test():
     expect(text_width("abc", bold) > text_width("abc", cjk12), "600 wider than 400 for Latin")
     expect(text_width("中", bold) == text_width("中", cjk12), "weight does not change CJK advance")
     expect(substitute("组 {g} · {n}") == "组 H · 16384", "placeholder substitution")
+    expect(abs(char_advance_px(NNBSP, cjk12) - 0.118 * 12) < 1e-6, "U+202F uses its real advance in sans")
+    expect(abs(char_advance_px(NNBSP, mono10) - 6.0) < 1e-6, "U+202F is 0.6 em in mono")
     two = {"font": "mono", "size": 10, "weight": 400, "ls": 0, "lines": 2}
     lines = wrap("AAAA BBBB CCCC", two, 54)  # each word 24px, space 6px
     expect(len(lines) == 2, "greedy Latin wrap breaks at spaces (got %d)" % len(lines))
@@ -294,7 +301,7 @@ def self_test():
         for f in fails:
             print("自测失败：" + f)
         return 1
-    print("自测通过（%d 项）" % 18)
+    print("自测通过（%d 项）" % 20)
     return 0
 
 

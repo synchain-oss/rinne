@@ -70,11 +70,11 @@ export function typographyProblems(lang, value) {
             if (prev === "(" || prev === "{") continue;
             if (!NBSPS.includes(prev)) out.push(`法语 ${mark} 之前应为 U+00A0 或 U+202F`);
         }
-        for (const m of v.matchAll(/«(\s?)/gu)) {
-            if (!NBSPS.includes(m[1])) out.push("法语 « 之后应为 U+00A0 或 U+202F");
-        }
-        for (const m of v.matchAll(/(\s?)»/gu)) {
-            if (!NBSPS.includes(m[1])) out.push("法语 » 之前应为 U+00A0 或 U+202F");
+        // « 之后与 » 之前必须正好是一个 U+00A0 或 U+202F；没有空格或是普通空格都不行
+        for (let i = 0; i < v.length; i++) {
+            if (v[i] === "«" && !(i + 1 < v.length && NBSPS.includes(v[i + 1])))
+                out.push("法语 « 之后应为 U+00A0 或 U+202F");
+            if (v[i] === "»" && !(i > 0 && NBSPS.includes(v[i - 1]))) out.push("法语 » 之前应为 U+00A0 或 U+202F");
         }
     }
     return [...new Set(out)];
@@ -224,6 +224,10 @@ export async function selfTest() {
     add("fr 冒号前普通空格（旧词条原样）", true, withKey("fr", "a.y", LEGACY_LOCKED));
     add("fr 冒号前没有空格", true, withKey("fr", "a.y", "Note: ok mais:"));
     add("fr 冒号前 U+202F", false, withKey("fr", "a.y", "Note\u202f: ok"));
+    add("fr « » 内侧没有空格", true, withKey("fr", "a.y", "«bonjour»"));
+    add("fr « » 内侧普通空格", true, withKey("fr", "a.y", "« bonjour »"));
+    add("fr « » 内侧 U+00A0", false, withKey("fr", "a.y", "«" + "\u00a0bonjour\u00a0" + "»"));
+    add("fr « » 内侧 U+202F", false, withKey("fr", "a.y", "«" + "\u202fbonjour\u202f" + "»"));
     add("fr 直撇号", true, withKey("fr", "a.y", "l'écran"));
     add("en 直引号", true, withKey("en", "a.y", 'say "hi"'));
     add("禁用字形", true, withKey("en", "a.y", "Done ✓"));

@@ -64,7 +64,7 @@ OUTPUTS = [
     ("SpaceGrotesk.woff2", "SpaceGrotesk.ttf", {"wght": 600}, ("Space Grotesk", "SemiBold", "SpaceGrotesk-SemiBold", None, 600), "latin"),
     ("RinneSans.woff2", "IBMPlexSans.ttf", {"wght": 400, "wdth": 100}, ("Rinne Sans", "Regular", "RinneSans-Regular", "Plex", 400), "latin"),
     ("RinneMono.woff2", "IBMPlexMono.ttf", None, ("Rinne Mono", "Regular", "RinneMono-Regular", "Plex", 400), "latin"),
-    ("NotoSansSC.woff2", "NotoSansSC.ttf", {"wght": (300, 700)}, None, "all"),
+    ("NotoSansSC.woff2", "NotoSansSC.ttf", {"wght": (300, 700)}, ("Noto Sans SC", "Light", "NotoSansSC-Light", None, 300), "all"),
 ]
 LATIN_OUTPUTS = [o[0] for o in OUTPUTS if o[4] == "latin"]
 CJK_OUTPUT = [o[0] for o in OUTPUTS if o[4] == "all"][0]

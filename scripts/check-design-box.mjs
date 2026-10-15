@@ -88,18 +88,24 @@ async function loadDesign(root) {
 
 /** scale-ui.js 的行为断言，返回 caseResult 用的用例数组。 */
 export async function scaleUiCases(root = ROOT) {
-    const { createScaleUi, scaleOverflows, CONFIRM_SECONDS } = await import(
-        pathToFileURL(path.join(root, "web", "shared", "scale-ui.js")).href
-    );
+    const {
+        createScaleUi,
+        scaleOverflows,
+        CONFIRM_SECONDS: SOURCE_CONFIRM_SECONDS,
+    } = await import(pathToFileURL(path.join(root, "web", "shared", "scale-ui.js")).href);
     const cases = [];
     const add = (label, bad, passed) => cases.push({ label, bad, passed });
+    // 测试按字面量的 10 秒推进，不取被测源码里的常量：常量被改成别的值，下面的用例必须变红
+    const CONFIRM_SECONDS = 10;
 
     // 可手动推进的假计时器
     const fakeTimers = () => {
         let next = 1;
         const live = new Map();
         return {
-            setInterval(fn) {
+            delays: [],
+            setInterval(fn, ms) {
+                this.delays.push(ms);
                 live.set(next, fn);
                 return next++;
             },
@@ -129,6 +135,15 @@ export async function scaleUiCases(root = ROOT) {
     };
     const flush = () => new Promise((r) => setImmediate(r));
 
+    {
+        const { ui, timers } = rig();
+        await ui.preview(1.5);
+        add(
+            "确认倒计时：常量为 10 秒，计时间隔为 1000 毫秒",
+            false,
+            SOURCE_CONFIRM_SECONDS === 10 && timers.delays.length === 1 && timers.delays.every((ms) => ms === 1000),
+        );
+    }
     {
         const { ui, calls, timers } = rig();
         await ui.preview(1.5);
@@ -321,7 +336,7 @@ export async function scaleUiCases(root = ROOT) {
         pending[0].resolve({ ok: true });
         await p;
         timers.tick(CONFIRM_SECONDS);
-        pending[1].reject(new TypeError("setUiScale 未登记"));
+        pending[1]?.reject(new TypeError("setUiScale 未登记"));
         await flush();
         add(
             "倒计时回退时桥调用失败：交给 onError，不产生未处理的 rejection",

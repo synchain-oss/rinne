@@ -142,9 +142,14 @@ def self_test():
 
     def set_name(nid, value):
         def edit(font):
-            for r in font["name"].names:
+            name = font["name"]
+            found = False
+            for r in name.names:
                 if r.nameID == nid:
                     r.string = value
+                    found = True
+            if not found:
+                name.setName(value, nid, 3, 1, 0x409)
         return edit
 
     def drop_name(nid):
@@ -156,9 +161,17 @@ def self_test():
         ("族名被改回上游名", "RinneSans.woff2", set_name(1, "IBM Plex Sans")),
         ("PostScript 名含保留字体名", "RinneMono.woff2", set_name(6, "IBMPlexMono-Regular")),
         ("某条非署名记录残留保留字体名", "RinneSans.woff2", set_name(5, "Plex Version 3.201")),
+        ("Noto 的族名含保留字体名 Source", "NotoSansSC.woff2", set_name(1, "Source Sans")),
+        ("全名 nameID 4 含保留字体名", "RinneSans.woff2", set_name(4, "Plex Sans Regular")),
+        ("排版族名 nameID 16 含保留字体名", "RinneMono.woff2", set_name(16, "IBM Plex Mono")),
+        ("子族名 nameID 17 含保留字体名", "RinneSans.woff2", set_name(17, "Plex")),
+        ("唯一标识 nameID 3 含保留字体名", "RinneMono.woff2", set_name(3, "2.3;IBM;PlexMono")),
         ("缺许可证声明", "SpaceGrotesk.woff2", drop_name(13)),
         ("版权行与 REUSE 登记不一致", "NotoSansSC.woff2", set_name(0, "Copyright 1999 Nobody")),
     ]
+    # nameID 7 是上游的商标声明，OFL 的保留名限制只针对呈现给用户的主字体名，所以它是唯一的豁免：改动它不应变红
+    if mutated("RinneSans.woff2", set_name(7, "IBM Plex(r) is a trademark of IBM Corp.")):
+        fails.append("nameID 7 里的商标声明不应触发保留字体名判据")
     for label, fname, edit in cases:
         if not mutated(fname, edit):
             fails.append("%s：应当变红却没有" % label)
@@ -166,7 +179,7 @@ def self_test():
         for f in fails:
             print("[FAIL] 自测：" + f)
         return 1
-    print("[PASS] check-font-names 自测通过（坏样例 %d、正例 1）" % len(cases))
+    print("[PASS] check-font-names 自测通过（坏样例 %d、正例 2）" % len(cases))
     return 0
 
 

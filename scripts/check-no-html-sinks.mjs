@@ -11,7 +11,15 @@ import path from "node:path";
 import { ROOT, assertNodeVersion, caseResult, isMain, j, readText } from "./lib/check-kit.mjs";
 
 const SINKS = new RegExp(
-    j("\\b(?:inner", "HTML|outer", "HTML|insertAdjacent", "HTML)\\b|\\bdocument\\s*\\.\\s*wr", "ite\\s*\\("),
+    j(
+        "\\b(?:inner",
+        "HTML|outer",
+        "HTML|insertAdjacent",
+        "HTML|setHTML",
+        "Unsafe|createContextual",
+        "Fragment)\\b|\\bdocument\\s*\\.\\s*wr",
+        "ite(?:ln)?\\s*\\(",
+    ),
 );
 const SKIP = ["web/js/juce", "web/fonts"];
 // 正则字面量可以出现在这些字符之后；其余情况下的 / 是除号
@@ -146,6 +154,10 @@ export function selfTest() {
         ["内联脚本的注释不算", false, findSinks(`<script>// ${sink}\nlet a;</script>\n`, "a.html")],
         ["内联脚本的代码照判", true, findSinks(`<script>${sink}</script>\n`, "a.html")],
         ["正则字面量里的双斜杠不吞掉后面的代码", true, findSinks(`const r = /a\\/\\//; ${sink}\n`, "a.js")],
+        ["document.writeln", true, findSinks(j("document.wr", "iteln(s);"), "a.js")],
+        ["setHTMLUnsafe", true, findSinks(j("el.setHTML", "Unsafe(s);"), "a.js")],
+        ["createContextualFragment", true, findSinks(j("range.createContextual", "Fragment(s);"), "a.js")],
+        ["setHTML 的安全版不算", false, findSinks("el.setHTML(s);", "a.js")],
         ["除号不被当成正则", true, findSinks(`const q = a / b; ${sink}\n`, "a.js")],
     ].map(([label, bad, found]) => ({ label, bad, passed: bad ? found.length > 0 : found.length === 0 }));
     const live = checkTree(ROOT);

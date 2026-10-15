@@ -8,7 +8,7 @@
 | `SpaceGrotesk.woff2` | Space Grotesk，固定到 wght=600 | 354 | 19200 | 标题、大数字、主按钮 |
 | `RinneSans.woff2` | IBM Plex Sans，固定到 wght=400、wdth=100，改名 | 355 | 27792 | 正文 |
 | `RinneMono.woff2` | IBM Plex Mono Regular，改名 | 349 | 18664 | 标签、读数、状态灯 |
-| `NotoSansSC.woff2` | Noto Sans SC，字重轴收窄到 300 到 700 | 4178 | 1071780 | 汉字与全角标点，三条字体栈共同的内嵌回退 |
+| `NotoSansSC.woff2` | Noto Sans SC，字重轴收窄到 300 到 700 | 4178 | 1072200 | 汉字与全角标点，三条字体栈共同的内嵌回退 |
 
 字形数是 cmap 里的码位数；字节数是 `scripts/fetch_fonts.py` 当前产出的大小，重跑后在同一个 PR 里更新这张表。
 
