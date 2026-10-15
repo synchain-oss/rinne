@@ -111,7 +111,7 @@ function Invoke-RinneTimed {
             foreach ($q in $pumps) { Step-RinneStreamPump $q }
             Start-Sleep -Milliseconds 50
         }
-        $out, $err = "$($pumps[0].Text)", "$($pumps[1].Text)"
+        $out, $err = (Get-RinnePumpText $pumps[0]), (Get-RinnePumpText $pumps[1])
         if ($timedOut) { return @{ Code = -1; Out = $out; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true } }
         $note = @($pumps | Where-Object { -not $_.Done }).Count ? "`n（进程已退出，留下的子进程还握着输出管道，$DrainSeconds 秒后不再等）" : ''
         @{ Code = $p.ExitCode; Out = $out.TrimEnd(); Err = $err + $note; TimedOut = $false }
@@ -120,22 +120,37 @@ function Invoke-RinneTimed {
     }
 }
 
-<# 一条输出流的读取器：同一时刻只挂一个 ReadAsync，由 Step-RinneStreamPump 在调用方线程上收结果；Text 是目前读到的全部。 #>
+<# 一条输出流的读取器：同一时刻只挂一个 ReadAsync，由 Step-RinneStreamPump 在调用方线程上收结果；Text 是目前读到的
+   输出，超过 PumpMaxChars 时只留后面的部分（Truncated）。 #>
+$script:PumpMaxChars = 4MB
 function New-RinneStreamPump {
     param([Parameter(Mandatory)][IO.StreamReader]$Reader)
-    [pscustomobject]@{ Reader = $Reader; Buffer = [char[]]::new(8192); Text = [Text.StringBuilder]::new(); Task = $null; Done = $false }
+    [pscustomobject]@{ Reader = $Reader; Buffer = [char[]]::new(8192); Text = [Text.StringBuilder]::new(); Task = $null; Done = $false; Truncated = $false }
 }
 
-<# 把已经读完的块收进 Text，再挂下一次读；读到 EOF 或流出错时 Done。不阻塞。 #>
+<# 把已经读完的块收进 Text，再挂下一次读；读到 EOF 或流出错时 Done。不阻塞，每次最多收 MaxChunks 块：子进程一直刷屏、
+   每次读都立刻完成时，也要按时回到调用方去查超时。 #>
 function Step-RinneStreamPump {
-    param([Parameter(Mandatory)]$Pump)
-    while (-not $Pump.Done) {
+    param([Parameter(Mandatory)]$Pump, [int]$MaxChunks = 64)
+    for ($i = 0; $i -lt $MaxChunks -and -not $Pump.Done; $i++) {
         if (-not $Pump.Task) { $Pump.Task = $Pump.Reader.ReadAsync($Pump.Buffer, 0, $Pump.Buffer.Length) }
         if (-not $Pump.Task.IsCompleted) { return }
         $n = if ($Pump.Task.IsCompletedSuccessfully) { $Pump.Task.Result } else { 0 }
         $Pump.Task = $null
-        if ($n -le 0) { $Pump.Done = $true } else { $null = $Pump.Text.Append($Pump.Buffer, 0, $n) }
+        if ($n -le 0) { $Pump.Done = $true; return }
+        $null = $Pump.Text.Append($Pump.Buffer, 0, $n)
+        # 超出上限时一次砍到一半，免得每块都挪一遍
+        if ($Pump.Text.Length -gt $script:PumpMaxChars) {
+            $null = $Pump.Text.Remove(0, $Pump.Text.Length - [int]($script:PumpMaxChars / 2))
+            $Pump.Truncated = $true
+        }
     }
+}
+
+<# 读取器里的输出；截断过的在前面注明。 #>
+function Get-RinnePumpText {
+    param([Parameter(Mandatory)]$Pump)
+    ($Pump.Truncated ? "（输出过长，只保留最后一段）`n" : '') + $Pump.Text.ToString()
 }
 
 function Invoke-RinneGh {

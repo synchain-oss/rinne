@@ -877,7 +877,13 @@ function Invoke-SelfTest {
         $orphan = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', $linger) -TimeoutSeconds 60 -AllowFail
         $sw2.Stop()
         # 超时被结束的命令：结束前写出的输出也留着
-        $partial = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', "'partial-out'; Start-Sleep -Seconds 60") -TimeoutSeconds 3 -AllowFail
+        $partial = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', "'partial-out'; Start-Sleep -Seconds 120") -TimeoutSeconds 10 -AllowFail
+        # 一直刷屏的命令：超时照样生效，输出只留最后一段（上限临时调小）
+        & (Get-Module RinneGh) { $script:PumpMaxChars = 200000 }
+        $sw3 = [Diagnostics.Stopwatch]::StartNew()
+        $flood = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', "`$s = 'x' * 65536; while (`$true) { [Console]::Out.Write(`$s) }") -TimeoutSeconds 5 -AllowFail
+        $sw3.Stop()
+        & (Get-Module RinneGh) { $script:PumpMaxChars = 4MB }
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Add-RinneCase $cases '外部命令超时：到点结束进程、判超时' $true ($slow.TimedOut -and $slow.Code -ne 0 -and $sw.Elapsed.TotalSeconds -lt 30)
         Add-RinneCase $cases '外部命令没超时：照常返回退出码' $false (-not ($quick.Code -eq 3 -and -not $quick.TimedOut))
@@ -885,6 +891,15 @@ function Invoke-SelfTest {
             $orphan.Code -eq 0 -and -not $orphan.TimedOut -and $sw2.Elapsed.TotalSeconds -lt 30 -and $orphan.Err -match '不再等')
         Add-RinneCase $cases '外部命令退出后没等到 EOF：已经读到的输出照样留着' $true ($orphan.Out -match 'before-exit')
         Add-RinneCase $cases '外部命令超时：结束前写出的输出照样留着' $true ($partial.TimedOut -and $partial.Out -match 'partial-out')
+        # 读取器一次只收有限的块：数据一直现成可读（每次读都立刻完成）时也要回到调用方
+        $ready = & (Get-Module RinneGh) {
+            $pump = New-RinneStreamPump ([IO.StreamReader]::new([IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes('x' * 1000000))))
+            Step-RinneStreamPump $pump
+            $pump
+        }
+        Add-RinneCase $cases '读取器每次最多收 64 块：数据一直现成时也按时返回' $true ((-not $ready.Done) -and $ready.Text.Length -le 64 * 8192)
+        Add-RinneCase $cases ('外部命令一直刷屏：超时照样生效（{0:N0} 秒），输出只留最后一段' -f $sw3.Elapsed.TotalSeconds) $true (
+            $flood.TimedOut -and $sw3.Elapsed.TotalSeconds -lt 30 -and $flood.Out.Length -le 200000 + 100 -and $flood.Out -match '^（输出过长')
 
         # 合并后构建：最后一道；只在其余判据都通过、没碰基础设施时跑；子进程看不到凭据与个人针；
         # 每个 PR 自己的 wt/tip-<n>，用前清理；整段持构建槽、构建本身不在 git 锁里；带超时
