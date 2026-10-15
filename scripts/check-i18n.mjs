@@ -225,6 +225,8 @@ export async function selfTest() {
     add("fr 冒号前没有空格", true, withKey("fr", "a.y", "Note: ok mais:"));
     add("fr 冒号前 U+202F", false, withKey("fr", "a.y", "Note\u202f: ok"));
     add("fr « » 内侧没有空格", true, withKey("fr", "a.y", "«bonjour»"));
+    add("fr » 之前缺空格（« 之后正常）", true, withKey("fr", "a.y", "«\u00a0bonjour»"));
+    add("fr « 之后缺空格（» 之前正常）", true, withKey("fr", "a.y", "«bonjour\u00a0»"));
     add("fr « » 内侧普通空格", true, withKey("fr", "a.y", "« bonjour »"));
     add("fr « » 内侧 U+00A0", false, withKey("fr", "a.y", "«" + "\u00a0bonjour\u00a0" + "»"));
     add("fr « » 内侧 U+202F", false, withKey("fr", "a.y", "«" + "\u202fbonjour\u202f" + "»"));

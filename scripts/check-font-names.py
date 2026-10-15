@@ -99,7 +99,7 @@ def nnbsp_problems(fonts_dir, expected, tolerance=0.005):
     return out
 
 
-def find_problems(fonts_dir, reuse):
+def find_problems(fonts_dir, reuse, nnbsp_expected=None):
     """检查 fonts_dir 里的四个字体，返回问题字符串数组。reuse 是 {路径: 版权行}。"""
     problems = []
     names = {o[0]: o[3] for o in ff.OUTPUTS}
@@ -145,7 +145,7 @@ def find_problems(fonts_dir, reuse):
             problems.append("%s：REUSE.toml 里没有这个字体文件的块" % fname)
         elif strip_prefix(line) != reuse[key].strip():
             problems.append("%s：REUSE.toml 版权行 %r 与 nameID 0 %r 不一致" % (fname, reuse[key], strip_prefix(line)))
-    problems.extend(nnbsp_problems(fonts_dir, load_text_fit().NNBSP_EM))
+    problems.extend(nnbsp_problems(fonts_dir, nnbsp_expected or load_text_fit().NNBSP_EM))
     return problems
 
 
@@ -209,6 +209,8 @@ def self_test():
     for label, fname, edit in cases:
         if not mutated(fname, edit):
             fails.append("%s：应当变红却没有" % label)
+    if not find_problems(fonts_dir, reuse, {"sans": 0.2, "grotesk": 0.185}):
+        fails.append("经 find_problems 入口：U+202F 宽度与字体不符时应当变红却没有")
     if not nnbsp_problems(fonts_dir, {"sans": 0.2, "grotesk": 0.185}):
         fails.append("U+202F 宽度与字体不符时应当变红却没有")
     if nnbsp_problems(fonts_dir, load_text_fit().NNBSP_EM):
