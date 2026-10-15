@@ -13,6 +13,7 @@ IBM Plex 的保留字体名是 "Plex"。子集化算 Modified Version，按 OFL-
      且署名之外的所有 name 记录都不含保留字体名（大小写不敏感）；
   3. 所有字体：nameID 0、13、14 存在且非空；族名记录（1、4、6、16）不含该家族的保留字体名；
   4. REUSE.toml 里每个字体文件都有一个块，版权行与 nameID 0 去掉 "Copyright"、"(c)"、"©" 前缀后逐字相同。
+  5. check-text-fit.py 里手抄的 U+202F 前进宽度与字体里的真实值一致（容差 0.005 em）。
 用法：python scripts/check-font-names.py [--self-test]
 """
 
@@ -68,6 +69,36 @@ def reuse_copyrights():
     return out
 
 
+def load_text_fit():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_text_fit", os.path.join(HERE, "check-text-fit.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def nnbsp_problems(fonts_dir, expected, tolerance=0.005):
+    """check-text-fit.py 里手抄的 U+202F 宽度（em）必须与字体里的真实前进宽度一致。
+    expected 形如 {"sans": 0.118, "grotesk": 0.185}；等宽字体固定 0.6 em。"""
+    out = []
+    files = {"sans": "RinneSans.woff2", "grotesk": "SpaceGrotesk.woff2", "mono": "RinneMono.woff2"}
+    for kind, fname in files.items():
+        want = 0.6 if kind == "mono" else expected[kind]
+        path = os.path.join(fonts_dir, fname)
+        if not os.path.isfile(path):
+            continue
+        font = TTFont(path)
+        glyph = font.getBestCmap().get(0x202F)
+        if glyph is None:
+            out.append("%s：没有 U+202F 的字形" % fname)
+            continue
+        got = font["hmtx"][glyph][0] / font["head"].unitsPerEm
+        if abs(got - want) > tolerance:
+            out.append("%s：U+202F 的前进宽度是 %.3f em，check-text-fit.py 里写的是 %.3f em" % (fname, got, want))
+    return out
+
+
 def find_problems(fonts_dir, reuse):
     """检查 fonts_dir 里的四个字体，返回问题字符串数组。reuse 是 {路径: 版权行}。"""
     problems = []
@@ -93,9 +124,10 @@ def find_problems(fonts_dir, reuse):
                 for v in by_id.get(nid, ()):
                     if reserved.casefold() in v.casefold():
                         problems.append("%s：nameID %d 含保留字体名 %r：%r" % (fname, nid, reserved, v))
-        if naming and naming[3]:
+        if naming:
             family, style, ps_name, rfn, _weight = naming
-            want = {1: family, 4: "%s %s" % (family, style), 6: ps_name, 16: family, 17: style}
+            ribbi = style in ("Regular", "Bold", "Italic", "Bold Italic")
+            want = {1: family if ribbi else "%s %s" % (family, style), 4: "%s %s" % (family, style), 6: ps_name, 16: family, 17: style}
             for nid, expect in want.items():
                 got = by_id.get(nid, set())
                 # Regular 样式的字体可以没有排版族名与子族名（16、17），有就必须是登记的名字
@@ -103,7 +135,7 @@ def find_problems(fonts_dir, reuse):
                     continue
                 if got != {expect}:
                     problems.append("%s：nameID %d 应为 %r，实际 %r" % (fname, nid, expect, sorted(got)))
-            for nid, val in recs:
+            for nid, val in recs if rfn else ():
                 if nid not in ff.NAME_IDS_ATTRIBUTION and rfn.casefold() in val.casefold():
                     problems.append("%s：nameID %d 残留保留字体名 %r：%r" % (fname, nid, rfn, val))
 
@@ -113,6 +145,7 @@ def find_problems(fonts_dir, reuse):
             problems.append("%s：REUSE.toml 里没有这个字体文件的块" % fname)
         elif strip_prefix(line) != reuse[key].strip():
             problems.append("%s：REUSE.toml 版权行 %r 与 nameID 0 %r 不一致" % (fname, reuse[key], strip_prefix(line)))
+    problems.extend(nnbsp_problems(fonts_dir, load_text_fit().NNBSP_EM))
     return problems
 
 
@@ -166,15 +199,20 @@ def self_test():
         ("排版族名 nameID 16 含保留字体名", "RinneMono.woff2", set_name(16, "IBM Plex Mono")),
         ("子族名 nameID 17 含保留字体名", "RinneSans.woff2", set_name(17, "Plex")),
         ("唯一标识 nameID 3 含保留字体名", "RinneMono.woff2", set_name(3, "2.3;IBM;PlexMono")),
+        ("Noto 的 PostScript 名漂回 Thin", "NotoSansSC.woff2", set_name(6, "NotoSansSC-Thin")),
         ("缺许可证声明", "SpaceGrotesk.woff2", drop_name(13)),
         ("版权行与 REUSE 登记不一致", "NotoSansSC.woff2", set_name(0, "Copyright 1999 Nobody")),
     ]
-    # nameID 7 是上游的商标声明，OFL 的保留名限制只针对呈现给用户的主字体名，所以它是唯一的豁免：改动它不应变红
+    # 署名记录（nameID 0、7、13、14）不参与保留字体名复核：OFL 的保留名限制只针对呈现给用户的主字体名。这里以 nameID 7 的商标声明作正例，改动它不应变红
     if mutated("RinneSans.woff2", set_name(7, "IBM Plex(r) is a trademark of IBM Corp.")):
         fails.append("nameID 7 里的商标声明不应触发保留字体名判据")
     for label, fname, edit in cases:
         if not mutated(fname, edit):
             fails.append("%s：应当变红却没有" % label)
+    if not nnbsp_problems(fonts_dir, {"sans": 0.2, "grotesk": 0.185}):
+        fails.append("U+202F 宽度与字体不符时应当变红却没有")
+    if nnbsp_problems(fonts_dir, load_text_fit().NNBSP_EM):
+        fails.append("check-text-fit.py 里的 U+202F 宽度应当与字体一致")
     if fails:
         for f in fails:
             print("[FAIL] 自测：" + f)
