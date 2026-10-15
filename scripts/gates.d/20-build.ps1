@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Standard 档的 G6 构建与 G7 ctest，由 scripts/gates.ps1 加载。两道都以子进程调 scripts/build.ps1，与合并后构建、CI 同一份配方。
-#   G6  Lock = build：运行器先等内存、再取一把构建槽，并发折算好放进 $ctx.Jobs；这里设 RINNE_BUILD_SLOT_HELD=1 再调 build.ps1，
-#       它就不再自己取槽。本机构建用带 D 的段名前缀，与维护者 DAW 里装的正式版互不相见。
+#   G6  Lock = build：运行器先等内存、再取一把构建槽，并发折算好放进 $ctx.Jobs；这里把 RINNE_BUILD_SLOT_HELD 设成本进程
+#       （持槽的运行器）的 pid 再调 build.ps1，它就不再自己取槽。本机构建用带 D 的段名前缀，与维护者 DAW 里装的正式版互不相见。
 #   G7  Lock = ipc：持 ipc-tests 锁跑 ctest。两份 gates 都是 D 前缀，同时跑跨进程测试会撞上同一组真实段名。
 #       还没有 tests/CMakeLists.txt 时 build.ps1 打印跳过，这里记 SKIP；G6 没有产出当前 HEAD 的构建时也记 SKIP。
 # 构建目录取 $ctx.BuildDir（相对仓根），JUCE 取 $ctx.JucePath，空着时 build.ps1 自己按环境变量与 git config 找。
@@ -13,7 +13,7 @@ function Invoke-BuildScript($Ctx, [string[]]$Arguments, [switch]$SlotHeld) {
     $a = @('-BuildDir', $Ctx.BuildDir) + $Arguments
     if ($Ctx.JucePath) { $a += '-JucePath', $Ctx.JucePath }
     $saved = $env:RINNE_BUILD_SLOT_HELD
-    if ($SlotHeld) { $env:RINNE_BUILD_SLOT_HELD = '1' }
+    if ($SlotHeld) { $env:RINNE_BUILD_SLOT_HELD = "$PID" }
     try {
         $lines = @(& $pwsh -NoProfile -NonInteractive -File (Join-Path $Ctx.Root 'scripts/build.ps1') @a 2>&1 | ForEach-Object { "$_" })
         $code = $LASTEXITCODE

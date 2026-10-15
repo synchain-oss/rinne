@@ -48,12 +48,15 @@ function Invoke-Dispatch {
     $inputs['ref'] = $Sha
     if ($Probe) { if ($declared -notcontains 'probe') { throw 'build.yml 在该提交上没有 probe 输入' }; $inputs['probe'] = 'true' }
     if ($KitVersion) { if ($declared -notcontains 'kit-version') { throw 'build.yml 在该提交上没有 kit-version 输入' }; $inputs['kit-version'] = $KitVersion }
+    $list = "repos/$repo/actions/workflows/$Workflow/runs?event=workflow_dispatch&branch=$([uri]::EscapeDataString($Ref))&per_page=10"
+    # 触发前已有的运行不算：同一提交连着触发两次时，第二次的运行还没建出来，按时间找会找回第一次的那个
+    $before = @(@((Get-RinneApi $list).workflow_runs) | ForEach-Object { [long]$_.id })
     Invoke-RinneApiWrite -Method POST -Path "repos/$repo/actions/workflows/$Workflow/dispatches" -Body @{ ref = $Ref; inputs = $inputs } | Out-Null
     # 接口不回运行编号：按分支、事件、head 与触发时间找刚建的那次运行
     $deadline = [datetime]::UtcNow.AddSeconds($FindSeconds)
     while ($true) {
-        $runs = (Get-RinneApi "repos/$repo/actions/workflows/$Workflow/runs?event=workflow_dispatch&branch=$([uri]::EscapeDataString($Ref))&per_page=10").workflow_runs
-        $run = @($runs) | Where-Object { $_.head_sha -eq $Sha -and (ConvertTo-RinneUtc $_.created_at) -ge $Now.AddSeconds(-30) } |
+        $runs = (Get-RinneApi $list).workflow_runs
+        $run = @($runs) | Where-Object { $_.head_sha -eq $Sha -and [long]$_.id -notin $before -and (ConvertTo-RinneUtc $_.created_at) -ge $Now.AddSeconds(-30) } |
             Sort-Object { [long]$_.id } | Select-Object -Last 1
         if ($run) { return $run }
         if ([datetime]::UtcNow -ge $deadline) { throw '已触发，但一分钟内没找到对应的运行；稍后用 -RunId 查' }
@@ -89,12 +92,14 @@ function Invoke-SelfTest {
     $doc = @{ Yml = "on:`n  workflow_dispatch:`n    inputs:`n      ref:`n        type: string`n      probe:`n        type: boolean`npermissions:`n  contents: read`n" }
     $now = [datetime]::UtcNow
     $run = @{ id = 42; head_sha = $tip; created_at = $now.ToString('o'); status = 'completed'; conclusion = 'success'; html_url = 'u' }
+    $box = @{ Runs = @(); OnPost = @($run) }
     $jobs = @{ jobs = @(@{ name = 'build-win'; status = 'completed'; conclusion = 'success' }, @{ name = 'web-smoke'; status = 'completed'; conclusion = 'success' }) }
     $routes = [ordered]@{
         'branches/feature%2Fv1'   = { @{ commit = @{ sha = $tip } } }
         'contents/\.github/workflows/build\.yml' = { @{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($doc.Yml)) } }
-        'api -X POST \S+/dispatches --input' = { param($argv) $posted.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); '' }
-        'workflows/build\.yml/runs' = { @{ workflow_runs = @($run) } }
+        # 触发前接口里是 Runs，触发之后才多出 OnPost 里的运行
+        'api -X POST \S+/dispatches --input' = { param($argv) $posted.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); $box.Runs = @($box.Runs) + @($box.OnPost); '' }
+        'workflows/build\.yml/runs' = { @{ workflow_runs = @($box.Runs) } }
         'actions/runs/42/jobs'    = { $jobs }
         'actions/runs/42$'        = { $run }
     }
@@ -104,6 +109,12 @@ function Invoke-SelfTest {
         $p = $posted[-1]
         Add-RinneCase $cases '按 sha 触发：ref 输入是 sha40，-Probe 传 probe' $false (-not ($r.id -eq 42 -and $p.ref -eq 'feature/v1' -and $p.inputs.ref -eq $tip -and $p.inputs.probe -eq 'true'))
         Add-RinneCase $cases '没传的输入不带' $false (@($p.inputs.PSObject.Properties.Name) -contains 'kit-version')
+        # 同一提交连着触发第二次：触发前已有的运行（41）不算，找的是这次新建的（43）
+        $older = @{ id = 41; head_sha = $tip; created_at = $now.ToString('o'); status = 'in_progress'; conclusion = $null; html_url = 'u' }
+        $box.Runs, $box.OnPost = @($older), @(@{ id = 43; head_sha = $tip; created_at = $now.ToString('o'); status = 'queued'; conclusion = $null; html_url = 'u' })
+        Add-RinneCase $cases '同一提交第二次触发：报出的是新建的运行，不是前一次的' $true ((Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now).id -eq 43)
+        $box.Runs, $box.OnPost = @($older), @()
+        Add-RinneCase $cases '新运行还没出现：不拿触发前的运行充数' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 0 })
         Add-RinneCase $cases 'build.yml 没声明的输入不传' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -KitVersion '0.1.0-preview.1' -Now $now })
         Add-RinneCase $cases '-Sha 不是分支此刻的 tip' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha ('d' * 40) -Now $now })
         foreach ($bad in 'dev', 'prod', 'v0.9.0-rc.1') { Add-RinneCase $cases "不对 $bad 触发" $true (Test-Throws { Invoke-Dispatch -Ref $bad -Sha $tip -Now $now }) }

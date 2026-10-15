@@ -71,7 +71,9 @@ jobs:
         run: |
           $sha = "$(git rev-parse HEAD)".Trim()
           if ($sha -notmatch '^[0-9a-f]{40}$') { Write-Error '取不到检出的提交'; exit 1 }
-          if ($env:WANT_REF -match '^[0-9a-f]{40}$' -and $env:WANT_REF -ne $sha) { Write-Error "检出的是 $sha，不是要构建的 $env:WANT_REF"; exit 1 }
+          # ref 只收 40 位提交号：分支名、tag、短 sha 都会变，构建与 concurrency 组就对应不到确定的提交
+          if ($env:WANT_REF -and $env:WANT_REF -notmatch '^[0-9a-f]{40}$') { Write-Error 'ref 必须是 40 位提交号（空着就构建所选分支的 tip）'; exit 1 }
+          if ($env:WANT_REF -and $env:WANT_REF -ne $sha) { Write-Error "检出的是 $sha，不是要构建的 $env:WANT_REF"; exit 1 }
           if ($env:RELEASE_TAG) {
             if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { Write-Error 'release-tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1 }
             $mode, $name, $keep = 'release', "Rinne-release-win64-$($env:RELEASE_TAG)", 7

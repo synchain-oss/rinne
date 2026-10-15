@@ -77,9 +77,13 @@ function Invoke-RinneExternal {
     return $r
 }
 
-<# 带超时跑一个进程：输出异步读（免得管道写满卡住），到点 Kill 整棵进程树（构建会起编译器子进程）。 #>
+<#
+  带超时跑一个进程：输出异步读（免得管道写满卡住），到点 Kill 整棵进程树（构建会起编译器子进程）。
+  进程退出后读管道最多再等 DrainSeconds：它留下的常驻子进程（编译器的 PDB 服务、编译缓存的服务）继承了管道时，
+  EOF 要等它们退出才来，不设上限的话超时就形同虚设。等不到时用已经读到的输出，并在 Err 里注明。
+#>
 function Invoke-RinneTimed {
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds)
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds, [int]$DrainSeconds = 10)
     $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
     foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }
     $psi.UseShellExecute = $false
@@ -93,14 +97,22 @@ function Invoke-RinneTimed {
         if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
             # 恰好在这之间自己退出了，Kill 会抛错；照样按超时算
             try { $p.Kill($true) } catch [InvalidOperationException] { }
-            $p.WaitForExit()
-            return @{ Code = -1; Out = $out.Result; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true }
+            $null = $p.WaitForExit(5000)
+            return @{ Code = -1; Out = (Read-RinneDrained $out $DrainSeconds).Text; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true }
         }
-        $p.WaitForExit()
-        @{ Code = $p.ExitCode; Out = $out.Result.TrimEnd(); Err = $err.Result; TimedOut = $false }
+        $o, $e = (Read-RinneDrained $out $DrainSeconds), (Read-RinneDrained $err $DrainSeconds)
+        $note = ($o.Done -and $e.Done) ? '' : "`n（进程已退出，留下的子进程还握着输出管道，$DrainSeconds 秒后不再等）"
+        @{ Code = $p.ExitCode; Out = $o.Text.TrimEnd(); Err = $e.Text + $note; TimedOut = $false }
     } finally {
         $p.Dispose()
     }
+}
+
+<# 异步读到的文本：最多等 Seconds 秒；没等到 EOF 时返回空串并标 Done = $false。 #>
+function Read-RinneDrained {
+    param([Parameter(Mandatory)][System.Threading.Tasks.Task[string]]$Task, [int]$Seconds)
+    if ($Task.Wait([TimeSpan]::FromSeconds($Seconds))) { return @{ Text = $Task.Result; Done = $true } }
+    @{ Text = ''; Done = $false }
 }
 
 function Invoke-RinneGh {
@@ -707,11 +719,11 @@ function Get-RinneCloneState {
 
 <#
   合并后构建跑的是 PR 树里的脚本：子进程启动前从本进程环境里拿掉凭据与个人针（GH_TOKEN、GITHUB_TOKEN、
-  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY、*_SECRET、*_PASSWORD），
+  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY、*_SECRET、*_PASSWORD、*_PAT），
   结束后在 finally 里还原。这只挡住环境变量；本机 gh 的登录凭据与 git config 仍在，所以合并后构建只在其他判据都通过、
   且没碰基础设施时才跑。
 #>
-$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY|.+_SECRET|.+_PASSWORD)$'
+$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY|.+_SECRET|.+_PASSWORD|.+_PAT)$'
 
 function Invoke-RinneWithoutSecrets {
     param([Parameter(Mandatory)][scriptblock]$Script)

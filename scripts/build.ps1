@@ -16,8 +16,8 @@
 # 段名前缀：本机构建一律用带 D 的 gates 前缀，与维护者 DAW 里装的正式版互不相见；-Ci 用默认值（正式版，探针时是探针前缀），
 # 本机的 -Probe 用探针前缀。真源与校验在根 CMakeLists.txt（这里只从那里读正式前缀），配置后再核一次 cache 里的值。
 # 构建槽：配置与构建持一把（同时最多两份编译），先等可用内存，再按内存折算并发。调用方已经持有一把时（gates 的构建、合并后
-# 构建）设 RINNE_BUILD_SLOT_HELD=1，这里就不再取：两个持槽的调用方各自的子进程再去取，会互相等到超时。设了它、两把槽却都
-# 空着，说明它是残留的，照常取槽并提示。-Ci 不取槽。
+# 构建）把 RINNE_BUILD_SLOT_HELD 设成持槽进程自己的 pid，这里就不再取：两个持槽的调用方各自的子进程再去取，会互相等到超时。
+# 这个 pid 不是本进程的祖先、或者两把槽都空着，说明标记是残留的，照常取槽并提示。-Ci 不取槽。
 # 输出：cmake、ninja、ctest、pluginval 的输出写进 <构建目录>/logs/ 下的文件，不经管道；本进程的标准句柄开跑前设为不可继承。
 # MSVC 的 mspdbsrv、编译缓存的服务进程会比构建活得久，它们继承了调用方的管道，调用方读 EOF 就要等它们退出，超时也就失效了。
 # 屏幕上只打印步骤、告警与失败步骤日志的末尾。
@@ -159,18 +159,31 @@ function Get-ShmPrefix([string]$Flavor) {
     $m.Groups[1].Value + @{ ci = ''; dev = 'D'; probe = 'P' }[$Flavor]
 }
 
+# 持槽标记的值是持槽进程的 pid，它必须是本进程的祖先（调用方或调用方的调用方）。
+function Test-HolderIsAncestor([string]$Marker) {
+    if ($Marker -notmatch '^\d+$') { return $false }
+    $p = (Get-Process -Id $PID).Parent
+    for ($hops = 0; $p -and $hops -lt 8; $hops++) {
+        if ($p.Id -eq [int]$Marker) { return $true }
+        $p = $p.Parent
+    }
+    $false
+}
+
 function Enter-BuildSlot {
     if ($Ci) { return $null }
     Import-Module (Join-Path $PSScriptRoot 'lib/Locks.psm1') -ErrorAction Stop
     if ($env:RINNE_BUILD_SLOT_HELD) {
         $free = @('build-slot-1', 'build-slot-2' | ForEach-Object { Enter-RinneLock $_ -TimeoutSeconds 0 -Quiet })
         $free | ForEach-Object { Exit-RinneLock $_ }
-        if (@($free | Where-Object { $_ }).Count -lt 2) {
-            Write-Host '构建槽由调用方持有（RINNE_BUILD_SLOT_HELD），这里不再取'
+        $ancestor = Test-HolderIsAncestor $env:RINNE_BUILD_SLOT_HELD
+        if ($ancestor -and @($free | Where-Object { $_ }).Count -lt 2) {
+            Write-Host "构建槽由调用方（pid $($env:RINNE_BUILD_SLOT_HELD)）持有，这里不再取"
             if (-not $script:Jobs) { $script:Jobs = Get-RinneJobs (Get-RinneAvailableMB) }
             return $null
         }
-        Write-Host 'RINNE_BUILD_SLOT_HELD 设了，两把构建槽却都空着：当成残留的设置，照常取槽'
+        Write-Host ($ancestor ? 'RINNE_BUILD_SLOT_HELD 设了，两把构建槽却都空着：当成残留的设置，照常取槽' :
+            "RINNE_BUILD_SLOT_HELD=$($env:RINNE_BUILD_SLOT_HELD) 不是本进程某个祖先的 pid：当成残留的设置，照常取槽")
     }
     $mem = Wait-RinneMemory -MinMB 6000 -TimeoutSeconds ($MemWaitMinutes * 60)
     if (-not $mem.Ok) { Write-Host "等了 $MemWaitMinutes 分钟，可用内存仍只有 $($mem.AvailMB) MB，降为 -j2" }
@@ -322,11 +335,12 @@ function Invoke-SelfTest {
         $fast, $slow = (& $eof $true), (& $eof $false)
         & $check ('构建留下的长命子进程不拖住调用方的管道（{0:N1} 秒读到 EOF）' -f $fast) $false ($fast -lt 5)
         & $check ('反例：不改句柄继承时调用方要等孙进程退出（{0:N1} 秒）' -f $slow) $true ($slow -ge 6)
-        # 持槽标记（换一组自测专用的锁名）：两把槽都空时标记当残留、照常取槽；子进程占住一把时标记生效、不再取
+        # 持槽标记（换一组自测专用的锁名，标记取本进程父进程的 pid）：两把槽都空时标记当残留、照常取槽；
+        # 子进程占住一把时标记生效、不再取；标记的 pid 不是祖先时（例如那个子进程自己），哪怕有一把槽被占也照常取槽
         Import-Module (Join-Path $PSScriptRoot 'lib/Locks.psm1') -ErrorAction Stop
         $scope = "Rinne-selftest-$PID"
         & (Get-Module Locks) { param($s) $script:Scope = $s } $scope
-        $env:RINNE_BUILD_SLOT_HELD, $script:Jobs, $script:MemWaitMinutes = '1', 2, 0
+        $env:RINNE_BUILD_SLOT_HELD, $script:Jobs, $script:MemWaitMinutes = "$((Get-Process -Id $PID).Parent.Id)", 2, 0
         $lock = Enter-BuildSlot
         & $check '持槽标记是残留的（两把槽都空）：照常取槽' $true ($null -ne $lock)
         Exit-RinneLock $lock
@@ -337,6 +351,10 @@ function Invoke-SelfTest {
         while (-not (Test-Path -LiteralPath $ready) -and -not $child.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
         $lock = Enter-BuildSlot
         & $check '调用方持着一把构建槽：不再取槽' $false ((Test-Path -LiteralPath $ready) -and $null -eq $lock)
+        Exit-RinneLock $lock
+        $env:RINNE_BUILD_SLOT_HELD = "$($child.Id)"
+        $lock = Enter-BuildSlot
+        & $check '标记的 pid 不是本进程的祖先，另一把槽被别人占着：照常取槽' $true ((Test-Path -LiteralPath $ready) -and $null -ne $lock)
         Exit-RinneLock $lock
     } catch {
         & $check "自测抛错：$($_.Exception.Message)" $true $false

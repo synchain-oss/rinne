@@ -31,7 +31,7 @@
 # 合并后构建（Standard 及以上）跑的是 PR 树里的脚本，所以是最后一道：其他判据全部通过、且没碰基础设施时才跑，
 # 子进程的环境里拿掉凭据与个人针。-Check 在那之前不会执行 PR 里的任何代码。每个 PR 用自己的 <根>/wt/tip-<n>，
 # 用前 reset 并 git clean；建树、合并、构建到 abort 整段持一把构建槽（同一个 PR 固定落在同一把上，两次核对彼此互斥），
-# 构建有超时。
+# 构建脚本经 RINNE_BUILD_SLOT_HELD（本进程的 pid）知道槽已经持着、不再自己取；构建有超时。
 
 [CmdletBinding()]
 param(
@@ -412,8 +412,15 @@ function Invoke-Premerge {
             $build = Join-Path $tip 'scripts/build.ps1'
             if (-not (Test-Path -LiteralPath $build)) { $result.Reason = '合并后的树里没有 scripts/build.ps1，做不了合并后构建'; return }
             $pwsh = [Environment]::ProcessPath
-            $r = Invoke-RinneWithoutSecrets {
-                Invoke-RinneExternal $pwsh @('-NoProfile', '-NonInteractive', '-File', $build) -Cwd $tip -AllowFail -TimeoutSeconds $PremergeTimeoutSeconds
+            # 构建槽由本进程持着：告诉构建脚本持槽方的 pid，它就不再自己取槽（两个奇偶不同的 PR 同时构建时不会互等到超时）
+            $savedHeld = $env:RINNE_BUILD_SLOT_HELD
+            $env:RINNE_BUILD_SLOT_HELD = "$PID"
+            try {
+                $r = Invoke-RinneWithoutSecrets {
+                    Invoke-RinneExternal $pwsh @('-NoProfile', '-NonInteractive', '-File', $build) -Cwd $tip -AllowFail -TimeoutSeconds $PremergeTimeoutSeconds
+                }
+            } finally {
+                $env:RINNE_BUILD_SLOT_HELD = $savedHeld
             }
             $result.Ok = $r.Code -eq 0
             $result.Reason = if ($r.ContainsKey('TimedOut') -and $r.TimedOut) { "合并后构建超过 $PremergeTimeoutSeconds 秒，已结束" } else { "合并后构建退出码 $($r.Code)" }
@@ -629,6 +636,7 @@ function Invoke-SelfTest {
                 $builds.Add([pscustomobject]@{
                         GhToken = & $getEnv 'GH_TOKEN'; OtherKey = & $getEnv 'RINNE_SELFTEST_KEY'; Secret = & $getEnv 'RINNE_SELFTEST_SECRET'
                         Password = & $getEnv 'RINNE_SELFTEST_PASSWORD'; Needles = & $getEnv 'RINNE_PRIVACY_LOCAL'; Plain = & $getEnv 'RINNE_SELFTEST_PLAIN'
+                        Pat = & $getEnv 'RINNE_SELFTEST_PAT'; SlotHeld = & $getEnv 'RINNE_BUILD_SLOT_HELD'
                         Held = @($held); Cwd = $opts.Cwd; Timeout = $opts.TimeoutSeconds
                     })
                 $buildResult
@@ -863,9 +871,16 @@ function Invoke-SelfTest {
         $slow = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 60') -TimeoutSeconds 2 -AllowFail
         $sw.Stop()
         $quick = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', 'exit 3') -TimeoutSeconds 60 -AllowFail
+        # 命令自己马上退出，却留下一个继承了输出管道、活 40 秒的子进程：读管道只再等一个有上限的时间
+        $linger = "Start-Process -FilePath '$([Environment]::ProcessPath)' -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 40' -NoNewWindow; exit 0"
+        $sw2 = [Diagnostics.Stopwatch]::StartNew()
+        $orphan = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', $linger) -TimeoutSeconds 60 -AllowFail
+        $sw2.Stop()
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Add-RinneCase $cases '外部命令超时：到点结束进程、判超时' $true ($slow.TimedOut -and $slow.Code -ne 0 -and $sw.Elapsed.TotalSeconds -lt 30)
         Add-RinneCase $cases '外部命令没超时：照常返回退出码' $false (-not ($quick.Code -eq 3 -and -not $quick.TimedOut))
+        Add-RinneCase $cases ('外部命令退出后，留下的子进程握着管道也不无限等（{0:N0} 秒）' -f $sw2.Elapsed.TotalSeconds) $true (
+            $orphan.Code -eq 0 -and -not $orphan.TimedOut -and $sw2.Elapsed.TotalSeconds -lt 30 -and $orphan.Err -match '不再等')
 
         # 合并后构建：最后一道；只在其余判据都通过、没碰基础设施时跑；子进程看不到凭据与个人针；
         # 每个 PR 自己的 wt/tip-<n>，用前清理；整段持构建槽、构建本身不在 git 锁里；带超时
@@ -873,18 +888,20 @@ function Invoke-SelfTest {
         $slot = Get-PremergeSlot 3
         $card.tier = 'Standard'; & $writeCard
         $gates.tier = 'Standard'; & $writeGates
-        $secretNames = 'GH_TOKEN', 'RINNE_SELFTEST_KEY', 'RINNE_SELFTEST_SECRET', 'RINNE_SELFTEST_PASSWORD', 'RINNE_SELFTEST_PLAIN'
+        $secretNames = 'GH_TOKEN', 'RINNE_SELFTEST_KEY', 'RINNE_SELFTEST_SECRET', 'RINNE_SELFTEST_PASSWORD', 'RINNE_SELFTEST_PAT', 'RINNE_SELFTEST_PLAIN', 'RINNE_BUILD_SLOT_HELD'
         $saveTok = @{}; foreach ($k in $secretNames) { $saveTok[$k] = [Environment]::GetEnvironmentVariable($k) }
         try {
             $env:GH_TOKEN = 'tok-selftest'; $env:RINNE_SELFTEST_KEY = 'key-selftest'; $env:RINNE_SELFTEST_PLAIN = 'kept'
-            $env:RINNE_SELFTEST_SECRET = 'secret-selftest'; $env:RINNE_SELFTEST_PASSWORD = 'password-selftest'
+            $env:RINNE_SELFTEST_SECRET = 'secret-selftest'; $env:RINNE_SELFTEST_PASSWORD = 'password-selftest'; $env:RINNE_SELFTEST_PAT = 'pat-selftest'
+            $env:RINNE_BUILD_SLOT_HELD = $null
             $lockLog.Clear(); $tipOps.Clear()
             $vc = Invoke-MergeCheck 3 $cid
             $b = $builds | Select-Object -Last 1
             Add-RinneCase $cases '合并后构建：其余都通过时最后才跑' $false (-not ($vc.Code -eq 'ready' -and $builds.Count -eq 1 -and $vc.Premerge.Ok))
-            Add-RinneCase $cases '合并后构建：子进程看不到 GH_TOKEN、*_KEY、*_SECRET、*_PASSWORD 与个人针，其他变量照常' $false (-not (
-                    $b -and -not $b.GhToken -and -not $b.OtherKey -and -not $b.Secret -and -not $b.Password -and -not $b.Needles -and $b.Plain -eq 'kept'))
-            Add-RinneCase $cases '合并后构建：跑完还原环境' $false ($env:GH_TOKEN -ne 'tok-selftest' -or $env:RINNE_SELFTEST_KEY -ne 'key-selftest' -or $env:RINNE_SELFTEST_SECRET -ne 'secret-selftest' -or $env:RINNE_SELFTEST_PASSWORD -ne 'password-selftest' -or $env:RINNE_PRIVACY_LOCAL -ne $needles.File)
+            Add-RinneCase $cases '合并后构建：子进程看不到 GH_TOKEN、*_KEY、*_SECRET、*_PASSWORD、*_PAT 与个人针，其他变量照常' $false (-not (
+                    $b -and -not $b.GhToken -and -not $b.OtherKey -and -not $b.Secret -and -not $b.Password -and -not $b.Pat -and -not $b.Needles -and $b.Plain -eq 'kept'))
+            Add-RinneCase $cases '合并后构建：构建脚本拿到持槽方（本进程）的 pid，不再自己取槽' $false (-not ($b -and $b.SlotHeld -eq "$PID"))
+            Add-RinneCase $cases '合并后构建：跑完还原环境' $false ($env:GH_TOKEN -ne 'tok-selftest' -or $env:RINNE_SELFTEST_KEY -ne 'key-selftest' -or $env:RINNE_SELFTEST_SECRET -ne 'secret-selftest' -or $env:RINNE_SELFTEST_PASSWORD -ne 'password-selftest' -or $env:RINNE_SELFTEST_PAT -ne 'pat-selftest' -or $env:RINNE_PRIVACY_LOCAL -ne $needles.File -or $env:RINNE_BUILD_SLOT_HELD)
             Add-RinneCase $cases '合并后构建：在本 PR 自己的 wt/tip-3 里跑，带超时' $false (-not ($b.Cwd -eq $tip -and $b.Timeout -gt 0))
             Add-RinneCase $cases '合并后构建：构建持着构建槽，不在 git 锁里' $false (-not ($b.Held -contains $slot -and $b.Held -notcontains 'git'))
             Add-RinneCase $cases '合并后构建：第一次用时 worktree add 到 wt/tip-3' $false (-not ($tipOps.Count -ge 1 -and $tipOps[0].Line -match "worktree add --detach $([regex]::Escape($tip)) origin/feature/v1$"))
