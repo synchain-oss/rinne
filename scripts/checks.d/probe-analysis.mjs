@@ -44,26 +44,40 @@ function py(root, args) {
     return r;
 }
 
-/** 文档里没有出现的规格项。events / kinds / variants 逐个要求带反引号；case 只要求两端的编号出现。 */
+/**
+ * 文档里没有出现或写错的规格项：行类型的列名与列序（按表格行逐列对拍）、H 的枚举取值、事件、case、variant、guard、
+ * 阈值、取值上界、退出码。事件参数的类型与含义不在这里对拍。
+ */
 export function docProblems(spec, doc) {
     const missing = [];
     const need = (label, token) => {
         if (!doc.includes(token)) missing.push(`${label} ${token}`);
     };
+    const tick = (t) => `\`${t}\``;
+    const lines = doc.split("\n");
     need("魔数", spec.magic);
     for (const [kind, cols] of Object.entries(spec.rows)) {
-        need("行类型", `\`${kind}\``);
-        for (const c of cols) need(`${kind} 行的列`, `\`${c}\``);
+        const line = lines.find((l) => l.startsWith(`| ${tick(kind)} |`));
+        if (!line) {
+            missing.push(`行类型 ${tick(kind)}`);
+            continue;
+        }
+        const cells = line.split("|").map((c) => c.trim());
+        const got = [...(cells[cells.length - 2] ?? "").matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+        if (got.join(",") !== cols.join(",")) missing.push(`${kind} 行的列名与列序应为 ${cols.join(" ")}`);
     }
-    for (const e of spec.events) need("事件", `\`${e}\``);
-    for (const v of spec.variants) need("variant", `\`${v}\``);
-    for (const g of spec.guards) need("guard", `\`${g}\``);
-    for (const prefix of ["CB", "LU"]) {
-        const ids = spec.cases.filter((c) => c.startsWith(prefix));
-        need("case", `\`${ids[0]}\``);
-        need("case", `\`${ids[ids.length - 1]}\``);
-    }
+    for (const [name, vals] of Object.entries(spec.h_enums)) for (const v of vals) need(`H.${name}`, tick(v));
+    for (const e of spec.events) need("事件", tick(e));
+    for (const v of spec.variants) need("variant", tick(v));
+    for (const g of spec.guards) need("guard", tick(g));
+    for (const c of spec.cases) need("case", tick(c));
     need("比对表头", spec.compare_head);
+    const t = spec.thresholds;
+    const nums = [t.min_steady_blocks, t.min_toggles, t.min_slice_blocks, t.residual_limit_dbfs];
+    for (const n of nums) need("阈值", String(n));
+    for (const ms of [t.slice_ms, t.stall_ms]) need("阈值", `${ms / 1000} s`);
+    for (const [k, v] of Object.entries(spec.limits)) need(`上界 ${k}`, String(v));
+    for (const code of Object.keys(spec.exit_codes)) need("退出码", `| ${code} |`);
     return missing;
 }
 
@@ -110,20 +124,44 @@ export default {
         // Python 一侧的自测由 run() 跑；这里证明两道文档对拍本身会变红，并并入 Python 的计数
         const spec = {
             magic: "m,1",
-            rows: { H: ["role"] },
+            rows: { H: ["role", "format"], B: ["seq", "n"] },
+            h_enums: { role: ["I", "O"] },
             events: ["ev_a"],
             variants: ["-"],
             guards: ["off"],
             cases: ["CB-01", "CB-02", "LU-01", "LU-09"],
             compare_head: "h1,h2",
+            thresholds: {
+                min_steady_blocks: 32,
+                min_toggles: 10,
+                min_slice_blocks: 8,
+                slice_ms: 2000,
+                stall_ms: 5000,
+                residual_limit_dbfs: -120,
+            },
+            limits: { buf: 65536 },
+            exit_codes: { 0: "ok", 3: "incomplete" },
         };
-        const full = "m,1 `H` `role` `ev_a` `-` `off` `CB-01` `CB-02` `LU-01` `LU-09` h1,h2";
+        const full = [
+            "m,1 `ev_a` `-` `off` `CB-01` `CB-02` `LU-01` `LU-09` h1,h2 `I` `O`",
+            "| `H` | 实例头 | `role` `format` |",
+            "| `B` | 逐块 | `seq` `n` |",
+            "32 10 8 2 s 5 s -120 65536",
+            "| 0 | 全过 |",
+            "| 3 | 数据不全 |",
+        ].join("\n");
         const tpl = `${TEMPLATE_NAME} ${Array.from({ length: 9 }, (_, i) => `A${i + 1}`).join(" ")} F1 F2 F3 F4`;
         const cases = [
             ["文档齐全", false, docProblems(spec, full).length === 0],
             ["文档缺一个事件", true, docProblems(spec, full.replace("`ev_a`", "")).length > 0],
             ["文档缺魔数", true, docProblems(spec, full.replace("m,1", "")).length > 0],
-            ["文档缺 case 编号", true, docProblems(spec, full.replace("`LU-09`", "")).length > 0],
+            ["文档缺 case 编号", true, docProblems(spec, full.replace("`CB-02`", "")).length > 0],
+            ["文档里列序写反", true, docProblems(spec, full.replace("`seq` `n`", "`n` `seq`")).length > 0],
+            ["文档缺一个列名", true, docProblems(spec, full.replace("`format`", "")).length > 0],
+            ["文档缺 H 枚举取值", true, docProblems(spec, full.replace("`O`", "")).length > 0],
+            ["文档缺阈值", true, docProblems(spec, full.replace("-120", "")).length > 0],
+            ["文档缺取值上界", true, docProblems(spec, full.replace("65536", "")).length > 0],
+            ["文档缺退出码", true, docProblems(spec, full.replace("| 3 | 数据不全 |", "")).length > 0],
             ["模板齐全", false, templateProblems(tpl).length === 0],
             ["模板缺 A5", true, templateProblems(tpl.replace("A5", "")).length > 0],
             ["模板缺 F3", true, templateProblems(tpl.replace("F3", "")).length > 0],

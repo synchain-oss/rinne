@@ -6,7 +6,8 @@
     python analyze-probe.py --mutation-check         # 逐条屏蔽判据与脱敏，每条都必须让自测变红
     python analyze-probe.py --spec                   # 以 JSON 打印日志格式的机读规格
 
-退出码：0 = A1-A9 全部通过；1 = 有不通过或数据不全；2 = 输入不合格式或用法错误。
+退出码：0 = A1-A9 全部通过；1 = 有不通过；3 = 无不通过但有数据不全；2 = 输入不合格式或用法错误；4 = 内部错误。
+`--json` 的 `stop` 字段为真表示 A1 不通过，要停工上报。输出固定为 UTF-8。
 
 输出会被公开粘贴，所以只由枚举、整数、case 编号和 8 位散列拼成：不含路径、用户名、主机名，
 轨道名只给 same / different / unknown 和一个 8 位散列。格式出错时的消息只带文件序号、行号和固定的列名，
@@ -48,7 +49,7 @@ VARIANTS = (
 GUARDS = ("off", "low", "normal", "high", "na")
 EVENTS = {
     # 名字: (a 的类型, b 的类型)
-    "prepare": ("uint", "uint"),  # a = 采样率，b = 声明的最大块长
+    "prepare": ("sr", "blk"),  # a = 采样率，b = 声明的最大块长
     "release": ("empty", "empty"),
     "reset": ("empty", "empty"),
     "set_processing": ("bool", "empty"),
@@ -57,7 +58,7 @@ EVENTS = {
     "get_state": ("empty", "empty"),
     "first_block": ("empty", "empty"),
     "first_paired_block": ("empty", "empty"),
-    "paired": ("uint", "group"),  # a = 对端 pid，b = 组
+    "paired": ("pid", "group"),  # a = 对端 pid，b = 组
     "track_props": ("pct", "colour"),  # a = 轨道名（百分号编码），b = 颜色
     "backend": ("backend", "uint"),  # a = win32 | posix，b = errno
     "shm_denied": ("empty", "empty"),
@@ -84,6 +85,14 @@ A1_CASES = ("CB-01", "CB-03", "LU-03")
 A2_CASES = ("CB-02", "LU-03")
 A3_CASES = ("CB-04", "LU-04")
 A3_JUDGED = ("export-offline", "bounce")
+A3_REQUIRED = {"CB-04": ("export-offline",), "LU-04": ("export-offline", "bounce")}
+MIN_SLICE_BLOCKS = 8
+CLONE_VARIANTS = ("rip", "freeze")  # 宿主可能克隆实例：同键出现多个实例是预期内的
+MATRIX = {
+    "CB-01": [("steady", b, g) for b in (64, 256, 1024) for g in ("off", "low", "normal", "high")],
+    "LU-03": [("steady", b, "na") for b in (64, 512, 2048)],
+}
+LIMITS = {"buf": 65536, "sr": 768000, "block": 1 << 20, "d": 1 << 31, "pid": (1 << 32) - 1, "name_bytes": 200}
 A6_CASES = ("CB-07", "LU-06")
 A9_CASES = ("CB-07", "LU-09")
 F1_CASES = ("CB-01", "CB-02", "CB-04", "CB-05", "LU-02", "LU-03", "LU-04")
@@ -95,7 +104,7 @@ ITEM_NAMES = {
 }  # fmt: skip
 VERDICT_ZH = {"PASS": "通过", "FAIL": "不通过", "INCOMPLETE": "数据不全"}
 
-SPEC = {
+SPEC = {  # noqa: E501
     "magic": MAGIC,
     "rows": {
         "H": "role format host_kind os arch pid ppid tok4 build".split(),
@@ -110,6 +119,17 @@ SPEC = {
     "variants": list(VARIANTS),
     "guards": list(GUARDS),
     "compare_head": COMPARE_HEAD,
+    "h_enums": {
+        "role": ["I", "O"], "format": ["vst3", "au"], "host_kind": ["cubase", "luna", "other"],
+        "os": ["win", "mac"], "arch": ["x64", "arm64"],
+    },
+    "event_args": {k: list(v) for k, v in EVENTS.items()},
+    "limits": LIMITS,
+    "thresholds": {
+        "min_steady_blocks": MIN_STEADY_BLOCKS, "min_toggles": MIN_TOGGLES, "min_slice_blocks": MIN_SLICE_BLOCKS,
+        "slice_ms": SLICE_NS // 1_000_000, "residual_limit_dbfs": RESIDUAL_LIMIT_DB, "stall_ms": STALL_NS // 1_000_000,
+    },
+    "exit_codes": {"0": "A1-A9 全部通过", "1": "有不通过", "2": "格式或用法错误", "3": "无不通过但有数据不全", "4": "内部错误"},
 }
 
 # ---------------------------------------------------------------------------------------------------
@@ -183,9 +203,13 @@ class FormatError(Exception):
         super().__init__(f"{label} 第 {line} 行：{what}")
 
 
+class Incomplete(FormatError):
+    """文件太短或没有合法的 H 行：实例刚创建就崩溃时的样子，不是格式错误，记入 A8 后其余文件照常分析。"""
+
+
 _UINT = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _SINT = re.compile(r"^-?(?:0|[1-9][0-9]{0,18})$")
-_PCT = re.compile(r"^(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2}){0,200}$")
+_PCT = re.compile(r"^(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2}){0,4096}$")
 _FLOAT = re.compile(r"^(?:-inf|-?(?:0|[1-9][0-9]{0,6})(?:\.[0-9]{1,6})?)$")
 
 
@@ -233,33 +257,54 @@ def _empty(s):
     return ""
 
 
+def _trunc_pct(s, limit):
+    """按解码后的字节数截断百分号编码文本（不拆开 %XX）。"""
+    out, n, k = [], 0, 0
+    while k < len(s) and n < limit:
+        tok = s[k : k + 3] if s[k] == "%" else s[k]
+        out.append(tok)
+        k += len(tok)
+        n += 1
+    return "".join(out)
+
+
 def _pct(s):
     if not _PCT.match(s):
         raise ValueError
-    return s
+    return _trunc_pct(s, LIMITS["name_bytes"])  # 超长的轨道名只用于比较，截断即可
+
+
+def _ub(hi):
+    def f(s):
+        v = _uint(s)
+        if v > hi:
+            raise ValueError
+        return v
+
+    return f
 
 
 def _buf(s):
-    return s if s == "-" else _uint(s)
+    return s if s == "-" else _ub(LIMITS["buf"])(s)
 
 
 V_BOOL = _enum("0", "1")
 V_GROUP = _enum("A", "B", "C", "D", "E", "F", "G", "H", "-")
 ARG_TYPES = {
-    "uint": _uint, "bool": lambda s: int(V_BOOL(s)), "empty": _empty, "group": V_GROUP, "pct": _pct,
+    "uint": _uint, "sr": _ub(LIMITS["sr"]), "blk": _ub(LIMITS["block"]), "pid": _ub(LIMITS["pid"]), "bool": lambda s: int(V_BOOL(s)), "empty": _empty, "group": V_GROUP, "pct": _pct,
     "colour": _re(r"^(?:|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"), "backend": _enum("win32", "posix"),
     "mode": _enum("realtime", "offline"),
 }  # fmt: skip
 ROW_VALIDATORS = {
     "H": [
         _enum("I", "O"), _enum("vst3", "au"), _enum("cubase", "luna", "other"), _enum("win", "mac"),
-        _enum("x64", "arm64"), _uint, _uint, _re(r"^[0-9a-f]{4}$"), _re(r"^[0-9a-f]{8}$"),
+        _enum("x64", "arm64"), _ub(LIMITS["pid"]), _ub(LIMITS["pid"]), _re(r"^[0-9a-f]{4}$"), _re(r"^[0-9a-f]{8}$"),
     ],
-    "C": [_uint, _enum(*CASES), _enum(*VARIANTS), _buf, _enum(*GUARDS), _uint],
+    "C": [_uint, _enum(*CASES), _enum(*VARIANTS), _buf, _enum(*GUARDS), _ub(LIMITS["sr"])],
     "B": [
-        _uint, _uint, _enum("I", "O"), _uint, _uint, _uint, lambda s: int(V_BOOL(s)), lambda s: int(V_BOOL(s)),
-        lambda s: int(V_BOOL(s)), lambda s: int(V_BOOL(s)), _uint, _re(r"^[0-9a-f]{8}$"), _sint, _uint, _sint,
-        _uint, _uint,
+        _uint, _uint, _enum("I", "O"), _ub(LIMITS["block"]), _ub(LIMITS["block"]), _uint, lambda s: int(V_BOOL(s)),
+        lambda s: int(V_BOOL(s)), lambda s: int(V_BOOL(s)), lambda s: int(V_BOOL(s)), _uint, _re(r"^[0-9a-f]{8}$"),
+        _sint, _uint, _sint, _uint, _ub(LIMITS["d"]),
     ],
     "S": [_uint] * 6,
     "Z": [_uint] * 3,
@@ -276,6 +321,8 @@ class Log:
         self.summaries = []
         self.closing = None
         self.truncated = False
+        self.pre_events = []  # 第一个 C 行之前的事件：实例级
+        self.orphans = 0  # 早于第一个 C 行、没法归入任何格的块
 
 
 def _split_row(label, ln, line, kind, cols):
@@ -303,7 +350,7 @@ def parse_log(raw, label):
     if "\r" in text:
         raise FormatError(label, 0, "含回车符，行尾只能是 LF")
     if not text:
-        raise FormatError(label, 1, "空文件")
+        raise Incomplete(label, 1, "空文件")
     lines = text.split("\n")
     lg = Log(label)
     if lines[-1] == "":
@@ -311,7 +358,9 @@ def parse_log(raw, label):
     else:  # 最后一行没有换行：写到一半被截断，丢掉它并记下
         lines.pop()
         lg.truncated = True
-    if not lines or lines[0] != MAGIC:
+    if not lines:
+        raise Incomplete(label, 1, "只有写到一半的首行")
+    if lines[0] != MAGIC:
         raise FormatError(label, 1, "首行不是格式魔数")
     last_seq = last_call = None
     for ln, line in enumerate(lines[1:], start=2):
@@ -348,7 +397,7 @@ def parse_log(raw, label):
             last_seq, last_call = row["seq"], row["call_seq"]
             lg.blocks.append(row)
     if lg.header is None:
-        raise FormatError(label, 2, "缺 H 行")
+        raise Incomplete(label, 2, "缺 H 行")
     return lg
 
 
@@ -369,7 +418,10 @@ def parse_compare(raw, label):
         f = line.split(",")
         if len(f) != len(cols):
             raise FormatError(label, ln, f"应有 {len(cols)} 列")
-        rows.append(_convert(label, ln, "比对", cols, vs, f))
+        row = _convert(label, ln, "比对", cols, vs, f)
+        if (row["bit_exact"] == 1) != (row["residual_dbfs"] == float("-inf")):
+            raise FormatError(label, ln, "bit_exact 与残差不自洽（逐位相同时残差须为 -inf，反之亦然）")
+        rows.append(row)
     return rows
 
 
@@ -397,15 +449,21 @@ def key_label(key):
 
 
 class Session:
-    def __init__(self, logs, compares):
+    def __init__(self, logs, compares, broken=()):
         self.logs = logs
         self.compares = compares  # 比对行
+        self.broken = list(broken)  # 不完整的日志文件（只有标签，没有内容）
         self.segments = []
         self.cells = {}
+        self.orphans = 0
         for lg in logs:
             self._segment(lg)
         for seg in self.segments:
             self.cells.setdefault(seg.key, {"I": [], "O": []})[seg.role].append(seg)
+        self.dups = sorted(
+            (k for k, c in self.cells.items() if k[1] not in CLONE_VARIANTS and (len(c["I"]) > 1 or len(c["O"]) > 1)),
+            key=lambda k: (k[0], k[1], str(k[2]), k[3]),
+        )
 
     def _segment(self, lg):
         times = [c["t_ns"] for c in lg.cases]
@@ -418,6 +476,8 @@ class Session:
             i = at(e["t_ns"])
             if i >= 0:
                 segs[i].events.append(e)
+            else:
+                lg.pre_events.append(e)
         prev = None
         for b in lg.blocks:
             i = at(b["mono_ns"])
@@ -425,6 +485,9 @@ class Session:
                 segs[i].blocks.append(b)
                 if prev is not None and b["seq"] != prev + 1:
                     segs[i].gaps += 1
+            else:
+                lg.orphans += 1
+                self.orphans += 1
             prev = b["seq"]
         dropped = max([s["dropped"] for s in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0])
         if dropped and not any(s.gaps for s in segs):
@@ -438,20 +501,27 @@ class Session:
 
 
 def fold(item, parts, cover=()):
-    """parts = [(状态, 说明)]。可信数据里的不通过压过数据不全：A1 的停工条件不能被别处的缺口盖住。"""
-    states = [s for s, _ in parts]
+    """parts = [(状态, 说明)]；状态 NOTE 只补充说明、不参与判定。
+    可信数据里的不通过压过数据不全：A1 的停工条件不能被别处的缺口盖住。"""
+    real = [p for p in parts if p[0] != "NOTE"]
+    states = [s for s, _ in real]
     if "FAIL" in states:
         v = "FAIL"
-    elif not parts or "INCOMPLETE" in states:
+    elif not real or "INCOMPLETE" in states:
         v = "INCOMPLETE"
     else:
         v = "PASS"
-    notes = [n for s, n in parts if n and (s != "PASS" or v == "PASS")]
-    if not parts:
-        notes = ["没有可用于本项的数据"]
-    elif len(notes) > 4:
+    notes = [n for s, n in parts if n and (s in ("NOTE", "FAIL", "INCOMPLETE") or v == "PASS")]
+    if not real:
+        notes.append("没有可用于本项的数据")
+    if len(notes) > 4:
         notes = notes[:3] + [f"另有 {len(notes) - 3} 条同类记录"]
     return {"id": item, "name": ITEM_NAMES[item], "verdict": v, "notes": notes, "cover": sorted(set(cover))}
+
+
+def _cells(s):
+    """按键排序的格；buf 可能是整数也可能是 "-"，统一成字符串再排。"""
+    return sorted(s.cells.items(), key=lambda kv: (kv[0][0], kv[0][1], str(kv[0][2]), kv[0][3]))
 
 
 def _usable(seg, need=MIN_STEADY_BLOCKS):
@@ -463,17 +533,30 @@ def _usable(seg, need=MIN_STEADY_BLOCKS):
     return None, ""
 
 
-def _has_toggle(cell):
-    return any(e["name"] in TOGGLES for s in cell["I"] + cell["O"] for e in s.events)
+def _cell_pair(key, cell):
+    """一个格应恰有一个 In 和一个 Out 实例：返回 (i, o, 问题说明)。"""
+    ni, no = len(cell["I"]), len(cell["O"])
+    if ni > 1 or no > 1:
+        return None, None, f"{key_label(key)} 同键重复记录（In {ni}、Out {no}），旧文件须挪走后重采"
+    if not ni or not no:
+        return None, None, f"{key_label(key)} 只有 {'In' if ni else 'Out'} 一端"
+    return cell["I"][0], cell["O"][0], None
 
 
 def judge_a1(s):
-    parts, cover = [], []
-    for key, cell in sorted(s.cells.items()):
-        if key[0] not in A1_CASES or _has_toggle(cell):
+    parts, cover, skipped = [], [], 0
+    for key, cell in _cells(s):
+        if key[0] not in A1_CASES:
             continue
-        for seg in cell["I"] + cell["O"]:
-            cover.append(key[0])
+        if key[1] == "toggle":  # 切换格归 A2，这里不计，但要说清楚
+            skipped += 1
+            continue
+        cover.append(key[0])
+        i, o, why = _cell_pair(key, cell)
+        if why:
+            parts.append(("INCOMPLETE", why))
+            continue
+        for seg in (i, o):
             bad, why = _usable(seg)
             if bad:
                 parts.append((bad, why))
@@ -490,32 +573,42 @@ def judge_a1(s):
                 parts.append(("FAIL", msg))
             else:
                 parts.append(("PASS", ""))
+    if skipped:
+        parts.append(("NOTE", f"{skipped} 个 variant=toggle 的格归 A2，未计入 A1"))
     return fold("A1", parts, cover)
 
 
 def judge_a2(s):
-    parts, cover = [], []
-    per_case = {}
-    for key, cell in sorted(s.cells.items()):
-        if key[0] not in A2_CASES or not _has_toggle(cell):
+    parts, cover, per_case = [], [], {}
+    for key, cell in _cells(s):
+        if key[0] not in A2_CASES or key[1] != "toggle":
             continue
         cover.append(key[0])
-        for seg in cell["I"]:
-            ts = sorted(e["t_ns"] for e in seg.events if e["name"] in TOGGLES)
-            per_case[key[0]] = per_case.get(key[0], 0) + len(ts)
-            bad, why = _usable(seg)
-            if bad:
-                parts.append((bad, why))
-                continue
-            worst = 0
-            for i, t in enumerate(ts):
-                end = min(ts[i + 1] if i + 1 < len(ts) else t + SLICE_NS, t + SLICE_NS)
-                worst = max(worst, sum(b["rs"] for b in seg.blocks if t <= b["mono_ns"] < end))
-            ds = {b["d"] for b in seg.blocks}
-            if worst > 1 or len(ds) > 1:
-                parts.append(("FAIL", f"{key_label(key)} 每次切换后重同步最多 {worst} 次、D 取值 {len(ds)} 种"))
-            else:
-                parts.append(("PASS", ""))
+        if len(cell["I"]) != 1:
+            parts.append(("INCOMPLETE", f"{key_label(key)} In 端记录数为 {len(cell['I'])}，应恰有 1 个"))
+            continue
+        seg = cell["I"][0]
+        ts = sorted(e["t_ns"] for e in seg.events if e["name"] in TOGGLES)
+        per_case[key[0]] = per_case.get(key[0], 0) + len(ts)
+        bad, why = _usable(seg)
+        if bad:
+            parts.append((bad, why))
+            continue
+        worst, thin = 0, 0
+        for i, t in enumerate(ts):
+            end = min(ts[i + 1] if i + 1 < len(ts) else t + SLICE_NS, t + SLICE_NS)
+            window = [b for b in seg.blocks if t <= b["mono_ns"] < end]
+            if len(window) < MIN_SLICE_BLOCKS:
+                thin += 1
+            worst = max(worst, sum(b["rs"] for b in window))
+        if thin:
+            parts.append(("INCOMPLETE", f"{key_label(key)} 有 {thin} 次切换后的窗口里块数不足 {MIN_SLICE_BLOCKS}"))
+            continue
+        ds = {b["d"] for b in seg.blocks}
+        if worst > 1 or len(ds) > 1:
+            parts.append(("FAIL", f"{key_label(key)} 每次切换后重同步最多 {worst} 次、D 取值 {len(ds)} 种"))
+        else:
+            parts.append(("PASS", ""))
     for case, n in sorted(per_case.items()):
         if n < MIN_TOGGLES:
             parts.append(("INCOMPLETE", f"{case} 只有 {n} 次切换，不足 {MIN_TOGGLES}"))
@@ -533,59 +626,71 @@ def judge_a3(s):
         if any(g.gaps for g in segs):
             parts.append(("INCOMPLETE", f"{case} 日志有序号缺口"))
         judged = [r for r in rows if r["variant"] in A3_JUDGED]
-        if not judged:
-            parts.append(("INCOMPLETE", f"{case} 缺导出比对（variant 须为 {'/'.join(A3_JUDGED)} 之一）"))
+        if not any(r["variant"] in A3_REQUIRED[case] for r in judged):
+            need = "/".join(A3_REQUIRED[case])
+            parts.append(("INCOMPLETE", f"{case} 缺导出比对（需要 variant 为 {need} 的行）"))
         for r in judged:
-            ok = r["bit_exact"] == 1 or r["residual_dbfs"] <= RESIDUAL_LIMIT_DB
+            ok = r["lag_samples"] == 0 and (r["bit_exact"] == 1 or r["residual_dbfs"] <= RESIDUAL_LIMIT_DB)
             head = "逐位相同" if r["bit_exact"] else f"残差 {r['residual_dbfs']:.1f} dBFS"
-            msg = f"{case}/{r['variant']} {head}，开头单列 {r['head_residual_dbfs']:.1f} dBFS"
+            msg = f"{case}/{r['variant']} {head}，lag {r['lag_samples']}，开头单列 {r['head_residual_dbfs']:.1f} dBFS"
             parts.append(("PASS" if ok else "FAIL", msg))
     return fold("A3", parts, cover)
 
 
 def judge_a4(s):
     parts, cover = [], []
-    for seg in s.segments:
-        if not seg.blocks:
+    for key, cell in _cells(s):
+        if not any(g.blocks for g in cell["I"] + cell["O"]):
             continue
-        cover.append(seg.key[0])
-        if seg.gaps:
-            parts.append(("INCOMPLETE", f"{key_label(seg.key)} {seg.role} 序号缺口 {seg.gaps} 处"))
-            continue
-        # 每块对照它之前最近一次 prepare 声明的最大块长：中途改缓冲会重新 prepare
-        preps = sorted((e["t_ns"], e["b"]) for e in seg.log.events if e["name"] == "prepare")
-        times = [t for t, _ in preps]
+        cover.append(key[0])
+        if key[1] in CLONE_VARIANTS:  # 克隆出来的实例各自成段，不要求成对，也不要求块数
+            segs, need = cell["I"] + cell["O"], 1
+        else:
+            i, o, why = _cell_pair(key, cell)
+            if why:
+                parts.append(("INCOMPLETE", why))
+                continue
+            segs, need = [i, o], MIN_STEADY_BLOCKS
+        for seg in segs:
+            bad, why = _usable(seg, need)
+            if bad:
+                parts.append((bad, why))
+                continue
+            # 每块对照它之前最近一次 prepare 声明的最大块长：中途改缓冲会重新 prepare
+            preps = sorted((e["t_ns"], e["b"]) for e in seg.log.events if e["name"] == "prepare")
+            times = [t for t, _ in preps]
 
-        def limit(b):
-            i = bisect_right(times, b["mono_ns"]) - 1
-            return preps[i][1] if i >= 0 else None
+            def limit(b):
+                k = bisect_right(times, b["mono_ns"]) - 1
+                return preps[k][1] if k >= 0 else None
 
-        if any(limit(b) is None for b in seg.blocks):
-            parts.append(("INCOMPLETE", f"{key_label(seg.key)} {seg.role} 有块早于任何 prepare 事件"))
-            continue
-        over = sum(1 for b in seg.blocks if b["n"] > limit(b) or b["n"] > b["n_decl"])
-        ns = [b["n"] for b in seg.blocks]
-        msg = f"{key_label(seg.key)} {seg.role} n∈[{min(ns)},{max(ns)}]，prepare 共 {len(preps)} 次，超限 {over}"
-        parts.append(("FAIL" if over else "PASS", msg))
+            if any(limit(b) is None for b in seg.blocks):
+                parts.append(("INCOMPLETE", f"{key_label(key)} {seg.role} 有块早于任何 prepare 事件"))
+                continue
+            over = sum(1 for b in seg.blocks if b["n"] > limit(b) or b["n"] > b["n_decl"])
+            ns = [b["n"] for b in seg.blocks]
+            msg = f"{key_label(key)} {seg.role} n∈[{min(ns)},{max(ns)}]，prepare 共 {len(preps)} 次，超限 {over}"
+            parts.append(("FAIL" if over else "PASS", msg))
     return fold("A4", parts, cover)
 
 
 def judge_a5(s):
     parts, cover, seen = [], [], set()
-    for key, cell in sorted(s.cells.items()):
+    for key, cell in _cells(s):
         if key[0] != "LU-02":
             continue
         cover.append("LU-02")
-        if len(cell["I"]) != 1 or len(cell["O"]) != 1:
-            parts.append(("INCOMPLETE", f"{key_label(key)} 应恰有一个 In 和一个 Out 实例"))
+        i, o, why = _cell_pair(key, cell)
+        if why:
+            parts.append(("INCOMPLETE", why))
             continue
-        i, o = cell["I"][0], cell["O"][0]
         combo = (i.log.header["format"], o.log.header["format"])
         seen.add(combo)
+        # 配对与后端的事件常发生在用户选 case 之前，所以实例级事件与分段事件一起看
+        ei, eo = i.events + i.log.pre_events, o.events + o.log.pre_events
         same = i.log.header["pid"] == o.log.header["pid"]
-        paired = any(e["name"] == "paired" and e["a"] == o.log.header["pid"] for e in i.events)
-        denied = any(g.has("shm_denied") or any(e["name"] == "backend" and e["b"] != 0 for e in g.events)
-                     for g in (i, o))  # fmt: skip
+        paired = any(e["name"] == "paired" and e["a"] == o.log.header["pid"] for e in ei)
+        denied = any(e["name"] == "shm_denied" or (e["name"] == "backend" and e["b"] != 0) for e in ei + eo)
         ok = same and paired and not denied
         msg = f"{combo[0]}+{combo[1]}：同 pid {int(same)}、已配对 {int(paired)}、kShmDenied {int(denied)}"
         parts.append(("PASS" if ok else "FAIL", msg))
@@ -597,20 +702,24 @@ def judge_a5(s):
 
 def judge_a6(s, salt=b"x"):
     parts, cover = [], []
-    for key, cell in sorted(s.cells.items()):
+    for key, cell in _cells(s):
         if key[0] not in A6_CASES:
             continue
         ends = {}
         for seg in cell["I"] + cell["O"]:
             props = [e for e in seg.events if e["name"] == "track_props"]
             if props:
-                ends[seg.role] = props[-1]
+                ends.setdefault(seg.role, []).append(props[-1])
         if not ends:
             continue
         cover.append(key[0])
         if set(ends) != {"I", "O"}:
             parts.append(("INCOMPLETE", f"{key_label(key)} 只有一端记录了轨道信息"))
             continue
+        if any(len(v) > 1 for v in ends.values()):
+            parts.append(("INCOMPLETE", f"{key_label(key)} 同键重复记录，旧文件须挪走后重采"))
+            continue
+        ends = {r: v[0] for r, v in ends.items()}
         got = all(e["a"] for e in ends.values())
         verdict, h = name_verdict(ends["I"]["a"], ends["O"]["a"], salt)
         colour = "有" if all(e["b"] for e in ends.values()) else "缺"
@@ -634,33 +743,39 @@ def _pairs(i_blocks, o_blocks):
 
 def judge_a7(s):
     parts, cover = [], []
-    for key, cell in sorted(s.cells.items()):
-        if len(cell["I"]) != 1 or len(cell["O"]) != 1 or not (cell["I"][0].blocks and cell["O"][0].blocks):
+    for key, cell in _cells(s):
+        if key[1] in CLONE_VARIANTS or not any(g.blocks for g in cell["I"] + cell["O"]):
             continue
-        i, o = cell["I"][0], cell["O"][0]
         cover.append(key[0])
+        i, o, why = _cell_pair(key, cell)
+        if why:
+            parts.append(("INCOMPLETE", why))
+            continue
         bad = next((x for x in (_usable(i), _usable(o)) if x[0]), None)
         if bad:
             parts.append(bad)
             continue
-        pairs = _pairs(i.blocks, o.blocks)
         playing = [b for sg in (i, o) for b in sg.blocks if b["playing"]]
-        valid = sum(b["host_ns_valid"] for b in playing)
         if not playing:
             parts.append(("INCOMPLETE", f"{key_label(key)} 两端都没有播放中的块"))
             continue
+        valid = sum(b["host_ns_valid"] for b in playing)
         if valid / len(playing) < 0.99:
             parts.append(("FAIL", f"{key_label(key)} hostNs 有效率 {valid}/{len(playing)}，不足 99%"))
             continue
-        both = [(a[2], b[2]) for a, b in pairs if a[2]["host_ns_valid"] and b[2]["host_ns_valid"]]
+        pairs = _pairs(i.blocks, o.blocks)
+        both = [(a[2], b[2]) for a, b in pairs if all(x[2]["playing"] and x[2]["host_ns_valid"] for x in (a, b))]
+        if len(both) < MIN_STEADY_BLOCKS:
+            n = len(pairs)
+            parts.append(("INCOMPLETE", f"{key_label(key)} 交错成对的回调 {n}、其中两端都在播放且 hostNs 有效的 {len(both)}，不足 {MIN_STEADY_BLOCKS}"))
+            continue
         mismatch = sum(1 for a, b in both if a["host_ns"] != b["host_ns"])
         nonmono = 0
         for sg in (i, o):
             seq = [b["host_ns"] for b in sorted(sg.blocks, key=lambda b: b["seq"]) if b["playing"] and b["host_ns_valid"]]
             nonmono += sum(1 for x, y in zip(seq, seq[1:]) if y <= x)
         first = sum(1 for a, _ in pairs if a[1] == "I")
-        ratio = mismatch / max(1, len(both))
-        ok = ratio <= HOSTNS_MISMATCH_RATIO and nonmono == 0
+        ok = mismatch / len(both) <= HOSTNS_MISMATCH_RATIO and nonmono == 0
         msg = f"{key_label(key)} 配对 {len(both)}，两端不等 {mismatch}，非递增 {nonmono}，In 先于 Out {first}/{len(pairs)}"
         parts.append(("PASS" if ok else "FAIL", msg))
     return fold("A7", parts, cover)
@@ -668,15 +783,22 @@ def judge_a7(s):
 
 def judge_a8(s):
     parts = []
+    for label in s.broken:
+        parts.append(("FAIL", f"{label} 只有不完整的内容（实例刚创建就崩溃，或日志写到一半被截断）"))
     for n, lg in enumerate(s.logs, start=1):
         who = f"实例 {n}（{lg.header['role']}）"
         ts = [x["t_ns"] for x in lg.summaries]
         stall = max([b - a for a, b in zip(ts, ts[1:])] + [0])
         trips = max([x["trips"] for x in lg.summaries] + [0])
+        problems = []
         if lg.truncated or lg.closing is None:
-            parts.append(("FAIL", f"{who} 日志没有正常收尾（疑似崩溃或被强杀）"))
-        elif stall > STALL_NS or trips:
-            parts.append(("FAIL", f"{who} 摘要间隔最长 {stall // 1_000_000} ms、跳闸 {trips} 次"))
+            problems.append("日志没有收尾（疑似崩溃或被强杀）")
+        if stall > STALL_NS:
+            problems.append(f"摘要间隔超限（最长 {stall // 1_000_000} ms，阈值 {STALL_NS // 1_000_000} ms；也可能是写摘要的线程被宿主占住）")
+        if trips:
+            problems.append(f"跳闸 {trips} 次")
+        if problems:
+            parts.append(("FAIL", f"{who} " + "；".join(problems)))
         elif len(ts) < 2:
             parts.append(("INCOMPLETE", f"{who} 摘要行不足 2 条，无法判断卡死"))
         else:
@@ -686,20 +808,23 @@ def judge_a8(s):
 
 def judge_a9(s):
     parts, cover = [], []
-    for key, cell in sorted(s.cells.items()):
+    for key, cell in _cells(s):
         if key[0] not in A9_CASES or key[1] != "reopen":
             continue
         cover.append(key[0])
-        for seg in cell["I"]:
-            if seg.gaps:
-                parts.append(("INCOMPLETE", f"{key_label(key)} 序号缺口"))
-                continue
-            sets = [e["t_ns"] for e in seg.events if e["name"] == "set_state"]
-            pairs = [e["t_ns"] for e in seg.events if e["name"] == "paired"]
-            ok = bool(sets) and any(p >= min(sets) for p in pairs)
-            order = ">".join(e["name"] for e in sorted(seg.events, key=lambda e: e["t_ns"])
-                             if e["name"] in ("prepare", "set_state", "first_block", "first_paired_block", "paired"))  # fmt: skip
-            parts.append(("PASS" if ok else "FAIL", f"{key_label(key)} 事件顺序 {order or '无'}"))
+        if len(cell["I"]) != 1:
+            parts.append(("INCOMPLETE", f"{key_label(key)} In 端记录数为 {len(cell['I'])}，应恰有 1 个；同键重复的旧文件须挪走后重采"))
+            continue
+        seg = cell["I"][0]
+        if seg.gaps:
+            parts.append(("INCOMPLETE", f"{key_label(key)} 序号缺口"))
+            continue
+        evs = sorted(seg.events + seg.log.pre_events, key=lambda e: e["t_ns"])  # 重开后的事件多在选 case 之前
+        sets = [e["t_ns"] for e in evs if e["name"] == "set_state"]
+        pairs = [e["t_ns"] for e in evs if e["name"] == "paired"]
+        ok = bool(sets) and any(p >= min(sets) for p in pairs)
+        order = ">".join(e["name"] for e in evs if e["name"] in ("prepare", "set_state", "first_block", "first_paired_block", "paired"))  # fmt: skip
+        parts.append(("PASS" if ok else "FAIL", f"{key_label(key)} 事件顺序 {order or '无'}"))
     return fold("A9", parts, cover)
 
 
@@ -707,26 +832,69 @@ JUDGES = [("A1", judge_a1), ("A2", judge_a2), ("A3", judge_a3), ("A4", judge_a4)
           ("A6", judge_a6), ("A7", judge_a7), ("A8", judge_a8), ("A9", judge_a9)]  # fmt: skip
 
 
+def _case_has_data(s, case):
+    """F1 要的是能下结论的数据，而不是一个 C 行：CB-04、LU-04 可只靠导出比对行；LU-02 看配对与后端事件；其余要有块。"""
+    if any(r["case"] == case for r in s.compares):
+        return True
+    segs = [g for g in s.segments if g.case["case"] == case]
+    if case == "LU-02":
+        return any(e["name"] in ("paired", "backend") for g in segs for e in g.events + g.log.pre_events)
+    return any(g.blocks for g in segs)
+
+
+def _matrix_missing(s, case):
+    out = []
+    for variant, buf, guard in MATRIX[case]:
+        cell = s.cells.get((case, variant, buf, guard))
+        ok = bool(cell) and len(cell["I"]) == 1 and len(cell["O"]) == 1
+        ok = ok and all(_usable(g)[0] is None for g in (cell["I"] + cell["O"] if cell else []))
+        if not ok:
+            out.append(f"{variant}/buf={buf}/guard={guard}")
+    return out
+
+
 def freeze_f1(s, items):
     missing = []
     for case in F1_CASES:
         segs = [g for g in s.segments if g.case["case"] == case]
-        has = bool(segs) or any(r["case"] == case for r in s.compares)
-        if not has:
+        if not _case_has_data(s, case):
             missing.append(f"{case} 无数据")
         elif any(g.gaps for g in segs):
             missing.append(f"{case} 有序号缺口")
+    for case in MATRIX:
+        gone = _matrix_missing(s, case)
+        if gone:
+            shown = "、".join(gone[:6]) + (f" 等共 {len(gone)} 格" if len(gone) > 6 else "")
+            missing.append(f"{case} 矩阵缺格：{shown}")
+    if s.orphans:
+        missing.append(f"有 {s.orphans} 个块不属于任何测试格")
+    if s.dups:
+        missing.append(f"{len(s.dups)} 个格同键重复记录")
     for it in items[:8]:  # A1-A8 必须有结论；A9（工程恢复）不阻断 F1
         if it["verdict"] == "INCOMPLETE":
             missing.append(f"{it['id']} 数据不全")
     return {"ok": not missing, "missing": missing}
 
 
-def extras(s):
-    """只记录、不下结论的项：RIP/Freeze 是否克隆实例、Ping 一致性、各 case 的块长范围。"""
+def warnings_of(s):
     out = []
-    for key, cell in sorted(s.cells.items()):
-        if key[1] in ("rip", "freeze"):
+    if s.orphans:
+        out.append(f"{s.orphans} 个块早于所在日志的第一个 C 行，未计入任何测试格")
+    if s.dups:
+        out.append(f"{len(s.dups)} 个格同键重复记录（如 {key_label(s.dups[0])}）：旧文件须挪走后重采，相关判据按数据不全处理")
+    if s.broken:
+        out.append(f"{len(s.broken)} 个日志文件不完整，已记入 A8")
+    lost = sum(1 for lg in s.logs if max([x["dropped"] for x in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0]))
+    if lost:
+        out.append(f"{lost} 个实例的探针报告过丢弃记录，相关格按数据不全处理")
+    return out
+
+
+def extras(s):
+    """只记录、不下结论的项：RIP/Freeze 是否克隆实例、Ping 一致性。"""
+    out = []
+    for key, cell in _cells(s):
+        if key[1] in CLONE_VARIANTS:
             n = len({id(seg.log) for seg in cell["I"] + cell["O"]})
             out.append(f"{key_label(key)} 涉及 {n} 个实例日志，{'有' if n > 2 else '无'}克隆迹象")
         pings = sorted({e["a"] for sg in cell["I"] for e in sg.events if e["name"] == "ping"})
@@ -742,40 +910,48 @@ def extras(s):
 
 def load_dir(path):
     names = sorted(os.listdir(path))
-    logs, compares = [], []
+    logs, compares, broken, files = [], [], [], 0
     for nm in names:
         full = os.path.join(path, nm)
         if not os.path.isfile(full):
             continue
         if nm.startswith("probe-") and nm.endswith(".csv"):
-            label = f"日志#{len(logs) + 1}"
+            files += 1
+            label = f"日志#{files}"
             with open(full, "rb") as f:
-                logs.append(parse_log(f.read(), label))
+                try:
+                    logs.append(parse_log(f.read(), label))
+                except Incomplete:
+                    broken.append(label)
         elif nm.startswith("compare-") and nm.endswith(".csv"):
             label = f"比对#{len(compares) + 1}"
             with open(full, "rb") as f:
                 compares += parse_compare(f.read(), label)
-    return logs, compares
+    return logs, compares, broken
 
 
 def analyze(path, salt):
-    logs, compares = load_dir(path)
-    s = Session(logs, compares)
+    logs, compares, broken = load_dir(path)
+    s = Session(logs, compares, broken)
     items = [(fn(s, salt) if iid == "A6" else fn(s)) for iid, fn in JUDGES]
     f1 = freeze_f1(s, items)
     roles = [lg.header["role"] for lg in logs]
     return {
-        "inputs": {"logs": len(logs), "in": roles.count("I"), "out": roles.count("O"), "compares": len(compares)},
+        "inputs": {
+            "logs": len(logs) + len(broken), "in": roles.count("I"), "out": roles.count("O"),
+            "broken": len(broken), "compares": len(compares),
+        },
         "items": items,
         "f1": f1,
         "stop": items[0]["verdict"] == "FAIL",
         "extras": extras(s),
+        "warnings": warnings_of(s),
     }
 
 
 def render_md(res):
     i = res["inputs"]
-    out = ["# 探针分析结果", "", f"输入：实例日志 {i['logs']} 个（In {i['in']}、Out {i['out']}），导出比对 {i['compares']} 行", ""]
+    out = ["# 探针分析结果", "", f"输入：实例日志 {i['logs']} 个（In {i['in']}、Out {i['out']}、不完整 {i['broken']}），导出比对 {i['compares']} 行", ""]
     if res["stop"]:
         out += ["**A1 不通过：停工并上报**，评估时间线寻址加固定 D 的混合方案，此前不冻结。", ""]
     out += ["| 项 | 内容 | 结论 | 依据 |", "|---|---|---|---|"]
@@ -787,6 +963,8 @@ def render_md(res):
     out += ["", "## 冻结条件", ""]
     out.append("- F1 数据齐全、A1-A8 有结论：" + ("满足" if f1["ok"] else "未满足（" + "；".join(f1["missing"]) + "）"))
     out += ["- F2 无需改布局：人工确认", "- F3 Win/mac 测试与压测全绿：以 gates 与 dispatch 结果为准", "- F4 用户已过目：人工确认"]
+    if res["warnings"]:
+        out += ["", "## 提示", ""] + [f"- {x}" for x in res["warnings"]]
     if res["extras"]:
         out += ["", "## 附加记录", ""] + [f"- {x}" for x in res["extras"]]
     return "\n".join(out) + "\n"
@@ -800,10 +978,20 @@ def _scrub_result(res):
         it["cover"] = [scrub(x) for x in it["cover"]]
     res["f1"]["missing"] = [scrub(x) for x in res["f1"]["missing"]]
     res["extras"] = [scrub(x) for x in res["extras"]]
+    res["warnings"] = [scrub(x) for x in res["warnings"]]
     return res
 
 
 def run(argv, out, err):
+    """入口。任何未预期的异常只报一句固定的话：traceback 里有脚本路径和用户名，不能进输出。"""
+    try:
+        return _run(argv, out, err)
+    except Exception:  # noqa: BLE001
+        err.write("内部错误：分析器遇到未预期的情况，细节已隐去。请换个目录重试，或把输入交给维护者排查。\n")
+        return 4
+
+
+def _run(argv, out, err):
     args = list(argv)
 
     def take(flag, many=False):
@@ -855,7 +1043,8 @@ def run(argv, out, err):
         out.write(json.dumps(_scrub_result(res), ensure_ascii=False, indent=2) + "\n")
     else:
         out.write(scrub(render_md(res)))
-    return 0 if all(it["verdict"] == "PASS" for it in res["items"]) else 1
+    verdicts = {it["verdict"] for it in res["items"]}
+    return 1 if "FAIL" in verdicts else 3 if "INCOMPLETE" in verdicts else 0
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -923,7 +1112,9 @@ def _mutations_of(text):
     yield "行中间的空行", "\n".join(lines[:b] + [""] + lines[b:])
     yield "Z 行之后还有内容", text + lines[b] + "\n"
     yield "H 行 pid 含路径", edit(1, 6, "x:" + "\\" + "dir")
-    yield "空文件", ""
+    yield "buf 超上界", edit(c, 4, "99999999")
+    yield "pid 超上界", edit(1, 6, "99999999999")
+    yield "n 超上界", edit(b, 4, "99999999")
 
 
 def self_test():
@@ -954,7 +1145,7 @@ def _self_test(tmp):
         _write_tree(base, files)
         res = analyze(base, salt)
         got = {it["id"]: it["verdict"] for it in res["items"]}
-        want = expect.get(d) or {i: "PASS" for i in ps.ITEMS}
+        want = expect[d] if d in expect else {i: "PASS" for i in ps.ITEMS}
         for item, v in want.items():
             check(f"{d}：{item} 应为 {v}，实为 {got[item]}", got[item] == v, v != "PASS")
         if d == "full-pass":
@@ -1026,6 +1217,52 @@ def _self_test(tmp):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+    # 2b. 不完整的文件降级而不是中止；超长轨道名截断而不是判错；比对表自洽
+    for label, raw in (("空文件", b""), ("只有魔数", (MAGIC + "\n").encode()), ("H 行写了一半", (MAGIC + "\nH,I,vst").encode())):
+        try:
+            parse_log(raw, "日志#1")
+            check(f"不完整应降级：{label}", False, True)
+        except Incomplete:
+            check(f"不完整应降级：{label}", True, True)
+        except FormatError:
+            check(f"不完整应降级而不是格式错：{label}", False, True)
+    long_name = "%E4%B8%AD" * 300
+    lg_long = parse_log(valid.replace("\nZ,", "\nE,5,track_props," + long_name + ",\nZ,").encode("ascii"), "日志#1")
+    tp = [e for e in lg_long.events if e["name"] == "track_props"][0]["a"]
+    check("超长轨道名被截断到 200 字节", len(unquote_to_bytes(tp)) <= LIMITS["name_bytes"], False)
+    head = COMPARE_HEAD + "\n"
+    for label, row in (("逐位相同却有残差", "CB-04,export-offline,1,-50.0,-50.0,0\n"), ("残差 -inf 却不逐位", "CB-04,export-offline,0,-inf,-inf,0\n")):
+        try:
+            parse_compare((head + row).encode(), "比对#1")
+            check(f"比对表应拒绝：{label}", False, True)
+        except FormatError:
+            check(f"比对表应拒绝：{label}", True, True)
+    # 2c. 红旗回归：混 buf、非 UTF-8 控制台、内部错误都不能漏出 traceback 或路径
+    mixed = os.path.join(tmp, "mixed-buf")
+    ma = ps.pair("CB-01", "steady", 256, "low", pid=4801)
+    mb = ps.pair("CB-01", "steady", "-", "low", pid=4802)
+    _write_tree(mixed, ps.files_of(*ma, *mb))
+    code, so, se = _cli([mixed])
+    check("混用 buf 取值不崩溃", code in (0, 1, 3) and "内部错误" not in se, True)
+    import subprocess
+
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    r = subprocess.run([sys.executable, "-B", os.path.abspath(__file__), os.path.join(tmp, "full-pass")], capture_output=True, env=env)
+    err_text = r.stderr.decode("utf-8", "replace")
+    check("cp1252 控制台也能正常输出", r.returncode == 0 and b"Traceback" not in r.stderr, True)
+    check("stderr 不含路径特征", "Users" not in err_text and ".py" not in err_text and "line " not in err_text, True)
+    saved_analyze = globals()["analyze"]
+
+    def boom(*a, **k):
+        raise RuntimeError(os.path.abspath(__file__))
+
+    globals()["analyze"] = boom
+    try:
+        code, so, se = _cli([os.path.join(tmp, "full-pass")])
+    finally:
+        globals()["analyze"] = saved_analyze
+    check("内部错误退出码 4", code == 4, True)
+    check("内部错误只报固定一句", se.strip().startswith("内部错误") and "Traceback" not in se and ".py" not in se and "line " not in se, True)
     # 3b. 用户名与枚举撞词（USERNAME=pass）时，JSON 的枚举不能被清洗坏
     saved = os.environ.get("USERNAME")
     os.environ["USERNAME"] = "pass"
@@ -1046,6 +1283,12 @@ def _self_test(tmp):
     check("目录不存在退出码 2", _cli([os.path.join(tmp, "nope")])[0] == 2, True)
     check("全部通过退出码 0", _cli([os.path.join(tmp, "full-pass")])[0] == 0, False)
     check("有不通过退出码 1", _cli([os.path.join(tmp, "a1-fail")])[0] == 1, True)
+    check("只有数据不全退出码 3", _cli([os.path.join(tmp, "a1-incomplete")])[0] == 3, True)
+    # 5. F1：缺矩阵格、块早于第一个 C 行都要被指出
+    res = analyze(os.path.join(tmp, "f1-missing-cell"), salt)
+    check("缺一格 CB-01 时 F1 指出矩阵缺格", (not res["f1"]["ok"]) and any("矩阵缺格" in m for m in res["f1"]["missing"]), True)
+    res = analyze(os.path.join(tmp, "orphan-blocks"), salt)
+    check("块早于第一个 C 行时给出提示", any("第一个 C 行" in w for w in res["warnings"]) and not res["f1"]["ok"], True)
     return {"ok": not lines, "bad": bad, "good": good, "lines": lines}
 
 
@@ -1075,7 +1318,7 @@ def mutation_check():
         finally:
             HOOKS[hook] = orig
     # 阈值常量：放宽后对应的坏夹具必须不再被拦住，自测随之变红
-    for const, loose in (("RESIDUAL_LIMIT_DB", 0.0), ("MIN_TOGGLES", 0), ("HOSTNS_MISMATCH_RATIO", 1.0)):
+    for const, loose in (("RESIDUAL_LIMIT_DB", 0.0), ("MIN_TOGGLES", 0), ("HOSTNS_MISMATCH_RATIO", 1.0), ("MIN_SLICE_BLOCKS", 0), ("MIN_STEADY_BLOCKS", 0)):
         orig = globals()[const]
         globals()[const] = loose
         try:
@@ -1087,4 +1330,9 @@ def mutation_check():
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # 非 CJK 区域设置的控制台编码装不下中文时不能崩
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(run(sys.argv[1:], sys.stdout, sys.stderr))

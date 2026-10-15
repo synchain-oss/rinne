@@ -2,7 +2,16 @@
   "a1-fail": {
     "A1": "FAIL"
   },
+  "a1-fail-spurious-toggle": {
+    "A1": "FAIL"
+  },
   "a1-incomplete": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-dup": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-in-only": {
     "A1": "INCOMPLETE"
   },
   "a1-pass": {
@@ -14,6 +23,9 @@
   "a2-incomplete": {
     "A2": "INCOMPLETE"
   },
+  "a2-incomplete-emptywindows": {
+    "A2": "INCOMPLETE"
+  },
   "a2-incomplete-noblocks": {
     "A2": "INCOMPLETE"
   },
@@ -23,7 +35,13 @@
   "a3-fail": {
     "A3": "FAIL"
   },
+  "a3-fail-lag": {
+    "A3": "FAIL"
+  },
   "a3-incomplete": {
+    "A3": "INCOMPLETE"
+  },
+  "a3-incomplete-bounce-only": {
     "A3": "INCOMPLETE"
   },
   "a3-pass": {
@@ -35,6 +53,9 @@
   "a4-incomplete": {
     "A4": "INCOMPLETE"
   },
+  "a4-incomplete-fewblocks": {
+    "A4": "INCOMPLETE"
+  },
   "a4-pass": {
     "A4": "PASS"
   },
@@ -44,10 +65,16 @@
   "a5-fail": {
     "A5": "FAIL"
   },
+  "a5-fail-early-denied": {
+    "A5": "FAIL"
+  },
   "a5-incomplete": {
     "A5": "INCOMPLETE"
   },
   "a5-pass": {
+    "A5": "PASS"
+  },
+  "a5-pass-early": {
     "A5": "PASS"
   },
   "a6-fail": {
@@ -59,10 +86,19 @@
   "a6-pass": {
     "A6": "PASS"
   },
+  "a6-pass-longname": {
+    "A6": "PASS"
+  },
   "a7-fail": {
     "A7": "FAIL"
   },
   "a7-incomplete": {
+    "A7": "INCOMPLETE"
+  },
+  "a7-incomplete-callseq": {
+    "A7": "INCOMPLETE"
+  },
+  "a7-incomplete-fewplaying": {
     "A7": "INCOMPLETE"
   },
   "a7-incomplete-notplaying": {
@@ -72,6 +108,9 @@
     "A7": "PASS"
   },
   "a8-fail": {
+    "A8": "FAIL"
+  },
+  "a8-fail-broken-file": {
     "A8": "FAIL"
   },
   "a8-incomplete": {
@@ -88,5 +127,10 @@
   },
   "a9-pass": {
     "A9": "PASS"
-  }
+  },
+  "a9-pass-early": {
+    "A9": "PASS"
+  },
+  "f1-missing-cell": {},
+  "orphan-blocks": {}
 }
