@@ -87,7 +87,7 @@ function markdownFiles(root) {
     const walk = (rel) => {
         for (const e of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
             const p = rel ? `${rel}/${e.name}` : e.name;
-            if (e.isDirectory() && p.startsWith("docs")) walk(p);
+            if (e.isDirectory() && (p === "docs" || p.startsWith("docs/"))) walk(p);
             else if (e.isFile() && p.endsWith(".md")) out.push(p);
         }
     };

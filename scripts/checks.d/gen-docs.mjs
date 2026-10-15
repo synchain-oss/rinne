@@ -95,6 +95,15 @@ export async function selfTest(root = ROOT) {
             (p) => p.some((x) => x.includes("审校记录已过期")),
         ],
         [
+            "frReview 标 reviewed 但审校人为空",
+            true,
+            (c) =>
+                c.edit(I18N_FILE, (t) =>
+                    reviewed(zhHashes(loadSource(c.dir)).combined)(t).replace('"reviewedBy": "x"', '"reviewedBy": ""'),
+                ),
+            (p) => p.some((x) => x.includes("reviewedBy")),
+        ],
+        [
             "标记拼错",
             true,
             (c) => c.edit("README.md", swap("gen:hard-rules:en", "gen:hard-rule:en")),
