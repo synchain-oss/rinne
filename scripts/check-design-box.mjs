@@ -262,6 +262,36 @@ export async function scaleUiCases(root = ROOT) {
             calls.at(-1)?.join() === "set,2" && timers.count() === 0 && !ui.state().confirming,
         );
     }
+    for (const order of ["过期的先返回", "最新的先被拒"]) {
+        const { ui, calls, pending, timers } = deferredRig({ scale: 1 });
+        const a = ui.preview(1.5);
+        const b = ui.preview(2);
+        if (order === "过期的先返回") {
+            pending[0].resolve({ ok: true });
+            pending[1].resolve({ ok: false });
+        } else {
+            pending[1].resolve({ ok: false });
+            pending[0].resolve({ ok: true });
+        }
+        await Promise.all([a, b]);
+        const counting = ui.state().confirming && timers.count() === 1;
+        timers.tick(CONFIRM_SECONDS);
+        await flush();
+        add(
+            `交叠预览，前一次生效、后一次被拒（${order}）：仍有倒计时，回到最初的档位`,
+            false,
+            counting && calls.at(-1)?.join() === "set,1" && !ui.state().confirming,
+        );
+    }
+    {
+        const { ui, pending, timers } = deferredRig();
+        const a = ui.preview(1.5);
+        const b = ui.preview(2);
+        pending[0].resolve({ ok: false });
+        pending[1].resolve({ ok: false });
+        await Promise.all([a, b]);
+        add("交叠预览全部被拒：退出确认态，不起倒计时", false, !ui.state().confirming && timers.count() === 0);
+    }
     {
         const { ui, calls, pending, timers } = deferredRig();
         const first = ui.preview(1.5);

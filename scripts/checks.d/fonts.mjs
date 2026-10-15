@@ -40,8 +40,11 @@ export default {
     },
     selfTest(ctx) {
         const python = findPython(ctx?.env);
-        if (!python)
-            return { ok: true, bad: 1, good: 1, lines: ["没有装 fontTools 与 brotli 的 Python 3，跳过字体自测"] };
+        if (!python) {
+            const why = "没有装 fontTools 与 brotli 的 Python 3（pip install fonttools brotli），字体自测没有运行";
+            // 自测模式没有 SKIP：CI 里放行并写明，本机判红
+            return { ok: inCI(ctx?.env), bad: 1, good: 1, lines: [why] };
+        }
         const results = SCRIPTS.map((s) => run(python, s, ["--self-test"]));
         return {
             ok: results.every((r) => r.ok),

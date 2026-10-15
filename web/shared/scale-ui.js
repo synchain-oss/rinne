@@ -68,9 +68,12 @@ export function createScaleUi(o) {
 
     // 确认态从发出预览的那一刻起就算，不等桥调用返回：桥调用返回之前用户可能连按方向键再选档位，
     // 或者点了保存。gen 是代次，每次进入、保存、取消、卸载都加一，过期的预览返回后据此放弃，
-    // 不再起计时器，也不改写回退目标。
+    // 不再起计时器，也不改写回退目标。inflight 是还没返回的预览数；applied 记录本次确认态里是否已有
+    // 预览生效（包括已经过期的那些）：窗口已经被改过，就必须有倒计时把它带回去。
     let active = false;
     let gen = 0;
+    let inflight = 0;
+    let applied = false;
     let timer = 0;
     let prev = 1;
     let left = 0;
@@ -80,6 +83,7 @@ export function createScaleUi(o) {
     function stop() {
         gen += 1;
         active = false;
+        applied = false;
         if (timer) timers.clearInterval(timer);
         timer = 0;
         left = 0;
@@ -91,6 +95,20 @@ export function createScaleUi(o) {
         const target = prev;
         stop();
         await bridge.setUiScale(target);
+    }
+
+    function begin() {
+        left = CONFIRM_SECONDS;
+        if (timer) timers.clearInterval(timer);
+        timer = timers.setInterval(() => {
+            left -= 1;
+            if (left <= 0) {
+                revert().catch(onError);
+            } else {
+                notify();
+            }
+        }, 1000);
+        notify();
     }
 
     return {
@@ -110,41 +128,40 @@ export function createScaleUi(o) {
 
         /**
          * 选档：立即预览，进入确认态并开始倒计时。回退目标是进入确认态之前的档位，确认态里再选档位不会改写它。
-         * 桥调用被拒（ok 为 false）或抛错时：从未起过倒计时就退出确认态；已经有倒计时在跑就让它继续，
-         * 此时窗口停在上一次成功预览的档位上，仍然会被倒计时或用户的取消带回去。
+         * 多次预览交叠时，最新一次生效就以它起倒计时；最新一次被拒或抛错时，只要有任何一次预览已经生效
+         * （包括已过期的），仍然起倒计时把窗口带回去；一次都没生效才退出确认态。
          * 返回 true 表示这次预览生效并起了倒计时；桥调用抛错时交给 onError，返回 false。
          */
         async preview(f) {
             if (!active) {
                 prev = getScale();
                 active = true;
+                applied = false;
             }
             const mine = ++gen;
-            let res;
+            inflight += 1;
+            let ok = false;
+            let failure = null;
             try {
-                res = await bridge.setUiScale(f);
+                const res = await bridge.setUiScale(f);
+                ok = !(res && res.ok === false);
             } catch (e) {
-                if (mine === gen && !timer) stop();
-                onError(e);
-                return false;
+                failure = e;
             }
-            if (mine !== gen) return false;
-            if (res && res.ok === false) {
-                if (!timer) stop();
-                return false;
+            inflight -= 1;
+            if (failure) onError(failure);
+            if (!active) return false; // 期间已经保存、取消或卸载
+            if (ok) applied = true;
+            if (ok && mine === gen) {
+                begin();
+                return true;
             }
-            left = CONFIRM_SECONDS;
-            if (timer) timers.clearInterval(timer);
-            timer = timers.setInterval(() => {
-                left -= 1;
-                if (left <= 0) {
-                    revert().catch(onError);
-                } else {
-                    notify();
-                }
-            }, 1000);
-            notify();
-            return true;
+            // 过期的预览，或最新一次失败：等所有预览都返回后，已经有预览生效就起倒计时，否则退出确认态
+            if (inflight === 0 && !timer) {
+                if (applied) begin();
+                else stop();
+            }
+            return false;
         },
 
         /** 保存：停倒计时，档位随实例 state 保存。预览还没返回时保存，会让那次预览返回后不再起倒计时。 */
