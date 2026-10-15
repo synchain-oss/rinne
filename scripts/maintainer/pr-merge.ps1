@@ -872,15 +872,19 @@ function Invoke-SelfTest {
         $sw.Stop()
         $quick = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', 'exit 3') -TimeoutSeconds 60 -AllowFail
         # 命令自己马上退出，却留下一个继承了输出管道、活 40 秒的子进程：读管道只再等一个有上限的时间
-        $linger = "Start-Process -FilePath '$([Environment]::ProcessPath)' -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 40' -NoNewWindow; exit 0"
+        $linger = "Start-Process -FilePath '$([Environment]::ProcessPath)' -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 40' -NoNewWindow; 'before-exit'; exit 0"
         $sw2 = [Diagnostics.Stopwatch]::StartNew()
         $orphan = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', $linger) -TimeoutSeconds 60 -AllowFail
         $sw2.Stop()
+        # 超时被结束的命令：结束前写出的输出也留着
+        $partial = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', "'partial-out'; Start-Sleep -Seconds 60") -TimeoutSeconds 3 -AllowFail
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Add-RinneCase $cases '外部命令超时：到点结束进程、判超时' $true ($slow.TimedOut -and $slow.Code -ne 0 -and $sw.Elapsed.TotalSeconds -lt 30)
         Add-RinneCase $cases '外部命令没超时：照常返回退出码' $false (-not ($quick.Code -eq 3 -and -not $quick.TimedOut))
         Add-RinneCase $cases ('外部命令退出后，留下的子进程握着管道也不无限等（{0:N0} 秒）' -f $sw2.Elapsed.TotalSeconds) $true (
             $orphan.Code -eq 0 -and -not $orphan.TimedOut -and $sw2.Elapsed.TotalSeconds -lt 30 -and $orphan.Err -match '不再等')
+        Add-RinneCase $cases '外部命令退出后没等到 EOF：已经读到的输出照样留着' $true ($orphan.Out -match 'before-exit')
+        Add-RinneCase $cases '外部命令超时：结束前写出的输出照样留着' $true ($partial.TimedOut -and $partial.Out -match 'partial-out')
 
         # 合并后构建：最后一道；只在其余判据都通过、没碰基础设施时跑；子进程看不到凭据与个人针；
         # 每个 PR 自己的 wt/tip-<n>，用前清理；整段持构建槽、构建本身不在 git 锁里；带超时

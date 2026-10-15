@@ -78,9 +78,9 @@ function Invoke-RinneExternal {
 }
 
 <#
-  带超时跑一个进程：输出异步读（免得管道写满卡住），到点 Kill 整棵进程树（构建会起编译器子进程）。
-  进程退出后读管道最多再等 DrainSeconds：它留下的常驻子进程（编译器的 PDB 服务、编译缓存的服务）继承了管道时，
-  EOF 要等它们退出才来，不设上限的话超时就形同虚设。等不到时用已经读到的输出，并在 Err 里注明。
+  带超时跑一个进程，到点 Kill 整棵进程树（构建会起编译器子进程）。两条输出流在本线程上轮询着读（免得管道写满卡住），
+  读到的随时可用。进程退出后读管道最多再等 DrainSeconds：它留下的常驻子进程（编译器的 PDB 服务、编译缓存的服务）
+  继承了管道时，EOF 要等它们退出才来，不设上限的话超时就形同虚设。等不到时用已经读到的输出，并在 Err 里注明。
 #>
 function Invoke-RinneTimed {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds, [int]$DrainSeconds = 10)
@@ -92,27 +92,50 @@ function Invoke-RinneTimed {
     if ($Cwd) { $psi.WorkingDirectory = $Cwd }
     $p = [System.Diagnostics.Process]::Start($psi)
     try {
-        $out = $p.StandardOutput.ReadToEndAsync()
-        $err = $p.StandardError.ReadToEndAsync()
-        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
-            # 恰好在这之间自己退出了，Kill 会抛错；照样按超时算
-            try { $p.Kill($true) } catch [InvalidOperationException] { }
-            $null = $p.WaitForExit(5000)
-            return @{ Code = -1; Out = (Read-RinneDrained $out $DrainSeconds).Text; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true }
+        $pumps = @((New-RinneStreamPump $p.StandardOutput), (New-RinneStreamPump $p.StandardError))
+        $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $timedOut = $false
+        while (-not $p.HasExited) {
+            foreach ($q in $pumps) { Step-RinneStreamPump $q }
+            if ([datetime]::UtcNow -ge $deadline) {
+                # 恰好在这之间自己退出了，Kill 会抛错；照样按超时算
+                try { $p.Kill($true) } catch [InvalidOperationException] { }
+                $null = $p.WaitForExit(5000)
+                $timedOut = $true
+                break
+            }
+            Start-Sleep -Milliseconds 50
         }
-        $o, $e = (Read-RinneDrained $out $DrainSeconds), (Read-RinneDrained $err $DrainSeconds)
-        $note = ($o.Done -and $e.Done) ? '' : "`n（进程已退出，留下的子进程还握着输出管道，$DrainSeconds 秒后不再等）"
-        @{ Code = $p.ExitCode; Out = $o.Text.TrimEnd(); Err = $e.Text + $note; TimedOut = $false }
+        $drainEnd = [datetime]::UtcNow.AddSeconds($DrainSeconds)
+        while (@($pumps | Where-Object { -not $_.Done }).Count -and [datetime]::UtcNow -lt $drainEnd) {
+            foreach ($q in $pumps) { Step-RinneStreamPump $q }
+            Start-Sleep -Milliseconds 50
+        }
+        $out, $err = "$($pumps[0].Text)", "$($pumps[1].Text)"
+        if ($timedOut) { return @{ Code = -1; Out = $out; Err = "超过 $TimeoutSeconds 秒，已结束整棵进程树"; TimedOut = $true } }
+        $note = @($pumps | Where-Object { -not $_.Done }).Count ? "`n（进程已退出，留下的子进程还握着输出管道，$DrainSeconds 秒后不再等）" : ''
+        @{ Code = $p.ExitCode; Out = $out.TrimEnd(); Err = $err + $note; TimedOut = $false }
     } finally {
         $p.Dispose()
     }
 }
 
-<# 异步读到的文本：最多等 Seconds 秒；没等到 EOF 时返回空串并标 Done = $false。 #>
-function Read-RinneDrained {
-    param([Parameter(Mandatory)][System.Threading.Tasks.Task[string]]$Task, [int]$Seconds)
-    if ($Task.Wait([TimeSpan]::FromSeconds($Seconds))) { return @{ Text = $Task.Result; Done = $true } }
-    @{ Text = ''; Done = $false }
+<# 一条输出流的读取器：同一时刻只挂一个 ReadAsync，由 Step-RinneStreamPump 在调用方线程上收结果；Text 是目前读到的全部。 #>
+function New-RinneStreamPump {
+    param([Parameter(Mandatory)][IO.StreamReader]$Reader)
+    [pscustomobject]@{ Reader = $Reader; Buffer = [char[]]::new(8192); Text = [Text.StringBuilder]::new(); Task = $null; Done = $false }
+}
+
+<# 把已经读完的块收进 Text，再挂下一次读；读到 EOF 或流出错时 Done。不阻塞。 #>
+function Step-RinneStreamPump {
+    param([Parameter(Mandatory)]$Pump)
+    while (-not $Pump.Done) {
+        if (-not $Pump.Task) { $Pump.Task = $Pump.Reader.ReadAsync($Pump.Buffer, 0, $Pump.Buffer.Length) }
+        if (-not $Pump.Task.IsCompleted) { return }
+        $n = if ($Pump.Task.IsCompletedSuccessfully) { $Pump.Task.Result } else { 0 }
+        $Pump.Task = $null
+        if ($n -le 0) { $Pump.Done = $true } else { $null = $Pump.Text.Append($Pump.Buffer, 0, $n) }
+    }
 }
 
 function Invoke-RinneGh {
