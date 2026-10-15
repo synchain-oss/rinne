@@ -142,14 +142,16 @@ export function createScaleUi(o) {
             inflight += 1;
             let ok = false;
             let failure = null;
+            let threw = false;
             try {
                 const res = await bridge.setUiScale(f);
                 ok = !(res && res.ok === false);
             } catch (e) {
                 failure = e;
+                threw = true;
             }
             inflight -= 1;
-            if (failure) onError(failure);
+            if (threw) onError(failure);
             if (!active) return false; // 期间已经保存、取消或卸载
             if (ok) applied = true;
             if (ok && mine === gen) {

@@ -284,6 +284,14 @@ export async function scaleUiCases(root = ROOT) {
         );
     }
     {
+        // 桥调用以 undefined 为原因 reject 时，onError 也必须被调用
+        const { ui, pending, errors } = deferredRig();
+        const p = ui.preview(1.5);
+        pending[0].reject(undefined);
+        await p;
+        add("桥调用无原因地 reject：仍交给 onError", false, errors.length === 1 && !ui.state().confirming);
+    }
+    {
         const { ui, pending, timers } = deferredRig();
         const a = ui.preview(1.5);
         const b = ui.preview(2);
