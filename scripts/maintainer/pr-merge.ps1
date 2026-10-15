@@ -398,9 +398,14 @@ function Get-CloneIntegrityTargets {
     if ($script:IntegrityTargets) { return $script:IntegrityTargets }
     $git = (Invoke-RinneGit @('rev-parse', '--path-format=absolute', '--git-common-dir')).Out.Trim()
     $hooks = (Invoke-RinneGit @('config', '--local', '--get', 'core.hooksPath') -AllowFail).Out.Trim()
-    # 用户级的 git 配置对主 clone 同样生效（--local 里没设的键都从这里取）
-    $xdg = $env:XDG_CONFIG_HOME ? $env:XDG_CONFIG_HOME : (Join-Path $HOME '.config')
-    $user = [ordered]@{ '~/.gitconfig' = (Join-Path $HOME '.gitconfig'); 'XDG 的 git/config' = (Join-Path $xdg 'git/config') }
+    # 用户级的 git 配置对主 clone 同样生效（--local 里没设的键都从这里取）。路径问 git 自己：它认 GIT_CONFIG_GLOBAL、
+    # Windows 上先看 %HOME% 再看 %USERPROFILE%、还有 XDG 的那一份；问不到（git 太旧）才按常见位置猜
+    $var = Invoke-RinneGit @('var', 'GIT_CONFIG_GLOBAL') -AllowFail
+    $files = if ($var.Code -eq 0 -and $var.Out.Trim()) { @($var.Out -split "`r?`n" | Where-Object { $_.Trim() }) }
+    else { @((Join-Path $HOME '.gitconfig'), (Join-Path ($env:XDG_CONFIG_HOME ? $env:XDG_CONFIG_HOME : (Join-Path $HOME '.config')) 'git/config')) }
+    $homeDir = ([IO.Path]::GetFullPath($HOME) -replace '\\', '/').TrimEnd('/')
+    $user = [ordered]@{}
+    foreach ($f in $files) { $user[((([IO.Path]::GetFullPath($f.Trim()) -replace '\\', '/') -ireplace "^$([regex]::Escape($homeDir))", '~'))] = $f.Trim() }
     [pscustomobject]@{ Root = (Get-RinneRepoRoot); Config = (Join-Path $git 'config'); UserConfigs = $user; Hooks = $hooks; Records = (Get-RecordsPath) }
 }
 
@@ -433,10 +438,10 @@ function Test-CloneIntegrity {
     $want = Join-Path $Targets.Root 'scripts/hooks'
     # 相对路径按各自工作树的根解析：在 wt/tip-<n> 里跑 git 时会指到 PR 树里的那一份，所以一律要求绝对路径
     if (-not $Targets.Hooks) { '主 clone 没有设 core.hooksPath（应指向主 clone 的 scripts/hooks）' }
-    elseif (-not [IO.Path]::IsPathRooted($Targets.Hooks)) { "core.hooksPath 必须是绝对路径（相对路径在 wt/tip-<n> 里会指到 PR 树里的 hooks）：$($Targets.Hooks)" }
+    elseif (-not [IO.Path]::IsPathFullyQualified($Targets.Hooks)) { "core.hooksPath 必须是绝对路径（相对路径在 wt/tip-<n> 里会指到 PR 树里的 hooks）：$($Targets.Hooks)" }
     elseif ((& $full $Targets.Hooks) -ine (& $full $want)) { "core.hooksPath 应指向主 clone 的 scripts/hooks，现在是 $($Targets.Hooks)" }
     if (-not $Targets.Records) { '主 clone 没有设 rinne.waivers（git config --local）' }
-    elseif (-not [IO.Path]::IsPathRooted($Targets.Records)) { "rinne.waivers 必须是绝对路径：$($Targets.Records)" }
+    elseif (-not [IO.Path]::IsPathFullyQualified($Targets.Records)) { "rinne.waivers 必须是绝对路径：$($Targets.Records)" }
     elseif (-not (Test-Path -LiteralPath $Targets.Records -PathType Leaf)) { "rinne.waivers 指向的记录文件不存在：$($Targets.Records)" }
     elseif ((& $under $Targets.Records $Targets.Root) -or (& $under $Targets.Records (Join-Path $WorkRoot 'wt'))) {
         "记录文件必须在主 clone 与 wt/ 之外：$($Targets.Records)"
@@ -739,6 +744,7 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '判据文件位置：hooksPath 指到别处' $true ((@(& $ti @{ Hooks = $tmp }) -match 'core\.hooksPath').Count -eq 1)
         Add-RinneCase $cases '判据文件位置：hooksPath 是相对路径' $true ((@(& $ti @{ Hooks = 'scripts/hooks' }) -match '绝对路径').Count -eq 1)
         Add-RinneCase $cases '判据文件位置：rinne.waivers 是相对路径' $true ((@(& $ti @{ Records = 'records.json' }) -match '绝对路径').Count -eq 1)
+        Add-RinneCase $cases '判据文件位置：rinne.waivers 是盘符相对或当前盘根的写法' $true ((@(& $ti @{ Records = 'C:records.json' }) -match '绝对路径').Count -eq 1 -and (@(& $ti @{ Records = '\records.json' }) -match '绝对路径').Count -eq 1)
         Add-RinneCase $cases '判据文件位置：没设 rinne.waivers' $true ((@(& $ti @{ Records = $null }) -match 'rinne\.waivers').Count -eq 1)
         Add-RinneCase $cases '判据文件位置：记录文件不存在' $true ((@(& $ti @{ Records = (Join-Path $tmp 'missing.json') }) -match '不存在').Count -eq 1)
         Set-Content -LiteralPath (Join-Path $tmp 'wt/records.json') -Value '{}'
