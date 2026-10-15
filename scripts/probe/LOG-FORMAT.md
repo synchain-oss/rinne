@@ -191,7 +191,7 @@
 **格观察**不带 A 编号、不阻断，`--json` 里是单独的 `observations` 键。它逐格给出类别 2 / 3 的本格证据，并把采到的数据算出来，对应计划里不在 A1 至 A9 内的几项，只观察不判定：
 
 - 同通道顺序：所有类别 1 的格里，按 `call_seq` 是 In 先于 Out 的回调占比（`order.in_first` / `order.pairs`）。
-- 旁路（`bypass-in`、`bypass-out`）：两端 `bypassed` 为 1 的块数，即走了 `processBlockBypassed` 的块；Output 的 `w` 按 `seq` 排序后相邻两块的停滞次数（相等）、回退次数（变小）与跳变次数（差为正却不等于上一块的 `n`）。
+- 旁路（`bypass-in`、`bypass-out`）：两端 `bypassed` 为 1 的块数，即走了 `processBlockBypassed` 的块；Output 的 `w` 按 `seq` 排序后相邻两块的停滞次数（相等且上一块的 `n` 不为 0；0 样本回调不推进写头）、回退次数（变小）与跳变次数（差为正却不等于上一块的 `n`）。
 - Smart（`smart`）：In 端块之间最长的回调间隙（ms）、重同步总次数（`rs` 之和，其中含 stall_resume，日志不区分原因，解读时要结合该格没有别的重同步来源）、`ping` 条数。
 - 错放（`misplaced-*`）：两端都有块时给成对数、In 先于 Out 的数、hostNs 相等的数和两端 `off` 的取值；只有一端有块写「无法判断」。
 
