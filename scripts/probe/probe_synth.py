@@ -390,7 +390,7 @@ def extra_cells():
     for lg in (dead_a, dead_b):
         lg.event(T_START + 10, "set_processing", 0)
     dup1 = pair("CB-07", "dup", blocks=False, pid=4820)
-    dup2 = pair("CB-07", "dup", blocks=False, pid=4821, tok=("a9b8", "c7d6"))
+    dup2 = pair("CB-07", "dup", blocks=False, pid=4820, tok=("a9b8", "c7d6"))
     for li_, lo_ in (dup1, dup2):
         li_.event(T_START + 20, "paired", lo_.pid, "A")
     undup = pair("CB-07", "dup", blocks=False, pid=4830)
@@ -398,13 +398,13 @@ def extra_cells():
         if r == "I" and k >= 20:
             row["m"] = 3
 
-    tp1, tp2, tp3 = (pair("CB-12", "twoproj", blocks=False, pid=4860 + n, tok=(f"d{n}01", f"d{n}02")) for n in range(3))
+    tp1, tp2, tp3 = (pair("CB-12", "twoproj", blocks=False, pid=4860, tok=(f"d{n}01", f"d{n}02")) for n in range(3))
     tp_ok = []
     for li_, lo_ in (tp1, tp2):
         li_.event(T_START + 20, "paired", lo_.pid, "A")
         tp_ok += [li_, lo_]
     bad_dup = pair("CB-07", "dup", blocks=False, pid=4890, tok=("a9b8", "c7d6"))
-    dup_good = pair("CB-07", "dup", blocks=False, pid=4891)
+    dup_good = pair("CB-07", "dup", blocks=False, pid=4890)
     dup_good[0].event(T_START + 20, "paired", dup_good[1].pid, "A")
     cat2_only = pair("CB-05", "deactivate", pid=4870)
     cat2_only[1].event(T_START + 10, "set_processing", 0)
@@ -415,7 +415,11 @@ def extra_cells():
         lg.event(T_START + 5, "track_props", "Track%201", "ff8800")
     names_b[0].event(T_START + 5, "track_props", "Track%202", "ff8800")
     names_b[1].event(T_START + 5, "track_props", "", "")  # 第二个实例没收到，第一个实例的好数据不能掩盖它
+    lone_out = pair("CB-12", "twoproj", blocks=False, pid=4860, tok=("d901", "d902"))[1]
+    two_bypass = [pair("CB-05", "bypass-out", pid=4895, tok=(f"f{n}01", f"f{n}02"), hook=lambda r, k, row: row.update(bypassed=1 if k >= 20 else 0)) for n in range(2)]
     return {
+        "cb12-twoproj-stray-out": (files_of(*tp_ok, lone_out), {"OBS": "INCOMPLETE"}),
+        "f1-cb05-bypass-dup": (files_of(*two_bypass[0], *two_bypass[1]), {"OBS": "INCOMPLETE"}),
         "cb12-twoproj-two-pairs": (files_of(*tp_ok), {"OBS": "PASS"}),
         "cb12-twoproj-unpaired": (files_of(*tp_ok, *tp3), {"OBS": "INCOMPLETE"}),
         "cb07-dup-one-bad": (files_of(*dup_good, *bad_dup), {"OBS": "INCOMPLETE"}),

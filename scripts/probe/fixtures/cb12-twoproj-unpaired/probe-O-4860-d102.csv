@@ -1,5 +1,5 @@
 rinne-probe-log,1
-H,I,vst3,cubase,win,x64,4862,900,d201,0123abcd
+H,O,vst3,cubase,win,x64,4860,900,d102,0123abcd
 E,999999500,prepare,48000,256
 C,999999900,CB-12,twoproj,-,na,48000
 S,1000000000,0,0,256,0,0

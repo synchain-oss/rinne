@@ -129,19 +129,19 @@
 | `CB-05` | `deactivate` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 set_processing（a 为 0）或 release 事件 |
 | `CB-05` | `disable-track` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 set_processing（a 为 0）或 release 事件 |
 | `CB-06` | `smart` | 2 各自证据 | 格观察 | 至少两条 ping 事件（前后各一次） |
-| `CB-07` | `dup` | 2 各自证据 | 格观察 | 每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid |
+| `CB-07` | `dup` | 2 各自证据 | 格观察 | 每个 In 实例都有 paired 事件（同一宿主里两端同 pid，所以不核对对端 pid） |
 | `CB-07` | `fxchain` | 3 只记录 | 格观察 | 只记录，不阻断 |
 | `CB-07` | `preset` | 3 只记录 | 格观察 | 只记录，不阻断 |
 | `CB-07` | `rename` | 2 各自证据 | A6 | 每个实例都收到非空轨道名 |
 | `CB-07` | `reopen` | 2 各自证据 | A9 | set_state 之后出现 paired |
-| `CB-07` | `undo` | 2 各自证据 | 格观察 | 每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid |
+| `CB-07` | `undo` | 2 各自证据 | 格观察 | 每个 In 实例都有 paired 事件（同一宿主里两端同 pid，所以不核对对端 pid） |
 | `CB-08` | `misplaced-order` | 2 各自证据 | 格观察 | 至少一端有记录；paired 有无见格观察 |
 | `CB-08` | `misplaced-post` | 2 各自证据 | 格观察 | 至少一端有记录；paired 有无见格观察 |
 | `CB-08` | `misplaced-track` | 2 各自证据 | 格观察 | 至少一端有记录；paired 有无见格观察 |
 | `CB-09` | `mono` | 1 成对满块 | A4 A7 | 两端各至少 32 块 |
 | `CB-10` | `bufchange` | 1 成对满块 | A4 | 两端各至少 32 块 |
 | `CB-11` | `constrain` | 1 成对满块 | A4 A7 | 两端各至少 32 块 |
-| `CB-12` | `twoproj` | 2 各自证据 | 格观察 | 按 paired 的对端 pid 逐对检查：每个 In 都配到本格内的 Out，每个 Out 都被配到 |
+| `CB-12` | `twoproj` | 2 各自证据 | 格观察 | 每个 In 实例都有 paired 事件，且 In 与 Out 实例数相等 |
 | `LU-01` | `-` | 3 只记录 | 格观察 | 只记录，不阻断 |
 | `LU-02` | `au-au` | 2 各自证据 | A5 | 同 pid、已配对、无 shm_denied |
 | `LU-02` | `au-vst3` | 2 各自证据 | A5 | 同 pid、已配对、无 shm_denied |

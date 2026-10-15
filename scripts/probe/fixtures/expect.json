@@ -159,10 +159,16 @@
   "cb07-dup-unpaired": {
     "OBS": "INCOMPLETE"
   },
+  "cb12-twoproj-stray-out": {
+    "OBS": "INCOMPLETE"
+  },
   "cb12-twoproj-two-pairs": {
     "OBS": "PASS"
   },
   "cb12-twoproj-unpaired": {
+    "OBS": "INCOMPLETE"
+  },
+  "f1-cb05-bypass-dup": {
     "OBS": "INCOMPLETE"
   },
   "f1-cb05-no-blocks": {},

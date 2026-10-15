@@ -106,7 +106,7 @@ def _r(cases, variants, cat, feeds, evidence):
 _STEADY = "两端各至少 32 块"
 _EXPORT = "导出比对行见 A3；块只查块长上限，不进 A7"
 _DEACT = "至少一端 32 块，且有 set_processing（a 为 0）或 release 事件"
-_PAIRED_EV = "每个 In 实例都有 paired 事件，指向本格内某个 Out 的 pid"
+_PAIRED_EV = "每个 In 实例都有 paired 事件（同一宿主里两端同 pid，所以不核对对端 pid）"
 _r("CB-01 LU-03", "steady", 1, "A1 A4 A7", _STEADY)
 _r("CB-02 LU-03", "toggle", 1, "A2 A4 A7", "两端各至少 32 块，每次切换后的窗口里至少 8 块")
 _r("CB-03", "guard-in guard-out guard-both", 1, "A1 A4 A7", _STEADY)
@@ -124,7 +124,7 @@ _r("CB-07 LU-06", "rename", 2, "A6", "每个实例都收到非空轨道名")
 _r("CB-07", "dup undo", 2, "格观察", _PAIRED_EV)
 _r("CB-07", "preset fxchain", 3, "格观察", "只记录，不阻断")
 _r("CB-08", "misplaced-order misplaced-track misplaced-post", 2, "格观察", "至少一端有记录；paired 有无见格观察")
-_r("CB-12", "twoproj", 2, "格观察", "按 paired 的对端 pid 逐对检查：每个 In 都配到本格内的 Out，每个 Out 都被配到")
+_r("CB-12", "twoproj", 2, "格观察", "每个 In 实例都有 paired 事件，且 In 与 Out 实例数相等")
 _r("LU-01 LU-08", "-", 3, "格观察", "只记录，不阻断")
 _r("LU-02", "au-au vst3-vst3 au-vst3", 2, "A5", "同 pid、已配对、无 shm_denied")
 _r("LU-07", "coreaudio", 2, "格观察", "有 backend 事件或任一事件，不要求块")
@@ -952,7 +952,7 @@ def freeze_f1(s, items, obs):
             missing.append(f"{case} 矩阵缺格：{shown}")
     if s.orphans:
         missing.append(f"有 {s.orphans} 个块不属于任何测试格")
-    f1_dups = [k for k in s.dups if k[0] in F1_CASES and is_cat1(k)]
+    f1_dups = [k for k in s.dups if k[0] in F1_CASES]  # s.dups 已排除允许多实例的 variant
     if f1_dups:
         missing.append(f"{len(f1_dups)} 个格同键重复记录")
     for case in F1_CASES:  # 格观察里本格证据缺失的格，所在 case 在 F1 里就是缺数据
@@ -978,11 +978,13 @@ def warnings_of(s):
     return out
 
 
-def _cell_evidence(key, cell):
+def _cell_evidence(s, key, cell):
     """类别 2 / 3 的格自己的证据。类别 2 一条都没有就是数据不全；类别 3 只留一条说明。返回 [(状态, 说明)]。"""
     v, segs = key[1], cell["I"] + cell["O"]
     label = key_label(key)
     cat = _rule(key)[0]
+    if cat == 2 and key in s.dups:  # 同键重采没挪走旧文件：证据不能在两份记录里各取所需
+        return [("INCOMPLETE", f"{label} 同键重复记录（In {len(cell['I'])}、Out {len(cell['O'])}），旧文件须挪走后重采")]
     if cat == 3:
         return [("NOTE", f"{label} 只记录：{sum(len(g.blocks) for g in segs)} 块、{sum(len(g.events) for g in segs)} 个事件")]
     if v not in ("deactivate", "disable-track", "bypass-in", "bypass-out", "smart", "dup", "undo", "twoproj",
@@ -1018,18 +1020,14 @@ def _cell_evidence(key, cell):
         if not any(g.blocks or g.events for g in segs):
             return [("INCOMPLETE", f"{label} 两端都没有记录")]
         return [("PASS", f"{label} 有记录，paired 事件 {sum(1 for e in evs if e['name'] == 'paired')} 条")]
-    # dup / undo / twoproj：逐个 In 实例检查，一个配好的实例不能掩盖没配好的
-    o_pids = {g.log.header["pid"] for g in cell["O"]}
+    # dup / undo / twoproj：逐个 In 实例检查，一个配好的实例不能掩盖没配好的。
+    # 同一个宿主里两端是同一个 pid，paired 事件的对端 pid 区分不了实例，所以只看有没有 paired，twoproj 另看实例数相等
     if not cell["I"]:
         return [("INCOMPLETE", f"{label} 没有 In 实例")]
-    reached, unpaired = set(), 0
-    for g in cell["I"]:
-        hit = {e["a"] for e in g.events + g.log.pre_events if e["name"] == "paired" and e["a"] in o_pids}
-        reached |= hit
-        unpaired += 0 if hit else 1
-    stray = len(o_pids - reached) if v == "twoproj" else 0
+    unpaired = sum(1 for g in cell["I"] if not any(e["name"] == "paired" for e in g.events + g.log.pre_events))
+    stray = abs(len(cell["I"]) - len(cell["O"])) if v == "twoproj" else 0
     if unpaired or stray:
-        return [("INCOMPLETE", f"{label} 有 {unpaired} 个 In 实例缺指向本格 Out 的 paired 事件，{stray} 个 Out 没被任何 In 配到")]
+        return [("INCOMPLETE", f"{label} 有 {unpaired} 个 In 实例缺 paired 事件，In 与 Out 实例数相差 {stray}")]
     return [("PASS", f"{label} {len(cell['I'])} 个 In 实例都已配对")]
 
 
@@ -1051,7 +1049,7 @@ def observations(s):
                 pairs_total += len(pr)
                 first_total += sum(1 for a, _ in pr if a[1] == "I")
         else:
-            cells += [{"case": key[0], "cell": label, "state": st, "note": n} for st, n in _cell_evidence(key, cell)]
+            cells += [{"case": key[0], "cell": label, "state": st, "note": n} for st, n in _cell_evidence(s, key, cell)]
         v = key[1]
         if v in ("bypass-in", "bypass-out"):
             stalls = regress = 0
@@ -1532,6 +1530,8 @@ def _self_test(tmp):
     res = analyze(os.path.join(tmp, "f1-cb05-no-blocks"), salt)
     check("CB-05 只有 C 行时 F1 指出无数据", (not res["f1"]["ok"]) and "CB-05 无数据" in res["f1"]["missing"], True)
     check("A1-A9 过了但 F1 没满足时退出码是 3", _cli([os.path.join(tmp, "f1-missing-cell")])[0] == 3, True)
+    res = analyze(os.path.join(tmp, "f1-cb05-bypass-dup"), salt)
+    check("CB-05 同键重采两对时 F1 不满足且指出重复", (not res["f1"]["ok"]) and any("同键重复" in m for m in res["f1"]["missing"]), True)
     res = analyze(os.path.join(tmp, "orphan-blocks"), salt)
     check("块早于第一个 C 行时给出提示", any("第一个 C 行" in w for w in res["warnings"]) and not res["f1"]["ok"], True)
     return {"ok": not lines, "bad": bad, "good": good, "lines": lines}
