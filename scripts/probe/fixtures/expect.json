@@ -1,0 +1,83 @@
+{
+  "a1-fail": {
+    "A1": "FAIL"
+  },
+  "a1-incomplete": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-pass": {
+    "A1": "PASS"
+  },
+  "a2-fail": {
+    "A2": "FAIL"
+  },
+  "a2-incomplete": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-pass": {
+    "A2": "PASS"
+  },
+  "a3-fail": {
+    "A3": "FAIL"
+  },
+  "a3-incomplete": {
+    "A3": "INCOMPLETE"
+  },
+  "a3-pass": {
+    "A3": "PASS"
+  },
+  "a4-fail": {
+    "A4": "FAIL"
+  },
+  "a4-incomplete": {
+    "A4": "INCOMPLETE"
+  },
+  "a4-pass": {
+    "A4": "PASS"
+  },
+  "a5-fail": {
+    "A5": "FAIL"
+  },
+  "a5-incomplete": {
+    "A5": "INCOMPLETE"
+  },
+  "a5-pass": {
+    "A5": "PASS"
+  },
+  "a6-fail": {
+    "A6": "FAIL"
+  },
+  "a6-incomplete": {
+    "A6": "INCOMPLETE"
+  },
+  "a6-pass": {
+    "A6": "PASS"
+  },
+  "a7-fail": {
+    "A7": "FAIL"
+  },
+  "a7-incomplete": {
+    "A7": "INCOMPLETE"
+  },
+  "a7-pass": {
+    "A7": "PASS"
+  },
+  "a8-fail": {
+    "A8": "FAIL"
+  },
+  "a8-incomplete": {
+    "A8": "INCOMPLETE"
+  },
+  "a8-pass": {
+    "A8": "PASS"
+  },
+  "a9-fail": {
+    "A9": "FAIL"
+  },
+  "a9-incomplete": {
+    "A9": "INCOMPLETE"
+  },
+  "a9-pass": {
+    "A9": "PASS"
+  }
+}
