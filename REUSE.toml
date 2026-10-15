@@ -23,7 +23,7 @@ SPDX-License-Identifier = "GPL-3.0-or-later"
 # --- section:juce-web-js ---
 # JUCE 自带的前端辅助脚本，随 JUCE 的许可，不加 Synchain 版权。
 [[annotations]]
-path = "web/js/juce/**"
+path = ["web/js/juce/index.js", "web/js/juce/check_native_interop.js"]
 precedence = "override"
 SPDX-FileCopyrightText = "Raw Material Software Limited"
 SPDX-License-Identifier = "AGPL-3.0-only"
@@ -34,6 +34,30 @@ SPDX-License-Identifier = "AGPL-3.0-only"
 # --- section:fonts ---
 # 字体逐文件登记 OFL-1.1，版权行与字体 name 表 nameID 0 逐字一致，不用目录通配：
 # 同目录的说明文件是本仓自己写的，归兜底块。字体入库时每个文件在此加一个块。
+
+[[annotations]]
+path = "web/fonts/SpaceGrotesk.woff2"
+precedence = "override"
+SPDX-FileCopyrightText = "2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "web/fonts/RinneSans.woff2"
+precedence = "override"
+SPDX-FileCopyrightText = "2019 IBM Corp. All rights reserved."
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "web/fonts/RinneMono.woff2"
+precedence = "override"
+SPDX-FileCopyrightText = "2017 IBM Corp. All rights reserved."
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "web/fonts/NotoSansSC.woff2"
+precedence = "override"
+SPDX-FileCopyrightText = "2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'."
+SPDX-License-Identifier = "OFL-1.1"
 
 # --- section:third-party-notices ---
 # third_party/notices/ 下的上游许可声明原文，每份一个 precedence = "override" 的块：
