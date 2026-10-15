@@ -16,6 +16,13 @@ clang-format==18.1.8 \
     --hash=sha256:065ddb7fdd0cb329976115fa03500dd560d9753dd50c25a269776648e6e6bf35 \
     --hash=sha256:2de122b8aa78ba49e326f974131caab2c79f4ae877c227cd4e3e5d82a98d21e5 \
     --hash=sha256:6ca6768270e291495174faa6d8c082aa0181722b29ef8e36558b397069fa4a2d
+# 字体检查（scripts/check-font-*.py）：fontTools 读 woff2 的 cmap 与 name 表，brotli 解压 woff2。
+# docs-truth 只装这两条（见 format.yml），不装 reuse 那一大串。
+fonttools==4.67.0 \
+    --hash=sha256:4304f03ed7f4ba000a8dcc941ad854bfa52e2f3b6112b8f099b6f431cf98e701
+brotli==1.2.0 \
+    --hash=sha256:ef87b8ab2704da227e83a246356a2b179ef826f550f794b2c52cddb4efbd0196 \
+    --hash=sha256:072e7624b1fc4d601036ab3f4f27942ef772887e876beff0301d261210bca97f
 reuse[charset-normalizer]==6.2.0 \
     --hash=sha256:4feae057a2334c9a513e6933cdb9be819d8b822f3b5b435a36138bd218897d23
 # 以下是 reuse 的依赖

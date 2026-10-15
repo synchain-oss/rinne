@@ -29,6 +29,12 @@ IBM Plex 的保留字体名是 "Plex"。子集化属于 Modified Version，按 O
 4. ASCII 可打印字符、Latin-1 补充、拉丁扩展 A；
 5. 兜底字符：弯引号、破折号、省略号、窄不换行空格、箭头、数学符号、中日韩标点、全角形式。
 
+汉字只覆盖上面的集合：GB 2312 一级汉字是通用规范汉字一级 3500 字的近似（3755 字，覆盖绝大部分常用字），
+不是它的精确超集。集合之外的字（例如用户的轨道名或预设名里的生僻字）不会出方块：三条字体栈在 Noto Sans SC 之后
+依次回退到 `-apple-system`、`"PingFang SC"`、`system-ui`、`"Segoe UI"`、`"Microsoft YaHei"`，即宿主系统自带的中文字体
+（Rinne Mono 一栈在 Noto 之后是 `ui-monospace`、`"Cascadia Code"`、`Consolas`、`monospace`，等宽字体里没有的汉字由系统再回退），
+所以回退显示的是系统字体的字形，字重和字形风格与内嵌字体略有差异。
+
 Noto Sans SC 自己没有的字符（例如拉丁扩展 A 里的一部分）由前面的拉丁字体提供，三条字体栈都是「拉丁族、Noto Sans SC、系统字体」。
 
 法语排版用窄不换行空格 U+202F。Space Grotesk、Rinne Mono 与 Noto Sans SC 没有这个字形，

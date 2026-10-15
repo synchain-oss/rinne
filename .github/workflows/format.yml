@@ -78,6 +78,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/actionlint"
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/actionlint" actionlint
           echo "RINNE_ACTIONLINT=$RUNNER_TEMP/actionlint/actionlint" >> "$GITHUB_ENV"
+      - name: Install pinned font tools (fontTools, brotli)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/py"
+          # 只取 requirements-tools.txt 里 fonttools 与 brotli 两条（版本行加上以 \ 续接的哈希行），按哈希装，只收 wheel
+          awk '/^(fonttools|brotli)==/{p=1} p{print; if (substr($0, length($0)) != "\\") p=0}' requirements-tools.txt \
+            > "$RUNNER_TEMP/font-tools.txt"
+          "$RUNNER_TEMP/py/bin/pip" install --disable-pip-version-check -q --require-hashes --no-deps --only-binary=:all: \
+            -r "$RUNNER_TEMP/font-tools.txt"
+          echo "RINNE_PYTHON=$RUNNER_TEMP/py/bin/python" >> "$GITHUB_ENV"
       - name: Self-test
         run: node scripts/run-checks.mjs --group docs --self-test
       - name: Docs truth
