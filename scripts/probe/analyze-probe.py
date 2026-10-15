@@ -1092,7 +1092,7 @@ def observations(s):
                     if b["seq"] != a["seq"] + 1:
                         continue
                     d = b["w"] - a["w"]
-                    stalls += d == 0
+                    stalls += d == 0 and a["n"] != 0  # 0 样本回调不推进写头，下一块的 w 本来就相等
                     regress += d < 0
                     jumps += d > 0 and d != a["n"]  # w 是累计帧数，相邻差应等于上一块的 n
             byp = {r: sum(b["bypassed"] for g in segs if g.role == r for b in g.blocks) for r in ("I", "O")}

@@ -331,7 +331,13 @@ def obs_fixtures():
             row["mono_ns"] += 1_200_000_000  # 回调中间断了 1.2 s
 
     steady = pair("CB-01", "steady", 256, "low", pid=4900)
-    bypass = pair("CB-05", "bypass-out", hook=byp, pid=4901)
+    def byp_zero(r, k, row):
+        byp(r, k, row)
+        if r == "O":  # 第 10 块是 0 样本回调：不推进写头，之后的 w 整体少前进一块
+            row["n"] = 0 if k == 10 else 256
+            row["w"] = 4800 + (k - (1 if k >= 11 else 0)) * 256
+
+    bypass = pair("CB-05", "bypass-out", hook=byp_zero, pid=4901)
     smart = pair("CB-06", "smart", pid=4902)
     for t in (1000, 2000):
         smart[0].event(T_START + t, "ping", 9600)
