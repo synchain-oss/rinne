@@ -17,7 +17,9 @@ clang-format==18.1.8 \
     --hash=sha256:2de122b8aa78ba49e326f974131caab2c79f4ae877c227cd4e3e5d82a98d21e5 \
     --hash=sha256:6ca6768270e291495174faa6d8c082aa0181722b29ef8e36558b397069fa4a2d
 # 字体检查（scripts/check-font-*.py）：fontTools 读 woff2 的 cmap 与 name 表，brotli 解压 woff2。
-# docs-truth 只装这两条（见 format.yml），不装 reuse 那一大串。
+# docs-truth 只装这两条（见 format.yml）；compliance 与本机 bootstrap 整份安装，所以也会装它们。
+# fonttools 是通用 wheel；brotli 没有通用 wheel，两个哈希各对应一个平台：
+# ef87b8ab… 是 cp310 win_amd64（本机），072e7624… 是 cp312 manylinux x86_64（CI）。升级时两个平台都要核对。
 fonttools==4.67.0 \
     --hash=sha256:4304f03ed7f4ba000a8dcc941ad854bfa52e2f3b6112b8f099b6f431cf98e701
 brotli==1.2.0 \
