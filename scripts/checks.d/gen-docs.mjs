@@ -104,6 +104,18 @@ export async function selfTest(root = ROOT) {
             (p) => p.some((x) => x.includes("reviewedBy")),
         ],
         [
+            "frReview 标 reviewed 但确认链接不是 https",
+            true,
+            (c) =>
+                c.edit(I18N_FILE, (t) =>
+                    reviewed(zhHashes(loadSource(c.dir)).combined)(t).replace(
+                        "https://example.com/x",
+                        "http://example.com/x",
+                    ),
+                ),
+            (p) => p.some((x) => x.includes("approvalUrl")),
+        ],
+        [
             "标记拼错",
             true,
             (c) => c.edit("README.md", swap("gen:hard-rules:en", "gen:hard-rule:en")),
