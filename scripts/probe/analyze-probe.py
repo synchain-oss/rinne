@@ -113,8 +113,11 @@ _r("CB-03", "guard-in guard-out guard-both", 1, "A1 A4 A7", _STEADY)
 _r("CB-09", "mono", 1, "A4 A7", _STEADY)
 _r("CB-11", "constrain", 1, "A4 A7", _STEADY)
 _r("CB-10", "bufchange", 1, "A4", _STEADY)
-_r("CB-04", "export-rt export-offline dop freeze rip", 2, "A3 A4", _EXPORT)
-_r("LU-04", "export-rt export-offline bounce freeze", 2, "A3 A4", _EXPORT)
+_CLONE = "至少一个实例有块或事件；格观察列出实例数（克隆实例就看这个）"
+_r("CB-04", "export-rt export-offline dop", 2, "A3 A4", _EXPORT)
+_r("LU-04", "export-rt export-offline bounce", 2, "A3 A4", _EXPORT)
+_r("CB-04 LU-04", "freeze", 2, "A4 格观察", _CLONE)
+_r("CB-04", "rip", 2, "A4 格观察", _CLONE)
 _r("CB-05 LU-05", "bypass-in bypass-out", 2, "格观察", "至少一端 32 块，且有 bypassed 为 1 的块")
 _r("CB-05 LU-05", "deactivate", 2, "格观察", _DEACT)
 _r("CB-05", "disable-track", 2, "格观察", _DEACT)
@@ -147,7 +150,14 @@ MATRIX = {
     "CB-01": [("steady", b, g) for b in (64, 256, 1024) for g in ("off", "low", "normal", "high")],
     "LU-03": [("steady", b, "na") for b in (64, 512, 2048)],
 }
-LIMITS = {"buf": 65536, "sr": 768000, "block": 1 << 20, "d": 1 << 31, "pid": (1 << 32) - 1, "name_bytes": 200}
+LIMITS = {
+    "buf": 65536, "sr": 768000, "block": 1 << 20, "d": 1 << 31, "pid": (1 << 32) - 1, "name_bytes": 200,
+    "sample_pos": 1 << 40,
+}  # fmt: skip
+F1_VARIANTS = {  # F1 所列 case 里，这些 variant 各至少要有一格得出本格证据（dop 是可选项，不强制）
+    "CB-05": ("bypass-out", "bypass-in", "deactivate", "disable-track"),
+    "CB-04": ("rip", "freeze"),
+}
 A6_CASES = ("CB-07", "LU-06")
 A9_CASES = ("CB-07", "LU-09")
 F1_CASES = ("CB-01", "CB-02", "CB-04", "CB-05", "LU-02", "LU-03", "LU-04")
@@ -181,6 +191,7 @@ SPEC = {  # noqa: E501
     },
     "event_args": {k: list(v) for k, v in EVENTS.items()},
     "limits": LIMITS,
+    "f1_variants": {k: list(v) for k, v in F1_VARIANTS.items()},
     "thresholds": {
         "min_steady_blocks": MIN_STEADY_BLOCKS, "min_toggles": MIN_TOGGLES, "min_slice_blocks": MIN_SLICE_BLOCKS,
         "slice_ms": SLICE_NS // 1_000_000, "residual_limit_dbfs": RESIDUAL_LIMIT_DB, "stall_ms": STALL_NS // 1_000_000,
@@ -340,6 +351,16 @@ def _ub(hi):
     return f
 
 
+def _sb(hi):
+    def f(s):
+        v = _sint(s)
+        if abs(v) > hi:
+            raise ValueError
+        return v
+
+    return f
+
+
 def _buf(s):
     return s if s == "-" else _ub(LIMITS["buf"])(s)
 
@@ -360,7 +381,7 @@ ROW_VALIDATORS = {
     "B": [
         _uint, _uint, _enum("I", "O"), _ub(LIMITS["block"]), _ub(LIMITS["block"]), _uint, lambda s: int(V_BOOL(s)),
         lambda s: int(V_BOOL(s)), lambda s: int(V_BOOL(s)), lambda s: int(V_BOOL(s)), _uint, _re(r"^[0-9a-f]{8}$"),
-        _sint, _uint, _sint, _uint, _ub(LIMITS["d"]),
+        _sb(LIMITS["sample_pos"]), _ub(LIMITS["sample_pos"]), _sb(LIMITS["sample_pos"]), _uint, _ub(LIMITS["d"]),
     ],
     "S": [_uint] * 6,
     "Z": [_uint] * 3,
@@ -789,10 +810,11 @@ def judge_a6(s, salt=b"x"):
         for g in segs:
             props = [e for e in g.events if e["name"] == "track_props"]
             last.append(max(props, key=lambda e: e["t_ns"]) if props else None)
-        if not any(last):
-            continue
         cover.append(key[0])
         label = key_label(key)
+        if not any(last):
+            parts.append(("INCOMPLETE", f"{label} 没有任何 track_props 事件（契约要求每个 C 行之后补写一条快照）"))
+            continue
         # 逐实例检查：一个好实例不能掩盖坏实例
         empty = sum(1 for e in last if e is not None and not e["a"])
         if empty:
@@ -955,6 +977,10 @@ def freeze_f1(s, items, obs):
     f1_dups = [k for k in s.dups if k[0] in F1_CASES]  # s.dups 已排除允许多实例的 variant
     if f1_dups:
         missing.append(f"{len(f1_dups)} 个格同键重复记录")
+    for case, variants in F1_VARIANTS.items():
+        for v in variants:
+            if not any(c["case"] == case and c["variant"] == v and c["state"] == "PASS" for c in obs["cells"]):
+                missing.append(f"{case} 缺 {v} 格的本格证据")
     for case in F1_CASES:  # 格观察里本格证据缺失的格，所在 case 在 F1 里就是缺数据
         if any(c["state"] == "INCOMPLETE" and c["case"] == case for c in obs["cells"]):
             missing.append(f"{case} 格观察数据不全")
@@ -988,7 +1014,7 @@ def _cell_evidence(s, key, cell):
     if cat == 3:
         return [("NOTE", f"{label} 只记录：{sum(len(g.blocks) for g in segs)} 块、{sum(len(g.events) for g in segs)} 个事件")]
     if v not in ("deactivate", "disable-track", "bypass-in", "bypass-out", "smart", "dup", "undo", "twoproj",
-                 "coreaudio") and not v.startswith("misplaced-"):  # fmt: skip
+                 "coreaudio", "rip", "freeze") and not v.startswith("misplaced-"):  # fmt: skip
         return []  # 其余格的证据由 A3、A5、A6、A9 各自下结论
     if any(g.gaps for g in segs):
         return [("INCOMPLETE", f"{label} 序号缺口")]
@@ -1012,6 +1038,10 @@ def _cell_evidence(s, key, cell):
         if pings < 2:
             return [("INCOMPLETE", f"{label} 只有 {pings} 条 ping，前后各一次需要 2 条")]
         return [("PASS", f"{label} ping {pings} 条")]
+    if v in ("rip", "freeze"):
+        if not any(g.blocks or g.events for g in segs):
+            return [("INCOMPLETE", f"{label} 两端都没有记录")]
+        return [("PASS", f"{label} 涉及 {len({id(g.log) for g in segs})} 个实例日志")]
     if v == "coreaudio":
         if not evs:
             return [("INCOMPLETE", f"{label} 没有任何事件")]
@@ -1049,16 +1079,24 @@ def observations(s):
                 pairs_total += len(pr)
                 first_total += sum(1 for a, _ in pr if a[1] == "I")
         else:
-            cells += [{"case": key[0], "cell": label, "state": st, "note": n} for st, n in _cell_evidence(s, key, cell)]
+            cells += [
+                {"case": key[0], "variant": key[1], "cell": label, "state": st, "note": n}
+                for st, n in _cell_evidence(s, key, cell)
+            ]
         v = key[1]
         if v in ("bypass-in", "bypass-out"):
-            stalls = regress = 0
+            stalls = regress = jumps = 0
             for g in cell["O"]:
-                w = [b["w"] for b in sorted(g.blocks, key=lambda b: b["seq"])]
-                stalls += sum(1 for x, y in zip(w, w[1:]) if y == x)
-                regress += sum(1 for x, y in zip(w, w[1:]) if y < x)
+                bl = sorted(g.blocks, key=lambda b: b["seq"])
+                for a, b in zip(bl, bl[1:]):
+                    if b["seq"] != a["seq"] + 1:
+                        continue
+                    d = b["w"] - a["w"]
+                    stalls += d == 0
+                    regress += d < 0
+                    jumps += d > 0 and d != a["n"]  # w 是累计帧数，相邻差应等于上一块的 n
             byp = {r: sum(b["bypassed"] for g in segs if g.role == r for b in g.blocks) for r in ("I", "O")}
-            bypass.append({"cell": label, "bypassed_blocks": byp, "o_w_stalls": stalls, "o_w_regress": regress})
+            bypass.append({"cell": label, "bypassed_blocks": byp, "o_w_stalls": stalls, "o_w_regress": regress, "o_w_jumps": jumps})
         elif v == "smart":
             blocks = [b for g in cell["I"] for b in g.blocks]
             smart.append({
@@ -1093,7 +1131,7 @@ def render_observations(obs):
         out.append(f"- [{VERDICT_ZH.get(c['state'], '说明')}] {c['note']}")
     for b in obs["bypass"]:
         out.append(f"- 旁路 {b['cell']}：旁路块 In {b['bypassed_blocks']['I']}、Out {b['bypassed_blocks']['O']}；"
-                   f"Out 的 w 停滞 {b['o_w_stalls']} 次、回退 {b['o_w_regress']} 次")  # fmt: skip
+                   f"Out 的 w 停滞 {b['o_w_stalls']} 次、回退 {b['o_w_regress']} 次、跳变 {b['o_w_jumps']} 次（相邻差不等于上一块的 n）")  # fmt: skip
     for m in obs["smart"]:
         out.append(f"- Smart {m['cell']}：最长回调间隙 {m['max_gap_ms']} ms，重同步 {m['resync_total']} 次（含 stall_resume），ping {m['pings']} 条")
     for m in obs["misplaced"]:
@@ -1341,6 +1379,8 @@ def _mutations_of(text):
     yield "H 行 pid 含路径", edit(1, 6, "x:" + "\\" + "dir")
     yield "case 与 variant 的组合不在表内", edit(c, 3, "deactivate")
     yield "buf 超上界", edit(c, 4, "99999999")
+    yield "off 超上界", edit(b, 15, "9999999999999999")
+    yield "w 超上界", edit(b, 14, "9999999999999999")
     yield "pid 超上界", edit(1, 6, "99999999999")
     yield "n 超上界", edit(b, 4, "99999999")
 
@@ -1516,12 +1556,12 @@ def _self_test(tmp):
     # 4b. 格观察的数字：正常值与异常值各一组
     ob = analyze(os.path.join(tmp, "obs-normal"), salt)["observations"]
     check("正常：同通道顺序全是 In 先", ob["order"] == {"pairs": 40, "in_first": 40}, False)
-    check("正常：旁路块与 w 连续", ob["bypass"][0]["bypassed_blocks"] == {"I": 20, "O": 20} and ob["bypass"][0]["o_w_stalls"] == 0 and ob["bypass"][0]["o_w_regress"] == 0, False)
+    check("正常：旁路块与 w 连续", ob["bypass"][0]["bypassed_blocks"] == {"I": 20, "O": 20} and (ob["bypass"][0]["o_w_stalls"], ob["bypass"][0]["o_w_regress"], ob["bypass"][0]["o_w_jumps"]) == (0, 0, 0), False)
     check("正常：Smart 间隙小、ping 两条", ob["smart"][0]["max_gap_ms"] < 10 and ob["smart"][0]["pings"] == 2, False)
     check("正常：错放两端都在时给先后与 off", ob["misplaced"][0]["verdict"] == "两端都在" and ob["misplaced"][0]["in_first"] == 0 and ob["misplaced"][0]["pairs"] == 40 and ob["misplaced"][0]["off_in"] == [480], False)
     ob = analyze(os.path.join(tmp, "obs-abnormal"), salt)["observations"]
     check("异常：Out 先于 In 的回调被数出来", ob["order"] == {"pairs": 40, "in_first": 30}, True)
-    check("异常：w 停滞 3 次、回退 1 次", ob["bypass"][0]["o_w_stalls"] == 3 and ob["bypass"][0]["o_w_regress"] == 1, True)
+    check("异常：w 停滞 3 次、回退 1 次、跳变 2 次", (ob["bypass"][0]["o_w_stalls"], ob["bypass"][0]["o_w_regress"], ob["bypass"][0]["o_w_jumps"]) == (3, 1, 2), True)
     check("异常：Smart 最长间隙大于 1 s 且 ping 不足", ob["smart"][0]["max_gap_ms"] >= 1200 and ob["status"] == "INCOMPLETE", True)
     check("异常：错放只有一端时写无法判断", ob["misplaced"][0]["verdict"] == "无法判断", True)
     # 5. F1：缺矩阵格、块早于第一个 C 行都要被指出
@@ -1532,6 +1572,9 @@ def _self_test(tmp):
     check("A1-A9 过了但 F1 没满足时退出码是 3", _cli([os.path.join(tmp, "f1-missing-cell")])[0] == 3, True)
     res = analyze(os.path.join(tmp, "f1-cb05-bypass-dup"), salt)
     check("CB-05 同键重采两对时 F1 不满足且指出重复", (not res["f1"]["ok"]) and any("同键重复" in m for m in res["f1"]["missing"]), True)
+    res = analyze(os.path.join(tmp, "f1-cb04-no-rip"), salt)
+    check("CB-04 缺 rip 时 F1 点名", (not res["f1"]["ok"]) and any("CB-04 缺 rip" in m for m in res["f1"]["missing"]), True)
+    check("同键重复挡 F1 时退出码是 3", _cli([os.path.join(tmp, "f1-cb05-bypass-dup")])[0] == 3, True)
     res = analyze(os.path.join(tmp, "orphan-blocks"), salt)
     check("块早于第一个 C 行时给出提示", any("第一个 C 行" in w for w in res["warnings"]) and not res["f1"]["ok"], True)
     return {"ok": not lines, "bad": bad, "good": good, "lines": lines}

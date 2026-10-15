@@ -109,8 +109,15 @@ export function docProblems(spec, doc) {
         d: `不超过 ${L.d}`,
         pid: `不超过 ${L.pid}`,
         name_bytes: `编码前至多 ${L.name_bytes} 字节`,
+        sample_pos: `绝对值都不超过 ${L.sample_pos}`,
     };
     for (const [k, phrase] of Object.entries(limitPhrases)) need(`上界 ${k}`, phrase);
+    // F1 的 variant 覆盖：每个 case 一行「- `case`：`variant` ……」，列出的 variant 与顺序都要一致
+    for (const [c, vs] of Object.entries(spec.f1_variants)) {
+        const row = lines.find((l) => l.startsWith(`- ${tick(c)}：`)) ?? "";
+        const got = [...row.matchAll(/`([^`]+)`/g)].map((x) => x[1]).slice(1);
+        if (got.join(",") !== vs.join(",")) missing.push(`F1 的 variant 覆盖：${c} 应为 ${vs.join(" ")}`);
+    }
     for (const code of Object.keys(spec.exit_codes)) need("退出码", `| ${code} |`);
     return missing;
 }
@@ -174,7 +181,16 @@ export default {
                 stall_ms: 5000,
                 residual_limit_dbfs: -120,
             },
-            limits: { buf: 65536, sr: 768000, block: 1048576, d: 2147483648, pid: 4294967295, name_bytes: 200 },
+            limits: {
+                buf: 65536,
+                sr: 768000,
+                block: 1048576,
+                d: 2147483648,
+                pid: 4294967295,
+                name_bytes: 200,
+                sample_pos: 1099511627776,
+            },
+            f1_variants: { "CB-05": ["bypass-out", "bypass-in"] },
             exit_codes: { 0: "ok", 3: "incomplete" },
         };
         const full = [
@@ -188,7 +204,8 @@ export default {
             "| A2 | 切换：2 s 内，每个窗口至少 8 块，至少 10 次切换 |",
             "| A3 | 导出：不高于 -120 dBFS |",
             "| A8 | 稳定：摘要间隔不超过 5 s |",
-            "不超过 65536 不超过 768000 不超过 1048576 不超过 2147483648 不超过 4294967295 编码前至多 200 字节",
+            "不超过 65536 不超过 768000 不超过 1048576 不超过 2147483648 不超过 4294967295 编码前至多 200 字节 绝对值都不超过 1099511627776",
+            "- `CB-05`：`bypass-out` `bypass-in`",
             "| 0 | 全过 |",
             "| 3 | 数据不全 |",
         ].join("\n");
@@ -219,6 +236,16 @@ export default {
                     .length > 0,
             ],
             ["文档里规则表的类别写错", true, docProblems(spec, full.replace("1 成对满块", "2 各自证据")).length > 0],
+            [
+                "F1 的 variant 覆盖写漏一个",
+                true,
+                docProblems(
+                    spec,
+                    full
+                        .replace("`bypass-in`\n", "\n")
+                        .replace("- `CB-05`：`bypass-out` `bypass-in`", "- `CB-05`：`bypass-out`"),
+                ).length > 0,
+            ],
             ["文档缺阈值", true, docProblems(spec, full.replace("-120 dBFS", "")).length > 0],
             ["文档缺取值上界", true, docProblems(spec, full.replace("不超过 65536", "")).length > 0],
             ["文档缺退出码", true, docProblems(spec, full.replace("| 3 | 数据不全 |", "")).length > 0],

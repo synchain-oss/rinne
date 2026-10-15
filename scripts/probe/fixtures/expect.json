@@ -56,6 +56,9 @@
   "a4-incomplete": {
     "A4": "INCOMPLETE"
   },
+  "a4-incomplete-cat2-gap": {
+    "A4": "INCOMPLETE"
+  },
   "a4-incomplete-fewblocks": {
     "A4": "INCOMPLETE"
   },
@@ -93,6 +96,9 @@
   "a6-incomplete": {
     "A6": "INCOMPLETE"
   },
+  "a6-incomplete-one-cell-missing": {
+    "A6": "INCOMPLETE"
+  },
   "a6-pass": {
     "A6": "PASS"
   },
@@ -106,6 +112,9 @@
     "A7": "INCOMPLETE"
   },
   "a7-incomplete-callseq": {
+    "A7": "INCOMPLETE"
+  },
+  "a7-incomplete-cat2-full": {
     "A7": "INCOMPLETE"
   },
   "a7-incomplete-fewplaying": {
@@ -168,6 +177,7 @@
   "cb12-twoproj-unpaired": {
     "OBS": "INCOMPLETE"
   },
+  "f1-cb04-no-rip": {},
   "f1-cb05-bypass-dup": {
     "OBS": "INCOMPLETE"
   },

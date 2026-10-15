@@ -273,7 +273,7 @@ SCENARIOS = {
 }  # fmt: skip
 
 
-def full_pass(skip_cell=None, cb05_blocks=True):
+def full_pass(skip_cell=None, cb05_blocks=True, skip_rip=False):
     """所有判据都通过，且 F1 要求的七个 case 与两张矩阵都齐。每个场景用自己的 pid，文件名不冲突。"""
     out = {}
     cb01 = [c for c in _matrix("CB-01") if c != skip_cell]
@@ -287,7 +287,15 @@ def full_pass(skip_cell=None, cb05_blocks=True):
     def bypass(r, k, row):
         row["bypassed"] = 1 if k >= 20 else 0
 
-    out.update(files_of(*pair("CB-05", "bypass-out", hook=bypass, pid=4200, blocks=cb05_blocks)))
+    for n, v in enumerate(("bypass-out", "bypass-in")):
+        out.update(files_of(*pair("CB-05", v, hook=bypass, pid=4200 + n, tok=(f"b{n}a1", f"b{n}a2"), blocks=cb05_blocks)))
+    for n, v in enumerate(("deactivate", "disable-track")):
+        li, lo = pair("CB-05", v, pid=4210 + n, tok=(f"c{n}a1", f"c{n}a2"), blocks=cb05_blocks)
+        lo.event(T_START + 10, "set_processing", 0)
+        out.update(files_of(li, lo))
+    out.update(files_of(*pair("CB-04", "freeze", pid=4220, tok=("e0a1", "e0a2"))))
+    if not skip_rip:
+        out.update(files_of(*pair("CB-04", "rip", pid=4221, tok=("e1a1", "e1a2"))))
     return out
 
 
@@ -417,7 +425,20 @@ def extra_cells():
     names_b[1].event(T_START + 5, "track_props", "", "")  # 第二个实例没收到，第一个实例的好数据不能掩盖它
     lone_out = pair("CB-12", "twoproj", blocks=False, pid=4860, tok=("d901", "d902"))[1]
     two_bypass = [pair("CB-05", "bypass-out", pid=4895, tok=(f"f{n}01", f"f{n}02"), hook=lambda r, k, row: row.update(bypassed=1 if k >= 20 else 0)) for n in range(2)]
+    cat2_full = pair("CB-04", "export-offline", pid=4930)
+    gap_a = pair("CB-05", "deactivate", pid=4931, hook=_drop_at(15))
+    gap_a[1].event(T_START + 10, "set_processing", 0)
+    one_cell_missing = [
+        *pair("LU-06", "rename", host_kind="luna", os_name="mac", blocks=False, pid=4932),
+        *pair("CB-07", "rename", blocks=False, pid=4933, tok=("a9b8", "c7d6")),
+    ]
+    for lg in one_cell_missing[:2]:
+        lg.event(T_START + 5, "track_props", "Track%201", "ff8800")
     return {
+        "a7-incomplete-cat2-full": (files_of(*cat2_full), {"A7": "INCOMPLETE"}),
+        "a4-incomplete-cat2-gap": (files_of(*gap_a), {"A4": "INCOMPLETE"}),
+        "a6-incomplete-one-cell-missing": (files_of(*one_cell_missing), {"A6": "INCOMPLETE"}),
+        "f1-cb04-no-rip": (full_pass(skip_rip=True), {}),
         "cb12-twoproj-stray-out": (files_of(*tp_ok, lone_out), {"OBS": "INCOMPLETE"}),
         "f1-cb05-bypass-dup": (files_of(*two_bypass[0], *two_bypass[1]), {"OBS": "INCOMPLETE"}),
         "cb12-twoproj-two-pairs": (files_of(*tp_ok), {"OBS": "PASS"}),

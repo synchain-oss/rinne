@@ -17,7 +17,7 @@
 | 类型 | 含义 | 列 |
 |---|---|---|
 | `H` | 实例头，恰好一行，必须在第 2 行 | `role` `format` `host_kind` `os` `arch` `pid` `ppid` `tok4` `build` |
-| `C` | 开始一个测试格（case 上下文），之后到下一个 `C` 之前的块与事件都属于它 | `t_ns` `case` `variant` `buf` `guard` `sr` |
+| `C` | 开始一个测试格（case 上下文），之后到下一个 `C` 之前的块与事件都属于它；`C` 行的 `t_ns` 不得晚于该窗口第一块的 `mono_ns`（先取时间戳、写 `C` 行，再打开块记录），否则那块成孤块、挡 F1 | `t_ns` `case` `variant` `buf` `guard` `sr` |
 | `B` | 逐块记录，只在「开始记录」窗口内写 | `seq` `call_seq` `role` `n` `n_decl` `host_ns` `host_ns_valid` `playing` `nonrt` `bypassed` `mono_ns` `thread` `m` `w` `off` `rs` `d` |
 | `S` | 1 Hz 摘要，窗口外也写 | `t_ns` `blocks` `dropped` `max_n` `resync` `trips` |
 | `E` | 事件 | `t_ns` `name` `a` `b` |
@@ -44,7 +44,7 @@
 | `mono_ns` | 本块开始时的单调时钟 |
 | `thread` | 线程标识的 8 位小写十六进制散列，不是原始线程号 |
 | `m` | 读头与期望位置的偏差（样本，有符号），稳态应恒为 0。Input 与 Output 都写；Output 写自己的写位置与期望位置的偏差 |
-| `w` `off` | 写位置；读头相对写位置的偏移（样本，有符号）。Output 的 `off` 写它的写位置相对时间线的偏移。稳态下 `off` 恒定，分析器对两端都这样要求 |
+| `w` `off` | `w` 是单调累计的帧计数（与 IPC 的单调写头一致，不对环容量取模），相邻两块的差应等于上一块的 `n`，旁路时同样；`off` 是读头相对写位置的偏移（样本，有符号）。Output 的 `off` 写它的写位置相对时间线的偏移。稳态下 `off` 恒定，分析器对两端都这样要求。`m`、`w`、`off` 的绝对值都不超过 1099511627776 |
 | `rs` | 本块内发生的重同步次数（Input 一侧计，Output 写 0） |
 | `d` | 当前生效的环路延迟 D（样本，不超过 2147483648） |
 
@@ -122,8 +122,8 @@
 | `CB-04` | `dop` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
 | `CB-04` | `export-offline` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
 | `CB-04` | `export-rt` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
-| `CB-04` | `freeze` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
-| `CB-04` | `rip` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
+| `CB-04` | `freeze` | 2 各自证据 | A4 格观察 | 至少一个实例有块或事件；格观察列出实例数（克隆实例就看这个） |
+| `CB-04` | `rip` | 2 各自证据 | A4 格观察 | 至少一个实例有块或事件；格观察列出实例数（克隆实例就看这个） |
 | `CB-05` | `bypass-in` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 bypassed 为 1 的块 |
 | `CB-05` | `bypass-out` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 bypassed 为 1 的块 |
 | `CB-05` | `deactivate` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 set_processing（a 为 0）或 release 事件 |
@@ -151,7 +151,7 @@
 | `LU-04` | `bounce` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
 | `LU-04` | `export-offline` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
 | `LU-04` | `export-rt` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
-| `LU-04` | `freeze` | 2 各自证据 | A3 A4 | 导出比对行见 A3；块只查块长上限，不进 A7 |
+| `LU-04` | `freeze` | 2 各自证据 | A4 格观察 | 至少一个实例有块或事件；格观察列出实例数（克隆实例就看这个） |
 | `LU-05` | `bypass-in` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 bypassed 为 1 的块 |
 | `LU-05` | `bypass-out` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 bypassed 为 1 的块 |
 | `LU-05` | `deactivate` | 2 各自证据 | 格观察 | 至少一端 32 块，且有 set_processing（a 为 0）或 release 事件 |
@@ -191,9 +191,18 @@
 **格观察**不带 A 编号、不阻断，`--json` 里是单独的 `observations` 键。它逐格给出类别 2 / 3 的本格证据，并把采到的数据算出来，对应计划里不在 A1 至 A9 内的几项，只观察不判定：
 
 - 同通道顺序：所有类别 1 的格里，按 `call_seq` 是 In 先于 Out 的回调占比（`order.in_first` / `order.pairs`）。
-- 旁路（`bypass-in`、`bypass-out`）：两端 `bypassed` 为 1 的块数，即走了 `processBlockBypassed` 的块；Output 的 `w` 按 `seq` 排序后相邻两块的停滞次数（相等）与回退次数（变小）。
-- Smart（`smart`）：In 端块之间最长的回调间隙（ms）、重同步总次数（`rs` 之和，其中含 stall_resume，日志不区分原因）、`ping` 条数。
+- 旁路（`bypass-in`、`bypass-out`）：两端 `bypassed` 为 1 的块数，即走了 `processBlockBypassed` 的块；Output 的 `w` 按 `seq` 排序后相邻两块的停滞次数（相等）、回退次数（变小）与跳变次数（差为正却不等于上一块的 `n`）。
+- Smart（`smart`）：In 端块之间最长的回调间隙（ms）、重同步总次数（`rs` 之和，其中含 stall_resume，日志不区分原因，解读时要结合该格没有别的重同步来源）、`ping` 条数。
 - 错放（`misplaced-*`）：两端都有块时给成对数、In 先于 Out 的数、hostNs 相等的数和两端 `off` 的取值；只有一端有块写「无法判断」。
+
+**rename 格**没有任何 `track_props` 事件时判 A6 数据不全，而不是当没有这一格：契约要求每个 `C` 行之后补写一条快照。
+
+**冻结条件 F1 的 variant 覆盖。** F1 所列 case 里，下面这些 variant 各至少要有一格得出本格证据，缺哪个就在 F1 行里点名（`CB-04` 的 `dop` 是可选项，不强制；`CB-04` 的 `export-offline` 与 `LU-04` 的 `export-offline` 或 `bounce` 由 A3 要求）：
+
+- `CB-05`：`bypass-out` `bypass-in` `deactivate` `disable-track`
+- `CB-04`：`rip` `freeze`
+
+`rip`、`freeze` 的格观察里列出实例日志数，宿主是否克隆实例就看这个数。
 
 **冻结条件 F1** 要求：`CB-01`、`CB-02`、`CB-04`、`CB-05`、`LU-02`、`LU-03`、`LU-04` 都有能下结论的数据且无缺口（`CB-04`、`LU-04` 可只靠导出比对行，`LU-02` 看配对与后端事件，其余要有块）；`CB-01` 的 12 格与 `LU-03` 的 3 格稳态矩阵一格不缺；没有无法归格的块、没有同键重复（只看上述 case 里类别 1 的格）；F1 所列 case 的格观察没有数据不全；A1 至 A8 都有结论。F2 至 F4 由人确认。
 
