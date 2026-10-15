@@ -1,0 +1,8 @@
+# 对外引用的路径与锚点：插件、官网与 zip 里的 INSTALL.txt 都按这些写法链接。
+# 一行一条，`路径` 或 `路径#锚点`；文件改名、移动或锚点删改，links 检查会报红。
+# 首个公开版本之后，这些路径与锚点在 prod 上不得改名或移动。
+docs/INSTALL.md
+docs/INSTALL.md#windows
+docs/INSTALL.md#macos
+docs/USER_GUIDE.zh-CN.md
+docs/USER_GUIDE.zh-CN.md#使用前必读

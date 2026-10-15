@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "lead": {
+    "zhSha256": "1f549adbf00bb51fa1591b19552794f8c14503da500ab5c393ed63b0ee37325d",
+    "en": "Feedback can get loud — fast. Rinne deliberately feeds a channel back into itself. Start with Feedback at 0, keep monitors and headphones low while you experiment, and leave Rinne’s safety protection on. Rinne limits and sanitises the signal it feeds back and has a Panic button, but plugins you place inside the loop can still raise the level that reaches your speakers, and no software can guarantee a loop will never howl. Rinne comes with no warranty (GPL-3.0, sections 15–16).",
+    "fr": "La réinjection peut devenir très forte, très vite. Rinne renvoie volontairement une voie dans elle-même. Démarrez avec la réinjection à 0, gardez enceintes et casque à bas volume pendant vos essais et laissez la protection de Rinne activée. Rinne limite et assainit le signal renvoyé et dispose d’un bouton Coupure d’urgence (Panic), mais les plug-ins placés dans la boucle peuvent tout de même augmenter le niveau qui arrive à vos enceintes, et aucun logiciel ne peut garantir qu’une boucle ne larsenera jamais. Rinne est fourni sans aucune garantie (GPL-3.0, articles 15–16)."
+  },
+  "rules": [
+    {
+      "id": "placement",
+      "installTxt": true,
+      "zhSha256": "4bc4f0c414b883e9b3efb996ec3751c0d0f83a5bdb6b2ae7df3c2545ded0f7b7",
+      "en": {
+        "lead": "Placement",
+        "body": "Put Rinne Input on the first insert slot of the channel. Put Rinne Output after the last plug-in you want in the loop and above the fader divider (simplest: the last pre-fader slot; if your host has no pre-fader section, the last insert slot). Every plug-in between them — including the host’s own insert effects — is inside the loop, and its own latency adds to the loop delay D; plug-ins after Output, the fader, pan and sends are not."
+      },
+      "fr": {
+        "lead": "Placement",
+        "body": "Placez Rinne Input dans le premier slot d’insert de la voie. Placez Rinne Output après le dernier plug-in voulu dans la boucle et au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader ; si votre hôte n’a pas de section pré-fader, dernier slot d’insert). Tout plug-in situé entre les deux — y compris les effets d’insert propres à l’hôte — est dans la boucle, et sa propre latence s’ajoute au délai de boucle D ; les plug-ins après Output, le fader, le panoramique et les envois n’y sont pas."
+      }
+    },
+    {
+      "id": "zero",
+      "installTxt": true,
+      "zhSha256": "ef513ea1dc27dac317b3d6cc67a756fb340fc080b6b61efd648f6ff341baf390",
+      "en": {
+        "lead": "Start from 0",
+        "body": "A new instance starts at 0% feedback, and the return fades in from 0 when a project or preset loads. Turn your monitors down, then raise feedback slowly from 0: the more return, the easier the loop self-oscillates. With Mix at 50% or more and nothing attenuating in the loop, feedback above 100% always self-oscillates; gain-adding plug-ins in the loop (EQ boosts, compressor make-up, saturation) can make it happen lower. The limiter and runaway protection are on by default, but they can’t protect you from sustained loud levels."
+      },
+      "fr": {
+        "lead": "Partir de 0",
+        "body": "Une nouvelle instance démarre à 0 % de réinjection, et le retour revient en fondu depuis 0 au chargement d’un projet ou d’un préréglage. Baissez le volume d’écoute, puis montez lentement la réinjection depuis 0 : plus il y a de retour, plus la boucle entre facilement en auto-oscillation. Avec le mix à 50 % ou plus et rien qui atténue dans la boucle, une réinjection au-delà de 100 % entre toujours en auto-oscillation ; des plug-ins ajoutant du gain dans la boucle (boost d’EQ, compensation de compresseur, saturation) peuvent la provoquer plus bas. Le limiteur et la protection anti-emballement sont activés par défaut, mais ils ne vous protègent pas contre des niveaux élevés prolongés."
+      }
+    },
+    {
+      "id": "panic",
+      "installTxt": true,
+      "zhSha256": "ab0d9b84a0bfa0c9d9e2818f984bd069cf0a9b4f7c879c5ad2fdde45c1febb51",
+      "en": {
+        "lead": "Cut it first",
+        "body": "If you hear howling or anything odd, press Panic first: it cuts only the return, and the dry signal keeps playing; restore it with Restore return in the notice bar. With the window closed, the fastest way is to bypass Rinne Input in the host. The fader isn’t in the loop — pulling it down only hides the sound while the loop keeps growing, and stopping playback or muting won’t stop self-oscillation either."
+      },
+      "fr": {
+        "lead": "Couper d’abord",
+        "body": "Si vous entendez un larsen ou quoi que ce soit d’anormal, appuyez d’abord sur Coupure d’urgence : elle ne coupe que le retour, le signal sec continue de passer ; rétablissez-le avec Rétablir le retour dans la barre d’avis. Fenêtre fermée, le plus rapide est de contourner Rinne Input dans l’hôte. Le fader n’est pas dans la boucle — le baisser ne fait que masquer le son pendant que la boucle continue de croître, et arrêter la lecture ou couper le son n’arrête pas non plus l’auto-oscillation."
+      }
+    },
+    {
+      "id": "pairing",
+      "installTxt": false,
+      "zhSha256": "2d24501b332add9555fdfbf89d4e76732d8f276fc979db444a60ac9cf3af8868",
+      "en": {
+        "lead": "One pair per group",
+        "body": "A group (A–H) holds one Rinne Input and one Rinne Output, and they connect only when their groups match. Duplicating a track copies its group too: the copy shows CONFLICT — click Move to free group on the copy’s Rinne Input, then Re-pair on the copy’s Rinne Output."
+      },
+      "fr": {
+        "lead": "Une paire par groupe",
+        "body": "Un groupe (A–H) contient un Rinne Input et un Rinne Output, et ils ne se connectent que si leurs groupes correspondent. Dupliquer une piste copie aussi son groupe : la copie affiche CONFLIT — cliquez sur « Vers un groupe libre » dans le Rinne Input de la copie, puis sur « Réappairer » dans son Rinne Output."
+      }
+    }
+  ],
+  "frReview": {
+    "status": "pending",
+    "reviewedBy": "",
+    "reviewedZhSha256": "",
+    "approvalUrl": ""
+  }
+}
