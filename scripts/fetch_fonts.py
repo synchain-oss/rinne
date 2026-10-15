@@ -200,26 +200,28 @@ def strip_html(src):
 
 
 def scan_web():
-    """返回 (字符集合, 明细)。扫 web/ 下 js、mjs、html、css 去掉注释后的非 ASCII 字符。"""
+    """返回 (字符集合, 明细)。扫 web/ 下 js、mjs、html、css 和 web-preview/ 下 html 去掉注释后的非 ASCII 字符。"""
     chars, detail = set(), []
-    for dirpath, dirs, files in os.walk(WEB):
-        rel = os.path.relpath(dirpath, ROOT).replace("\\", "/")
-        dirs[:] = sorted(d for d in dirs if "%s/%s" % (rel, d) not in ("web/js", "web/fonts"))
-        for fn in sorted(files):
-            p = os.path.join(dirpath, fn)
-            with open(p, "r", encoding="utf-8") as f:
-                text = f.read()
-            if fn.endswith((".js", ".mjs")):
-                text = strip_js_comments(text)
-            elif fn.endswith(".html"):
-                text = strip_html(text)
-            elif fn.endswith(".css"):
-                text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
-            else:
-                continue
-            found = {c for c in unescape_js(text) if ord(c) > 0x7E and usable(c)}
-            chars |= found
-            detail.append((os.path.relpath(p, ROOT).replace("\\", "/"), len(found)))
+    roots = [(WEB, (".js", ".mjs", ".html", ".css")), (os.path.join(ROOT, "web-preview"), (".html",))]
+    for base, exts in roots:
+        for dirpath, dirs, files in os.walk(base):
+            rel = os.path.relpath(dirpath, ROOT).replace("\\", "/")
+            dirs[:] = sorted(d for d in dirs if "%s/%s" % (rel, d) not in ("web/js", "web/fonts"))
+            for fn in sorted(files):
+                if not fn.endswith(exts):
+                    continue
+                p = os.path.join(dirpath, fn)
+                with open(p, "r", encoding="utf-8") as f:
+                    text = f.read()
+                if fn.endswith((".js", ".mjs")):
+                    text = strip_js_comments(text)
+                elif fn.endswith(".html"):
+                    text = strip_html(text)
+                else:
+                    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+                found = {c for c in unescape_js(text) if ord(c) > 0x7E and usable(c)}
+                chars |= found
+                detail.append((os.path.relpath(p, ROOT).replace("\\", "/"), len(found)))
     return chars, detail
 
 
