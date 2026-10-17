@@ -4,8 +4,10 @@
 // 每种原语一个必须数到的用例：它们是零分配断言的反例，计数器漏掉任何一种，对应的用例就变红。
 // 用例都先把计数读进局部变量、作用域结束之后再 CHECK：断言宏自己记录结果时也会分配（junit、json 报告器下更明显），
 // 在作用域里 CHECK 会把它们数进去，结果就取决于用哪个报告器。
-// malloc 家族（HeapBlock、AudioBuffer、juce::Array、MemoryBlock、calloc、realloc）的计数目前只在 Windows 上实现，
-// 见 AllocationCounter.h；其他平台上这几个用例会以 SKIP 标出来，等 mac CI 那一轮补上钩子再启用。
+// malloc 家族（HeapBlock、AudioBuffer、juce::Array、MemoryBlock、calloc、realloc）的计数在 Windows（导入表钩子）与 mac
+// （malloc zone）上实现，见 AllocationCounter.h；其他平台上这几个用例会以 SKIP 标出来。
+// mac 上的「必须变红」反例：环境变量 RINNE_TEST_ALLOC_BLIND 让计数器对 malloc、calloc、realloc 或 free 之一视而不见，
+// 对应的用例（section 名就是原语名）必须失败，CI 逐个验证，见 scripts/ci/mac/alloc-canary.sh。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -209,7 +211,7 @@ TEST_CASE("allocation counter ignores what happens outside its scope", "[host][s
     }
 }
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
 
 TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][shell][allocation]")
 {
@@ -363,8 +365,7 @@ TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][sh
 
 TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][shell][allocation]")
 {
-    SKIP("malloc family is not hooked on this platform yet; the zero-allocation assertions only cover operator new "
-         "here");
+    SKIP("malloc family is not hooked on this platform; the zero-allocation assertions only cover operator new here");
 }
 
 #endif

@@ -11,9 +11,13 @@
 # 按 sha256 装；sccache 按 .sccache-version 与 .sccache-sha256 装；WebView2 包由 CMake 按 sha256 取。
 # artifact：Rinne-win64-{pr<N>|dispatch}-<sha40>（release 为 Rinne-release-win64-<tag>），两个插件在顶层，tools-bin 下有
 # 可执行文件时放进 tools/；探针另传 Rinne-probe-win64-<sha40>。<sha40> 一律是实际检出、构建的那个提交。
+# build-mac（macos-15、arm64 原生）：配置、构建、ctest，零分配计数器的反例，bundle 身份（2 个 .vst3 + 2 个 .component），
+# ad-hoc 签名与 codesign --verify，auval ×2 与 auval -a 唯一性，pluginval ×4，前后各一次共享内存残段检查，进程外自测（非门禁），
+# arm64 压测与变异构建。判据都在 scripts/ci/mac/，每个有自测。artifact：Rinne-macos-arm64-{pr<N>|dispatch}-<sha40>
+# （release 为 Rinne-release-macos-arm64-<tag>），里面是 ditto 打的 zip；probe 另出 universal 的 Rinne-probe-macos-universal-<sha40>。
 # core-sanitizers（ubuntu、clang-18、RINNE_CORE_ONLY=ON）：asan_ubsan 与 tsan 两个配置各自配置、构建、跑全部 ctest；不需要 JUCE。
 # web-smoke：web-preview/tests/run-all.mjs 存在就跑，不存在时打印 SKIP 注记并通过（页面冒烟随 web 预览一起到）。
-# 这三个 job 的名字就是 dev / prod ruleset 里 required check 的 context（见 .github/required-checks.json），不要改名，也不要加 job 级 if。
+# 这四个 job 的名字就是 dev / prod ruleset 里 required check 的 context（见 .github/required-checks.json），不要改名，也不要加 job 级 if。
 # run-name：`Build & Validate <事件> <40 位提交> <nonce>`。dispatch.ps1 给每次触发带一个随机 nonce，靠它在 run-name 里精确认出
 # 自己触发的那次运行；nonce 没给时末尾就是空的。
 # concurrency：PR 按 PR 号分组、新推送取消旧的；dispatch 与 release 按提交分组、不取消，每次运行都对应确定的一次提交。
@@ -225,6 +229,250 @@ jobs:
           path: |
             build/logs
             build-probe/logs
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # mac 构建（macos-15，arm64 原生）。配置、构建、验证的判据都在 scripts/ci/mac/ 的脚本里，那里每个判据有自测，本 job 一开头先跑一遍。
+  # 阶段：构建与 ctest（含 TIMEOUT 门禁、免 DAW 宿主测试）→ 零分配计数器的反例 → bundle 身份（2 个 .vst3 + 2 个 .component、
+  # 架构、minos、AU 三元组）→ ad-hoc 签名与 codesign --verify → 上传 → 残段检查 → 装 AU、auval ×2、auval -a 唯一性、
+  # pluginval ×4（不开 GUI）→ 残段检查 → 进程外自测（非门禁）→ arm64 压测与变异构建 →（probe）探针 universal。
+  # 后面的步骤都用 !cancelled() 加前置步骤的结论判断，前面红了也尽量把能看的都跑出来；job 的结论仍然是任何一步红即红。
+  # 压测与变异构建：rinne_stress 存在时自动生效，不存在时打印 SKIP 并通过；进程外自测（mac-au-oop）是 continue-on-error，release 时跳过。
+  build-mac:
+    name: build-mac
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      JUCE_DIR: ${{ github.workspace }}/JUCE
+      # 部署目标的唯一真源是 cmake/RinneMac.cmake；check-cache.sh 从 CMakeCache 读回来断言它就是 11.0
+      MINOS: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || inputs.release-tag || '' }}
+          persist-credentials: false
+
+      - name: Mode and names
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          WANT_REF: ${{ inputs.ref }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          NONCE: ${{ inputs.nonce }}
+        run: |
+          set -euo pipefail
+          # nonce 只进 run-name，这里仍限死字符集：不让任何不可信文本流进后面的步骤
+          if [ -n "$NONCE" ] && ! printf '%s' "$NONCE" | grep -Eq '^[0-9A-Za-z._-]{1,64}$'; then echo '::error::nonce 只能是 1 到 64 个字母、数字、点、下划线或连字符'; exit 1; fi
+          sha="$(git rev-parse HEAD)"
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then echo '::error::取不到检出的提交'; exit 1; fi
+          # ref 只收 40 位提交号：分支名、tag、短 sha 都会变，构建与 concurrency 组就对应不到确定的提交
+          if [ -n "$WANT_REF" ] && ! printf '%s' "$WANT_REF" | grep -Eq '^[0-9a-f]{40}$'; then echo '::error::ref 必须是 40 位提交号（空着就构建所选分支的 tip）'; exit 1; fi
+          if [ -n "$WANT_REF" ] && [ "$WANT_REF" != "$sha" ]; then echo "::error::检出的是 $sha，不是要构建的 $WANT_REF"; exit 1; fi
+          if [ -n "$RELEASE_TAG" ]; then
+            if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then echo '::error::release-tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1; fi
+            mode=release; name="Rinne-release-macos-arm64-$RELEASE_TAG"; keep=7
+          elif [ "$EVENT_NAME" = pull_request ]; then
+            if ! printf '%s' "$PR_NUMBER" | grep -Eq '^[0-9]+$'; then echo '::error::取不到 PR 号'; exit 1; fi
+            mode=pr; name="Rinne-macos-arm64-pr$PR_NUMBER-$sha"; keep=14
+          else
+            mode=dispatch; name="Rinne-macos-arm64-dispatch-$sha"; keep=30
+          fi
+          echo "mode=$mode sha=$sha artifact=$name"
+          {
+            echo "MODE=$mode"
+            echo "BUILT_SHA=$sha"
+            echo "ARTIFACT=$name"
+            echo "RETENTION=$keep"
+            echo "PROBE_ARTIFACT=Rinne-probe-macos-universal-$sha"
+            echo "JUCE_TAG=$(tr -d '[:space:]' < .juce-version)"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Gate script self-tests
+        run: bash scripts/ci/mac/selftest.sh
+
+      - name: Record toolchain
+        run: |
+          set -uo pipefail
+          arch=$(uname -m)
+          if [ "$arch" != arm64 ]; then echo "::error::期望 arm64 的 runner，实际是 $arch"; exit 1; fi
+          sw_vers
+          xcodebuild -version
+          clang --version
+          cmake --version | head -n 1
+          pwsh --version || echo 'pwsh 不在 PATH 上'
+          {
+            echo "### build-mac"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 提交 | \`$BUILT_SHA\` |"
+            echo "| 系统 | macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)) $arch |"
+            echo "| Xcode | $(xcodebuild -version | tr '\n' ' ') |"
+            echo "| clang | $(clang --version | head -n 1) |"
+            echo "| cmake | $(cmake --version | head -n 1) |"
+            echo "| JUCE | $JUCE_TAG |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore JUCE
+        id: juce-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.JUCE_DIR }}
+          key: juce-${{ runner.os }}-${{ hashFiles('.juce-commit') }}
+
+      - name: Clone JUCE (pinned tag)
+        if: steps.juce-cache.outputs.cache-hit != 'true'
+        run: git clone --quiet --depth 1 --branch "$JUCE_TAG" https://github.com/juce-framework/JUCE.git "$JUCE_DIR"
+
+      - name: Ensure Ninja
+        run: |
+          set -euo pipefail
+          command -v ninja >/dev/null 2>&1 || brew install ninja
+          ninja --version
+
+      # 架构与部署目标不在命令行传：它们的唯一真源是 cmake/RinneMac.cmake，下一步从 CMakeCache 读回来核，传了就证明不了它在起作用。
+      # CMAKE_COLOR_DIAGNOSTICS=OFF：诊断行里夹进颜色码，日志里的告警就认不出来了。
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJUCE_PATH="$JUCE_DIR" -DCMAKE_COLOR_DIAGNOSTICS=OFF
+
+      - name: Architecture, deployment target and shared-memory prefix are the defaults
+        run: bash scripts/ci/mac/check-cache.sh build formal
+
+      # 第一方源码是告警即错误（rinne_warnings_as_errors），所以这一步绿就是第一方零 warning
+      - name: Build
+        id: build
+        run: cmake --build build --parallel
+
+      - name: ctest
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ctest --test-dir build --output-on-failure --no-tests=error
+
+      # 零分配计数器的反例：计数器对 malloc、calloc、realloc、free 之一视而不见时，对应用例必须变红
+      - name: Allocation counter canaries must fire
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          exe=$(find build -type f -name rinne_host_tests -perm -u+x -not -path '*/_deps/*' -print -quit)
+          if [ -z "$exe" ]; then echo '::error::找不到 rinne_host_tests'; exit 1; fi
+          bash scripts/ci/mac/alloc-canary.sh "$exe"
+
+      # 构建出来的 .vst3 里 moduleinfo.json 的 CID、名称、厂商、子类与版本，要和 tests/golden/identity.json 对得上
+      - name: VST3 identity matches the golden
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node scripts/checks.d/contract-static-identity.mjs --moduleinfo build
+
+      - name: Bundles (2 VST3 + 2 AU, arm64, minos, AU triples)
+        id: bundles
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node scripts/ci/mac/check-bundles.mjs --build build --minos "$MINOS" --list bundles.txt --triples triples.txt
+
+      - name: ad-hoc signature verifies (and the controls turn red)
+        id: sign
+        if: ${{ !cancelled() && steps.bundles.outcome == 'success' }}
+        run: bash scripts/ci/mac/sign-and-verify.sh bundles.txt
+
+      # 上传的是 ditto 打的 zip：upload-artifact 会丢可执行位和符号链接，bundle 里的签名就对不上了
+      - name: Stage
+        id: stage
+        if: ${{ !cancelled() && steps.sign.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          while IFS= read -r b; do ditto -c -k --keepParent "$b" "$dist/$(basename "$b").zip"; done < bundles.txt
+          ls -l "$dist"
+
+      - name: Upload plugins
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          retention-days: ${{ env.RETENTION }}
+
+      - name: Shared-memory leftovers before validation
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: bash scripts/ci/mac/shm-leftover.sh build before
+
+      - name: Install AU components
+        id: au_install
+        if: ${{ !cancelled() && steps.sign.outcome == 'success' }}
+        run: bash scripts/ci/mac/au-gate.sh install bundles.txt au-installed.txt
+
+      - name: auval -v (aufx Rnni Snch, aufx Rnno Snch)
+        id: auval
+        if: ${{ !cancelled() && steps.au_install.outcome == 'success' }}
+        timeout-minutes: 10
+        run: bash scripts/ci/mac/au-gate.sh validate triples.txt ci-logs/auval
+
+      - name: auval -a lists each triple exactly once
+        if: ${{ !cancelled() && steps.au_install.outcome == 'success' }}
+        run: bash scripts/ci/mac/au-gate.sh unique triples.txt ci-logs/auval
+
+      - name: pluginval x4 (strictness 5, no GUI)
+        id: pluginval
+        if: ${{ !cancelled() && steps.au_install.outcome == 'success' }}
+        timeout-minutes: 20
+        run: bash scripts/ci/mac/pluginval-gate.sh bundles.txt au-installed.txt ci-logs/pluginval
+
+      - name: Shared-memory leftovers after validation
+        if: ${{ !cancelled() && steps.au_install.outcome == 'success' }}
+        run: bash scripts/ci/mac/shm-leftover.sh build after
+
+      # 进程外自测：不是门禁，红了只在 summary 里留痕；release 时跳过，mac 的失败不挡发布
+      - name: mac-au-oop (AUHostingService, not a gate)
+        id: oop
+        if: ${{ !cancelled() && steps.au_install.outcome == 'success' && !inputs.release-tag }}
+        continue-on-error: true
+        timeout-minutes: 15
+        run: bash scripts/ci/mac/oop-run.sh triples.txt build-oop
+
+      # 压测与变异构建：core-only，不需要 JUCE。rinne_stress 不存在时打印 SKIP 并通过
+      - name: Stress (arm64) and mutation builds must turn red
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: bash scripts/ci/mac/stress.sh build-stress
+
+      - name: Build probe identity (universal)
+        id: probe
+        if: ${{ !cancelled() && inputs.probe }}
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-probe -G Ninja -DCMAKE_BUILD_TYPE=Release -DJUCE_PATH="$JUCE_DIR" -DRINNE_PROBE_BUILD=ON -DCMAKE_COLOR_DIAGNOSTICS=OFF
+          bash scripts/ci/mac/check-cache.sh build-probe probe
+          cmake --build build-probe --parallel
+          node scripts/checks.d/contract-static-identity.mjs --moduleinfo build-probe --probe
+          node scripts/ci/mac/check-bundles.mjs --build build-probe --minos "$MINOS" --probe --list probe-bundles.txt
+          bash scripts/ci/mac/sign-and-verify.sh probe-bundles.txt
+          dist="$RUNNER_TEMP/dist-probe"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          while IFS= read -r b; do ditto -c -k --keepParent "$b" "$dist/$(basename "$b").zip"; done < probe-bundles.txt
+          ls -l "$dist"
+
+      - name: Upload probe plugins
+        if: ${{ !cancelled() && steps.probe.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PROBE_ARTIFACT }}
+          path: ${{ runner.temp }}/dist-probe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Rinne-macos-arm64-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ci-logs
+            build/Testing
           if-no-files-found: ignore
           retention-days: 7
 
