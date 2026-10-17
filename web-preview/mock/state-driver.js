@@ -61,6 +61,7 @@ function applyInput(model, st) {
     if (typeof st.dBadge === "string") model.delay.reason = st.dBadge === "overrun" ? "overrun" : "raised";
     if (has(st, "min")) model.delay.minMs = parseNum(st.min) ?? model.delay.minMs;
     if (has(st, "maxBlock")) model.delay.maxBlock = parseNum(st.maxBlock) ?? model.delay.maxBlock;
+    if (st.confirm === "takeover") model.takeover = true;
     if (st.panic === "cut") {
         const c = st.cause === "manual" ? "panic" : st.cause;
         model.cut = c === "nan" || c === "runaway" || c === "huge" ? c : "panic";
@@ -111,6 +112,7 @@ function applyOutput(model, st) {
             model.send.sampleRate = (parseNum(st.send.split("·")[1]) ?? 48) * 1000;
         }
     }
+    if (st.confirm === "takeover") model.takeover = true;
     if (st.sub === "inputMuted") model.pair.state = "connectedStill";
     if (st.vals && typeof st.vals === "object") {
         if (has(st.vals, "a")) model.version = String(st.vals.a);

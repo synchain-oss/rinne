@@ -341,6 +341,13 @@ export async function selfTest(root = ROOT) {
                 'output: ["rinne.state", "rinne.pair"]',
             )),
     );
+    add(
+        "Output 头文件少 repairPair",
+        true,
+        (s) => (s.headerOutput = drop(s.headerOutput, 'kFnRepairPair = "repairPair"')),
+    );
+    add("bridge.js 的 Input 名表少 moveToFreeGroup", true, (s) => (s.bridge = drop(s.bridge, '"moveToFreeGroup",')));
+    add("文档删 resolveTakeover", true, (s) => dropRow(s, "resolveTakeover"));
     add("mock 的 Input 后端少一个函数", true, (s) => (s.mockInput = drop(s.mockInput, '"loadPreset",')));
     add("mock 的 Output 后端少一个函数", true, (s) => (s.mockOutput = drop(s.mockOutput, '"openExternal",')));
     add("mock 的 Input 后端少一个事件", true, (s) => (s.mockInput = drop(s.mockInput, '"rinne.presets"')));

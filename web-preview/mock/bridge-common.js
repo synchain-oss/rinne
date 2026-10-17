@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// mock 后端的共用部分：全局位存储、事件分发、四赫兹异步状态回声、两个角色共用的九个桥函数。
+// mock 后端的共用部分：全局位存储、事件分发、四赫兹异步状态回声、两个角色共用的十二个桥函数。
 // 两个角色的后端（bridge-input.js、bridge-output.js）在这个核心上各自加自己的函数与事件。
 //
 // 与真桥同形的时序，页面按真桥的纪律写才不会只在预览里能用：
@@ -231,7 +231,7 @@ export function buildDiagnostics(fields) {
 }
 
 /**
- * 两个角色共用的九个桥函数。env 是角色后端的可变状态（scale、group、groupOrigin、clipboard、opened）
+ * 两个角色共用的十二个桥函数。env 是角色后端的可变状态（scale、group、groupOrigin、clipboard、opened）
  * 加一个 diagnostics() 取文本的函数。每个函数同步返回回执，bridge.js 再把它包成 async。
  */
 export function commonFunctions(core, env) {
@@ -278,6 +278,24 @@ export function commonFunctions(core, env) {
             env.groupOrigin = "manual";
             core.scheduleEcho();
             return { ok: true, group: g };
+        },
+        setDiagLog(on) {
+            if (typeof on !== "boolean") return { ok: false, reason: "bad-value" };
+            defaults.set({ diagLog: on });
+            core.scheduleEcho();
+            return { ok: true, value: on };
+        },
+        resolveTakeover(accept) {
+            if (typeof accept !== "boolean") return { ok: false, reason: "bad-value" };
+            if (!env.takeover) return { ok: false, reason: "no-pending" };
+            env.takeover = false;
+            if (accept) env.pairState = "searching";
+            core.scheduleEcho();
+            return { ok: true, accepted: accept };
+        },
+        showLicense() {
+            env.licenseShown = true;
+            return { ok: true };
         },
         copyDiagnostics(commit) {
             const text = env.diagnostics();

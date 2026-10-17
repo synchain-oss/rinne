@@ -10,7 +10,7 @@
 
 namespace rinne::input::bridge
 {
-// ---- 函数：界面调原生，两个角色共用的九个在前 ----
+// ---- 函数：界面调原生，两个角色共用的十二个在前 ----
 inline constexpr const char* kFnRequestInitialState = "requestInitialState";
 inline constexpr const char* kFnSetLang = "setLang";
 inline constexpr const char* kFnSetUiScale = "setUiScale";
@@ -20,6 +20,9 @@ inline constexpr const char* kFnSetGuideSeen = "setGuideSeen";
 inline constexpr const char* kFnSetGroup = "setGroup";
 inline constexpr const char* kFnCopyDiagnostics = "copyDiagnostics";
 inline constexpr const char* kFnOpenExternal = "openExternal";
+inline constexpr const char* kFnSetDiagLog = "setDiagLog";
+inline constexpr const char* kFnResolveTakeover = "resolveTakeover";
+inline constexpr const char* kFnShowLicense = "showLicense";
 // ---- 函数：只在 Input ----
 inline constexpr const char* kFnBeginParamGesture = "beginParamGesture";
 inline constexpr const char* kFnSetParam = "setParam";
@@ -31,6 +34,10 @@ inline constexpr const char* kFnDismissHint = "dismissHint";
 inline constexpr const char* kFnLoadPreset = "loadPreset";
 inline constexpr const char* kFnSavePreset = "savePreset";
 inline constexpr const char* kFnDeletePreset = "deletePreset";
+inline constexpr const char* kFnSetGuardOn = "setGuardOn";
+inline constexpr const char* kFnSetResetOnPlay = "setResetOnPlay";
+inline constexpr const char* kFnSetTailMode = "setTailMode";
+inline constexpr const char* kFnMoveToFreeGroup = "moveToFreeGroup";
 
 // ---- 事件：原生推给界面 ----
 inline constexpr const char* kEvState = "rinne.state";

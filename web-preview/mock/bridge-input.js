@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Rinne Input 的 mock 后端：九个共用函数加十个 Input 专用函数，六个事件。
+// Rinne Input 的 mock 后端：十二个共用函数加十四个 Input 专用函数，六个事件。
 // 名表与 docs/UI_BRIDGE.md、src/input/InputBridgeApi.h、web/shared/bridge.js 逐名相等，由 check-bridge-parity 对拍。
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据，不模拟 DSP。
 
@@ -8,6 +8,7 @@ import { buildDiagnostics, commonFunctions, createCore, memoryStorage } from "./
 import {
     CUT_REASONS,
     FACTORY_PRESETS,
+    GROUPS,
     PARAM_DEFS,
     PARAM_IDS,
     PRESET_NAME_MAX,
@@ -24,6 +25,9 @@ export const FUNCTIONS = [
     "setGroup",
     "copyDiagnostics",
     "openExternal",
+    "setDiagLog",
+    "resolveTakeover",
+    "showLicense",
     "beginParamGesture",
     "setParam",
     "endParamGesture",
@@ -34,12 +38,19 @@ export const FUNCTIONS = [
     "loadPreset",
     "savePreset",
     "deletePreset",
+    "setGuardOn",
+    "setResetOnPlay",
+    "setTailMode",
+    "moveToFreeGroup",
 ];
 
 export const EVENTS = ["rinne.state", "rinne.pair", "rinne.error", "rinne.params", "rinne.meters", "rinne.presets"];
 
 /** 载入预设时不动的参数：环路开关、限制器和上限不进预设。 */
 const PRESET_EXEMPT = ["loop_on", "limiter", "ceiling"];
+
+/** tail 模式取值。 */
+const TAIL_MODES = ["auto", "infinite", "30s"];
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
@@ -87,6 +98,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         group: "A",
         groupOrigin: "auto",
         restored: false,
+        takeover: false, // 休眠实例占着本组，等用户确认接管
         values: defaultValues(),
         cfg: { resetOnPlay: true, tailMode: "auto", delayUnit: "ms", fbUnit: "pct", guardOn: true },
         presetId: "init",
@@ -137,6 +149,16 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         set groupOrigin(v) {
             model.groupOrigin = v;
         },
+        get takeover() {
+            return model.takeover;
+        },
+        set takeover(v) {
+            model.takeover = v;
+        },
+        set pairState(v) {
+            model.pair.state = v;
+        },
+        licenseShown: false,
         clipboard: null,
         opened: null,
         diagnostics: () =>
@@ -173,6 +195,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         guideSeen: core.ui.guideSeenInput,
         uiScale: model.scale,
         restored: model.restored,
+        takeover: model.takeover,
         group: model.group,
         groupOrigin: model.groupOrigin,
         diagLog: core.ui.diagLog,
@@ -248,6 +271,34 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
             model.cut = null;
             core.scheduleEcho();
             return { ok: true };
+        },
+        setGuardOn(on) {
+            if (typeof on !== "boolean") return { ok: false, reason: "bad-value" };
+            model.cfg.guardOn = on;
+            core.scheduleEcho();
+            return { ok: true, value: on };
+        },
+        setResetOnPlay(on) {
+            if (typeof on !== "boolean") return { ok: false, reason: "bad-value" };
+            model.cfg.resetOnPlay = on;
+            core.scheduleEcho();
+            return { ok: true, value: on };
+        },
+        setTailMode(mode) {
+            if (!TAIL_MODES.includes(mode)) return { ok: false, reason: "bad-value" };
+            model.cfg.tailMode = mode;
+            core.scheduleEcho();
+            return { ok: true, value: mode };
+        },
+        moveToFreeGroup() {
+            if (model.pair.state !== "conflict") return { ok: false, reason: "not-conflict" };
+            const free = GROUPS.find((g) => g !== model.group && !(model.pair.groupMask & (1 << GROUPS.indexOf(g))));
+            if (!free) return { ok: false, reason: "no-free-group" };
+            model.group = free;
+            model.groupOrigin = "auto";
+            model.pair.state = "searching";
+            core.scheduleEcho();
+            return { ok: true, group: free };
         },
         dismissHint(id) {
             if (typeof id !== "string" || id === "") return { ok: false, reason: "bad-id" };

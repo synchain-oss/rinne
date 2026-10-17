@@ -41,7 +41,7 @@
 // 缺名会在 createBridge() 处抛错并列出缺失项，这是运行期兜底，静态面要等 parity 检查建立后才有。
 
 /**
- * 桥函数名表。两个角色共用的名字（前九个）在两侧各写一遍，数组保持纯字面量，
+ * 桥函数名表。两个角色共用的名字（前十二个）在两侧各写一遍，数组保持纯字面量，
  * 方便 parity 脚本不执行本文件就能读出。
  */
 export const BRIDGE_FUNCTIONS = {
@@ -55,6 +55,10 @@ export const BRIDGE_FUNCTIONS = {
         "setGroup",
         "copyDiagnostics",
         "openExternal",
+        "setDiagLog",
+        "resolveTakeover",
+        "showLicense",
+        "repairPair",
     ],
     input: [
         "requestInitialState",
@@ -66,6 +70,9 @@ export const BRIDGE_FUNCTIONS = {
         "setGroup",
         "copyDiagnostics",
         "openExternal",
+        "setDiagLog",
+        "resolveTakeover",
+        "showLicense",
         "beginParamGesture",
         "setParam",
         "endParamGesture",
@@ -76,6 +83,10 @@ export const BRIDGE_FUNCTIONS = {
         "loadPreset",
         "savePreset",
         "deletePreset",
+        "setGuardOn",
+        "setResetOnPlay",
+        "setTailMode",
+        "moveToFreeGroup",
     ],
 };
 

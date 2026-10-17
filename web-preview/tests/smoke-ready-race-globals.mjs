@@ -232,4 +232,30 @@ for (const [url, want] of [
     t.stop();
 }
 
+// ---- 新增动作 ----
+{
+    const s = open("input", "scenario=in-conflict&auto=0", stores());
+    const m = s.mock;
+    run.check(m.setGuardOn(false).ok && m.setGuardOn("x").ok === false, "setGuardOn：只收布尔");
+    run.check(m.setTailMode("30s").ok && m.setTailMode("nope").ok === false, "setTailMode：只收表内取值");
+    run.check(m.setResetOnPlay(false).ok, "setResetOnPlay");
+    run.eq(m.moveToFreeGroup().ok, true, "moveToFreeGroup：冲突态可以移走");
+    run.eq(m.moveToFreeGroup().reason, "not-conflict", "moveToFreeGroup：不在冲突态被拒");
+    run.eq(m.resolveTakeover(true).reason, "no-pending", "resolveTakeover：没有待确认时被拒");
+    run.check(m.setDiagLog(true).ok && m.setDiagLog(1).ok === false, "setDiagLog：只收布尔");
+    run.check(m.showLicense().ok, "showLicense");
+    s.stop();
+    const t = open("output", "scenario=out-takeover-confirm&auto=0", stores());
+    run.eq(lastState(t).takeover, true, "接管场景：state 带 takeover");
+    run.check(
+        t.mock.resolveTakeover(false).ok && lastState(t).takeover === false,
+        "resolveTakeover(false)：取消后确认条消失",
+    );
+    run.eq(t.mock.repairPair().reason, "not-conflict", "repairPair：不在冲突态被拒");
+    t.stop();
+    const c = open("output", "scenario=out-conflict&auto=0", stores());
+    run.check(c.mock.repairPair().ok && lastState(c).group !== "A", "repairPair：冲突态重选组");
+    c.stop();
+}
+
 run.finish();

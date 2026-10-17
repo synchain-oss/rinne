@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Rinne Output 的 mock 后端：九个共用函数，三个事件。Output 只做分组与配对，没有参数。
+// Rinne Output 的 mock 后端：十二个共用函数加一个 Output 专用函数，三个事件。Output 只做分组与配对，没有参数。
 // 名表与 docs/UI_BRIDGE.md、src/output/OutputBridgeApi.h、web/shared/bridge.js 逐名相等，由 check-bridge-parity 对拍。
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据。
 
+import { GROUPS } from "./contract.js";
 import { buildDiagnostics, commonFunctions, createCore, memoryStorage } from "./bridge-common.js";
 
 export const FUNCTIONS = [
@@ -16,6 +17,10 @@ export const FUNCTIONS = [
     "setGroup",
     "copyDiagnostics",
     "openExternal",
+    "setDiagLog",
+    "resolveTakeover",
+    "showLicense",
+    "repairPair",
 ];
 
 export const EVENTS = ["rinne.state", "rinne.pair", "rinne.error"];
@@ -41,6 +46,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         group: "A",
         groupOrigin: "auto",
         restored: false,
+        takeover: false, // 休眠实例占着本组，等用户确认接管
         send: { channels: "ST", sampleRate: 48000, bypassed: false, hostPaused: false },
         pair: {
             state: "searching",
@@ -70,6 +76,16 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         set groupOrigin(v) {
             model.groupOrigin = v;
         },
+        get takeover() {
+            return model.takeover;
+        },
+        set takeover(v) {
+            model.takeover = v;
+        },
+        set pairState(v) {
+            model.pair.state = v;
+        },
+        licenseShown: false,
         clipboard: null,
         opened: null,
         diagnostics: () =>
@@ -102,6 +118,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         inputGuideSeen: core.ui.guideSeenInput,
         uiScale: model.scale,
         restored: model.restored,
+        takeover: model.takeover,
         group: model.group,
         groupOrigin: model.groupOrigin,
         diagLog: core.ui.diagLog,
@@ -118,6 +135,20 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
     }));
 
     const mock = { addEventListener: core.addEventListener };
-    for (const name of FUNCTIONS) mock[name] = common[name];
+    const fns = {
+        ...common,
+        repairPair() {
+            if (model.pair.state !== "conflict") return { ok: false, reason: "not-conflict" };
+            // 按智能默认重选组：这里取第一个与当前不同、没有未配对对端在等的组
+            const free = GROUPS.find((g) => g !== model.group && !(model.pair.groupMask & (1 << GROUPS.indexOf(g))));
+            if (!free) return { ok: false, reason: "no-free-group" };
+            model.group = free;
+            model.groupOrigin = "auto";
+            model.pair.state = "searching";
+            core.scheduleEcho();
+            return { ok: true, group: free };
+        },
+    };
+    for (const name of FUNCTIONS) mock[name] = fns[name];
     return { role: "output", core, model, mock };
 }

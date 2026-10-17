@@ -21,6 +21,11 @@ inline constexpr const char* kFnSetGuideSeen = "setGuideSeen";
 inline constexpr const char* kFnSetGroup = "setGroup";
 inline constexpr const char* kFnCopyDiagnostics = "copyDiagnostics";
 inline constexpr const char* kFnOpenExternal = "openExternal";
+inline constexpr const char* kFnSetDiagLog = "setDiagLog";
+inline constexpr const char* kFnResolveTakeover = "resolveTakeover";
+inline constexpr const char* kFnShowLicense = "showLicense";
+// ---- 函数：只在 Output ----
+inline constexpr const char* kFnRepairPair = "repairPair";
 
 // ---- 事件：原生推给界面 ----
 inline constexpr const char* kEvState = "rinne.state";

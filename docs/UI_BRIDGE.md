@@ -42,6 +42,9 @@ The bridge between the web UI and the native plugin: function names, event names
 | `setGroup` | `g`：`A` 到 `H` | `{ ok, group }` | 手动选组，之后永不自动迁组；`groupOrigin` 变为 `manual`。 |
 | `copyDiagnostics` | `commit`：布尔 | `{ ok, copied, text }` | `false` 只返回预览文本，`true` 才写剪贴板。文本只含下面的白名单字段。 |
 | `openExternal` | `url` | `{ ok }` | 原生侧解析后精确匹配：scheme 为 `https`，host 为 `synchain.ca`，或 host 为 `github.com` 且路径等于 `/synchain-oss/rinne` 或以 `/synchain-oss/rinne/` 开头。其余一律回 `{ ok: false, reason: "not-allowed" }`。 |
+| `setDiagLog` | `on`：布尔 | `{ ok, value }` | 诊断日志开关，本机设置，写全局位，不进工程。 |
+| `resolveTakeover` | `accept`：布尔 | `{ ok, accepted }` | 休眠实例占着本组时的确认条：`true` 接管，`false` 取消。没有待确认的接管回 `{ ok: false, reason: "no-pending" }`。 |
+| `showLicense` | 无 | `{ ok }` | 查看许可证：原生侧用系统方式打开嵌入的 LICENSE。 |
 
 ### 事件（原生推给界面，两个角色共用）
 
@@ -65,6 +68,7 @@ The bridge between the web UI and the native plugin: function names, event names
 | `guideSeen` | 本角色的引导是否已看（Output 另带 `inputGuideSeen`）。 |
 | `uiScale` | 当前缩放档位。 |
 | `restored` | 本实例经过 `setStateInformation`。 |
+| `takeover` | 休眠实例占着本组，界面显示接管确认条，等 `resolveTakeover`。 |
 | `group` | `A` 到 `H`，没有空闲组时为 `null`。 |
 | `groupOrigin` | `auto`、`manual` 或 `project`；`auto` 时页面显示「自动」徽标。 |
 | `diagLog` | 诊断日志开关（本机设置，不进工程）。 |
@@ -156,6 +160,10 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | `loadPreset` | `id`：工厂或用户预设 ID | `{ ok }` | 载入后从首个有效读样本起 500 ms 淡入。 |
 | `savePreset` | `name`、`overwrite` | `{ ok, id }` | 名字去控制字符、首尾空白，限 24 个字符；重名且未允许覆盖回 `{ ok: false, reason: "exists" }`。 |
 | `deletePreset` | `id` | `{ ok }` | 只删用户预设。 |
+| `setGuardOn` | `on`：布尔 | `{ ok, value }` | 失控保护开关（`cfg.guardOn`，默认开）。 |
+| `setResetOnPlay` | `on`：布尔 | `{ ok, value }` | 起播时清空环路（`cfg.resetOnPlay`，默认开），在关于面板的高级设置里。 |
+| `setTailMode` | `mode`：`auto`、`infinite`、`30s` | `{ ok, value }` | tail 模式（`cfg.tailMode`），在高级设置里。 |
+| `moveToFreeGroup` | 无 | `{ ok, group }` | `conflict` 时的一键修复：移到空闲组，不自动迁移的纪律不变；不在冲突态回 `{ ok: false, reason: "not-conflict" }`，没有空闲组回 `reason: "no-free-group"`。 |
 
 ### 专用事件
 
@@ -204,15 +212,19 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 - 失控保护（`cfg.guardOn`）：降到 −24 dB 仍持续 1 s 时 `cut = "runaway"`。
 - Panic 是界面动作，不是参数，不进预设、不可自动化。
 
-### 计划新增、尚未登记的动作
-
-下面几项界面需要，但还不在 `web/shared/bridge.js` 的名表里，所以现在不进上面的机读表，也不进 mock。要加时先改名表，再在同一个提交里补进这份文档、`InputBridgeApi.h` 与 mock：失控保护开关（`cfg.guardOn`）、高级设置（`resetOnPlay`、`tailMode`、诊断日志开关）、Input 的「移到空闲组」、休眠实例占组的接管确认、查看许可证。
-
 <!-- section:output -->
 
 ## output：Rinne Output
 
-Output 只用共用的九个函数和三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
+Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
+
+### 专用函数
+
+<!-- names:fn -->
+
+| 函数 | 参数 | 回执 | 说明 |
+|---|---|---|---|
+| `repairPair` | 无 | `{ ok, group }` | `conflict` 时的一键修复，按钮文案「重新配对」：按智能默认重选组；不在冲突态回 `{ ok: false, reason: "not-conflict" }`。 |
 
 ### rinne.state 的 Output 字段
 
@@ -226,7 +238,3 @@ Output 只用共用的九个函数和三个事件，没有参数，不接收 `ri
 - `rinne.pair` 的 `self.name` 与 `peer.name` 对应配对卡里「本轨」与「Input 所在轨」两行；`verify` 决定核验徽标。
 - `conflict` 时的修复按钮文案是「重新配对」（按智能默认重选组）。界面文字里不出现「自动配对」。
 - 智能默认只看本进程内的实例，新 Output 的选组顺序是：同名轨上未配对的 Input、最近认领的未配对 Input、编号最小的空组等待（每 1 s 重评）。用户手选组之后永不自动迁组。
-
-### 计划新增、尚未登记的动作
-
-Output 的「重新配对」按钮和休眠实例占组的接管确认还不在 `web/shared/bridge.js` 的名表里，处理方式同 Input 一节末尾。
