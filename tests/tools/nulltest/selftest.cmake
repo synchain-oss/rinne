@@ -13,7 +13,8 @@ file(MAKE_DIRECTORY "${WORK_DIR}")
 # run(<期望退出码> <输出里必须出现的正则> <参数...>)
 function(run expect_rc expect_text)
   execute_process(COMMAND "${NULLTEST}" ${ARGN}
-    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    ENCODING UTF-8)
   if(NOT rc EQUAL expect_rc)
     message(FATAL_ERROR "期望退出码 ${expect_rc}，实际 ${rc}：rinne_nulltest ${ARGN}\n${out}${err}")
   endif()
