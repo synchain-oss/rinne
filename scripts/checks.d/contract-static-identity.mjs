@@ -246,6 +246,18 @@ export function checkIdentity({ golden, read, cmakeFiles }) {
             `${ROOT_CMAKE}：Apple 上追加的格式是 ${JSON.stringify(formats.apple)}，golden 是 ${JSON.stringify(golden.formats.apple)}`,
         );
 
+    // 宏清单：根文件里 set(RINNE_PLUGIN_DEFINITIONS …) 恰好一处，三个参数 ID 宏都在其中。
+    // 再写一次 set 会把清单整个换掉，宏从插件目标上消失，而每个宏仍然「只出现一次」，下面的计数看不出来
+    const defSets = calls(stripComments(rootText), "set")
+        .map(tokens)
+        .filter((t) => t[0] === "RINNE_PLUGIN_DEFINITIONS");
+    if (defSets.length !== 1)
+        errors.push(`${ROOT_CMAKE}：set(RINNE_PLUGIN_DEFINITIONS …) 应当恰好一处，现在 ${defSets.length} 处`);
+    else
+        for (const macro of Object.keys(golden.definitions))
+            if (!defSets[0].some((tok) => tok.startsWith(`${macro}=`)))
+                errors.push(`${ROOT_CMAKE}：set(RINNE_PLUGIN_DEFINITIONS …) 里没有 ${macro}`);
+
     // 参数 ID 的宏：全部 CMake 文件里每个宏恰好一处、值对
     const texts = cmakeFiles.map((f) => ({ f, code: stripComments(read(f) ?? "") }));
     for (const [macro, want] of Object.entries(golden.definitions)) {
@@ -647,6 +659,30 @@ export function selfTest() {
                     "if(WIN32)\n  list(APPEND RINNE_PLUGIN_FORMATS LV2)\nendif()\nset(RINNE_PLUGIN_DEFINITIONS",
                 ),
             ),
+        ],
+        [
+            "宏清单被后一次 set 写成空串",
+            true,
+            run({ ...base, [ROOT_CMAKE]: base[ROOT_CMAKE] + "\n" + 'set(RINNE_PLUGIN_DEFINITIONS "")' + "\n" }),
+        ],
+        [
+            "juce_add_plugin 的参数里多引用一次身份变量",
+            true,
+            run(edit(base, IN, "IS_SYNTH FALSE", "IS_SYNTH FALSE DESCRIPTION ${_rinne_RinneInput_identity}")),
+        ],
+        [
+            "宏清单被后一次 set 清空",
+            true,
+            run({ ...base, [ROOT_CMAKE]: `${base[ROOT_CMAKE]}\nset(RINNE_PLUGIN_DEFINITIONS JUCE_WEB_BROWSER=1)\n` }),
+        ],
+        [
+            "宏清单里少了一个宏而这个宏改写到别处",
+            true,
+            run({
+                ...base,
+                [ROOT_CMAKE]: base[ROOT_CMAKE].replace("  JUCE_FORCE_USE_LEGACY_PARAM_IDS=0\n", ""),
+                "cmake/X.cmake": "add_compile_definitions(JUCE_FORCE_USE_LEGACY_PARAM_IDS=0)\n",
+            }),
         ],
         [
             "根 CMakeLists 的 if 之外追加格式",

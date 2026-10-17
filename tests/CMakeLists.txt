@@ -91,6 +91,19 @@ rinne_finish_test_suite(rinne_params_tests params)
 rinne_add_test_suite(rinne_host_tests host NEEDS_JUCE TIMEOUT 300)
 rinne_finish_test_suite(rinne_host_tests host)
 
+# UBSan 金丝雀，用工程自己的编译选项构建（继承 rinne_core 的 PUBLIC 选项），不是脚本带着 -fsanitize 另编的那份：
+# 把工程配置里的 undefined 去掉，它就不再报告，ctest 判红。UBSan 没有 ASan / TSan 那样可查询的编译器特性宏，只能这样证明。
+# 与 sanitizer-canary/run.sh 共用同一个源文件；PASS_REGULAR_EXPRESSION 下 ctest 只看输出里有没有报告，不看退出码。
+if(RINNE_SANITIZE STREQUAL "asan_ubsan")
+  add_executable(rinne_ubsan_canary sanitizer-canary/signed_overflow.cpp)
+  target_link_libraries(rinne_ubsan_canary PRIVATE rinne_core)
+  add_test(NAME rinne_ubsan_canary COMMAND rinne_ubsan_canary)
+  set_tests_properties(rinne_ubsan_canary PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "runtime error:")
+  if(_rinne_test_env)
+    set_tests_properties(rinne_ubsan_canary PROPERTIES ENVIRONMENT "${_rinne_test_env}")
+  endif()
+endif()
+
 # ctest 的 TIMEOUT 门禁：自测加实扫，都在 ctest 里跑，本机 gates、CI 的 build-win 与 core-sanitizers 因此同吃一份。
 # 实扫向 ctest 要它真正会跑的测试全集（--show-only=json-v1），含 discover_tests 之类后注册的，逐条要求 TIMEOUT 为正数。
 # 本机 gates 与两种 CI runner 都有 pwsh；找不到就是环境坏了，直接停下，不让门禁悄悄消失。

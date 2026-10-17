@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 零分配断言的底座自查：计数器必须数得到每一种分配原语，否则「回调里没有分配」会在某一种分配上静默变绿。
+// 零分配断言的底座自查：计数器必须数得到每一种分配与释放原语，否则「回调里没有分配」会在某一种原语上静默变绿。
 // 每种原语一个必须数到的用例：它们是零分配断言的反例，计数器漏掉任何一种，对应的用例就变红。
+// 用例都先把计数读进局部变量、作用域结束之后再 CHECK：断言宏自己记录结果时也会分配（junit、json 报告器下更明显），
+// 在作用域里 CHECK 会把它们数进去，结果就取决于用哪个报告器。
 // malloc 家族（HeapBlock、AudioBuffer、juce::Array、MemoryBlock、calloc、realloc）的计数目前只在 Windows 上实现，
-// 见 AllocationCounter.h；其他平台等 mac CI 那一轮补上钩子再启用这几个用例。
+// 见 AllocationCounter.h；其他平台上这几个用例会以 SKIP 标出来，等 mac CI 那一轮补上钩子再启用。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -36,47 +38,67 @@ TEST_CASE("allocation counter sees operator new in all its forms", "[host][shell
 
     SECTION("plain new")
     {
-        const AllocationScope scope;
-        auto* p = new int(1);
-        touch(p);
-        delete p;
-        CHECK(scope.allocations() == 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            auto* p = new int(1);
+            touch(p);
+            delete p;
+            seen = scope.allocations();
+        }
+        CHECK(seen == 1);
     }
 
     SECTION("array new")
     {
-        const AllocationScope scope;
-        auto* p = new int[4];
-        touch(p);
-        delete[] p;
-        CHECK(scope.allocations() == 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            auto* p = new int[4];
+            touch(p);
+            delete[] p;
+            seen = scope.allocations();
+        }
+        CHECK(seen == 1);
     }
 
     SECTION("nothrow new")
     {
-        const AllocationScope scope;
-        auto* p = new (std::nothrow) int[4];
-        touch(p);
-        delete[] p;
-        CHECK(scope.allocations() == 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            auto* p = new (std::nothrow) int[4];
+            touch(p);
+            delete[] p;
+            seen = scope.allocations();
+        }
+        CHECK(seen == 1);
     }
 
     SECTION("over-aligned new")
     {
-        const AllocationScope scope;
-        auto* p = new Wide;
-        touch(p);
-        delete p;
-        CHECK(scope.allocations() == 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            auto* p = new Wide;
+            touch(p);
+            delete p;
+            seen = scope.allocations();
+        }
+        CHECK(seen == 1);
     }
 
     SECTION("over-aligned array new")
     {
-        const AllocationScope scope;
-        auto* p = new Wide[2];
-        touch(p);
-        delete[] p;
-        CHECK(scope.allocations() == 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            auto* p = new Wide[2];
+            touch(p);
+            delete[] p;
+            seen = scope.allocations();
+        }
+        CHECK(seen == 1);
     }
 }
 
@@ -88,10 +110,16 @@ TEST_CASE("allocation counter sees releases as well", "[host][shell][allocation]
     {
         auto* p = new int(1);
         touch(p);
-        const AllocationScope scope;
-        delete p;
-        CHECK(scope.allocations() == 0);
-        CHECK(scope.frees() == 1);
+        long allocs = -1;
+        long frees = -1;
+        {
+            const AllocationScope scope;
+            delete p;
+            allocs = scope.allocations();
+            frees = scope.frees();
+        }
+        CHECK(allocs == 0);
+        CHECK(frees == 1);
     }
 
     SECTION("delete[] and over-aligned delete")
@@ -100,28 +128,42 @@ TEST_CASE("allocation counter sees releases as well", "[host][shell][allocation]
         auto* w = new Wide;
         touch(a);
         touch(w);
-        const AllocationScope scope;
-        delete[] a;
-        delete w;
-        CHECK(scope.frees() == 2);
+        long frees = -1;
+        {
+            const AllocationScope scope;
+            delete[] a;
+            delete w;
+            frees = scope.frees();
+        }
+        CHECK(frees == 2);
     }
 
     SECTION("an allocation inside the scope that is released inside it counts on both sides")
     {
-        const AllocationScope scope;
-        auto* p = new int(1);
-        touch(p);
-        delete p;
-        CHECK(scope.allocations() == 1);
-        CHECK(scope.frees() == 1);
+        long allocs = -1;
+        long frees = -1;
+        {
+            const AllocationScope scope;
+            auto* p = new int(1);
+            touch(p);
+            delete p;
+            allocs = scope.allocations();
+            frees = scope.frees();
+        }
+        CHECK(allocs == 1);
+        CHECK(frees == 1);
     }
 
     SECTION("nothing released, nothing counted")
     {
-        const AllocationScope scope;
-        int local[4] = {};
-        touch(local);
-        CHECK(scope.frees() == 0);
+        long frees = -1;
+        {
+            const AllocationScope scope;
+            int local[4] = {};
+            touch(local);
+            frees = scope.frees();
+        }
+        CHECK(frees == 0);
     }
 }
 
@@ -133,27 +175,37 @@ TEST_CASE("allocation counter ignores what happens outside its scope", "[host][s
     {
         auto* before = new int(1);
         touch(before);
-        const AllocationScope scope;
-        int local[16] = {};
-        touch(local);
+        long seen = -1;
+        {
+            const AllocationScope scope;
+            int local[16] = {};
+            touch(local);
+            seen = scope.allocations();
+        }
         delete before;
-        CHECK(scope.allocations() == 0);
+        CHECK(seen == 0);
     }
 
     SECTION("nested scopes each count their own part")
     {
-        const AllocationScope outer;
-        auto* a = new int(1);
-        touch(a);
+        long inner = -1;
+        long outer = -1;
         {
-            const AllocationScope inner;
-            auto* b = new int(2);
-            touch(b);
-            delete b;
-            CHECK(inner.allocations() == 1);
+            const AllocationScope outerScope;
+            auto* a = new int(1);
+            touch(a);
+            {
+                const AllocationScope innerScope;
+                auto* b = new int(2);
+                touch(b);
+                delete b;
+                inner = innerScope.allocations();
+            }
+            delete a;
+            outer = outerScope.allocations();
         }
-        delete a;
-        CHECK(outer.allocations() == 2);
+        CHECK(inner == 1);
+        CHECK(outer == 2);
     }
 }
 
@@ -165,30 +217,41 @@ TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][sh
 
     SECTION("malloc")
     {
-        const AllocationScope scope;
-        void* p = std::malloc(64);
-        touch(p);
-        std::free(p);
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            void* p = std::malloc(64);
+            touch(p);
+            std::free(p);
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("calloc")
     {
-        const AllocationScope scope;
-        void* p = std::calloc(4, 16);
-        touch(p);
-        std::free(p);
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            void* p = std::calloc(4, 16);
+            touch(p);
+            std::free(p);
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("realloc")
     {
         void* p = std::malloc(16);
         touch(p);
-        const AllocationScope scope;
-        p = std::realloc(p, 4096);
-        touch(p);
-        const long seen = scope.allocations();
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            p = std::realloc(p, 4096);
+            touch(p);
+            seen = scope.allocations();
+        }
         std::free(p);
         CHECK(seen >= 1);
     }
@@ -197,9 +260,13 @@ TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][sh
     {
         void* p = std::malloc(32);
         touch(p);
-        const AllocationScope scope;
-        std::free(p);
-        CHECK(scope.frees() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            std::free(p);
+            seen = scope.frees();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("juce::HeapBlock release")
@@ -207,61 +274,97 @@ TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][sh
         juce::HeapBlock<float> block;
         block.allocate(64, false);
         touch(block.get());
-        const AllocationScope scope;
-        block.free();
-        CHECK(scope.frees() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            block.free();
+            seen = scope.frees();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("juce::HeapBlock")
     {
-        const AllocationScope scope;
-        juce::HeapBlock<float> block;
-        block.allocate(256, false);
-        touch(block.get());
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            juce::HeapBlock<float> block;
+            block.allocate(256, false);
+            touch(block.get());
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("juce::AudioBuffer construction")
     {
-        const AllocationScope scope;
-        juce::AudioBuffer<float> buffer(2, 480);
-        touch(buffer.getWritePointer(0));
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            juce::AudioBuffer<float> buffer(2, 480);
+            touch(buffer.getWritePointer(0));
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("juce::AudioBuffer::setSize")
     {
         juce::AudioBuffer<float> buffer(2, 16);
-        const AllocationScope scope;
-        buffer.setSize(2, 100000);
-        touch(buffer.getWritePointer(0));
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            buffer.setSize(2, 100000);
+            touch(buffer.getWritePointer(0));
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("juce::Array growth")
     {
         juce::Array<int> array;
-        const AllocationScope scope;
-        for (int i = 0; i < 1000; ++i)
-            array.add(i);
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            for (int i = 0; i < 1000; ++i)
+                array.add(i);
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("juce::MemoryBlock")
     {
-        const AllocationScope scope;
-        juce::MemoryBlock block(512);
-        touch(block.getData());
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            juce::MemoryBlock block(512);
+            touch(block.getData());
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
 
     SECTION("juce::String")
     {
-        const AllocationScope scope;
-        juce::String text("a string that is long enough to need heap storage, not the small buffer");
-        text += "more";
-        CHECK(scope.allocations() >= 1);
+        long seen = 0;
+        {
+            const AllocationScope scope;
+            juce::String text("a string that is long enough to need heap storage, not the small buffer");
+            text += "more";
+            seen = scope.allocations();
+        }
+        CHECK(seen >= 1);
     }
+}
+
+#else
+
+TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][shell][allocation]")
+{
+    SKIP("malloc family is not hooked on this platform yet; the zero-allocation assertions only cover operator new "
+         "here");
 }
 
 #endif

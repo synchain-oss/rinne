@@ -22,6 +22,8 @@ export const INFRA_PATHS = [
     "scripts/check-*",
     // ctest 的 TIMEOUT 门禁就是这个文件里的两条 add_test，Catch2 的钉版也在这里：删掉它们不该由自合的 PR 完成
     "tests/CMakeLists.txt",
+    // sanitizer 金丝雀：run.sh 由 CI 调用，被改成恒过，core-sanitizers 的绿就不可信
+    "tests/sanitizer-canary/**",
     "scripts/review-bot.mjs",
     "scripts/lock-actions.mjs",
     "scripts/sync-labels.mjs",
