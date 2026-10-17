@@ -17,7 +17,7 @@ import { createRun, repoRoot } from "./lib/harness.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("静态导出清空守卫");
-const { cleanVerdict, NAME_RE, OUT_REL, MARKER } = await import(
+const { cleanVerdict, OUT_REL, MARKER } = await import(
     pathToFileURL(path.join(ROOT, "web-preview", "build-static.mjs")).href
 );
 
@@ -30,9 +30,8 @@ const rejected = (patch, label) => run.check(!verdict(patch).ok, `${label}：拒
 
 run.check(verdict({}).ok, "固定目录、有标记：放行");
 run.check(verdict({ exists: false, hasMarker: false }).ok, "固定目录不存在：放行");
-run.check(verdict({ targetReal: path.join(baseReal, "demo") }).ok, "固定目录下的子目录：放行");
+rejected({ targetReal: path.join(baseReal, "demo") }, "固定目录下的子目录（不再有子名）");
 rejected({ hasMarker: false }, "已存在却没有标记文件");
-rejected({ targetReal: path.join(baseReal, "demo"), hasMarker: false }, "子目录已存在却没有标记文件");
 
 for (const [label, targetReal] of [
     ["仓库根", rootReal],
@@ -79,12 +78,6 @@ run.check(
 );
 rejected({ rootReal: realRoot2 }, "目录在字面仓库根下、真实仓库根却是别处");
 
-// 子名
-for (const good of ["a", "demo", "v1-2", "0abc", "a".repeat(32)]) run.check(NAME_RE.test(good), `子名 ${good}：合法`);
-for (const bad of ["", "-a", "A", "a_b", "a.b", "a/b", "a\\b", "..", ".", "a".repeat(33), "a b", "../x"]) {
-    run.check(!NAME_RE.test(bad), `子名 ${JSON.stringify(bad)}：非法`);
-}
-
 // ---- ② 端到端：只在 mkdtemp 出来的仓库副本里跑 ----
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-static-"));
 try {
@@ -106,32 +99,29 @@ try {
     fs.writeFileSync(path.join(out, "stale.txt"), "x");
     r = exec();
     run.check(r.status === 0 && !fs.existsSync(path.join(out, "stale.txt")), "有标记的目录可以被清空重建");
-    r = exec("--name", "demo");
-    run.check(r.status === 0 && fs.existsSync(path.join(out, "demo", MARKER)), "--name 导出到固定目录的子目录");
 
+    // 目录里放一个没有标记的子目录，被拒绝的调用都不得删掉它
+    const foreign = path.join(out, "foreign");
+    fs.mkdirSync(foreign);
+    fs.writeFileSync(path.join(foreign, "keep.txt"), "keep");
     for (const args of [
         ["--out", tmp],
         ["--out", "."],
-        ["--name", ".."],
-        ["--name", "../web"],
-        ["--name", "A"],
+        ["--name", "demo"],
         ["--name"],
+        ["--name", ".."],
         ["--bogus"],
     ]) {
         r = exec(...args);
         run.check(r.status === 1, `参数 ${JSON.stringify(args)}：应当被拒绝（退出码 1），实得 ${r.status}`);
         run.check(fs.existsSync(bridge), `参数 ${JSON.stringify(args)}：被拒之后副本里的 web/ 仍在`);
+        run.check(
+            fs.existsSync(path.join(foreign, "keep.txt")),
+            `参数 ${JSON.stringify(args)}：被拒之后输出目录里的内容仍在`,
+        );
     }
 
-    // 目录已存在却没有标记：拒绝，什么都不删
-    const foreign = path.join(out, "foreign");
-    fs.mkdirSync(foreign);
-    fs.writeFileSync(path.join(foreign, "keep.txt"), "keep");
-    r = exec("--name", "foreign");
-    run.check(
-        r.status === 1 && fs.existsSync(path.join(foreign, "keep.txt")),
-        "已存在却没有标记的子目录：拒绝，文件还在",
-    );
+    // 固定目录丢了标记文件：拒绝，什么都不删
     fs.rmSync(path.join(out, MARKER));
     r = exec();
     run.check(r.status === 1 && fs.existsSync(path.join(foreign, "keep.txt")), "固定目录丢了标记文件：拒绝，内容还在");

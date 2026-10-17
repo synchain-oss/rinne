@@ -5,13 +5,13 @@
 // 纯拷贝，不改任何文件内容，所以页面与 mock 仍是纯本地：不发任何网络请求，不依赖任何框架。
 // 导出之后自检这棵树：任何 http(s) 外链、任何网络调用（fetch、XMLHttpRequest、WebSocket、sendBeacon、EventSource）都判红，
 // 放行的只有两种字面量：SVG 命名空间和 JUCE 辅助脚本的宿主伪源（都不是网络请求）。
-//   node web-preview/build-static.mjs [--name <子名>] [--check]
+//   node web-preview/build-static.mjs [--check]
 //
 // 输出目录是写死的：<仓库根>/build/web-preview-static，仓库根由本脚本自身的路径推出；没有 --out。
-// 需要多份输出时只接受 --name <子名>（匹配 ^[a-z0-9][a-z0-9-]{0,31}$），最终目录是 build/web-preview-static/<子名>。
+// 只接受 --check，没有任何选项能改输出位置。
 // 脚本绝不删除调用方给的任意路径。清空目标目录前要全部满足：
 //   1. 目标的真实路径（realpath；目标不存在时先对已存在的上级取 realpath 再拼回去，符号链接与 junction 因此无处藏身）
-//      以 realpath(<仓库根>/build/web-preview-static) 为前缀，且不是它的上级；
+//      恰好等于 realpath(<仓库根>)/build/web-preview-static（build/ 被换成 junction 也拒），且不是仓库根、它的上级或盘根；
 //   2. 目标若已存在，必须含本脚本上次写下的标记文件 .rinne-build-static，否则拒绝（不删，退出 1）。
 // 判定是纯函数 cleanVerdict，测试只传路径字符串。删除只针对这个目标目录，不用 force 吞错。
 // --check 只自检仓库里的源树，不写任何文件。
@@ -24,7 +24,6 @@ import { fileURLToPath } from "node:url";
 /** 固定输出目录相对仓库根的位置，标记文件名，子名的格式。 */
 export const OUT_REL = ["build", "web-preview-static"];
 export const MARKER = ".rinne-build-static";
-export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 const isUnder = (base, p) => {
     const rel = path.relative(base, p);
@@ -52,8 +51,8 @@ export function cleanVerdict({ rootReal, baseReal, targetReal, exists, hasMarker
             `固定输出目录的真实路径 ${baseReal} 不在仓库根真实路径下的 ${OUT_REL.join("/")}（符号链接或 junction？）`,
         );
     }
-    if (!samePath(baseReal, targetReal) && !isUnder(baseReal, targetReal)) {
-        return no(`目标的真实路径 ${targetReal} 不在 ${baseReal} 之下`);
+    if (!samePath(baseReal, targetReal)) {
+        return no(`目标的真实路径 ${targetReal} 不是固定输出目录 ${baseReal}`);
     }
     if (
         samePath(targetReal, rootReal) ||
@@ -125,21 +124,15 @@ export function verify(files) {
 function main() {
     const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
     const argv = process.argv.slice(2);
-    let name = null;
     let check = false;
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === "--check") check = true;
-        else if (argv[i] === "--name" && i + 1 < argv.length) name = argv[++i];
         else {
             console.error(
-                `build-static：不认识的参数 ${argv[i]}（没有 --out：输出目录是写死的 ${OUT_REL.join("/")}，可选 --name <子名>）`,
+                `build-static：不认识的参数 ${argv[i]}（没有 --out：输出目录是写死的 ${OUT_REL.join("/")}，只接受 --check）`,
             );
             process.exit(1);
         }
-    }
-    if (name !== null && !NAME_RE.test(name)) {
-        console.error(`build-static：--name 必须匹配 ${NAME_RE}，实得 ${JSON.stringify(name)}`);
-        process.exit(1);
     }
 
     const files = [];
@@ -152,7 +145,7 @@ function main() {
 
     if (!check) {
         const base = path.join(root, ...OUT_REL);
-        const target = name === null ? base : path.join(base, name);
+        const target = base;
         const exists = fs.existsSync(target);
         const verdict = cleanVerdict({
             rootReal: fs.realpathSync(root),
