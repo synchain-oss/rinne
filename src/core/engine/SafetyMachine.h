@@ -125,7 +125,7 @@ public:
     // 每样本先调 advance 取本样本的增益，再把测量结果交给 observe
     SafetyGains advance(bool tapValid) noexcept;
     void observe(const SafetyObservation& observation) noexcept;
-    // 起播沿复位（回送此时已淡出、延迟线已清）：清判据与失控保护；load / first_pair 的淡入直接置满
+    // 起播沿复位（回送此时已淡出、延迟线已清）：清判据与失控保护。进行中的淡入照常走完，不提前置满
     void playEdgeReset() noexcept;
     void noteReturnNonFinite(int count) noexcept;
 

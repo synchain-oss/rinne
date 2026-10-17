@@ -58,7 +58,7 @@ struct SafetyEvent
     SafetyEventCode code = SafetyEventCode::StateChanged;
     std::uint8_t a = 0;
     std::uint8_t b = 0;
-    std::int64_t sample = 0; // 事件发生在 prepare 之后的第几个样本
+    std::int64_t sample = 0; // 实例创建以来处理过的第几个样本（重 prepare 不清零，事件顺序因此单调）
 };
 
 // 一块之内的事件，定长；装不下时只数丢了几条。引擎每块处理完后读走，下一块开始时清空

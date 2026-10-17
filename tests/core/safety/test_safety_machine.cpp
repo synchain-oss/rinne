@@ -191,7 +191,10 @@ TEST_CASE("panic fades out in 10 ms, asks for one flush, and stays latched", "[s
     rig.run(10);
     CHECK(rig.m.state() == SafetyState::Tripped);
     CHECK(rig.lastGain == 0.0f);
-    CHECK_FALSE(rig.m.takeFlushRequest()); // 已经清过一次，不重复请求
+    // 换采样率后延迟线是新的一份：再请求一次清空，只一次
+    CHECK(rig.m.takeFlushRequest());
+    rig.run(10);
+    CHECK_FALSE(rig.m.takeFlushRequest());
     CHECK(rig.m.tripReason() == TripReason::Panic);
 }
 
@@ -263,16 +266,27 @@ TEST_CASE("command numbers already present on the first block are not replayed",
     CHECK_FALSE(m.latched());
 }
 
-TEST_CASE("the play-edge reset completes load and first_pair fade-ins only", "[safety][machine][playedge]")
+TEST_CASE("the play-edge reset never shortcuts a fade-in", "[safety][machine][playedge]")
 {
     {
+        // 已配对、还没读到有效数据：起播沿之后仍从首个有效读样本起 500 ms
+        MachineRig rig;
+        rig.run(1000, false);
+        rig.m.playEdgeReset();
+        CHECK(rig.m.state() == SafetyState::FadeIn);
+        rig.run(100, false);
+        CHECK(rig.lastGain == 0.0f);
+        rig.step(true);
+        CHECK(rig.lastGain == static_cast<float>(1.0 / k500ms));
+    }
+    {
+        // 淡入走到一半：起播沿之后接着走，不跳到 1
         MachineRig rig;
         rig.run(100, true);
-        REQUIRE(rig.m.fadeReason() == FadeReason::Load);
         rig.m.playEdgeReset();
-        CHECK(rig.m.state() == SafetyState::Run);
-        rig.step();
-        CHECK(rig.lastGain == 1.0f);
+        CHECK(rig.m.state() == SafetyState::FadeIn);
+        rig.step(true);
+        CHECK(rig.lastGain == static_cast<float>(101.0 / k500ms));
     }
     for (const FadeReason reason : {FadeReason::Preset, FadeReason::SetState, FadeReason::NewWriter})
     {
@@ -283,7 +297,7 @@ TEST_CASE("the play-edge reset completes load and first_pair fade-ins only", "[s
         rig.m.playEdgeReset();
         CHECK(rig.m.state() == SafetyState::FadeIn);
         rig.step();
-        CHECK(rig.lastGain < 0.01f);
+        CHECK(rig.lastGain == static_cast<float>(101.0 / k500ms));
     }
 }
 

@@ -69,12 +69,13 @@ void SafetyMachine::prepare(double sampleRate) noexcept
 
     resetDetectors();
     resetGuard();
-    // 首次 prepare 或采样率变了：流已经不连续，回送从 0 起；跳闸时重新计冷却，淡出完成即请求清空
+    // 首次 prepare 或采样率变了：流已经不连续，回送从 0 起；跳闸时重新计冷却，并再请求一次清空延迟线
     gSafety_.setCurrentAndTargetValue(0.0f);
     if (latched_)
     {
         cooldown_ = cooldownSamples_;
         phase_ = FadePhase::Idle;
+        flushIssued_ = false;
     }
     else
     {
@@ -370,15 +371,9 @@ void SafetyMachine::playEdgeReset() noexcept
 {
     if (!prepared_)
         return;
+    // 进行中的淡入不提前置满：仍从首个有效读样本起走完 500 ms
     resetDetectors();
     resetGuard();
-    if (!latched_ && paired_ && phase_ != FadePhase::Idle &&
-        (fadeReason_ == FadeReason::Load || fadeReason_ == FadeReason::FirstPair))
-    {
-        gSafety_.setCurrentAndTargetValue(1.0f);
-        phase_ = FadePhase::Idle;
-        pendingGuardReset_ = false;
-    }
 }
 
 void SafetyMachine::noteReturnNonFinite(int count) noexcept
