@@ -29,13 +29,13 @@
 #include "ipc/SegmentBackendWin32.h"
 #else
 #include <cerrno>
-#include <filesystem>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "TempDir.h"
 #include "ipc/SegmentBackendPosix.h"
 #endif
 
@@ -123,24 +123,6 @@ bool segmentExists(const std::string& name)
     return true;
 }
 
-struct TempLockDir
-{
-    TempLockDir()
-    {
-        std::string templ = (std::filesystem::temp_directory_path() / "rinne-leftover-XXXXXX").string();
-        REQUIRE(::mkdtemp(templ.data()) != nullptr);
-        path = templ;
-    }
-    ~TempLockDir()
-    {
-        std::error_code ec;
-        std::filesystem::remove_all(path, ec);
-    }
-    TempLockDir(const TempLockDir&) = delete;
-    TempLockDir& operator=(const TempLockDir&) = delete;
-    std::string path;
-};
-
 #endif
 
 } // namespace
@@ -150,8 +132,8 @@ TEST_CASE("segments released normally leave nothing behind", "[ipc][backend][shm
 #if defined(_WIN32)
     const std::string lockDir;
 #else
-    TempLockDir dir;
-    const std::string lockDir = dir.path;
+    rinne::test::TempDir dir;
+    const std::string lockDir = dir.path();
 #endif
     const Naming naming(NameScope::randomForTesting());
     const auto names = allNames(naming);
@@ -207,13 +189,13 @@ TEST_CASE("segments of a holder that exits without releasing do not survive", "[
         CHECK_FALSE(segmentExists(name));
     }
 #else
-    TempLockDir dir;
+    rinne::test::TempDir dir;
     const pid_t child = ::fork();
     REQUIRE(child >= 0);
     if (child == 0)
     {
         // 子进程：建段，不 unmap、不跑析构，直接退出（等同崩溃）。退出码告诉父进程建没建成
-        auto backend = makeBackend(dir.path);
+        auto backend = makeBackend(dir.path());
         for (std::uint32_t g = 0; g <= kGroupCount; ++g)
         {
             SegmentView view;
@@ -229,7 +211,7 @@ TEST_CASE("segments of a holder that exits without releasing do not survive", "[
     REQUIRE(WIFEXITED(status));
     REQUIRE(WEXITSTATUS(status) == 0);
 
-    auto backend = makeBackend(dir.path);
+    auto backend = makeBackend(dir.path());
     for (std::uint32_t g = 0; g <= kGroupCount; ++g)
     {
         INFO(names[g]);

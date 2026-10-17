@@ -20,14 +20,13 @@
 #else
 #include <cerrno>
 #include <chrono>
-#include <cstdlib>
-#include <filesystem>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "TempDir.h"
 #include "ipc/SegmentBackendPosix.h"
 #endif
 
@@ -45,30 +44,16 @@ struct BackendFixture
 
 #else
 
-// 每个用例一个临时锁目录，用完删掉
+// 每个用例一个临时锁目录（本进程 mkdtemp 新建，用完由 TempDir 核过路径再删）
 struct BackendFixture
 {
-    BackendFixture()
-    {
-        std::string templ = (std::filesystem::temp_directory_path() / "rinne-ipc-XXXXXX").string();
-        REQUIRE(::mkdtemp(templ.data()) != nullptr);
-        lockDir = templ;
-    }
-    ~BackendFixture()
-    {
-        std::error_code ec;
-        std::filesystem::permissions(lockDir, std::filesystem::perms::owner_all, ec);
-        std::filesystem::remove_all(lockDir, ec);
-    }
-    BackendFixture(const BackendFixture&) = delete;
-    BackendFixture& operator=(const BackendFixture&) = delete;
-
     std::unique_ptr<SegmentBackendPosix> make() const
     {
         return std::make_unique<SegmentBackendPosix>(SegmentBackendPosix::LockDirForTesting{lockDir});
     }
 
-    std::string lockDir;
+    rinne::test::TempDir dir;
+    const std::string lockDir = dir.path();
 };
 
 #endif
@@ -278,6 +263,19 @@ TEST_CASE("a held lifecycle lock fails retries at once and is reported with the 
     backend->unmap(again);
     backend->unmap(view);
     CHECK(diag.events().empty());
+}
+
+TEST_CASE("the temp lock directory guard only accepts its own directory", "[ipc][backend][posix]")
+{
+    // 只核判定，不在任何真实路径上触发删除
+    using rinne::test::TempDir;
+    CHECK_FALSE(TempDir::safeToRemove("/"));
+    CHECK_FALSE(TempDir::safeToRemove(std::filesystem::temp_directory_path().string()));
+    CHECK_FALSE(TempDir::safeToRemove(SegmentBackendPosix::defaultLockDir()));
+    CHECK_FALSE(TempDir::safeToRemove("relative/path"));
+    const TempDir dir;
+    CHECK(TempDir::safeToRemove(dir.path()));
+    CHECK_FALSE(TempDir::safeToRemove(dir.path() + "/.."));
 }
 
 TEST_CASE("the default lock directory lives under the real home", "[ipc][backend][posix]")

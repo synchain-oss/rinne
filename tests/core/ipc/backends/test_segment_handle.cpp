@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 映射句柄的租约与释放：持租约时不解映射；释放请求之后不再发租约；租约归零后还要再等满宽限期才经后端解映射；
-// 移动只转移所有权；析构或移动赋值覆盖时走不完宽限期，控制块与映射都留到进程退出，租约照样有效；
-// 时钟读出 0 或倒退时宽限期从头算。时间用参数注入，不睡眠。
+// 移动只转移所有权；析构或移动赋值覆盖时走不完宽限期，映射交给回收表，之后走完宽限期再解映射，租约照样有效；
+// 后端先没了时回收表把它忘掉；时钟读出 0 或倒退时宽限期从头算。时间用参数注入，不睡眠。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -118,8 +118,15 @@ TEST_CASE("a lease that outlives its handle keeps the control block alive", "[ip
     CHECK(lease.base() == base);
     CHECK(lease.size() == kRingBytes);
     static_cast<unsigned char*>(lease.base())[kRingDataOffset] = 1;
-    lease = SegmentHandle::Lease{}; // 归还：落在仍然活着的控制块上
+    // 租约还在：回收表不解映射
+    CHECK(SegmentHandle::reapRetired(1000) == 0);
+    CHECK(SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs * 10) == 0);
     CHECK(backend.unmaps == 0);
+    lease = SegmentHandle::Lease{}; // 归还：落在仍然活着的控制块上
+    // 归还之后宽限期才开始，走完就解映射
+    CHECK(SegmentHandle::reapRetired(20000) == 0);
+    CHECK(SegmentHandle::reapRetired(20000 + SegmentHandle::kReleaseGraceMs) >= 1);
+    CHECK(backend.unmaps == 1);
 }
 
 TEST_CASE("move-assigning over a live handle keeps its outstanding leases valid", "[ipc][backend][handle][lifetime]")
@@ -138,9 +145,10 @@ TEST_CASE("move-assigning over a live handle keeps its outstanding leases valid"
     CHECK(leaseA.base() == baseA);
     leaseA = SegmentHandle::Lease{};
     CHECK(backend.unmaps == 0);
+    // a 的 release 顺手回收被覆盖的那一块：两块各走完自己的宽限期
     CHECK_FALSE(a.release(1000));
     CHECK(a.release(1000 + SegmentHandle::kReleaseGraceMs));
-    CHECK(backend.unmaps == 1);
+    CHECK(backend.unmaps == 2);
 }
 
 TEST_CASE("the grace period never ends early when the clock reads 0 or goes backwards", "[ipc][backend][handle][clock]")
@@ -160,16 +168,43 @@ TEST_CASE("the grace period never ends early when the clock reads 0 or goes back
     CHECK(backend.unmaps == 1);
 }
 
-TEST_CASE("destroying a handle before the grace period leaves the mapping alone", "[ipc][backend][handle]")
+TEST_CASE("handles destroyed before the grace period are reclaimed once it passes", "[ipc][backend][handle][reap]")
 {
+    // 插件卸载、删轨、撤销反复建删实例：析构时宽限期才开始，映射交给回收表，之后由回收者解映射、关句柄，
+    // 不在会话期间越积越多
     SegmentBackendInProcess::resetAllForTesting();
     CountingBackend backend;
+    constexpr int kHandles = 5;
+    const std::size_t pendingBefore = SegmentHandle::retiredPending();
+    for (int i = 0; i < kHandles; ++i)
     {
         SegmentHandle handle = openHandle(backend);
         CHECK(handle.valid());
     }
-    // 析构时宽限期才开始：不解映射，映射留到进程退出（音频线程可能仍持有的裸指针不会悬空）
     CHECK(backend.unmaps == 0);
+    CHECK(SegmentHandle::retiredPending() == pendingBefore + kHandles);
+    // 析构时的宽限期按真实时钟开始；这里换成注入的时间：时间倒退从头计，再走满 500 ms
+    SegmentHandle::reapRetired(1000);
+    CHECK(SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs - 1) == 0);
+    CHECK(backend.unmaps == 0);
+    CHECK(SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs) >= static_cast<std::size_t>(kHandles));
+    CHECK(backend.unmaps == kHandles);
+    CHECK(SegmentHandle::retiredPending() == pendingBefore);
+}
+
+TEST_CASE("a backend destroyed before reclaiming is forgotten by the retired table", "[ipc][backend][handle][reap]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const std::size_t pendingBefore = SegmentHandle::retiredPending();
+    {
+        CountingBackend backend;
+        SegmentHandle handle = openHandle(backend);
+        // handle 先析构（交给回收表），backend 随后析构：回收表摘掉指着它的映射
+    }
+    CHECK(SegmentHandle::retiredPending() == pendingBefore);
+    // 之后的回收不会再碰已经没了的后端
+    SegmentHandle::reapRetired(1000);
+    SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs);
 }
 
 TEST_CASE("leases taken concurrently with a release request stop once it is seen", "[ipc][backend][handle][threads]")

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -155,7 +156,9 @@ struct SegmentHeaderSpec
 class ISegmentBackend
 {
 public:
-    virtual ~ISegmentBackend() = default;
+    // 析构时把还挂在待回收表上、指着自己的映射摘掉（它们留到进程退出，回收者不再碰这个后端）。定义在文件末尾。
+    // 后端析构与 SegmentHandle::reapRetired 都在持生命周期锁的非实时线程上，两者不并发。
+    virtual ~ISegmentBackend();
 
     // 建或开命名段。created = true 时内核已把整段清零；created = false 时要经 initHeader 判定能不能用。
     virtual InitResult createOrOpen(const std::string& name, std::size_t size, SegmentView& view) = 0;
@@ -359,54 +362,182 @@ private:
 namespace detail
 {
 
-// 映射控制块：持有视图与租约计数。由 SegmentHandle 独占（只在非实时线程上碰），音频线程只经裸指针增减 leaseCount。
+// 映射控制块：持有视图与租约计数。音频线程只经裸指针增减 leaseCount、读 view.base；其余字段只在非实时线程上碰
+// （由句柄独占时归句柄，挂进回收表之后归回收表的锁）。
+// 控制块一经分配就到进程退出才释放：解映射之后它仍留在回收表里（约百字节）。这样 lease() 里「读到裸指针」与
+// 「计数 + 1」之间不管被挂起多久，加计数时碰到的都是活着的内存；随后看到 releaseRequested 就退还计数，
+// 从不去读已经解映射的 base。两道保护都不再依赖时间。
 struct SegmentMapping
 {
     SegmentView view;
     std::atomic<u32> leaseCount{0};
     std::atomic<bool> releaseRequested{false};
-    SegmentMapping* retainedNext = nullptr; // 进了「留到进程退出」表之后的链
+    ISegmentBackend* backend = nullptr; // 解映射用；解映射之后、或后端先没了，为空
+    u64 graceStartMs = 0;
+    bool graceStarted = false;
+    bool unmapped = false;
+    SegmentMapping* next = nullptr; // 在回收表里的链
 
-    explicit SegmentMapping(SegmentView&& v) : view(std::move(v)) {}
+    SegmentMapping(SegmentView&& v, ISegmentBackend* b) : view(std::move(v)), backend(b) {}
 };
 
-// 宽限期没走完就被丢下的控制块（连同它的映射）留到进程退出：音频线程可能还拿着指向它的租约，或者正停在 lease() 里
-// 读到裸指针、还没加计数的那一步，这时释放控制块就是释放后使用。挂在一张全局的侵入式单链上，插入不分配、不加锁；
-// 泄漏检测把它当可达内存。每个链接了 rinne_core 的二进制一张表。
-inline void retainUntilExit(SegmentMapping* mapping) noexcept
+// 宽限期的判定：租约归零之后再过 500 ms。时钟读出 0 时既不开始也不推进；时间倒退时从现在重新计，
+// 绝不因为无符号相减回绕而提前结束。
+constexpr u64 kReleaseGraceMs = 500;
+
+inline bool graceElapsed(SegmentMapping& m, u64 nowMs) noexcept
 {
-    static std::atomic<SegmentMapping*> head{nullptr};
-    SegmentMapping* old = head.load(std::memory_order_relaxed);
-    do
+    if (m.leaseCount.load(std::memory_order_seq_cst) != 0) // 握手的非实时一侧，见 SegmentHandle::lease()
     {
-        mapping->retainedNext = old;
-    } while (!head.compare_exchange_weak(old, mapping, std::memory_order_release, std::memory_order_relaxed));
+        return false;
+    }
+    if (nowMs == 0)
+    {
+        return false;
+    }
+    if (!m.graceStarted || nowMs < m.graceStartMs)
+    {
+        m.graceStarted = true;
+        m.graceStartMs = nowMs;
+        return false;
+    }
+    return nowMs - m.graceStartMs >= kReleaseGraceMs;
 }
+
+// 宽限期满就解映射、关平台句柄。控制块不释放
+inline bool unmapIfReady(SegmentMapping& m, u64 nowMs)
+{
+    if (m.unmapped)
+    {
+        return true;
+    }
+    if (!graceElapsed(m, nowMs))
+    {
+        return false;
+    }
+    if (m.backend != nullptr)
+    {
+        m.backend->unmap(m.view);
+    }
+    m.view.reset();
+    std::string().swap(m.view.name);
+    m.backend = nullptr;
+    m.unmapped = true;
+    return true;
+}
+
+// 进程级的回收表（每个链接了 rinne_core 的二进制一张，永不析构）：
+//   pending  句柄析构或被覆盖时宽限期还没走完的映射，由 reap() 在之后的某一拍走完宽限期再解映射；
+//   done     已解映射（或后端先没了）的控制块，留到进程退出。
+// 侵入式单链，插入与摘除不分配；一把锁，只在非实时线程上取。泄漏检测把这些控制块当可达内存。
+class RetiredMappings
+{
+public:
+    static RetiredMappings& instance() noexcept
+    {
+        static RetiredMappings* table = new RetiredMappings();
+        return *table;
+    }
+
+    void retire(SegmentMapping* m) noexcept
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        push(m->unmapped ? done_ : pending_, m);
+    }
+
+    std::size_t reap(u64 nowMs) noexcept
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        std::size_t unmapped = 0;
+        for (SegmentMapping** link = &pending_; *link != nullptr;)
+        {
+            SegmentMapping* m = *link;
+            if (unmapIfReady(*m, nowMs))
+            {
+                *link = m->next;
+                push(done_, m);
+                ++unmapped;
+            }
+            else
+            {
+                link = &m->next;
+            }
+        }
+        return unmapped;
+    }
+
+    // 后端析构：还没解映射、指着它的映射不再由回收表解映射，映射本身留到进程退出（平台句柄随进程关）
+    void forget(const ISegmentBackend* backend) noexcept
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        for (SegmentMapping** link = &pending_; *link != nullptr;)
+        {
+            SegmentMapping* m = *link;
+            if (m->backend == backend)
+            {
+                m->backend = nullptr;
+                m->unmapped = true;
+                *link = m->next;
+                push(done_, m);
+            }
+            else
+            {
+                link = &m->next;
+            }
+        }
+    }
+
+    std::size_t pendingCount() noexcept
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        std::size_t n = 0;
+        for (const SegmentMapping* m = pending_; m != nullptr; m = m->next)
+        {
+            ++n;
+        }
+        return n;
+    }
+
+private:
+    RetiredMappings() = default;
+
+    static void push(SegmentMapping*& head, SegmentMapping* m) noexcept
+    {
+        m->next = head;
+        head = m;
+    }
+
+    std::mutex mutex_;
+    SegmentMapping* pending_ = nullptr;
+    SegmentMapping* done_ = nullptr;
+};
 
 } // namespace detail
 
+inline ISegmentBackend::~ISegmentBackend()
+{
+    detail::RetiredMappings::instance().forget(this);
+}
+
 // 映射句柄：独占控制块 + 按块租约 + 宽限期释放。
 //   - 控制块只在非实时线程上碰；音频线程经原子裸指针 implPtr_ 拿到它，增减 leaseCount。
-//   - release(now)：先置 releaseRequested，再摘掉 implPtr_（不再发放新租约），然后在 leaseCount 归零、
-//     且又过了 kReleaseGraceMs 之后才经后端解映射、删掉控制块。
-//   - 析构、或者移动赋值覆盖一个还没释放完的句柄：宽限期走不完，控制块与映射都留到进程退出（retainUntilExit），
-//     租约与裸指针都不会悬空。插件卸载时这是常态。
-// 两道保护各管一段：lease() 里「读到裸指针」与「leaseCount + 1」之间那一小段只有宽限期兜着（计数还没加上，
-// 握手与计数复核都看不见它）；租约发放之后才归计数复核与握手管。前一段依赖「500 ms 宽限 > 音频线程在这两步之间
-// 可能被挂起的时长」这个前提，这是有意接受的设计假设；单测用显式的静默点代替真实时间，测的是后一段。
-// 时间由调用方传入，必须是 util::monoNowMs() 那一个跨进程单调时钟；读不出时钟（0）或时间倒退时宽限期从头算，
-// 绝不因为无符号相减回绕而提前解映射。
+//   - release(now)：先置 releaseRequested，再摘掉 implPtr_（不再发放新租约），然后在 leaseCount 归零、且又过了
+//     kReleaseGraceMs 之后经后端解映射。控制块不释放，交给回收表留到进程退出。
+//   - 析构、或者移动赋值覆盖一个还没释放完的句柄：映射挂进回收表，由 reapRetired() 在之后的某一拍走完宽限期再
+//     解映射、关平台句柄（插件卸载时这是常态）。持生命周期锁的非实时线程要定时调用 reapRetired()（会合层的 25 Hz
+//     定时器）；任何句柄的 release() 也顺手回收一次。
+// 时间由调用方传入，必须是 util::monoNowMs() 那一个跨进程单调时钟。
 class SegmentHandle
 {
 public:
     // 两个 4 Hz 心跳的间隔，远大于宿主的最大块时长
-    static constexpr u64 kReleaseGraceMs = 500;
+    static constexpr u64 kReleaseGraceMs = detail::kReleaseGraceMs;
 
     SegmentHandle() = default;
 
     // 接管视图（createOrOpen / openExisting 与 initHeader 之后，非实时线程）
     SegmentHandle(SegmentView&& view, ISegmentBackend* backend)
-        : impl_(new detail::SegmentMapping(std::move(view))), backend_(backend)
+        : impl_(new detail::SegmentMapping(std::move(view), backend))
     {
         implPtr_.store(impl_, std::memory_order_release);
     }
@@ -416,7 +547,7 @@ public:
     SegmentHandle(const SegmentHandle&) = delete;
     SegmentHandle& operator=(const SegmentHandle&) = delete;
 
-    // 移动转移所有权；移动赋值先放下自己原来的那一块（走不完宽限期的留到进程退出）
+    // 移动转移所有权；移动赋值先放下自己原来的那一块（走不完宽限期的交给回收表）
     SegmentHandle(SegmentHandle&& o) noexcept { takeFrom(o); }
     SegmentHandle& operator=(SegmentHandle&& o) noexcept
     {
@@ -442,7 +573,7 @@ public:
         return p != nullptr ? p->view.size : 0;
     }
 
-    // 音频线程的按块租约：持有期间保证不解映射、控制块不被删。块首 lease()，块末析构归还。
+    // 音频线程的按块租约：持有期间保证不解映射。块首 lease()，块末析构归还。
     class Lease
     {
     public:
@@ -483,11 +614,13 @@ public:
 
     // 音频线程每块调用：读裸指针 → leaseCount + 1 → 查 releaseRequested，已置就退还并返回空租约。
     // 与 release() 构成 Dekker 式握手：音频「加计数，再读请求」，非实时线程「置请求，再读计数」。
-    // 四个访问（这里的 fetch_add 与 load、release() 的 store、unmapIfIdle() 的 load）一律 seq_cst：
+    // 四个访问（这里的 fetch_add 与 load、release() 的 store、graceElapsed() 的 load）一律 seq_cst：
     // 只用 acquire / release 时，C++ 允许两边的 store→load 重排、同时读到旧值，音频拿到租约的同时
     // 非实时线程判「没有在途租约」开始计宽限期。四个都在同一个全序里时，至少有一边看得见另一边。
     // 代价：x86 上只有 release() 的那条 store 从 mov 变成 xchg（不在音频热路径）；arm64 上两条 load 编成 LDAR，
     // 不会被编成可以越过前面 STLR / LDADDAL 提前读的 LDAPR。
+    // 读到裸指针之后被挂起多久都不要紧：控制块永不释放，加计数总落在活着的内存上，之后看到释放请求就退还，
+    // 不去读已经解映射的 base。
     Lease lease() const
     {
         detail::SegmentMapping* p = implPtr_.load(std::memory_order_acquire);
@@ -505,78 +638,54 @@ public:
     }
 
     // 非实时线程请求释放。返回 true = 已解映射；false = 租约在途或宽限期未满，下一拍再调。幂等。
+    // 顺手回收一次被丢下的映射。
     bool release(u64 nowMs)
     {
+        detail::RetiredMappings::instance().reap(nowMs);
         if (impl_ == nullptr)
         {
             return true;
         }
         impl_->releaseRequested.store(true, std::memory_order_seq_cst); // 握手的这一侧，见 lease()
         implPtr_.store(nullptr, std::memory_order_release);
-        return unmapIfIdle(nowMs);
-    }
-
-private:
-    bool unmapIfIdle(u64 nowMs)
-    {
-        if (impl_->leaseCount.load(std::memory_order_seq_cst) != 0) // 握手的这一侧，见 lease()
+        if (!detail::unmapIfReady(*impl_, nowMs))
         {
             return false;
         }
-        if (nowMs == 0)
-        {
-            return false; // 时钟读不出来：宽限期既不开始也不推进
-        }
-        if (!graceStarted_ || nowMs < graceStartMs_)
-        {
-            // 第一次看到租约归零，或者时间倒退了：从现在重新计
-            graceStarted_ = true;
-            graceStartMs_ = nowMs;
-            return false;
-        }
-        if (nowMs - graceStartMs_ < kReleaseGraceMs)
-        {
-            return false;
-        }
-        if (backend_ != nullptr)
-        {
-            backend_->unmap(impl_->view);
-        }
-        delete impl_;
+        detail::RetiredMappings::instance().retire(impl_); // 已解映射，控制块留到进程退出
         impl_ = nullptr;
-        backend_ = nullptr;
-        graceStarted_ = false;
-        graceStartMs_ = 0;
         return true;
     }
 
-    // 放下自己的那一块：能在这一拍释放完就释放，否则（宽限期还没走完）留到进程退出
+    // 走完被丢下的映射的宽限期并解映射；返回这一次解映射的个数。持生命周期锁的非实时线程定时调用。
+    static std::size_t reapRetired(u64 nowMs) { return detail::RetiredMappings::instance().reap(nowMs); }
+
+    // 还在等宽限期的被丢下的映射数（诊断与单测用）
+    static std::size_t retiredPending() { return detail::RetiredMappings::instance().pendingCount(); }
+
+private:
+    // 放下自己的那一块：这一拍能释放完就释放，否则交给回收表
     void abandon() noexcept
     {
-        if (impl_ != nullptr && !release(util::monoNowMs()))
+        if (impl_ == nullptr)
         {
-            detail::retainUntilExit(impl_);
-            impl_ = nullptr;
-            backend_ = nullptr;
-            graceStarted_ = false;
-            graceStartMs_ = 0;
+            return;
         }
+        if (!release(util::monoNowMs()) && impl_ != nullptr)
+        {
+            detail::RetiredMappings::instance().retire(impl_);
+        }
+        impl_ = nullptr;
     }
 
     void takeFrom(SegmentHandle& o) noexcept
     {
         impl_ = std::exchange(o.impl_, nullptr);
-        backend_ = std::exchange(o.backend_, nullptr);
-        graceStartMs_ = std::exchange(o.graceStartMs_, 0);
-        graceStarted_ = std::exchange(o.graceStarted_, false);
         implPtr_.store(o.implPtr_.exchange(nullptr, std::memory_order_acq_rel), std::memory_order_release);
     }
 
     detail::SegmentMapping* impl_ = nullptr; // 独占的控制块；只在非实时线程上碰
     std::atomic<detail::SegmentMapping*> implPtr_{nullptr}; // 音频线程经它拿裸指针；release 之后为空
-    ISegmentBackend* backend_ = nullptr;
-    u64 graceStartMs_ = 0;
-    bool graceStarted_ = false;
 };
 
 } // namespace rinne::ipc
