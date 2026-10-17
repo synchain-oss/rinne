@@ -23,9 +23,15 @@ run_canaries() {
   for p in malloc calloc realloc free; do
     rc=0
     RINNE_TEST_ALLOC_BLIND=$p "$exe" "[allocation]" > "$out" 2>&1 || rc=$?
-    if [ "$rc" = "0" ] || [ "$rc" -gt 99 ]; then
+    # Catch2 v3 的退出码是失败断言数（2、3、4 同时表示没跑用例、过滤没匹配、全部 SKIP），所以不看退出码的大小，
+    # 要求输出里有失败断言，且不是崩溃或未捕获异常
+    if [ "$rc" = "0" ]; then
       tail -n 40 "$out"
-      echo "::error::对 $p 致盲后期望用例失败，实际退出码 $rc"
+      echo "::error::对 $p 致盲后期望用例失败，实际通过了"
+      fail=1
+    elif ! grep -q ': FAILED:' "$out" || grep -qE 'fatal error condition|unexpected exception' "$out"; then
+      tail -n 40 "$out"
+      echo "::error::对 $p 致盲后退出码是 $rc，但输出里没有失败断言，或者是崩溃：不能算用例按预期变红"
       fail=1
     elif ! grep -qx "  $p" "$out"; then
       tail -n 40 "$out"
@@ -42,10 +48,11 @@ run_canaries() {
 if [ "${1:-}" = "--self-test" ]; then
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
   trap 'rm -rf "$tmp"' EXIT
-  # 假的测试程序：good 对致盲有反应（失败并点名 section），deaf 对致盲没反应，wrong 失败但点的不是对应的 section
+  # 假的测试程序：good 对致盲有反应（失败并点名 section），deaf 对致盲没反应，wrong 失败但点的不是对应的 section，
+  # silent 致盲后什么都没跑
   cat > "$tmp/good" <<'SH'
 #!/usr/bin/env bash
-if [ -n "${RINNE_TEST_ALLOC_BLIND:-}" ]; then printf 'case\n  %s\nFAILED\n' "$RINNE_TEST_ALLOC_BLIND"; exit 2; fi
+if [ -n "${RINNE_TEST_ALLOC_BLIND:-}" ]; then printf 'case\n  %s\nf.cpp:1: FAILED:\n' "$RINNE_TEST_ALLOC_BLIND"; exit 2; fi
 echo "All tests passed"
 SH
   cat > "$tmp/deaf" <<'SH'
@@ -54,7 +61,12 @@ echo "All tests passed"
 SH
   cat > "$tmp/wrong" <<'SH'
 #!/usr/bin/env bash
-if [ -n "${RINNE_TEST_ALLOC_BLIND:-}" ]; then printf 'case\n  something else\nFAILED\n'; exit 2; fi
+if [ -n "${RINNE_TEST_ALLOC_BLIND:-}" ]; then printf 'case\n  something else\nf.cpp:1: FAILED:\n'; exit 2; fi
+echo "All tests passed"
+SH
+  cat > "$tmp/silent" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${RINNE_TEST_ALLOC_BLIND:-}" ]; then echo "No test cases matched"; exit 2; fi
 echo "All tests passed"
 SH
   cat > "$tmp/skipped" <<'SH'
@@ -71,6 +83,7 @@ SH
   expect "致盲后点名失败的计数器：通过" 0 "$tmp/good"
   expect "致盲后仍然全绿的计数器：红" 1 "$tmp/deaf"
   expect "失败但没点名对应 section：红" 1 "$tmp/wrong"
+  expect "致盲后什么都没跑（退出码 2，无失败断言）：红" 1 "$tmp/silent"
   expect "用例被 SKIP：红" 1 "$tmp/skipped"
   [ "$bad" = 0 ] || { echo "alloc-canary 自测失败"; exit 1; }
   echo "alloc-canary 自测通过"

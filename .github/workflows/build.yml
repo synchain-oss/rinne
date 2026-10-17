@@ -333,6 +333,7 @@ jobs:
           set -euo pipefail
           command -v ninja >/dev/null 2>&1 || brew install ninja
           ninja --version
+          echo "| ninja | $(ninja --version)（runner 自带或 brew，未钉版） |" >> "$GITHUB_STEP_SUMMARY"
 
       # 架构与部署目标不在命令行传：它们的唯一真源是 cmake/RinneMac.cmake，下一步从 CMakeCache 读回来核，传了就证明不了它在起作用。
       # CMAKE_COLOR_DIAGNOSTICS=OFF：诊断行里夹进颜色码，日志里的告警就认不出来了。

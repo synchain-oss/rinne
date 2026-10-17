@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# POSIX 共享内存残段检查：验证前后各跑一次，/SnchRinne.* 不许有残留。
+# POSIX 共享内存残段检查：验证前后各跑一次，会合段与数据段不许有残留。
 #   shm-leftover.sh <构建目录> <说明>
 # mac 上 POSIX 共享内存段没有可列目录，只能由认得段名的代码去探：跨进程契约套件 rinne_ipc_tests 里带 [shm-leftover] 标签的
-# 用例负责（按 Naming 生成全部会合段与数据段的名字，逐个 shm_open 探，存在就失败）。套件还没有时打印 SKIP 注记并通过；
+# 用例负责（按命名模块生成全部会合段与数据段的名字，逐个 shm_open 探，存在就失败；名字由命名模块决定，本脚本不写死）。套件还没有时打印 SKIP 注记并通过；
 # 套件有了却没有这个标签的用例，是契约被改丢了，判红，不悄悄变成空检查。
 
 set -uo pipefail
@@ -30,7 +30,7 @@ if grep -q 'No test cases matched' "$log"; then
 fi
 rm -f "$log"
 if [ "$rc" != "0" ]; then
-  echo "::error::残段检查（$label）失败，退出码 $rc：/SnchRinne.* 有残留，列表见上"
+  echo "::error::残段检查（$label）失败，退出码 $rc：有共享内存段残留，列表见上"
   echo "- 残段检查（$label）：**有残留**" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
   exit 1
 fi

@@ -339,6 +339,18 @@ void releaseThreadState(void* state)
 malloc_zone_t gZone;
 malloc_introspection_t gIntrospection;
 
+// 已注册的第一个 zone，也就是 malloc() 实际用的默认 zone。不能用 malloc_default_zone()：macOS 10.12
+// 起它返回一个不在注册列表里的 「虚拟默认 zone」，每次调用都转给列表里的第一个 zone（装了 malloc 栈日志时转给 lite
+// zone），拿它当原 zone，计数 zone 一旦排到最前， 转发就会绕回自己，无限递归。
+malloc_zone_t* firstRegisteredZone()
+{
+    vm_address_t* zones = nullptr;
+    unsigned count = 0;
+    if (malloc_get_all_zones(0, nullptr, &zones, &count) != KERN_SUCCESS || zones == nullptr || count == 0)
+        return nullptr;
+    return reinterpret_cast<malloc_zone_t*>(zones[0]);
+}
+
 bool installHooks()
 {
     const char* blind = std::getenv("RINNE_TEST_ALLOC_BLIND");
@@ -359,7 +371,7 @@ bool installHooks()
     if (pthread_key_create(&gKey, &releaseThreadState) != 0)
         return false;
 
-    gOriginal = malloc_default_zone();
+    gOriginal = firstRegisteredZone();
     if (gOriginal == nullptr || gOriginal->introspect == nullptr || gOriginal->introspect->good_size == nullptr)
         return false;
 
@@ -401,16 +413,18 @@ bool installHooks()
     if (gZone.version >= 10 && gOriginal->claimed_address != nullptr)
         gZone.claimed_address = &zoneClaimedAddress;
 
-    // 先注册；再把排在前面的 zone 依次注销后重新注册（它们排到末尾），直到计数 zone 成为列表第一个，也就是 malloc()
-    // 的默认 zone。 其余 zone 重新注册后仍然在册，free() 找得到它们。
+    // 先注册；再把排在前面的 zone 依次注销后重新注册（它们排到末尾），直到计数 zone 成为列表里的第一个，也就是 malloc()
+    // 的 默认 zone。其余 zone 重新注册后仍然在册，free() 找得到它们。
     malloc_zone_register(&gZone);
-    for (int i = 0; i < 8 && malloc_default_zone() != &gZone; ++i)
+    for (int i = 0; i < 8 && firstRegisteredZone() != &gZone; ++i)
     {
-        malloc_zone_t* front = malloc_default_zone();
+        malloc_zone_t* front = firstRegisteredZone();
+        if (front == nullptr)
+            return false;
         malloc_zone_unregister(front);
         malloc_zone_register(front);
     }
-    return malloc_default_zone() == &gZone;
+    return firstRegisteredZone() == &gZone;
 }
 
 // 本线程第一次进作用域之前先建好计数结构；建的时候本线程还没有结构，钩子不计数

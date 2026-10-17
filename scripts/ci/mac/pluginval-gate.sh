@@ -15,6 +15,7 @@ bundles=$1
 installed=$2
 logs=$3
 mkdir -p "$logs"
+logs=$(cd "$logs" && pwd)
 
 tag=$(tr -d '[:space:]' < "$root/.pluginval-version")
 read -r pinned_tag pinned_sha < "$here/pluginval-macos.sha256"
@@ -39,11 +40,12 @@ exe="$work/pluginval.app/Contents/MacOS/pluginval"
 chmod +x "$exe"
 ver=$("$exe" --version </dev/null 2>&1 || true)
 echo "pluginval --version：$ver"
-# 版本号逐字相等（子串匹配会让 1.0.40 冒充 1.0.4）；输出形如 `pluginval - 1.0.4`
+# 版本号要作为一个完整的词出现在 --version 的输出里（子串匹配会让 1.0.40 或 1.0.4-rc1 冒充 1.0.4）
 want=${tag#v}
-have=$(sed -nE 's/^pluginval - ([^[:space:]]+)[[:space:]]*$/\1/p' <<< "$ver" | tail -n 1)
-if [ "$have" != "$want" ]; then
-  echo "::error::下载的 pluginval 自报版本 '${have:-?}'（原文 '$ver'），.pluginval-version 是 $tag"
+escaped=$(printf '%s' "$want" | sed 's/\./\\./g')
+pattern="(^|[^0-9A-Za-z.-])v?${escaped}([^0-9A-Za-z.-]|$)"
+if ! grep -Eq "$pattern" <<< "$ver"; then
+  echo "::error::下载的 pluginval 自报版本 '$ver'，.pluginval-version 是 $tag"
   exit 1
 fi
 
