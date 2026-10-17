@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 外壳阶段的核心承诺：两端对宿主的音频都是逐位直通。随机位型里带 -0.0 与各种 NaN 载荷，块长取 1 到 8192 的每一个值，
-// 正常路径与旁路路径各走一遍；回调里不得有任何堆分配。验证宿主下（见 test_shell_contract.cpp）同样成立。
+// 正常路径与旁路路径各走一遍；回调里不得有任何堆分配与释放。验证宿主下（见 test_shell_contract.cpp）同样成立。
 
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -42,9 +42,9 @@ void process(Processor& processor, juce::AudioBuffer<float>& buffer, juce::MidiB
         processor.processBlockBypassed(buffer, midi);
 }
 
-// 把 1..kMaxBlock 的每个块长都走一遍；返回第一个不是逐位直通的块长，全部通过返回 0。顺带累计回调内的堆分配次数
+// 把 1..kMaxBlock 的每个块长都走一遍；返回第一个不是逐位直通的块长，全部通过返回 0。顺带累计回调内的堆分配与释放次数
 template<typename Processor>
-int sweep(Processor& processor, int numChannels, Path path, long& allocations)
+int sweep(Processor& processor, int numChannels, Path path, long& allocations, long& frees)
 {
     auto fixture = std::make_unique<BlockFixture>();
     juce::MidiBuffer midi;
@@ -56,6 +56,7 @@ int sweep(Processor& processor, int numChannels, Path path, long& allocations)
             const AllocationScope scope;
             process(processor, buffer, midi, path);
             allocations += scope.allocations();
+            frees += scope.frees();
         }
         if (!fixture->unchanged(numChannels, n))
             return n;
@@ -76,8 +77,10 @@ TEMPLATE_TEST_CASE("stereo audio passes through bit for bit at every block size"
         DYNAMIC_SECTION(pathName(path))
         {
             long allocations = 0;
-            CHECK(sweep(processor, 2, path, allocations) == 0);
+            long frees = 0;
+            CHECK(sweep(processor, 2, path, allocations, frees) == 0);
             CHECK(allocations == 0);
+            CHECK(frees == 0);
         }
     }
 }
@@ -95,8 +98,10 @@ TEMPLATE_TEST_CASE("mono audio passes through bit for bit at every block size", 
         DYNAMIC_SECTION(pathName(path))
         {
             long allocations = 0;
-            CHECK(sweep(processor, 1, path, allocations) == 0);
+            long frees = 0;
+            CHECK(sweep(processor, 1, path, allocations, frees) == 0);
             CHECK(allocations == 0);
+            CHECK(frees == 0);
         }
     }
 }

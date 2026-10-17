@@ -19,6 +19,7 @@ namespace
 
 // 无构造函数的 thread_local：第一次访问不会触发分配
 thread_local long gAllocations = 0;
+thread_local long gFrees = 0;
 thread_local int gScopeDepth = 0;
 
 void count() noexcept
@@ -27,13 +28,21 @@ void count() noexcept
         ++gAllocations;
 }
 
+void countFree() noexcept
+{
+    if (gScopeDepth > 0)
+        ++gFrees;
+}
+
 #if defined(_WIN32)
 
 using HeapAllocFn = LPVOID(WINAPI*)(HANDLE, DWORD, SIZE_T);
 using HeapReAllocFn = LPVOID(WINAPI*)(HANDLE, DWORD, LPVOID, SIZE_T);
+using HeapFreeFn = BOOL(WINAPI*)(HANDLE, DWORD, LPVOID);
 
 HeapAllocFn gRealHeapAlloc = nullptr;
 HeapReAllocFn gRealHeapReAlloc = nullptr;
+HeapFreeFn gRealHeapFree = nullptr;
 
 LPVOID WINAPI countedHeapAlloc(HANDLE heap, DWORD flags, SIZE_T bytes)
 {
@@ -45,6 +54,13 @@ LPVOID WINAPI countedHeapReAlloc(HANDLE heap, DWORD flags, LPVOID block, SIZE_T 
 {
     count();
     return gRealHeapReAlloc(heap, flags, block, bytes);
+}
+
+BOOL WINAPI countedHeapFree(HANDLE heap, DWORD flags, LPVOID block)
+{
+    if (block != nullptr)
+        countFree();
+    return gRealHeapFree(heap, flags, block);
 }
 
 // 把本模块导入表里名叫 name 的导入项（不论来自哪个 DLL）换成 replacement；返回换了几处
@@ -89,11 +105,13 @@ bool installHooks()
         return false;
     gRealHeapAlloc = reinterpret_cast<HeapAllocFn>(GetProcAddress(kernel, "HeapAlloc"));
     gRealHeapReAlloc = reinterpret_cast<HeapReAllocFn>(GetProcAddress(kernel, "HeapReAlloc"));
-    if (gRealHeapAlloc == nullptr || gRealHeapReAlloc == nullptr)
+    gRealHeapFree = reinterpret_cast<HeapFreeFn>(GetProcAddress(kernel, "HeapFree"));
+    if (gRealHeapAlloc == nullptr || gRealHeapReAlloc == nullptr || gRealHeapFree == nullptr)
         return false;
-    // 两个都要换到：只换其一，realloc 或 malloc 会漏
+    // 三个都要换到：只换其一，realloc、malloc 或释放会漏
     return patchImports("HeapAlloc", reinterpret_cast<void*>(&countedHeapAlloc)) > 0 &&
-           patchImports("HeapReAlloc", reinterpret_cast<void*>(&countedHeapReAlloc)) > 0;
+           patchImports("HeapReAlloc", reinterpret_cast<void*>(&countedHeapReAlloc)) > 0 &&
+           patchImports("HeapFree", reinterpret_cast<void*>(&countedHeapFree)) > 0;
 }
 
 #else
@@ -132,6 +150,7 @@ AllocationScope::AllocationScope()
         throw std::runtime_error("AllocationCounter: could not hook HeapAlloc / HeapReAlloc in the import table");
 #endif
     before_ = gAllocations;
+    beforeFrees_ = gFrees;
     ++gScopeDepth;
 }
 
@@ -143,6 +162,11 @@ AllocationScope::~AllocationScope()
 long AllocationScope::allocations() const noexcept
 {
     return gAllocations - before_;
+}
+
+long AllocationScope::frees() const noexcept
+{
+    return gFrees - beforeFrees_;
 }
 
 } // namespace rinne::test
@@ -161,21 +185,25 @@ void* operator new[](std::size_t size)
 
 void operator delete(void* p) noexcept
 {
+    countFree();
     std::free(p);
 }
 
 void operator delete[](void* p) noexcept
 {
+    countFree();
     std::free(p);
 }
 
 void operator delete(void* p, std::size_t) noexcept
 {
+    countFree();
     std::free(p);
 }
 
 void operator delete[](void* p, std::size_t) noexcept
 {
+    countFree();
     std::free(p);
 }
 
@@ -191,21 +219,25 @@ void* operator new[](std::size_t size, std::align_val_t alignment)
 
 void operator delete(void* p, std::align_val_t) noexcept
 {
+    countFree();
     std::free(p);
 }
 
 void operator delete[](void* p, std::align_val_t) noexcept
 {
+    countFree();
     std::free(p);
 }
 
 void operator delete(void* p, std::size_t, std::align_val_t) noexcept
 {
+    countFree();
     std::free(p);
 }
 
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept
 {
+    countFree();
     std::free(p);
 }
 

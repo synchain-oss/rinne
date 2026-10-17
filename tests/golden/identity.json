@@ -132,7 +132,6 @@
   },
   "moduleinfo": {
     "vendor": "Synchain",
-    "sdkVersion": "VST 3.7.12",
     "cidPrefix": "ABCDEF01",
     "classes": {
       "Audio Module Class": "9182FAEB",

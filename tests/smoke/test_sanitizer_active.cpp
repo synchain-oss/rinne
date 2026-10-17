@@ -8,7 +8,7 @@
 namespace
 {
 
-constexpr bool addressSanitizerActive()
+[[maybe_unused]] constexpr bool addressSanitizerActive()
 {
 #if defined(__SANITIZE_ADDRESS__)
     return true;
@@ -23,7 +23,7 @@ constexpr bool addressSanitizerActive()
 #endif
 }
 
-constexpr bool threadSanitizerActive()
+[[maybe_unused]] constexpr bool threadSanitizerActive()
 {
 #if defined(__SANITIZE_THREAD__)
     return true;

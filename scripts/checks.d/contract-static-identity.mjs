@@ -183,6 +183,31 @@ function parsePlugin(text, label) {
     };
 }
 
+/**
+ * 根 CMakeLists 里认可的写法挖掉：set(RINNE_PLUGIN_FORMATS …)、if(APPLE) 里的 list(APPEND RINNE_PLUGIN_FORMATS …)、
+ * set(RINNE_PLUGIN_DEFINITIONS …) 与 list(APPEND RINNE_PLUGIN_DEFINITIONS …)。别处（if(WIN32) 里、if 之外）
+ * 追加格式或改写这两张清单，剩下的文本里仍有这些词，就判越界。
+ */
+function cleanRoot(code) {
+    let out = code;
+    for (const inner of calls(code, "set")) {
+        const first = tokens(inner)[0];
+        if (first === "RINNE_PLUGIN_FORMATS" || first === "RINNE_PLUGIN_DEFINITIONS") out = out.replace(inner, " ");
+    }
+    for (const inner of calls(code, "list")) {
+        const t = tokens(inner);
+        if (t[0] === "APPEND" && t[1] === "RINNE_PLUGIN_DEFINITIONS") out = out.replace(inner, " ");
+    }
+    return out.replace(/if\s*\(\s*APPLE\s*\)[\s\S]*?endif\s*\(\s*\)/gi, (block) => {
+        let cleaned = block;
+        for (const inner of calls(block, "list")) {
+            const t = tokens(inner);
+            if (t[0] === "APPEND" && t[1] === "RINNE_PLUGIN_FORMATS") cleaned = cleaned.replace(inner, " ");
+        }
+        return cleaned;
+    });
+}
+
 /** 根 CMakeLists 的格式清单与全部 CMake 文件里的宏。 */
 function parseFormats(rootText) {
     const code = stripComments(rootText);
@@ -275,19 +300,11 @@ export function checkIdentity({ golden, read, cmakeFiles }) {
 
     const sensitive = new RegExp(WORD([...IDENTITY_KEYWORDS, ...IDENTITY_PATTERNS].join("|")), "g");
     for (const { f, code } of texts) {
-        let rest = code;
+        let rest = f === ROOT_CMAKE ? cleanRoot(code) : code;
         for (const region of allowed.get(f) ?? []) rest = rest.replace(region, " ");
         const found = [...new Set([...rest.matchAll(sensitive)].map((m) => m[0]))];
-        // 根 CMakeLists 里的格式清单与宏清单是 golden 另外认可的（上面已按值核对），只放过这两个词
-        const stray =
-            f === ROOT_CMAKE
-                ? found.filter(
-                      (w) =>
-                          !/^(?:RINNE_PLUGIN_FORMATS|RINNE_PLUGIN_DEFINITIONS|JUCE_VST3_CAN_REPLACE_VST2|JUCE_FORCE_USE_LEGACY_PARAM_IDS|JUCE_USE_STUDIO_ONE_COMPATIBLE_PARAMETERS)$/.test(
-                              w,
-                          ),
-                  )
-                : found;
+        // 根 CMakeLists：格式清单与宏清单的认可写法已在 cleanRoot 里挖掉，剩下的才算越界
+        const stray = found;
         if (stray.length)
             errors.push(`${f}：身份相关的 ${stray.join("、")} 只许出现在 golden 认可的 juce_add_plugin 与身份 set 里`);
     }
@@ -360,7 +377,6 @@ const shared = (extra = {}) => ({
 const FIXTURE_GOLDEN = {
     moduleinfo: {
         vendor: "Synchain",
-        sdkVersion: "VST 3.7.12",
         cidPrefix: "ABCDEF01",
         classes: {
             "Audio Module Class": "9182FAEB",
@@ -621,6 +637,30 @@ export function selfTest() {
             }),
         ],
         [
+            "根 CMakeLists 的 if(WIN32) 里追加格式",
+            true,
+            run(
+                edit(
+                    base,
+                    ROOT_CMAKE,
+                    "set(RINNE_PLUGIN_DEFINITIONS",
+                    "if(WIN32)\n  list(APPEND RINNE_PLUGIN_FORMATS LV2)\nendif()\nset(RINNE_PLUGIN_DEFINITIONS",
+                ),
+            ),
+        ],
+        [
+            "根 CMakeLists 的 if 之外追加格式",
+            true,
+            run(
+                edit(
+                    base,
+                    ROOT_CMAKE,
+                    "set(RINNE_PLUGIN_DEFINITIONS",
+                    "list(APPEND RINNE_PLUGIN_FORMATS LV2)\nset(RINNE_PLUGIN_DEFINITIONS",
+                ),
+            ),
+        ],
+        [
             "RINNE_PLUGIN_FORMATS 在别处被改写",
             true,
             run({ ...base, "cmake/X.cmake": "list(APPEND RINNE_PLUGIN_FORMATS AAX)\n" }),
@@ -638,7 +678,7 @@ export function selfTest() {
             Name: id.PRODUCT_NAME[0],
             Vendor: mi.vendor,
             Version: "0.9.0",
-            SDKVersion: mi.sdkVersion,
+            SDKVersion: "VST 3.7.12",
             ...(subs ? { "Sub Categories": subs } : {}),
         });
         return {
@@ -701,7 +741,7 @@ export function parseModuleInfo(text) {
 const hex = (s) => Buffer.from(s, "latin1").toString("hex").toUpperCase();
 
 /**
- * 与 golden 对拍一份 moduleinfo：名称、厂商、版本、SDK、每个类的 CID 与子类。
+ * 与 golden 对拍一份 moduleinfo：名称、厂商、版本、每个类的 CID 与子类（SDK 版本随 JUCE 自带的 VST3 SDK 走，不属于插件身份，不对拍）。
  * CID = 前缀 + 类别固定段 + 厂商码 + 插件码（十六进制），由 golden 里的身份字段算出来，所以插件码改了这里一定对不上。
  * flavor 是 "formal" 或 "probe"；version 是根 CMakeLists 的 project 版本。
  */
@@ -731,7 +771,6 @@ export function checkModuleInfo({ golden, plugin, flavor, info, version }) {
         want(`${category} 的名称`, c.Name, id.PRODUCT_NAME[0]);
         want(`${category} 的厂商`, c.Vendor, mi.vendor);
         want(`${category} 的版本`, c.Version, version);
-        want(`${category} 的 SDK 版本`, c.SDKVersion, mi.sdkVersion);
         // 插件兼容类不带子类
         if (category !== "Plugin Compatibility Class")
             want(`${category} 的子类`, c["Sub Categories"], spec.shared.VST3_CATEGORIES);

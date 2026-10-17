@@ -80,6 +80,51 @@ TEST_CASE("allocation counter sees operator new in all its forms", "[host][shell
     }
 }
 
+TEST_CASE("allocation counter sees releases as well", "[host][shell][allocation]")
+{
+    using rinne::test::AllocationScope;
+
+    SECTION("delete of an object allocated before the scope")
+    {
+        auto* p = new int(1);
+        touch(p);
+        const AllocationScope scope;
+        delete p;
+        CHECK(scope.allocations() == 0);
+        CHECK(scope.frees() == 1);
+    }
+
+    SECTION("delete[] and over-aligned delete")
+    {
+        auto* a = new int[4];
+        auto* w = new Wide;
+        touch(a);
+        touch(w);
+        const AllocationScope scope;
+        delete[] a;
+        delete w;
+        CHECK(scope.frees() == 2);
+    }
+
+    SECTION("an allocation inside the scope that is released inside it counts on both sides")
+    {
+        const AllocationScope scope;
+        auto* p = new int(1);
+        touch(p);
+        delete p;
+        CHECK(scope.allocations() == 1);
+        CHECK(scope.frees() == 1);
+    }
+
+    SECTION("nothing released, nothing counted")
+    {
+        const AllocationScope scope;
+        int local[4] = {};
+        touch(local);
+        CHECK(scope.frees() == 0);
+    }
+}
+
 TEST_CASE("allocation counter ignores what happens outside its scope", "[host][shell][allocation]")
 {
     using rinne::test::AllocationScope;
@@ -146,6 +191,25 @@ TEST_CASE("allocation counter sees the malloc family JUCE relies on", "[host][sh
         const long seen = scope.allocations();
         std::free(p);
         CHECK(seen >= 1);
+    }
+
+    SECTION("free")
+    {
+        void* p = std::malloc(32);
+        touch(p);
+        const AllocationScope scope;
+        std::free(p);
+        CHECK(scope.frees() >= 1);
+    }
+
+    SECTION("juce::HeapBlock release")
+    {
+        juce::HeapBlock<float> block;
+        block.allocate(64, false);
+        touch(block.get());
+        const AllocationScope scope;
+        block.free();
+        CHECK(scope.frees() >= 1);
     }
 
     SECTION("juce::HeapBlock")
