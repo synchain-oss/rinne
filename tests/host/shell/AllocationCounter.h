@@ -7,11 +7,11 @@
 //     进系统堆（释放走 HeapFree），第一次建 AllocationScope
 //     时把这三个导入项换成计数包装。只改测试可执行文件自己的导入表，不进插件。 operator new（含对齐版、nothrow）走 CRT
 //     的 malloc，因此也在里面，不另替换。
-//   mac：往 malloc 的 zone 列表最前面注册一个计数 zone，malloc / calloc / realloc / free（含
-//   valloc、memalign、批量接口）
-//     先数一次再转给系统原来的 zone；operator new 走 libc++，最终也是 malloc，不另替换。没有 AllocationScope
-//     的线程不受影响。 测试用的环境变量 RINNE_TEST_ALLOC_BLIND（malloc、calloc、realloc、free
-//     之一）让计数器漏掉那一种原语，CI 靠它证明 对应用例确实会变红。
+//   mac：往 malloc 的 zone 列表最前面注册一个计数 zone，malloc / calloc / realloc / free（含 valloc、memalign、
+//     批量接口）先数一次再转给系统原来的 zone。operator new 走 libc++，最终也是 malloc，不另替换。
+//     没有 AllocationScope 的线程不受影响。
+//     环境变量 RINNE_TEST_ALLOC_BLIND（malloc、calloc、realloc、free 之一）让计数器漏掉那一种原语，
+//     CI 靠它证明对应用例确实会变红。
 //   其他平台（Linux）：只替换了全局 operator new / delete（含对齐版），malloc 家族是盲区；宿主测试在那里不跑。
 #pragma once
 
