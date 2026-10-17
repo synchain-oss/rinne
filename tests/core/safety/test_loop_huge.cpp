@@ -163,3 +163,25 @@ TEST_CASE("low-frequency hot returns at 20 Hz and 10 Hz still trip", "[safety][l
         CHECK(tripAt - start < samplesOf(0.2));
     }
 }
+
+TEST_CASE("one over-estimated moment does not expose hot dry to huge for the next 3 s", "[safety][loop][huge][fp]")
+{
+    // 恒等链、反馈 90 %：环内插件在 1 s 处吐出 5 ms 的 +40 dBFS 尖峰，估计在那 100 ms 里 > 1，防误报门因此保持
+    // 打开 3 s；1.3 s 起是 +13 dBFS 的热干声。超大值看的是逐格判定，所以不跳；它若跟着保持走，这里就会误跳
+    LoopSim sim(kRate, 4800, 1.0f);
+    sim.controls.feedback = 0.9f;
+    sim.inject = [](std::int64_t n) {
+        return (n >= samplesOf(1.0) && n < samplesOf(1.005)) ? ((n / 24) % 2 ? 100.0f : -100.0f) : 0.0f;
+    };
+    const double amplitude = dbfs(13.0);
+    const auto dry = [amplitude](std::int64_t n) {
+        return n < samplesOf(1.3) ? 0.0f : sine(1000.0, kRate, n, amplitude);
+    };
+    bool heldWhileHot = false;
+    sim.run(samplesOf(4.0), 256, dry, [&](std::int64_t n, float, float, float, float) {
+        if (n > samplesOf(1.4) && sim.chain.chainAmplifies() && !sim.chain.chainAmplifiesNow())
+            heldWhileHot = true;
+    });
+    CHECK(heldWhileHot); // 用例确实落在「保持中、逐格不放大、热干声在」的区间里
+    CHECK_FALSE(sim.chain.machine().latched());
+}

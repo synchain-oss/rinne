@@ -54,7 +54,9 @@ inline constexpr float kCeilingDefaultDb = -6.0f;
 // 50 ms 是 10 Hz 的半周期：|x| 的峰每半个周期出现一次，间隔取它，10 Hz 及以上的低频热信号都能连续计满 100 ms
 // （DC 阻断在 10 Hz 只衰减约 1 dB，更低的成分越来越弱；5 Hz 的半周期就是整整 100 ms，判据会退化成两个孤立的峰）。
 // 看的电平是 max(|tap|, |x|)，但只计「回送路径自己放大出来的」部分：|tap| 只在链增益估计 > 0 dB 时计入，
-// |x|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；回送不活动（g = 0）时两项都不计。干声随整条通道进环，
+// |x|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；回送不活动（g = 0）时两项都不计。这里的「链增益估计
+// > 0 dB」是逐格的判定，不带下面给防误报门用的 3 s 保持：超大值一跳就锁存，估计偏大一格不该让之后 3 s 的热干声
+// 都有误跳的风险。干声随整条通道进环，
 // 恒等链下 |tap| 就约等于干声，单看绝对阈值会对热轨道误跳；链不放大且 g ≤ 1 时 |x| ≤ |tap|，同理。
 inline constexpr float kHugeLevel = 3.98107171f;
 inline constexpr double kHugeSeconds = 0.100;
@@ -77,7 +79,8 @@ inline constexpr float kGuardFeedbackLimit = 0.90f;
 // 两个方向都会偏：
 //   偏大：环内插件延迟超过 1 s、或链有相位变化时，可能把不放大的链判成放大，只会多介入；
 //   偏小：送出窗口比回读窗口长，里面更响的干声瞬态（鼓点）会盖住真放大的链，真失控就逃过防误报门。
-// 所以「判为放大」一旦成立就保持 3 s（失控保护的窗长）才允许回落：间歇的瞬态盖不住整段失控。
+// 所以给防误报门用的「判为放大」一旦成立就保持 3 s（失控保护的窗长）才允许回落：间歇的瞬态盖不住整段失控。
+// 超大值用的是不保持的逐格判定（见上面 kHugeLevel 的说明）。
 // 送出为 0 而回读不为 0 时判为放大（坏插件在静音时自己吐信号）。D 变小时旧的较大 D 继续用到旧内容全部移出
 // 回读窗为止，所以交叉淡化期间按两个读头中较大的计。
 // 峰值历史是对象里的定长环：1024 格 = 10.24 s，盖住 D 最大 4000 ms + 1 s + 100 ms，音频线程上没有任何分配。
@@ -251,9 +254,12 @@ public:
     const SafetyMachine& machine() const noexcept { return machine_; }
     // 上一个样本 ⑥ 用的总增益
     float lastGain() const noexcept { return lastGain_; }
-    // 链增益估计（线性）；送出为 0 而回读不为 0 时是 +∞，两者都为 0 时是 0。每 10 ms 格更新一次
+    // 链增益估计（线性）；送出为 0 而回读不为 0 时是 +∞，两者都为 0 时是 0。每 10 ms 格更新一次。
+    // 三个量的关系：chainAmplifiesNow() 就是「这一格估计 > 1」，超大值看它；chainAmplifies() 是防误报门看的、
+    // 带 3 s 保持的判定，保持期间估计可能已经 ≤ 1 而它仍为 true。诊断或界面要显示时把估计值与两个判定一起带上
     float chainGainEstimate() const noexcept;
     bool chainAmplifies() const noexcept { return chainAmplifies_; }
+    bool chainAmplifiesNow() const noexcept { return chainAmplifiesNow_; }
     // 链增益估计实际用的 D（D 变小时暂时保留旧值）
     std::int64_t estimatorDelay() const noexcept { return delayInUse_; }
     // 防误报门是否关着（关着时失控保护不计任何命中）
@@ -291,7 +297,8 @@ private:
     float lastGain_ = 0.0f;
     float tapMax_ = 0.0f;
     float sentMax_ = 0.0f;
-    bool chainAmplifies_ = false;
+    bool chainAmplifies_ = false; // 带 3 s 保持，给防误报门
+    bool chainAmplifiesNow_ = false; // 逐格判定，给超大值
     std::int64_t amplifyHold_ = 1;
     std::int64_t amplifyUntil_ = -1; // 「判为放大」保持到这个样本
 

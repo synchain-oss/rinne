@@ -460,6 +460,7 @@ void SafetyChain::prepare(double sampleRate) noexcept
     tapMax_ = 0.0f;
     sentMax_ = 0.0f;
     chainAmplifies_ = false;
+    chainAmplifiesNow_ = false;
     amplifyUntil_ = -1;
     requestedDelay_ = 0;
     delayInUse_ = 0;
@@ -594,9 +595,10 @@ void SafetyChain::processBack(float& left, float& right, float dryLeft, float dr
     }
 
     SafetyObservation o;
-    // 超大值只计回送路径自己放大出来的电平（见 SafetyMachine.h 里 kHugeLevel 的说明）；g = 0 时状态机整个不计
-    const float tapTerm = chainAmplifies_ ? tapPeak_ : 0.0f;
-    const float gainTerm = (chainAmplifies_ || gain > 1.0f) ? xPeak : 0.0f;
+    // 超大值只计回送路径自己放大出来的电平（见 SafetyMachine.h 里 kHugeLevel 的说明），用逐格判定、不带保持；
+    // g = 0 时状态机整个不计
+    const float tapTerm = chainAmplifiesNow_ ? tapPeak_ : 0.0f;
+    const float gainTerm = (chainAmplifiesNow_ || gain > 1.0f) ? xPeak : 0.0f;
     o.contributing = gain > 0.0f;
     o.hugeLevel = tapTerm > gainTerm ? tapTerm : gainTerm;
     o.guardHot = hot;
@@ -623,7 +625,8 @@ void SafetyChain::updateChainGain() noexcept
     sentMax_ = sentHistory_.maxOfLast(safety::kChainTapHops + static_cast<int>(lagHops));
     // 判为放大之后保持 3 s：送出窗口里的干声瞬态会让估计间歇地偏小，不能让它把整段真失控放过去
     const std::int64_t now = machine_.samplesProcessed();
-    if (tapMax_ > sentMax_)
+    chainAmplifiesNow_ = tapMax_ > sentMax_;
+    if (chainAmplifiesNow_)
         amplifyUntil_ = now + amplifyHold_;
     chainAmplifies_ = now < amplifyUntil_;
 }
@@ -664,6 +667,7 @@ void SafetyChain::playEdgeReset() noexcept
     tapMax_ = 0.0f;
     sentMax_ = 0.0f;
     chainAmplifies_ = false;
+    chainAmplifiesNow_ = false;
     amplifyUntil_ = -1;
     // 历史清空了，旧 D 的内容也就不在了
     delayInUse_ = requestedDelay_;
