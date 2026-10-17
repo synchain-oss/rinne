@@ -48,7 +48,7 @@ the rationale is in [ADR-0003](adr/0003-safety-model.md). Weakening any invarian
 | ① 清洗 | 非有限值 → 0（计数，不跳闸）；钳 ±16；绝对值小于 1e-30 的冲成 0 |
 | ② DC 阻断 | 一阶高通 `y = x − x₁ + R·y₁`，`R = exp(−2π·5/sr)`，恒开 |
 | ⑥ 增益 | `g = 平滑30ms(min(feedback, 上限)·g_ret) × 平滑10ms(loop_on·未旁路) × g_safety × g_guard`；反馈上限：限制器开 1.5，关 1.0；平滑终点精确 |
-| 超大值 | 电平 ≥ +12 dBFS 持续 100 ms（相邻两个超限样本相隔不超过 10 ms 算连续）→ 跳闸。电平取 `max(\|tap\|, \|x\|)`，但 \|tap\| 只在链增益估计 > 0 dB 时计入，\|x\|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；g = 0（反馈为 0、环路关、旁路）时都不计。理由见第 4 节 |
+| 超大值 | 电平 ≥ +12 dBFS 持续 100 ms（相邻两个超限样本相隔不超过 50 ms 算连续，50 ms 是 10 Hz 的半周期，低频热信号也能计满）→ 跳闸。电平取 `max(\|tap\|, \|x\|)`，但 \|tap\| 只在链增益估计 > 0 dB 时计入，\|x\|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；g = 0（反馈为 0、环路关、旁路）时都不计。理由见第 4 节 |
 | ⑦ 限制器 | 峰值、左右联动、无前视；起音瞬时，释放一阶 80 ms；上限 c 为 −24…0 dBFS，默认 −6，30 ms 平滑；末级钳 ±c；开关时 10 ms 线性交叉 |
 | ⑧ 软削波 | `\|x\| ≤ 0.7` 逐位直通；之上 `0.7 + 0.3·tanh((\|x\| − 0.7)/0.3)`；末级钳到小于 1.0 的最大 float；逐位不放大 |
 | ⑨ 有限性检查 | 前后两段之间（音色级）或之后出现非有限值：本样本输出 0，立即跳闸（NaN） |
@@ -82,13 +82,20 @@ the rationale is in [ADR-0003](adr/0003-safety-model.md). Weakening any invarian
   限制器关时改为软削波样本占比 ≥ 50 %。判据成立期间 g_guard 以 −6 dB/s 下降，最低 −24 dB；连续平静 3 s 后以
   +3 dB/s 回升，回到 0 dB 退出。压到 −24 dB 后又命中满 1 s → TRIPPED(runaway)。`guard_on` 关时不计数，
   已压低的部分按 +3 dB/s 放回。
+  - 按规格只有 GR ≥ 6 dB 才算命中，所以环路增益低于约 +6 dB（约 ×2）的稳态自激会被限制器一直钉在上限 c，
+    失控保护不介入。例如恒等链、反馈 150 % 时 GR 只有约 3.5 dB。这是设计取舍：回送仍受硬上界约束，
+    要停下它需要用户按 Panic 或调低反馈。
 - **防误报门**：反馈 ≤ 90 % 且链增益 ≤ 0 dB 时，失控保护一个命中都不计，零介入。
 - **链增益估计**（防误报门与超大值共用）：每 10 ms 格记一次回读与送出信号的峰值，估计 = 最近 100 ms 回读的峰值 ÷
-  覆盖 [0, D + 1 s] 时延的送出峰值。只依赖样本计数；峰值历史是对象里的定长环（1024 格 = 10.24 s，盖住 D 最大
-  4000 ms + 1 s + 100 ms），音频线程上不分配。
+  覆盖 [0, D + 1 s] 时延的送出峰值；估计 > 1 判为放大，判为放大后保持 3 s（失控保护的窗长）才允许回落。
+  只依赖样本计数；峰值历史是对象里的定长环（1024 格 = 10.24 s，盖住 D 最大 4000 ms + 1 s + 100 ms），
+  音频线程上不分配。
   - 回读样本都来自窗口覆盖的那段送出信号，所以恒等链与衰减链下估计必然 ≤ 1（D 取 1 ms 与 4000 ms 两端、
     块长随机切分都有测试）。
-  - 多出的 1 s 容纳环内插件自己的延迟；超过 1 s 时估计可能偏大，只会让防误报门打开、让超大值多计，都偏保守。
+  - 估计两个方向都会偏。偏大：环内插件延迟超过 1 s（多出的 1 s 就是给它们的余量）或链有相位变化时，不放大的链
+    可能被判成放大，只会多介入。偏小：送出窗口比回读窗口长，里面更响的干声瞬态会盖住真放大的链——例如链 +8 dB、
+    反馈 90 %、干声是间隔 0.2–0.8 s 的鼓点时，逐格估计只有约一半时间 > 1，没有保持时失控保护一次也进不去。
+    3 s 的保持让间歇的瞬态盖不住整段失控；这组情形写成了用例。
   - D 变大立即用；D 变小时旧的较大 D 继续用，直到旧内容移出回读窗（旧 D + 1 s + 100 ms）且 D 不再变化，
     所以交叉淡化期间按两个读头中较大的 D 计。
   - 送出为 0 而回读不为 0 时估计为 +∞、判为放大：坏插件在静音时自己吐出大信号也要能跳闸。
@@ -126,12 +133,12 @@ the rationale is in [ADR-0003](adr/0003-safety-model.md). Weakening any invarian
 
 | # | 不变量 | 守住它的测试（Catch2 用例名） |
 | --- | --- | --- |
-| 1 | 任何失败只会让回送变成 0，干声照常 | `a non-finite value produced inside the Input trips immediately`；`panic fades out in 10 ms, asks for one flush, and stays latched`；`losing the pairing fades out in 10 ms; re-pairing fades in as first_pair`；`an unprepared machine gives zero gain`；`stereo audio passes through bit for bit at every block size` |
+| 1 | 任何失败只会让回送变成 0，干声照常 | `every failure leaves the return at exactly zero`；`a non-finite value produced inside the Input trips immediately`；`panic fades out in 10 ms, asks for one flush, and stays latched`；`losing the pairing fades out in 10 ms; re-pairing fades in as first_pair`；`an unprepared machine gives zero gain`。安全链不碰干声（由引擎相加）；干声逐位不变在接线后由外壳用例 `stereo audio passes through bit for bit at every block size` 覆盖（安全链接进引擎之前它只测外壳） |
 | 2 | 永不读旧数据或别名数据 | `panic fades out in 10 ms, asks for one flush, and stays latched`（跳闸后清空延迟线）；读位下界与撕裂判定的用例随环路层与 IPC 层的代码一起入库，届时补进这一格 |
 | 3 | 回送有硬上界：\|ret\| < 1.0；限制器开时 ≤ 上限 | `return stays below 1.0 and within the ceiling for random and extreme input`；`a million parameter jumps never make the chain diverge`；`soft clip stays finite and strictly below 1.0f at the extremes`；`soft clip never expands, is odd and monotonic over a dense sweep`；`limiter output never exceeds the ceiling, bit for bit` |
 | 4 | 默认安全：反馈默认 0；新配对、换写方、载入预设、恢复之后，都从首个有效读样本起 500 ms 淡入 | `safety controls default to the safe settings`；`a new instance stays silent until paired, then fades in over 500 ms from the first valid sample`；`entering a fade-in from RUN ramps down over 10 ms before the 500 ms ramp, without a step`；`a fade-in after the ramp-down still waits for the first valid read sample`；`recover is refused during the 1.5 s cooldown and never queued` |
-| 5 | 音频线程不加锁、不分配、不做 I/O、不读墙钟 | `test_safety_chain.cpp` 开头的静态断言（安全链可平凡析构、不持有堆内存，处理函数 noexcept）与 `Meters.h` 的无锁断言；`stereo audio passes through bit for bit at every block size`（回调内零分配） |
+| 5 | 音频线程不加锁、不分配、不做 I/O、不读墙钟 | `test_safety_chain.cpp` 开头的静态断言（安全链可平凡析构、不持有堆内存，处理函数 noexcept）与 `Meters.h` 的无锁断言。回调内零分配的运行时检查随接线补：外壳用例 `stereo audio passes through bit for bit at every block size` 在安全链接进引擎之后才覆盖安全链 |
 | 6 | 两端向宿主上报的延迟恒为 0 | `latency is always zero` |
-| 7 | 参数恒定时，输出与宿主怎么切块逐位无关 | `output and state transitions do not depend on how the host splits blocks`；`stereo audio passes through bit for bit at every block size` |
+| 7 | 参数恒定时，输出与宿主怎么切块逐位无关 | `output and state transitions do not depend on how the host splits blocks`（安全链这一层）；接线后由外壳用例 `stereo audio passes through bit for bit at every block size` 覆盖整条处理 |
 | 8 | Output 永不改动宿主 buffer（逐位直通） | `stereo audio passes through bit for bit at every block size`；`mono audio passes through bit for bit at every block size` |
 | 9 | 环头与标签头只由该槽的属主写 | 由 IPC 层的测试守住，随该层代码入库时补进这一格 |

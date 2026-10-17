@@ -3,8 +3,8 @@
 // 闭环里的超大值（≥ +12 dBFS 持续 100 ms 跳闸）。只计回送路径自己放大出来的电平：
 //   |tap| 只在链增益估计 > 0 dB 时计入；|x|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；回送不活动（g =
 //   0）时都不计。
-// 干声随整条通道进环：恒等链下热干声绕一圈回来就是 |tap|，绝对阈值单看 tap 会误跳（照计划原句实现时，
-// +12 dBFS 干声、反馈 90 %、恒等链的 9 格里有 8 格误跳）；该放大的情形照样在 100 ms 级跳闸。
+// 干声随整条通道进环：恒等链下热干声绕一圈回来就是 |tap|，绝对阈值单看 tap 会误跳（按字面公式 max(|tap|, |x|)
+// 无条件计入时，+12 dBFS 干声、反馈 90 %、恒等链的 9 格里有 8 格误跳）；该放大的情形照样在 100 ms 级跳闸。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -134,4 +134,32 @@ TEST_CASE("a +24 dB chain does not trip at 0 % feedback and trips about 100 ms a
     CHECK(sim.chain.machine().tripReason() == TripReason::Huge);
     CHECK(tripAt - raisedAt >= samplesOf(0.1) - 1);
     CHECK(tripAt - raisedAt < samplesOf(0.12));
+}
+
+TEST_CASE("low-frequency hot returns at 20 Hz and 10 Hz still trip", "[safety][loop][huge][threshold]")
+{
+    // |x| 的峰每半个周期出现一次：20 Hz 每 25 ms、10 Hz 每 50 ms。g = 1.2，×g 之后约 +14.6 dBFS
+    for (const double freq : {20.0, 10.0})
+    {
+        INFO("freq " << freq);
+        OpenLoop loop;
+        loop.controls.feedback = 1.2f;
+        loop.block(static_cast<int>(samplesOf(0.6)), [](std::int64_t) { return TapFrame{}; });
+        const double dcGain = freq / std::sqrt(freq * freq + 25.0); // 5 Hz 一阶高通在该频率的增益
+        const double amplitude = dbfs(14.6) / 1.2 / dcGain;
+        const std::int64_t start = loop.n;
+        std::int64_t tripAt = -1;
+        for (int b = 0; b < 40 && tripAt < 0; ++b)
+            loop.block(480, [&](std::int64_t n) {
+                TapFrame f;
+                f.tapLeft = sine(freq, kRate, n - start, amplitude);
+                f.tapRight = f.tapLeft;
+                if (tripAt < 0 && loop.chain.machine().latched())
+                    tripAt = n;
+                return f;
+            });
+        REQUIRE(tripAt >= 0);
+        CHECK(loop.chain.machine().tripReason() == TripReason::Huge);
+        CHECK(tripAt - start < samplesOf(0.2));
+    }
 }

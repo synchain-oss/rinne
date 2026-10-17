@@ -86,6 +86,13 @@ void SafetyMachine::prepare(double sampleRate) noexcept
     prepared_ = true;
 }
 
+void SafetyMachine::setCommandBaseline(std::uint32_t panicSeq, std::uint32_t recoverSeq) noexcept
+{
+    panicSeq_ = panicSeq;
+    recoverSeq_ = recoverSeq;
+    syncCommands_ = false;
+}
+
 void SafetyMachine::beginBlock(const SafetyControls& c) noexcept
 {
     events_.clear();
@@ -444,7 +451,8 @@ void SafetyChain::prepare(double sampleRate) noexcept
     tapHistory_.prepare(hop);
     sentHistory_.prepare(hop);
     chainLatency_ = samplesFor(sr, safety::kChainLatencySeconds);
-    nearGap_ = samplesFor(sr, safety::kHugeGapSeconds);
+    nearGap_ = samplesFor(sr, safety::kNearFullGapSeconds);
+    amplifyHold_ = samplesFor(sr, safety::kChainAmplifyHoldSeconds);
     dcCoeff_ = 1.0 - std::exp(-1.0 / (safety::kDcMeanSeconds * sr));
     dcMeanLeft_ = 0.0;
     dcMeanRight_ = 0.0;
@@ -452,6 +460,7 @@ void SafetyChain::prepare(double sampleRate) noexcept
     tapMax_ = 0.0f;
     sentMax_ = 0.0f;
     chainAmplifies_ = false;
+    amplifyUntil_ = -1;
     requestedDelay_ = 0;
     delayInUse_ = 0;
     delayDropAt_ = -1;
@@ -612,7 +621,11 @@ void SafetyChain::updateChainGain() noexcept
         lagHops = maxLag;
     tapMax_ = tapHistory_.maxOfLast(safety::kChainTapHops);
     sentMax_ = sentHistory_.maxOfLast(safety::kChainTapHops + static_cast<int>(lagHops));
-    chainAmplifies_ = tapMax_ > sentMax_;
+    // 判为放大之后保持 3 s：送出窗口里的干声瞬态会让估计间歇地偏小，不能让它把整段真失控放过去
+    const std::int64_t now = machine_.samplesProcessed();
+    if (tapMax_ > sentMax_)
+        amplifyUntil_ = now + amplifyHold_;
+    chainAmplifies_ = now < amplifyUntil_;
 }
 
 float SafetyChain::chainGainEstimate() const noexcept
@@ -651,6 +664,7 @@ void SafetyChain::playEdgeReset() noexcept
     tapMax_ = 0.0f;
     sentMax_ = 0.0f;
     chainAmplifies_ = false;
+    amplifyUntil_ = -1;
     // 历史清空了，旧 D 的内容也就不在了
     delayInUse_ = requestedDelay_;
     delayDropAt_ = -1;

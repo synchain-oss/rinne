@@ -3,7 +3,7 @@
 // 失控保护与超大值的每个阈值，都在边界两侧各走一次（48 kHz，1 s = 48000 样本）：
 //   失控保护：3 s 窗内 GR ≥ 6 dB 累计 2 s 进入（限制器关时软削波占比 50 %，即 1.5 s）；−6 dB/s 下降；
 //            平静 3 s 后 +3 dB/s 回升；压到 −24 dB 后仍命中 1 s → 跳闸（失控）；guard_on = 0 不介入。
-//   超大值：电平 ≥ +12 dBFS 持续 100 ms → 跳闸；两个超限样本相隔 ≤ 10 ms 算连续。
+//   超大值：电平 ≥ +12 dBFS 持续 100 ms → 跳闸；两个超限样本相隔 ≤ 50 ms 算连续（10 Hz 的半周期）。
 // 这里直接给状态机「命中」与电平，防误报门（反馈 ≤ 90 % 且链增益 ≤ 0 dB）在闭环测试里验。
 
 #include <catch2/catch_test_macros.hpp>
@@ -180,7 +180,21 @@ TEST_CASE("switching guard off while engaged releases at 3 dB/s without waiting 
     CHECK(rig.m.state() == SafetyState::Run);
 }
 
-TEST_CASE("recover clears the guard; a fresh pairing clears it once the return is at zero", "[safety][guard]")
+TEST_CASE("recover clears the guard at once", "[safety][guard]")
+{
+    MachineRig rig = runningRig();
+    rig.run(k2s + k1s, true, hotGuard());
+    REQUIRE(rig.m.guardGainDb() < -5.0);
+    rig.panic();
+    rig.run(3 * k1s / 2);
+    rig.recover();
+    // 恢复的那一刻（还没走下一个样本）失控保护就已清零
+    CHECK(rig.m.guardGainDb() == 0.0);
+    CHECK_FALSE(rig.m.guardEngaged());
+    CHECK(rig.m.state() == SafetyState::FadeIn);
+}
+
+TEST_CASE("a fresh pairing clears the guard once the return is at zero", "[safety][guard]")
 {
     MachineRig rig = runningRig();
     rig.run(k2s + k1s, true, hotGuard());
@@ -218,7 +232,7 @@ TEST_CASE("huge trips after exactly 100 ms at +12 dBFS", "[safety][huge][thresho
     CHECK(std::fabs(20.0 * std::log10(static_cast<double>(rinne::engine::safety::kHugeLevel)) - 12.0) < 1.0e-6);
 }
 
-TEST_CASE("huge treats hits up to 10 ms apart as continuous", "[safety][huge][threshold]")
+TEST_CASE("huge treats hits up to 50 ms apart as continuous", "[safety][huge][threshold]")
 {
     const auto spaced = [](std::int64_t spacing) {
         MachineRig rig = runningRig();
@@ -226,8 +240,8 @@ TEST_CASE("huge treats hits up to 10 ms apart as continuous", "[safety][huge][th
             rig.step(true, hugeAt(i % spacing == 0 ? 5.0f : 0.1f));
         return rig.m.latched();
     };
-    CHECK(spaced(k10ms));
-    CHECK_FALSE(spaced(k10ms + 1));
+    CHECK(spaced(5 * k10ms));
+    CHECK_FALSE(spaced(5 * k10ms + 1));
 }
 
 TEST_CASE("huge only counts while the return contributes", "[safety][huge]")

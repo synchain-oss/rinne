@@ -141,3 +141,59 @@ TEST_CASE("with guard_on off the same runaway is only held by the limiter", "[sa
     CHECK_FALSE(r.tripped);
     CHECK(r.maxReturn <= dbfs(-24.0));
 }
+
+namespace
+{
+
+// 间歇的鼓点干声：每 0.2–0.8 s 一下，20 ms 长、峰值 peakDb 的衰减噪声，其余时间静音。
+// 它会让送出窗口里时不时出现比回读更响的瞬态，把真放大的链盖住
+struct Drums
+{
+    Rng rng;
+    float peak;
+    std::int64_t next = 0;
+    std::int64_t hitAt = -1000000;
+    Drums(std::uint64_t seed, double peakDb) : rng(seed), peak(dbfs(peakDb)) {}
+    float operator()(std::int64_t n)
+    {
+        if (n >= next)
+        {
+            hitAt = n;
+            next = n + samplesOf(rng.range(0.2, 0.8));
+        }
+        const std::int64_t k = n - hitAt;
+        if (k >= samplesOf(0.02))
+            return 0.0f;
+        const double env = 1.0 - static_cast<double>(k) / static_cast<double>(samplesOf(0.02));
+        return static_cast<float>(peak * env * rng.range(-1.0, 1.0));
+    }
+};
+
+} // namespace
+
+TEST_CASE("louder dry transients in the send window do not hide a real runaway at 90 % feedback",
+          "[safety][loop][guard][fp]")
+{
+    // 链 +7.2 / +8 dB、反馈 90 %：环路增益 2.07–2.25，自激被限制器钉在上限；干声鼓点让估计间歇地偏小
+    struct Cell
+    {
+        float chainGain;
+        double peakDb;
+        std::uint64_t seed;
+        float ceilingDb;
+    };
+    for (const Cell c : {Cell{2.3f, -1.0, 1, -6.0f}, Cell{2.3f, 0.0, 1, -6.0f}, Cell{2.5f, -1.0, 1, -6.0f},
+                         Cell{2.5f, 0.0, 1, -6.0f}, Cell{2.3f, -1.0, 2, -6.0f}, Cell{2.3f, 0.0, 2, -6.0f},
+                         Cell{2.5f, -1.0, 2, -6.0f}, Cell{2.5f, 0.0, 2, -6.0f}, Cell{2.5f, 0.0, 3, -12.0f}})
+    {
+        INFO("chain " << c.chainGain << " peak " << c.peakDb << " seed " << c.seed << " ceiling " << c.ceilingDb);
+        LoopSetup s = gate(0.90f, c.chainGain);
+        s.delay = samplesOf(0.1);
+        s.ceilingDb = c.ceilingDb;
+        s.seconds = 12.0;
+        Drums dry(c.seed, c.peakDb);
+        const LoopResult r = runLoop(s, dry);
+        CHECK(r.guardEngaged);
+        CHECK(r.maxReturn <= dbfs(c.ceilingDb));
+    }
+}

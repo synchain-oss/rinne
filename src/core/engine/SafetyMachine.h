@@ -15,6 +15,10 @@
 // 实时约定：全部成员定长，处理函数 noexcept、不加锁、不分配、不读墙钟；一切计时按样本数（采样率由 prepare 注入），
 // 所以参数恒定时，同一段输入怎么切块，输出与状态转移都逐位相同。前后两段每个样本都要调用，快速路径也不能跳过：
 // 恢复冷却、等待首个有效读样本这些计时都靠它推进。
+//
+// 命令序号的基线：第一块默认只记下 Panic / 恢复的序号、不执行，工程重载因此不会重放旧命令。这也意味着实例建好之后、
+// 首个音频块之前按下的 Panic 会被当成基线吞掉。接线方要在构造引擎时用当时的序号调用 setCommandBaseline，
+// 之后的变化（包括首块之前按下的）就会在首块生效。
 #pragma once
 
 #include <cstdint>
@@ -46,13 +50,15 @@ inline constexpr float kCeilingMinDb = -24.0f;
 inline constexpr float kCeilingMaxDb = 0.0f;
 inline constexpr float kCeilingDefaultDb = -6.0f;
 
-// 超大值：电平 ≥ +12 dBFS（10^(12/20)），连续 100 ms；两个超限样本相隔不超过 10 ms 仍算连续。
+// 超大值：电平 ≥ +12 dBFS（10^(12/20)），连续 100 ms；两个超限样本相隔不超过 50 ms 仍算连续。
+// 50 ms 是 10 Hz 的半周期：|x| 的峰每半个周期出现一次，间隔取它，10 Hz 及以上的低频热信号都能连续计满 100 ms
+// （DC 阻断在 10 Hz 只衰减约 1 dB，更低的成分越来越弱；5 Hz 的半周期就是整整 100 ms，判据会退化成两个孤立的峰）。
 // 看的电平是 max(|tap|, |x|)，但只计「回送路径自己放大出来的」部分：|tap| 只在链增益估计 > 0 dB 时计入，
 // |x|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；回送不活动（g = 0）时两项都不计。干声随整条通道进环，
 // 恒等链下 |tap| 就约等于干声，单看绝对阈值会对热轨道误跳；链不放大且 g ≤ 1 时 |x| ≤ |tap|，同理。
 inline constexpr float kHugeLevel = 3.98107171f;
 inline constexpr double kHugeSeconds = 0.100;
-inline constexpr double kHugeGapSeconds = 0.010;
+inline constexpr double kHugeGapSeconds = 0.050;
 
 // 失控保护
 inline constexpr int kGuardWindowHops = 300; // 3 s 窗（10 ms 格）
@@ -67,17 +73,23 @@ inline constexpr double kGuardFloorSeconds = 1.0;
 // 防误报：反馈 ≤ 90 % 且链增益 ≤ 0 dB 时零介入
 inline constexpr float kGuardFeedbackLimit = 0.90f;
 
-// 链增益估计：最近 100 ms 回读的峰值 ÷ 覆盖 [0, D + 1 s] 时延的送出峰值。多出的 1 s 容纳环内插件自己的延迟；
-// 超过 1 s 时估计可能偏大，只会让门打开、让超大值多计，都偏保守。送出为 0 而回读不为 0 时判为放大（坏插件在
-// 静音时自己吐信号）。D 变小时旧的较大 D 继续用到旧内容全部移出回读窗为止，所以交叉淡化期间按两个读头中较大的计。
+// 链增益估计：最近 100 ms 回读的峰值 ÷ 覆盖 [0, D + 1 s] 时延的送出峰值。恒等链与衰减链下它必然 ≤ 1。
+// 两个方向都会偏：
+//   偏大：环内插件延迟超过 1 s、或链有相位变化时，可能把不放大的链判成放大，只会多介入；
+//   偏小：送出窗口比回读窗口长，里面更响的干声瞬态（鼓点）会盖住真放大的链，真失控就逃过防误报门。
+// 所以「判为放大」一旦成立就保持 3 s（失控保护的窗长）才允许回落：间歇的瞬态盖不住整段失控。
+// 送出为 0 而回读不为 0 时判为放大（坏插件在静音时自己吐信号）。D 变小时旧的较大 D 继续用到旧内容全部移出
+// 回读窗为止，所以交叉淡化期间按两个读头中较大的计。
 // 峰值历史是对象里的定长环：1024 格 = 10.24 s，盖住 D 最大 4000 ms + 1 s + 100 ms，音频线程上没有任何分配。
 inline constexpr int kChainTapHops = 10;
 inline constexpr double kChainLatencySeconds = 1.0;
 inline constexpr int kChainHistoryHops = 1024;
+inline constexpr double kChainAmplifyHoldSeconds = 3.0;
 
 // 测量量
 inline constexpr double kDcMeanSeconds = 0.300;
 inline constexpr float kNearFullLevel = 0.7f;
+inline constexpr double kNearFullGapSeconds = 0.010; // 贴近满幅的样本相隔不超过它仍算同一段
 } // namespace safety
 
 // 每块开头从引擎来的控制量
@@ -119,6 +131,8 @@ public:
     // 采样率没变的重 prepare 什么都不动（流连续）；采样率变了，重算常数、复位判据，未跳闸时从 0 重新淡入。
     // 跳闸锁存从不因 prepare 清除。
     void prepare(double sampleRate) noexcept;
+    // 命令序号的基线（见文件头）：不调用时，第一块的序号当作基线
+    void setCommandBaseline(std::uint32_t panicSeq, std::uint32_t recoverSeq) noexcept;
     void beginBlock(const SafetyControls& controls) noexcept;
     // 引擎在样本之间调用：载入预设、setState、换写方等。跳闸期间无效（预设与 setState 都不解除锁存）
     void requestFadeIn(FadeReason reason) noexcept;
@@ -217,6 +231,10 @@ class SafetyChain
 {
 public:
     void prepare(double sampleRate) noexcept;
+    void setCommandBaseline(std::uint32_t panicSeq, std::uint32_t recoverSeq) noexcept
+    {
+        machine_.setCommandBaseline(panicSeq, recoverSeq);
+    }
     void beginBlock(const SafetyControls& controls) noexcept;
     // ①②：就地处理读头读出的一对样本。tapValid 表示本样本来自有效的环数据（等首个有效读样本靠它）
     void processFront(float& left, float& right, bool tapValid) noexcept;
@@ -274,6 +292,8 @@ private:
     float tapMax_ = 0.0f;
     float sentMax_ = 0.0f;
     bool chainAmplifies_ = false;
+    std::int64_t amplifyHold_ = 1;
+    std::int64_t amplifyUntil_ = -1; // 「判为放大」保持到这个样本
 
     double dcCoeff_ = 0.0;
     double dcMeanLeft_ = 0.0;

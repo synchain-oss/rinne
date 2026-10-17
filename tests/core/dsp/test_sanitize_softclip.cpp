@@ -86,21 +86,32 @@ TEST_CASE("soft clip stays finite and strictly below 1.0f at the extremes", "[ds
 
 TEST_CASE("soft clip never expands, is odd and monotonic over a dense sweep", "[dsp][softclip][bound]")
 {
-    // 从拐点到 +Inf 的每第 512 个 float 位型（约 210 万点），拐点之上的头 4096 个逐 ulp 走
+    // (0.7, 2] 逐 ulp 走（约 1340 万点），之上到 +Inf 每第 512 个位型取一个点。
+    // 软削波可能放大的只有 (0.7, 1)：|x| ≥ 1 时末级钳已让 y < 1 ≤ |x|。min(y, |x|) 那一钳在 MSVC 的 tanhf 下
+    // 从不触发（这里逐 ulp 扫过，0 次），留着是给别的平台的 tanhf：它们若在某个点放大 1 ulp，这个扫描就会变红。
+    std::int64_t overOne = 0;
+    std::int64_t expands = 0;
+    std::int64_t backwards = 0;
+    std::int64_t notOdd = 0;
     float prev = softClip(kSoftClipKnee);
-    const std::uint32_t lo = floatBits(kSoftClipKnee);
+    const std::uint32_t lo = floatBits(kSoftClipKnee) + 1u;
+    const std::uint32_t two = floatBits(2.0f);
     const std::uint32_t hi = floatBits(std::numeric_limits<float>::infinity());
-    for (std::uint32_t b = lo; b < hi; b += (b - lo < 4096u ? 1u : 512u))
+    for (std::uint32_t b = lo; b < hi; b += (b <= two ? 1u : 512u))
     {
         const float x = fromBits(b);
         const float y = softClip(x);
-        REQUIRE(y < 1.0f);
-        REQUIRE(y <= x);
+        overOne += y >= 1.0f;
+        expands += y > x;
         // 各平台的 tanhf 只保证误差在 1 ulp 内，单调性按 1 ulp 的容差查
-        REQUIRE(y >= std::nextafter(prev, 0.0f));
-        REQUIRE(softClip(-x) == -y);
+        backwards += y < std::nextafter(prev, 0.0f);
+        notOdd += softClip(-x) != -y;
         prev = y;
     }
+    CHECK(overOne == 0);
+    CHECK(expands == 0);
+    CHECK(backwards == 0);
+    CHECK(notOdd == 0);
 }
 
 TEST_CASE("soft clip has a continuous slope at the knee", "[dsp][softclip]")

@@ -266,6 +266,20 @@ TEST_CASE("command numbers already present on the first block are not replayed",
     CHECK_FALSE(m.latched());
 }
 
+TEST_CASE("a panic pressed before the first block takes effect when a baseline was set", "[safety][machine][recover]")
+{
+    SafetyMachine m;
+    m.prepare(kRate);
+    m.setCommandBaseline(7, 3); // 引擎构造时的序号
+    SafetyControls c;
+    c.paired = true;
+    c.panicSeq = 8; // 首块之前按了一次 Panic
+    c.recoverSeq = 3;
+    m.beginBlock(c);
+    CHECK(m.state() == SafetyState::Tripped);
+    CHECK(m.tripReason() == TripReason::Panic);
+}
+
 TEST_CASE("the play-edge reset never shortcuts a fade-in", "[safety][machine][playedge]")
 {
     {

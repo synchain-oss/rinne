@@ -92,6 +92,78 @@ TEST_CASE("safety controls default to the safe settings", "[safety][chain][defau
     CHECK(loop.chain.lastGain() == 0.0f);
 }
 
+TEST_CASE("every failure leaves the return at exactly zero", "[safety][chain][failure]")
+{
+    // 失败只让回送归零：跳闸（Panic、内部非有限值、超大值）、失去配对、未 prepare。
+    // 归零之后的回送逐位是 ±0，干声由引擎相加、安全链不碰
+    const auto loud = [](std::int64_t n) {
+        TapFrame f;
+        f.tapLeft = sine(440.0, kRate, n, 0.9);
+        f.tapRight = -f.tapLeft;
+        return f;
+    };
+    const auto zeroAfter = [&](OpenLoop& loop) {
+        loop.block(480, loud); // 10 ms 淡出
+        bool allZero = true;
+        loop.block(4800, loud, [&](std::int64_t, float l, float r) { allZero = allZero && l == 0.0f && r == 0.0f; });
+        return allZero;
+    };
+    {
+        OpenLoop loop;
+        loop.controls.feedback = 1.0f;
+        settle(loop);
+        ++loop.controls.panicSeq;
+        CHECK(zeroAfter(loop));
+    }
+    {
+        OpenLoop loop;
+        loop.controls.feedback = 1.0f;
+        settle(loop);
+        loop.chain.beginBlock(loop.controls);
+        float a = 0.2f;
+        float b = 0.2f;
+        loop.chain.processFront(a, b, true);
+        float l = std::numeric_limits<float>::quiet_NaN(); // 音色级吐出的非有限值
+        float r = b;
+        loop.chain.processBack(l, r, 0.0f, 0.0f);
+        CHECK(loop.chain.machine().tripReason() == TripReason::Nan);
+        CHECK(zeroAfter(loop));
+    }
+    {
+        OpenLoop loop;
+        loop.controls.feedback = 1.5f;
+        settle(loop);
+        loop.block(static_cast<int>(samplesOf(0.2)), [](std::int64_t n) {
+            TapFrame f;
+            f.tapLeft = (n / 40) % 2 ? 8.0f : -8.0f;
+            f.tapRight = -f.tapLeft;
+            return f;
+        });
+        CHECK(loop.chain.machine().tripReason() == TripReason::Huge);
+        CHECK(zeroAfter(loop));
+    }
+    {
+        OpenLoop loop;
+        loop.controls.feedback = 1.0f;
+        settle(loop);
+        loop.controls.paired = false;
+        CHECK(zeroAfter(loop));
+    }
+    {
+        SafetyChain chain; // 没有 prepare
+        SafetyControls c;
+        c.paired = true;
+        c.feedback = 1.0f;
+        chain.beginBlock(c);
+        float l = 0.5f;
+        float r = 0.5f;
+        chain.processFront(l, r, true);
+        chain.processBack(l, r, 0.0f, 0.0f);
+        CHECK(l == 0.0f);
+        CHECK(r == 0.0f);
+    }
+}
+
 TEST_CASE("return stays below 1.0 and within the ceiling for random and extreme input", "[safety][chain][bound]")
 {
     Rng rng(2026);
@@ -222,7 +294,7 @@ TEST_CASE("stages run in the fixed order sanitize, DC, gain, limiter, soft clip"
     for (std::size_t i = 0; i < n; ++i)
     {
         inL[i] = (i % 1000 == 0) ? std::numeric_limits<float>::quiet_NaN() : static_cast<float>(rng.range(-1.2, 1.2));
-        inR[i] = (i % 777 == 0) ? 40.0f : static_cast<float>(rng.range(-0.4, 0.4));
+        inR[i] = (i % 2777 == 0) ? 40.0f : static_cast<float>(rng.range(-0.4, 0.4));
     }
     std::vector<float> outL(n);
     std::vector<float> outR(n);
