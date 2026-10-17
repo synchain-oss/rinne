@@ -464,7 +464,7 @@ jobs:
           retention-days: 30
 
       # 判据脚本的自测放在最后：它们和构建产物无关，放在前面一旦红了，后面所有依赖 mac 环境的步骤都被连带跳过，一轮看不到别的问题
-# 注意：自测在上传之后才跑。它红了的 run，前面已经上传的 artifact（含 release 模式下的发布包）一律不可信，job 本身也是红的
+      # 注意：自测在上传之后才跑。它红了的 run，前面已经上传的 artifact（含 release 模式下的发布包）一律不可信，job 本身也是红的
       - name: Gate script self-tests
         if: ${{ !cancelled() }}
         run: bash scripts/ci/mac/selftest.sh
