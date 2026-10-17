@@ -5,37 +5,73 @@
 // 纯拷贝，不改任何文件内容，所以页面与 mock 仍是纯本地：不发任何网络请求，不依赖任何框架。
 // 导出之后自检这棵树：任何 http(s) 外链、任何网络调用（fetch、XMLHttpRequest、WebSocket、sendBeacon、EventSource）都判红，
 // 放行的只有两种字面量：SVG 命名空间和 JUCE 辅助脚本的宿主伪源（都不是网络请求）。
-//   node web-preview/build-static.mjs [--out <目录>] [--check]
-// --out 缺省为 build/web-preview-static（build/ 已被忽略）；只允许 build/ 或系统临时目录之下，因为导出前会整个删掉重建。--check 只自检不写文件（自检对象是仓库里的源树）。
-// 退出码：0 通过；1 有外链或网络调用，或拷贝失败。
+//   node web-preview/build-static.mjs [--name <子名>] [--check]
+//
+// 输出目录是写死的：<仓库根>/build/web-preview-static，仓库根由本脚本自身的路径推出；没有 --out。
+// 需要多份输出时只接受 --name <子名>（匹配 ^[a-z0-9][a-z0-9-]{0,31}$），最终目录是 build/web-preview-static/<子名>。
+// 脚本绝不删除调用方给的任意路径。清空目标目录前要全部满足：
+//   1. 目标的真实路径（realpath；目标不存在时先对已存在的上级取 realpath 再拼回去，符号链接与 junction 因此无处藏身）
+//      以 realpath(<仓库根>/build/web-preview-static) 为前缀，且不是它的上级；
+//   2. 目标若已存在，必须含本脚本上次写下的标记文件 .rinne-build-static，否则拒绝（不删，退出 1）。
+// 判定是纯函数 cleanVerdict，测试只传路径字符串。删除只针对这个目标目录，不用 force 吞错。
+// --check 只自检仓库里的源树，不写任何文件。
+// 退出码：0 通过；1 有外链或网络调用、守卫拒绝，或拷贝失败。
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const argv = process.argv.slice(2);
-const outDir = path.resolve(
-    root,
-    argv.includes("--out") ? argv[argv.indexOf("--out") + 1] : "build/web-preview-static",
-);
+/** 固定输出目录相对仓库根的位置，标记文件名，子名的格式。 */
+export const OUT_REL = ["build", "web-preview-static"];
+export const MARKER = ".rinne-build-static";
+export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+const isUnder = (base, p) => {
+    const rel = path.relative(base, p);
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+};
+const samePath = (a, b) => path.relative(a, b) === "";
 
 /**
- * 输出目录会被整个删掉重建，所以先排除仓库本身及其上级，再按位置判断：
- * 在仓库之内只允许 build/ 之下；在仓库之外只允许系统临时目录之下。两种情况都不能是那个目录本身。
+ * 清空目标目录前的判定，纯函数：只看传进来的路径字符串与两个事实，不碰文件系统。
+ * @param {object} i
+ * @param {string} i.rootReal 仓库根的真实路径
+ * @param {string} i.baseReal 固定输出目录的真实路径（不存在时是已存在的上级的真实路径拼回去）
+ * @param {string} i.targetReal 目标目录的真实路径（同上）
+ * @param {boolean} i.exists 目标目录是否已存在
+ * @param {boolean} i.hasMarker 目标目录里有没有标记文件
+ * @returns {{ok:boolean, reason:string}}
  */
-function outDirProblem(dir) {
-    const under = (base, d) => {
-        const rel = path.relative(base, d);
-        return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
-    };
-    const same = (a, b) => path.relative(a, b) === "";
-    if (same(dir, root) || under(dir, root)) return `--out 不能是仓库根或它的上级，实得 ${dir}`;
-    if (under(root, dir)) {
-        return under(path.join(root, "build"), dir) ? null : `--out 在仓库内时只能放在 build/ 之下，实得 ${dir}`;
+export function cleanVerdict({ rootReal, baseReal, targetReal, exists, hasMarker }) {
+    const no = (reason) => ({ ok: false, reason });
+    for (const [k, v] of Object.entries({ rootReal, baseReal, targetReal })) {
+        if (typeof v !== "string" || v === "" || !path.isAbsolute(v)) return no(`${k} 必须是非空的绝对路径`);
     }
-    return under(os.tmpdir(), dir) ? null : `--out 在仓库外时只能放在系统临时目录之下，实得 ${dir}`;
+    if (!samePath(baseReal, path.join(rootReal, ...OUT_REL))) {
+        return no(
+            `固定输出目录的真实路径 ${baseReal} 不在仓库根真实路径下的 ${OUT_REL.join("/")}（符号链接或 junction？）`,
+        );
+    }
+    if (!samePath(baseReal, targetReal) && !isUnder(baseReal, targetReal)) {
+        return no(`目标的真实路径 ${targetReal} 不在 ${baseReal} 之下`);
+    }
+    if (
+        samePath(targetReal, rootReal) ||
+        isUnder(targetReal, rootReal) ||
+        samePath(targetReal, path.parse(targetReal).root)
+    ) {
+        return no(`目标 ${targetReal} 是仓库根、它的上级或盘根`);
+    }
+    if (exists && !hasMarker) return no(`目标目录已存在却没有标记文件 ${MARKER}，不是本脚本导出的目录`);
+    return { ok: true, reason: "" };
+}
+
+/** 对可能不存在的路径取真实路径：存在就 realpath，不存在就对上级递归后拼回去。 */
+export function realpathLoose(p) {
+    if (fs.existsSync(p)) return fs.realpathSync(p);
+    const parent = path.dirname(p);
+    if (parent === p) return p;
+    return path.join(realpathLoose(parent), path.basename(p));
 }
 
 /** 进入导出的目录与文件：web/ 全部，web-preview/ 去掉测试、截图、脚本。 */
@@ -86,37 +122,74 @@ export function verify(files) {
     return out;
 }
 
-const files = [];
-for (const { dir, skip } of INCLUDE) {
-    for (const f of walk(path.join(root, dir), dir)) {
-        if (!skip(path.relative(path.join(root, dir), f.abs).split(path.sep).join("/"))) files.push(f);
+function main() {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const argv = process.argv.slice(2);
+    let name = null;
+    let check = false;
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === "--check") check = true;
+        else if (argv[i] === "--name" && i + 1 < argv.length) name = argv[++i];
+        else {
+            console.error(
+                `build-static：不认识的参数 ${argv[i]}（没有 --out：输出目录是写死的 ${OUT_REL.join("/")}，可选 --name <子名>）`,
+            );
+            process.exit(1);
+        }
     }
-}
-
-const problems = verify(files);
-if (!argv.includes("--check")) {
-    const bad = outDirProblem(outDir);
-    if (bad) {
-        console.error(`build-static：${bad}`);
+    if (name !== null && !NAME_RE.test(name)) {
+        console.error(`build-static：--name 必须匹配 ${NAME_RE}，实得 ${JSON.stringify(name)}`);
         process.exit(1);
     }
-    fs.rmSync(outDir, { recursive: true, force: true });
-    for (const f of files) {
-        const dest = path.join(outDir, f.rel);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.copyFileSync(f.abs, dest);
+
+    const files = [];
+    for (const { dir, skip } of INCLUDE) {
+        for (const f of walk(path.join(root, dir), dir)) {
+            if (!skip(path.relative(path.join(root, dir), f.abs).split(path.sep).join("/"))) files.push(f);
+        }
     }
-    fs.writeFileSync(
-        path.join(outDir, "index.html"),
-        '<!doctype html>\n<meta charset="utf-8" />\n<meta http-equiv="refresh" content="0; url=web-preview/input.html" />\n<a href="web-preview/input.html">Rinne Input 预览</a>\n',
-    );
-    const bytes = files.reduce((n, f) => n + fs.statSync(f.abs).size, 0);
+    const problems = verify(files);
+
+    if (!check) {
+        const base = path.join(root, ...OUT_REL);
+        const target = name === null ? base : path.join(base, name);
+        const exists = fs.existsSync(target);
+        const verdict = cleanVerdict({
+            rootReal: fs.realpathSync(root),
+            baseReal: realpathLoose(base),
+            targetReal: realpathLoose(target),
+            exists,
+            hasMarker: exists && fs.existsSync(path.join(target, MARKER)),
+        });
+        if (!verdict.ok) {
+            console.error(`build-static：拒绝清空输出目录：${verdict.reason}`);
+            process.exit(1);
+        }
+        if (exists) fs.rmSync(target, { recursive: true });
+        for (const f of files) {
+            const dest = path.join(target, f.rel);
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.copyFileSync(f.abs, dest);
+        }
+        fs.writeFileSync(
+            path.join(target, MARKER),
+            "本目录由 web-preview/build-static.mjs 生成，可以被它整个清空重建。\n",
+        );
+        fs.writeFileSync(
+            path.join(target, "index.html"),
+            '<!doctype html>\n<meta charset="utf-8" />\n<meta http-equiv="refresh" content="0; url=web-preview/input.html" />\n<a href="web-preview/input.html">Rinne Input 预览</a>\n',
+        );
+        const bytes = files.reduce((n, f) => n + fs.statSync(f.abs).size, 0);
+        console.log(
+            `导出 ${files.length} 个文件（${(bytes / 1024 / 1024).toFixed(1)} MB）到 ${path.relative(root, target)}`,
+        );
+    }
+    for (const p of problems) console.error(`  ${p}`);
     console.log(
-        `导出 ${files.length} 个文件（${(bytes / 1024 / 1024).toFixed(1)} MB）到 ${path.relative(root, outDir) || "."}`,
+        `build-static：${problems.length ? `${problems.length} 处外链或网络调用` : "自检通过，纯本地、无网络请求"}`,
     );
+    process.exitCode = problems.length ? 1 : 0;
 }
-for (const p of problems) console.error(`  ${p}`);
-console.log(
-    `build-static：${problems.length ? `${problems.length} 处外链或网络调用` : "自检通过，纯本地、无网络请求"}`,
-);
-process.exitCode = problems.length ? 1 : 0;
+
+// 被 import（测试）时只导出函数，不执行
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) main();
