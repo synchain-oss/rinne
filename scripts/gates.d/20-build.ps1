@@ -7,27 +7,8 @@
 #       还没有 tests/CMakeLists.txt 时 build.ps1 打印跳过，这里记 SKIP；G6 没有产出当前 HEAD 的构建时也记 SKIP。
 # 构建目录取 $ctx.BuildDir（相对仓根），JUCE 取 $ctx.JucePath，空着时 build.ps1 自己按环境变量与 git config 找。
 # build.ps1 把工具的输出写进 <构建目录>/logs/，自己的标准句柄不可继承，这里读它的管道不会被编译器留下的进程拖住；起它的
-# 时候运行器自己的标准输出与标准错误也设为不可继承，运行器的调用方同样不会被拖住。
-
-# 跑一段代码，期间本进程的标准输出与标准错误不可继承，结束后按原样还原。Windows 上起子进程会把所有可继承的句柄都交给它，
-# 其中就有本进程连着调用方的那两条管道（给子进程重定向的是另建的管道，不受影响）。标准输入不动。
-# maintainer/lib/RinneGh.psm1 与 30-plugin.ps1 里有同样的一份。
-function Invoke-WithoutStdInherit([scriptblock]$Script) {
-    if (-not $IsWindows) { return & $Script }
-    if (-not ('Rinne.StdInherit' -as [type])) {
-        Add-Type -Namespace Rinne -Name StdInherit -MemberDefinition @'
-[DllImport("kernel32.dll")] public static extern System.IntPtr GetStdHandle(int nStdHandle);
-[DllImport("kernel32.dll")] public static extern bool GetHandleInformation(System.IntPtr hObject, out int lpdwFlags);
-[DllImport("kernel32.dll")] public static extern bool SetHandleInformation(System.IntPtr hObject, int dwMask, int dwFlags);
-'@
-    }
-    # 局部变量带 std 前缀：$Script 在这里的子作用域里跑，按动态作用域也看得见它们，不要遮住调用方的同名变量
-    $stdSaved = foreach ($stdN in -11, -12) {
-        $stdH = [Rinne.StdInherit]::GetStdHandle($stdN); $stdF = 0
-        if ([Rinne.StdInherit]::GetHandleInformation($stdH, [ref]$stdF)) { $null = [Rinne.StdInherit]::SetHandleInformation($stdH, 1, 0); @{ H = $stdH; F = $stdF -band 1 } }
-    }
-    try { & $Script } finally { foreach ($stdS in @($stdSaved)) { $null = [Rinne.StdInherit]::SetHandleInformation($stdS.H, 1, $stdS.F) } }
-}
+# 时候运行器自己的标准输出与标准错误也设为不可继承（Invoke-WithoutStdInherit，来自运行器导入的 scripts/lib/StdHandles.psm1），
+# 运行器的调用方同样不会被拖住。
 
 function Invoke-BuildScript($Ctx, [string[]]$Arguments, [switch]$SlotHeld) {
     $pwsh = (Get-Process -Id $PID).Path
@@ -69,15 +50,16 @@ function Invoke-CtestGate($Ctx) {
 
 # 真起进程量一次：一个「中间层」pwsh 的输出接管道（像调用方读 gates 那样），它加载 gates.d 里的一个文件，执行 $Call 调起
 # 临时目录里的桩 build.ps1；桩只取真 build.ps1 的函数，留下一个活 12 秒的孙进程就退出。返回调用方读到中间层输出 EOF 的秒数。
-# 30-plugin.ps1 的 G8 也在这里量（它没有自己的自测）。
+# 30-plugin.ps1 的 G8 也在这里量（它没有自己的自测）。中间层像运行器那样先导入 scripts/lib/StdHandles.psm1。
 function Measure-CallerEof([string]$Root, [string]$File, [string]$Call) {
     $pwsh = (Get-Process -Id $PID).Path
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-gates-eof-$PID-$(Get-Random)"
     $null = New-Item -ItemType Directory -Path (Join-Path $tmp 'scripts')
+    $p = $null
     try {
         Set-Content -LiteralPath (Join-Path $tmp 'scripts/build.ps1') -Value (". '$(Join-Path $Root 'scripts/build.ps1')'; Protect-StdHandles; " +
             "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pwsh', '-NoProfile', '-Command', 'Start-Sleep', '12') '$tmp\l.log' 60)")
-        $middle = "`$m = New-Module -ScriptBlock ([scriptblock]::Create((Get-Content -Raw -LiteralPath '$(Join-Path $Root "scripts/gates.d/$File")'))); " +
+        $middle = "Import-Module '$(Join-Path $Root 'scripts/lib/StdHandles.psm1')'; `$m = New-Module -ScriptBlock ([scriptblock]::Create((Get-Content -Raw -LiteralPath '$(Join-Path $Root "scripts/gates.d/$File")'))); " +
             "`$c = [pscustomobject]@{ Root = '$tmp'; BuildDir = 'b'; JucePath = '' }; `$null = & `$m { param(`$c) $Call } `$c; 'middle-done'"
         $psi = [Diagnostics.ProcessStartInfo]::new($pwsh)
         foreach ($x in '-NoProfile', '-NonInteractive', '-Command', $middle) { $psi.ArgumentList.Add($x) }
@@ -85,9 +67,15 @@ function Measure-CallerEof([string]$Root, [string]$File, [string]$Call) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $p = [Diagnostics.Process]::Start($psi)
         $out, $err = $p.StandardOutput.ReadToEndAsync(), $p.StandardError.ReadToEndAsync()
-        $null = $out.Wait(30000) -and $err.Wait(30000)
-        [pscustomobject]@{ Seconds = $sw.Elapsed.TotalSeconds; Done = $out.Result -match 'middle-done' }
-    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+        # 30 秒还读不到 EOF 就结束中间层（连同它的子孙）并判没跑完；没读完的 Result 不去碰，免得一直阻塞
+        $eof = $out.Wait(30000) -and $err.Wait(30000)
+        $s = $sw.Elapsed.TotalSeconds
+        if (-not $eof) { try { $p.Kill($true) } catch [InvalidOperationException] { $null = $_ } }
+        [pscustomobject]@{ Seconds = $s; Done = $eof -and $out.Result -match 'middle-done' }
+    } finally {
+        if ($p) { $p.Dispose() }
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # 自测（运行器传入仓根）：build.ps1 的自测，退出码到 gate 结论的映射，以及运行器的管道不被构建留下的进程拖住。
@@ -95,12 +83,15 @@ function Test-RinneGates([string]$Root) {
     $pwsh = (Get-Process -Id $PID).Path
     $null = & $pwsh -NoProfile -NonInteractive -File (Join-Path $Root 'scripts/build.ps1') -SelfTest 2>&1
     [pscustomobject]@{ Label = 'build.ps1 -SelfTest 通过'; Bad = $false; Passed = $LASTEXITCODE -eq 0 }
-    $fast = Measure-CallerEof $Root '20-build.ps1' 'Invoke-BuildScript $c @()'
-    $slow = Measure-CallerEof $Root '20-build.ps1' "@(& '$pwsh' -NoProfile -NonInteractive -File (Join-Path `$c.Root 'scripts/build.ps1') 2>&1)"
-    [pscustomobject]@{ Label = ('G6/G7 调 build.ps1：构建留下的进程不拖住运行器的调用方（{0:N1} 秒读到 EOF）' -f $fast.Seconds); Bad = $false; Passed = $fast.Done -and $fast.Seconds -lt 7 }
-    [pscustomobject]@{ Label = ('反例：不改句柄继承时调用方要等孙进程退出（{0:N1} 秒）' -f $slow.Seconds); Bad = $true; Passed = $slow.Done -and $slow.Seconds -ge 10 }
-    $plug = Measure-CallerEof $Root '30-plugin.ps1' "Invoke-PluginvalGate `$c '-Validate' 'x'"
-    [pscustomobject]@{ Label = ('G8 调 build.ps1：pluginval 留下的进程不拖住运行器的调用方（{0:N1} 秒读到 EOF）' -f $plug.Seconds); Bad = $false; Passed = $plug.Done -and $plug.Seconds -lt 7 }
+    # 桩靠 cmd.exe 留下孙进程，句柄继承也只在 Windows 上改：别的平台不量
+    if ($IsWindows) {
+        $fast = Measure-CallerEof $Root '20-build.ps1' 'Invoke-BuildScript $c @()'
+        $slow = Measure-CallerEof $Root '20-build.ps1' "@(& '$pwsh' -NoProfile -NonInteractive -File (Join-Path `$c.Root 'scripts/build.ps1') 2>&1)"
+        [pscustomobject]@{ Label = ('G6/G7 调 build.ps1：构建留下的进程不拖住运行器的调用方（{0:N1} 秒读到 EOF）' -f $fast.Seconds); Bad = $false; Passed = $fast.Done -and $fast.Seconds -lt 7 }
+        [pscustomobject]@{ Label = ('反例：不改句柄继承时调用方要等孙进程退出（{0:N1} 秒）' -f $slow.Seconds); Bad = $true; Passed = $slow.Done -and $slow.Seconds -ge 10 }
+        $plug = Measure-CallerEof $Root '30-plugin.ps1' "Invoke-PluginvalGate `$c '-Validate' 'x'"
+        [pscustomobject]@{ Label = ('G8 调 build.ps1：pluginval 留下的进程不拖住运行器的调用方（{0:N1} 秒读到 EOF）' -f $plug.Seconds); Bad = $false; Passed = $plug.Done -and $plug.Seconds -lt 7 }
+    }
     $map = { param($c) (ConvertTo-GateResult ([pscustomobject]@{ Code = $c; Lines = @(); Last = '失败：x' }) 'ok').Status }
     [pscustomobject]@{ Label = 'build.ps1 退出 0 记 PASS'; Bad = $false; Passed = (& $map 0) -eq 'PASS' }
     [pscustomobject]@{ Label = 'build.ps1 退出 1 记 FAIL'; Bad = $true; Passed = (& $map 1) -eq 'FAIL' }

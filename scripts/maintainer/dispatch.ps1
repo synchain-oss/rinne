@@ -8,8 +8,9 @@
 # 只对 feature 线与 feat/ 子支线触发，不碰 dev / prod 与 tag；-Sha 必须就是该分支此刻的 tip（构建对应到确定的提交）。
 # 只传 build.yml 在该提交上声明了的输入（多传会被接口拒掉）。-Wait 单次最多 9 分钟（-TimeoutMin），没跑完退出 3，
 # 下次带 -RunId 接着等；-Judge 退出 0 = 全绿、1 = 有红、3 = 还在跑。
-# 认领运行：接口不回运行编号。build.yml 在该提交上声明了 nonce 输入时，传一个随机 nonce，按运行名（run-name 必须原样带上
-# inputs.nonce，接口里是 display_title）精确认领，两个进程同时对同一提交触发也认得准；没声明时退回「触发前已有的运行不算」，
+# 认领运行：接口不回运行编号。build.yml 在该提交上声明了 nonce 输入时，传一个随机 nonce（32 位十六进制），按运行名精确认领：
+# build.yml 的 run-name 是「Build & Validate <事件> <sha40> <nonce>」，接口里是 display_title，这里要求它恰好等于
+# 「Build & Validate workflow_dispatch <本次的 sha> <本次的 nonce>」，两个进程同时对同一提交触发也认得准；没声明时退回「触发前已有的运行不算」，
 # 这时同时触发的两个进程会认成同一次运行。
 # 并发限制：build.yml 的 concurrency 按提交分组、dispatch 不取消运行中的那次，但 GitHub 每个组只保留一个排队项：同一提交
 # 一次在跑、一次在排时再触发第三次，排着的那次会被取消。同一提交不要同时触发两次以上。
@@ -26,6 +27,8 @@ Import-Module (Join-Path $PSScriptRoot 'lib/RinneGh.psm1') -Force
 
 $PollSeconds = 20
 $FindPollSeconds = 5
+# build.yml 的 run-name 格式：{0} 是 sha40，{1} 是 nonce（dispatch 事件）
+$RunNameFormat = 'Build & Validate workflow_dispatch {0} {1}'
 $Workflow = 'build.yml'
 
 <# build.yml 在该提交上声明的 workflow_dispatch 输入名。 #>
@@ -63,13 +66,14 @@ function Invoke-Dispatch {
     $deadline = [datetime]::UtcNow.AddSeconds($FindSeconds)
     while ($true) {
         $runs = @((Get-RinneApi $list).workflow_runs) | Where-Object { $_ -and $_.head_sha -eq $Sha }
-        $mine = if ($nonce) { @($runs | Where-Object { [string](Get-RinneProp $_ 'display_title') -match "(?<![0-9a-f])$nonce(?![0-9a-f])" }) }
-        else { @($runs | Where-Object { [long]$_.id -notin $before -and (ConvertTo-RinneUtc $_.created_at) -ge $Now.AddSeconds(-30) }) }
+        # 两个分支整体包一层 @()：一次也没筛到时是空数组而不是 $null（触发后头一两次查询通常还看不到新运行）
+        $mine = @(if ($nonce) { $runs | Where-Object { [string](Get-RinneProp $_ 'display_title') -ceq ($RunNameFormat -f $Sha, $nonce) } }
+            else { $runs | Where-Object { [long]$_.id -notin $before -and (ConvertTo-RinneUtc $_.created_at) -ge $Now.AddSeconds(-30) } })
         if ($nonce -and $mine.Count -gt 1) { throw "有 $($mine.Count) 次运行的运行名都带着这次的 nonce，认不准" }
         $run = $mine | Sort-Object { [long]$_.id } | Select-Object -Last 1
         if ($run) { return $run }
         if ([datetime]::UtcNow -ge $deadline) {
-            throw "已触发，但 $FindSeconds 秒内没找到对应的运行$(if ($nonce) { "（按运行名里的 nonce $nonce 找：build.yml 的 run-name 要带上 inputs.nonce）" })；稍后用 -RunId 查"
+            throw "已触发，但 $FindSeconds 秒内没找到对应的运行$(if ($nonce) { "（按运行名「$($RunNameFormat -f $Sha, $nonce)」找）" })；稍后用 -RunId 查"
         }
         Start-Sleep -Seconds $FindPollSeconds
     }
@@ -103,8 +107,9 @@ function Invoke-SelfTest {
     $doc = @{ Yml = "on:`n  workflow_dispatch:`n    inputs:`n      ref:`n        type: string`n      probe:`n        type: boolean`npermissions:`n  contents: read`n" }
     $now = [datetime]::UtcNow
     $run = @{ id = 42; head_sha = $tip; created_at = $now.ToString('o'); status = 'completed'; conclusion = 'success'; html_url = 'u' }
-    # 触发前接口里是 Runs；触发时 OnPost（拿到请求体）给出新建的运行，Later 里的运行要到触发之后再查一次才出现
-    $box = @{ Runs = @(); OnPost = { param($p) @($run) }; Later = @(); Posted = $false }
+    # 触发前接口里是 Runs；触发时 OnPost（拿到请求体）给出新建的运行；Later 里的运行要到触发之后再查一次才出现，
+    # 它也可以是拿到请求体再给出运行的块（运行名里要带这次的 nonce）
+    $box = @{ Runs = @(); OnPost = { param($p) @($run) }; Later = @(); Posted = $false; LastPost = $null }
     $jobs = @{ jobs = @(@{ name = 'build-win'; status = 'completed'; conclusion = 'success' }, @{ name = 'web-smoke'; status = 'completed'; conclusion = 'success' }) }
     $routes = [ordered]@{
         'branches/feature%2Fv1'   = { @{ commit = @{ sha = $tip } } }
@@ -112,11 +117,14 @@ function Invoke-SelfTest {
         'api -X POST \S+/dispatches --input' = {
             param($argv)
             $p = Get-Content -Raw ($argv[-1]) | ConvertFrom-Json
-            $posted.Add($p); $box.Posted = $true; $box.Runs = @($box.Runs) + @(& $box.OnPost $p); ''
+            $posted.Add($p); $box.Posted = $true; $box.LastPost = $p; $box.Runs = @($box.Runs) + @(& $box.OnPost $p); ''
         }
         'workflows/build\.yml/runs' = {
             $r = @($box.Runs)
-            if ($box.Posted -and @($box.Later).Count) { $box.Runs = @($box.Runs) + @($box.Later); $box.Later = @() }
+            if ($box.Posted) {
+                $later = @(if ($box.Later -is [scriptblock]) { & $box.Later $box.LastPost } else { $box.Later })
+                if ($later.Count) { $box.Runs = @($box.Runs) + $later; $box.Later = @() }
+            }
             @{ workflow_runs = $r }
         }
         'actions/runs/42/jobs'    = { $jobs }
@@ -137,16 +145,27 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '同一提交第二次触发：报出的是新建的运行，不是前一次的' $true ((Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now).id -eq 43)
         $box.Runs, $box.OnPost, $box.Later, $box.Posted = @($older), { @() }, @(), $false
         Add-RinneCase $cases '新运行还没出现：不拿触发前的运行充数' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 0 })
-        # build.yml 声明了 nonce：传一个随机 nonce，按运行名认领。另一个进程同时对同一提交触发的运行（51）编号更大，不认它
+        # build.yml 声明了 nonce：传一个随机 nonce，按运行名认领。运行都要到触发之后第二次查询才出现（接口建运行是异步的）；
+        # 另一个进程同时对同一提交触发的运行（51）编号更大，不认它
         $doc.Yml = "on:`n  workflow_dispatch:`n    inputs:`n      ref:`n        type: string`n      nonce:`n        type: string`n"
         $byName = { param($id, $title) @{ id = $id; head_sha = $tip; display_title = $title; created_at = $now.ToString('o'); status = 'queued'; conclusion = $null; html_url = 'u' } }
-        $box.Runs, $box.Later, $box.Posted = @(), @(), $false
-        $box.OnPost = { param($p) @((& $byName 50 "build $($tip.Substring(0, 7)) $($p.inputs.nonce)"), (& $byName 51 "build $($tip.Substring(0, 7)) $('e' * 32)")) }
-        $rn = Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now
-        Add-RinneCase $cases '有 nonce：同一提交同时触发两次，认领的是运行名带着自己 nonce 的那次' $true ($rn.id -eq 50 -and $posted[-1].inputs.nonce -match '^[0-9a-f]{32}$')
-        $box.Runs, $box.Later, $box.Posted = @(), @(), $false
-        $box.OnPost = { param($p) @(& $byName 52 "build $($tip.Substring(0, 7))") }
-        Add-RinneCase $cases '有 nonce：运行名里没有这次的 nonce，就不认' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 0 })
+        $title = { param($p, $fmt = 'Build & Validate workflow_dispatch {0} {1}') $fmt -f $tip, $p.inputs.nonce, ('d' * 40) }
+        $later = { param($blk) $box.Runs, $box.OnPost, $box.Later, $box.Posted = @(), { @() }, $blk, $false }
+        # 抛错的消息（没抛就是空串）：「不认」的用例要看到的是找不到运行的超时报错，不是别的异常
+        $thrown = { param($sb) try { & $sb | Out-Null; '' } catch { $_.Exception.Message } }
+        & $later { param($p) @((& $byName 50 (& $title $p)), (& $byName 51 "Build & Validate workflow_dispatch $tip $('e' * 32)")) }
+        $rn = try { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 5 } catch { $null }
+        Add-RinneCase $cases '有 nonce：新运行第二次查询才出现、同一提交同时触发两次，认领的是运行名带着自己 nonce 的那次' $true ($rn -and $rn.id -eq 50 -and $posted[-1].inputs.nonce -match '^[0-9a-f]{32}$')
+        & $later { param($p) @(& $byName 52 "Build & Validate workflow_dispatch $tip ") }
+        Add-RinneCase $cases '有 nonce：运行名里没有这次的 nonce（末尾是空串），等到超时也不认' $true ((& $thrown { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 1 }) -match '秒内没找到对应的运行')
+        # 运行名只是「含有」这次的 nonce 不算：格式必须逐字对上（别的事件、别的提交、多了前后缀都不认）
+        foreach ($t in @('Build & Validate pull_request {0} {1}', 'Build & Validate workflow_dispatch {2} {1}', 'Build & Validate workflow_dispatch {0} {1}x', 're: Build & Validate workflow_dispatch {0} {1}')) {
+            & $later { param($p) @(& $byName 53 (& $title $p $t)) }.GetNewClosure()
+            Add-RinneCase $cases "有 nonce：运行名「$($t -f '<sha>', '<nonce>', '<别的 sha>')」等到超时也不认" $true ((& $thrown { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 1 }) -match '秒内没找到对应的运行')
+        }
+        # 两次运行的运行名都是这次的：认不准，报错而不是随便挑一个
+        & $later { param($p) @((& $byName 54 (& $title $p)), (& $byName 55 (& $title $p))) }
+        Add-RinneCase $cases '有 nonce：两次运行的运行名都带着这次的 nonce，报认不准' $true ((& $thrown { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 5 }) -match '认不准')
         $box.OnPost = { param($p) @($run) }
         $doc.Yml = "on:`n  workflow_dispatch:`n    inputs:`n      ref:`n        type: string`n      probe:`n        type: boolean`npermissions:`n  contents: read`n"
         Add-RinneCase $cases 'build.yml 没声明的输入不传' $true (Test-Throws { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -KitVersion '0.1.0-preview.1' -Now $now })

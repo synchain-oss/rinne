@@ -4,7 +4,8 @@
 // （.clang-format 头注释、requirements-tools.txt 与 .clang-format-version 对拍）。
 // 构建用的五个钉版文件与工具钉版一样是必需的，缺一个就判红。WebView2 包的版本与 sha256 钉在 CMake 里，
 // 与 THIRD-PARTY-NOTICES.md、third_party/notices/README.md 写的对拍。requirements-tools.txt 里字体检查要用的
-// fontTools 与 brotli 必须在位、带版本与 sha256。
+// fontTools 与 brotli 必须在位、带版本与 sha256。tests/CMakeLists.txt 存在时，Catch2 的 GIT_TAG 必须是 40 位小写十六进制
+// 提交号，行尾注释写明版本（# vX.Y.Z），并与 THIRD-PARTY-NOTICES.md、third_party/notices/README.md 写的版本与提交对拍。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -66,6 +67,38 @@ function checkWebView2(read) {
     return errors;
 }
 
+const CATCH2 = { cmake: "tests/CMakeLists.txt", notices: WEBVIEW2.notices, readme: WEBVIEW2.readme };
+
+/** Catch2：FetchContent 钉的提交与注释里的版本，和两份声明一致。tests/CMakeLists.txt 不存在时不查。 */
+function checkCatch2(read) {
+    const cmake = read(CATCH2.cmake);
+    if (cmake === null) return [];
+    const block = /FetchContent_Declare\(\s*Catch2\b[\s\S]*?\)[^\n]*/.exec(cmake)?.[0] || "";
+    const tag = /\bGIT_TAG\s+([^\s)]+)/.exec(block)?.[1];
+    const ver = /#\s*(v\d+\.\d+\.\d+)\s*$/m.exec(block)?.[1];
+    if (!block) return [`${CATCH2.cmake} 里没有 FetchContent_Declare(Catch2 …)`];
+    const errors = [];
+    if (!/^[0-9a-f]{40}$/.test(tag || ""))
+        errors.push(`${CATCH2.cmake} 的 Catch2 GIT_TAG 必须是 40 位小写十六进制提交号，现在是 ${tag || "（没有）"}`);
+    if (!ver) errors.push(`${CATCH2.cmake} 的 Catch2 GIT_TAG 行尾要注明版本（# vX.Y.Z）`);
+    if (errors.length) return errors;
+    // NOTICES 的 catch2 小节与总表里那一行写的版本都是它，至少一处
+    const notices = read(CATCH2.notices) || "";
+    const section = /<!-- section:catch2 -->([\s\S]*?)<!-- \/section:catch2 -->/.exec(notices)?.[1] || "";
+    const row = notices.split(/\r?\n/).filter((l) => /^\|\s*Catch2\s*\|/.test(l));
+    const seen = [...new Set([section, ...row].join("\n").match(/\bv\d+\.\d+\.\d+\b/g) || [])];
+    if (!section || seen.length !== 1 || seen[0] !== ver) {
+        errors.push(
+            `${CATCH2.notices} 的 catch2 小节写的 Catch2 版本（${seen.join("、") || "没有"}）与 ${CATCH2.cmake} 的 ${ver} 不一致`,
+        );
+    }
+    const line = (read(CATCH2.readme) || "").split(/\r?\n/).find((l) => l.includes("`catch2.LICENSE.txt`")) || "";
+    if (!line.includes(`tag ${ver}`) || !line.includes(`\`${tag}\``)) {
+        errors.push(`${CATCH2.readme} 里 Catch2 的 tag 或提交与 ${CATCH2.cmake} 不一致`);
+    }
+    return errors;
+}
+
 /** read(rel) 返回文件文本或 null。 */
 export function checkPins(read) {
     const errors = [];
@@ -95,6 +128,7 @@ export function checkPins(read) {
         }
     }
     errors.push(...checkWebView2(read));
+    errors.push(...checkCatch2(read));
     return errors;
 }
 
@@ -118,6 +152,38 @@ const GOOD = {
         "| WebView2 loader | `WEBVIEW2_VERSION` in CMake (1.0.2957.106) |\n(version `WEBVIEW2_VERSION` in CMake, currently 1.0.2957.106).\n",
     [WEBVIEW2.readme]: `| \`webview2.LICENSE.txt\` | \`LICENSE.txt\` in the NuGet package \`Microsoft.Web.WebView2\` 1.0.2957.106 | package sha256 \`${"4c".repeat(32)}\` |\n`,
 };
+
+const CATCH2_SHA = "b5373dadca40b7edc8570cf9470b9b1cb1934d40";
+/** Catch2 一组夹具（tests/CMakeLists.txt、NOTICES、notices/README），按需改其中一项。 */
+function catch2({
+    tag = CATCH2_SHA,
+    comment = " # v3.5.4",
+    section = "v3.5.4",
+    row = "v3.5.4",
+    readmeSha = CATCH2_SHA,
+    readmeTag = "v3.5.4",
+} = {}) {
+    const cmake = [
+        "include(FetchContent)",
+        "FetchContent_Declare(Catch2",
+        "  GIT_REPOSITORY https://github.com/catchorg/Catch2.git",
+        `  GIT_TAG ${tag})${comment}`,
+        "FetchContent_MakeAvailable(Catch2)",
+    ];
+    const notices = [
+        `| Catch2 | FetchContent tag in \`tests/CMakeLists.txt\` (${row}) | \`BSL-1.0\` |`,
+        "<!-- section:catch2 -->",
+        "### Catch2",
+        `- fetched at the pinned tag (${section}, resolved to a fixed commit).`,
+        "<!-- /section:catch2 -->",
+    ];
+    const readme = `| \`catch2.LICENSE.txt\` | catchorg/Catch2 tag ${readmeTag}, \`LICENSE.txt\` | commit \`${readmeSha}\` |`;
+    return {
+        [CATCH2.cmake]: `${cmake.join("\n")}\n`,
+        [CATCH2.notices]: `${GOOD[WEBVIEW2.notices]}${notices.join("\n")}\n`,
+        [CATCH2.readme]: `${GOOD[WEBVIEW2.readme]}${readme}\n`,
+    };
+}
 
 export default {
     name: "pins",
@@ -194,6 +260,16 @@ export default {
             ],
             // WebView2：CMake 是真源，两份声明逐字对拍
             ["CMake 里没有 WEBVIEW2_SHA256", true, with_(edit(WEBVIEW2.cmake, "WEBVIEW2_SHA256", "WEBVIEW2_HASH"))],
+            // sha 格式不对、两份声明却照抄了同一个值：对拍抓不到，只有 CMake 里那条格式判据抓得到
+            [
+                "CMake 里的 WEBVIEW2_SHA256 不是 64 位小写十六进制（声明照抄）",
+                true,
+                with_({
+                    ...edit(WEBVIEW2.cmake, "4c".repeat(32), "4C".repeat(32)),
+                    ...edit(WEBVIEW2.readme, "4c".repeat(32), "4C".repeat(32)),
+                }),
+                /WEBVIEW2_SHA256/,
+            ],
             ["CMake 里的 WebView2 版本不是四段", true, with_(edit(WEBVIEW2.cmake, '"1.0.2957.106"', '"1.0.2957"'))],
             [
                 "NOTICES 有一处还写着旧版本",
@@ -217,7 +293,36 @@ export default {
                 with_(edit(WEBVIEW2.readme, "1.0.2957.106", "1.0.2957.107")),
             ],
             ["CMake 升了版本、两份声明都没跟", true, with_(edit(WEBVIEW2.cmake, "1.0.2957.106", "1.0.3000.1"))],
-        ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
+            // Catch2：tests/CMakeLists.txt 不在时不查；在时 GIT_TAG、行尾版本与两份声明逐项对拍
+            ["没有 tests/CMakeLists.txt 时不查 Catch2", false, with_({ [CATCH2.cmake]: null })],
+            ["Catch2 钉在 40 位提交上、版本与声明一致", false, with_(catch2())],
+            // 坏值同时写进 notices/README，只有 GIT_TAG 这条判据本身抓得到；用例还点名要看到的那条报错
+            ...[
+                ["写成 tag 名", "v3.5.4"],
+                ["是大写十六进制", CATCH2_SHA.toUpperCase()],
+                ["少一位", CATCH2_SHA.slice(1)],
+            ].map(([what, tag]) => [
+                `Catch2 的 GIT_TAG ${what}`,
+                true,
+                with_(catch2({ tag, readmeSha: tag })),
+                /40 位小写十六进制提交号/,
+            ]),
+            ["Catch2 的 GIT_TAG 行尾没注版本", true, with_(catch2({ comment: "" })), /行尾要注明版本/],
+            [
+                "tests/CMakeLists.txt 里没有 Catch2",
+                true,
+                with_({ ...catch2(), [CATCH2.cmake]: "include(FetchContent)\n" }),
+            ],
+            ["NOTICES 的 catch2 小节还写着旧版本", true, with_(catch2({ section: "v3.5.3" }))],
+            ["NOTICES 总表里 Catch2 那一行写着别的版本", true, with_(catch2({ row: "v3.6.0" }))],
+            ["NOTICES 没有 catch2 小节", true, with_({ ...catch2(), [CATCH2.notices]: GOOD[WEBVIEW2.notices] })],
+            ["notices/README 的 Catch2 提交与 GIT_TAG 不同", true, with_(catch2({ readmeSha: "c".repeat(40) }))],
+            ["notices/README 的 Catch2 tag 与注释的版本不同", true, with_(catch2({ readmeTag: "v3.5.3" }))],
+        ].map(([label, bad, errors, want]) => ({
+            label,
+            bad,
+            passed: bad ? errors.length > 0 && (!want || errors.some((e) => want.test(e))) : errors.length === 0,
+        }));
         return caseResult(cases);
     },
 };

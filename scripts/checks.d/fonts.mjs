@@ -13,21 +13,31 @@ import { ROOT, localSetting } from "../lib/check-kit.mjs";
 const SCRIPTS = ["check-font-coverage.py", "check-font-names.py"];
 const FIX = "用 pwsh scripts/bootstrap-tools.ps1 -Tools pytools 建 venv，再按它打印的命令设 git config rinne.python";
 
-/** 返回 { python } 或 { why }。why 只写来源与原因，不写配置的路径。 */
-export function findPython(env = process.env) {
+/**
+ * 找一个能跑 probe 的 Python（本检查与 text-fit 共用）：配置了 RINNE_PYTHON 或 git config rinne.python 就只试它，
+ * 都没配置才试 PATH 上的 python3、python。probe 以退出码 3 表示「版本太旧」。返回 { python } 或 { why }；
+ * why 只写来源与原因，不写配置的路径。
+ */
+export function locatePython(env, probe, { need, check, tooOld = "版本太旧", fix = "" }) {
     const configured = localSetting("RINNE_PYTHON", "rinne.python", { env, cwd: ROOT });
     const source = env.RINNE_PYTHON ? "RINNE_PYTHON" : "git config rinne.python";
     const tried = [];
     for (const cand of configured ? [configured] : ["python3", "python"]) {
-        const r = spawnSync(cand, ["-I", "-c", "import fontTools, brotli"], { encoding: "utf8" });
+        const r = spawnSync(cand, ["-I", "-c", probe], { encoding: "utf8" });
         if (r.status === 0) return { python: cand };
-        const err = `${r.stderr || ""}${r.stdout || ""}`.trim().split(/\r?\n/).pop();
-        tried.push(
-            `${configured ? `${source} 指定的 Python` : cand}：${r.error ? "找不到这个程序" : err || `退出码 ${r.status}`}`,
-        );
+        const last = `${r.stderr || ""}${r.stdout || ""}`.trim().split(/\r?\n/).pop();
+        const err = r.error ? "找不到这个程序" : r.status === 3 ? tooOld : last || `退出码 ${r.status}`;
+        tried.push(`${configured ? `${source} 指定的 Python` : cand}：${err}`);
     }
-    return { why: `没有装了 fontTools 与 brotli 的 Python 3（${tried.join("；")}），字体检查没有运行；${FIX}` };
+    return { why: `没有${need}（${tried.join("；")}），${check}没有运行${fix ? `；${fix}` : ""}` };
 }
+
+export const findPython = (env = process.env) =>
+    locatePython(env, "import fontTools, brotli", {
+        need: "装了 fontTools 与 brotli 的 Python 3",
+        check: "字体检查",
+        fix: FIX,
+    });
 
 function run(python, script, args) {
     const r = spawnSync(python, ["-I", path.join(ROOT, "scripts", script), ...args], { cwd: ROOT, encoding: "utf8" });

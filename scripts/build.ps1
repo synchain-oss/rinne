@@ -37,10 +37,12 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ }
 $Root = Split-Path -Parent $PSScriptRoot
-# 凭据与个人针：名字带这些词或以 _KEY、_PAT、_AUTH 结尾的，值像带口令的 URL 或常见 token 前缀的，一律删掉。
+# 凭据与个人针：名字带这些词或以 _KEY、_PAT、_AUTH、_PWD、_PASS、_JWT 结尾的，值像带口令的 URL 或常见 token 前缀
+# （GitHub、OpenAI 类的 sk-、JWT、Slack、GitLab、npm、AWS 访问键）的，一律删掉。黑名单总有漏网的，所以合并后构建只在
+# 其余判据都通过、没碰基础设施时才跑（见 pr-merge.ps1）。
 # 全仓只有这一份：合并后构建（maintainer/lib/RinneGh.psm1）从主 clone 的这个文件里读这两条，起子进程之前就拿掉。
-$SecretEnv = '^(?:PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|APIKEY|API_KEY).*|.+_(?:KEY|PAT|AUTH))$'
-$SecretEnvValue = '^(?:[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|gh[pousr]_[A-Za-z0-9]{20}|github_pat_\w{20}|sk-[\w-]{20})'
+$SecretEnv = '^(?:PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|DOCKER_AUTH_CONFIG|.*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|APIKEY|API_KEY).*|.+_(?:KEY|PAT|AUTH|PWD|PASS|JWT))$'
+$SecretEnvValue = '^(?:[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|gh[pousr]_[A-Za-z0-9]{20}|github_pat_\w{20}|sk-[\w-]{20}|eyJ[\w-]{10,}\.[\w-]{10,}\.|xox[abprs]-[\w-]{10}|glpat-[\w-]{20}|npm_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16})'
 $PluginvalEnv = '^(?:VALIDATE|VALIDATE_IN_PROCESS|STRICTNESS_LEVEL|TIMEOUT_MS|SKIP_GUI_TESTS|DISABLED_TESTS|REPEAT|RANDOMISE|RANDOM_SEED|SAMPLE_RATES|BLOCK_SIZES|DATA_FILE|VST3VALIDATOR|OUTPUT_DIR|OUTPUT_FILENAME|VERBOSE)$'
 
 class BuildStop : Exception {
@@ -328,7 +330,10 @@ function Invoke-SelfTest {
     # 凭据：按名字（*_PAT、*_CREDENTIALS、不带下划线的 *APIKEY*、*_PASSPHRASE）与按值（带口令的 URL、GitHub token）都删，别的留着。
     # 夹具的值在运行时拼出来，源码里没有完整的形态
     $fake = @{ RINNE_SELFTEST_PAT = 'x'; RINNE_SELFTEST_CREDENTIALS = 'x'; RINNE_SELFTESTAPIKEY = 'x'; RINNE_SELFTEST_PASSPHRASE = 'x'
-        RINNE_SELFTEST_URL = 'https://u' + ':p@example.invalid/x'; RINNE_SELFTEST_GH = 'gh' + 'p_' + ('a' * 36) }
+        RINNE_SELFTEST_PWD = 'x'; RINNE_SELFTEST_PASS = 'x'; RINNE_SELFTEST_JWT = 'x'; DOCKER_AUTH_CONFIG = 'x'
+        RINNE_SELFTEST_URL = 'https://u' + ':p@example.invalid/x'; RINNE_SELFTEST_GH = 'gh' + 'p_' + ('a' * 36)
+        RINNE_SELFTEST_V1 = 'ey' + 'J' + ('a' * 12) + '.' + ('b' * 12) + '.c'; RINNE_SELFTEST_V2 = 'xo' + 'xb-' + ('1' * 12)
+        RINNE_SELFTEST_V3 = 'gl' + 'pat-' + ('a' * 20); RINNE_SELFTEST_V4 = 'np' + 'm_' + ('a' * 36); RINNE_SELFTEST_V5 = 'AK' + 'IA' + ('A' * 16) }
     $keep = @{ RINNE_SELFTEST_KEEP = 'y'; RINNE_SELFTEST_PLAINURL = 'https://example.invalid/x' }
     foreach ($e in @($fake.GetEnumerator()) + @($keep.GetEnumerator())) { [Environment]::SetEnvironmentVariable($e.Key, $e.Value) }
     Remove-EnvMatching $SecretEnv $SecretEnvValue
@@ -388,6 +393,10 @@ function Invoke-SelfTest {
         & $check '-CheckCache：cache 与编进去的段名前缀、探针开关都对' $false ((& $cc $f 'false') -eq 0)
         & $check '-CheckCache：cache 是默认值，编进去的却被同名普通变量遮成本机前缀' $true ((& $cc "${f}D" 'false') -eq 1)
         & $check '-CheckCache：正式构建编进去的 kProbeBuild 是 true' $true ((& $cc $f 'true') -eq 1)
+        # 编进去的值都对、cache 却被覆盖成本机前缀：cache 那一道照样判红
+        Set-Content -LiteralPath (Join-Path $bd 'CMakeCache.txt') -Value (& $cache "${f}D" $f)
+        & $check '-CheckCache：编进去的对、cache 被覆盖成本机前缀' $true ((& $cc $f 'false') -eq 1)
+        Set-Content -LiteralPath (Join-Path $bd 'CMakeCache.txt') -Value (& $cache $f $f)
         # -Ci 只在 GitHub Actions 上：没有 GITHUB_ACTIONS=true 退出 1；有的话照常往下走（这里没有构建记录，退出 2）
         $savedGa = $env:GITHUB_ACTIONS
         $ci = { param($v) $env:GITHUB_ACTIONS = $v; $o = & $pwsh -NoProfile -NonInteractive -File $PSCommandPath -Ci -NoBuild -BuildDir $bd 2>&1 | Out-String; @($LASTEXITCODE, $o) }

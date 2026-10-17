@@ -4,6 +4,7 @@
 # 按钉版文件把本机工具装进 -ToolsDir，或检查本机的 hooks 配置。
 #   pwsh scripts/bootstrap-tools.ps1 [-ToolsDir <目录>] [-Tools node,gitleaks,…] [-Python <python>]
 #   pwsh scripts/bootstrap-tools.ps1 -CheckHooks
+#   pwsh scripts/bootstrap-tools.ps1 -SelfTest      纯函数的正反例（gates 的自测会调用）
 # -ToolsDir 缺省取环境变量 RINNE_TOOLS_DIR，两者都没有就停下。版本取自仓内钉版文件：.node-version、.gitleaks-version、
 # .actionlint-version、.prettier-version；clang-format 与 reuse 取 requirements-tools.txt。ninja 还没有钉版文件、
 # pluginval 的钉版文件构建骨架入库时才有，两者先用下面清单里的版本，只在 -Tools 点名或钉版文件出现后才装。
@@ -28,7 +29,8 @@ param(
     [string]$ToolsDir = $env:RINNE_TOOLS_DIR,
     [string[]]$Tools = @(),
     [string]$Python = 'python',
-    [switch]$CheckHooks
+    [switch]$CheckHooks,
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -198,6 +200,15 @@ function Install-Archive([string]$Name, $Spec, [string]$Node) {
     $entry
 }
 
+# 字体检查要的 fontTools 与 brotli：venv 里报出的「fonttools <版本> brotli <版本>」与 requirements-tools.txt 钉的对不上时
+# 返回错误文字，对上了返回空。
+function Get-FontToolsMismatch([string]$Requirements, [string]$Have) {
+    $want = @('fonttools', 'brotli' | ForEach-Object { $v = [regex]::Match($Requirements, "(?mi)^$_==(\S+)").Groups[1].Value; $v ? "$_ $v" : $null })
+    if ($want.Count -ne 2 -or $want -contains $null) { return 'requirements-tools.txt 里没有钉住 fonttools 与 brotli 的版本' }
+    $w = $want -join ' '
+    ($Have -ceq $w) ? '' : "字体检查的依赖是「$Have」，应为 $w"
+}
+
 # requirements-tools.txt 里 poetry-core 那一条（版本行加上以 \ 续接的哈希行）。
 function Get-BackendRequirement([string]$Req) {
     $lines = @(Get-Content -LiteralPath $Req)
@@ -223,7 +234,7 @@ function Install-PyTools {
     $versions = {
         foreach ($n in $want.Keys) { if (-not (Test-Installed (Join-Path $bin "$n$ext") @('--version') $want[$n] '')) { "$n 核对不过版本 $($want[$n])" } }
         $have = "$(& $py -I -c "import fontTools, brotli; from importlib.metadata import version as v; print('fonttools', v('fonttools'), 'brotli', v('brotli'))" 2>$null)".Trim()
-        if ($have -cne $fonts) { "字体检查的依赖是「$have」，应为 $fonts" }
+        Get-FontToolsMismatch $text $have | Where-Object { $_ }
     }
     $pip = '--disable-pip-version-check', '-q', '--require-hashes'
     if (Test-Path -LiteralPath $dest) {
@@ -254,6 +265,22 @@ function Install-PyTools {
     }
     # rinne.python 交给字体与文本宽度检查（gates 把它设进 RINNE_PYTHON）
     [ordered]@{ 'rinne.clangFormat' = (Join-Path $bin "clang-format$ext"); 'rinne.reuse' = (Join-Path $bin "reuse$ext"); 'rinne.python' = $py }
+}
+
+if ($SelfTest) {
+    $req = "clang-format==18.1.8`nfonttools==4.65.0 \`n    --hash=sha256:aa`nbrotli==1.2.0 \`n    --hash=sha256:bb`n"
+    $cases = @(
+        @('版本都对上', $false, (Get-FontToolsMismatch $req 'fonttools 4.65.0 brotli 1.2.0')),
+        @('fonttools 版本不对', $true, (Get-FontToolsMismatch $req 'fonttools 4.67.0 brotli 1.2.0')),
+        @('brotli 版本不对', $true, (Get-FontToolsMismatch $req 'fonttools 4.65.0 brotli 1.1.0')),
+        @('venv 里导入失败（什么都没报出来）', $true, (Get-FontToolsMismatch $req '')),
+        @('requirements 里没钉 brotli', $true, (Get-FontToolsMismatch "fonttools==4.65.0`n" 'fonttools 4.65.0 ')),
+        @('包名大小写不同也认', $false, (Get-FontToolsMismatch ($req -replace 'fonttools==', 'FontTools==') 'fonttools 4.65.0 brotli 1.2.0'))
+    )
+    $failed = @($cases | Where-Object { [bool]$_[2] -ne $_[1] })
+    $failed | ForEach-Object { Write-Host "自测未通过：$($_[0])" }
+    Write-Host ('bootstrap-tools --self-test：{0}（{1} 项）' -f ($failed ? '失败' : '通过'), $cases.Count)
+    exit [int]($failed.Count -gt 0)
 }
 
 if ($CheckHooks) {

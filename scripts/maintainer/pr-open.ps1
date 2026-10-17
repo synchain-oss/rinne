@@ -150,6 +150,9 @@ function Invoke-SelfTest {
         $existing.state = 'open'; $existing.base.ref = 'dev'
         Add-RinneCase $cases '-Update：开到 dev 的 PR 不改' $true (-not (& $upd $good))
         $existing.base.ref = 'feature/v1'
+        $existing.head.repo.full_name = 'someone/rinne'; $n = $patched.Count
+        Add-RinneCase $cases '-Update：head 是 fork 的分支（不在本仓）的 PR 不改' $true ((-not (& $upd $good)) -and $patched.Count -eq $n)
+        $existing.head.repo.full_name = (Get-RinneRepo)
     } finally {
         Set-RinneFake $null
         Exit-RinneSelfTestNeedles $needles

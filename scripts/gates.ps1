@@ -33,6 +33,8 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $Root = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $PSScriptRoot 'lib/Locks.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'lib/Tiers.psm1') -Force -ErrorAction Stop
+# gates.d 里起构建脚本的 gate 用它的 Invoke-WithoutStdInherit：子进程拿不到运行器调用方的管道
+Import-Module (Join-Path $PSScriptRoot 'lib/StdHandles.psm1') -Force -ErrorAction Stop
 $Rules = Get-RinneTierRules
 $Tiers = [string[]]$Rules.tiers
 if (-not $env:RINNE_PYTHON) { $env:RINNE_PYTHON = "$(git -C $Root config --get rinne.python 2>$null)".Trim() }
@@ -156,6 +158,9 @@ function Invoke-SelfTest {
     & $check '退出码：FAIL 优先于资源超时，DEFER 优先于一切，只有工作区不干净也是 1' $true ((@($ec)[0..2] -join ',') -eq '1,4,1')
     & $check '退出码：只有资源超时是 3，全过是 0' $false ((@($ec)[3..4] -join ',') -eq '3,0')
     Test-RinneLocks | ForEach-Object { $cases.Add($_) }
+    Test-StdHandles | ForEach-Object { $cases.Add($_) }
+    $null = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'bootstrap-tools.ps1') -SelfTest 2>&1
+    & $check 'bootstrap-tools.ps1 -SelfTest 通过' $false ($LASTEXITCODE -eq 0)
     Invoke-EndToEnd $check
     $failed = @($cases | Where-Object { -not $_.Passed })
     $failed | ForEach-Object { Write-Host "自测未通过：$($_.Label)" }
@@ -172,7 +177,7 @@ function Invoke-EndToEnd($Check) {
     try {
         $null = New-Item -ItemType Directory -Path (Join-Path $repo 'scripts/lib'), (Join-Path $repo 'scripts/gates.d'), (Join-Path $tmp '_logs')
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $repo 'scripts/gates.ps1')
-        foreach ($f in 'Tiers.psm1', 'tier-rules.json') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/$f") -Destination (Join-Path $repo "scripts/lib/$f") }
+        foreach ($f in 'Tiers.psm1', 'tier-rules.json', 'StdHandles.psm1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/$f") -Destination (Join-Path $repo "scripts/lib/$f") }
         $locks = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lib/Locks.psm1') -Raw).Replace("`$script:Scope = 'Rinne'", "`$script:Scope = 'Rinne-selftest-$PID'")
         Set-Content -LiteralPath (Join-Path $repo 'scripts/lib/Locks.psm1') -Value $locks
         $quick = ($Rules.gates | Where-Object tier -ceq 'Quick' | ForEach-Object { "'$($_.id)'" }) -join ', '

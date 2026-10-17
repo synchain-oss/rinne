@@ -30,6 +30,9 @@ if (-not (Test-RinnePwshVersion $PSVersionTable.PSVersion.Major $PSVersionTable.
     throw "维护者脚本需要 PowerShell 7.5 或更高（用到 ConvertFrom-Json -DateKind），当前是 $($PSVersionTable.PSVersion)"
 }
 
+# 起子进程时不把本进程调用方的管道交给它（Invoke-WithoutStdInherit）
+Import-Module (Join-Path $PSScriptRoot '../../lib/StdHandles.psm1') -ErrorAction Stop
+
 function Get-RinneRepo { $script:Repo }
 function Get-RinneMaintainer { $script:Maintainer }
 function Get-RinneRepoRoot { $script:RepoRoot }
@@ -87,7 +90,7 @@ function Invoke-RinneExternal {
   带超时跑一个进程，到点 Kill 整棵进程树（构建会起编译器子进程）。两条输出流在本线程上轮询着读（免得管道写满卡住），
   读到的随时可用。进程退出后读管道最多再等 DrainSeconds：它留下的常驻子进程（编译器的 PDB 服务、编译缓存的服务）
   继承了管道时，EOF 要等它们退出才来，不设上限的话超时就形同虚设。等不到时用已经读到的输出，并在 Err 里注明。
-  起进程的那一刻本进程的标准输出与标准错误不可继承（Invoke-RinneWithoutStdInherit），子进程拿不到本进程调用方的管道。
+  起进程的那一刻本进程的标准输出与标准错误不可继承（scripts/lib/StdHandles.psm1），子进程拿不到本进程调用方的管道。
 #>
 function Invoke-RinneTimed {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds, [int]$DrainSeconds = 10)
@@ -97,7 +100,7 @@ function Invoke-RinneTimed {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     if ($Cwd) { $psi.WorkingDirectory = $Cwd }
-    $p = Invoke-RinneWithoutStdInherit { [System.Diagnostics.Process]::Start($psi) }
+    $p = Invoke-WithoutStdInherit { [System.Diagnostics.Process]::Start($psi) }
     try {
         $pumps = @((New-RinneStreamPump $p.StandardOutput), (New-RinneStreamPump $p.StandardError))
         $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -125,29 +128,6 @@ function Invoke-RinneTimed {
     } finally {
         $p.Dispose()
     }
-}
-
-<#
-  跑一段代码，期间本进程的标准输出与标准错误不可继承，结束后按原样还原。Windows 上起子进程会把所有可继承的句柄都交给它，
-  其中就有本进程连着调用方的那两条管道（给子进程重定向的是另建的管道，不受影响）：子进程以及它留下的常驻进程不退出，
-  调用方就一直读不到 EOF。标准输入不动。gates.d/20-build.ps1、30-plugin.ps1 里有同样的一份。
-#>
-function Invoke-RinneWithoutStdInherit {
-    param([Parameter(Mandatory)][scriptblock]$Script)
-    if (-not $IsWindows) { return & $Script }
-    if (-not ('Rinne.StdInherit' -as [type])) {
-        Add-Type -Namespace Rinne -Name StdInherit -MemberDefinition @'
-[DllImport("kernel32.dll")] public static extern System.IntPtr GetStdHandle(int nStdHandle);
-[DllImport("kernel32.dll")] public static extern bool GetHandleInformation(System.IntPtr hObject, out int lpdwFlags);
-[DllImport("kernel32.dll")] public static extern bool SetHandleInformation(System.IntPtr hObject, int dwMask, int dwFlags);
-'@
-    }
-    # 局部变量带 std 前缀：$Script 在这里的子作用域里跑，按动态作用域也看得见它们，不要遮住调用方的同名变量
-    $stdSaved = foreach ($stdN in -11, -12) {
-        $stdH = [Rinne.StdInherit]::GetStdHandle($stdN); $stdF = 0
-        if ([Rinne.StdInherit]::GetHandleInformation($stdH, [ref]$stdF)) { $null = [Rinne.StdInherit]::SetHandleInformation($stdH, 1, 0); @{ H = $stdH; F = $stdF -band 1 } }
-    }
-    try { & $Script } finally { foreach ($stdS in @($stdSaved)) { $null = [Rinne.StdInherit]::SetHandleInformation($stdS.H, 1, $stdS.F) } }
 }
 
 <# 一条输出流的读取器：同一时刻只挂一个 ReadAsync，由 Step-RinneStreamPump 在调用方线程上收结果；Text 是目前读到的

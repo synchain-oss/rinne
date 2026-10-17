@@ -1,34 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 文本宽度预算门禁：先在本进程里合并三语词条写到临时文件，再交给 check-text-fit.py（只用 Python 标准库）。
-// 找不到 Python 时判红（本机和 CI 相同）。Python 的取法与字体检查相同：RINNE_PYTHON、git config rinne.python，
+// 找不到 Python 时判红（本机和 CI 相同）。Python 用字体检查的 locatePython 找：RINNE_PYTHON、git config rinne.python，
 // 都没配置时才退回 PATH 上的 python3、python；配置了却用不了直接判红并写明原因。
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ROOT, localSetting } from "../lib/check-kit.mjs";
+import { ROOT } from "../lib/check-kit.mjs";
+import { locatePython } from "./fonts.mjs";
 import { loadDict } from "../check-i18n.mjs";
 
 const SCRIPT = path.join(ROOT, "scripts", "check-text-fit.py");
 
-/** 返回 { python } 或 { why }。why 只写来源与原因，不写配置的路径。 */
-export function findPython(env = process.env) {
-    const configured = localSetting("RINNE_PYTHON", "rinne.python", { env, cwd: ROOT });
-    const source = env.RINNE_PYTHON ? "RINNE_PYTHON" : "git config rinne.python";
-    const tried = [];
-    for (const cand of configured ? [configured] : ["python3", "python"]) {
-        const r = spawnSync(cand, ["-I", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 3)"], {
-            encoding: "utf8",
-        });
-        if (r.status === 0) return { python: cand };
-        const last = `${r.stderr || ""}`.trim().split(/\r?\n/).pop();
-        const err = r.error ? "找不到这个程序" : r.status === 3 ? "版本低于 3.8" : last;
-        tried.push(`${configured ? `${source} 指定的 Python` : cand}：${err || `退出码 ${r.status}`}`);
-    }
-    return { why: `没有可用的 Python 3.8+（${tried.join("；")}），文本宽度检查没有运行` };
-}
+export const findPython = (env = process.env) =>
+    locatePython(env, "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 3)", {
+        need: "可用的 Python 3.8+",
+        check: "文本宽度检查",
+        tooOld: "版本低于 3.8",
+    });
 
 function runPython(python, args) {
     const r = spawnSync(python, ["-I", SCRIPT, ...args], { cwd: ROOT, encoding: "utf8" });
