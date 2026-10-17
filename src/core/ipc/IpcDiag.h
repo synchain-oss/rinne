@@ -67,7 +67,8 @@ struct IpcDiagEvent
     const char* segment = ""; // 平台段名；从不为 nullptr，可能为空串
     const char* path = ""; // 相关的文件或目录路径；从不为 nullptr，可能为空串
     const char* detail = ""; // 静态 ASCII 描述；从不为 nullptr
-    // 本条之前、同一后端实例略去未报的同类失败次数（只用于 lifecycle.lock 的断路窗口；0 = 没有）
+    // 本条之前、同一后端实例只计数没上报的 lifecycle.lock 取锁失败次数（只试一次的附着、断路窗口内的取锁），
+    // 并进它的下一条诊断，不论那条是哪一类；0 = 没有。目前只有 POSIX 后端用
     std::uint32_t suppressed = 0;
 };
 

@@ -2,11 +2,11 @@
 //
 // 共享内存段名。一个会合段 rv 加 8 个数据段，名字由「平台头 + 前缀族 + 作用域 + 段」拼成：
 //
-//                  正式（构建期前缀）                              测试作用域（t + 7 位小写十六进制）
-//   Windows        Local\SynchainRinne.rv                          Local\SnchRinne.t1a2b3c4.rv
-//                  Local\SynchainRinne.v1.g1 … g8                  Local\SnchRinne.t1a2b3c4.v1.g1 … g8
-//   POSIX          /SnchRinne.<uid8>.rv                            /SnchRinne.t1a2b3c4.rv
-//                  /SnchRinne.<uid8>.v1.g1 … g8                    /SnchRinne.t1a2b3c4.v1.g1 … g8
+//                  正式（构建期前缀）                              测试作用域（t + 6 位小写十六进制）
+//   Windows        Local\SynchainRinne.rv                          Local\SnchRinne.t1a2b3c.rv
+//                  Local\SynchainRinne.v1.g1 … g8                  Local\SnchRinne.t1a2b3c.v1.g1 … g8
+//   POSIX          /SnchRinne.<uid8>.rv                            /SnchRinne.t1a2b3c.rv
+//                  /SnchRinne.<uid8>.v1.g1 … g8                    /SnchRinne.t1a2b3c.v1.g1 … g8
 //
 // - 会合段名永不带 abi：abi 不同的两个版本打开的是同一个 rv，才能互相看见并报告不兼容；数据段名带 v<abi>，
 //   不同 abi 的环互不相干。
@@ -15,6 +15,7 @@
 // - 测试作用域只经 API 注入（NameScope::forTesting / randomForTesting），发布版不读任何环境变量。测试名在两个
 //   平台上同形同长，都用短写族名；作用域标签以 t 开头，不是十六进制，与任何 uid8 都撞不上。
 // - 名字（含平台头）不超过 kMaxSegmentNameLength = 31 个字符，两个平台统一按 macOS 的 POSIX 上限检查。
+//   给 abi 留了两位数的增长空间：abi 到 99 时最长的名字（Windows 上的测试数据段名）正好 31，golden 与单测都核这一条。
 //   超长、字符不合法时拼名失败，调用方按「IPC 不可用」处理，只出干声。
 // 只在非实时线程调用（拼名要分配）。
 #pragma once
@@ -90,11 +91,11 @@ constexpr const PrefixFamily* findPrefixFamily(std::string_view win32Prefix) noe
     return nullptr;
 }
 
-// 作用域：正式（标签为空）或测试（t + 7 位小写十六进制）。只能经下面三个工厂得到。
+// 作用域：正式（标签为空）或测试（t + 6 位小写十六进制）。只能经下面三个工厂得到。
 class NameScope
 {
 public:
-    static constexpr std::size_t kTagLength = 8;
+    static constexpr std::size_t kTagLength = 7;
 
     static NameScope formal() noexcept { return NameScope{}; }
     // 标签不合法时返回空
@@ -113,14 +114,12 @@ private:
 };
 
 // 拼段名：平台、前缀族、作用域、uid（只有 POSIX 的正式名用到）与段。成功时 out 是完整的平台名。
+// abi 只给单测核增长空间用；发布代码一律用本构建的 kIpcAbi。
 NameStatus composeSegmentName(NamePlatform platform, const PrefixFamily& family, const NameScope& scope,
-                              std::uint32_t uid, SegmentId segment, std::string& out);
+                              std::uint32_t uid, SegmentId segment, std::string& out, std::uint32_t abi = kIpcAbi);
 
 // 核对一个现成的平台名：平台头、字符集、每节非空、长度。后端在碰操作系统之前再查一遍。
 NameStatus validateSegmentName(NamePlatform platform, std::string_view name) noexcept;
-
-// 后端拒绝一个名字时的诊断（kName；超长归 kNameTooLong）。后端随后返回 InitResult::kFailedBadName。
-void reportBadSegmentName(const std::string& name, NameStatus status) noexcept;
 
 // 本构建的段名：构建期前缀、本机平台、当前有效用户。插件只用正式作用域；测试与 peer 进程传测试作用域。
 class Naming

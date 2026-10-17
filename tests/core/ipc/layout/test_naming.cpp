@@ -21,7 +21,7 @@ using namespace rinne::ipc;
 // golden 里 uid 与测试标签写成占位符；这里用固定值拼名，再换回占位符比
 constexpr std::uint32_t kUid = 0x01234567u;
 const char* const kUidText = "01234567";
-const char* const kTag = "t89abcde";
+const char* const kTag = "t89abcd";
 
 void replaceOnce(std::string& text, const std::string& from, const std::string& to)
 {
@@ -34,7 +34,7 @@ void replaceOnce(std::string& text, const std::string& from, const std::string& 
 std::string withPlaceholders(std::string name)
 {
     replaceOnce(name, kUidText, "<uid8>");
-    replaceOnce(name, kTag, "<tag8>");
+    replaceOnce(name, kTag, "<tag7>");
     return name;
 }
 
@@ -75,6 +75,33 @@ TEST_CASE("segment names match the golden for every prefix, platform and scope",
                     CHECK(row.str("segment") == (g == 0 ? std::string("rv") : "g" + std::to_string(g)));
                     CHECK(row.str("name") == withPlaceholders(name));
                     CHECK(row.num("length") == static_cast<long long>(name.size()));
+                    CHECK(name.size() <= kMaxSegmentNameLength);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("segment names leave room for a two-digit abi", "[ipc][naming][golden]")
+{
+    // abi 按冻结契约流程只会往上涨；涨到 golden 记的增长空间（至少 99）时，所有段名仍在 31 字符以内
+    const auto golden = rinne::test::loadIpcGolden();
+    REQUIRE(golden.loaded);
+    const long long headroom = golden.top.at("nameAbiHeadroom");
+    REQUIRE(headroom >= 99);
+    for (const auto& family : kPrefixFamilies)
+    {
+        for (const auto platform : {NamePlatform::kWin32, NamePlatform::kPosix})
+        {
+            for (const bool testing : {false, true})
+            {
+                for (std::uint32_t g = 0; g <= kGroupCount; ++g)
+                {
+                    const NameScope scope = testing ? testScope() : NameScope::formal();
+                    std::string name;
+                    INFO(family.win32 << " group " << g << (testing ? " testing" : " formal"));
+                    CHECK(composeSegmentName(platform, family, scope, kUid, SegmentId{g}, name,
+                                             static_cast<std::uint32_t>(headroom)) == NameStatus::kOk);
                     CHECK(name.size() <= kMaxSegmentNameLength);
                 }
             }
@@ -147,11 +174,11 @@ TEST_CASE("bad prefixes, groups and names are rejected", "[ipc][naming]")
 TEST_CASE("test scopes are injected only through the API and stay distinct", "[ipc][naming][scope]")
 {
     CHECK_FALSE(NameScope::formal().isTesting());
-    CHECK(NameScope::isValidTestTag("t0123abc"));
-    CHECK_FALSE(NameScope::isValidTestTag("t0123ab")); // 太短
-    CHECK_FALSE(NameScope::isValidTestTag("t0123abcd")); // 太长
-    CHECK_FALSE(NameScope::isValidTestTag("00123abc")); // 不以 t 开头：会和 uid8 撞上
-    CHECK_FALSE(NameScope::isValidTestTag("t0123ABC")); // 只许小写十六进制
+    CHECK(NameScope::isValidTestTag("t0123ab"));
+    CHECK_FALSE(NameScope::isValidTestTag("t0123a")); // 太短
+    CHECK_FALSE(NameScope::isValidTestTag("t0123abc")); // 太长
+    CHECK_FALSE(NameScope::isValidTestTag("00123ab")); // 不以 t 开头：会和 uid8 撞上
+    CHECK_FALSE(NameScope::isValidTestTag("t0123AB")); // 只许小写十六进制
     CHECK_FALSE(NameScope::forTesting("x").has_value());
 
     std::set<std::string> tags;
@@ -162,7 +189,7 @@ TEST_CASE("test scopes are injected only through the API and stay distinct", "[i
         CHECK(NameScope::isValidTestTag(s.tag()));
         tags.insert(std::string(s.tag()));
     }
-    CHECK(tags.size() >= 60); // 28 位随机数，64 个里撞上几个的概率可以忽略
+    CHECK(tags.size() >= 60); // 24 位随机数，64 个里撞上几个的概率可以忽略
 
     // 同一标签、两个平台的测试名同形同长；与同一 uid 的正式名不同
     std::string win;
@@ -174,8 +201,8 @@ TEST_CASE("test scopes are injected only through the API and stay distinct", "[i
             NameStatus::kOk);
     REQUIRE(composeSegmentName(NamePlatform::kPosix, kPrefixFamilies[1], NameScope::formal(), kUid, SegmentId{3},
                                formal) == NameStatus::kOk);
-    CHECK(win == "Local\\SnchRinneD.t89abcde.v1.g3");
-    CHECK(posix == "/SnchRinneD.t89abcde.v1.g3");
+    CHECK(win == "Local\\SnchRinneD.t89abcd.v1.g3");
+    CHECK(posix == "/SnchRinneD.t89abcd.v1.g3");
     CHECK(formal == "/SnchRinneD.01234567.v1.g3");
 }
 

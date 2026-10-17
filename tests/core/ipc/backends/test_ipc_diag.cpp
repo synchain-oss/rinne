@@ -34,13 +34,13 @@ TEST_CASE("reports reach the installed sink and nothing else", "[ipc][diag]")
     const IpcDiagSink before = ipcDiagSink();
     {
         rinne::test::DiagCapture capture;
-        reportIpcDiag(event(IpcDiagOp::kOpen, IpcDiagCode::kShmDenied, EPERM, "/SnchRinne.t0000000.rv"));
+        reportIpcDiag(event(IpcDiagOp::kOpen, IpcDiagCode::kShmDenied, EPERM, "/SnchRinne.t000000.rv"));
         const auto events = capture.events();
         REQUIRE(events.size() == 1);
         CHECK(events[0].op == IpcDiagOp::kOpen);
         CHECK(events[0].code == IpcDiagCode::kShmDenied);
         CHECK(events[0].error == EPERM);
-        CHECK(events[0].segment == "/SnchRinne.t0000000.rv");
+        CHECK(events[0].segment == "/SnchRinne.t000000.rv");
     }
     CHECK(ipcDiagSink() == before);
     // 没装 sink 时报告是空操作
@@ -80,7 +80,7 @@ TEST_CASE("errno values are classified and mapped to init results", "[ipc][diag]
 TEST_CASE("the limiter lets one line per key through each window", "[ipc][diag][limiter]")
 {
     IpcDiagLimiter limiter;
-    const auto e = event(IpcDiagOp::kLifecycleLock, IpcDiagCode::kBusy, ETIMEDOUT, "/SnchRinne.t0000000.rv");
+    const auto e = event(IpcDiagOp::kLifecycleLock, IpcDiagCode::kBusy, ETIMEDOUT, "/SnchRinne.t000000.rv");
     CHECK(limiter.onEvent(e, 1000).emit);
     for (int i = 0; i < 5; ++i)
     {

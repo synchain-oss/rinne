@@ -79,6 +79,6 @@ TEST_CASE("the platform alias picks the backend for this platform", "[ipc][backe
     ISegmentBackend& base = backend;
     SegmentView view;
     CHECK(base.openExisting(std::string(kHostNamePlatform == NamePlatform::kWin32 ? "Local\\" : "/") +
-                                "SnchRinne.t0000000.rv",
+                                "SnchRinne.t000000.rv",
                             view) == InitResult::kFailed);
 }

@@ -7,9 +7,10 @@
 //     最后一项收在结构末尾；u64 字段的偏移是 8 的倍数，u32 是 4 的倍数；
 //   - 结构的大小与对齐；常量（头文件里每个 inline constexpr 都要进 golden，值只能写字面量或 util::fourcc("ABCD")）；
 //   - 永久冻结面（本文件写死，不随 golden 改）：会合段头的前 16 字节，端点槽 version 的绝对位置与它依赖的
-//     组块偏移、步长，会合段的 magic；
+//     组块偏移、步长，会合段的 magic 与初始化标记；
 //   - 段名：三族前缀 × 9 段 × 2 平台 × {正式, 测试} 由本文件按规则重新拼一遍，与 golden 逐条相等，每条不超过 31 字符；
-//     前缀族与根 CMakeLists.txt 允许的三个值一一对应；会合段名不带 abi；
+//     abi 涨到 golden 的 nameAbiHeadroom（至少 99）时每条也不超过 31；前缀族与根 CMakeLists.txt 允许的三个值一一对应；
+//     会合段名不带 abi；
 //   - golden 的排版是规范形：每条记录一行、键序固定（不是规范形就判红，免得两行之间藏一处手改）；
 //   - 发布代码不读环境变量（src/** 里出现 getenv 一族判红，注释与字符串里的不算）；IPC 的测试钩子只出现在
 //     声明它们的文件里，插件与其他 core 代码不许调用。
@@ -29,7 +30,9 @@ const PLATFORMS = ["win32", "posix"];
 const SCOPES = ["formal", "testing"];
 const SEGMENTS = ["rv", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8"];
 const UID = "<uid8>";
-const TAG = "<tag8>";
+const TAG = "<tag7>";
+/** 段名给 abi 留的增长空间：abi 到这个值时所有段名仍不超过 31 字符。只许调大。 */
+const MIN_ABI_HEADROOM = 99;
 
 /** 永久冻结面：连 abi 升级都不许动。端点槽 version 的绝对位置 = 1024·G + {0, 256} + 56。 */
 const PERMANENT = [
@@ -44,7 +47,12 @@ const VERSION_ANCHORS = [
     { struct: "GroupBlock", field: "input", offset: 0 },
     { struct: "GroupBlock", field: "output", offset: 256 },
 ];
-const PERMANENT_CONSTANTS = { kRvMagic: fourcc("RNRV"), kGroupStride: 1024, kRoleSlotBytes: 256 };
+const PERMANENT_CONSTANTS = {
+    kRvMagic: fourcc("RNRV"),
+    kInitMarker: fourcc("RNIN"),
+    kGroupStride: 1024,
+    kRoleSlotBytes: 256,
+};
 
 const KEYS = {
     constants: ["constant", "value"],
@@ -53,7 +61,7 @@ const KEYS = {
     prefixes: ["win32", "posix"],
     names: ["platform", "scope", "prefix", "segment", "name", "length"],
 };
-const TOP = ["abi", "maxNameLength", ...Object.keys(KEYS)];
+const TOP = ["abi", "maxNameLength", "nameAbiHeadroom", ...Object.keys(KEYS)];
 
 export function fourcc(code) {
     return [...code].reduce((v, c, i) => (v + c.charCodeAt(0) * 2 ** (8 * i)) >>> 0, 0);
@@ -172,13 +180,13 @@ export function composeName(platform, family, scope, segment, abi) {
     return `${head}${prefix}${middle}.${seg}`;
 }
 
-/** 段名的真实长度：占位符按它代表的 8 个字符算。 */
-export const nameLength = (name) => name.replaceAll(UID, "u".repeat(8)).replaceAll(TAG, "t".repeat(8)).length;
+/** 段名的真实长度：占位符按它代表的字符数算（uid 8 个、测试标签 7 个）。 */
+export const nameLength = (name) => name.replaceAll(UID, "u".repeat(8)).replaceAll(TAG, "t".repeat(7)).length;
 
 /** golden 的规范排版：每条记录一行，键序按 KEYS。 */
 export function renderGolden(g) {
     const rec = (obj, keys) => `{ ${keys.map((k) => `${JSON.stringify(k)}: ${JSON.stringify(obj[k])}`).join(", ")} }`;
-    const parts = [`  "abi": ${JSON.stringify(g.abi)}`, `  "maxNameLength": ${JSON.stringify(g.maxNameLength)}`];
+    const parts = ["abi", "maxNameLength", "nameAbiHeadroom"].map((k) => `  "${k}": ${JSON.stringify(g[k])}`);
     for (const [section, keys] of Object.entries(KEYS)) {
         const rows = (g[section] ?? []).map((r) => `    ${rec(r, keys)}`);
         parts.push(`  "${section}": [\n${rows.join(",\n")}\n  ]`);
@@ -297,6 +305,11 @@ export function checkIpc({ layoutText, namingText, cmakeText, goldenText, source
     if (golden.abi !== layout.constants.kIpcAbi) errors.push(`golden 的 abi ${golden.abi} ≠ kIpcAbi`);
     if (golden.maxNameLength !== layout.constants.kMaxSegmentNameLength || golden.maxNameLength !== 31)
         errors.push("golden 的 maxNameLength 必须等于 kMaxSegmentNameLength，且是 31（macOS 的 POSIX 段名上限）");
+    const headroom = golden.nameAbiHeadroom;
+    if (!Number.isInteger(headroom) || headroom < MIN_ABI_HEADROOM || headroom < layout.constants.kIpcAbi)
+        errors.push(
+            `golden 的 nameAbiHeadroom 必须是不小于 ${MIN_ABI_HEADROOM} 的整数（段名要给 abi 留两位数的增长空间）`,
+        );
 
     // 永久冻结面：对头文件与 golden 各核一遍
     for (const [where, fields, constants] of [
@@ -345,6 +358,9 @@ export function checkIpc({ layoutText, namingText, cmakeText, goldenText, source
                         expected.push({ platform, scope, prefix: family.win32, segment, name, length });
                         if (length > 31) errors.push(`段名 ${name} 有 ${length} 个字符，超过 31`);
                         if (segment === "rv" && /\.v\d+\./.test(name)) errors.push(`会合段名 ${name} 带了 abi`);
+                        const grown = composeName(platform, family, scope, segment, Math.max(headroom ?? 0, 99));
+                        if (nameLength(grown) > 31)
+                            errors.push(`abi 涨到 ${headroom} 时段名 ${grown} 有 ${nameLength(grown)} 个字符，超过 31`);
                     }
         errors.push(...sameList("段名", expected, golden.names ?? [], KEYS.names));
     }
@@ -520,6 +536,25 @@ export function selfTest(root) {
                 }),
             }),
         ],
+        [
+            "短写族多一个字符：abi 1 时还放得下，abi 涨到两位数就超长",
+            true,
+            run({
+                namingText: edit(
+                    base.namingText,
+                    '{"SynchainRinneD", "SnchRinneD"}',
+                    '{"SynchainRinneD", "SnchRinneDx"}',
+                ),
+                goldenText: goldenWith((g) => {
+                    g.prefixes[1] = { win32: "SynchainRinneD", posix: "SnchRinneDx" };
+                    for (const n of g.names.filter((x) => x.name.includes("SnchRinneD."))) {
+                        n.name = n.name.replace("SnchRinneD.", "SnchRinneDx.");
+                        n.length = nameLength(n.name);
+                    }
+                }),
+            }),
+        ],
+        ["golden 把 abi 的增长空间调小", true, run({ goldenText: goldenWith((g) => (g.nameAbiHeadroom = 9)) })],
         [
             "Naming.h 的前缀族与 CMake 不一致",
             true,

@@ -68,6 +68,7 @@ TEST_CASE("ipc golden is readable", "[ipc][layout][golden]")
     REQUIRE(golden().loaded);
     CHECK(golden().top.at("abi") == kIpcAbi);
     CHECK(golden().top.at("maxNameLength") == kMaxSegmentNameLength);
+    CHECK(golden().top.at("nameAbiHeadroom") >= 99);
 }
 
 TEST_CASE("every layout field matches the golden row by row", "[ipc][layout][golden]")
@@ -166,6 +167,10 @@ TEST_CASE("the permanently frozen fields are exactly the rv header prologue and 
         CHECK(roleSlotOffset(g, true) + offsetof(RoleSlot, version) == 1024u * g + 256u + 56u);
     }
     CHECK(kRvMagic == rinne::util::fourcc('R', 'N', 'R', 'V'));
+    // magic 字段里的初始化标记：任何版本读到它都按「还没初始化完」处理
+    CHECK(kInitMarker == rinne::util::fourcc('R', 'N', 'I', 'N'));
+    CHECK(kInitMarker != kRvMagic);
+    CHECK(kInitMarker != kRingMagic);
 }
 
 TEST_CASE("ctl packs generation and state into one word", "[ipc][layout]")

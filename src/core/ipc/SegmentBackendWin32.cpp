@@ -11,15 +11,13 @@
 #endif
 #include <windows.h>
 
-#include "ipc/Naming.h"
-
 namespace rinne::ipc
 {
 
 namespace
 {
 
-// 名字已经过 validateSegmentName，只有 ASCII
+// 名字已经过 checkName，只有 ASCII
 std::wstring toWide(const std::string& name)
 {
     return std::wstring(name.begin(), name.end());
@@ -53,27 +51,25 @@ InitResult fail(IpcDiagOp op, DWORD error, const std::string& name, const char* 
     return initResultFor(e.code);
 }
 
-InitResult rejectName(const std::string& name, NameStatus status) noexcept
+// 映射好了：回读真实大小，填视图。真实大小取视图所在区域的大小（VirtualQuery）：映射整段的视图按页对齐，
+// 区域大小就是段大小按页上取整，对容量校验是安全的超集。section 句柄不是文件句柄，GetFileSizeEx 对它不适用。
+// 读不出来时撤掉映射、返回失败，绝不交出一个大小为 0 的「成功」视图。
+InitResult finishView(HANDLE h, void* base, bool created, const std::string& name, SegmentView& view)
 {
-    reportBadSegmentName(name, status);
-    return InitResult::kFailedBadName;
-}
-
-// GetFileSizeEx 对 section 句柄给出精确的段大小；失败时退回 VirtualQuery（按 64 KB 对齐的上界，
-// 对容量校验仍是安全的超集）
-std::size_t realSectionSize(HANDLE h, void* base) noexcept
-{
-    LARGE_INTEGER li{};
-    if (::GetFileSizeEx(h, &li) != FALSE && li.QuadPart > 0)
-    {
-        return static_cast<std::size_t>(li.QuadPart);
-    }
     MEMORY_BASIC_INFORMATION mbi{};
-    if (::VirtualQuery(base, &mbi, sizeof(mbi)) != 0 && mbi.RegionSize > 0)
+    if (::VirtualQuery(base, &mbi, sizeof(mbi)) == 0 || mbi.RegionSize == 0)
     {
-        return mbi.RegionSize;
+        const DWORD error = ::GetLastError();
+        ::UnmapViewOfFile(base);
+        ::CloseHandle(h);
+        return fail(IpcDiagOp::kMap, error, name, "VirtualQuery on the mapped view failed");
     }
-    return 0;
+    view.base = base;
+    view.size = static_cast<std::size_t>(mbi.RegionSize);
+    view.mapping = h;
+    view.created = created;
+    view.name = name;
+    return InitResult::kOk;
 }
 
 } // namespace
@@ -85,9 +81,9 @@ InitResult SegmentBackendWin32::createOrOpen(const std::string& name, std::size_
     {
         return InitResult::kFailed;
     }
-    if (const NameStatus status = validateSegmentName(NamePlatform::kWin32, name); status != NameStatus::kOk)
+    if (const InitResult r = checkName(NamePlatform::kWin32, name); r != InitResult::kOk)
     {
-        return rejectName(name, status);
+        return r;
     }
     const auto size64 = static_cast<unsigned long long>(size);
     const HANDLE h =
@@ -106,14 +102,8 @@ InitResult SegmentBackendWin32::createOrOpen(const std::string& name, std::size_
         ::CloseHandle(h);
         return fail(IpcDiagOp::kMap, error, name, "MapViewOfFile failed");
     }
-
-    view.base = base;
-    view.size = realSectionSize(h, base);
-    view.mapping = h;
-    view.created = created;
-    view.name = name;
-    // 锁页推迟到 initHeader 的建段分支：先写触碰再锁；附着方不锁
-    return InitResult::kOk;
+    // 锁页推迟到 initHeader 的初始化者分支：先写触碰再锁；附着方不锁
+    return finishView(h, base, created, name, view);
 }
 
 InitResult SegmentBackendWin32::openExisting(const std::string& name, SegmentView& view)
@@ -129,9 +119,9 @@ InitResult SegmentBackendWin32::openExistingReadOnly(const std::string& name, Se
 InitResult SegmentBackendWin32::openExistingWithAccess(const std::string& name, SegmentView& view, bool readOnly)
 {
     view.reset();
-    if (const NameStatus status = validateSegmentName(NamePlatform::kWin32, name); status != NameStatus::kOk)
+    if (const InitResult r = checkName(NamePlatform::kWin32, name); r != InitResult::kOk)
     {
-        return rejectName(name, status);
+        return r;
     }
     const DWORD access = readOnly ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS;
     const HANDLE h = ::OpenFileMappingW(access, FALSE, toWide(name).c_str());
@@ -151,12 +141,7 @@ InitResult SegmentBackendWin32::openExistingWithAccess(const std::string& name, 
         ::CloseHandle(h);
         return fail(IpcDiagOp::kMap, error, name, "MapViewOfFile failed");
     }
-    view.base = base;
-    view.size = realSectionSize(h, base);
-    view.mapping = h;
-    view.created = false;
-    view.name = name;
-    return InitResult::kOk;
+    return finishView(h, base, false, name, view);
 }
 
 void SegmentBackendWin32::tryLock(const SegmentView& view)
@@ -165,20 +150,16 @@ void SegmentBackendWin32::tryLock(const SegmentView& view)
     {
         return;
     }
-    const HANDLE process = ::GetCurrentProcess();
-    SIZE_T minWs = 0;
-    SIZE_T maxWs = 0;
-    if (::GetProcessWorkingSetSize(process, &minWs, &maxWs) != FALSE)
-    {
-        ::SetProcessWorkingSetSize(process, minWs, maxWs + static_cast<SIZE_T>(view.size));
-    }
+    // 不动工作集：最小 / 最大工作集是整个宿主进程的设置，插件不该替 DAW 改，改了也收不回来（别的实例可能还在用）。
+    // VirtualLock 能锁多少受最小工作集约束：宿主自己调大过时能锁住，默认设置下环那么大的段多半锁不住，
+    // 这时页面已经写触碰过、照常可用，只报一条诊断。解映射时系统自动解锁。
     if (::VirtualLock(view.base, view.size) == FALSE)
     {
         IpcDiagEvent e;
         e.op = IpcDiagOp::kLockPages;
         e.error = static_cast<int>(::GetLastError());
         e.segment = view.name.c_str();
-        e.detail = "VirtualLock failed; pages stay pageable";
+        e.detail = "VirtualLock failed (working set too small); pages stay pageable";
         reportIpcDiag(e);
     }
 }

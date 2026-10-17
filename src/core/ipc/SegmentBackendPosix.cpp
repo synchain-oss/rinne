@@ -17,7 +17,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "ipc/Naming.h"
+#include "util/MonoClock.h"
 
 namespace rinne::ipc
 {
@@ -27,8 +27,6 @@ struct SegmentBackendPosix::Mapping
 {
     int lockFd = -1; // 段锁文件的 fd，持 LOCK_SH 直到离开
     std::string shmName;
-    // 建映射时拼好的 lifecycle.lock 路径：离开时用同一把全局锁，leave() 不再分配（它会从析构里调用，不能抛）
-    std::string lifecyclePath;
     void* base = nullptr;
     std::size_t size = 0;
     Mapping* prev = nullptr;
@@ -45,7 +43,6 @@ struct SegmentBackendPosix::PendingDiag
     int error = 0;
     std::string path;
     const char* detail = "";
-    std::uint32_t suppressed = 0;
 
     void note(IpcDiagOp o, int e, const char* d) noexcept
     {
@@ -75,27 +72,6 @@ namespace
 {
 
 constexpr auto kLifecycleLockPoll = std::chrono::milliseconds(1);
-
-void report(IpcDiagOp op, IpcDiagCode code, int error, const std::string& segment, const std::string& path,
-            const char* detail, std::uint32_t suppressed = 0) noexcept
-{
-    IpcDiagEvent e;
-    e.op = op;
-    e.code = code;
-    e.error = error;
-    e.segment = segment.c_str();
-    e.path = path.c_str();
-    e.detail = detail;
-    e.suppressed = suppressed;
-    reportIpcDiag(e);
-}
-
-long long steadyMs() noexcept
-{
-    return static_cast<long long>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-}
 
 int openRetry(const char* path, int flags, int mode) noexcept
 {
@@ -172,8 +148,8 @@ bool ensureDirectory(const std::string& path, int& err)
 }
 
 // 全局 lifecycle.lock 的作用域持有（LOCK_EX，有界等待；wait = 0 时只试一次）。create = false 时文件不存在就不建
-// （只读、附着与离开的路径：锁目录里从没建过任何东西，也就不可能有段）。路径由调用方拼好并在本对象生命期内有效，
-// 这里只存引用：离开的路径不许分配。
+// （只读、附着与离开的路径：锁目录里从没建过任何东西，也就不可能有段）。路径是后端构造时拼好的成员，这里只存引用：
+// 取锁本身不分配。等待的截止时刻只在本进程内用，按 steady_clock 算。
 class LifecycleLock
 {
 public:
@@ -223,7 +199,6 @@ public:
 
     bool held() const noexcept { return held_; }
     int error() const noexcept { return error_; }
-    const std::string& path() const noexcept { return path_; }
 
 private:
     const std::string& path_;
@@ -284,9 +259,12 @@ std::string SegmentBackendPosix::defaultLockDir()
     return home + "/" + kHomeRelativeLockDir;
 }
 
-SegmentBackendPosix::SegmentBackendPosix() : lockDir_(defaultLockDir()) {}
+SegmentBackendPosix::SegmentBackendPosix() : SegmentBackendPosix(LockDirForTesting{defaultLockDir()}) {}
 
-SegmentBackendPosix::SegmentBackendPosix(LockDirForTesting lockDir) : lockDir_(std::move(lockDir.path)) {}
+SegmentBackendPosix::SegmentBackendPosix(LockDirForTesting lockDir)
+    : lockDir_(std::move(lockDir.path)), lifecyclePath_(lockDir_ + "/" + kLifecycleLockName)
+{
+}
 
 SegmentBackendPosix::~SegmentBackendPosix()
 {
@@ -318,31 +296,46 @@ SegmentBackendPosix::~SegmentBackendPosix()
 
 std::chrono::milliseconds SegmentBackendPosix::lockWait(std::chrono::milliseconds normal) const noexcept
 {
-    const long long last = lastLockTimeoutMs_.load(std::memory_order_relaxed);
-    if (last >= 0 && steadyMs() - last < kLockBreakerWindow.count())
+    const std::uint64_t last = lastLockTimeoutMs_.load(std::memory_order_relaxed);
+    const std::uint64_t now = util::monoNowMs();
+    if (last != 0 && now >= last && now - last < static_cast<std::uint64_t>(kLockBreakerWindow.count()))
     {
         return std::chrono::milliseconds(0);
     }
     return normal;
 }
 
-void SegmentBackendPosix::noteLockFailure(int error, const std::string& lockPath, std::chrono::milliseconds wait,
-                                          PendingDiag& diag) noexcept
+void SegmentBackendPosix::noteLockFailure(int error, std::chrono::milliseconds wait, PendingDiag& diag) noexcept
 {
     if (error == ETIMEDOUT)
     {
         if (wait.count() == 0)
         {
-            // 断路窗口内只试了一次：不上报，只计数，并进下一条同类诊断
+            // 只试了一次（附着路径，或断路窗口内）：不上报，只计数，并进本实例的下一条诊断
             suppressedLockFailures_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         // 真正等满的那次超时才（重新）打开断路窗口；窗口内的失败不续长它
-        lastLockTimeoutMs_.store(steadyMs(), std::memory_order_relaxed);
+        lastLockTimeoutMs_.store(util::monoNowMs(), std::memory_order_relaxed);
     }
     diag.note(IpcDiagOp::kLifecycleLock, error,
-              error == ETIMEDOUT ? "timed out waiting for lifecycle.lock" : "cannot open lifecycle.lock", lockPath);
-    diag.suppressed = suppressedLockFailures_.exchange(0, std::memory_order_relaxed);
+              error == ETIMEDOUT ? "timed out waiting for lifecycle.lock" : "cannot open lifecycle.lock",
+              lifecyclePath_);
+}
+
+void SegmentBackendPosix::emit(IpcDiagOp op, IpcDiagCode code, int error, const std::string& segment,
+                               const std::string& path, const char* detail) noexcept
+{
+    IpcDiagEvent e;
+    e.op = op;
+    e.code = code;
+    e.error = error;
+    e.segment = segment.c_str();
+    e.path = path.c_str();
+    e.detail = detail;
+    // 计数只在真的报出去时才取走：取锁成功不清零，否则断路期间略去的失败就从日志里消失了
+    e.suppressed = suppressedLockFailures_.exchange(0, std::memory_order_relaxed);
+    reportIpcDiag(e);
 }
 
 void SegmentBackendPosix::track(Mapping* m) noexcept
@@ -399,15 +392,14 @@ InitResult SegmentBackendPosix::openSegment(const std::string& name, std::size_t
     {
         return InitResult::kFailed;
     }
-    if (const NameStatus status = validateSegmentName(NamePlatform::kPosix, name); status != NameStatus::kOk)
+    if (const InitResult r = checkName(NamePlatform::kPosix, name); r != InitResult::kOk)
     {
-        reportBadSegmentName(name, status);
-        return InitResult::kFailedBadName;
+        return r;
     }
     if (lockDir_.empty() || lockDir_[0] != '/')
     {
-        report(IpcDiagOp::kLockDir, IpcDiagCode::kOther, ENOENT, name, lockDir_,
-               "cannot resolve the lock directory (no home directory, or not an absolute path)");
+        emit(IpcDiagOp::kLockDir, IpcDiagCode::kOther, ENOENT, name, lockDir_,
+             "cannot resolve the lock directory (no home directory, or not an absolute path)");
         return InitResult::kFailed;
     }
     if (create)
@@ -416,7 +408,7 @@ InitResult SegmentBackendPosix::openSegment(const std::string& name, std::size_t
         if (!ensureDirectory(lockDir_, err))
         {
             const IpcDiagCode code = classifyErrno(err);
-            report(IpcDiagOp::kLockDir, code, err, name, lockDir_, "cannot create the lock directory");
+            emit(IpcDiagOp::kLockDir, code, err, name, lockDir_, "cannot create the lock directory");
             return initResultFor(code);
         }
     }
@@ -426,7 +418,7 @@ InitResult SegmentBackendPosix::openSegment(const std::string& name, std::size_t
     // 到这里全局锁已经放掉，诊断此刻才交给 sink
     if (diag.set)
     {
-        report(diag.op, diag.code, diag.error, name, diag.path, diag.detail, diag.suppressed);
+        emit(diag.op, diag.code, diag.error, name, diag.path, diag.detail);
     }
     return r;
 }
@@ -436,27 +428,25 @@ InitResult SegmentBackendPosix::openLocked(const std::string& shm, std::size_t s
 {
     const bool create = (mode == Mode::kCreateOrOpen);
 
-    // 映射记录（含两份字符串）在拿任何 fd 或锁之前就分配好：分配失败只会把异常抛出去，不会留下已开的 fd 或映射。
-    // 之后直到成功返回，不再有可能抛的分配。离开时也用这份现成的路径，所以 leave() 不分配。
-    auto record = std::make_unique<Mapping>();
-    record->shmName = shm;
-    record->lifecyclePath = lockDir_ + "/" + kLifecycleLockName;
-    const std::string lockPath = lockDir_ + "/" + shm.substr(1) + ".lock";
-    std::string viewName = shm;
-
-    // 全局生命周期锁：从这里到函数返回，本进程与别的进程都插不进任何转换
+    // 全局生命周期锁：从这里到函数返回，本进程与别的进程都插不进任何转换。附着路径只试一次（25 Hz 重试路径）
     const auto wait = lockWait(create ? kCreateLockWait : kAttachLockWait);
-    LifecycleLock life(record->lifecyclePath, create, wait);
+    LifecycleLock life(lifecyclePath_, create, wait);
     if (!life.held())
     {
         if (!create && life.error() == ENOENT)
         {
-            return InitResult::kFailed; // 锁目录里从没建过东西，不可能有段；安静地等下一拍
+            return InitResult::kFailed; // 锁目录里从没建过东西，不可能有段；安静地等下一拍，不分配
         }
-        noteLockFailure(life.error(), life.path(), wait, diag);
+        noteLockFailure(life.error(), wait, diag);
         return diag.result();
     }
-    suppressedLockFailures_.store(0, std::memory_order_relaxed);
+
+    // 拿到锁之后才分配：映射记录与锁文件路径。分配失败只会把异常抛出去（全局锁随 life 析构放掉），
+    // 这时还没开任何 fd、也没有映射。之后直到成功返回，不再有可能抛的分配；leave() 用成员里的路径，也不分配。
+    auto record = std::make_unique<Mapping>();
+    record->shmName = shm;
+    const std::string lockPath = lockDir_ + "/" + shm.substr(1) + ".lock";
+    std::string viewName = shm;
 
     const int lockFlags = create ? (O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW) : (O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     const int lockFd = openRetry(lockPath.c_str(), lockFlags, 0600);
@@ -600,7 +590,7 @@ InitResult SegmentBackendPosix::openLocked(const std::string& shm, std::size_t s
     view.mapping = m;
     view.created = created;
     view.name = std::move(viewName);
-    // 锁页推迟到 initHeader 的建段分支（写触碰之后再锁，与 Win32 同序）；附着方不锁
+    // 锁页推迟到 initHeader 的初始化者分支（写触碰之后再锁，与 Win32 同序）；附着方不锁
     return InitResult::kOk;
 }
 
@@ -609,10 +599,9 @@ void SegmentBackendPosix::leave(Mapping& m) noexcept
     PendingDiag diag;
     {
         const auto wait = lockWait(kLeaveLockWait);
-        LifecycleLock life(m.lifecyclePath, /*create=*/false, wait);
+        LifecycleLock life(lifecyclePath_, /*create=*/false, wait);
         if (life.held())
         {
-            suppressedLockFailures_.store(0, std::memory_order_relaxed);
             // SH → EX 的探测（不是原子的：先放 SH 再试 EX；失败时 SH 已经放掉，这正是离开要的）
             if (flockRetry(m.lockFd, LOCK_EX | LOCK_NB) == 0)
             {
@@ -626,7 +615,7 @@ void SegmentBackendPosix::leave(Mapping& m) noexcept
         else
         {
             // 拿不到全局锁就不做 unlink 判定（否则可能与别人的建段交错）；段留给下一个创建者清理
-            noteLockFailure(life.error(), life.path(), wait, diag);
+            noteLockFailure(life.error(), wait, diag);
         }
         // 关锁 fd 即放掉剩下的锁；此刻全局锁（若拿到）仍在手里，整个离开落在锁内
         ::close(m.lockFd);
@@ -634,7 +623,7 @@ void SegmentBackendPosix::leave(Mapping& m) noexcept
     }
     if (diag.set)
     {
-        report(diag.op, diag.code, diag.error, m.shmName, diag.path, diag.detail, diag.suppressed);
+        emit(diag.op, diag.code, diag.error, m.shmName, diag.path, diag.detail);
     }
 }
 
@@ -668,7 +657,8 @@ void SegmentBackendPosix::tryLock(const SegmentView& view)
     {
         // 尽力而为：页面已在 initHeader 里写触碰过，锁不住只上报、不失败。这里不持全局锁
         const int err = errno;
-        report(IpcDiagOp::kLockPages, IpcDiagCode::kOther, err, view.name, {}, "mlock failed; pages stay pageable");
+        emit(IpcDiagOp::kLockPages, IpcDiagCode::kOther, err, view.name, std::string(),
+             "mlock failed; pages stay pageable");
     }
 }
 

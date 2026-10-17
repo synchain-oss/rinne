@@ -4,6 +4,7 @@
 // 后端也在调用线程上同步报告，所以一张受锁保护的表就够了。
 #pragma once
 
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@ struct CapturedDiag
     std::string segment;
     std::string path;
     std::string detail;
+    std::uint32_t suppressed;
 };
 
 class DiagCapture
@@ -73,7 +75,7 @@ private:
         try
         {
             const std::lock_guard<std::mutex> lock(mutex());
-            store().push_back({e.op, e.code, e.error, e.segment, e.path, e.detail});
+            store().push_back({e.op, e.code, e.error, e.segment, e.path, e.detail, e.suppressed});
         }
         catch (...)
         {

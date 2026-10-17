@@ -19,9 +19,11 @@
 #include "ipc/SegmentBackendWin32.h"
 #else
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -230,6 +232,52 @@ TEST_CASE("an unwritable lock directory is classified as denied", "[ipc][backend
     CHECK(backend.createOrOpen(segName(), kRingBytes, view) == InitResult::kFailedDenied);
     CHECK(diag.has(IpcDiagCode::kShmDenied));
     CHECK(view.base == nullptr);
+}
+
+TEST_CASE("a held lifecycle lock fails retries at once and is reported with the skipped count",
+          "[ipc][backend][posix][lock]")
+{
+    BackendFixture fixture;
+    auto backend = fixture.make();
+    const std::string name = segName();
+    SegmentView view;
+    REQUIRE(backend->createOrOpen(name, kRingBytes, view) == InitResult::kOk); // 建好锁目录与 lifecycle.lock
+
+    // 别的进程拿着全局锁不放（这里用同一进程里另开的 fd 模拟：flock 按打开的文件描述互斥）
+    const std::string lifecycle = fixture.lockDir + "/" + SegmentBackendPosix::kLifecycleLockName;
+    const int holder = ::open(lifecycle.c_str(), O_RDONLY | O_CLOEXEC);
+    REQUIRE(holder >= 0);
+    REQUIRE(::flock(holder, LOCK_EX | LOCK_NB) == 0);
+
+    rinne::test::DiagCapture diag;
+    // 重试路径（附着）只试一次、不等
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 3; ++i)
+    {
+        SegmentView attach;
+        CHECK(backend->openExisting(name, attach) == InitResult::kFailed);
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(elapsed < std::chrono::milliseconds(100));
+    CHECK(diag.events().empty()); // 只计数
+
+    // 建段路径有界等待，等满之后报一条，带上前面略去的 3 次
+    SegmentView create;
+    CHECK(backend->createOrOpen(segName(), kRingBytes, create) == InitResult::kFailed);
+    const auto events = diag.events();
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].op == IpcDiagOp::kLifecycleLock);
+    CHECK(events[0].code == IpcDiagCode::kBusy);
+    CHECK(events[0].suppressed == 3u);
+
+    ::close(holder);
+    // 锁放开以后照常；略去的计数已经随上一条报出，不会再报一遍
+    diag.clear();
+    SegmentView again;
+    REQUIRE(backend->openExisting(name, again) == InitResult::kOk);
+    backend->unmap(again);
+    backend->unmap(view);
+    CHECK(diag.events().empty());
 }
 
 TEST_CASE("the default lock directory lives under the real home", "[ipc][backend][posix]")

@@ -26,14 +26,14 @@ status: draft
 
 | 平台 | 正式 | 测试作用域 |
 |---|---|---|
-| Windows | `Local\SynchainRinne.rv`、`Local\SynchainRinne.v1.g1`…`g8` | `Local\SnchRinne.<tag8>.rv`、`Local\SnchRinne.<tag8>.v1.g1`…`g8` |
-| POSIX | `/SnchRinne.<uid8>.rv`、`/SnchRinne.<uid8>.v1.g1`…`g8` | `/SnchRinne.<tag8>.rv`、`/SnchRinne.<tag8>.v1.g1`…`g8` |
+| Windows | `Local\SynchainRinne.rv`、`Local\SynchainRinne.v1.g1`…`g8` | `Local\SnchRinne.<tag7>.rv`、`Local\SnchRinne.<tag7>.v1.g1`…`g8` |
+| POSIX | `/SnchRinne.<uid8>.rv`、`/SnchRinne.<uid8>.v1.g1`…`g8` | `/SnchRinne.<tag7>.rv`、`/SnchRinne.<tag7>.v1.g1`…`g8` |
 
 - **会合段名永不带 abi**（永久冻结）。数据段名带 `v<abi>`：abi 不同的环互不相干，而 abi 不同的实例打开的是同一个 `rv`，读得出对方的 abi 与版本号。
 - **前缀族**由构建期的 CMake 变量 `RINNE_SHM_PREFIX` 决定，只有三族：正式版 `SynchainRinne`（默认，CI 与发布构建断言用它）、本机 gates 构建 `SynchainRinneD`、探针 `SynchainRinneP`。本机测试与探针因此碰不到用户 DAW 里装的正式版。POSIX 用短写（`SnchRinne`、`SnchRinneD`、`SnchRinneP`）给 `<uid8>` 腾出位置。
 - `<uid8>` 是有效用户 id 的 8 位小写十六进制：POSIX 共享内存是全机命名空间，带上 uid，同一台机器上不同用户的段互不相见。Windows 的 `Local\` 本来就按登录会话隔开。
-- **测试作用域只经 API 注入**：`NameScope::forTesting(tag)` 或 `NameScope::randomForTesting()`，`<tag8>` 是 `t` 加 7 位小写十六进制（以 `t` 开头，与任何 uid8 都撞不上）。测试名在两个平台上同形同长。**发布代码不读任何环境变量**，插件代码不调用测试钩子（`contract-static-ipc` 扫描 `src/**` 判红）。
-- **长度**：名字（含平台头）不超过 31 个字符（macOS 的 POSIX 共享内存名上限），两个平台统一按它检查。3 族 × 9 段 × 2 平台 × {正式, 测试} 共 108 个名字逐条登记在 golden 里，最长的是 Windows 上的测试数据段名，正好 31。超长或字符不合法时拼名失败、后端也拒绝（`kFailedBadName`，诊断 `kNameTooLong`）。
+- **测试作用域只经 API 注入**：`NameScope::forTesting(tag)` 或 `NameScope::randomForTesting()`，`<tag7>` 是 `t` 加 6 位小写十六进制（以 `t` 开头，与任何 uid8 都撞不上）。测试名在两个平台上同形同长。**发布代码不读任何环境变量**，插件代码不调用测试钩子（`contract-static-ipc` 扫描 `src/**` 判红）。
+- **长度**：名字（含平台头）不超过 31 个字符（macOS 的 POSIX 共享内存名上限），两个平台统一按它检查。3 族 × 9 段 × 2 平台 × {正式, 测试} 共 108 个名字逐条登记在 golden 里，abi 1 时最长 30（Windows 上的测试数据段名）。给 abi 留了两位数的增长空间：abi 涨到 99 时所有名字仍不超过 31（golden 的 `nameAbiHeadroom`，单测与检查都核）。超长或字符不合法时拼名失败、后端也拒绝（`kFailedBadName`，诊断 `kNameTooLong`）。
 
 ## 会合段 `rv`（abi 1，16 384 字节）
 
@@ -132,29 +132,32 @@ status: draft
 
 ## 冻结与 abi
 
-- **永久冻结**（连 abi 升级都不许动）：会合段名不带 abi；`RvHeader` 的 0–15 字节；每个端点槽 `version` 的绝对位置 1024·G + {0, 256} + 56，以及它依赖的组块位置与步长、`'RNRV'`。`contract-static-ipc` 把这几项写死在检查里，不随 golden 改。
+- **永久冻结**（连 abi 升级都不许动）：会合段名不带 abi；`RvHeader` 的 0–15 字节；每个端点槽 `version` 的绝对位置 1024·G + {0, 256} + 56，以及它依赖的组块位置与步长、`'RNRV'` 与初始化标记 `'RNIN'`。`contract-static-ipc` 把这几项写死在检查里，不随 golden 改。
 - **随 abi**：其余字段、取值与段大小。任何改动都是布局改动：`kIpcAbi + 1`（数据段名随之变成 `v2`），同一个 PR 改头文件、golden 与本文，并按冻结契约流程附变更说明。保留区必须为 0，后续版本只能在保留区里加字段。
 - abi 不同的两端：读到对方的 `abi` 不同就停在「版本不兼容」（红），绝不写对方的段；只是版本号不同时可以连，界面给琥珀提示。
 
 ## 段头初始化
 
-两种段头的开头都是 `magic`、`abi`、`generation`。`magic` 最后发布，它就是「初始化完成」的标志：
+两种段头的开头都是 `magic`、`abi`、`generation`。`magic` 有三种状态：0（没初始化）、初始化标记 `'RNIN'`（有人认领了初始化、正在写）、真值（初始化完成）。谁来初始化只由一次 CAS 决定：把 `magic` 从 0 换成初始化标记的那一方是唯一的初始化者，别人只等；初始化者写完段头与几何字段，最后以 release 把 `magic` 换成真值。初始化标记与 `'RNRV'` 一样永久不变：任何版本读到它都按「还没初始化完」处理。
 
-1. **建段者**（操作系统报告新建）：逐页写触碰全段 → 锁页（尽力而为）→ 写 `abi`、`generation = 1` 与几何字段 → release 写 `magic`。
-2. **附着方**，`magic` 非 0：逐页只读触碰（严禁写：对端可能正在写环）→ `magic` 不是我们的就不用（诊断 `kForeign`）；`abi` 不同 → `kAbiMismatch`；段的真实大小小于本 abi 的布局 → 不用（`kBadSize`）。
-3. **附着方**，`magic` 为 0：只读探测的一方立刻返回失败、下一拍重试；建段的一方（Input 与 Output 都是）每 50 ms 看一次、最多 10 次，仍是 0 就说明创建者死在初始化中途，覆盖式重初始化：从段头之后清零、`generation + 1`、写几何字段、CAS `magic` 0 → magic。两个竞争者写的内容相同，竞态是良性的。
+1. **建段者**（操作系统报告新建）：马上认领 → 逐页写触碰全段（绕开前 16 字节）→ 锁页（尽力而为）→ 写 `abi`、`generation = 1` 与几何字段 → 发布 `magic`。
+2. **附着方**，`magic` 已发布：逐页只读触碰（只在看到发布之后，用原子读；严禁写：对端可能正在写环）→ `magic` 不是我们的就不用（诊断 `kForeign`）；`abi` 不同 → `kAbiMismatch`；段的真实大小小于本 abi 的布局 → 不用（`kBadSize`）。
+3. **附着方**，`magic` 还没发布：只读探测的一方立刻返回失败、下一拍重试；建段的一方（Input 与 Output 都是）每 50 ms 看一次、最多 10 次。仍是 0 说明创建者死在认领之前：自己认领，覆盖式重初始化（从段头之后清零、`generation + 1`、写几何字段、发布）。认领输了、或看到的是初始化标记：别人正在初始化，再等一轮。输掉的一方从不清零，所以不会抹掉胜者已经开始用的槽与环。
+4. 等满仍没发布：初始化者死在认领与发布之间的那几微秒里。返回 `kFailed`（诊断 `kBusy`），调用方**解映射**后下一拍重试；所有持有者都放手后段就消失，下一个建段者重新建。
 
-后端一律回读段的真实大小：同名段已存在时请求的大小被忽略，拿请求值当真实值发布几何，小视图配大几何就会写越界。
+等待只发生在附着到一个没初始化完的段时（建段者被杀之后），最多约 1 s，在调用它的非实时线程上。
+
+后端一律回读段的真实大小：同名段已存在时请求的大小被忽略，拿请求值当真实值发布几何，小视图配大几何就会写越界。读不出真实大小时打开失败，不交出大小为 0 的视图。
 
 ## 后端
 
 | 平台 | 后端 | 要点 |
 |---|---|---|
-| Windows | Win32 | `CreateFileMappingW` / `OpenFileMappingW`，`Local\` 命名空间；真实大小经 `GetFileSizeEx` 回读；段随最后一个句柄关闭由内核回收 |
-| macOS | POSIX | `shm_open` + `mmap`；每个映射持有锁文件 `<锁目录>/<名字>.lock` 的共享 flock，所有建、附着、离开都在全局 `lifecycle.lock` 的独占 flock 下做，最后一个离开者 `shm_unlink`，崩溃留下的残段由下一个建段者清理（只清本用户名下的）。锁目录是真实 home 下的 `Library/Application Support/Synchain/Rinne/ipc`（不看 `HOME`，不放 `TMPDIR`）；测试只能经构造参数换目录 |
+| Windows | Win32 | `CreateFileMappingW` / `OpenFileMappingW`，`Local\` 命名空间；真实大小取映射整段的视图所在区域的大小（`VirtualQuery`，按页上取整）；段随最后一个句柄关闭由内核回收。锁页尽力而为：不改宿主进程的工作集（那是整个 DAW 的设置），宿主自己调大过时 `VirtualLock` 能锁住，锁不住只报诊断 |
+| macOS | POSIX | `shm_open` + `mmap`（`fstat` 回读真实大小）；每个映射持有锁文件 `<锁目录>/<名字>.lock` 的共享 flock，所有建、附着、离开都在全局 `lifecycle.lock` 的独占 flock 下做，最后一个离开者 `shm_unlink`，崩溃留下的残段由下一个建段者清理（只清本用户名下的）。全局锁的等待：附着只试一次不等（25 Hz 重试路径），建段最多 2 s（只在加载与改组时），离开最多 200 ms；等满一次之后 1 s 内都只试一次。锁目录是真实 home 下的 `Library/Application Support/Synchain/Rinne/ipc`（不看 `HOME`，不放 `TMPDIR`）；测试只能经构造参数换目录 |
 | 单测、Linux core-only | 进程内 | 名字 → 清零的 64 字节对齐缓冲，跨进程不可见，不是可发布的形态 |
 
-选择在预处理期定死（`PlatformSegmentBackend`）。段操作只在持生命周期锁的非实时线程上做；音频线程只经映射句柄的按块租约拿裸指针，做原子读写，不碰任何系统调用。释放时先停发租约、等租约归零，再等 500 ms 宽限才解映射。
+选择在预处理期定死（`PlatformSegmentBackend`）。段操作只在持生命周期锁的非实时线程上做；音频线程只经映射句柄的按块租约拿裸指针，做原子读写，不碰任何系统调用。释放时先停发租约、等租约归零，再等 500 ms 宽限才解映射；宽限期按跨进程单调时钟算，时钟读不出或倒退时从头算。句柄析构或被覆盖时宽限期走不完的，控制块与映射都留到进程退出，音频线程手里的租约不会悬空。
 
 **失败的去向**：任何打开或初始化失败都只让回送变成 0、干声照常（安全不变量 1）。
 

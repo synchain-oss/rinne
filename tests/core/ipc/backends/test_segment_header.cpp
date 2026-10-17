@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 段头初始化协议（平台无关的那一半），在进程内后端上验：建段者最后发布 magic；附着方比对 magic、abi 与真实大小；
-// abi 不同的一方读得出对方的 abi 与版本、但拿到 kAbiMismatch；magic 不是我们的不碰；创建者死在初始化中途时
-// 覆盖式重初始化；只读校验绝不写。
+// 段头初始化协议（平台无关的那一半），在进程内后端上验：建段者认领后最后发布 magic；附着方比对 magic、abi 与真实大小；
+// abi 不同的一方读得出对方的 abi 与版本、但拿到 kAbiMismatch；magic 不是我们的不碰；创建者死在认领之前时由附着方
+// 重新初始化，两个附着方竞争时恰好一个初始化者、输家不清零；初始化者死在中途时放弃而不抢；只读校验绝不写。
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <cstring>
 #include <string>
+#include <thread>
 
 #include "DiagCapture.h"
 #include "ipc/ISegmentBackend.h"
@@ -28,21 +30,31 @@ std::string segName(const Naming& naming, SegmentId id)
     return name;
 }
 
+// initData 的观测：调了几次、每次调用时 magic 是不是初始化标记（几何字段必须在认领之后、发布之前写）。
+// 原子量：竞争用例在两个线程上同时初始化，Catch2 的断言不能在别的线程上用
+struct InitProbe
+{
+    std::atomic<int> calls{0};
+    std::atomic<bool> markerHeld{true};
+};
+
 InitResult initRv(ISegmentBackend& backend, SegmentView& view, const SegmentHeaderSpec& spec = kRvSpec,
-                  bool allowOverwrite = true, int* initCalls = nullptr)
+                  bool allowOverwrite = true, InitProbe* probe = nullptr)
 {
     auto* rv = static_cast<RvSegment*>(view.base);
     return backend.initHeader(
         view, &rv->header.magic, &rv->header.abi, &rv->header.generation, spec,
         [&] {
-            // 几何字段在 magic 发布之前写好
-            CHECK(rv->header.magic.load() == 0);
             rv->header.layout_bytes.store(kRvBytes, std::memory_order_relaxed);
             rv->header.groups.store(kGroupCount, std::memory_order_relaxed);
             rv->header.group_stride.store(kGroupStride, std::memory_order_relaxed);
-            if (initCalls != nullptr)
+            if (probe != nullptr)
             {
-                ++*initCalls;
+                probe->calls.fetch_add(1);
+                if (rv->header.magic.load() != kInitMarker)
+                {
+                    probe->markerHeld.store(false);
+                }
             }
         },
         allowOverwrite);
@@ -61,9 +73,10 @@ TEST_CASE("the creator publishes magic last and an attacher accepts it", "[ipc][
     REQUIRE(backend.createOrOpen(name, kRvBytes, creator) == InitResult::kOk);
     REQUIRE(creator.created);
     CHECK(creator.name == name);
-    int calls = 0;
-    REQUIRE(initRv(backend, creator, kRvSpec, true, &calls) == InitResult::kOk);
-    CHECK(calls == 1);
+    InitProbe probe;
+    REQUIRE(initRv(backend, creator, kRvSpec, true, &probe) == InitResult::kOk);
+    CHECK(probe.calls.load() == 1);
+    CHECK(probe.markerHeld.load()); // 几何字段在认领之后、发布之前写
     const auto* rv = static_cast<const RvSegment*>(creator.base);
     CHECK(rv->header.magic.load() == kRvMagic);
     CHECK(rv->header.abi.load() == kIpcAbi);
@@ -74,9 +87,9 @@ TEST_CASE("the creator publishes magic last and an attacher accepts it", "[ipc][
     REQUIRE(backend.createOrOpen(name, kRvBytes, attacher) == InitResult::kOk);
     CHECK_FALSE(attacher.created);
     CHECK(attacher.base == creator.base);
-    calls = 0;
-    CHECK(initRv(backend, attacher, kRvSpec, true, &calls) == InitResult::kOk);
-    CHECK(calls == 0); // 附着方不改几何
+    InitProbe attach;
+    CHECK(initRv(backend, attacher, kRvSpec, true, &attach) == InitResult::kOk);
+    CHECK(attach.calls.load() == 0); // 附着方不改几何
 }
 
 TEST_CASE("a different abi is visible through the frozen prologue and the slot version", "[ipc][backend][header][abi]")
@@ -199,10 +212,85 @@ TEST_CASE("an attacher re-initialises a segment whose creator died before publis
     SegmentView attacher;
     REQUIRE(backend.createOrOpen(name, kRvBytes, attacher) == InitResult::kOk);
     REQUIRE_FALSE(attacher.created);
-    int calls = 0;
-    CHECK(initRv(backend, attacher, kRvSpec, true, &calls) == InitResult::kOk);
-    CHECK(calls == 1);
+    InitProbe probe;
+    CHECK(initRv(backend, attacher, kRvSpec, true, &probe) == InitResult::kOk);
+    CHECK(probe.calls.load() == 1);
+    CHECK(probe.markerHeld.load());
     CHECK(rv->header.magic.load() == kRvMagic);
     CHECK(rv->header.generation.load() == 1u); // 原来是 0，覆盖一次 + 1
     CHECK(rv->groups[0].input.pid.load() == 0u); // clearFrom 起清零
+}
+
+TEST_CASE("two attachers racing to re-initialise elect exactly one initialiser", "[ipc][backend][header][threads]")
+{
+    // Input 与 Output 同时附着到一个创建者没发布 magic 就死掉的段：只能有一方初始化；另一方等它发布，
+    // 绝不在胜者开始用这一段之后再清零
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    const std::string name = segName(naming, SegmentId::rendezvous());
+    SegmentBackendInProcess backend;
+    SegmentView dead;
+    REQUIRE(backend.createOrOpen(name, kRvBytes, dead) == InitResult::kOk);
+    auto* rv = static_cast<RvSegment*>(dead.base);
+
+    InitProbe probe;
+    std::atomic<int> ready{0};
+    InitResult results[2] = {InitResult::kFailed, InitResult::kFailed};
+    const auto attach = [&](int who) {
+        SegmentView view;
+        if (backend.createOrOpen(name, kRvBytes, view) != InitResult::kOk)
+        {
+            return;
+        }
+        ready.fetch_add(1);
+        while (ready.load() < 2)
+        {
+            std::this_thread::yield();
+        }
+        results[who] = initRv(backend, view, kRvSpec, true, &probe);
+        if (results[who] == InitResult::kOk)
+        {
+            // 拿到 kOk 就开始用：各认领一个槽。输掉的一方若在这之后清零，这里写下的就没了
+            rv->groups[who].input.pid.store(100u + static_cast<u32>(who));
+        }
+    };
+    std::thread a(attach, 0);
+    std::thread b(attach, 1);
+    a.join();
+    b.join();
+
+    CHECK(results[0] == InitResult::kOk);
+    CHECK(results[1] == InitResult::kOk);
+    CHECK(probe.calls.load() == 1);
+    CHECK(probe.markerHeld.load());
+    CHECK(rv->header.generation.load() == 1u);
+    CHECK(rv->groups[0].input.pid.load() == 100u);
+    CHECK(rv->groups[1].input.pid.load() == 101u);
+}
+
+TEST_CASE("an initialiser that never publishes leaves the segment unusable, not cleared", "[ipc][backend][header]")
+{
+    // 初始化者认领之后就死了（magic 停在初始化标记）：别人等满后放弃（kFailed、诊断 kBusy），不抢着清零；
+    // 只读方从一开始就按「还没初始化完」处理
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    const std::string name = segName(naming, SegmentId::rendezvous());
+    SegmentBackendInProcess backend;
+    rinne::test::DiagCapture diag;
+    SegmentView dead;
+    REQUIRE(backend.createOrOpen(name, kRvBytes, dead) == InitResult::kOk);
+    auto* rv = static_cast<RvSegment*>(dead.base);
+    rv->header.magic.store(kInitMarker);
+    rv->groups[0].input.pid.store(7);
+
+    CHECK(backend.checkHeaderReadOnly(dead, rv->header.magic, rv->header.abi, kRvSpec) == InitResult::kFailed);
+    CHECK(diag.events().empty());
+    SegmentView attacher;
+    REQUIRE(backend.createOrOpen(name, kRvBytes, attacher) == InitResult::kOk);
+    InitProbe probe;
+    CHECK(initRv(backend, attacher, kRvSpec, true, &probe) == InitResult::kFailed);
+    CHECK(diag.has(IpcDiagCode::kBusy));
+    CHECK(probe.calls.load() == 0);
+    CHECK(rv->header.magic.load() == kInitMarker);
+    CHECK(rv->groups[0].input.pid.load() == 7u);
 }

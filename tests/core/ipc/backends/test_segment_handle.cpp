@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 映射句柄的租约与释放：持租约时不解映射；释放请求之后不再发租约；租约归零后还要再等满宽限期才经后端解映射；
-// 移动只转移所有权；析构早于宽限期时映射留到进程退出（不解映射）。时间用参数注入，不睡眠。
+// 移动只转移所有权；析构或移动赋值覆盖时走不完宽限期，控制块与映射都留到进程退出，租约照样有效；
+// 时钟读出 0 或倒退时宽限期从头算。时间用参数注入，不睡眠。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -95,8 +96,67 @@ TEST_CASE("moving a handle transfers ownership without releasing", "[ipc][backen
     CHECK_FALSE(b.valid());
     CHECK(c.lease().base() == base);
     CHECK(backend.unmaps == 0);
-    CHECK_FALSE(c.release(0));
-    CHECK(c.release(SegmentHandle::kReleaseGraceMs));
+    CHECK_FALSE(c.release(1000));
+    CHECK(c.release(1000 + SegmentHandle::kReleaseGraceMs));
+    CHECK(backend.unmaps == 1);
+}
+
+TEST_CASE("a lease that outlives its handle keeps the control block alive", "[ipc][backend][handle][lifetime]")
+{
+    // 插件卸载时音频线程还拿着租约：句柄析构走不完宽限期，控制块与映射都要留到进程退出，
+    // 否则租约读 base、归还计数都落在已释放的堆上
+    SegmentBackendInProcess::resetAllForTesting();
+    CountingBackend backend;
+    SegmentHandle::Lease lease;
+    void* base = nullptr;
+    {
+        SegmentHandle handle = openHandle(backend);
+        base = handle.base();
+        lease = handle.lease();
+        REQUIRE(lease);
+    }
+    CHECK(lease.base() == base);
+    CHECK(lease.size() == kRingBytes);
+    static_cast<unsigned char*>(lease.base())[kRingDataOffset] = 1;
+    lease = SegmentHandle::Lease{}; // 归还：落在仍然活着的控制块上
+    CHECK(backend.unmaps == 0);
+}
+
+TEST_CASE("move-assigning over a live handle keeps its outstanding leases valid", "[ipc][backend][handle][lifetime]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    CountingBackend backend;
+    SegmentHandle a = openHandle(backend);
+    void* const baseA = a.base();
+    auto leaseA = a.lease();
+    REQUIRE(leaseA);
+    SegmentHandle b = openHandle(backend);
+    void* const baseB = b.base();
+    a = std::move(b); // a 原来那一块还有租约在途
+    CHECK(a.base() == baseB);
+    CHECK_FALSE(b.valid());
+    CHECK(leaseA.base() == baseA);
+    leaseA = SegmentHandle::Lease{};
+    CHECK(backend.unmaps == 0);
+    CHECK_FALSE(a.release(1000));
+    CHECK(a.release(1000 + SegmentHandle::kReleaseGraceMs));
+    CHECK(backend.unmaps == 1);
+}
+
+TEST_CASE("the grace period never ends early when the clock reads 0 or goes backwards", "[ipc][backend][handle][clock]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    CountingBackend backend;
+    SegmentHandle handle = openHandle(backend);
+    CHECK_FALSE(handle.release(0)); // 读不出时钟：宽限期不开始
+    CHECK_FALSE(handle.release(0));
+    CHECK_FALSE(handle.release(5000000)); // 从这里开始
+    CHECK_FALSE(handle.release(0)); // 无符号相减回绕成极大值也不许提前解映射
+    CHECK(backend.unmaps == 0);
+    CHECK_FALSE(handle.release(10)); // 时间倒退：从 10 重新计
+    CHECK_FALSE(handle.release(10 + SegmentHandle::kReleaseGraceMs - 1));
+    CHECK(backend.unmaps == 0);
+    CHECK(handle.release(10 + SegmentHandle::kReleaseGraceMs));
     CHECK(backend.unmaps == 1);
 }
 

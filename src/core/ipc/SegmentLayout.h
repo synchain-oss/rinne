@@ -9,6 +9,7 @@
 //   - 永久冻结、连 abi 升级都不许动的只有两处：会合段头的前 16 字节（magic、abi、generation、layout_bytes），
 //     以及每个端点槽里 version 字段的绝对位置（1024·G + {0, 256} + 56）。会合段名不带 abi，新旧两个 abi 的实例
 //     打开的是同一个 rv：靠这两处，任何版本都能读出对方的 abi 与版本号，显示「版本不兼容」，而不是都停在「搜索中」。
+//     magic 字段里会出现的两个值（'RNRV' 与初始化标记 'RNIN'）也随之永久不变。
 //   - 保留区必须是 0；后续版本只能在保留区里加字段，加了也算布局改动。
 // 所有跨进程字段都是 std::atomic，并且 lock-free；结构体按段内的真实偏移排布，映射基址按页对齐，
 // 所以 8 字节字段的偏移都是 8 的倍数（字段表的对拍会检查）。
@@ -37,6 +38,9 @@ static_assert(sizeof(std::atomic<u32>) == 4 && sizeof(std::atomic<u64>) == 8 && 
 inline constexpr u32 kIpcAbi = 1;
 inline constexpr u32 kRvMagic = util::fourcc("RNRV");
 inline constexpr u32 kRingMagic = util::fourcc("RNRG");
+// 段头 magic 的「初始化中」标记：恰好一个初始化者用 CAS 把 magic 从 0 换成它，写完段头再换成真值。
+// 任何版本读到它都按「还没初始化完」处理，所以与会合段的 magic 一样永久不变
+inline constexpr u32 kInitMarker = util::fourcc("RNIN");
 inline constexpr u32 kGroupCount = 8;
 // 段名（含平台前缀）的最长字符数：macOS 的 POSIX 共享内存名上限，两个平台统一按它检查
 inline constexpr u32 kMaxSegmentNameLength = 31;
@@ -321,7 +325,7 @@ struct alignas(64) RingSegment
 
 // 进 golden 的常量（与上面的 inline constexpr 一一对应）
 #define RINNE_IPC_LAYOUT_CONSTANTS(X) \
-    X(kIpcAbi) X(kRvMagic) X(kRingMagic) X(kGroupCount) X(kMaxSegmentNameLength) \
+    X(kIpcAbi) X(kRvMagic) X(kRingMagic) X(kInitMarker) X(kGroupCount) X(kMaxSegmentNameLength) \
     X(kRvBytes) X(kRvHeaderBytes) X(kGroupStride) X(kRoleSlotBytes) X(kLabelNameWords) X(kLabelNameBytes) \
     X(kRingHeaderBytes) X(kRingFrames) X(kRingChannels) X(kRingDataOffset) X(kRingBytes) \
     X(kMaxSupportedBlock) X(kMaxWriteChunk) \

@@ -5,7 +5,6 @@
 #include <chrono>
 #include <random>
 
-#include "ipc/IpcDiag.h"
 #include "ipc/ProcessInfo.h"
 #include "util/RinneVersion.h"
 
@@ -114,7 +113,7 @@ NameScope NameScope::randomForTesting()
 }
 
 NameStatus composeSegmentName(NamePlatform platform, const PrefixFamily& family, const NameScope& scope,
-                              std::uint32_t uid, SegmentId segment, std::string& out)
+                              std::uint32_t uid, SegmentId segment, std::string& out, std::uint32_t abi)
 {
     out.clear();
     if (segment.group > kGroupCount)
@@ -156,7 +155,7 @@ NameStatus composeSegmentName(NamePlatform platform, const PrefixFamily& family,
     else
     {
         out.push_back('v');
-        out.append(std::to_string(kIpcAbi));
+        out.append(std::to_string(abi));
         out.append(".g");
         out.append(std::to_string(segment.group));
     }
@@ -194,17 +193,6 @@ NameStatus validateSegmentName(NamePlatform platform, std::string_view name) noe
         return NameStatus::kTooLong;
     }
     return NameStatus::kOk;
-}
-
-void reportBadSegmentName(const std::string& name, NameStatus status) noexcept
-{
-    IpcDiagEvent e;
-    e.op = IpcDiagOp::kName;
-    e.code = status == NameStatus::kTooLong ? IpcDiagCode::kNameTooLong : IpcDiagCode::kOther;
-    e.segment = name.c_str();
-    e.detail = status == NameStatus::kTooLong ? "segment name longer than 31 characters"
-                                              : "segment name has a bad platform head or characters";
-    reportIpcDiag(e);
 }
 
 Naming::Naming(NameScope scope) : scope_(scope), family_(findPrefixFamily(build::kShmPrefix)), uid_(currentUserId()) {}

@@ -9,8 +9,6 @@
 #include <mutex>
 #include <new>
 
-#include "ipc/Naming.h"
-
 namespace rinne::ipc
 {
 
@@ -46,12 +44,6 @@ std::map<std::string, std::shared_ptr<AlignedBuffer>>& segments()
     return m;
 }
 
-InitResult rejectName(const std::string& name, NameStatus status) noexcept
-{
-    reportBadSegmentName(name, status);
-    return InitResult::kFailedBadName;
-}
-
 } // namespace
 
 InitResult SegmentBackendInProcess::createOrOpen(const std::string& name, std::size_t size, SegmentView& view)
@@ -61,9 +53,9 @@ InitResult SegmentBackendInProcess::createOrOpen(const std::string& name, std::s
     {
         return InitResult::kFailed;
     }
-    if (const NameStatus status = validateSegmentName(kHostNamePlatform, name); status != NameStatus::kOk)
+    if (const InitResult r = checkName(kHostNamePlatform, name); r != InitResult::kOk)
     {
-        return rejectName(name, status);
+        return r;
     }
 
     const std::lock_guard<std::mutex> lock(segmentsMutex());
@@ -88,9 +80,9 @@ InitResult SegmentBackendInProcess::createOrOpen(const std::string& name, std::s
 InitResult SegmentBackendInProcess::openExisting(const std::string& name, SegmentView& view)
 {
     view.reset();
-    if (const NameStatus status = validateSegmentName(kHostNamePlatform, name); status != NameStatus::kOk)
+    if (const InitResult r = checkName(kHostNamePlatform, name); r != InitResult::kOk)
     {
-        return rejectName(name, status);
+        return r;
     }
     const std::lock_guard<std::mutex> lock(segmentsMutex());
     auto& map = segments();

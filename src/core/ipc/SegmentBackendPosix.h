@@ -15,10 +15,14 @@
 //   - 所有转换（建、附着、离开）都在全局 <锁目录>/lifecycle.lock 的 LOCK_EX 下做：BSD flock 的升降级不是原子的
 //     （先放旧锁再上新锁），只有在这把全局锁下，「EX 探测 → 降为 SH」与「离开时 EX 探测 → unlink」之间才不会
 //     插进别人的转换。
-//   - 全局锁有界等待，等不到就放弃这一次：createOrOpen 2 s（加载与改组，很少）；openExisting 100 ms（25 Hz 重试）；
-//     离开 200 ms（等不到就不做 unlink 判定，段留给下一个创建者清理）。一旦等满超时，之后 1 s 内本实例的取锁
-//     只试一次不等（断路）：锁被一个挂住的进程拿着时，卸载时的 N 个映射、25 Hz 的重试不会把等待乘上去。
-//     断路窗口内的失败只计数不上报，计数随下一条同类诊断的 suppressed 报出。
+//   - 全局锁的等待（都在调用它的非实时线程上，以 1 ms 为步轮询）：
+//       openExisting / openExistingReadOnly 只试一次、不等：它们在 25 Hz 的重试路径上，锁被占着就是这一拍失败；
+//       createOrOpen 最多等 2 s：只在插件加载与改组时调用，等不到这一次就失败（kFailed），调用方下一拍重试；
+//       离开最多等 200 ms：等不到就不做 unlink 判定，段留给下一个创建者清理。
+//     一旦真的等满超时，之后 1 s 内本实例的取锁都只试一次不等（断路）：锁被一个挂住的进程拿着时，卸载时的 N 个映射
+//     不会把等待乘上去。断路窗口内的失败只计数不上报，计数并进本实例的下一条诊断（任何一类）的 suppressed；
+//     之后再也没有诊断时这批计数不会出现在日志里，诊断用途可以接受。
+//   - 拿到全局锁之后才分配映射记录与锁文件路径：段不存在的常态重试（锁目录里没有 lifecycle.lock）不分配。
 //   - createOrOpen：对段锁文件试 LOCK_EX|LOCK_NB。
 //       拿到 ⇒ 没有活着的持有者 ⇒ 先 shm_unlink 残段（崩溃留下的、旧尺寸的都在这里清掉，只清本用户名下的），
 //              再 shm_open(O_CREAT|O_EXCL, 0600) + ftruncate，created = true；
@@ -65,7 +69,7 @@ public:
     static constexpr const char* kHomeRelativeLockDir = "Library/Application Support/Synchain/Rinne/ipc";
 
     static constexpr std::chrono::milliseconds kCreateLockWait{2000};
-    static constexpr std::chrono::milliseconds kAttachLockWait{100};
+    static constexpr std::chrono::milliseconds kAttachLockWait{0};
     static constexpr std::chrono::milliseconds kLeaveLockWait{200};
     static constexpr std::chrono::milliseconds kLockBreakerWindow{1000};
 
@@ -110,11 +114,14 @@ private:
     // 离开：全局锁下 EX 探测 → 最后离开者 shm_unlink → 关锁 fd。不 munmap；不分配、不抛（后端析构里也调它）
     void leave(Mapping& m) noexcept;
     std::chrono::milliseconds lockWait(std::chrono::milliseconds normal) const noexcept;
-    void noteLockFailure(int error, const std::string& lockPath, std::chrono::milliseconds wait,
-                         PendingDiag& diag) noexcept;
+    void noteLockFailure(int error, std::chrono::milliseconds wait, PendingDiag& diag) noexcept;
+    // 本实例的每条诊断都从这里出去，带上此前断路略去的次数
+    void emit(IpcDiagOp op, IpcDiagCode code, int error, const std::string& segment, const std::string& path,
+              const char* detail) noexcept;
 
     std::string lockDir_;
-    std::atomic<long long> lastLockTimeoutMs_{-1}; // steady_clock 毫秒；-1 = 从没超时过
+    std::string lifecyclePath_; // <锁目录>/lifecycle.lock，构造时拼好：取锁与离开都不再分配
+    std::atomic<std::uint64_t> lastLockTimeoutMs_{0}; // 最近一次等满超时的 util::monoNowMs()；0 = 从没超时过
     std::atomic<std::uint32_t> suppressedLockFailures_{0}; // 断路窗口内略去、尚未随诊断报出的失败次数
     std::mutex liveMutex_; // 保护 live_（几个线程共用一个后端实例时）
     Mapping* live_ = nullptr; // 本实例映射出去、尚未 unmap 的视图（侵入式双向链表，插入与摘除不分配）
