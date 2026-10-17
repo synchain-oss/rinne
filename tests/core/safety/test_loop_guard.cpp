@@ -145,7 +145,7 @@ TEST_CASE("with guard_on off the same runaway is only held by the limiter", "[sa
 namespace
 {
 
-// 间歇的鼓点干声：每 0.2–0.8 s 一下，20 ms 长、峰值 peakDb 的衰减噪声，其余时间静音。
+// 间歇的鼓点干声：每 minGap–maxGap 秒一下（默认 0.2–0.8 s），20 ms 长、峰值 peakDb 的衰减噪声，其余时间静音。
 // 它会让送出窗口里时不时出现比回读更响的瞬态，把真放大的链盖住
 struct Drums
 {
@@ -153,13 +153,18 @@ struct Drums
     float peak;
     std::int64_t next = 0;
     std::int64_t hitAt = -1000000;
-    Drums(std::uint64_t seed, double peakDb) : rng(seed), peak(dbfs(peakDb)) {}
+    double minGap;
+    double maxGap;
+    Drums(std::uint64_t seed, double peakDb, double minGapSeconds = 0.2, double maxGapSeconds = 0.8)
+        : rng(seed), peak(dbfs(peakDb)), minGap(minGapSeconds), maxGap(maxGapSeconds)
+    {
+    }
     float operator()(std::int64_t n)
     {
         if (n >= next)
         {
             hitAt = n;
-            next = n + samplesOf(rng.range(0.2, 0.8));
+            next = n + samplesOf(rng.range(minGap, maxGap));
         }
         const std::int64_t k = n - hitAt;
         if (k >= samplesOf(0.02))
@@ -196,4 +201,15 @@ TEST_CASE("louder dry transients in the send window do not hide a real runaway a
         CHECK(r.guardEngaged);
         CHECK(r.maxReturn <= dbfs(c.ceilingDb));
     }
+}
+
+TEST_CASE("the amplify hold spans a whole guard window when drum hits are 1.3 s apart", "[safety][loop][guard][fp]")
+{
+    // 每一下鼓点在送出窗口里停约 1.1 s，这段时间估计被盖住；鼓点相隔约 1.3 s 时，只有保持够 3 s，
+    // 门才一直开着，失控保护才能在 3 s 窗里攒够 2 s
+    LoopSetup s = gate(0.90f, 2.5f);
+    s.delay = samplesOf(0.1);
+    s.seconds = 12.0;
+    Drums dry(4, 0.0, 1.25, 1.35);
+    CHECK(runLoop(s, dry).guardEngaged);
 }
