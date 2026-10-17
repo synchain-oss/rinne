@@ -1,0 +1,102 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "f80e1c99271db1c7a85d2a300a8b154b2d45d2a7"
+    }
+  },
+  "files": [
+    {
+      "path": "web-preview/serve.ps1",
+      "source": "scvb-dev",
+      "from": "web-preview/serve.ps1",
+      "fromBlob": "73b7fd929bc6eea2b0af1a4dbd5b9a301e596143",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/shell.js",
+      "source": "scvb-dev",
+      "from": "web-preview/shell.js",
+      "fromBlob": "e34be6fd807d623aae9cccbd523a759f6caaae40",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/shot.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/shot.mjs",
+      "fromBlob": "31c261697158602f5d2ac5868650dd96147cb257",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/input.html",
+      "source": "scvb-dev",
+      "from": "web-preview/input.html",
+      "fromBlob": "2d0cf35c2733ef8ea4e2f8392433b3c35c5bd494",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/output.html",
+      "source": "scvb-dev",
+      "from": "web-preview/output.html",
+      "fromBlob": "12cc6470064d0c67462efa7e885294a835ea6da9",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/lib/await-state.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/tests/lib/await-state.mjs",
+      "fromBlob": "807b18522ae2fc8aa1b569e1d46d122f797facde",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/lib/browser.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/shot.mjs",
+      "fromBlob": "31c261697158602f5d2ac5868650dd96147cb257",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/smoke-embedded-resources.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/tests/smoke-embedded-resources.mjs",
+      "fromBlob": "27d161732c1aefd3215b5a4d4d574753fe345de0",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/smoke-first-frame-page.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/tests/smoke-first-frame-page.mjs",
+      "fromBlob": "dbe11c87286c75fbab10b0988fbc91f73ec8617b",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/smoke-frontend-syntax-floor.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/tests/smoke-frontend-syntax-floor.mjs",
+      "fromBlob": "e791b38380ca463ca955f31fcd42df6c92650a08",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/smoke-ready-race.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/tests/smoke-ready-race.mjs",
+      "fromBlob": "7b15bff0d3b197d994558d0c462818c893f26d58",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/smoke-shell-fit.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/tests/smoke-shell-fit.mjs",
+      "fromBlob": "bd6162081e5cddaa5f2b4d5a1ea0529a7953b4eb",
+      "mode": "forked"
+    },
+    {
+      "path": "web-preview/tests/smoke-shell-fit-page.mjs",
+      "source": "scvb-dev",
+      "from": "web-preview/tests/smoke-shell-fit-page.mjs",
+      "fromBlob": "b7f962528de61da1c7744f7a948cd3580fb00a0b",
+      "mode": "forked"
+    }
+  ]
+}
