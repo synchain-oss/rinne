@@ -35,7 +35,8 @@
 # wt/tip-<n> 与主 clone 共用 .git，PR 里的构建脚本与 CMake 配置期执行的代码都写得到这些文件，所以合并后构建前后各取一次
 # 指纹（见 Get-CloneIntegrityTargets）：git 实际读到的每个配置文件（含 include 进来的）、hooks 目录里每个文件（含隐藏的）、
 # 记录文件、构建之后还要用的 node 与卡片清单，任一项变了就判红；构建之后再断言主 clone 的工作树干净、HEAD 没变。squash
-# 消息的生成与公开文本检查（要跑 node）放在构建之前，构建之后只剩核对与合并请求。这只防构建期间直接改这些文件，不是隔离：
+# 消息的生成与公开文本检查（要跑 node）放在构建之前，构建之后只剩核对与合并请求。判据文件变了就写锁存标记（见
+# Get-PremergeLatchPath），之后的调用在跑任何 git 之前就拒绝，直到维护者核对后手动删掉。这只防构建期间直接改这些文件，不是隔离：
 # 脱离进程树的后台进程可以等核对之后再改。彻底的做法是独立 clone，或者换一个账户、容器来跑构建。
 #
 # 合并后构建（Standard 及以上）跑的是 PR 树里的脚本，所以是最后一道：其他判据全部通过、且没碰基础设施时才跑，
@@ -397,6 +398,25 @@ function Get-MergeVerdict {
 function Get-PremergeSlot { param([Parameter(Mandatory)][int]$Pr) "build-slot-$(1 + $Pr % 2)" }
 
 <#
+  锁存标记：合并后构建改过主 clone 的判据文件时写下，之后的 -Check / -Merge / -After 在跑任何 git 与 gh 之前看到它就拒绝，
+  只有维护者核对过主 clone 与共享 .git 之后手动删掉才放行（改过的 git 配置可能带着会执行代码的项，下一次的 fetch、status、
+  reset 照样会执行它）。位置在工作区根：主 clone 是 <根>/rinne（Assert-MainClone 核对），所以就是主 clone 的上一级，
+  在主 clone 与 wt/ 之外；这里不问 git config，免得读标记本身就要跑 git。自测换成一个临时文件。
+#>
+$script:LatchOverride = $null
+function Get-PremergeLatchPath {
+    if ($script:LatchOverride) { return $script:LatchOverride }
+    Join-Path (Split-Path -Parent (Get-RinneRepoRoot)) '.rinne-premerge-latch.json'
+}
+
+function Assert-NoPremergeLatch {
+    $latch = Get-PremergeLatchPath
+    if (Test-Path -LiteralPath $latch) {
+        throw "合并后构建改过主 clone 的判据文件，已锁存（$latch）：维护者核对主 clone、共享 .git 的配置与 hooks 之后手动删除这个文件，才能再跑 pr-merge"
+    }
+}
+
+<#
   主 clone 的判据文件（合并后构建前后各取一次指纹）：
   - Configs：git 配置。先放 .git/config（common dir 的那份）、git var 报的用户级与系统级配置（还不存在的也算：构建可以新建），
     再加 git config --list --show-origin 实际读到的每个文件（include / includeIf 引进来的都在里面），以及各配置里 include
@@ -631,7 +651,10 @@ function Invoke-Premerge {
             $changed = @(Compare-CloneFingerprint $before (Get-CloneFingerprint $targets))
             $tampered = $changed.Count -gt 0
             if ($tampered) {
-                $changed += "（之后没有再跑 git：主 clone 的工作树没有核对，wt/tip-$Pr 的合并也没有 abort，先人工查看）"
+                $latch = Get-PremergeLatchPath
+                $note = [ordered]@{ pr = $Pr; at = [datetime]::UtcNow.ToString('o'); changed = @($changed) }
+                [IO.File]::WriteAllText($latch, (ConvertTo-RinneJsonText $note), [Text.UTF8Encoding]::new($false))
+                $changed += "（之后没有再跑 git：主 clone 的工作树没有核对，wt/tip-$Pr 的合并也没有 abort；已写锁存标记 $latch，维护者核对后手动删除）"
             } else {
                 # 主 clone 的跟踪文件（下一次合并要跑的维护者脚本与检查都在里面）：工作树还是干净的、HEAD 没动
                 $cloneAfter = Get-RinneCloneState
@@ -655,6 +678,7 @@ function Invoke-Premerge {
 #>
 function Invoke-MergeCheck {
     param([Parameter(Mandatory)][int]$Pr, [Parameter(Mandatory)][string]$CardId)
+    Assert-NoPremergeLatch
     $facts = Get-MergeFacts $Pr $CardId
     $v = Get-MergeVerdict $facts
     if ($v.Code -eq 'ready' -and (Get-RinneTierOrder $v.Tier.Min) -ge (Get-RinneTierOrder 'Standard')) {
@@ -695,6 +719,7 @@ function New-MergeMessage {
 
 function Invoke-MergeUnlocked {
     param([int]$Pr, [string]$CardId, [string]$SummaryFile)
+    Assert-NoPremergeLatch
     # squash 消息先生成、先过检查（要跑 node 与仓里的判据脚本）：合并后构建跑的是 PR 里的代码，构建之后只剩接口核对与合并请求
     $pull = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
     $msg = New-MergeMessage -Pull $pull -Summary (Get-Content -Raw -LiteralPath $SummaryFile)
@@ -716,6 +741,7 @@ function Invoke-MergeUnlocked {
 
 function Invoke-AfterUnlocked {
     param([int]$Pr, [string]$CardId)
+    Assert-NoPremergeLatch
     if ($CardId -notmatch $CardPattern) { throw "卡号格式不对：$CardId" }
     Get-RinneCard $CardId | Out-Null
     $pull = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
@@ -798,6 +824,8 @@ function Invoke-SelfTest {
             Info = [ordered]@{ '.git/info/exclude' = (Join-Path $fakeClone '.git/info/exclude') }
         }
         $script:IntegrityTargets = $integrity
+        # 锁存标记写到临时目录（真跑时在工作区根）
+        $script:LatchOverride = Join-Path $tmp 'premerge-latch.json'
         # 假构建脚本要不要顺手改一样判据文件或主 clone 的状态（见下面构建的路由）
         $tamper = @{ What = '' }
         Clear-RinnePermCache
@@ -1362,6 +1390,7 @@ function Invoke-SelfTest {
                     $tree.Dirty = $false; $tree.Sha = $tipSha
                     Get-ChildItem -LiteralPath $integrity.Hooks -Force | Where-Object Name -ne 'pre-push' | Remove-Item -Force
                     Set-Content -LiteralPath (Join-Path $integrity.Hooks 'pre-push') -Value '#!/bin/sh'
+                    Remove-Item -LiteralPath $script:LatchOverride -ErrorAction SilentlyContinue
                 }
                 $v.Code -eq 'not-ready' -and @($v.Failures | Where-Object { $_ -match "判据文件：[^（]*$pattern" }).Count -eq 1
             }
@@ -1385,6 +1414,31 @@ function Invoke-SelfTest {
             Add-RinneCase $cases '合并后构建：判据文件变了之后不再跑 git（不查主 clone 的工作区、不 abort），Reason 写明' $true (
                 $vz.Code -eq 'not-ready' -and $plainAbort -ge 1 -and ($tree.Calls - $c1) -eq $plain - 1 -and
                 @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -eq 0 -and @($vz.Failures | Where-Object { $_ -match '之后没有再跑 git' }).Count -eq 1)
+            # 锁存：这次写下了标记（PR 号、时间、哪一项变了）；下一次 -Check / -Merge / -After 在跑任何 git 与 gh 之前就拒绝，
+            # 维护者删掉标记才放行
+            $note = (Test-Path -LiteralPath $script:LatchOverride) ? (Get-Content -Raw -LiteralPath $script:LatchOverride | ConvertFrom-Json) : $null
+            Add-RinneCase $cases '合并后构建：判据文件变了就写锁存标记，记下 PR 号、时间与变了的项' $true ($note -and $note.pr -eq 3 -and $note.at -and @($note.changed) -contains '.git/config')
+            $thrown = { param($sb) try { & $sb | Out-Null; '' } catch { $_.Exception.Message } }
+            $n0 = $log.Count
+            $latchCheck, $latchMerge, $latchAfter = (& $thrown { Invoke-MergeCheck 3 $cid }), (& $thrown { Invoke-MergeUnlocked -Pr 3 -CardId $cid -SummaryFile 'x' }), (& $thrown { Invoke-AfterUnlocked -Pr 3 -CardId $cid })
+            $ran = @($log | Select-Object -Skip $n0 | Where-Object { $_ -match '^(git|gh) ' })
+            Add-RinneCase $cases '锁存标记在：下一次 -Check / -Merge / -After 一条 git、gh 都不跑就拒绝' $true (
+                $latchCheck -match '已锁存' -and $latchMerge -match '已锁存' -and $latchAfter -match '已锁存' -and $ran.Count -eq 0)
+            Remove-Item -LiteralPath $script:LatchOverride -ErrorAction SilentlyContinue
+            Add-RinneCase $cases '维护者删掉锁存标记之后照常核对' $false ((Invoke-MergeCheck 3 $cid).Code -ne 'ready')
+            # 入口：标记在时，脚本在 gh 与 git 之前就拒绝（子进程跑一份同样布局的副本；PATH 最前面放假的 git、gh，被调用就留下记录）
+            $lt, $bin, $called = (Join-Path $tmp 'latchtree'), (Join-Path $tmp 'latchbin'), (Join-Path $tmp 'latch-called.txt')
+            $null = New-Item -ItemType Directory -Force -Path (Join-Path $lt 'rinne/scripts/maintainer/lib'), (Join-Path $lt 'rinne/scripts/lib'), $bin
+            Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $lt 'rinne/scripts/maintainer')
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'lib/RinneGh.psm1') -Destination (Join-Path $lt 'rinne/scripts/maintainer/lib')
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../lib/StdHandles.psm1') -Destination (Join-Path $lt 'rinne/scripts/lib')
+            Set-Content -LiteralPath (Join-Path $lt '.rinne-premerge-latch.json') -Value '{}'
+            foreach ($n in 'git', 'gh') { Set-Content -LiteralPath (Join-Path $bin "$n.cmd") -Value "@echo %0 %*>>`"$called`"`r`n@exit /b 1" }
+            $savedPath = $env:PATH
+            $env:PATH = "$bin;$env:PATH"
+            try { $lo = & ([Environment]::ProcessPath) -NoProfile -NonInteractive -File (Join-Path $lt 'rinne/scripts/maintainer/pr-merge.ps1') -Check -Pr 3 -Card $cid 2>&1 | Out-String; $lc = $LASTEXITCODE }
+            finally { $env:PATH = $savedPath }
+            Add-RinneCase $cases '锁存标记在：pr-merge -Check 在 gh 与 git 之前就拒绝' $true ($lc -ne 0 -and $lo -match '已锁存' -and -not (Test-Path -LiteralPath $called))
             $tamper.What = 'branch'
             $vb = Invoke-MergeCheck 3 $cid
             $tamper.What = ''
@@ -1556,6 +1610,7 @@ function Invoke-SelfTest {
         Set-RinneInfraList $null
         Exit-RinneSelfTestNeedles $needles
         $script:IntegrityTargets = $null
+        $script:LatchOverride = $null
         $env:RINNE_ROOT = $saved.Root
         $env:RINNE_CARDS = $saved.Cards
         $env:RINNE_WAIVERS = $saved.Waivers
@@ -1567,6 +1622,8 @@ function Invoke-SelfTest {
 if ($SelfTest) { exit (Invoke-SelfTest) }
 if (@($Check, $Merge, $After | Where-Object { $_ }).Count -ne 1) { throw '用法：-Check | -Merge | -After，三选一（或 -SelfTest）' }
 if ($Pr -le 0 -or $Card -notmatch $CardPattern) { throw '需要 -Pr <n> 与 -Card <卡号>' }
+# 锁存标记在任何 git 与 gh 之前看
+Assert-NoPremergeLatch
 Initialize-RinneIdentity
 Assert-MainClone
 if ($Check) {
