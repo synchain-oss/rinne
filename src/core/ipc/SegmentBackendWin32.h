@@ -18,11 +18,15 @@ namespace rinne::ipc
 class SegmentBackendWin32 final : public ISegmentBackend
 {
 public:
+    ~SegmentBackendWin32() override { forgetRetired(); }
+
     InitResult createOrOpen(const std::string& name, std::size_t size, SegmentView& view) override;
     InitResult openExisting(const std::string& name, SegmentView& view) override;
     // FILE_MAP_READ：只读探测的最小权限，类型之外再从操作系统层面防住误写
     InitResult openExistingReadOnly(const std::string& name, SegmentView& view) override;
-    void unmap(SegmentView& view) override;
+    void unmap(SegmentView& view) noexcept override;
+    // UnmapViewOfFile + CloseHandle：只用视图里的基址与句柄，后端没了也能收尾
+    OrphanUnmap orphanUnmapper() const noexcept override;
     // VirtualLock，尽力而为：不改宿主进程的工作集，锁不住只报诊断（页面已经写触碰过）
     void tryLock(const SegmentView& view) override;
 

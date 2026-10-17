@@ -268,6 +268,8 @@ SegmentBackendPosix::SegmentBackendPosix(LockDirForTesting lockDir)
 
 SegmentBackendPosix::~SegmentBackendPosix()
 {
+    // 先让回收表忘掉自己：还在等宽限期的视图到时只差 munmap（见 orphanUnmapper），锁的那一半下面补做
+    forgetRetired();
     // 视图没经 unmap 就被丢掉：映射留到进程退出，锁这一半在这里补做。全局锁挂住时，第一个映射等满 kLeaveLockWait
     // 之后断路打开，其余映射各只试一次
     for (;;)
@@ -627,7 +629,7 @@ void SegmentBackendPosix::leave(Mapping& m) noexcept
     }
 }
 
-void SegmentBackendPosix::unmap(SegmentView& view)
+void SegmentBackendPosix::unmap(SegmentView& view) noexcept
 {
     auto* m = static_cast<Mapping*>(view.mapping);
     if (m != nullptr)
@@ -645,6 +647,17 @@ void SegmentBackendPosix::unmap(SegmentView& view)
         ::munmap(view.base, view.size);
     }
     view.reset();
+}
+
+OrphanUnmap SegmentBackendPosix::orphanUnmapper() const noexcept
+{
+    return [](SegmentView& view) noexcept {
+        if (view.base != nullptr && view.size != 0)
+        {
+            ::munmap(view.base, view.size);
+        }
+        view.reset();
+    };
 }
 
 void SegmentBackendPosix::tryLock(const SegmentView& view)

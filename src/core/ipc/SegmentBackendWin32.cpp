@@ -72,6 +72,20 @@ InitResult finishView(HANDLE h, void* base, bool created, const std::string& nam
     return InitResult::kOk;
 }
 
+// 解映射、关句柄：只用视图里的字段，不碰后端的状态
+void unmapView(SegmentView& view) noexcept
+{
+    if (view.base != nullptr)
+    {
+        ::UnmapViewOfFile(view.base);
+    }
+    if (view.mapping != nullptr)
+    {
+        ::CloseHandle(static_cast<HANDLE>(view.mapping));
+    }
+    view.reset();
+}
+
 } // namespace
 
 InitResult SegmentBackendWin32::createOrOpen(const std::string& name, std::size_t size, SegmentView& view)
@@ -164,17 +178,14 @@ void SegmentBackendWin32::tryLock(const SegmentView& view)
     }
 }
 
-void SegmentBackendWin32::unmap(SegmentView& view)
+void SegmentBackendWin32::unmap(SegmentView& view) noexcept
 {
-    if (view.base != nullptr)
-    {
-        ::UnmapViewOfFile(view.base);
-    }
-    if (view.mapping != nullptr)
-    {
-        ::CloseHandle(static_cast<HANDLE>(view.mapping));
-    }
-    view.reset();
+    unmapView(view);
+}
+
+OrphanUnmap SegmentBackendWin32::orphanUnmapper() const noexcept
+{
+    return &unmapView;
 }
 
 } // namespace rinne::ipc

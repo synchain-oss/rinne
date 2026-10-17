@@ -98,7 +98,7 @@ InitResult SegmentBackendInProcess::openExisting(const std::string& name, Segmen
     return InitResult::kOk;
 }
 
-void SegmentBackendInProcess::unmap(SegmentView& view)
+void SegmentBackendInProcess::unmap(SegmentView& view) noexcept
 {
     view.reset();
 }

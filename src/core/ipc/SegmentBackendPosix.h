@@ -88,7 +88,9 @@ public:
     InitResult createOrOpen(const std::string& name, std::size_t size, SegmentView& view) override;
     InitResult openExisting(const std::string& name, SegmentView& view) override;
     InitResult openExistingReadOnly(const std::string& name, SegmentView& view) override;
-    void unmap(SegmentView& view) override;
+    void unmap(SegmentView& view) noexcept override;
+    // 只 munmap：后端析构时已经替还没解映射的视图做完了锁的那一半（离开、最后一个离开者 unlink）
+    OrphanUnmap orphanUnmapper() const noexcept override;
     void tryLock(const SegmentView& view) override;
 
     // 默认锁目录：<真实 home>/kHomeRelativeLockDir；查不到 home 时返回空串，之后所有打开都失败并报 kLockDir

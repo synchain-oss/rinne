@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 共享内存段不残留：正常释放（unmap）之后、以及持有者没有释放就退出之后，系统里都不留本测试作用域的段；
+// 共享内存段不残留：正常释放（unmap）之后、持有者没有释放就退出之后、句柄在宽限期内析构交给回收表之后
+// （后端还在或已先析构），系统里都不留本测试作用域的段；
 //   Windows  段随最后一个句柄关闭由内核回收：子进程建段后不释放就退出，父进程再打开必然失败。
 //   POSIX    名字会留到有人 shm_unlink：持有者崩溃后名字还在，下一个建段者清掉残段重建，最后一个离开者撤名字，
 //            之后 shm_open 必然失败。
@@ -228,8 +229,51 @@ TEST_CASE("segments of a holder that exits without releasing do not survive", "[
 #endif
 }
 
+TEST_CASE("segments of handles dropped before the grace period are released by the reaper",
+          "[ipc][backend][shm-leftover]")
+{
+    // 句柄析构时宽限期还没走完：映射交给回收表。后端还在（长寿的后端）与后端紧接着析构（与句柄同寿）两种情形，
+    // 回收表走完宽限期之后，本测试作用域的段都不再残留
 #if defined(_WIN32)
-// 上一个用例的子进程：从环境变量拿作用域，建段后不释放就退出。隐藏用例，只在显式按标签选中时运行
+    const std::string lockDir;
+#else
+    rinne::test::TempDir dir;
+    const std::string lockDir = dir.path();
+#endif
+    for (const bool backendDiesFirst : {false, true})
+    {
+        INFO((backendDiesFirst ? "backend destroyed before reaping" : "backend outlives reaping"));
+        const Naming naming(NameScope::randomForTesting());
+        const auto names = allNames(naming);
+        auto backend = makeBackend(lockDir);
+        {
+            std::vector<SegmentHandle> handles;
+            for (std::uint32_t g = 0; g <= kGroupCount; ++g)
+            {
+                SegmentView view;
+                REQUIRE(createInitialised(*backend, names[g], g, view));
+                handles.emplace_back(std::move(view), backend.get());
+            }
+        } // 全部析构：宽限期刚开始，映射还在
+#if defined(_WIN32)
+        CHECK(segmentExists(names[0])); // 本进程还开着句柄
+#endif
+        if (backendDiesFirst)
+        {
+            backend.reset();
+        }
+        SegmentHandle::reapRetired(100);
+        SegmentHandle::reapRetired(100 + SegmentHandle::kReleaseGraceMs);
+        for (const auto& name : names)
+        {
+            INFO(name);
+            CHECK_FALSE(segmentExists(name));
+        }
+    }
+}
+
+#if defined(_WIN32)
+// 「持有者不释放就退出」那个用例的子进程：从环境变量拿作用域，建段后不释放就退出。隐藏用例，只在显式按标签选中时运行
 TEST_CASE("shm leftover child: create and exit without releasing", "[.][shm-leftover-child]")
 {
     char tag[16] = {};

@@ -17,10 +17,12 @@ namespace rinne::ipc
 class SegmentBackendInProcess final : public ISegmentBackend
 {
 public:
+    ~SegmentBackendInProcess() override { forgetRetired(); }
+
     InitResult createOrOpen(const std::string& name, std::size_t size, SegmentView& view) override;
     InitResult openExisting(const std::string& name, SegmentView& view) override;
     // 只清视图；缓冲由全局表持有到进程退出或 resetAllForTesting，别的实例可能还在用同名段
-    void unmap(SegmentView& view) override;
+    void unmap(SegmentView& view) noexcept override;
 
     // 清空所有模拟段：每个用例开始时调用，用例之间不共享残留。调用时不得有任何视图仍在使用。
     static void resetAllForTesting();

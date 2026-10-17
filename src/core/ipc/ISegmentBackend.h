@@ -153,10 +153,15 @@ struct SegmentHeaderSpec
     std::size_t clearFrom = 0; // 覆盖式重初始化从这里清零到段尾；小于 16 时按 16 算，段头前 16 字节从不按字节写
 };
 
+// 不经后端实例解映射一个视图：后端先于它映射出去、还在等宽限期的视图析构时，回收表走完宽限期后用它收尾。
+// 只许用视图里的字段，不许碰后端的状态。
+using OrphanUnmap = void (*)(SegmentView& view) noexcept;
+
 class ISegmentBackend
 {
 public:
-    // 析构时把还挂在待回收表上、指着自己的映射摘掉（它们留到进程退出，回收者不再碰这个后端）。定义在文件末尾。
+    // 析构时让回收表忘掉自己：还在等宽限期、指着自己的映射改用 orphanUnmapper() 收尾。定义在文件末尾。
+    // 具体后端在自己的析构函数开头先调 forgetRetired()（派生部分析构之后就不能再经它解映射了），这里再兜一次。
     // 后端析构与 SegmentHandle::reapRetired 都在持生命周期锁的非实时线程上，两者不并发。
     virtual ~ISegmentBackend();
 
@@ -172,8 +177,12 @@ public:
         return openExisting(name, view);
     }
 
-    // 解映射并关平台句柄；之后 view 置空
-    virtual void unmap(SegmentView& view) = 0;
+    // 解映射并关平台句柄；之后 view 置空。noexcept：析构与回收路径都调它，内部取锁失败（std::system_error）
+    // 按不可恢复处理
+    virtual void unmap(SegmentView& view) noexcept = 0;
+
+    // 后端先没了时收尾用的解映射（见 OrphanUnmap）；没有要收尾的东西时返回 nullptr（进程内后端）
+    virtual OrphanUnmap orphanUnmapper() const noexcept { return nullptr; }
 
     // 初始化者写触碰之后锁页，尽力而为：失败只报诊断、不失败。附着方不锁。
     virtual void tryLock(const SegmentView& view) { (void)view; }
@@ -308,6 +317,9 @@ public:
     }
 
 protected:
+    // 让回收表忘掉本后端：具体后端的析构函数开头调用。幂等。定义在文件末尾
+    void forgetRetired() noexcept;
+
     // 后端在碰操作系统之前核对名字：不合格时报诊断（超长归 kNameTooLong）并返回 kFailedBadName，合格返回 kOk
     static InitResult checkName(NamePlatform platform, const std::string& name) noexcept
     {
@@ -373,12 +385,16 @@ struct SegmentMapping
     std::atomic<u32> leaseCount{0};
     std::atomic<bool> releaseRequested{false};
     ISegmentBackend* backend = nullptr; // 解映射用；解映射之后、或后端先没了，为空
+    OrphanUnmap orphanUnmap = nullptr; // 后端先没了时的收尾，建句柄时向后端要好
     u64 graceStartMs = 0;
     bool graceStarted = false;
     bool unmapped = false;
     SegmentMapping* next = nullptr; // 在回收表里的链
 
-    SegmentMapping(SegmentView&& v, ISegmentBackend* b) : view(std::move(v)), backend(b) {}
+    SegmentMapping(SegmentView&& v, ISegmentBackend* b)
+        : view(std::move(v)), backend(b), orphanUnmap(b != nullptr ? b->orphanUnmapper() : nullptr)
+    {
+    }
 };
 
 // 宽限期的判定：租约归零之后再过 500 ms。时钟读出 0 时既不开始也不推进；时间倒退时从现在重新计，
@@ -404,8 +420,8 @@ inline bool graceElapsed(SegmentMapping& m, u64 nowMs) noexcept
     return nowMs - m.graceStartMs >= kReleaseGraceMs;
 }
 
-// 宽限期满就解映射、关平台句柄。控制块不释放
-inline bool unmapIfReady(SegmentMapping& m, u64 nowMs)
+// 宽限期满就解映射、关平台句柄：后端还在就经后端，后端先没了就用建句柄时要好的收尾函数。控制块不释放
+inline bool unmapIfReady(SegmentMapping& m, u64 nowMs) noexcept
 {
     if (m.unmapped)
     {
@@ -419,6 +435,10 @@ inline bool unmapIfReady(SegmentMapping& m, u64 nowMs)
     {
         m.backend->unmap(m.view);
     }
+    else if (m.orphanUnmap != nullptr && m.view.base != nullptr)
+    {
+        m.orphanUnmap(m.view);
+    }
     m.view.reset();
     std::string().swap(m.view.name);
     m.backend = nullptr;
@@ -428,8 +448,10 @@ inline bool unmapIfReady(SegmentMapping& m, u64 nowMs)
 
 // 进程级的回收表（每个链接了 rinne_core 的二进制一张，永不析构）：
 //   pending  句柄析构或被覆盖时宽限期还没走完的映射，由 reap() 在之后的某一拍走完宽限期再解映射；
-//   done     已解映射（或后端先没了）的控制块，留到进程退出。
-// 侵入式单链，插入与摘除不分配；一把锁，只在非实时线程上取。泄漏检测把这些控制块当可达内存。
+//            后端先析构了也留在这里，到时用收尾函数解映射、关平台句柄，不靠后端实例；
+//   done     已解映射的控制块，留到进程退出。
+// 侵入式单链，插入与摘除不分配；一把锁，只在非实时线程上取（取锁失败按不可恢复处理）。
+// 泄漏检测把这些控制块当可达内存。
 class RetiredMappings
 {
 public:
@@ -466,23 +488,15 @@ public:
         return unmapped;
     }
 
-    // 后端析构：还没解映射、指着它的映射不再由回收表解映射，映射本身留到进程退出（平台句柄随进程关）
+    // 后端析构：还在等宽限期、指着它的映射不再经它解映射，留在 pending 里，到时用收尾函数（orphanUnmap）解映射
     void forget(const ISegmentBackend* backend) noexcept
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        for (SegmentMapping** link = &pending_; *link != nullptr;)
+        for (SegmentMapping* m = pending_; m != nullptr; m = m->next)
         {
-            SegmentMapping* m = *link;
             if (m->backend == backend)
             {
                 m->backend = nullptr;
-                m->unmapped = true;
-                *link = m->next;
-                push(done_, m);
-            }
-            else
-            {
-                link = &m->next;
             }
         }
     }
@@ -516,6 +530,11 @@ private:
 
 inline ISegmentBackend::~ISegmentBackend()
 {
+    forgetRetired();
+}
+
+inline void ISegmentBackend::forgetRetired() noexcept
+{
     detail::RetiredMappings::instance().forget(this);
 }
 
@@ -525,7 +544,8 @@ inline ISegmentBackend::~ISegmentBackend()
 //     kReleaseGraceMs 之后经后端解映射。控制块不释放，交给回收表留到进程退出。
 //   - 析构、或者移动赋值覆盖一个还没释放完的句柄：映射挂进回收表，由 reapRetired() 在之后的某一拍走完宽限期再
 //     解映射、关平台句柄（插件卸载时这是常态）。持生命周期锁的非实时线程要定时调用 reapRetired()（会合层的 25 Hz
-//     定时器）；任何句柄的 release() 也顺手回收一次。
+//     定时器）；任何句柄的 release() 也顺手回收一次。后端先于这些映射析构也不漏：到时用后端事先给的收尾函数
+//     解映射、关平台句柄。
 // 时间由调用方传入，必须是 util::monoNowMs() 那一个跨进程单调时钟。
 class SegmentHandle
 {
@@ -664,7 +684,8 @@ public:
     static std::size_t retiredPending() { return detail::RetiredMappings::instance().pendingCount(); }
 
 private:
-    // 放下自己的那一块：这一拍能释放完就释放，否则交给回收表
+    // 放下自己的那一块：这一拍能释放完就释放，否则交给回收表。noexcept：回收表的锁取不到（std::system_error）
+    // 与 unmap 一样按不可恢复处理
     void abandon() noexcept
     {
         if (impl_ == nullptr)

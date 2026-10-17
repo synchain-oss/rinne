@@ -19,10 +19,15 @@ namespace
 
 using namespace rinne::ipc;
 
-// 进程内后端外面包一层，数一数 unmap 调了几次
+// 后端先没了之后、由回收表用收尾函数解映射的次数
+std::atomic<int> gOrphanUnmaps{0};
+
+// 进程内后端外面包一层，数一数 unmap 调了几次；收尾函数另数
 class CountingBackend final : public ISegmentBackend
 {
 public:
+    ~CountingBackend() override { forgetRetired(); }
+
     InitResult createOrOpen(const std::string& name, std::size_t size, SegmentView& view) override
     {
         return inner.createOrOpen(name, size, view);
@@ -31,15 +36,29 @@ public:
     {
         return inner.openExisting(name, view);
     }
-    void unmap(SegmentView& view) override
+    void unmap(SegmentView& view) noexcept override
     {
         ++unmaps;
         inner.unmap(view);
+    }
+    OrphanUnmap orphanUnmapper() const noexcept override
+    {
+        return [](SegmentView& view) noexcept {
+            gOrphanUnmaps.fetch_add(1);
+            view.reset();
+        };
     }
 
     SegmentBackendInProcess inner;
     int unmaps = 0;
 };
+
+// 先把别的用例留在回收表里的映射回收掉，下面按差值断言
+void drainRetired()
+{
+    SegmentHandle::reapRetired(100);
+    SegmentHandle::reapRetired(100 + SegmentHandle::kReleaseGraceMs);
+}
 
 SegmentHandle openHandle(CountingBackend& backend)
 {
@@ -119,13 +138,14 @@ TEST_CASE("a lease that outlives its handle keeps the control block alive", "[ip
     CHECK(lease.size() == kRingBytes);
     static_cast<unsigned char*>(lease.base())[kRingDataOffset] = 1;
     // 租约还在：回收表不解映射
-    CHECK(SegmentHandle::reapRetired(1000) == 0);
-    CHECK(SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs * 10) == 0);
+    SegmentHandle::reapRetired(1000);
+    SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs * 10);
     CHECK(backend.unmaps == 0);
     lease = SegmentHandle::Lease{}; // 归还：落在仍然活着的控制块上
     // 归还之后宽限期才开始，走完就解映射
-    CHECK(SegmentHandle::reapRetired(20000) == 0);
-    CHECK(SegmentHandle::reapRetired(20000 + SegmentHandle::kReleaseGraceMs) >= 1);
+    SegmentHandle::reapRetired(20000);
+    CHECK(backend.unmaps == 0);
+    SegmentHandle::reapRetired(20000 + SegmentHandle::kReleaseGraceMs);
     CHECK(backend.unmaps == 1);
 }
 
@@ -175,6 +195,7 @@ TEST_CASE("handles destroyed before the grace period are reclaimed once it passe
     SegmentBackendInProcess::resetAllForTesting();
     CountingBackend backend;
     constexpr int kHandles = 5;
+    drainRetired();
     const std::size_t pendingBefore = SegmentHandle::retiredPending();
     for (int i = 0; i < kHandles; ++i)
     {
@@ -192,19 +213,29 @@ TEST_CASE("handles destroyed before the grace period are reclaimed once it passe
     CHECK(SegmentHandle::retiredPending() == pendingBefore);
 }
 
-TEST_CASE("a backend destroyed before reclaiming is forgotten by the retired table", "[ipc][backend][handle][reap]")
+TEST_CASE("mappings of a backend destroyed before reclaiming are still released", "[ipc][backend][handle][reap]")
 {
+    // 后端与句柄同寿（后端是插件实例的成员）：句柄先析构交给回收表，后端紧接着析构。映射不许漏到进程退出：
+    // 回收表不再经已经没了的后端，到时用后端事先给的收尾函数解映射、关平台句柄
     SegmentBackendInProcess::resetAllForTesting();
+    drainRetired();
     const std::size_t pendingBefore = SegmentHandle::retiredPending();
+    const int orphanBefore = gOrphanUnmaps.load();
+    int unmapsViaBackend = 0;
     {
         CountingBackend backend;
-        SegmentHandle handle = openHandle(backend);
-        // handle 先析构（交给回收表），backend 随后析构：回收表摘掉指着它的映射
+        {
+            SegmentHandle handle = openHandle(backend);
+        }
+        unmapsViaBackend = backend.unmaps;
     }
-    CHECK(SegmentHandle::retiredPending() == pendingBefore);
-    // 之后的回收不会再碰已经没了的后端
+    CHECK(unmapsViaBackend == 0);
+    CHECK(SegmentHandle::retiredPending() == pendingBefore + 1); // 还在等宽限期，没有被丢掉
     SegmentHandle::reapRetired(1000);
-    SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs);
+    CHECK(gOrphanUnmaps.load() == orphanBefore);
+    CHECK(SegmentHandle::reapRetired(1000 + SegmentHandle::kReleaseGraceMs) >= 1);
+    CHECK(gOrphanUnmaps.load() == orphanBefore + 1);
+    CHECK(SegmentHandle::retiredPending() == pendingBefore);
 }
 
 TEST_CASE("leases taken concurrently with a release request stop once it is seen", "[ipc][backend][handle][threads]")
