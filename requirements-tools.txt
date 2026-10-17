@@ -18,10 +18,11 @@ clang-format==18.1.8 \
     --hash=sha256:6ca6768270e291495174faa6d8c082aa0181722b29ef8e36558b397069fa4a2d
 # 字体检查（scripts/check-font-*.py）：fontTools 读 woff2 的 cmap 与 name 表，brotli 解压 woff2。
 # docs-truth 只装这两条（见 format.yml）；compliance 与本机 bootstrap 整份安装，所以也会装它们。
-# fonttools 是通用 wheel；4.66 起要求 Python 3.11，本机是 3.10，所以停在 4.65.0。web/fonts/ 里的 woff2 实际是 4.62.1 生成的
-# （按 fetch_fonts.py 重跑，四个都逐字节一致）；4.65.0 与 4.67.0 重跑的产物彼此逐字节相同，与入库的只差 NotoSansSC 的字节，
-# 码位与字形数不变。检查只读入库字体的 cmap 与 name 表，没有哪项重跑字体或比对字节。brotli 没有通用 wheel，两个哈希各对应
-# 一个平台：ef87b8ab… 是 cp310 win_amd64（本机），072e7624… 是 cp312 manylinux x86_64（CI）。升级时两个平台都要核对。
+# fonttools 是通用 wheel；4.66 起要求 Python 3.11，本机是 3.10，所以停在 4.65.0。web/fonts/README 说的「同样的输入产出逐字节
+# 相同」指同一个 fontTools 版本：入库的四个 woff2 是 4.62.1 生成的，用它按 fetch_fonts.py 重跑，四个都逐字节相同；用这里钉的
+# 4.65.0 重跑，三款逐字节相同，Noto Sans SC 的字节不同、码位与字形不变（4.67.0 的产物与 4.65.0 逐字节相同）。检查只读入库
+# 字体的 cmap 与 name 表，没有哪项重跑字体或比对字节。brotli 没有通用 wheel，两个哈希各对应一个平台：ef87b8ab… 是 cp310
+# win_amd64（本机），072e7624… 是 cp312 manylinux x86_64（CI）。升级时两个平台都要核对。
 fonttools==4.65.0 \
     --hash=sha256:3060b8c1fc2329fa20265b7c138614143ea7c1624e26c5c180c76aeb74deae6f
 brotli==1.2.0 \

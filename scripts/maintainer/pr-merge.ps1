@@ -424,7 +424,9 @@ function Assert-NoPremergeLatch {
     仓的位置、HEAD 所在的分支与配置本身，这几样都另有核对。
   - Hooks、Records：core.hooksPath 目录与记录文件。
   - Node、Cards：同一次 -Merge 在构建之后还会用到的 node（rinne.node，没配置时是 PATH 上的 node）与卡片清单（rinne.cards）。
-  - Info：共享 .git 里的 info/exclude 与 info/attributes（前者能让构建放进主 clone 的未跟踪文件在 status 里看不见）。
+  - Info：忽略与属性文件（忽略文件能让构建放进主 clone 的未跟踪文件在 status 里看不见）。共享 .git 里的 info/exclude 与
+    info/attributes；用户级的 git/ignore 与 git/attributes（git 不需要任何配置项就读，XDG_CONFIG_HOME 下的与 ~/.config 下的
+    都列上）；core.excludesFile / core.attributesFile 指的文件；git var 报的 GIT_ATTR_GLOBAL / GIT_ATTR_SYSTEM。
   -Repo 换一个仓（自测用临时仓）；自测也可以直接把 $script:IntegrityTargets 换成一组临时文件。
 #>
 $script:IntegrityTargets = $null
@@ -463,13 +465,28 @@ function Get-CloneIntegrityTargets {
         $target = if ($v -match '^~[\\/]') { Join-Path $homeEnv $v.Substring(2) } elseif ([IO.Path]::IsPathRooted($v)) { $v } else { Join-Path (Split-Path -Parent (& $norm $pr[0].Substring(5))) $v }
         if (-not (Test-Path -LiteralPath $target)) { & $add "git 配置（include，眼下不存在）$(& $tilde $target)" $target }
     }
+    $info = [ordered]@{}
+    $addInfo = { param($label, $p) if ($p -and -not @($info.Values | Where-Object { (& $norm $_) -ieq (& $norm $p) }).Count) { $info[$label] = (& $norm $p) } }
+    & $addInfo '.git/info/exclude' (Join-Path $git 'info/exclude')
+    & $addInfo '.git/info/attributes' (Join-Path $git 'info/attributes')
+    foreach ($d in @($env:XDG_CONFIG_HOME, (Join-Path $homeEnv '.config')) | Where-Object { $_ }) {
+        foreach ($n in 'ignore', 'attributes') { $p = Join-Path $d "git/$n"; & $addInfo "用户级 git/$n $(& $tilde $p)" $p }
+    }
+    foreach ($k in 'core.excludesFile', 'core.attributesFile') {
+        $r = Invoke-RinneGit @('config', '--path', '--get', $k) -Repo $Repo -AllowFail
+        if ($r.Code -notin 0, 1) { throw "git config --get $k 失败（退出码 $($r.Code)）：$($r.Err.Trim())" }
+        if ($r.Code -eq 0 -and $r.Out.Trim()) { & $addInfo "$k $(& $tilde $r.Out.Trim())" $r.Out.Trim() }
+    }
+    # 太旧的 git 没有这两个变量，上面几项已经覆盖默认位置
+    foreach ($k in 'GIT_ATTR_GLOBAL', 'GIT_ATTR_SYSTEM') {
+        $r = Invoke-RinneGit @('var', $k) -Repo $Repo -AllowFail
+        if ($r.Code -eq 0 -and $r.Out.Trim()) { & $addInfo "$k $(& $tilde $r.Out.Trim())" $r.Out.Trim() }
+    }
     $node = Get-RinneNode
     if (-not [IO.Path]::IsPathRooted($node)) { $node = (Get-Command $node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
     [pscustomobject]@{
         Root = $Repo; Configs = $configs; Hooks = $hooks; Records = (Get-RecordsPath -Repo $Repo)
-        Node = $node; Cards = (Get-RinneSetting -Env 'RINNE_CARDS' -GitKey 'rinne.cards')
-        # 共享 .git 里决定「工作树干不干净」与属性的两个文件：构建先往 exclude 里加一条再放未跟踪文件，status 就看不见它
-        Info = [ordered]@{ '.git/info/exclude' = (Join-Path $git 'info/exclude'); '.git/info/attributes' = (Join-Path $git 'info/attributes') }
+        Node = $node; Cards = (Get-RinneSetting -Env 'RINNE_CARDS' -GitKey 'rinne.cards'); Info = $info
     }
 }
 
@@ -818,10 +835,11 @@ function Invoke-SelfTest {
         Set-Content -LiteralPath (Join-Path $tmp 'node.exe') -Value 'node'
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $fakeClone '.git/info')
         Set-Content -LiteralPath (Join-Path $fakeClone '.git/info/exclude') -Value '# exclude'
+        Set-Content -LiteralPath (Join-Path $tmp 'global.ignore') -Value '# ignore'
         $integrity = [pscustomobject]@{
             Root = $fakeClone; Configs = [ordered]@{ '.git/config' = (Join-Path $fakeClone '.git/config'); '用户级 git 配置 ~/.gitconfig' = (Join-Path $tmp 'user.gitconfig') }
             Hooks = (Join-Path $fakeClone 'scripts/hooks'); Records = $recordsFile; Node = (Join-Path $tmp 'node.exe'); Cards = $cardsFile
-            Info = [ordered]@{ '.git/info/exclude' = (Join-Path $fakeClone '.git/info/exclude') }
+            Info = [ordered]@{ '.git/info/exclude' = (Join-Path $fakeClone '.git/info/exclude'); '用户级 git/ignore ~/.config/git/ignore' = (Join-Path $tmp 'global.ignore') }
         }
         $script:IntegrityTargets = $integrity
         # 锁存标记写到临时目录（真跑时在工作区根）
@@ -922,6 +940,7 @@ function Invoke-SelfTest {
                     'dirty' { $tree.Dirty = $true }
                     'head' { $tree.Sha = 'e' * 40 }
                     'exclude' { Add-Content -LiteralPath $integrity.Info['.git/info/exclude'] 'stray.txt' }
+                    'global-ignore' { Add-Content -LiteralPath $integrity.Info['用户级 git/ignore ~/.config/git/ignore'] 'stray.txt' }
                     # 构建期间有人改了 PR 标题（-Merge 用的是构建前生成的 squash 消息）
                     'title' { $prFixture.title = "$($prFixture.title)（改过）" }
                 }
@@ -1011,12 +1030,23 @@ function Invoke-SelfTest {
         $savedCfg = @{ G = $env:GIT_CONFIG_GLOBAL; H = $env:HOME; X = $env:XDG_CONFIG_HOME; S = $env:GIT_CONFIG_SYSTEM }
         $paths = { param($t) @($t.Configs.Values | ForEach-Object { [IO.Path]::GetFullPath($_) }) }
         $has = { param($t, $p) (& $paths $t) -contains [IO.Path]::GetFullPath($p) }
+        $hasInfo = { param($t, $p) @($t.Info.Values | ForEach-Object { [IO.Path]::GetFullPath($_) }) -contains [IO.Path]::GetFullPath($p) }
+        $xdg = Join-Path $tmp 'txdg'
+        $null = git -C $repo config core.excludesFile (Join-Path $tmp 'ex.ignore').Replace('\', '/') 2>&1
+        $null = git -C $repo config core.attributesFile (Join-Path $tmp 'at.attributes').Replace('\', '/') 2>&1
         Set-RinneFake $null
         $script:IntegrityTargets = $null
         try {
-            $env:XDG_CONFIG_HOME = $null
+            $env:XDG_CONFIG_HOME = $xdg
             $env:GIT_CONFIG_GLOBAL = Join-Path $tmp 'g.gitconfig'
             $tg = Get-CloneIntegrityTargets -Repo $repo
+            # 构建新建 XDG 下的全局忽略文件（git 不用任何配置项就会读它）：指纹里这一项变了
+            $fi = { Get-CloneFingerprint ([pscustomobject]@{ Configs = [ordered]@{}; Hooks = $null; Records = $null; Node = $null; Cards = $null; Info = $tg.Info }) }
+            $f0 = & $fi
+            $null = New-Item -ItemType Directory -Force -Path (Join-Path $xdg 'git')
+            Set-Content -LiteralPath (Join-Path $xdg 'git/ignore') -Value 'stray.txt'
+            $xdgChanged = @(Compare-CloneFingerprint $f0 (& $fi))
+            $env:XDG_CONFIG_HOME = $null
             $env:GIT_CONFIG_GLOBAL = Join-Path $tmp 'missing.gitconfig'
             $env:GIT_CONFIG_SYSTEM = Join-Path $tmp 'missing-system.gitconfig'
             $tm = Get-CloneIntegrityTargets -Repo $repo
@@ -1034,6 +1064,12 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '判据文件清单：系统级配置照 git var GIT_CONFIG_SYSTEM 列上（还不存在的也算）' $false (-not (& $has $tm (Join-Path $tmp 'missing-system.gitconfig')))
         Add-RinneCase $cases '判据文件清单：共享 .git 的 info/exclude 与 info/attributes 都在' $false (-not (
                 [IO.Path]::GetFullPath($tg.Info['.git/info/exclude']) -eq [IO.Path]::GetFullPath((Join-Path $repo '.git/info/exclude')) -and $tg.Info.Contains('.git/info/attributes')))
+        Add-RinneCase $cases '判据文件清单：XDG_CONFIG_HOME 下的 git/ignore 与 git/attributes、core.excludesFile 与 core.attributesFile 指的文件都在' $false (-not (
+                (& $hasInfo $tg (Join-Path $xdg 'git/ignore')) -and (& $hasInfo $tg (Join-Path $xdg 'git/attributes')) -and
+                (& $hasInfo $tg (Join-Path $tmp 'ex.ignore')) -and (& $hasInfo $tg (Join-Path $tmp 'at.attributes'))))
+        Add-RinneCase $cases '判据文件清单：HOME 下的 .config/git/ignore 与 .config/git/attributes（还不存在）也在' $false (-not (
+                (& $hasInfo $th (Join-Path $tHome '.config/git/ignore')) -and (& $hasInfo $th (Join-Path $tHome '.config/git/attributes'))))
+        Add-RinneCase $cases '指纹：构建新建 XDG 下的全局忽略文件，这一项变了' $true ($xdgChanged.Count -eq 1 -and $xdgChanged[0] -match '^用户级 git/ignore ')
         # include 查询出错（退出码不是 0 也不是 1）：抛错，不当成没有 include
         Set-RinneFake (New-RinneFake -Routes ([ordered]@{
                     ' rev-parse --path-format=absolute --git-common-dir$' = { (Join-Path $repo '.git') }
@@ -1404,6 +1440,7 @@ function Invoke-SelfTest {
             Add-RinneCase $cases '合并后构建：构建之后主 clone 的工作树不干净，判红并写明' $true (& $hit 'dirty' '主 clone 的工作树')
             Add-RinneCase $cases '合并后构建：构建之后主 clone 的 HEAD 变了，判红并写明' $true (& $hit 'head' '主 clone 的 HEAD')
             Add-RinneCase $cases '合并后构建：构建改了共享 .git 里的 info/exclude，判红并写明' $true (& $hit 'exclude' '\.git/info/exclude')
+            Add-RinneCase $cases '合并后构建：构建改了用户级的全局忽略文件，判红并写明' $true (& $hit 'global-ignore' '用户级 git/ignore')
             # 判据文件变了（例如 git 配置里多了会执行代码的项）：之后不再跑 git——不查主 clone 的工作区、不 abort wt/tip-3 的合并
             $c0 = $tree.Calls; $tipOps.Clear()
             $null = Invoke-MergeCheck 3 $cid
