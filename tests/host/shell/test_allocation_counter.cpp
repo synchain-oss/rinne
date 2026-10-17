@@ -25,11 +25,15 @@ struct alignas(64) Wide
     char bytes[64];
 };
 
-// 写一次 volatile，免得编译器把成对的分配与释放整个消掉
+// 把指针存进全局的 volatile，让它逃出当前函数。只写一次 volatile 挡不住 clang 把小块的 new / delete
+// 成对改成栈上变量（mac 上就发生过），那样计数器什么也看不到
+volatile void* gEscape = nullptr;
+
 template<typename T>
 void touch(T* p)
 {
     *reinterpret_cast<volatile char*>(p) = 1;
+    gEscape = p;
 }
 
 } // namespace
