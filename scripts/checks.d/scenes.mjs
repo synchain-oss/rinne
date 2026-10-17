@@ -7,7 +7,8 @@ import { checkTree, selfTest } from "../check-scenes.mjs";
 export default {
     name: "scenes",
     group: "docs",
-    inputs: ["web-preview/mock/scenarios.js"],
+    // 场景表是必需的：缺失由 run() 判红，不能放进 inputs 让运行器记成跳过
+    inputs: [],
     async run(ctx) {
         const { problems } = await checkTree(ctx.root);
         return { ok: problems.length === 0, lines: problems };

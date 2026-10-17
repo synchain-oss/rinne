@@ -37,7 +37,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
     const core = createCore({ role: "output", events: EVENTS, storage: store, timers, opts });
 
     const model = {
-        version: "0.9.0",
+        version: "0.0.0-preview",
         host: "preview",
         sampleRate: 48000,
         blockSize: 512,
@@ -143,7 +143,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             const free = GROUPS.find((g) => g !== model.group && !(model.pair.groupMask & (1 << GROUPS.indexOf(g))));
             if (!free) return { ok: false, reason: "no-free-group" };
             model.group = free;
-            model.groupOrigin = "auto";
+            model.groupOrigin = "auto"; // 重新配对是按智能默认重选，所以仍标「自动」
             model.pair.state = "searching";
             core.scheduleEcho();
             return { ok: true, group: free };

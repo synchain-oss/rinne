@@ -89,7 +89,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
     const core = createCore({ role: "input", events: EVENTS, storage: store, timers, opts });
 
     const model = {
-        version: "0.9.0",
+        version: "0.0.0-preview",
         host: "preview",
         sampleRate: 48000,
         blockSize: 512,
@@ -245,7 +245,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
             const v = coerceParam(id, value);
             if (v === undefined) return { ok: false, reason: "bad-value" };
             model.values[id] = v;
-            model.presetDirty = true;
+            if (!PRESET_EXEMPT.includes(id)) model.presetDirty = true; // 环路开关、限制器和上限不进预设
             const seq = core.nextSeq();
             core.timers.setTimeout(() => core.emit("rinne.params", { seq, values: { ...model.values } }), 0);
             core.scheduleEcho();
@@ -295,7 +295,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
             const free = GROUPS.find((g) => g !== model.group && !(model.pair.groupMask & (1 << GROUPS.indexOf(g))));
             if (!free) return { ok: false, reason: "no-free-group" };
             model.group = free;
-            model.groupOrigin = "auto";
+            model.groupOrigin = "manual"; // 用户点按钮选的，之后不再自动迁组
             model.pair.state = "searching";
             core.scheduleEcho();
             return { ok: true, group: free };

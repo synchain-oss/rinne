@@ -9,7 +9,8 @@ import { renderReport, runAgainstDesign, selfTest } from "../check-design-manife
 export default {
     name: "design-manifest",
     group: "docs",
-    inputs: ["web-preview/mock/scenarios.js", "web-preview/tests/lib/browser.mjs"],
+    // 场景表与浏览器库是必需的：缺失由 run() 判红；设计稿或浏览器缺失才跳过
+    inputs: [],
     async run(ctx) {
         const file = locateDesign(ctx.root);
         if (!file) return { ok: true, skip: "设计稿还没有入库（docs/design/ 不存在）" };

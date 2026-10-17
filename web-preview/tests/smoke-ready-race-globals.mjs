@@ -234,6 +234,15 @@ for (const [url, want] of [
 
 // ---- 新增动作 ----
 {
+    const d = open("input", "auto=0", stores());
+    const dirtyOf = () => lastState(d).preset.dirty;
+    d.mock.setLimiter(false);
+    d.mock.setParam("loop_on", false);
+    d.mock.setParam("ceiling", -10);
+    run.eq(dirtyOf(), false, "limiter、loop_on、ceiling 不进预设，改它们不弄脏预设");
+    d.mock.setParam("feedback", 10);
+    run.eq(dirtyOf(), true, "改 feedback 弄脏预设");
+    d.stop();
     const s = open("input", "scenario=in-conflict&auto=0", stores());
     const m = s.mock;
     run.check(m.setGuardOn(false).ok && m.setGuardOn("x").ok === false, "setGuardOn：只收布尔");

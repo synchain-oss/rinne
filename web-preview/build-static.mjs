@@ -6,10 +6,11 @@
 // 导出之后自检这棵树：任何 http(s) 外链、任何网络调用（fetch、XMLHttpRequest、WebSocket、sendBeacon、EventSource）都判红，
 // 放行的只有两种字面量：SVG 命名空间和 JUCE 辅助脚本的宿主伪源（都不是网络请求）。
 //   node web-preview/build-static.mjs [--out <目录>] [--check]
-// --out 缺省为 build/web-preview-static（build/ 已被忽略）。--check 只自检不写文件（自检对象是仓库里的源树）。
+// --out 缺省为 build/web-preview-static（build/ 已被忽略）；只允许 build/ 或系统临时目录之下，因为导出前会整个删掉重建。--check 只自检不写文件（自检对象是仓库里的源树）。
 // 退出码：0 通过；1 有外链或网络调用，或拷贝失败。
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +20,17 @@ const outDir = path.resolve(
     root,
     argv.includes("--out") ? argv[argv.indexOf("--out") + 1] : "build/web-preview-static",
 );
+
+/** 输出目录会被整个删掉重建，所以只允许放在仓库的 build/ 或系统临时目录之下，且不能就是这两个目录本身。 */
+function outDirProblem(dir) {
+    const under = (base) => {
+        const rel = path.relative(base, dir);
+        return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+    };
+    return under(path.join(root, "build")) || under(os.tmpdir())
+        ? null
+        : `--out 只能放在 build/ 或系统临时目录之下（不能是它们本身），实得 ${dir}`;
+}
 
 /** 进入导出的目录与文件：web/ 全部，web-preview/ 去掉测试、截图、脚本。 */
 const INCLUDE = [
@@ -77,6 +89,11 @@ for (const { dir, skip } of INCLUDE) {
 
 const problems = verify(files);
 if (!argv.includes("--check")) {
+    const bad = outDirProblem(outDir);
+    if (bad) {
+        console.error(`build-static：${bad}`);
+        process.exit(1);
+    }
     fs.rmSync(outDir, { recursive: true, force: true });
     for (const f of files) {
         const dest = path.join(outDir, f.rel);

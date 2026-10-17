@@ -23,7 +23,7 @@ export const PARAM_IDS = [
 /**
  * 参数定义。type：float 连续、bool 开关、enum 枚举（values 为取值表）。
  * auto 是宿主能否自动化；mock 只用它在文档里对拍，不影响行为。
- * 范围与默认值的真源是参数卡，这里取已批准计划的表。
+ * 范围与默认值的最终冻结归参数文档；这里只是预览用的取值，与 UI_BRIDGE.md 的参数表逐项对拍。
  */
 export const PARAM_DEFS = {
     feedback: { type: "float", min: 0, max: 150, def: 0, auto: true },
