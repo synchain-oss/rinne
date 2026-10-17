@@ -40,6 +40,7 @@ bad("WebSocket", "web/a.js", "new WebSocket('ws://x');");
 bad("EventSource", "web/a.js", "new EventSource('/x');");
 bad("importScripts", "web/a.js", "importScripts('a.js');");
 bad("new Worker", "web/a.js", "new Worker('w.js');");
+bad("new SharedWorker", "web/a.js", "new SharedWorker('w.js');");
 bad("html 里的内联脚本", "web/a.html", "<script>fetch('/x')</script>");
 
 // 好例
