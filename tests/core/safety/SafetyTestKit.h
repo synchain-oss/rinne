@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "core/dsp/DspTestKit.h"
@@ -172,7 +173,8 @@ struct OpenLoop
     }
 };
 
-// 闭环：out = 干声 + 回送；环 = 清洗(out × 链增益)，D 个样本后读回
+// 闭环：out = 干声 + 回送；环 = 清洗(out × 链增益 + 插件自己加进去的信号)，D 个样本后读回。
+// D 可以在两次 run 之间改（环保留 maxDelay 个样本的历史）；引擎报给安全链的 D 默认跟着 delay 走，测试可以另设
 struct LoopSim
 {
     SafetyChain chain;
@@ -180,23 +182,32 @@ struct LoopSim
     Meters meters;
     std::int64_t delay;
     float chainGain;
+    std::function<float(std::int64_t)> inject; // 环内插件不经输入、自己吐出的信号；空 = 没有
     std::vector<float> ringLeft;
     std::vector<float> ringRight;
     std::int64_t n = 0;
 
-    LoopSim(double sampleRate, std::int64_t delaySamples, float gain)
-        : delay(delaySamples), chainGain(gain), ringLeft(static_cast<std::size_t>(delaySamples), 0.0f),
-          ringRight(static_cast<std::size_t>(delaySamples), 0.0f)
+    LoopSim(double sampleRate, std::int64_t delaySamples, float gain, std::int64_t maxDelay = 0)
+        : delay(delaySamples), chainGain(gain),
+          ringLeft(static_cast<std::size_t>(std::max(delaySamples, maxDelay) + 1), 0.0f),
+          ringRight(ringLeft.size(), 0.0f)
     {
         chain.prepare(sampleRate);
         controls.paired = true;
         controls.loopDelaySamples = delaySamples;
     }
 
+    void setDelay(std::int64_t samples)
+    {
+        delay = samples;
+        controls.loopDelaySamples = samples;
+    }
+
     // dry(n) 给第 n 个样本的干声（两声道相同）；probe(n, outL, outR, retL, retR) 观察每个样本
     template<typename Dry, typename Probe>
     void run(std::int64_t count, int blockLength, Dry&& dry, Probe&& probe)
     {
+        const auto size = static_cast<std::int64_t>(ringLeft.size());
         std::int64_t done = 0;
         while (done < count)
         {
@@ -204,21 +215,85 @@ struct LoopSim
             chain.beginBlock(controls);
             for (std::int64_t i = 0; i < len; ++i, ++n, ++done)
             {
-                const auto slot = static_cast<std::size_t>(n % delay);
-                float l = ringLeft[slot];
-                float r = ringRight[slot];
-                chain.processFront(l, r, n >= delay);
+                const bool valid = n >= delay;
+                const auto from = static_cast<std::size_t>(valid ? (n - delay) % size : 0);
+                float l = valid ? ringLeft[from] : 0.0f;
+                float r = valid ? ringRight[from] : 0.0f;
+                chain.processFront(l, r, valid);
                 const float d = dry(n);
                 chain.processBack(l, r, d, d);
                 const float outLeft = d + l;
                 const float outRight = d + r;
-                ringLeft[slot] = dsp::sanitizeSample(outLeft * chainGain);
-                ringRight[slot] = dsp::sanitizeSample(outRight * chainGain);
+                const float own = inject ? inject(n) : 0.0f;
+                const auto to = static_cast<std::size_t>(n % size);
+                ringLeft[to] = dsp::sanitizeSample(outLeft * chainGain + own);
+                ringRight[to] = dsp::sanitizeSample(outRight * chainGain + own);
                 probe(n, outLeft, outRight, l, r);
             }
             chain.publish(meters);
         }
     }
 };
+
+// 跑一段闭环并收集结论。dry 给干声
+struct LoopSetup
+{
+    float feedback = 0.0f;
+    float chainGain = 1.0f;
+    float returnGain = 1.0f; // g_ret：混合 25 % 是 0.5，50 % 及以上是 1
+    bool limiterOn = true;
+    bool guardOn = true;
+    float ceilingDb = engine::safety::kCeilingDefaultDb;
+    std::int64_t delay = 4800;
+    std::int64_t reportedDelay = -1; // < 0：引擎报的 D 就是环的真实延迟
+    double seconds = 8.0;
+    std::function<float(std::int64_t)> inject;
+};
+
+struct LoopResult
+{
+    bool guardEngaged = false;
+    bool tripped = false;
+    TripReason reason = TripReason::None;
+    std::int64_t tripSample = -1; // 第一次锁存时的样本
+    float maxReturn = 0.0f;
+    float maxReduction = 0.0f;
+    float maxEstimate = 0.0f; // 链增益估计的最大值
+};
+
+template<typename Dry>
+LoopResult runLoop(const LoopSetup& setup, Dry&& dry)
+{
+    LoopSim sim(kRate, setup.delay, setup.chainGain);
+    sim.controls.feedback = setup.feedback;
+    sim.controls.returnGain = setup.returnGain;
+    sim.controls.limiterOn = setup.limiterOn;
+    sim.controls.guardOn = setup.guardOn;
+    sim.controls.ceilingDb = setup.ceilingDb;
+    if (setup.reportedDelay >= 0)
+        sim.controls.loopDelaySamples = setup.reportedDelay;
+    sim.inject = setup.inject;
+    LoopResult res;
+    const std::int64_t total = samplesOf(setup.seconds);
+    for (std::int64_t done = 0; done < total; done += 256)
+    {
+        sim.run(256, 256, dry, [&](std::int64_t n, float, float, float l, float r) {
+            res.maxReturn = std::max(res.maxReturn, std::max(std::fabs(l), std::fabs(r)));
+            res.guardEngaged = res.guardEngaged || sim.chain.machine().guardEngaged();
+            res.maxEstimate = std::max(res.maxEstimate, sim.chain.chainGainEstimate());
+            if (res.tripSample < 0 && sim.chain.machine().latched())
+                res.tripSample = n;
+        });
+        res.maxReduction = std::max(res.maxReduction, sim.meters.limiterReductionDb.take());
+    }
+    res.tripped = sim.chain.machine().latched();
+    res.reason = sim.chain.machine().tripReason();
+    return res;
+}
+
+inline float dbfs(double db)
+{
+    return static_cast<float>(std::pow(10.0, db / 20.0));
+}
 
 } // namespace rinne::test

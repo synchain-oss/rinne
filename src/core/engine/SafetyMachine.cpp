@@ -457,6 +457,9 @@ void SafetyChain::prepare(double sampleRate) noexcept
     tapMax_ = 0.0f;
     sentMax_ = 0.0f;
     chainAmplifies_ = false;
+    requestedDelay_ = 0;
+    delayInUse_ = 0;
+    delayDropAt_ = -1;
     minLimiterGain_ = 1.0f;
     // 第一块的控制量直接落定，不做斜坡：这时 g_safety 是 0，落定没有可听的跳变
     snapPending_ = true;
@@ -467,7 +470,19 @@ void SafetyChain::beginBlock(const SafetyControls& c) noexcept
 {
     feedback_ = clampUnit(c.feedback, safety::kFeedbackMax);
     limiterOn_ = c.limiterOn;
-    loopDelay_ = c.loopDelaySamples > 0 ? c.loopDelaySamples : 0;
+    // D 变大立即用；变小时旧的较大 D 继续用，等旧内容全部移出回读窗（旧 D + 1 s + 100 ms）且 D 不再变才换
+    const std::int64_t delay = c.loopDelaySamples > 0 ? c.loopDelaySamples : 0;
+    if (delay >= delayInUse_)
+    {
+        delayInUse_ = delay;
+        delayDropAt_ = -1;
+    }
+    else if (delay != requestedDelay_ || delayDropAt_ < 0)
+    {
+        delayDropAt_ = machine_.samplesProcessed() + delayInUse_ + chainLatency_ +
+                       safety::kChainTapHops * tapHistory_.hopSamples();
+    }
+    requestedDelay_ = delay;
     float ceilingDb = dsp::isFiniteSample(c.ceilingDb) ? c.ceilingDb : safety::kCeilingDefaultDb;
     ceilingDb = ceilingDb < safety::kCeilingMinDb ? safety::kCeilingMinDb : ceilingDb;
     ceilingDb = ceilingDb > safety::kCeilingMaxDb ? safety::kCeilingMaxDb : ceilingDb;
@@ -575,8 +590,11 @@ void SafetyChain::processBack(float& left, float& right, float dryLeft, float dr
     }
 
     SafetyObservation o;
+    // 超大值只计回送路径自己放大出来的电平（见 SafetyMachine.h 里 kHugeLevel 的说明）；g = 0 时状态机整个不计
+    const float tapTerm = chainAmplifies_ ? tapPeak_ : 0.0f;
+    const float gainTerm = (chainAmplifies_ || gain > 1.0f) ? xPeak : 0.0f;
     o.contributing = gain > 0.0f;
-    o.hugeLevel = tapPeak_ > xPeak ? tapPeak_ : xPeak;
+    o.hugeLevel = tapTerm > gainTerm ? tapTerm : gainTerm;
     o.guardHot = hot;
     o.internalNonFinite = nonFinite;
     machine_.observe(o);
@@ -587,8 +605,13 @@ void SafetyChain::processBack(float& left, float& right, float dryLeft, float dr
 
 void SafetyChain::updateChainGain() noexcept
 {
+    if (delayDropAt_ >= 0 && machine_.samplesProcessed() >= delayDropAt_)
+    {
+        delayInUse_ = requestedDelay_;
+        delayDropAt_ = -1;
+    }
     const std::int64_t hop = sentHistory_.hopSamples();
-    std::int64_t lagHops = (loopDelay_ + chainLatency_ + hop - 1) / hop;
+    std::int64_t lagHops = (delayInUse_ + chainLatency_ + hop - 1) / hop;
     const std::int64_t maxLag = safety::kChainHistoryHops - safety::kChainTapHops;
     if (lagHops > maxLag)
         lagHops = maxLag;
@@ -633,6 +656,9 @@ void SafetyChain::playEdgeReset() noexcept
     tapMax_ = 0.0f;
     sentMax_ = 0.0f;
     chainAmplifies_ = false;
+    // 历史清空了，旧 D 的内容也就不在了
+    delayInUse_ = requestedDelay_;
+    delayDropAt_ = -1;
     nearRun_ = false;
     machine_.playEdgeReset();
 }

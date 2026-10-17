@@ -46,7 +46,10 @@ inline constexpr float kCeilingMinDb = -24.0f;
 inline constexpr float kCeilingMaxDb = 0.0f;
 inline constexpr float kCeilingDefaultDb = -6.0f;
 
-// 超大值：电平 ≥ +12 dBFS（10^(12/20)），连续 100 ms；两个超限样本相隔不超过 10 ms 仍算连续
+// 超大值：电平 ≥ +12 dBFS（10^(12/20)），连续 100 ms；两个超限样本相隔不超过 10 ms 仍算连续。
+// 看的电平是 max(|tap|, |x|)，但只计「回送路径自己放大出来的」部分：|tap| 只在链增益估计 > 0 dB 时计入，
+// |x|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；回送不活动（g = 0）时两项都不计。干声随整条通道进环，
+// 恒等链下 |tap| 就约等于干声，单看绝对阈值会对热轨道误跳；链不放大且 g ≤ 1 时 |x| ≤ |tap|，同理。
 inline constexpr float kHugeLevel = 3.98107171f;
 inline constexpr double kHugeSeconds = 0.100;
 inline constexpr double kHugeGapSeconds = 0.010;
@@ -64,7 +67,10 @@ inline constexpr double kGuardFloorSeconds = 1.0;
 // 防误报：反馈 ≤ 90 % 且链增益 ≤ 0 dB 时零介入
 inline constexpr float kGuardFeedbackLimit = 0.90f;
 
-// 链增益估计：最近 100 ms 回读的峰值 ÷ 同期送出信号的峰值；送出一侧往前多看 D + 1 s，盖住环路延迟与环内插件的延迟
+// 链增益估计：最近 100 ms 回读的峰值 ÷ 覆盖 [0, D + 1 s] 时延的送出峰值。多出的 1 s 容纳环内插件自己的延迟；
+// 超过 1 s 时估计可能偏大，只会让门打开、让超大值多计，都偏保守。送出为 0 而回读不为 0 时判为放大（坏插件在
+// 静音时自己吐信号）。D 变小时旧的较大 D 继续用到旧内容全部移出回读窗为止，所以交叉淡化期间按两个读头中较大的计。
+// 峰值历史是对象里的定长环：1024 格 = 10.24 s，盖住 D 最大 4000 ms + 1 s + 100 ms，音频线程上没有任何分配。
 inline constexpr int kChainTapHops = 10;
 inline constexpr double kChainLatencySeconds = 1.0;
 inline constexpr int kChainHistoryHops = 1024;
@@ -88,6 +94,7 @@ struct SafetyControls
     std::uint32_t recoverSeq = 0;
     bool paired = false; // 有对端且能读环
     bool stalled = false; // 写头不动（断档）
+    // 当前环路延迟 D_eff（样本）；改 D 的交叉淡化期间给两个读头中较大的那个。链增益估计的窗口要盖住它
     std::int64_t loopDelaySamples = 0;
 };
 
@@ -213,7 +220,8 @@ public:
     void beginBlock(const SafetyControls& controls) noexcept;
     // ①②：就地处理读头读出的一对样本。tapValid 表示本样本来自有效的环数据（等首个有效读样本靠它）
     void processFront(float& left, float& right, bool tapValid) noexcept;
-    // ⑥–⑨：就地处理音色级的输出，结果就是回送。dry 是已乘 g_dry 的干声，只用来估计链增益，不在这里相加
+    // ⑥–⑨：就地处理音色级的输出，结果就是回送。dry 是已乘 g_dry 的干声：本样本送进环路的信号 = dry + 回送，
+    // 只用来估计链增益，相加由引擎做
     void processBack(float& left, float& right, float dryLeft, float dryRight) noexcept;
     void requestFadeIn(FadeReason reason) noexcept { machine_.requestFadeIn(reason); }
     // 起播沿复位：DSP 状态、平滑器落到目标、判据与链增益估计清零，再交给状态机
@@ -225,8 +233,11 @@ public:
     const SafetyMachine& machine() const noexcept { return machine_; }
     // 上一个样本 ⑥ 用的总增益
     float lastGain() const noexcept { return lastGain_; }
-    // 链增益估计（线性）；送出为 0 而回读不为 0 时是 +∞，两者都为 0 时是 0
+    // 链增益估计（线性）；送出为 0 而回读不为 0 时是 +∞，两者都为 0 时是 0。每 10 ms 格更新一次
     float chainGainEstimate() const noexcept;
+    bool chainAmplifies() const noexcept { return chainAmplifies_; }
+    // 链增益估计实际用的 D（D 变小时暂时保留旧值）
+    std::int64_t estimatorDelay() const noexcept { return delayInUse_; }
     // 防误报门是否关着（关着时失控保护不计任何命中）
     bool guardSuppressed() const noexcept;
 
@@ -251,7 +262,9 @@ private:
     bool snapPending_ = true;
     float feedback_ = 0.0f;
     bool limiterOn_ = true;
-    std::int64_t loopDelay_ = 0;
+    std::int64_t requestedDelay_ = 0;
+    std::int64_t delayInUse_ = 0;
+    std::int64_t delayDropAt_ = -1; // D 变小时，到这个样本才换成新的 D；-1 = 没有待换的
     std::int64_t chainLatency_ = 0;
     std::int64_t nearGap_ = 1;
 
