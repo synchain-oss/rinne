@@ -11,8 +11,14 @@
 # 按 sha256 装；sccache 按 .sccache-version 与 .sccache-sha256 装；WebView2 包由 CMake 按 sha256 取。
 # artifact：Rinne-win64-{pr<N>|dispatch}-<sha40>（release 为 Rinne-release-win64-<tag>），两个插件在顶层，tools-bin 下有
 # 可执行文件时放进 tools/；探针另传 Rinne-probe-win64-<sha40>。<sha40> 一律是实际检出、构建的那个提交。
+# core-sanitizers（ubuntu、clang-18、RINNE_CORE_ONLY=ON）：asan_ubsan 与 tsan 两个配置各自配置、构建、跑全部 ctest；不需要 JUCE。
+# web-smoke：web-preview/tests/run-all.mjs 存在就跑，不存在时打印 SKIP 注记并通过（页面冒烟随 web 预览一起到）。
+# 这三个 job 的名字就是 dev / prod ruleset 里 required check 的 context（见 .github/required-checks.json），不要改名，也不要加 job 级 if。
+# run-name：`Build & Validate <事件> <40 位提交> <nonce>`。dispatch.ps1 给每次触发带一个随机 nonce，靠它在 run-name 里精确认出
+# 自己触发的那次运行；nonce 没给时末尾就是空的。
 # concurrency：PR 按 PR 号分组、新推送取消旧的；dispatch 与 release 按提交分组、不取消，每次运行都对应确定的一次提交。
 name: Build & Validate
+run-name: Build & Validate ${{ github.event_name }} ${{ inputs.ref || github.sha }} ${{ inputs.nonce }}
 
 on:
   pull_request:
@@ -29,6 +35,10 @@ on:
         required: false
         type: boolean
         default: false
+      nonce:
+        description: 随机串，只用来让 dispatch.ps1 在 run-name 里认出自己触发的那次运行；可以不填
+        required: false
+        type: string
   workflow_call:
     inputs:
       release-tag:
@@ -68,7 +78,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           WANT_REF: ${{ inputs.ref }}
           RELEASE_TAG: ${{ inputs.release-tag }}
+          NONCE: ${{ inputs.nonce }}
         run: |
+          # nonce 只进 run-name，这里仍限死字符集：不让任何不可信文本流进后面的步骤
+          if ($env:NONCE -and $env:NONCE -notmatch '^[0-9A-Za-z._-]{1,64}$') { Write-Error 'nonce 只能是 1 到 64 个字母、数字、点、下划线或连字符'; exit 1 }
           $sha = "$(git rev-parse HEAD)".Trim()
           if ($sha -notmatch '^[0-9a-f]{40}$') { Write-Error '取不到检出的提交'; exit 1 }
           # ref 只收 40 位提交号：分支名、tag、短 sha 都会变，构建与 concurrency 组就对应不到确定的提交
@@ -150,6 +163,14 @@ jobs:
       - name: Shared-memory prefix is the default
         run: pwsh -NoProfile -File scripts/build.ps1 -CheckCache
 
+      # 构建出来的 .vst3 里 moduleinfo.json 的 CID、名称、厂商、子类与版本，要和 tests/golden/identity.json 对得上
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: VST3 identity matches the golden
+        run: node scripts/checks.d/contract-static-identity.mjs --moduleinfo build
+
       # sccache 失效时是静默的零命中，CI 照样绿、只是慢回冷编；打印命中率，顺手停掉服务让索引落盘
       - name: Compiler cache stats
         if: always()
@@ -183,6 +204,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File scripts/build.ps1 -CheckCache -Probe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/checks.d/contract-static-identity.mjs --moduleinfo build-probe --probe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File scripts/build.ps1 -Ci -Probe -NoBuild -Validate -Stage (Join-Path $env:RUNNER_TEMP 'dist-probe')
 
       - name: Upload probe plugins
@@ -204,3 +227,86 @@ jobs:
             build-probe/logs
           if-no-files-found: ignore
           retention-days: 7
+
+  # sanitizer 只作用于 rinne_core 与它的测试（RINNE_SANITIZE 经 rinne_core 的 PUBLIC 选项传给测试），所以不需要 JUCE，Linux 上就能跑。
+  # 两个配置在同一个 job 里依次跑：required check 的 context 是 job 名，矩阵会把名字变成 core-sanitizers (asan_ubsan)。
+  # ctest 里包含 TIMEOUT 门禁（ctest_timeouts_*），缺 TIMEOUT 的测试在这里同样会变红。
+  core-sanitizers:
+    name: core-sanitizers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || inputs.release-tag || '' }}
+          persist-credentials: false
+
+      - name: Checked-out commit is the requested one
+        env:
+          WANT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ -n "$WANT_REF" ] && ! printf '%s' "$WANT_REF" | grep -Eq '^[0-9a-f]{40}$'; then echo 'ref 必须是 40 位提交号' >&2; exit 1; fi
+          if [ -n "$WANT_REF" ] && [ "$WANT_REF" != "$sha" ]; then echo "检出的是 $sha，不是要构建的 $WANT_REF" >&2; exit 1; fi
+          echo "sha=$sha"
+
+      # GitHub 的 Ubuntu 24.04 镜像把 mmap 随机化放到 32 位，clang 18 的 sanitizer 在这种布局下起不来（unexpected memory mapping）
+      - name: Lower mmap entropy for sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          clang++-18 --version
+          cmake --version
+          pwsh --version
+
+      - name: asan_ubsan
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan_ubsan -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DRINNE_CORE_ONLY=ON -DRINNE_SANITIZE=asan_ubsan
+          cmake --build build-asan_ubsan --parallel
+          ctest --test-dir build-asan_ubsan --output-on-failure --no-tests=error
+
+      # 金丝雀：故意有问题的小程序必须被拦住，否则上面的绿不可信（脚本里每个程序不报就失败）
+      - name: asan_ubsan canaries must fire
+        run: bash tests/sanitizer-canary/run.sh asan_ubsan
+
+      - name: tsan
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DRINNE_CORE_ONLY=ON -DRINNE_SANITIZE=tsan
+          cmake --build build-tsan --parallel
+          ctest --test-dir build-tsan --output-on-failure --no-tests=error
+
+      - name: tsan canary must fire
+        run: bash tests/sanitizer-canary/run.sh tsan
+
+  # 页面冒烟。web-preview/tests/run-all.mjs 随 web 预览到位之前不存在，此时打印 SKIP 注记并通过；到位之后它就是门禁本身。
+  web-smoke:
+    name: web-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || inputs.release-tag || '' }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Web smoke
+        run: |
+          set -euo pipefail
+          if [ ! -f web-preview/tests/run-all.mjs ]; then
+            echo '::notice title=web-smoke::SKIP: web-preview/tests/run-all.mjs does not exist yet, nothing to run'
+            exit 0
+          fi
+          node web-preview/tests/run-all.mjs

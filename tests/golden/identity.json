@@ -1,0 +1,142 @@
+{
+  "formats": {
+    "base": [
+      "VST3"
+    ],
+    "apple": [
+      "AU"
+    ]
+  },
+  "definitions": {
+    "JUCE_VST3_CAN_REPLACE_VST2": "0",
+    "JUCE_FORCE_USE_LEGACY_PARAM_IDS": "0",
+    "JUCE_USE_STUDIO_ONE_COMPATIBLE_PARAMETERS": "1"
+  },
+  "plugins": {
+    "input": {
+      "file": "src/input/CMakeLists.txt",
+      "target": "RinneInput",
+      "identity": {
+        "formal": {
+          "PRODUCT_NAME": [
+            "Rinne Input"
+          ],
+          "PLUGIN_CODE": [
+            "Rnni"
+          ],
+          "BUNDLE_ID": [
+            "com.synchain.rinne.input"
+          ]
+        },
+        "probe": {
+          "PRODUCT_NAME": [
+            "Rinne Probe Input"
+          ],
+          "PLUGIN_CODE": [
+            "Rnpi"
+          ],
+          "BUNDLE_ID": [
+            "com.synchain.rinne.probe.input"
+          ]
+        }
+      },
+      "shared": {
+        "PLUGIN_MANUFACTURER_CODE": [
+          "Snch"
+        ],
+        "FORMATS": [
+          "${RINNE_PLUGIN_FORMATS}"
+        ],
+        "VST3_CATEGORIES": [
+          "Fx",
+          "Delay"
+        ],
+        "AU_MAIN_TYPE": [
+          "kAudioUnitType_Effect"
+        ],
+        "IS_SYNTH": [
+          "FALSE"
+        ],
+        "NEEDS_MIDI_INPUT": [
+          "FALSE"
+        ],
+        "NEEDS_MIDI_OUTPUT": [
+          "FALSE"
+        ],
+        "IS_MIDI_EFFECT": [
+          "FALSE"
+        ],
+        "AU_SANDBOX_SAFE": [
+          "FALSE"
+        ]
+      }
+    },
+    "output": {
+      "file": "src/output/CMakeLists.txt",
+      "target": "RinneOutput",
+      "identity": {
+        "formal": {
+          "PRODUCT_NAME": [
+            "Rinne Output"
+          ],
+          "PLUGIN_CODE": [
+            "Rnno"
+          ],
+          "BUNDLE_ID": [
+            "com.synchain.rinne.output"
+          ]
+        },
+        "probe": {
+          "PRODUCT_NAME": [
+            "Rinne Probe Output"
+          ],
+          "PLUGIN_CODE": [
+            "Rnpo"
+          ],
+          "BUNDLE_ID": [
+            "com.synchain.rinne.probe.output"
+          ]
+        }
+      },
+      "shared": {
+        "PLUGIN_MANUFACTURER_CODE": [
+          "Snch"
+        ],
+        "FORMATS": [
+          "${RINNE_PLUGIN_FORMATS}"
+        ],
+        "VST3_CATEGORIES": [
+          "Fx",
+          "Delay"
+        ],
+        "AU_MAIN_TYPE": [
+          "kAudioUnitType_Effect"
+        ],
+        "IS_SYNTH": [
+          "FALSE"
+        ],
+        "NEEDS_MIDI_INPUT": [
+          "FALSE"
+        ],
+        "NEEDS_MIDI_OUTPUT": [
+          "FALSE"
+        ],
+        "IS_MIDI_EFFECT": [
+          "FALSE"
+        ],
+        "AU_SANDBOX_SAFE": [
+          "FALSE"
+        ]
+      }
+    }
+  },
+  "moduleinfo": {
+    "vendor": "Synchain",
+    "cidPrefix": "ABCDEF01",
+    "classes": {
+      "Audio Module Class": "9182FAEB",
+      "Component Controller Class": "1234ABCD",
+      "Plugin Compatibility Class": "C0DEF00D"
+    }
+  }
+}

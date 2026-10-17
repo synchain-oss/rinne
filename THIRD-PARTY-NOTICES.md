@@ -185,7 +185,8 @@ Not linked into the plugins and not distributed with them.
 
 ### Catch2
 
-- Used only by the unit-test executables, fetched at configure time at the pinned tag. Not distributed.
+- Used only by the unit-test executables, fetched at configure time at the pinned tag (v3.5.4, resolved to a fixed commit
+  in `tests/CMakeLists.txt`). Not distributed.
 - Licence: Boost Software License 1.0 (`catch2.LICENSE.txt`). Copyright line, from the source headers:
   `Copyright Catch2 Authors`.
 
