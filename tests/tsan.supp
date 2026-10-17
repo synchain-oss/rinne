@@ -1,0 +1,4 @@
+# ThreadSanitizer 的抑制清单，tests/CMakeLists.txt 在 tsan 配置下经 TSAN_OPTIONS=suppressions= 交给每条 ctest。
+# 当前为空：rinne_core 与测试的告警都要修，不抑制。
+# 只有来自第三方库内部（Catch2、标准库）且确认是误报的，才允许加一行，并写明版本和理由；
+# 绝不为第一方代码里的竞争加抑制。格式见 clang 文档：race:<符号或路径片段>
