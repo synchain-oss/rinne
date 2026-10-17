@@ -32,6 +32,9 @@ if (-not (Test-RinnePwshVersion $PSVersionTable.PSVersion.Major $PSVersionTable.
 
 # 起子进程时不把本进程调用方的管道交给它（Invoke-WithoutStdInherit）
 Import-Module (Join-Path $PSScriptRoot '../../lib/StdHandles.psm1') -ErrorAction Stop
+# 合并后构建的锁存标记在时，导入就失败（见 scripts/lib/PremergeLatch.psm1）：包装脚本都先导入本模块，之后一条 git、gh 都不跑
+Import-Module (Join-Path $PSScriptRoot '../../lib/PremergeLatch.psm1') -ErrorAction Stop
+Assert-RinneNoLatch -RepoRoot $script:RepoRoot
 
 function Get-RinneRepo { $script:Repo }
 function Get-RinneMaintainer { $script:Maintainer }

@@ -18,7 +18,8 @@
 # json 是自报的：pr-merge 只能把它与 head 绑定，证明不了它出自本脚本，所以合并时会用主 clone 的 Tiers.psm1 按 PR 的
 # 文件清单重算最低档。字体检查要用的 Python：RINNE_PYTHON 没设时取 git config rinne.python（bootstrap-tools 建的 venv）
 # 设进本进程的 RINNE_PYTHON，交给各 gate 起的检查。最后一行固定为 `PASS n / FAIL n / SKIP n / FLAKY n  EXIT=x  @<sha7>  <档>  <耗时>`，不含路径。
-# 退出码：0 通过；1 有 FAIL 或工作区不干净；3 等锁超时；4 DEFER。
+# 合并后构建的锁存标记（lib/PremergeLatch.psm1）在时，开头就打印原因、退出 1，一条 git 都不跑（-SelfTest 也一样）。
+# 退出码：0 通过；1 有 FAIL、工作区不干净或锁存；3 等锁超时；4 DEFER。
 [CmdletBinding()]
 param(
     [switch]$Quick, [switch]$Standard, [switch]$Full, [switch]$SelfTest, [switch]$Fetch,
@@ -31,6 +32,9 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ }
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $Root = Split-Path -Parent $PSScriptRoot
+# 合并后构建的锁存标记在时（lib/PremergeLatch.psm1），在跑任何 git 之前停下
+Import-Module (Join-Path $PSScriptRoot 'lib/PremergeLatch.psm1') -Force -ErrorAction Stop
+try { Assert-RinneNoLatch -RepoRoot $Root } catch { Write-Host $_.Exception.Message; exit 1 }
 Import-Module (Join-Path $PSScriptRoot 'lib/Locks.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'lib/Tiers.psm1') -Force -ErrorAction Stop
 # gates.d 里起构建脚本的 gate 用它的 Invoke-WithoutStdInherit：子进程拿不到运行器调用方的管道
@@ -159,6 +163,7 @@ function Invoke-SelfTest {
     & $check '退出码：只有资源超时是 3，全过是 0' $false ((@($ec)[3..4] -join ',') -eq '3,0')
     Test-RinneLocks | ForEach-Object { $cases.Add($_) }
     Test-StdHandles | ForEach-Object { $cases.Add($_) }
+    Test-PremergeLatch | ForEach-Object { $cases.Add($_) }
     $null = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'bootstrap-tools.ps1') -SelfTest 2>&1
     & $check 'bootstrap-tools.ps1 -SelfTest 通过' $false ($LASTEXITCODE -eq 0)
     Invoke-EndToEnd $check
@@ -177,7 +182,7 @@ function Invoke-EndToEnd($Check) {
     try {
         $null = New-Item -ItemType Directory -Path (Join-Path $repo 'scripts/lib'), (Join-Path $repo 'scripts/gates.d'), (Join-Path $tmp '_logs')
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $repo 'scripts/gates.ps1')
-        foreach ($f in 'Tiers.psm1', 'tier-rules.json', 'StdHandles.psm1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/$f") -Destination (Join-Path $repo "scripts/lib/$f") }
+        foreach ($f in 'Tiers.psm1', 'tier-rules.json', 'StdHandles.psm1', 'PremergeLatch.psm1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/$f") -Destination (Join-Path $repo "scripts/lib/$f") }
         $locks = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lib/Locks.psm1') -Raw).Replace("`$script:Scope = 'Rinne'", "`$script:Scope = 'Rinne-selftest-$PID'")
         Set-Content -LiteralPath (Join-Path $repo 'scripts/lib/Locks.psm1') -Value $locks
         $quick = ($Rules.gates | Where-Object tier -ceq 'Quick' | ForEach-Object { "'$($_.id)'" }) -join ', '
