@@ -203,10 +203,11 @@ TEST_CASE("louder dry transients in the send window do not hide a real runaway a
     }
 }
 
-TEST_CASE("the amplify hold spans a whole guard window when drum hits are 1.3 s apart", "[safety][loop][guard][fp]")
+TEST_CASE("the amplify hold bridges drum hits 1.3 s apart", "[safety][loop][guard][fp]")
 {
-    // 每一下鼓点在送出窗口里停约 1.1 s，这段时间估计被盖住；鼓点相隔约 1.3 s 时，只有保持够 3 s，
-    // 门才一直开着，失控保护才能在 3 s 窗里攒够 2 s
+    // 每一下鼓点在送出窗口里停约 1.1 s，这段时间估计被盖住；鼓点相隔约 1.3 s 时，保持要不短于约 1.5 s，
+    // 失控保护才能在 3 s 窗里攒够 2 s。这一格只钉住保持的下限：任何 ≥ 2 s 的保持都会给出一段连续 ≥ 2 s 的
+    // 打开期，进入判据分不出 2 s 与 3 s。3 s 的长度由估计器那一层的用例逐格钉住
     LoopSetup s = gate(0.90f, 2.5f);
     s.delay = samplesOf(0.1);
     s.seconds = 12.0;

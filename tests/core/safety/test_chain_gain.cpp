@@ -116,3 +116,32 @@ TEST_CASE("a silent send with a loud return reads as amplifying", "[safety][esti
     CHECK(std::isinf(loop.chain.chainGainEstimate()));
     CHECK_FALSE(loop.chain.machine().latched()); // 回送不活动，超大值不计
 }
+
+TEST_CASE("the gate's amplify judgment is held for exactly 3 s, the per-hop one is not held", "[safety][estimator]")
+{
+    // 一次 20 ms 的回读（送出为静音，估计 > 1），之后全静音：估计在回读离开 100 ms 窗口后回到 ≤ 1；
+    // 防误报门的判定从最后一次「估计 > 1」起再保持 3 s（误差一格 10 ms），逐格判定在那之前就已经落下
+    OpenLoop loop;
+    loop.block(static_cast<int>(samplesOf(0.6)), [](std::int64_t) { return TapFrame{}; });
+    const std::int64_t burstFrom = loop.n;
+    std::int64_t lastOver = -1; // 最后一个「估计 > 1」的样本
+    std::int64_t lastHeld = -1; // 最后一个「门的判定为 true」的样本
+    std::int64_t lastNow = -1; // 最后一个「逐格判定为 true」的样本
+    for (int b = 0; b < 500; ++b)
+        loop.block(480, [&](std::int64_t n) {
+            TapFrame f;
+            if (n < burstFrom + samplesOf(0.02))
+                f.tapLeft = f.tapRight = (n / 24) % 2 ? 1.0f : -1.0f;
+            if (loop.chain.chainGainEstimate() > 1.0f)
+                lastOver = n;
+            if (loop.chain.chainAmplifies())
+                lastHeld = n;
+            if (loop.chain.chainAmplifiesNow())
+                lastNow = n;
+            return f;
+        });
+    REQUIRE(lastOver > burstFrom);
+    CHECK(lastHeld - lastOver >= samplesOf(3.0) - 480);
+    CHECK(lastHeld - lastOver <= samplesOf(3.0) + 480);
+    CHECK(lastNow <= lastOver);
+}

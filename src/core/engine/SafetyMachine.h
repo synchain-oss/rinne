@@ -55,9 +55,11 @@ inline constexpr float kCeilingDefaultDb = -6.0f;
 // （DC 阻断在 10 Hz 只衰减约 1 dB，更低的成分越来越弱；5 Hz 的半周期就是整整 100 ms，判据会退化成两个孤立的峰）。
 // 看的电平是 max(|tap|, |x|)，但只计「回送路径自己放大出来的」部分：|tap| 只在链增益估计 > 0 dB 时计入，
 // |x|（×g 之后）只在链增益估计 > 0 dB 或 g > 1 时计入；回送不活动（g = 0）时两项都不计。这里的「链增益估计
-// > 0 dB」是逐格的判定，不带下面给防误报门用的 3 s 保持：超大值一跳就锁存，估计偏大一格不该让之后 3 s 的热干声
-// 都有误跳的风险。干声随整条通道进环，
-// 恒等链下 |tap| 就约等于干声，单看绝对阈值会对热轨道误跳；链不放大且 g ≤ 1 时 |x| ≤ |tap|，同理。
+// > 0 dB」是逐格的判定：刚收尾这一格的回读峰值 > 送出窗口的峰值，不用 100 ms 的回读窗口，也不带下面给防误报门用
+// 的 3 s 保持。超大值一跳就锁存，一次短突发或估计偏大一格，不该让之后的热干声凑满 100 ms 误跳。
+// 副作用（偏保守，接受）：g > 1 或链在放大时，每 ≤ 50 ms 一个超过 +12 dBFS 的孤立尖峰，凑满 100 ms
+// 也会跳闸。干声随整条通道进环， 恒等链下 |tap| 就约等于干声，单看绝对阈值会对热轨道误跳；链不放大且 g ≤ 1 时 |x| ≤
+// |tap|，同理。
 inline constexpr float kHugeLevel = 3.98107171f;
 inline constexpr double kHugeSeconds = 0.100;
 inline constexpr double kHugeGapSeconds = 0.050;
@@ -255,8 +257,9 @@ public:
     // 上一个样本 ⑥ 用的总增益
     float lastGain() const noexcept { return lastGain_; }
     // 链增益估计（线性）；送出为 0 而回读不为 0 时是 +∞，两者都为 0 时是 0。每 10 ms 格更新一次。
-    // 三个量的关系：chainAmplifiesNow() 就是「这一格估计 > 1」，超大值看它；chainAmplifies() 是防误报门看的、
-    // 带 3 s 保持的判定，保持期间估计可能已经 ≤ 1 而它仍为 true。诊断或界面要显示时把估计值与两个判定一起带上
+    // 三个量的关系：chainGainEstimate() 是最近 100 ms 回读峰值与送出峰值之比；chainAmplifies() 是防误报门看的
+    // 判定（估计 > 1，再保持 3 s），保持期间估计可能已经 ≤ 1 而它仍为 true；chainAmplifiesNow() 是超大值看的逐格
+    // 判定（只比刚收尾这一格的回读峰值，不保持）。诊断或界面要显示时把估计值与两个判定一起带上
     float chainGainEstimate() const noexcept;
     bool chainAmplifies() const noexcept { return chainAmplifies_; }
     bool chainAmplifiesNow() const noexcept { return chainAmplifiesNow_; }

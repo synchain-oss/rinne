@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 
 #include "SafetyTestKit.h"
 
@@ -184,4 +185,41 @@ TEST_CASE("one over-estimated moment does not expose hot dry to huge for the nex
     });
     CHECK(heldWhileHot); // 用例确实落在「保持中、逐格不放大、热干声在」的区间里
     CHECK_FALSE(sim.chain.machine().latched());
+}
+
+TEST_CASE("a +12.5 dBFS dry at 90 % feedback does not trip after a plugin burst or through an all-pass chain",
+          "[safety][loop][huge][fp]")
+{
+    // 两种情形都会让链增益估计短时略 > 1：恒等链上插件吐一次 10 ms 突发；幅度恒为 1、只改相位的 200 Hz 全通链。
+    // 估计偏大的那一格之后，热干声不能被当成「放大出来的超大值」
+    const auto dry = hotDry(12.5);
+    for (const float burst : {0.5f, 1.0f, 4.0f, 100.0f})
+        for (const double offsetMs : {0.0, 3.0, 7.0}) // 突发与 10 ms 格对齐或跨两格
+        {
+            INFO("burst " << burst << " offset " << offsetMs << " ms");
+            LoopSetup s = loop(0.90f, 1.0f);
+            s.seconds = 4.0;
+            const std::int64_t from = samplesOf(1.0 + offsetMs / 1000.0);
+            const std::int64_t to = from + samplesOf(0.01);
+            s.inject = [burst, from, to](std::int64_t n) {
+                return (n >= from && n < to) ? ((n / 24) % 2 ? burst : -burst) : 0.0f;
+            };
+            CHECK_FALSE(runLoop(s, dry).tripped);
+        }
+    for (const std::int64_t delay : {480, 4800})
+    {
+        INFO("all-pass, delay " << delay);
+        LoopSetup s = loop(0.90f, 1.0f);
+        s.seconds = 4.0;
+        s.delay = delay;
+        auto left = std::make_shared<AllPass>(200.0, kRate);
+        auto right = std::make_shared<AllPass>(200.0, kRate);
+        s.process = [left, right](float& l, float& r) {
+            l = (*left)(l);
+            r = (*right)(r);
+        };
+        const LoopResult r = runLoop(s, dry);
+        CHECK(r.maxEstimate > 1.0f); // 全通链确实让估计偏大过
+        CHECK_FALSE(r.tripped);
+    }
 }

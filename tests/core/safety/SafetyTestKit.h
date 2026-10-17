@@ -183,6 +183,7 @@ struct LoopSim
     std::int64_t delay;
     float chainGain;
     std::function<float(std::int64_t)> inject; // 环内插件不经输入、自己吐出的信号；空 = 没有
+    std::function<void(float&, float&)> process; // 环内插件对信号的处理（在链增益之后）；空 = 没有
     std::vector<float> ringLeft;
     std::vector<float> ringRight;
     std::int64_t n = 0;
@@ -225,9 +226,13 @@ struct LoopSim
                 const float outLeft = d + l;
                 const float outRight = d + r;
                 const float own = inject ? inject(n) : 0.0f;
+                float chainLeft = outLeft * chainGain;
+                float chainRight = outRight * chainGain;
+                if (process)
+                    process(chainLeft, chainRight);
                 const auto to = static_cast<std::size_t>(n % size);
-                ringLeft[to] = dsp::sanitizeSample(outLeft * chainGain + own);
-                ringRight[to] = dsp::sanitizeSample(outRight * chainGain + own);
+                ringLeft[to] = dsp::sanitizeSample(chainLeft + own);
+                ringRight[to] = dsp::sanitizeSample(chainRight + own);
                 probe(n, outLeft, outRight, l, r);
             }
             chain.publish(meters);
@@ -248,6 +253,7 @@ struct LoopSetup
     std::int64_t reportedDelay = -1; // < 0：引擎报的 D 就是环的真实延迟
     double seconds = 8.0;
     std::function<float(std::int64_t)> inject;
+    std::function<void(float&, float&)> process;
 };
 
 struct LoopResult
@@ -273,6 +279,7 @@ LoopResult runLoop(const LoopSetup& setup, Dry&& dry)
     if (setup.reportedDelay >= 0)
         sim.controls.loopDelaySamples = setup.reportedDelay;
     sim.inject = setup.inject;
+    sim.process = setup.process;
     LoopResult res;
     const std::int64_t total = samplesOf(setup.seconds);
     for (std::int64_t done = 0; done < total; done += 256)
@@ -290,6 +297,26 @@ LoopResult runLoop(const LoopSetup& setup, Dry&& dry)
     res.reason = sim.chain.machine().tripReason();
     return res;
 }
+
+// 一阶全通：幅度恒为 1，只改相位（在 fc 处相移 90°）。每个声道一份状态
+struct AllPass
+{
+    float a = 0.0f;
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    AllPass(double fc, double sampleRate)
+    {
+        const double t = std::tan(kPi * fc / sampleRate);
+        a = static_cast<float>((t - 1.0) / (t + 1.0));
+    }
+    float operator()(float x)
+    {
+        const float y = a * x + x1 - a * y1;
+        x1 = x;
+        y1 = y;
+        return y;
+    }
+};
 
 inline float dbfs(double db)
 {
