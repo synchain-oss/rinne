@@ -33,10 +33,14 @@ std::unique_ptr<Processor> makeAs(juce::AudioProcessor::WrapperType type)
     return processor;
 }
 
+// JUCE 按宿主可执行文件的名字认验证宿主；这是它认的几个名字（各平台只认其中一部分，见 tests/host/suite.cmake）
 bool hostNameLooksLikeValidator()
 {
     const auto exe = juce::File::getSpecialLocation(juce::File::hostApplicationPath).getFileName();
-    return exe.containsIgnoreCase("pluginval");
+    for (const char* name : {"pluginval", "auvaltool", "com.apple.audio.InfoHelper", "VST_Scanner"})
+        if (exe.containsIgnoreCase(name))
+            return true;
+    return false;
 }
 
 } // namespace
@@ -124,6 +128,9 @@ TEMPLATE_TEST_CASE("only mono and stereo with matching channel counts are accept
     CHECK_FALSE(processor.isBusesLayoutSupported(rinne::test::layoutOf(none, none)));
     CHECK_FALSE(processor.isBusesLayoutSupported(rinne::test::layoutOf(stereo, none)));
 
+    // 旁路参数由包装层建，处理器自己不建（否则宿主里会出现两个旁路）
+    CHECK(processor.getBypassParameter() == nullptr);
+
     CHECK_FALSE(processor.acceptsMidi());
     CHECK_FALSE(processor.producesMidi());
     CHECK_FALSE(processor.isMidiEffect());
@@ -178,8 +185,8 @@ TEMPLATE_TEST_CASE("a zero-sample callback advances no counter", "[host][shell][
 TEMPLATE_TEST_CASE("validation host detection follows the host executable", "[host][shell][validation-host]",
                    rinne::InputProcessor, rinne::OutputProcessor)
 {
-    // 同一个测试由两个 ctest 条目跑：原名可执行文件（普通宿主），和带 pluginval 字样的副本（验证宿主）。
-    // 副本那条把 RINNE_EXPECT_VALIDATION_HOST 设成 1，没认出来或者副本根本没换名都会变红。
+    // 同一个测试由几个 ctest 条目跑：原名可执行文件（普通宿主），和带验证宿主名字的副本（每个平台认的名字见
+    // suite.cmake）。 副本那条把 RINNE_EXPECT_VALIDATION_HOST 设成 1，没认出来或者副本根本没换名都会变红。
     TestType processor;
     const bool expectValidation = juce::SystemStats::getEnvironmentVariable("RINNE_EXPECT_VALIDATION_HOST", "") == "1";
 

@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { assertNodeVersion, caseResult, git, isMain, j, tempRepo } from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
+import { IDENTITY_LINE_PATTERN } from "./checks.d/contract-static-identity.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 
@@ -151,8 +152,8 @@ export const CONTRACTS = {
     state: "docs/contracts/STATE_SCHEMA.md",
 };
 // [路径, 所属契约（* = 任一契约冻结即受守）, 只看哪些改动行]。按行判的路径只看 -U0 的改动行：
-// CMake 里经变量间接给身份（set(X Rnni) 再 PLUGIN_CODE ${X}）、或值写在下一行的情形这里抓不到，
-// 由身份 golden 的静态检查兜底。
+// CMake 的身份行判据复用身份 golden 检查的那份关键字清单（IDENTITY_LINE_PATTERN）；经变量间接给身份、
+// 或值写在下一行的情形这里抓不到，由 contract-static-identity 的白名单兜底。
 export const GUARDED = [
     [/^docs\/contracts\/IPC_CONTRACT\.md$|^src\/core\/ipc\/[^/]*Layout[^/]*\.h$/, "ipc"],
     [/^tests\/golden\/ipc-layout\.json$/, "ipc"],
@@ -160,7 +161,7 @@ export const GUARDED = [
     [/^tests\/golden\/state(?:-schema\.json$|\/)/, "state"],
     [/^docs\/contracts\/PARAMETERS\.md$|^tests\/golden\/(?:params-input|identity)\.json$/, "params"],
     [/^src\/input\/ParamTable\.h$/, "params", /\bRINNE_PARAM\b/],
-    [/(?:^|\/)CMakeLists\.txt$|\.cmake$/, "params", /\b(?:PLUGIN_(?:MANUFACTURER_)?CODE|BUNDLE_ID|AU_[A-Z_]+)\b/],
+    [/(?:^|\/)CMakeLists\.txt$|\.cmake$/, "params", IDENTITY_LINE_PATTERN],
     [/^docs\/contracts\/|^tests\/golden\//, "*"],
 ];
 const lineFiltered = (p) => !!p && GUARDED.some(([re, , lines]) => lines && re.test(p));
@@ -417,6 +418,17 @@ export function selfTest() {
     const cmake = (lines) => [{ status: "M", path: "src/input/CMakeLists.txt", lines }];
     g("契约：CMake 身份行", true, cmake(["-    PLUGIN_CODE Rnin", "+    PLUGIN_CODE Rnix"]), frozenParams);
     g("契约：CMake 非身份行", false, cmake(["+    target_sources(x)"]), frozenParams);
+    g("契约：下划线连着的身份关键字", true, cmake(["+  USE_LEGACY_COMPATIBILITY_PLUGIN_CODE TRUE"]), frozenParams);
+    g("契约：AU_SANDBOX_SAFE", true, cmake(["-  AU_SANDBOX_SAFE FALSE", "+  AU_SANDBOX_SAFE TRUE"]), frozenParams);
+    g("契约：产品名", true, cmake(["+  PRODUCT_NAME x"]), frozenParams);
+    g("契约：JUCE 身份属性", true, cmake(["+set_target_properties(A PROPERTIES JUCE_BUNDLE_ID x)"]), frozenParams);
+    g(
+        "契约：-D 形式的参数 ID 宏",
+        true,
+        cmake(["+add_compile_options(-DJUCE_FORCE_USE_LEGACY_PARAM_IDS=1)"]),
+        frozenParams,
+    );
+    g("契约：身份变量", true, cmake(["+set(_rinne_input_identity x)"]), frozenParams);
     const table = (lines, status = "M") => [{ status, path: "src/input/ParamTable.h", lines }];
     g("契约：参数表宏行", true, table(["+RINNE_PARAM(feedback, 1, 0, 1, 1, 0, pct)"]), frozenParams);
     g("契约：参数表注释行", false, table(["+// 说明"]), frozenParams);

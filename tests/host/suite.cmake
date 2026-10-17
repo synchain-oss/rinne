@@ -23,13 +23,23 @@ target_compile_definitions(rinne_host_tests PRIVATE
   JUCE_WEB_BROWSER=0
   JUCE_USE_CURL=0)
 
-# 验证宿主（pluginval、auval 等）按宿主可执行文件的名字识别。同一个测试再以带 pluginval 字样的文件名跑一遍，
-# 处理器就会认出自己在验证宿主里：既覆盖「验证宿主下只出干声」，也证明识别真的在起作用。
-# 副本只是换名字的拷贝，每次构建后覆盖，测试里用环境变量断言识别结果，拷贝没生效时它会变红。
-set(_rinne_host_copy "$<TARGET_FILE_DIR:rinne_host_tests>/pluginval-rinne-host-tests${CMAKE_EXECUTABLE_SUFFIX}")
-add_custom_command(TARGET rinne_host_tests POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:rinne_host_tests> "${_rinne_host_copy}"
-  VERBATIM)
-add_test(NAME rinne_host_tests_validation_host COMMAND "${_rinne_host_copy}")
-set_tests_properties(rinne_host_tests_validation_host PROPERTIES TIMEOUT 300
-  ENVIRONMENT "RINNE_EXPECT_VALIDATION_HOST=1")
+# 验证宿主（pluginval、auval 等）按宿主可执行文件的名字识别，而且各平台认的名字不同（见 JUCE 的 PluginHostType）。
+# 同一个测试再以带这些名字的可执行文件副本跑一遍全套，处理器就会认出自己在验证宿主里：既覆盖「验证宿主下只出干声」，
+# 也证明识别真的在起作用。副本只是换名字的拷贝，每次构建后覆盖；测试里用环境变量断言识别结果，副本没生效时它会变红。
+if(WIN32)
+  set(_rinne_validation_names pluginval VST_Scanner)
+elseif(APPLE)
+  set(_rinne_validation_names pluginval auvaltool com.apple.audio.InfoHelper)
+else()
+  set(_rinne_validation_names pluginval)
+endif()
+foreach(_name IN LISTS _rinne_validation_names)
+  string(MAKE_C_IDENTIFIER "${_name}" _id)
+  set(_copy "$<TARGET_FILE_DIR:rinne_host_tests>/${_name}-rinne-host-tests${CMAKE_EXECUTABLE_SUFFIX}")
+  add_custom_command(TARGET rinne_host_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:rinne_host_tests> "${_copy}"
+    VERBATIM)
+  add_test(NAME rinne_host_tests_as_${_id} COMMAND "${_copy}")
+  set_tests_properties(rinne_host_tests_as_${_id} PROPERTIES TIMEOUT 300
+    ENVIRONMENT "RINNE_EXPECT_VALIDATION_HOST=1")
+endforeach()

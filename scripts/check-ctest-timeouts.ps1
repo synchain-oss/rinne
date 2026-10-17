@@ -2,120 +2,119 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Derived from synchain-oss/scvb; see upstream/tests.json
 #
-# 断言 ctest 真正吃的那份清单里，每个 add_test 都带 TIMEOUT 属性。
-#   pwsh scripts/check-ctest-timeouts.ps1 -SelfTest             判据自测
-#   pwsh scripts/check-ctest-timeouts.ps1 -BuildDir <构建目录>   实扫
-# 为什么要有它：新加一个测试、忘了写 TIMEOUT，它会静默退回 ctest 默认的 1500 秒，而这在本机与 CI 上都不会红
-# （命令行的 --timeout 只对没有属性的测试生效，等于给了一个「看起来有上界」的假象）。
-# 为什么读生成物、不读 CMakeLists：属性可以写在任何一个 CMakeLists.txt 里，也可以由开关决定进不进集合，手边的文本回答不了
-# 「谁有属性」；构建目录里各处的 CTestTestfile.cmake 才是 ctest 真正读的。
-# 判负三条，缺一条门禁就会静默变绿：
-#   有 add_test 没有 TIMEOUT  → 判负并点名；
-#   一个 CTestTestfile 都找不到 → 判负（没配置过的构建目录会让判据恒真）；
-#   找到文件但一个测试都没有   → 判负（空集合会让「全部都有」恒真）。
-# 排除 FetchContent 拉下来的第三方（路径里有 _deps 一段）：它的测试不归本仓管、也改不动。
+# 断言 ctest 会跑的每一条测试都带正数的 TIMEOUT 属性，且不超过上限。
+#   pwsh scripts/check-ctest-timeouts.ps1 -SelfTest                                      判据自测
+#   pwsh scripts/check-ctest-timeouts.ps1 -BuildDir <构建目录> [-Config Release] [-Ctest <ctest>]   实扫
+# 为什么要有它：新加一个测试、忘了写 TIMEOUT，它会静默退回 ctest 默认的 1500 秒；写成 0 更糟，CMake 文档写明显式的 0 就是
+# 不设上限。这两种在本机与 CI 上都不会红（命令行的 --timeout 只对没有属性的测试生效）。
+# 测试全集取自 `ctest --show-only=json-v1`，也就是 ctest 真正会跑的那一份：经 TEST_INCLUDE_FILES 注册的测试
+# （catch_discover_tests 就是这样来的）、名字里带方括号的测试，都在里面；不读 CMakeLists，也不扒生成文件的文本。
+# 判负几条，缺一条门禁就会静默变绿：
+#   某条测试没有 TIMEOUT、TIMEOUT 不是数、不大于 0、或超过上限  → 判负并点名；
+#   ctest 本身失败、输出不是 json-v1                            → 判负；
+#   一条测试都没有                                                → 判负（空集合会让「全部都有」恒真）。
+# 第三方（FetchContent 拉下来的）测试若有，同样要求 TIMEOUT：改不动它就别让它进 ctest。
 
 param(
     [string]$BuildDir = 'build',
+    [string]$Config = 'Release',
+    [string]$Ctest = 'ctest',
+    [int]$MaxTimeout = 1800,
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
     [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
 
-# 路径里有没有 _deps 这一段。先把两种分隔符统一成 /，再用通配比较，不用正则，免得转义和反斜杠的坑；
-# 两侧都要求分隔符，my_deps_here 这种同名子串不算第三方。
-function Test-ThirdPartyPath {
-    param([string]$FullName)
-    $norm = $FullName.Replace([char]92, '/')
-    return ($norm -like '*/_deps/*')
-}
+# 判据本体：实扫与 -SelfTest 共用这一个函数，自测证明的才是门禁本身。
+# 参数是 ctest --show-only=json-v1 的输出文本与 ctest 的退出码；返回 Ok、点名的 Lines 与测试条数 Count。
+function Test-CtestTimeouts {
+    param([string]$Json, [int]$ExitCode, [int]$Max)
 
-# 判据本体：生产路径与 -SelfTest 共用这一个函数，自测证明的才是门禁本身。
-function Get-CtestTimeoutReport {
-    param([string[]]$Contents)
+    $fail = { param($msg) [pscustomobject]@{ Ok = $false; Lines = @($msg); Count = 0 } }
+    if ($ExitCode -ne 0) { return (& $fail "ctest --show-only=json-v1 失败，退出码 $ExitCode") }
+    try { $doc = $Json | ConvertFrom-Json -ErrorAction Stop } catch { return (& $fail "ctest 的输出不是 JSON：$($_.Exception.Message)") }
+    if ($null -eq $doc -or $null -eq $doc.PSObject.Properties['tests']) { return (& $fail 'ctest 的输出里没有 tests，不是 json-v1') }
+    $tests = @($doc.tests)
+    if ($tests.Count -eq 0) { return (& $fail 'ctest 一条测试都没有。空集合会让本判据恒真') }
 
-    $declared = New-Object 'System.Collections.Generic.HashSet[string]'
-    $withTimeout = New-Object 'System.Collections.Generic.HashSet[string]'
-
-    foreach ($text in $Contents) {
-        foreach ($m in [regex]::Matches($text, 'add_test\(\[=\[([^\]]+)\]=\]')) {
-            [void]$declared.Add($m.Groups[1].Value)
-        }
-        foreach ($m in [regex]::Matches($text, 'set_tests_properties\(\[=\[([^\]]+)\]=\]\s+PROPERTIES\s')) {
-            $name = $m.Groups[1].Value
-            # 属性尾巴按「名 值」逐对读，只认落在属性名位置上的 TIMEOUT：同一行里 _BACKTRACE_TRIPLES 的值是带引号的路径，
-            # 路径里恰好有 timeout 字样（工作目录名）时，整行 grep 会把没有上界的测试判成有。
-            $tail = $text.Substring($m.Index + $m.Length)
-            $pos = 0
-            while ($pos -lt $tail.Length) {
-                $pair = [regex]::Match($tail.Substring($pos), '^\s*([A-Za-z_][A-Za-z0-9_]*)\s+("(?:[^"\\]|\\.)*"|[^\s)]+)')
-                if (-not $pair.Success) { break }
-                if ($pair.Groups[1].Value -ceq 'TIMEOUT') { [void]$withTimeout.Add($name); break }
-                $pos += $pair.Length
-            }
+    $lines = @()
+    foreach ($t in $tests) {
+        $name = [string]$t.name
+        $prop = $null
+        if ($t.PSObject.Properties['properties']) { $prop = @($t.properties) | Where-Object { $_.name -ceq 'TIMEOUT' } | Select-Object -First 1 }
+        if ($null -eq $prop) { $lines += "${name}：没有 TIMEOUT，会静默吃 ctest 默认的 1500 秒"; continue }
+        $value = 0.0
+        if (-not [double]::TryParse([string]$prop.value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) {
+            $lines += "${name}：TIMEOUT 的值不是数：$($prop.value)"
+        } elseif ($value -le 0) {
+            $lines += "${name}：TIMEOUT 是 $($prop.value)，必须大于 0（0 就是不设上限）"
+        } elseif ($value -gt $Max) {
+            $lines += "${name}：TIMEOUT 是 $($prop.value)，超过上限 $Max"
         }
     }
-
-    [pscustomobject]@{
-        Declared    = @($declared | Sort-Object)
-        WithTimeout = @($withTimeout | Sort-Object)
-        Missing     = @($declared | Where-Object { -not $withTimeout.Contains($_) } | Sort-Object)
-    }
+    [pscustomobject]@{ Ok = ($lines.Count -eq 0); Lines = $lines; Count = $tests.Count; Names = @($tests | ForEach-Object { [string]$_.name }) }
 }
 
 if ($SelfTest) {
-    # 夹具现场拼装，不读仓、不写进任何被扫描的路径
-    $q = [char]34
-    $mk = {
-        param([string]$name, [string]$props)
-        ('add_test([=[{0}]=] "C:/x/{0}.exe")' -f $name) + "`n" +
-        $(if ($props) { ('set_tests_properties([=[{0}]=] PROPERTIES  {1})' -f $name, $props) + "`n" } else { '' })
+    # 夹具现场拼装，不读仓、不碰任何被扫描的路径
+    $doc = {
+        param([object[]]$tests)
+        (@{ kind = 'ctestInfo'; version = @{ major = 1; minor = 0 }; tests = @($tests) } | ConvertTo-Json -Depth 8)
     }
-    $fixOk = & $mk 'fix_has_timeout' ('TIMEOUT {0}30{0} _BACKTRACE_TRIPLES {0}C:/x/CMakeLists.txt;1;add_test;{0}' -f $q)
-    $fixMissing = & $mk 'fix_no_timeout' ('WILL_FAIL {0}FALSE{0} _BACKTRACE_TRIPLES {0}C:/x/CMakeLists.txt;2;add_test;{0}' -f $q)
-    $fixNoProps = & $mk 'fix_no_properties' ''
-    # TIMEOUT 只出现在 _BACKTRACE_TRIPLES 的值里
-    $fixInValue = & $mk 'fix_timeout_in_path' ('WILL_FAIL {0}FALSE{0} _BACKTRACE_TRIPLES {0}C:/agents/TIMEOUT-repro/CMakeLists.txt;3;add_test;{0}' -f $q)
-    # 属性名大小写不对不算（ctest 的属性名区分大小写）
-    $fixLower = & $mk 'fix_lowercase' ('timeout {0}30{0}' -f $q)
+    $t = {
+        param([string]$name, $timeout, [switch]$noProps, [switch]$otherProps, [string]$propName = 'TIMEOUT')
+        $o = @{ name = $name; config = 'Release' }
+        if (-not $noProps) {
+            $props = @()
+            if ($otherProps) { $props += @{ name = 'WILL_FAIL'; value = $false }; $props += @{ name = 'ENVIRONMENT'; value = @('TIMEOUT=30') } }
+            if ($null -ne $timeout) { $props += @{ name = $propName; value = $timeout } }
+            $o.properties = $props
+        }
+        $o
+    }
+    $judge = { param($json, [int]$code = 0) Test-CtestTimeouts -Json $json -ExitCode $code -Max 1800 }
 
-    $failures = @()
-    $r1 = Get-CtestTimeoutReport -Contents @($fixOk)
-    if ($r1.Missing.Count -ne 0) { $failures += ('有 TIMEOUT 的夹具被误判成缺失：{0}' -f ($r1.Missing -join ', ')) }
-    $r2 = Get-CtestTimeoutReport -Contents @($fixMissing)
-    if ($r2.Missing -notcontains 'fix_no_timeout') { $failures += '有属性但没有 TIMEOUT 的夹具没被抓到，判据没有牙' }
-    $r3 = Get-CtestTimeoutReport -Contents @($fixNoProps)
-    if ($r3.Missing -notcontains 'fix_no_properties') { $failures += '完全没有属性的夹具没被抓到，判据没有牙' }
-    $r4 = Get-CtestTimeoutReport -Contents @($fixInValue)
-    if ($r4.Missing -notcontains 'fix_timeout_in_path') { $failures += 'TIMEOUT 出现在属性值里被当成属性名，逐对读失效' }
-    $r5 = Get-CtestTimeoutReport -Contents @($fixLower)
-    if ($r5.Missing -notcontains 'fix_lowercase') { $failures += '小写的 timeout 被当成了 TIMEOUT' }
-    # 混合：只有该红的那个红，免得「一红全红」蒙混过关；声明在不同文件里也要合并判断
-    $r6 = Get-CtestTimeoutReport -Contents @($fixOk, $fixMissing)
-    if (($r6.Missing -join ',') -ne 'fix_no_timeout') { $failures += ('混合夹具的缺失集合不对：[{0}]' -f ($r6.Missing -join ', ')) }
-    $r7 = Get-CtestTimeoutReport -Contents @()
-    if ($r7.Declared.Count -ne 0) { $failures += '空输入应当没有任何声明' }
-
-    # 第三方路径判定四格；反斜杠那格是旧写法漏掉的
-    $bs = [char]92
-    $pathCases = @(
-        @{ p = ('C:' + $bs + 'x' + $bs + 'build' + $bs + '_deps' + $bs + 'catch2-build' + $bs + 'CTestTestfile.cmake'); want = $true; why = '反斜杠路径下的 _deps 必须被排除' },
-        @{ p = 'C:/x/build/_deps/catch2-build/CTestTestfile.cmake'; want = $true; why = '正斜杠路径下的 _deps 必须被排除' },
-        @{ p = ('C:' + $bs + 'x' + $bs + 'build' + $bs + 'tests' + $bs + 'CTestTestfile.cmake'); want = $false; why = '本仓自己的测试目录不得被排除' },
-        @{ p = ('C:' + $bs + 'x' + $bs + 'my_deps_here' + $bs + 'CTestTestfile.cmake'); want = $false; why = '同名子串（两侧无分隔符）不得被排除' }
-    )
-    foreach ($c in $pathCases) {
-        $got = Test-ThirdPartyPath $c.p
-        if ($got -ne $c.want) { $failures += ('第三方路径判定错：{0}（期望 {1}，实得 {2}）：{3}' -f $c.p, $c.want, $got, $c.why) }
+    $script:failures = @()
+    $expectRed = {
+        param($label, $r, $needle)
+        if ($r.Ok) { $script:failures += "$label：应当判红却通过了，判据没有牙" }
+        elseif ($needle -and -not ($r.Lines -join "`n").Contains($needle)) { $script:failures += "$label：红了，但没有点名「$needle」：$($r.Lines -join ' / ')" }
     }
 
-    if ($failures.Count -gt 0) {
+    $r = & $judge (& $doc @((& $t 'good' 30)))
+    if (-not $r.Ok) { $script:failures += "有 TIMEOUT 的测试被误判：$($r.Lines -join ' / ')" }
+    $r = & $judge (& $doc @((& $t 'a' 30), (& $t 'b' 1800)))
+    if (-not $r.Ok -or $r.Count -ne 2) { $script:failures += '两条都合格的测试被误判，或条数不对' }
+
+    & $expectRed '没有任何属性' (& $judge (& $doc @((& $t 'plain' $null -noProps)))) 'plain'
+    & $expectRed '有别的属性但没有 TIMEOUT' (& $judge (& $doc @((& $t 'other' $null -otherProps)))) 'other'
+    # TIMEOUT 字样只出现在别的属性的值里（环境变量）：不能算
+    & $expectRed 'TIMEOUT 只出现在属性值里' (& $judge (& $doc @((& $t 'invalue' $null -otherProps)))) 'invalue'
+    & $expectRed '属性名大小写不对（ctest 的属性名区分大小写）' (& $judge (& $doc @((& $t 'lower' 30 -propName 'timeout')))) 'lower'
+    & $expectRed 'TIMEOUT 为 0' (& $judge (& $doc @((& $t 'zero' 0)))) 'zero'
+    & $expectRed 'TIMEOUT 为负' (& $judge (& $doc @((& $t 'neg' -5)))) 'neg'
+    & $expectRed 'TIMEOUT 超过上限' (& $judge (& $doc @((& $t 'huge' 1801)))) 'huge'
+    & $expectRed 'TIMEOUT 不是数' (& $judge (& $doc @((& $t 'text' 'soon')))) 'text'
+    # 名字里带方括号：旧的按文本扒 add_test([=[名]=] 的写法在这里读漏
+    & $expectRed '名字里带方括号且没有 TIMEOUT' (& $judge (& $doc @((& $t 'bracket[1]' $null -noProps)))) 'bracket[1]'
+    $r = & $judge (& $doc @((& $t 'bracket[2]' 60)))
+    if (-not $r.Ok) { $script:failures += "名字里带方括号且有 TIMEOUT 的测试被误判：$($r.Lines -join ' / ')" }
+    # 混合：只点名该红的
+    $r = & $judge (& $doc @((& $t 'fine' 30), (& $t 'bad_zero' 0), (& $t 'bad_none' $null -noProps)))
+    if ($r.Ok -or $r.Lines.Count -ne 2 -or ($r.Lines -join ' ').Contains('fine')) { $script:failures += "混合夹具应当恰好点名 2 条：$($r.Lines -join ' / ')" }
+    # 主流程里的三条判负
+    & $expectRed '一条测试都没有' (& $judge (& $doc @())) '一条测试都没有'
+    & $expectRed 'ctest 本身失败' (& $judge (& $doc @((& $t 'x' 30))) 1) '退出码 1'
+    & $expectRed '输出不是 JSON' (& $judge 'not json') 'JSON'
+    & $expectRed '输出不是 json-v1（没有 tests）' (& $judge '{"kind":"other"}') 'tests'
+
+    if ($script:failures.Count -gt 0) {
         Write-Host '[FAIL] check-ctest-timeouts -SelfTest：' -ForegroundColor Red
-        $failures | ForEach-Object { Write-Host ('  ' + $_) -ForegroundColor Red }
+        $script:failures | ForEach-Object { Write-Host ('  ' + $_) -ForegroundColor Red }
         exit 1
     }
-    Write-Host 'check-ctest-timeouts -SelfTest：全部通过（有属性不误报、缺属性抓得到、值里的 TIMEOUT 不算、小写不算、混合只红该红的、_deps 两种分隔符都排除、本仓目录与同名子串不排除）'
+    Write-Host 'check-ctest-timeouts -SelfTest：全部通过（缺属性、0、负数、超上限、非数、值里的 TIMEOUT、方括号名字、混合、空集合、ctest 失败、非 JSON、非 json-v1 都判得出）'
     exit 0
 }
 
@@ -125,24 +124,13 @@ if (-not (Test-Path -LiteralPath $buildPath)) {
     exit 1
 }
 
-$files = @(Get-ChildItem -LiteralPath $buildPath -Filter 'CTestTestfile.cmake' -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { -not (Test-ThirdPartyPath $_.FullName) })
-if ($files.Count -eq 0) {
-    Write-Host ('[FAIL] {0} 下找不到 CTestTestfile.cmake，先配置一次' -f $buildPath) -ForegroundColor Red
+$json = (& $Ctest --test-dir $buildPath -C $Config --show-only=json-v1 2>&1 | Out-String)
+$report = Test-CtestTimeouts -Json $json -ExitCode $LASTEXITCODE -Max $MaxTimeout
+if (-not $report.Ok) {
+    Write-Host '[FAIL] ctest 的 TIMEOUT 门禁不通过：' -ForegroundColor Red
+    $report.Lines | ForEach-Object { Write-Host ('  ' + $_) -ForegroundColor Red }
+    Write-Host '修法：在 add_test 旁写 set_tests_properties(<名> PROPERTIES TIMEOUT <秒>)；套件走 tests/CMakeLists.txt 的 rinne_add_test_suite 会自带。' -ForegroundColor Yellow
     exit 1
 }
-
-$report = Get-CtestTimeoutReport -Contents @($files | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw })
-if ($report.Declared.Count -eq 0) {
-    Write-Host ('[FAIL] 读了 {0} 份 CTestTestfile.cmake，一个 add_test 都没有。空集合会让本判据恒真' -f $files.Count) -ForegroundColor Red
-    exit 1
-}
-if ($report.Missing.Count -gt 0) {
-    Write-Host '[FAIL] 下列测试没有 TIMEOUT 属性，会静默吃 ctest 默认的 1500 秒：' -ForegroundColor Red
-    $report.Missing | ForEach-Object { Write-Host ('  ' + $_) -ForegroundColor Red }
-    Write-Host '修法：在它的 add_test 旁写 set_tests_properties(<名> PROPERTIES TIMEOUT <秒>)；套件走 tests/CMakeLists.txt 的 rinne_add_test_suite 会自带。' -ForegroundColor Yellow
-    exit 1
-}
-
-Write-Host ('ctest 上界属性完备：{0} 条测试全部有 TIMEOUT（{1}）' -f $report.Declared.Count, ($report.Declared -join '、'))
+Write-Host ('ctest 上界属性完备：{0} 条测试全部有正数的 TIMEOUT（{1}）' -f $report.Count, ($report.Names -join '、'))
 exit 0

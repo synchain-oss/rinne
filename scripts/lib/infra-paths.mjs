@@ -20,6 +20,8 @@ export const INFRA_PATHS = [
     "scripts/run-checks.mjs",
     // 检查脚本不只 .mjs：还有 PowerShell 与 Python 写的（ctest 上界、发布 tag、字体）
     "scripts/check-*",
+    // ctest 的 TIMEOUT 门禁就是这个文件里的两条 add_test，Catch2 的钉版也在这里：删掉它们不该由自合的 PR 完成
+    "tests/CMakeLists.txt",
     "scripts/review-bot.mjs",
     "scripts/lock-actions.mjs",
     "scripts/sync-labels.mjs",

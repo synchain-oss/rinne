@@ -9,17 +9,56 @@
 //   - 根 CMakeLists.txt 的格式清单（VST3，Apple 上加 AU）；
 //   - JUCE_VST3_CAN_REPLACE_VST2、JUCE_FORCE_USE_LEGACY_PARAM_IDS、JUCE_USE_STUDIO_ONE_COMPATIBLE_PARAMETERS 三个宏：
 //     决定宿主工程里保存的参数 ID。每个宏在全部 CMake 文件里只许出现一次、值与 golden 一致，免得别处用后写覆盖。
+// 白名单式：身份敏感的关键字（IDENTITY_KEYWORDS）与 JUCE 的身份属性，只许出现在 golden 认可的 juce_add_plugin 调用和
+// 两个身份 set(…) 里；CMake 树里任何其他地方出现一律判红（含 cmake/*.cmake、set_target_properties、add_compile_options、
+// -D / /D 形式的宏）。身份变量 _rinne_<名>_identity 在全部 CMake 文件里恰好出现三次（两处 set、一处使用）。
+// 构建之后，两个 .vst3 的 moduleinfo.json（CID、名称、厂商、子类、版本）还要与 golden 对拍：
+//   node scripts/checks.d/contract-static-identity.mjs --moduleinfo <构建目录> [--probe]
 // 解析器只认本仓手写 CMake 的写法（关键字全大写、值一个个排开、探针分支写成 if(RINNE_PROBE_BUILD) … else() … endif()）。
 // 有意改身份是兼容性事件：按 CLAUDE.md 的「冻结契约」一节走变更文档，并同一个 PR 更新 golden。
 //   node scripts/run-checks.mjs --only contract-static-identity [--self-test | --mutation-check]
 
 import fs from "node:fs";
 import path from "node:path";
-import { caseResult } from "../lib/check-kit.mjs";
+import { caseResult, isMain } from "../lib/check-kit.mjs";
 
 const GOLDEN = "tests/golden/identity.json";
 const ROOT_CMAKE = "CMakeLists.txt";
 const IDENTITY_KEYS = ["PRODUCT_NAME", "PLUGIN_CODE", "BUNDLE_ID"];
+/** 身份敏感的 juce_add_plugin 关键字：值等于 golden，或者根本不出现。check-commits.mjs 的契约守卫复用这一份。 */
+export const IDENTITY_KEYWORDS = [
+    "PRODUCT_NAME",
+    "PLUGIN_CODE",
+    "BUNDLE_ID",
+    "PLUGIN_MANUFACTURER_CODE",
+    "PLUGIN_NAME",
+    "USE_LEGACY_COMPATIBILITY_PLUGIN_CODE",
+    "AU_EXPORT_PREFIX",
+    "AU_SANDBOX_SAFE",
+    "AU_MAIN_TYPE",
+    "LV2URI",
+    "AAX_IDENTIFIER",
+    "VST2_CATEGORY",
+    "VST3_CATEGORIES",
+    "FORMATS",
+    "IS_SYNTH",
+    "NEEDS_MIDI_INPUT",
+    "NEEDS_MIDI_OUTPUT",
+    "IS_MIDI_EFFECT",
+];
+/** 其他经 target 属性、变量改身份的写法。 */
+const IDENTITY_PATTERNS = [
+    "JUCE_(?:PLUGIN_CODE|PLUGIN_MANUFACTURER_CODE|BUNDLE_ID|PLUGIN_NAME|PRODUCT_NAME|AU_\\w+|USE_LEGACY_COMPATIBILITY_PLUGIN_CODE)",
+    "RINNE_PLUGIN_FORMATS",
+    "RINNE_PLUGIN_DEFINITIONS",
+    "_rinne_\\w+_identity",
+    "JUCE_VST3_CAN_REPLACE_VST2",
+    "JUCE_FORCE_USE_LEGACY_PARAM_IDS",
+    "JUCE_USE_STUDIO_ONE_COMPATIBLE_PARAMETERS",
+];
+const WORD = (alt) => `(?:(?<![\\w])|(?<=[-/]D))(?:${alt})(?![\\w])`;
+/** 契约守卫按行判 CMake 改动时用：一行里出现任何身份敏感的词。 */
+export const IDENTITY_LINE_PATTERN = new RegExp(WORD([...IDENTITY_KEYWORDS, ...IDENTITY_PATTERNS].join("|")));
 /** 全大写但是是取值而不是关键字的词。 */
 const VALUES = new Set(["TRUE", "FALSE", "ON", "OFF", "YES", "NO", "VST3", "VST", "AU", "AUV3", "AAX", "LV2", "UNITY"]);
 
@@ -103,6 +142,10 @@ function parsePlugin(text, label) {
     const ref = rest.find((t) => /^\$\{_rinne_\w+_identity\}$/.test(t));
     const direct = keywordMap(rest.filter((t) => t !== ref));
     const identity = {};
+    const allowedRegions = [plugin[0]];
+    for (const a of calls(code, "target_compile_definitions"))
+        if (/^\s*\S+\s+PUBLIC\s+\$\{RINNE_PLUGIN_DEFINITIONS\}\s*$/.test(a) && tokens(a)[0] === target)
+            allowedRegions.push(a);
     if (ref) {
         const name = ref.slice(2, -1);
         const branch = /if\s*\(\s*RINNE_PROBE_BUILD\s*\)([\s\S]*?)\belse\s*\(\s*\)([\s\S]*?)\bendif\s*\(\s*\)/i.exec(
@@ -117,7 +160,10 @@ function parsePlugin(text, label) {
                 const sets = calls(body, "set").filter((a) => tokens(a)[0] === name);
                 if (sets.length !== 1)
                     errors.push(`${label}：${flavor} 分支里应当恰好一处 set(${name} …)，现在 ${sets.length} 处`);
-                else identity[flavor] = keywordMap(tokens(sets[0]).slice(1));
+                else {
+                    identity[flavor] = keywordMap(tokens(sets[0]).slice(1));
+                    allowedRegions.push(sets[0]);
+                }
             }
         }
     } else {
@@ -126,7 +172,15 @@ function parsePlugin(text, label) {
     // 直接写在 juce_add_plugin 里的身份字段（不分正式与探针）也算身份，但不该有
     for (const k of IDENTITY_KEYS)
         if (k in direct) errors.push(`${label}：${k} 不能直接写在 juce_add_plugin 里，须在正式与探针两套里分别写`);
-    return { target, identity, shared: direct, code, errors };
+    return {
+        target,
+        identity,
+        shared: direct,
+        code,
+        errors,
+        allowedRegions,
+        identityVar: ref ? ref.slice(2, -1) : null,
+    };
 }
 
 /** 根 CMakeLists 的格式清单与全部 CMake 文件里的宏。 */
@@ -171,7 +225,7 @@ export function checkIdentity({ golden, read, cmakeFiles }) {
     const texts = cmakeFiles.map((f) => ({ f, code: stripComments(read(f) ?? "") }));
     for (const [macro, want] of Object.entries(golden.definitions)) {
         const hits = texts.flatMap(({ f, code }) =>
-            [...code.matchAll(new RegExp(`(?<![\\w])${macro}(?:\\s*=\\s*([^\\s)"]+))?`, "g"))].map((m) => ({
+            [...code.matchAll(new RegExp(`${WORD(macro)}(?:\\s*=\\s*([^\\s)"]+))?`, "g"))].map((m) => ({
                 f,
                 value: m[1],
             })),
@@ -184,6 +238,9 @@ export function checkIdentity({ golden, read, cmakeFiles }) {
             errors.push(`${hits[0].f}：${macro} 的值是 ${hits[0].value ?? "(空)"}，golden 是 ${want}`);
     }
 
+    // 白名单：认可的区域（juce_add_plugin 调用、两个身份 set）从文本里挖掉，剩下的地方出现敏感词就是越界
+    const allowed = new Map(); // 文件 -> 要挖掉的片段
+    const identityVars = [];
     for (const [name, spec] of Object.entries(golden.plugins)) {
         const text = read(spec.file);
         if (text === null) {
@@ -194,12 +251,17 @@ export function checkIdentity({ golden, read, cmakeFiles }) {
         const p = parsePlugin(text, label);
         errors.push(...p.errors);
         if (!p.code) continue;
+        allowed.set(spec.file, p.allowedRegions);
+        if (p.identityVar) identityVars.push(p.identityVar);
         if (p.target !== spec.target) errors.push(`${label}：目标名是 ${p.target}，golden 是 ${spec.target}`);
         for (const flavor of ["formal", "probe"]) {
             if (!p.identity[flavor]) continue;
             compareMap(`${label}（${flavor}）`, p.identity[flavor], spec.identity[flavor], errors, { exact: true });
         }
         compareMap(`${label}`, p.shared, spec.shared, errors, { exact: false });
+        // juce_add_plugin 里身份敏感的关键字，golden 没列的也不许有
+        for (const k of IDENTITY_KEYWORDS)
+            if (k in p.shared && !(k in spec.shared)) errors.push(`${label}：多了身份相关的 ${k}，golden 里没有`);
         // 宏要真的挂到插件目标上，并且是 PUBLIC：包装层的编译单元也要看到
         const attach = new RegExp(
             `target_compile_definitions\\s*\\(\\s*${spec.target}\\s+PUBLIC\\s+\\$\\{RINNE_PLUGIN_DEFINITIONS\\}\\s*\\)`,
@@ -209,6 +271,30 @@ export function checkIdentity({ golden, read, cmakeFiles }) {
                 `${label}：${spec.target} 上没有 target_compile_definitions(${spec.target} PUBLIC \${RINNE_PLUGIN_DEFINITIONS})`,
             );
         if (!name) errors.push("golden 里有空的插件名");
+    }
+
+    const sensitive = new RegExp(WORD([...IDENTITY_KEYWORDS, ...IDENTITY_PATTERNS].join("|")), "g");
+    for (const { f, code } of texts) {
+        let rest = code;
+        for (const region of allowed.get(f) ?? []) rest = rest.replace(region, " ");
+        const found = [...new Set([...rest.matchAll(sensitive)].map((m) => m[0]))];
+        // 根 CMakeLists 里的格式清单与宏清单是 golden 另外认可的（上面已按值核对），只放过这两个词
+        const stray =
+            f === ROOT_CMAKE
+                ? found.filter(
+                      (w) =>
+                          !/^(?:RINNE_PLUGIN_FORMATS|RINNE_PLUGIN_DEFINITIONS|JUCE_VST3_CAN_REPLACE_VST2|JUCE_FORCE_USE_LEGACY_PARAM_IDS|JUCE_USE_STUDIO_ONE_COMPATIBLE_PARAMETERS)$/.test(
+                              w,
+                          ),
+                  )
+                : found;
+        if (stray.length)
+            errors.push(`${f}：身份相关的 ${stray.join("、")} 只许出现在 golden 认可的 juce_add_plugin 与身份 set 里`);
+    }
+    // 其他文件里除了 golden 认可的位置，也不许再用这些词来引用身份变量、格式清单与宏清单
+    for (const v of identityVars) {
+        const n = texts.reduce((sum, { code }) => sum + [...code.matchAll(new RegExp(WORD(v), "g"))].length, 0);
+        if (n !== 3) errors.push(`${v} 在 CMake 文件里出现 ${n} 次，应当恰好三次（两处 set、一处使用）`);
     }
     return errors;
 }
@@ -250,6 +336,7 @@ juce_add_plugin(${target}
   FORMATS \${RINNE_PLUGIN_FORMATS}
   VST3_CATEGORIES Fx Delay
   AU_MAIN_TYPE kAudioUnitType_Effect # 注释
+  AU_SANDBOX_SAFE FALSE
   IS_SYNTH FALSE
   NEEDS_MIDI_INPUT FALSE
   NEEDS_MIDI_OUTPUT FALSE
@@ -262,6 +349,7 @@ const shared = (extra = {}) => ({
     FORMATS: ["${RINNE_PLUGIN_FORMATS}"],
     VST3_CATEGORIES: ["Fx", "Delay"],
     AU_MAIN_TYPE: ["kAudioUnitType_Effect"],
+    AU_SANDBOX_SAFE: ["FALSE"],
     IS_SYNTH: ["FALSE"],
     NEEDS_MIDI_INPUT: ["FALSE"],
     NEEDS_MIDI_OUTPUT: ["FALSE"],
@@ -270,6 +358,16 @@ const shared = (extra = {}) => ({
 });
 
 const FIXTURE_GOLDEN = {
+    moduleinfo: {
+        vendor: "Synchain",
+        sdkVersion: "VST 3.7.12",
+        cidPrefix: "ABCDEF01",
+        classes: {
+            "Audio Module Class": "9182FAEB",
+            "Component Controller Class": "1234ABCD",
+            "Plugin Compatibility Class": "C0DEF00D",
+        },
+    },
     formats: { base: ["VST3"], apple: ["AU"] },
     definitions: {
         JUCE_VST3_CAN_REPLACE_VST2: "0",
@@ -429,6 +527,11 @@ export function selfTest() {
             run({ ...base, "cmake/Extra.cmake": "add_compile_definitions(JUCE_FORCE_USE_LEGACY_PARAM_IDS=1)\n" }),
         ],
         [
+            "前缀相同的别的宏名不算同一个宏",
+            false,
+            run({ ...base, "cmake/Extra.cmake": "add_compile_definitions(JUCE_FORCE_USE_LEGACY_PARAM_IDS_EXTRA=1)\n" }),
+        ],
+        [
             "宏没有挂到插件目标上",
             true,
             run(edit(base, OUT, "target_compile_definitions(RinneOutput PUBLIC ${RINNE_PLUGIN_DEFINITIONS})", "")),
@@ -457,8 +560,220 @@ export function selfTest() {
                 goldenWith((g) => (g.definitions.JUCE_VST3_CAN_REPLACE_VST2 = "1")),
             ),
         ],
+        ["AU_SANDBOX_SAFE 改成 TRUE", true, run(edit(base, IN, "AU_SANDBOX_SAFE FALSE", "AU_SANDBOX_SAFE TRUE"))],
+        [
+            "加 USE_LEGACY_COMPATIBILITY_PLUGIN_CODE",
+            true,
+            run(edit(base, IN, "IS_SYNTH FALSE", "IS_SYNTH FALSE USE_LEGACY_COMPATIBILITY_PLUGIN_CODE TRUE")),
+        ],
+        ["加 PLUGIN_NAME", true, run(edit(base, OUT, "IS_SYNTH FALSE", 'IS_SYNTH FALSE PLUGIN_NAME "Rinne Send"'))],
+        ["加 AU_EXPORT_PREFIX", true, run(edit(base, IN, "IS_SYNTH FALSE", "IS_SYNTH FALSE AU_EXPORT_PREFIX X"))],
+        [
+            "sources-*.cmake 里 set_target_properties 改 JUCE 身份属性",
+            true,
+            run({
+                ...base,
+                "src/input/sources-x.cmake": "set_target_properties(RinneInput PROPERTIES JUCE_BUNDLE_ID com.x)\n",
+            }),
+        ],
+        ["别的 cmake 文件里写身份关键字", true, run({ ...base, "cmake/X.cmake": "set(PLUGIN_CODE Abcd)\n" })],
+        [
+            "endif 之后再 set 一次身份变量",
+            true,
+            run(
+                edit(
+                    base,
+                    IN,
+                    "target_compile_definitions(RinneInput",
+                    "set(_rinne_RinneInput_identity PRODUCT_NAME x PLUGIN_CODE Rnnx BUNDLE_ID y)\ntarget_compile_definitions(RinneInput",
+                ),
+            ),
+        ],
+        [
+            "list(TRANSFORM) 改身份变量",
+            true,
+            run(
+                edit(
+                    base,
+                    IN,
+                    "target_compile_definitions(RinneInput",
+                    "list(TRANSFORM _rinne_RinneInput_identity REPLACE Rnni Rnnx)\ntarget_compile_definitions(RinneInput",
+                ),
+            ),
+        ],
+        [
+            "add_compile_options 用 -D 改参数 ID 宏",
+            true,
+            run({ ...base, "cmake/X.cmake": "add_compile_options(-DJUCE_FORCE_USE_LEGACY_PARAM_IDS=1)\n" }),
+        ],
+        [
+            "add_compile_options 用 /D 改参数 ID 宏",
+            true,
+            run({ ...base, "cmake/X.cmake": "add_compile_options(/DJUCE_FORCE_USE_LEGACY_PARAM_IDS=1)\n" }),
+        ],
+        [
+            "target_compile_definitions 里 -D 写参数 ID 宏",
+            true,
+            run({
+                ...base,
+                "src/input/sources-x.cmake":
+                    "target_compile_definitions(RinneInput PUBLIC -DJUCE_VST3_CAN_REPLACE_VST2=1)\n",
+            }),
+        ],
+        [
+            "RINNE_PLUGIN_FORMATS 在别处被改写",
+            true,
+            run({ ...base, "cmake/X.cmake": "list(APPEND RINNE_PLUGIN_FORMATS AAX)\n" }),
+        ],
     ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
+    // moduleinfo 对拍：用 golden 夹具拼出一份正确的 moduleinfo（带尾逗号，与 JUCE 生成的写法一致），再逐项改坏
+    const miGood = (plugin = "input", flavor = "formal") => {
+        const spec = FIXTURE_GOLDEN.plugins[plugin];
+        const id = spec.identity[flavor];
+        const mi = FIXTURE_GOLDEN.moduleinfo;
+        const tail = hex(spec.shared.PLUGIN_MANUFACTURER_CODE[0]) + hex(id.PLUGIN_CODE[0]);
+        const cls = (category, middle, subs) => ({
+            CID: mi.cidPrefix + middle + tail,
+            Category: category,
+            Name: id.PRODUCT_NAME[0],
+            Vendor: mi.vendor,
+            Version: "0.9.0",
+            SDKVersion: mi.sdkVersion,
+            ...(subs ? { "Sub Categories": subs } : {}),
+        });
+        return {
+            Name: id.PRODUCT_NAME[0],
+            Version: "0.9.0",
+            "Factory Info": { Vendor: mi.vendor },
+            Classes: [
+                cls("Audio Module Class", mi.classes["Audio Module Class"], ["Fx", "Delay"]),
+                cls("Component Controller Class", mi.classes["Component Controller Class"], ["Fx", "Delay"]),
+                cls("Plugin Compatibility Class", mi.classes["Plugin Compatibility Class"]),
+            ],
+        };
+    };
+    const miRun = (mutate, plugin = "input", flavor = "formal") => {
+        const info = miGood(plugin, flavor);
+        mutate?.(info);
+        // 经文本往返一次，顺带验证尾逗号的宽松解析
+        const text = JSON.stringify(info, null, 2).replace(/([}\]"\d])(\s*\n\s*[}\]])/g, "$1,$2");
+        return checkModuleInfo({
+            golden: FIXTURE_GOLDEN,
+            plugin,
+            flavor,
+            info: parseModuleInfo(text),
+            version: "0.9.0",
+        });
+    };
+    for (const [label, bad, errors] of [
+        ["moduleinfo：正式版 Input 一致", false, miRun()],
+        ["moduleinfo：探针版 Output 一致", false, miRun(undefined, "output", "probe")],
+        ["moduleinfo：CID 改一位", true, miRun((i) => (i.Classes[0].CID = i.Classes[0].CID.replace(/.$/, "0")))],
+        [
+            "moduleinfo：插件码对应的 CID 尾段换成别的",
+            true,
+            miRun((i) => i.Classes.forEach((c) => (c.CID = c.CID.slice(0, -8) + "526E6E6A"))),
+        ],
+        [
+            "moduleinfo：厂商码对应的 CID 段换了",
+            true,
+            miRun((i) => (i.Classes[1].CID = "ABCDEF011234ABCD536E6369526E6E69")),
+        ],
+        ["moduleinfo：名称改了", true, miRun((i) => (i.Name = "Rinne Send"))],
+        ["moduleinfo：类里的名称改了", true, miRun((i) => (i.Classes[2].Name = "x"))],
+        ["moduleinfo：厂商改了", true, miRun((i) => (i["Factory Info"].Vendor = "Other"))],
+        ["moduleinfo：版本与工程版本不一致", true, miRun((i) => (i.Version = "0.9.1"))],
+        ["moduleinfo：子类改了", true, miRun((i) => (i.Classes[0]["Sub Categories"] = ["Fx"]))],
+        ["moduleinfo：缺一个类", true, miRun((i) => i.Classes.pop())],
+        ["moduleinfo：多一个类", true, miRun((i) => i.Classes.push({ ...i.Classes[2] }))],
+    ])
+        cases.push({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 });
     return caseResult(cases);
+}
+
+// ---- 构建产物：VST3 的 moduleinfo.json ----
+
+/** moduleinfo.json 允许尾逗号，标准 JSON 解析器不认：先去掉再解析。 */
+export function parseModuleInfo(text) {
+    return JSON.parse(text.replace(/,(\s*[}\]])/g, "$1"));
+}
+
+const hex = (s) => Buffer.from(s, "latin1").toString("hex").toUpperCase();
+
+/**
+ * 与 golden 对拍一份 moduleinfo：名称、厂商、版本、SDK、每个类的 CID 与子类。
+ * CID = 前缀 + 类别固定段 + 厂商码 + 插件码（十六进制），由 golden 里的身份字段算出来，所以插件码改了这里一定对不上。
+ * flavor 是 "formal" 或 "probe"；version 是根 CMakeLists 的 project 版本。
+ */
+export function checkModuleInfo({ golden, plugin, flavor, info, version }) {
+    const spec = golden.plugins[plugin];
+    const id = spec.identity[flavor];
+    const mi = golden.moduleinfo;
+    const label = `${spec.target}（${flavor}）moduleinfo`;
+    const errors = [];
+    const want = (what, got, expected) => {
+        if (JSON.stringify(got) !== JSON.stringify(expected))
+            errors.push(`${label}：${what} 是 ${JSON.stringify(got)}，应为 ${JSON.stringify(expected)}`);
+    };
+    want("Name", info.Name, id.PRODUCT_NAME[0]);
+    want("Version", info.Version, version);
+    want("厂商", info["Factory Info"]?.Vendor, mi.vendor);
+    const classes = Array.isArray(info.Classes) ? info.Classes : [];
+    want("类数量", classes.length, Object.keys(mi.classes).length);
+    const tail = hex(spec.shared.PLUGIN_MANUFACTURER_CODE[0]) + hex(id.PLUGIN_CODE[0]);
+    for (const [category, middle] of Object.entries(mi.classes)) {
+        const c = classes.find((x) => x.Category === category);
+        if (!c) {
+            errors.push(`${label}：缺类 ${category}`);
+            continue;
+        }
+        want(`${category} 的 CID`, c.CID, mi.cidPrefix + middle + tail);
+        want(`${category} 的名称`, c.Name, id.PRODUCT_NAME[0]);
+        want(`${category} 的厂商`, c.Vendor, mi.vendor);
+        want(`${category} 的版本`, c.Version, version);
+        want(`${category} 的 SDK 版本`, c.SDKVersion, mi.sdkVersion);
+        // 插件兼容类不带子类
+        if (category !== "Plugin Compatibility Class")
+            want(`${category} 的子类`, c["Sub Categories"], spec.shared.VST3_CATEGORIES);
+    }
+    return errors;
+}
+
+/** 在构建目录里找两个插件的 moduleinfo.json 并对拍；返回错误列表。 */
+export function checkBuiltModuleInfo(root, buildDir, flavor) {
+    const golden = JSON.parse(fs.readFileSync(path.join(root, GOLDEN), "utf8"));
+    const rootText = fs.readFileSync(path.join(root, ROOT_CMAKE), "utf8");
+    const version = /project\s*\(\s*Rinne\s+VERSION\s+([\d.]+)/i.exec(stripComments(rootText))?.[1];
+    if (!version) return [`${ROOT_CMAKE}：读不出 project(Rinne VERSION …)`];
+    const errors = [];
+    for (const [plugin, spec] of Object.entries(golden.plugins)) {
+        const product = spec.identity[flavor].PRODUCT_NAME[0];
+        const dir = path.join(buildDir, path.dirname(spec.file), `${spec.target}_artefacts`);
+        const found = fs.existsSync(dir)
+            ? fs
+                  .readdirSync(dir, { withFileTypes: true })
+                  .filter((e) => e.isDirectory())
+                  .map((e) =>
+                      path.join(dir, e.name, "VST3", `${product}.vst3`, "Contents", "Resources", "moduleinfo.json"),
+                  )
+                  .filter((f) => fs.existsSync(f))
+            : [];
+        if (!found.length) {
+            errors.push(`${spec.target}（${flavor}）：在 ${dir} 下找不到「${product}.vst3」的 moduleinfo.json`);
+            continue;
+        }
+        for (const f of found) {
+            let info;
+            try {
+                info = parseModuleInfo(fs.readFileSync(f, "utf8"));
+            } catch (e) {
+                errors.push(`${f}：解析失败：${e.message}`);
+                continue;
+            }
+            errors.push(...checkModuleInfo({ golden, plugin, flavor, info, version }));
+        }
+    }
+    return errors;
 }
 
 // ---- 注册 ----
@@ -517,3 +832,27 @@ export default {
         return { ok: lines.length === 0, lines };
     },
 };
+
+if (isMain(import.meta.url)) {
+    const argv = process.argv.slice(2);
+    const i = argv.indexOf("--moduleinfo");
+    if (i < 0) {
+        console.error("用法：node scripts/checks.d/contract-static-identity.mjs --moduleinfo <构建目录> [--probe]");
+        process.exitCode = 2;
+    } else {
+        const root = path.resolve(
+            path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/, "")),
+            "..",
+            "..",
+        );
+        const flavor = argv.includes("--probe") ? "probe" : "formal";
+        const errors = checkBuiltModuleInfo(root, path.resolve(argv[i + 1] ?? ""), flavor);
+        for (const e of errors) console.error(e);
+        console.log(
+            errors.length
+                ? `moduleinfo 对拍失败（${flavor}）：${errors.length} 处`
+                : `moduleinfo 与 golden 一致（${flavor}）`,
+        );
+        process.exitCode = errors.length ? 1 : 0;
+    }
+}

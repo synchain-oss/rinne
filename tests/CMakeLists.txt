@@ -13,7 +13,7 @@
 # 新增测试只往对应目录里放 .cpp，不改这里。套件要额外的源码、链接或 ctest 设置，写在 tests/<套件>/suite.cmake 里：
 # 建好目标之后 include，用套件的目标名（上表第二列）加源码、链接和 ctest 设置。
 # 每条 ctest 都必须有显式 TIMEOUT：rinne_add_test_suite 统一设，别处自己 add_test 的要自己写；
-# 末尾的 ctest_timeouts_scan 读生成的 CTestTestfile.cmake，缺 TIMEOUT 的测试会让它变红。
+# 末尾的 ctest_timeouts_scan 向 ctest 要它会跑的全部测试（含后注册的），缺 TIMEOUT 或 TIMEOUT 不为正的会让它变红。
 # sanitizer 构建（RINNE_SANITIZE，只在 Linux 上用）的选项在 src/core/CMakeLists.txt 里经 rinne_core 传下来。
 
 include(FetchContent)
@@ -92,15 +92,16 @@ rinne_add_test_suite(rinne_host_tests host NEEDS_JUCE TIMEOUT 300)
 rinne_finish_test_suite(rinne_host_tests host)
 
 # ctest 的 TIMEOUT 门禁：自测加实扫，都在 ctest 里跑，本机 gates、CI 的 build-win 与 core-sanitizers 因此同吃一份。
-# 实扫读的是 ctest 真正吃的那份生成物（各目录的 CTestTestfile.cmake，不含 FetchContent 的第三方），不是 CMakeLists 的文本。
+# 实扫向 ctest 要它真正会跑的测试全集（--show-only=json-v1），含 discover_tests 之类后注册的，逐条要求 TIMEOUT 为正数。
+# 本机 gates 与两种 CI runner 都有 pwsh；找不到就是环境坏了，直接停下，不让门禁悄悄消失。
 find_program(RINNE_PWSH NAMES pwsh)
-if(RINNE_PWSH)
-  set(_rinne_timeout_script "${CMAKE_SOURCE_DIR}/scripts/check-ctest-timeouts.ps1")
-  add_test(NAME ctest_timeouts_selftest
-    COMMAND "${RINNE_PWSH}" -NoProfile -NonInteractive -File "${_rinne_timeout_script}" -SelfTest)
-  add_test(NAME ctest_timeouts_scan
-    COMMAND "${RINNE_PWSH}" -NoProfile -NonInteractive -File "${_rinne_timeout_script}" -BuildDir "${CMAKE_BINARY_DIR}")
-  set_tests_properties(ctest_timeouts_selftest ctest_timeouts_scan PROPERTIES TIMEOUT 60)
-else()
-  message(WARNING "找不到 pwsh：ctest 的 TIMEOUT 门禁（check-ctest-timeouts.ps1）不会作为 ctest 运行")
+if(NOT RINNE_PWSH)
+  message(FATAL_ERROR "找不到 pwsh：ctest 的 TIMEOUT 门禁（scripts/check-ctest-timeouts.ps1）跑不起来。装 PowerShell 7 再配置")
 endif()
+set(_rinne_timeout_script "${CMAKE_SOURCE_DIR}/scripts/check-ctest-timeouts.ps1")
+add_test(NAME ctest_timeouts_selftest
+  COMMAND "${RINNE_PWSH}" -NoProfile -NonInteractive -File "${_rinne_timeout_script}" -SelfTest)
+add_test(NAME ctest_timeouts_scan
+  COMMAND "${RINNE_PWSH}" -NoProfile -NonInteractive -File "${_rinne_timeout_script}"
+          -BuildDir "${CMAKE_BINARY_DIR}" -Config "$<CONFIG>" -Ctest "${CMAKE_CTEST_COMMAND}")
+set_tests_properties(ctest_timeouts_selftest ctest_timeouts_scan PROPERTIES TIMEOUT 60)

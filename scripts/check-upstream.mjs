@@ -28,7 +28,7 @@ const HEADER =
     /^\s*(?:#|\/\/|\/\*+|\*|<!--|;|--|rem\b)?\s*Derived from synchain-oss\/scvb; see upstream\/([\w.-]+)\.json\s*(?:\*\/|-->)?\s*$/;
 /** 写不了注释的格式：登记照常，但不要求文件头。 */
 const NO_COMMENT =
-    /\.(?:json|woff2?|png|jpe?g|gif|ico|svg|txt|lock)$|(?:^|\/)\.[\w.-]*version$|(?:^|\/)\.[\w.-]*sha256$/;
+    /\.(?:json|woff2?|png|jpe?g|gif|ico|svg|lock)$|(?<!CMakeLists)\.txt$|(?:^|\/)\.[\w.-]*version$|(?:^|\/)\.[\w.-]*sha256$/;
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const safeRel = (p) =>
@@ -190,10 +190,17 @@ export function checkTree(root = ROOT) {
  * 返回 { drifted: [...], missing: [...], same: n }。
  */
 export function compareDrift(fragments, blobAt) {
-    const report = { drifted: [], missing: [], same: 0 };
+    const report = { drifted: [], missing: [], wrongPin: [], same: 0 };
     for (const [area, frag] of Object.entries(fragments)) {
         for (const f of frag.files ?? []) {
-            const blob = blobAt(frag.sources[f.source], f.from);
+            // 登记的 fromBlob 先要等于钉住的提交里那个文件的 blob：否则随手填一个 40 位值，离线检查和漂移比对都发现不了
+            const pinned = blobAt(frag.sources[f.source], f.from, true);
+            if (pinned === null) report.wrongPin.push(`${f.path}（${area}）：钉住的提交里没有 ${f.from}`);
+            else if (pinned !== f.fromBlob)
+                report.wrongPin.push(
+                    `${f.path}（${area}）：登记的 fromBlob ${f.fromBlob.slice(0, 12)} 不是钉住的提交里 ${f.from} 的 ${pinned.slice(0, 12)}`,
+                );
+            const blob = blobAt(frag.sources[f.source], f.from, false);
             if (blob === null) report.missing.push(`${f.path}（${area}）：来源里已没有 ${f.from}`);
             else if (blob === f.fromBlob) report.same++;
             else
@@ -206,12 +213,13 @@ export function compareDrift(fragments, blobAt) {
 /** 本地克隆里取 blob：先 fetch 来源分支，再按 origin/<ref>:<from> 解析。 */
 function blobFromClone(dir) {
     const fetched = new Set();
-    return (src, from) => {
+    return (src, from, atPinned) => {
         if (!fetched.has(src.ref)) {
             git(["-C", dir, "fetch", "--quiet", "origin", src.ref], { allowFail: false });
             fetched.add(src.ref);
         }
-        const out = git(["-C", dir, "rev-parse", "--verify", "--quiet", `origin/${src.ref}:${from}`], {
+        const rev = atPinned ? src.sha : `origin/${src.ref}`;
+        const out = git(["-C", dir, "rev-parse", "--verify", "--quiet", `${rev}:${from}`], {
             allowFail: true,
         });
         return out ? out.trim() : null;
@@ -219,8 +227,9 @@ function blobFromClone(dir) {
 }
 
 /** 经 GitHub 接口取 blob；认证沿用 gh 当前的登录或 GH_TOKEN，本脚本不切换账号。 */
-function blobFromGitHub(src, from) {
-    const url = `repos/${src.repo}/contents/${from.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(src.ref)}`;
+function blobFromGitHub(src, from, atPinned) {
+    const ref = atPinned ? src.sha : src.ref;
+    const url = `repos/${src.repo}/contents/${from.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`;
     const r = spawnSync("gh", ["api", url, "--jq", ".sha"], { encoding: "utf8" });
     if (r.status === 0) return r.stdout.trim();
     if (/HTTP 404/.test(`${r.stderr}`)) return null;
@@ -248,6 +257,12 @@ export function selfTest() {
         f(copy);
         return { x: copy };
     };
+    // 登记的是 src/CMakeLists.txt：它写得了 # 注释，不能被当成 .txt 声明文件而跳过文件头校验
+    const cmakeCase = (text) =>
+        run({
+            fragments: { x: frag({ path: "src/CMakeLists.txt", from: "CMakeLists.txt" }) },
+            texts: { "src/a.cpp": "int a;\n", "src/CMakeLists.txt": text },
+        });
     const cases = [
         ["登记完整、文件头对得上", false, run()],
         [
@@ -300,11 +315,39 @@ export function selfTest() {
         ],
         ["文件头在第 8 行之后", true, run({ texts: { "src/a.cpp": `${"//\n".repeat(8)}${hdr()}` } })],
         ["有文件头却没登记", true, run({ texts: { "src/b.cpp": hdr() } })],
+        [
+            "CMakeLists.txt 带 # 头：正例",
+            false,
+            cmakeCase("# Derived from synchain-oss/scvb; see upstream/x.json\nproject(x)\n"),
+        ],
+        ["CMakeLists.txt 缺文件头", true, cmakeCase("project(x)\n")],
+        [
+            "CMakeLists.txt 两行文件头",
+            true,
+            cmakeCase(
+                "# Derived from synchain-oss/scvb; see upstream/x.json\n# Derived from synchain-oss/scvb; see upstream/x.json\n",
+            ),
+        ],
+        [
+            "CMakeLists.txt 的文件头指向别的片段",
+            true,
+            cmakeCase("# Derived from synchain-oss/scvb; see upstream/y.json\n"),
+        ],
+        [
+            "普通 .txt（如声明文件）仍不要求文件头",
+            false,
+            run({
+                fragments: { x: frag({ path: "notes.txt", from: "notes.txt" }) },
+                texts: { "src/a.cpp": "int a;\n", "notes.txt": "plain\n" },
+            }),
+        ],
     ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
 
     const same = compareDrift({ x: frag() }, () => blob);
-    const moved = compareDrift({ x: frag() }, () => "c".repeat(40));
-    const gone = compareDrift({ x: frag() }, () => null);
+    const moved = compareDrift({ x: frag() }, (_src, _from, atPinned) => (atPinned ? blob : "c".repeat(40)));
+    const gone = compareDrift({ x: frag() }, (_src, _from, atPinned) => (atPinned ? blob : null));
+    const forged = compareDrift({ x: frag() }, (_src, _from, atPinned) => (atPinned ? "d".repeat(40) : blob));
+    const unpinned = compareDrift({ x: frag() }, (_src, _from, atPinned) => (atPinned ? null : blob));
     cases.push(
         {
             label: "漂移：blob 相同不报",
@@ -313,6 +356,9 @@ export function selfTest() {
         },
         { label: "漂移：blob 不同要报", bad: true, passed: moved.drifted.length === 1 },
         { label: "漂移：上游已删除要报", bad: true, passed: gone.missing.length === 1 },
+        { label: "登记的 fromBlob 不是钉住的提交里的 blob 要报", bad: true, passed: forged.wrongPin.length === 1 },
+        { label: "钉住的提交里没有这个文件要报", bad: true, passed: unpinned.wrongPin.length === 1 },
+        { label: "fromBlob 与钉住的提交一致不报", bad: false, passed: same.wrongPin.length === 0 },
     );
     return caseResult(cases);
 }
@@ -331,10 +377,11 @@ function main(argv) {
         const report = compareDrift(loadFragments(ROOT), blobAt);
         for (const l of report.drifted) console.log(`漂移：${l}`);
         for (const l of report.missing) console.log(`上游已无：${l}`);
+        for (const l of report.wrongPin) console.log(`登记有误：${l}`);
         console.log(
-            `check-upstream --drift：${report.same} 个文件与来源分支一致，${report.drifted.length} 个漂移，${report.missing.length} 个上游已无`,
+            `check-upstream --drift：${report.same} 个文件与来源分支一致，${report.drifted.length} 个漂移，${report.missing.length} 个上游已无，${report.wrongPin.length} 个登记与钉住的提交不符`,
         );
-        return report.drifted.length || report.missing.length ? 1 : 0;
+        return report.drifted.length || report.missing.length || report.wrongPin.length ? 1 : 0;
     }
     const errors = checkTree();
     if (!errors.length) {
