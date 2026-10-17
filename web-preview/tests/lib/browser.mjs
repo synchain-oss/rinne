@@ -41,6 +41,8 @@ class Page {
         this.pending = new Map();
         ws.addEventListener("message", (ev) => {
             const m = JSON.parse(ev.data);
+            if (m.method && this.requests && m.method === "Network.requestWillBeSent")
+                this.requests.push(m.params.request.url);
             if (m.id && this.pending.has(m.id)) {
                 this.pending.get(m.id)(m);
                 this.pending.delete(m.id);
@@ -110,11 +112,17 @@ class Page {
         }
     }
 
-    async screenshot(file) {
+    /** 截图，只返回 PNG 字节；写文件由调用方负责（且只能写到它自己限定的目录）。 */
+    async screenshot() {
         const r = await this.send("Page.captureScreenshot", { format: "png" });
-        const buf = Buffer.from(r.data, "base64");
-        if (file) fs.writeFileSync(file, buf);
-        return buf;
+        return Buffer.from(r.data, "base64");
+    }
+
+    /** 开始记录页面发出的所有网络请求（Network.requestWillBeSent），返回会持续增长的 URL 数组。 */
+    async recordRequests() {
+        this.requests = [];
+        await this.send("Network.enable");
+        return this.requests;
     }
 
     async close() {

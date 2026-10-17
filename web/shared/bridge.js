@@ -29,16 +29,15 @@
 //     收到的回声只更新显示，绝不回写）。
 //   - 枚举取值、载荷形状、单位换算一概不出现在本文件；想知道某个名字收什么、回什么，读 docs/UI_BRIDGE.md。
 //
-// 名表需要与桥契约文档（docs/UI_BRIDGE.md）、两个 *BridgeApi.h 和预览 mock 逐字相符，并由 parity 检查
-// 对拍。这几样目前都还没有建立，在它们落地之前这份名表没有静态检查兜底；建立桥契约的工作要同时补上
-// 契约文档和 parity 检查，此后加桥函数时这几处在同一个 PR 里一起改。
+// 名表需要与桥契约文档（docs/UI_BRIDGE.md）、两个 *BridgeApi.h 和预览 mock 逐字相符，并由
+// scripts/check-bridge-parity.mjs 对拍：任何一方多一项或少一项都判红。加桥函数时这几处在同一个提交里一起改。
 // parity 脚本预期按正则读数组字面量、不执行本文件，所以名表保持纯字面量，数组行内不写带方括号的注释。
 //
 // mock 后端形状：opts.mockBackend 必须是 window.__JUCE__.backend 的同形替身，
 // 让「mock 与真后端导出名一致」由结构保证，而不靠人工核对：
 //   - BRIDGE_FUNCTIONS[role] 的每个名字一个方法（可以是 async，返回 JSON 对象）；
 //   - addEventListener(evtName, cb) 一个方法，用于推送 BRIDGE_EVENTS[role] 的事件。
-// 缺名会在 createBridge() 处抛错并列出缺失项，这是运行期兜底，静态面要等 parity 检查建立后才有。
+// 缺名会在 createBridge() 处抛错并列出缺失项，这是运行期兜底；静态面由 scripts/check-bridge-parity.mjs 守。
 
 /**
  * 桥函数名表。两个角色共用的名字（前十二个）在两侧各写一遍，数组保持纯字面量，

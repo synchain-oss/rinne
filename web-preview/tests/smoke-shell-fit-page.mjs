@@ -26,6 +26,7 @@ const browser = await launchBrowser();
 
 try {
     const page = await browser.newPage();
+    const requests = await page.recordRequests();
 
     // ---- ① 夹具页 ----
     const measure = () =>
@@ -122,6 +123,11 @@ try {
     run.check(true, "占位页：工具条显示「页面尚未接桥」，不判失败");
 
     run.check(page.errors.length === 0, `页面不应有错误：${page.errors.join("；")}`);
+    const foreign = requests.filter((u) => !/^(data|blob|about):/.test(u) && new URL(u).origin !== server.url);
+    run.check(
+        requests.length > 0 && foreign.length === 0,
+        `壳页与夹具页发出的请求都必须同源，外部请求：${JSON.stringify(foreign)}`,
+    );
 } finally {
     await browser.close();
     await server.close();

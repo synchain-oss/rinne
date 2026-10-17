@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 场景集合对拍：预览的场景表（web-preview/mock/scenarios.js 的 SCENES）与设计稿的机读清单（#rinne-scenes）。
-//   1. 场景表自身一致（恒执行）：ID 唯一、前缀与窗口对应（in- 对 input，out- 对 output，cat- 对 catalog）、语言合法、
+//   1. 场景表自身一致，并与仓内钉死的清单 web-preview/mock/scenes.manifest.json 逐个一致（恒执行，删场景或改名都会变红）：ID 唯一、前缀与窗口对应（in- 对 input，out- 对 output，cat- 对 catalog）、语言合法、
 //      mustShow 里的元件编号都在锚点表里且与窗口一致、整窗场景带外壳元件；
 //   2. 与设计稿对拍（设计稿入库后生效）：ID 集合相等；每个场景的窗口与语言相同；设计稿的 elements 覆盖场景表的 mustShow；
 //      设计盒尺寸与 web/shared/design-box.js 相同。
@@ -41,6 +41,28 @@ export function internalProblems(scenes, anchors) {
         }
         const shell = s.role === "input" ? "I-01" : s.role === "output" ? "O-01" : null;
         if (shell && !s.mustShow.includes(shell)) out.push(`场景 ${id}：整窗场景缺外壳 ${shell}`);
+    }
+    return out;
+}
+
+/** 与仓内钉死的场景清单（scenes.manifest.json）对拍：ID 集合、窗口、语言逐个一致。 */
+export function pinnedProblems(scenes, pinned) {
+    const out = [];
+    const list = Array.isArray(pinned?.scenes) ? pinned.scenes : null;
+    if (!list) return ["scenes.manifest.json 读不到 scenes 数组"];
+    const mine = new Map(scenes.map((s) => [s.id, s]));
+    const pins = new Map();
+    for (const p of list) {
+        if (pins.has(p.id)) out.push(`钉死清单里场景 ${p.id} 重复`);
+        pins.set(p.id, p);
+    }
+    for (const id of mine.keys()) if (!pins.has(id)) out.push(`场景表有 ${id}，钉死清单没有`);
+    for (const id of pins.keys()) if (!mine.has(id)) out.push(`钉死清单有 ${id}，场景表没有（被删了或改了名）`);
+    for (const [id, s] of mine) {
+        const p = pins.get(id);
+        if (!p) continue;
+        if (p.role !== s.role) out.push(`场景 ${id}：钉死清单窗口 ${p.role}，场景表 ${s.role}`);
+        if (p.lang !== s.lang) out.push(`场景 ${id}：钉死清单语言 ${p.lang}，场景表 ${s.lang}`);
     }
     return out;
 }
@@ -109,8 +131,15 @@ export async function checkTree(root = ROOT, explicitDesign = null) {
     const { ELEMENT_ANCHORS } = await import(url("web-preview/mock/anchors.js"));
     const { DESIGN } = await import(url("web/shared/design-box.js"));
     const problems = internalProblems(SCENES, ELEMENT_ANCHORS);
+    const pinFile = path.join(root, "web-preview", "mock", "scenes.manifest.json");
+    if (!fs.existsSync(pinFile)) problems.push("缺 web-preview/mock/scenes.manifest.json（钉死的场景清单）");
+    else problems.push(...pinnedProblems(SCENES, JSON.parse(fs.readFileSync(pinFile, "utf8"))));
     const file = locateDesign(root, explicitDesign);
-    if (!file) return { problems, skip: "设计稿还没有入库（docs/design/ 不存在），只做场景表自身的一致性检查" };
+    if (!file)
+        return {
+            problems,
+            skip: "设计稿还没有入库（docs/design/ 不存在），只做场景表自身的一致性检查，以及与钉死清单 web-preview/mock/scenes.manifest.json 的对拍",
+        };
     const r = readManifest(file);
     if (r.problem) problems.push(r.problem);
     else problems.push(...compareManifest(SCENES, r.manifest, DESIGN));
@@ -150,6 +179,19 @@ export function selfTest() {
         false,
         withManifest((m) => m.scenes[0].elements.push("I-17")),
     );
+    const pins = () => ({ scenes: scenes.map((s) => ({ id: s.id, role: s.role, lang: s.lang })) });
+    add("场景表与钉死清单一致", false, pinnedProblems(scenes, pins()));
+    add("场景表改了名", true, pinnedProblems([{ ...scenes[0], id: "in-renamed" }, ...scenes.slice(1)], pins()));
+    add("场景表删了一个场景", true, pinnedProblems(scenes.slice(1), pins()));
+    add("场景表多了一个场景", true, pinnedProblems([...scenes, { id: "in-extra", role: "input", lang: "zh" }], pins()));
+    add(
+        "场景的窗口与钉死清单不同",
+        true,
+        pinnedProblems([{ ...scenes[0], role: "output" }, ...scenes.slice(1)], pins()),
+    );
+    add("场景的语言与钉死清单不同", true, pinnedProblems([{ ...scenes[0], lang: "fr" }, ...scenes.slice(1)], pins()));
+    add("钉死清单里 ID 重复", true, pinnedProblems(scenes, { scenes: [...pins().scenes, pins().scenes[0]] }));
+    add("钉死清单读不出 scenes", true, pinnedProblems(scenes, {}));
     add(
         "场景 ID 重复",
         true,

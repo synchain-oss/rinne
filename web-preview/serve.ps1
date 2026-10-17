@@ -34,8 +34,18 @@ $MimeTypes = @{
     '.txt' = 'text/plain; charset=utf-8'
 }
 
-# URL 路径转磁盘路径并挡掉目录穿越：先解码，再拼到站点根上归一化，最后断言仍在站点根之内。
+# 站点根是仓库根，但只放行预览要用到的两棵目录：/web/ 与 /web-preview/；别的一律 404（含 /.git/、/scripts/、/_logs/ 等）。
+# 以点开头的路径段（.git、.shots、.env 之类）也一律 404。
+function Test-AllowedUrlPath([string]$UrlPath) {
+    $decoded = [System.Uri]::UnescapeDataString($UrlPath)
+    if ($decoded -notmatch '^/(web|web-preview)/') { return $false }
+    foreach ($seg in ($decoded -split '[/\\]')) { if ($seg.StartsWith('.')) { return $false } }
+    return $true
+}
+
+# URL 路径转磁盘路径并挡掉目录穿越：先查前缀白名单，再解码、拼到站点根上归一化，最后断言仍在站点根之内。
 function Get-SafeLocalPath([string]$UrlPath, [string]$Root) {
+    if (-not (Test-AllowedUrlPath $UrlPath)) { return $null }
     $decoded = [System.Uri]::UnescapeDataString($UrlPath).TrimStart('/')
     $decoded = $decoded -replace '/', [System.IO.Path]::DirectorySeparatorChar
     $full = [System.IO.Path]::GetFullPath((Join-Path $Root $decoded))
@@ -118,6 +128,12 @@ if ($SmokeTest) {
         @{ Path = '/web/shared/bridge.js'; Want = 200 }
         @{ Path = '/web-preview/%2e%2e/%2e%2e/etc/passwd'; Want = 404 }
         @{ Path = '/web-preview/no-such-file.js'; Want = 404 }
+        @{ Path = '/.git/config'; Want = 404 }
+        @{ Path = '/scripts/gates.ps1'; Want = 404 }
+        @{ Path = '/CLAUDE.md'; Want = 404 }
+        @{ Path = '/web-preview/.shots/x.png'; Want = 404 }
+        @{ Path = '/web/%2e%67it/config'; Want = 404 }
+        @{ Path = '/web/../.git/config'; Want = 404 }
     )
     $fail = 0
     foreach ($c in $cases) {

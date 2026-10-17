@@ -31,6 +31,8 @@ const rejected = (patch, label) => run.check(!verdict(patch).ok, `${label}：拒
 run.check(verdict({}).ok, "固定目录、有标记：放行");
 run.check(verdict({ exists: false, hasMarker: false }).ok, "固定目录不存在：放行");
 rejected({ targetReal: path.join(baseReal, "demo") }, "固定目录下的子目录（不再有子名）");
+rejected({ targetIsLink: true }, "目标本身是符号链接或 junction（含悬空的）");
+rejected({ targetIsLink: true, exists: false, hasMarker: false }, "目标是悬空链接（existsSync 为假也拒绝）");
 rejected({ hasMarker: false }, "已存在却没有标记文件");
 
 for (const [label, targetReal] of [
@@ -128,6 +130,32 @@ try {
 
     r = exec("--check");
     run.check(r.status === 0, "--check 只自检不写文件");
+
+    // 固定目录本身是 junction：指向带标记的外部目录、以及悬空的，都必须拒绝，外部什么都不能被写或被删
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-outside-"));
+    try {
+        fs.writeFileSync(path.join(outside, MARKER), "m");
+        fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
+        fs.rmSync(out, { recursive: true }); // 副本里的固定目录
+        fs.symlinkSync(outside, out, "junction");
+        r = exec();
+        run.check(r.status === 1, `固定目录是 junction 指向带标记的外部目录：应当拒绝，实得 ${r.status}`);
+        run.check(
+            fs.readdirSync(outside).sort().join() === `${MARKER},keep.txt`,
+            "junction 指向的外部目录：什么都没被写或删",
+        );
+        fs.rmdirSync(out); // 只摘掉副本里的 junction 本身
+        const gone = path.join(outside, "gone");
+        fs.mkdirSync(gone);
+        fs.symlinkSync(gone, out, "junction");
+        fs.rmdirSync(gone); // 让 junction 悬空
+        r = exec();
+        run.check(r.status === 1, `固定目录是悬空的 junction：应当拒绝，实得 ${r.status}`);
+        run.check(!fs.existsSync(gone), "悬空 junction：没有穿过链接创建任何东西");
+        fs.rmdirSync(out);
+    } finally {
+        fs.rmSync(outside, { recursive: true }); // 只删上面 mkdtemp 出来的目录
+    }
 } finally {
     fs.rmSync(tmp, { recursive: true }); // 只删上面 mkdtemp 出来的目录
 }

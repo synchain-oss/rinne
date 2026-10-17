@@ -20,6 +20,7 @@ export function repoRoot(argv = process.argv.slice(2)) {
 export function createRun(name) {
     let fail = 0;
     let n = 0;
+    let skipped = 0;
     const out = (s) => console.log(s);
     const run = {
         name,
@@ -40,6 +41,14 @@ export function createRun(name) {
             out(`  [失败] ${msg}\n         实得 ${a}\n         应为 ${b}`);
             return false;
         },
+        /**
+         * 套内的某一项跳过（例如还没入库的 C++ 侧对拍项）：记一行并计数，不算失败，但也不能当作通过。
+         * run-all 与 gates 会把它按跳过汇总、写明原因，所以这类项不会悄悄空转。
+         */
+        skipItem(what, reason) {
+            skipped++;
+            out(`  [跳过项] ${what}：${reason}`);
+        },
         /** 整套跳过：打印原因并以 2 退出。 */
         skip(reason) {
             out(`${name}：跳过（${reason}）`);
@@ -47,7 +56,8 @@ export function createRun(name) {
         },
         /** 收尾：打印汇总并设退出码。 */
         finish() {
-            out(`${name}：${fail === 0 ? "通过" : `${fail} 项失败`}（${n} 项断言）`);
+            const extra = skipped ? `，${skipped} 项跳过项` : "";
+            out(`${name}：${fail === 0 ? "通过" : `${fail} 项失败`}（${n} 项断言${extra}）`);
             process.exitCode = fail === 0 ? EXIT_PASS : EXIT_FAIL;
             return fail === 0;
         },

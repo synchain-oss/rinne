@@ -33,6 +33,11 @@ export async function startStaticServer(root) {
             res.writeHead(204).end(); // 浏览器自己会要，不让它在控制台留 404
             return;
         }
+        // 与 serve.ps1 同一套：只放行 /web/ 与 /web-preview/，以点开头的路径段一律 404
+        if (!/^\/(web|web-preview)\//.test(rel) || rel.split(/[/\\]/).some((seg) => seg.startsWith("."))) {
+            res.writeHead(404).end("404");
+            return;
+        }
         let file = path.resolve(base, "." + rel);
         if (file !== base && !file.startsWith(base + path.sep)) {
             res.writeHead(404).end("404");

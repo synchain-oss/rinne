@@ -13,6 +13,9 @@
 //
 // 用法：node web-preview/tests/smoke-first-frame-page.mjs [仓库根]
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
@@ -35,9 +38,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function open(url, preamble) {
     const page = await browser.newPage();
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_HOST + preamble });
+    page.requestLog = await page.recordRequests();
     await page.goto(url);
     return page;
 }
+
+/** 页面发出的请求里不同源的那些（data:、blob:、about: 不算网络请求）。 */
+const foreignRequests = (page, origin) =>
+    page.requestLog.filter((u) => !/^(data|blob|about):/.test(u) && new URL(u).origin !== origin);
 const posted = (page, id) => page.eval(`window.__posted.filter((m) => m.eventId === ${JSON.stringify(id)})`);
 
 try {
@@ -64,6 +72,12 @@ try {
                 `${role}（正常）：首帧发出后 __rinneBooted 置位`,
             );
             run.check(page.errors.length === 0, `${role}（正常）：控制台不应有错误：${page.errors.join("；")}`);
+            run.check(page.requestLog.length > 0, `${role}（正常）：应当记录到页面自己的请求（防空转）`);
+            run.eq(
+                foreignRequests(page, server.url),
+                [],
+                `${role}（正常）：页面发出的所有请求都必须与服务器同源（本地，无外部请求）`,
+            );
             await page.close();
         }
 
@@ -129,6 +143,30 @@ try {
             );
             await page.close();
         }
+    }
+
+    // 坏例：一个会发外部请求的页面，必须被同源断言抓到。页面放在 mkdtemp 出来的临时目录里，请求发往本机一个无人监听的端口，
+    // 不会真的出网；同源断言要把它认作外部请求。
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-badpage-"));
+    try {
+        fs.mkdirSync(path.join(tmp, "web-preview"));
+        fs.writeFileSync(
+            path.join(tmp, "web-preview", "bad.html"),
+            // 页面加载完之后才发外部请求：不拖慢本测试等待页面加载完成
+            '<!doctype html><meta charset="utf-8"><p>bad</p><script>addEventListener("load", function () { new Image().src = "http://127.0.0.1:9/p.gif"; var s = document.createElement("script"); s.src = "http://127.0.0.1:9/external.js"; document.head.appendChild(s); });</script>',
+        );
+        const badServer = await startStaticServer(tmp);
+        try {
+            const page = await open(`${badServer.url}/web-preview/bad.html`, "");
+            await sleep(300);
+            const offenders = foreignRequests(page, badServer.url);
+            run.check(offenders.length >= 2, `坏例：同源断言应当抓到外部请求，实得 ${JSON.stringify(offenders)}`);
+            await page.close();
+        } finally {
+            await badServer.close();
+        }
+    } finally {
+        fs.rmSync(tmp, { recursive: true }); // 只删上面 mkdtemp 出来的目录
     }
 } finally {
     await browser.close();

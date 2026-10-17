@@ -271,5 +271,5 @@ for (const role of roles) {
     }
 }
 
-for (const s of skipped) run.log(`  [跳过] ${s}：C++ 侧文件还没入库，入库后自动生效`);
+for (const s of skipped) run.skipItem(s, "C++ 侧文件还没入库，入库后自动生效");
 run.finish();

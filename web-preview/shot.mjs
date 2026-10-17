@@ -11,15 +11,18 @@
 //   node web-preview/shot.mjs --role=input --scenario=in-playing --out=in-playing.png
 //   node web-preview/shot.mjs --role=output --scenario=out-fr-worst --lang=fr
 //   node web-preview/shot.mjs --role=input --scale=1.25 --dpr=2
-//   node web-preview/shot.mjs --role=input --all            每个场景一张，写到 web-preview/.shots/
+//   node web-preview/shot.mjs --role=input --all            每个场景一张，写到 build/web-preview-shots/
 //   node web-preview/shot.mjs --base=http://127.0.0.1:8833 --role=output
 // 选项：--role=input|output（缺省 input）、--scenario、--lang、--scale、--fresh=1、--dpr、--wait=毫秒（缺省 600）、
-//       --out=文件（缺省 web-preview/.shots/<角色>-<场景>.png）、--page=probe 打开夹具页、--help。
+//       --out=<名字>.png（只能是不带目录的文件名，缺省 <角色>-<场景>.png）、--page=probe 打开夹具页、--help。
+// 输出只会写进仓库的 build/web-preview-shots/（build/ 已被忽略），后缀限 .png，不接受任何路径，不覆盖目录，
+// 目录或目标是符号链接、junction 时拒绝（见 tests/lib/safe-out.mjs）。
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { findBrowser, launchBrowser } from "./tests/lib/browser.mjs";
+import { resolveOutFile } from "./tests/lib/safe-out.mjs";
 import { startStaticServer } from "./tests/lib/static-server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -35,7 +38,7 @@ if (args.has("help")) {
         fs
             .readFileSync(fileURLToPath(import.meta.url), "utf8")
             .split("\n")
-            .slice(8, 18)
+            .slice(9, 19)
             .join("\n")
             .replace(/^\/\/ ?/gm, ""),
     );
@@ -53,18 +56,18 @@ if (!findBrowser()) {
 }
 
 const { SCENES } = await import(pathToFileURL(path.join(root, "web-preview/mock/scenarios.js")).href);
-const outDir = path.join(root, "web-preview/.shots");
+const OUT_REL = ["build", "web-preview-shots"];
 const jobs = args.has("all")
     ? SCENES.filter((s) => s.role === role).map((s) => ({
           scenario: s.id,
           lang: s.lang,
-          file: path.join(outDir, `${s.id}.png`),
+          name: `${s.id}.png`,
       }))
     : [
           {
               scenario: opt("scenario", ""),
               lang: opt("lang", ""),
-              file: path.resolve(opt("out", path.join(outDir, `${role}-${opt("scenario", "default")}.png`))),
+              name: opt("out", `${role}-${opt("scenario", "default")}.png`),
           },
       ];
 
@@ -92,10 +95,17 @@ try {
             `(() => { const r = document.querySelector("iframe").getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`,
         );
         const shot = await page.send("Page.captureScreenshot", { format: "png", clip: { ...rect, scale: 1 } });
-        fs.mkdirSync(path.dirname(job.file), { recursive: true });
-        fs.writeFileSync(job.file, Buffer.from(shot.data, "base64"));
+        let file;
+        try {
+            file = resolveOutFile(root, OUT_REL, job.name, [".png"]);
+        } catch (e) {
+            console.error(e.message);
+            process.exitCode = 1;
+            continue;
+        }
+        fs.writeFileSync(file, Buffer.from(shot.data, "base64"));
         console.log(
-            `${job.scenario || "(默认态)"}：${Math.round(rect.width)}×${Math.round(rect.height)} -> ${path.relative(root, job.file)}`,
+            `${job.scenario || "(默认态)"}：${Math.round(rect.width)}×${Math.round(rect.height)} -> ${path.relative(root, file)}`,
         );
     }
     if (page.errors.length) console.error(`页面有 ${page.errors.length} 条错误：\n  ${page.errors.join("\n  ")}`);

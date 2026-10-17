@@ -13,7 +13,7 @@
 //   外链    不引用任何 http(s) 地址（带 data-preview-only 的预览字体块除外），样式里也不能有 url(http…) 与 @import。
 // 输出：逐类问题清单（A 缺失、B 偏离、D 稿内缺陷的草稿分类供用户一次裁定）和一份按 DELTA 固定五节写的草稿。
 // 设计稿的位置、浏览器缺失时的处理与 check-scenes 相同：设计稿没入库就跳过。
-//   node scripts/check-design-manifest.mjs [--design <文件>] [--scene <id>]... [--delta <输出.md>] [--self-test]
+//   node scripts/check-design-manifest.mjs [--design <文件>] [--scene <id>]... [--delta <名字>.md|.json] [--self-test]
 // 退出码：0 没有判红的问题；1 有；2 整个检查跳过（没有设计稿或没有浏览器）。
 
 import fs from "node:fs";
@@ -21,6 +21,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ROOT, assertNodeVersion, caseResult, isMain } from "./lib/check-kit.mjs";
 import { compareManifest, locateDesign, readManifest } from "./check-scenes.mjs";
+import { resolveOutFile } from "../web-preview/tests/lib/safe-out.mjs";
 
 // ---------------------------------------------------------------- 浏览器里跑的采集脚本
 
@@ -633,7 +634,12 @@ if (isMain(import.meta.url)) {
                 process.exitCode = 2;
             } else {
                 console.log(renderReport(r.findings));
-                if (opt("--delta")) fs.writeFileSync(opt("--delta"), renderDelta(r.findings));
+                if (opt("--delta")) {
+                    // 只写进 build/design-delta/，只接受不带目录的文件名，后缀限 .md / .json（见 safe-out.mjs）
+                    const out = resolveOutFile(ROOT, ["build", "design-delta"], opt("--delta"), [".md", ".json"]);
+                    fs.writeFileSync(out, renderDelta(r.findings));
+                    console.log(`DELTA 草稿已写入 ${path.relative(ROOT, out)}`);
+                }
                 process.exitCode = r.findings.some((f) => f.severity === "red") ? 1 : 0;
             }
         }

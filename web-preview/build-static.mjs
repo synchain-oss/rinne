@@ -12,7 +12,9 @@
 // 脚本绝不删除调用方给的任意路径。清空目标目录前要全部满足：
 //   1. 目标的真实路径（realpath；目标不存在时先对已存在的上级取 realpath 再拼回去，符号链接与 junction 因此无处藏身）
 //      恰好等于 realpath(<仓库根>)/build/web-preview-static（build/ 被换成 junction 也拒），且不是仓库根、它的上级或盘根；
-//   2. 目标若已存在，必须含本脚本上次写下的标记文件 .rinne-build-static，否则拒绝（不删，退出 1）。
+//   2. 目标若已存在，必须含本脚本上次写下的标记文件 .rinne-build-static，否则拒绝（不删，退出 1）；
+//   3. 目标本身不能是符号链接或 junction（lstat 判，悬空的也算）。
+// 导出时先写标记文件再拷内容；源树自检不过就不导出。
 // 判定是纯函数 cleanVerdict，测试只传路径字符串。删除只针对这个目标目录，不用 force 吞错。
 // --check 只自检仓库里的源树，不写任何文件。
 // 退出码：0 通过；1 有外链或网络调用、守卫拒绝，或拷贝失败。
@@ -21,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** 固定输出目录相对仓库根的位置，标记文件名，子名的格式。 */
+/** 固定输出目录相对仓库根的位置，和标记文件名。 */
 export const OUT_REL = ["build", "web-preview-static"];
 export const MARKER = ".rinne-build-static";
 
@@ -39,9 +41,10 @@ const samePath = (a, b) => path.relative(a, b) === "";
  * @param {string} i.targetReal 目标目录的真实路径（同上）
  * @param {boolean} i.exists 目标目录是否已存在
  * @param {boolean} i.hasMarker 目标目录里有没有标记文件
+ * @param {boolean} i.targetIsLink 目标本身是不是符号链接或 junction（lstat 判，悬空的也算）
  * @returns {{ok:boolean, reason:string}}
  */
-export function cleanVerdict({ rootReal, baseReal, targetReal, exists, hasMarker }) {
+export function cleanVerdict({ rootReal, baseReal, targetReal, exists, hasMarker, targetIsLink = false }) {
     const no = (reason) => ({ ok: false, reason });
     for (const [k, v] of Object.entries({ rootReal, baseReal, targetReal })) {
         if (typeof v !== "string" || v === "" || !path.isAbsolute(v)) return no(`${k} 必须是非空的绝对路径`);
@@ -51,6 +54,7 @@ export function cleanVerdict({ rootReal, baseReal, targetReal, exists, hasMarker
             `固定输出目录的真实路径 ${baseReal} 不在仓库根真实路径下的 ${OUT_REL.join("/")}（符号链接或 junction？）`,
         );
     }
+    if (targetIsLink) return no("目标本身是符号链接或 junction（含悬空的），拒绝导出");
     if (!samePath(baseReal, targetReal)) {
         return no(`目标的真实路径 ${targetReal} 不是固定输出目录 ${baseReal}`);
     }
@@ -84,7 +88,20 @@ const INCLUDE = [
 
 /** 可以出现 http(s) 字面量的两种情形：SVG 命名空间（标识符，不是请求）；JUCE 前端辅助脚本里宿主资源的伪源（原生侧拦截，不出网）。 */
 const ALLOWED_URL = /^https?:\/\/(?:www\.w3\.org\/2000\/svg|juce\.backend\/?)$/;
-const NETWORK_CALLS = /\b(?:fetch|sendBeacon)\s*\(|\bXMLHttpRequest\b|\bnew\s+(?:WebSocket|EventSource)\b/;
+/**
+ * 网络调用：fetch、sendBeacon 等只要出现这个词就判红（不要求带括号：`const f = window.fetch; f()` 这类间接调用也拦住），
+ * 另外 XMLHttpRequest、WebSocket、EventSource、各类 Worker 与 importScripts。静态扫描挡不住运行时拼出来的名字，
+ * 那一层由 first-frame-page 冒烟用 Network.requestWillBeSent 断言所有请求同源来兜。
+ */
+const NETWORK_CALLS = /\b(?:fetch|sendBeacon|XMLHttpRequest|WebSocket|EventSource|importScripts|Worker|SharedWorker)\b/;
+
+/** 协议相对地址（//host/…）：属性、url()、@import 与 JS 字符串里的形态。 */
+const PROTOCOL_RELATIVE = [
+    /\b(?:src|href|action|poster|formaction|srcset|data)\s*=\s*["']?\s*\/\//i,
+    /url\(\s*["']?\s*\/\//i,
+    /@import\s+(?:url\(\s*)?["']?\s*\/\//i,
+    /["'`]\s*\/\/[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)+/,
+];
 
 function* walk(dirAbs, relBase) {
     for (const name of fs.readdirSync(dirAbs).sort()) {
@@ -105,8 +122,15 @@ export function textProblems(rel, text) {
     for (const m of bare.matchAll(/https?:\/\/[^\s"'`)<>]+/g)) {
         if (!ALLOWED_URL.test(m[0])) out.push(`${rel}：外链 ${m[0]}`);
     }
-    if (/\.(js|mjs|html)$/.test(rel) && !rel.startsWith("web/js/juce/") && NETWORK_CALLS.test(bare)) {
-        out.push(`${rel}：出现网络调用`);
+    // web/js/juce/ 是 JUCE 官方原样副本，只查上面的 http(s) 字面量
+    if (rel.startsWith("web/js/juce/")) return out;
+    for (const re of PROTOCOL_RELATIVE) {
+        const m = re.exec(bare);
+        if (m) out.push(`${rel}：协议相对地址 ${m[0].trim()}`);
+    }
+    if (/\.(js|mjs|html)$/.test(rel)) {
+        const m = NETWORK_CALLS.exec(bare);
+        if (m) out.push(`${rel}：出现网络调用 ${m[0]}`);
     }
     return out;
 }
@@ -143,31 +167,40 @@ function main() {
     }
     const problems = verify(files);
 
-    if (!check) {
-        const base = path.join(root, ...OUT_REL);
-        const target = base;
-        const exists = fs.existsSync(target);
+    // 源树自检不过就不导出：不往输出目录写一棵有问题的树
+    if (!check && !problems.length) {
+        const target = path.join(root, ...OUT_REL);
+        let st = null;
+        try {
+            st = fs.lstatSync(target); // lstat 不跟链接：悬空的符号链接或 junction 也能看见
+        } catch {
+            st = null;
+        }
+        const exists = st !== null;
         const verdict = cleanVerdict({
             rootReal: fs.realpathSync(root),
-            baseReal: realpathLoose(base),
+            baseReal: realpathLoose(target),
             targetReal: realpathLoose(target),
             exists,
             hasMarker: exists && fs.existsSync(path.join(target, MARKER)),
+            targetIsLink: st !== null && st.isSymbolicLink(),
         });
         if (!verdict.ok) {
             console.error(`build-static：拒绝清空输出目录：${verdict.reason}`);
             process.exit(1);
         }
         if (exists) fs.rmSync(target, { recursive: true });
+        // 先写标记再拷内容：中途失败也不会留下没有标记、之后再也清不掉的目录
+        fs.mkdirSync(target, { recursive: true });
+        fs.writeFileSync(
+            path.join(target, MARKER),
+            "本目录由 web-preview/build-static.mjs 生成，可以被它整个清空重建。\n",
+        );
         for (const f of files) {
             const dest = path.join(target, f.rel);
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.copyFileSync(f.abs, dest);
         }
-        fs.writeFileSync(
-            path.join(target, MARKER),
-            "本目录由 web-preview/build-static.mjs 生成，可以被它整个清空重建。\n",
-        );
         fs.writeFileSync(
             path.join(target, "index.html"),
             '<!doctype html>\n<meta charset="utf-8" />\n<meta http-equiv="refresh" content="0; url=web-preview/input.html" />\n<a href="web-preview/input.html">Rinne Input 预览</a>\n',

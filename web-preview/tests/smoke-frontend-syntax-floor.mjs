@@ -136,7 +136,8 @@ const header = ["src/plugin-common/PlatformWebView.h", "src/plugin-common/WebVie
     .join("\n");
 const floorMatch = /kMinRuntimeMajor\s*=\s*(\d+)/.exec(header);
 const floor = floorMatch ? Number(floorMatch[1]) : null;
-run.log(floor === null ? "声明下限：kMinRuntimeMajor 还没入库，只列事实下限" : `声明下限 kMinRuntimeMajor = ${floor}`);
+if (floor === null) run.skipItem("声明下限对拍", "kMinRuntimeMajor 还没入库，只列事实下限，入库后自动生效");
+else run.log(`声明下限 kMinRuntimeMajor = ${floor}`);
 
 const files = ["web/input", "web/output", "web/shared", "web/i18n"].flatMap((d) => listFiles(d, [".js", ".html"]));
 const used = new Map(); // 特性名 -> { chromium, at: Set }
