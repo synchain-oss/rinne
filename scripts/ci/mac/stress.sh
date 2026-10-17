@@ -39,5 +39,5 @@ for mutation in no_read_fence no_intent; do
   exe=$(find "$dir" -type f -name rinne_stress -perm -u+x -not -path '*/_deps/*' -print -quit)
   [ -n "$exe" ] || { echo "::error::变异构建 $mutation 里找不到 rinne_stress"; exit 1; }
   bash "$here/expect-red.sh" --catch2 "变异 $mutation" -- "$exe"
-  echo "- 变异构建 $mutation：压测按预期变红" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  echo "- 变异构建 ${mutation}：压测按预期变红" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 done

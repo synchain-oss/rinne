@@ -30,8 +30,9 @@ if [ "${1:-}" = "--self-test" ]; then
   check() { # $1 说明 $2 期望退出码 $3 模式开关（空或 --catch2） $4 命令
     local got args=()
     [ -z "$3" ] || args=("$3")
-    got=$(bash "$0" ${args[@]+"${args[@]}"} "自测" -- bash -c "$4" 2>/dev/null; echo "exit=$?")
-    if [ "$(tail -n 1 <<< "$got")" != "exit=$2" ]; then echo "FAIL  $1（期望 exit=$2，实际 $(tail -n 1 <<< "$got")）"; bad=1; else echo "PASS  $1"; fi
+    got=$(bash "$0" ${args[@]+"${args[@]}"} "自测" -- bash -c "$4" 2>&1; echo "exit=$?")
+    if [ "$(tail -n 1 <<< "$got")" != "exit=$2" ]; then echo "FAIL  ${1}（期望 exit=${2}，实际 $(tail -n 1 <<< "$got")）"; printf '%s
+' "$got" | sed 's/^/      | /'; bad=1; else echo "PASS  $1"; fi
   }
   failed_line="echo 'a.cpp:1: FAILED:'; echo 'assertions: 3 | 2 passed | 1 failed'"
   check "命令失败（false）：这一步通过" 0 "" "false"
@@ -65,7 +66,8 @@ rc=0
 "$@" 2>&1 | tee "$out"
 rc=${PIPESTATUS[0]}
 case "$(classify "$rc" "$out" "$mode")" in
-  CAUGHT) echo "$label：被测命令按预期变红（退出码 $rc）" ;;
-  SURVIVED) echo "::error::$label：被测命令通过了，变异没有被抓住"; exit 1 ;;
-  *) echo "::error::$label：被测命令没有按预期失败（退出码 $rc，输出里没有失败断言，或是崩溃），不能算抓住了变异"; exit 1 ;;
+  CAUGHT) echo "${label}：被测命令按预期变红（退出码 ${rc}）" ;;
+  SURVIVED) echo "::error::${label}：被测命令通过了，变异没有被抓住"; exit 1 ;;
+  *) echo "::error::${label}：被测命令没有按预期失败（退出码 ${rc}，输出里没有失败断言，或是崩溃），不能算抓住了变异"; exit 1 ;;
 esac
+exit 0

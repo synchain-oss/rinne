@@ -232,7 +232,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # mac 构建（macos-15，arm64 原生）。配置、构建、验证的判据都在 scripts/ci/mac/ 的脚本里，那里每个判据有自测，本 job 一开头先跑一遍。
+  # mac 构建（macos-15，arm64 原生）。配置、构建、验证的判据都在 scripts/ci/mac/ 的脚本里，那里每个判据有自测，本 job 最后跑一遍。
   # 阶段：构建与 ctest（含 TIMEOUT 门禁、免 DAW 宿主测试）→ 零分配计数器的反例 → bundle 身份（2 个 .vst3 + 2 个 .component、
   # 架构、minos、AU 三元组）→ ad-hoc 签名与 codesign --verify → 上传 → 残段检查 → 装 AU、auval ×2、auval -a 唯一性、
   # pluginval ×4（不开 GUI）→ 残段检查 → 进程外自测（非门禁）→ arm64 压测与变异构建 →（probe）探针 universal。
@@ -267,7 +267,7 @@ jobs:
           if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then echo '::error::取不到检出的提交'; exit 1; fi
           # ref 只收 40 位提交号：分支名、tag、短 sha 都会变，构建与 concurrency 组就对应不到确定的提交
           if [ -n "$WANT_REF" ] && ! printf '%s' "$WANT_REF" | grep -Eq '^[0-9a-f]{40}$'; then echo '::error::ref 必须是 40 位提交号（空着就构建所选分支的 tip）'; exit 1; fi
-          if [ -n "$WANT_REF" ] && [ "$WANT_REF" != "$sha" ]; then echo "::error::检出的是 $sha，不是要构建的 $WANT_REF"; exit 1; fi
+          if [ -n "$WANT_REF" ] && [ "$WANT_REF" != "$sha" ]; then echo "::error::检出的是 ${sha}，不是要构建的 $WANT_REF"; exit 1; fi
           if [ -n "$RELEASE_TAG" ]; then
             if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then echo '::error::release-tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1; fi
             mode=release; name="Rinne-release-macos-arm64-$RELEASE_TAG"; keep=7
@@ -290,9 +290,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
-
-      - name: Gate script self-tests
-        run: bash scripts/ci/mac/selftest.sh
 
       - name: Record toolchain
         run: |
@@ -465,6 +462,11 @@ jobs:
           path: ${{ runner.temp }}/dist-probe
           if-no-files-found: error
           retention-days: 30
+
+      # 判据脚本的自测放在最后：它们和构建产物无关，放在前面一旦红了，后面所有依赖 mac 环境的步骤都被连带跳过，一轮看不到别的问题
+      - name: Gate script self-tests
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/mac/selftest.sh
 
       - name: Upload logs
         if: failure()

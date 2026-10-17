@@ -40,7 +40,7 @@ if [ "${1:-}" = "--self-test" ]; then
   expect() { # $1 说明 $2 期望（ok 或 bad） $3 缓存文件 $4 formal|probe
     local got
     got=$(verify "$3" "$4")
-    if { [ "$2" = ok ] && [ -z "$got" ]; } || { [ "$2" = bad ] && [ -n "$got" ]; }; then echo "PASS  $1"; else echo "FAIL  $1（'$got'）"; bad=1; fi
+    if { [ "$2" = ok ] && [ -z "$got" ]; } || { [ "$2" = bad ] && [ -n "$got" ]; }; then echo "PASS  $1"; else echo "FAIL  ${1}（'$got'）"; bad=1; fi
   }
   mk "$tmp/a" "arm64" "11.0" "SynchainRinne" "SynchainRinne" OFF;       expect "正式构建的默认值对得上" ok "$tmp/a" formal
   mk "$tmp/b" "arm64;x86_64" "11.0" "SynchainRinne" "SynchainRinne" OFF; expect "正式构建出了 universal 判错" bad "$tmp/b" formal
@@ -56,4 +56,4 @@ fi
 
 err=$(verify "$1/CMakeCache.txt" "$2")
 if [ -n "$err" ]; then echo "::error::$err"; exit 1; fi
-echo "缓存核对通过（$2）：架构 $(cache_value CMAKE_OSX_ARCHITECTURES "$1/CMakeCache.txt")，部署目标 $(cache_value CMAKE_OSX_DEPLOYMENT_TARGET "$1/CMakeCache.txt")，段名前缀 $(cache_value RINNE_SHM_PREFIX "$1/CMakeCache.txt")"
+echo "缓存核对通过（${2}）：架构 $(cache_value CMAKE_OSX_ARCHITECTURES "$1/CMakeCache.txt")，部署目标 $(cache_value CMAKE_OSX_DEPLOYMENT_TARGET "$1/CMakeCache.txt")，段名前缀 $(cache_value RINNE_SHM_PREFIX "$1/CMakeCache.txt")"

@@ -31,7 +31,7 @@ self_test() {
   dir=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
   trap 'rm -rf "$dir"' RETURN
   expect() { # $1 说明 $2 期望 $3 实际
-    if [ "$2" != "$3" ]; then echo "FAIL  $1（期望 $2，实际 $3）"; bad=1; else echo "PASS  $1"; fi
+    if [ "$2" != "$3" ]; then echo "FAIL  ${1}（期望 ${2}，实际 ${3}）"; bad=1; else echo "PASS  $1"; fi
   }
   printf 'AU VALIDATION SUCCEEDED.\n' > "$dir/ok.log"
   expect "成功标记加退出码 0 通过" SUCCEEDED "$(verdict 0 "$dir/ok.log")"
@@ -96,11 +96,11 @@ validate() {
     rc=0
     auval -v "$type" "$code" "$mfr" </dev/null > "$logs/auval-$code.log" 2>&1 || rc=$?
     v=$(verdict "$rc" "$logs/auval-$code.log")
-    echo "::group::auval -v $type $code $mfr（退出码 $rc，$v）"
+    echo "::group::auval -v $type $code ${mfr}（退出码 ${rc}，${v}）"
     cat "$logs/auval-$code.log"
     echo "::endgroup::"
-    echo "- \`auval -v $type $code $mfr\`：退出码 $rc，$v" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-    if [ "$v" != "SUCCEEDED" ]; then echo "::error::auval -v $type $code $mfr 未通过（退出码 $rc）"; fail=1; fi
+    echo "- \`auval -v $type $code $mfr\`：退出码 ${rc}，$v" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    if [ "$v" != "SUCCEEDED" ]; then echo "::error::auval -v $type $code $mfr 未通过（退出码 ${rc}）"; fail=1; fi
   done 3<<< "$FROZEN"
   exit "$fail"
 }
@@ -116,7 +116,7 @@ unique() {
   while read -r type code mfr <&3; do
     [ -n "$type" ] || continue
     k=$(count_lines "$type" "$code" "$mfr" "$logs/auval-list.txt")
-    echo "$type $code $mfr：auval -a 里 $k 行"
+    echo "$type $code ${mfr}：auval -a 里 $k 行"
     echo "- \`auval -a\` 里 \`$type $code $mfr\`：$k 行" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
     if [ "$k" != "1" ]; then echo "::error::$type $code $mfr 在 auval -a 里是 $k 行，应当恰好 1 行"; fail=1; fi
   done 3< "$triples"

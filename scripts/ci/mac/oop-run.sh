@@ -25,7 +25,7 @@ while read -r type code mfr <&3; do
     echo "- 进程外 \`$type $code $mfr\`：通过" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
   else
     echo "::error::进程外自测 $type $code $mfr 失败，退出码 $rc"
-    echo "- 进程外 \`$type $code $mfr\`：**失败**（退出码 $rc）" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    echo "- 进程外 \`$type $code $mfr\`：**失败**（退出码 ${rc}）" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
     fail=1
   fi
 done 3< "$triples"

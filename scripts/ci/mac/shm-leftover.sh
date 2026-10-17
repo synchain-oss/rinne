@@ -15,7 +15,7 @@ label=$2
 exe=$(find "$build" -type f -name rinne_ipc_tests -perm -u+x -not -path '*/_deps/*' -print -quit 2>/dev/null || true)
 if [ -z "$exe" ]; then
   echo "::notice title=shm-leftover::SKIP: rinne_ipc_tests not built yet, nothing to probe ($label)"
-  echo "- 残段检查（$label）：SKIP，rinne_ipc_tests 还没有" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  echo "- 残段检查（${label}）：SKIP，rinne_ipc_tests 还没有" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
   exit 0
 fi
 
@@ -30,9 +30,9 @@ if grep -q 'No test cases matched' "$log"; then
 fi
 rm -f "$log"
 if [ "$rc" != "0" ]; then
-  echo "::error::残段检查（$label）失败，退出码 $rc：有共享内存段残留，列表见上"
-  echo "- 残段检查（$label）：**有残留**" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  echo "::error::残段检查（${label}）失败，退出码 ${rc}：有共享内存段残留，列表见上"
+  echo "- 残段检查（${label}）：**有残留**" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
   exit 1
 fi
-echo "残段检查（$label）：干净"
-echo "- 残段检查（$label）：干净" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+echo "残段检查（${label}）：干净"
+echo "- 残段检查（${label}）：干净" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

@@ -31,7 +31,7 @@ curl -fsSL --retry 3 --retry-delay 5 -o "$work/pluginval_macOS.zip" \
   "https://github.com/Tracktion/pluginval/releases/download/$tag/pluginval_macOS.zip"
 got=$(shasum -a 256 "$work/pluginval_macOS.zip" | awk '{ print $1 }')
 if [ "$got" != "$pinned_sha" ]; then
-  echo "::error::pluginval_macOS.zip 的 sha256 是 $got，登记的是 $pinned_sha"
+  echo "::error::pluginval_macOS.zip 的 sha256 是 ${got}，登记的是 $pinned_sha"
   exit 1
 fi
 unzip -q "$work/pluginval_macOS.zip" -d "$work"
@@ -59,7 +59,7 @@ n=$(grep -c . "$targets" || true)
 if [ "${n:-0}" != "4" ]; then echo "::error::pluginval 的目标有 ${n:-0} 个，应当是 4 个（2 个 .vst3 加 2 个已装 .component）"; exit 1; fi
 
 {
-  echo "### pluginval $tag（strictness 5，不开 GUI）"
+  echo "### pluginval ${tag}（strictness 5，不开 GUI）"
   echo ""
   echo "| bundle | 格式 | 退出码 | SUCCESS 行 | 结论 |"
   echo "|---|---|---|---|---|"
@@ -76,10 +76,10 @@ while IFS=$'\t' read -r fmt path <&3; do
   if grep -qx 'SUCCESS' "$log"; then ok=yes; fi
   verdict=PASS
   if [ "$rc" != "0" ] || [ "$ok" != "yes" ]; then verdict=FAIL; fail=1; fi
-  echo "::group::pluginval $name（$fmt）：退出码 $rc，SUCCESS 行 $ok，$verdict"
+  echo "::group::pluginval ${name}（${fmt}）：退出码 ${rc}，SUCCESS 行 ${ok}，$verdict"
   cat "$log"
   echo "::endgroup::"
   echo "| \`$name\` | $fmt | $rc | $ok | $verdict |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-  if [ "$verdict" = "FAIL" ]; then echo "::error::pluginval $name（$fmt）未通过：退出码 $rc，SUCCESS 行 $ok"; fi
+  if [ "$verdict" = "FAIL" ]; then echo "::error::pluginval ${name}（${fmt}）未通过：退出码 ${rc}，SUCCESS 行 $ok"; fi
 done 3< "$targets"
 exit "$fail"

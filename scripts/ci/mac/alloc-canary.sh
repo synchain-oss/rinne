@@ -17,7 +17,7 @@ run_canaries() {
   out=$(mktemp "${TMPDIR:-/tmp}/rinne.XXXXXX")
   rc=0
   "$exe" "[allocation]" > "$out" 2>&1 || rc=$?
-  if [ "$rc" != "0" ]; then cat "$out"; echo "::error::不致盲时计数器用例就失败了（退出码 $rc）"; rm -f "$out"; return 1; fi
+  if [ "$rc" != "0" ]; then cat "$out"; echo "::error::不致盲时计数器用例就失败了（退出码 ${rc}）"; rm -f "$out"; return 1; fi
   if grep -qi 'skipped' "$out"; then cat "$out"; echo "::error::计数器用例被 SKIP 了，没有真正断言"; rm -f "$out"; return 1; fi
   echo "不致盲：计数器用例全部通过"
   for p in malloc calloc realloc free; do
@@ -32,14 +32,14 @@ run_canaries() {
     elif ! grep -q ': FAILED:' "$out" || ! grep -qE '^assertions:.* failed' "$out" \
       || grep -qE 'fatal error condition|unexpected exception' "$out"; then
       tail -n 40 "$out"
-      echo "::error::对 $p 致盲后退出码是 $rc，但输出里没有失败断言，或者是崩溃：不能算用例按预期变红"
+      echo "::error::对 $p 致盲后退出码是 ${rc}，但输出里没有失败断言，或者是崩溃：不能算用例按预期变红"
       fail=1
     elif ! grep -qx "  $p" "$out"; then
       tail -n 40 "$out"
       echo "::error::对 $p 致盲后有用例失败，但失败的里面没有名为 $p 的 section"
       fail=1
     else
-      echo "对 $p 致盲：用例按预期变红（退出码 $rc，section $p 在失败之列）"
+      echo "对 $p 致盲：用例按预期变红（退出码 ${rc}，section $p 在失败之列）"
     fi
   done
   rm -f "$out"
@@ -69,7 +69,7 @@ if [ -n "${RINNE_TEST_ALLOC_BLIND:-}" ]; then %s; fi
   expect() { # $1 说明 $2 期望退出码 $3 程序
     local rc=0
     run_canaries "$3" > /dev/null 2>&1 || rc=$?
-    if [ "$rc" != "$2" ]; then echo "FAIL  $1（期望 $2，实际 $rc）"; bad=1; else echo "PASS  $1"; fi
+    if [ "$rc" != "$2" ]; then echo "FAIL  ${1}（期望 ${2}，实际 ${rc}）"; bad=1; else echo "PASS  $1"; fi
   }
   expect "致盲后点名失败的计数器：通过" 0 "$tmp/good"
   expect "致盲后仍然全绿的计数器：红" 1 "$tmp/deaf"
