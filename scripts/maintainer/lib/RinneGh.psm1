@@ -87,6 +87,7 @@ function Invoke-RinneExternal {
   带超时跑一个进程，到点 Kill 整棵进程树（构建会起编译器子进程）。两条输出流在本线程上轮询着读（免得管道写满卡住），
   读到的随时可用。进程退出后读管道最多再等 DrainSeconds：它留下的常驻子进程（编译器的 PDB 服务、编译缓存的服务）
   继承了管道时，EOF 要等它们退出才来，不设上限的话超时就形同虚设。等不到时用已经读到的输出，并在 Err 里注明。
+  起进程的那一刻本进程的标准输出与标准错误不可继承（Invoke-RinneWithoutStdInherit），子进程拿不到本进程调用方的管道。
 #>
 function Invoke-RinneTimed {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [Parameter(Mandatory)][int]$TimeoutSeconds, [int]$DrainSeconds = 10)
@@ -96,7 +97,7 @@ function Invoke-RinneTimed {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     if ($Cwd) { $psi.WorkingDirectory = $Cwd }
-    $p = [System.Diagnostics.Process]::Start($psi)
+    $p = Invoke-RinneWithoutStdInherit { [System.Diagnostics.Process]::Start($psi) }
     try {
         $pumps = @((New-RinneStreamPump $p.StandardOutput), (New-RinneStreamPump $p.StandardError))
         $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -124,6 +125,29 @@ function Invoke-RinneTimed {
     } finally {
         $p.Dispose()
     }
+}
+
+<#
+  跑一段代码，期间本进程的标准输出与标准错误不可继承，结束后按原样还原。Windows 上起子进程会把所有可继承的句柄都交给它，
+  其中就有本进程连着调用方的那两条管道（给子进程重定向的是另建的管道，不受影响）：子进程以及它留下的常驻进程不退出，
+  调用方就一直读不到 EOF。标准输入不动。gates.d/20-build.ps1、30-plugin.ps1 里有同样的一份。
+#>
+function Invoke-RinneWithoutStdInherit {
+    param([Parameter(Mandatory)][scriptblock]$Script)
+    if (-not $IsWindows) { return & $Script }
+    if (-not ('Rinne.StdInherit' -as [type])) {
+        Add-Type -Namespace Rinne -Name StdInherit -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern System.IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll")] public static extern bool GetHandleInformation(System.IntPtr hObject, out int lpdwFlags);
+[DllImport("kernel32.dll")] public static extern bool SetHandleInformation(System.IntPtr hObject, int dwMask, int dwFlags);
+'@
+    }
+    # 局部变量带 std 前缀：$Script 在这里的子作用域里跑，按动态作用域也看得见它们，不要遮住调用方的同名变量
+    $stdSaved = foreach ($stdN in -11, -12) {
+        $stdH = [Rinne.StdInherit]::GetStdHandle($stdN); $stdF = 0
+        if ([Rinne.StdInherit]::GetHandleInformation($stdH, [ref]$stdF)) { $null = [Rinne.StdInherit]::SetHandleInformation($stdH, 1, 0); @{ H = $stdH; F = $stdF -band 1 } }
+    }
+    try { & $Script } finally { foreach ($stdS in @($stdSaved)) { $null = [Rinne.StdInherit]::SetHandleInformation($stdS.H, 1, $stdS.F) } }
 }
 
 <# 一条输出流的读取器：同一时刻只挂一个 ReadAsync，由 Step-RinneStreamPump 在调用方线程上收结果；Text 是目前读到的
@@ -762,20 +786,38 @@ function Get-RinneCloneState {
 # ---- 不带凭据跑不可信代码 -------------------------------------------------------------------
 
 <#
-  合并后构建跑的是 PR 树里的脚本：子进程启动前从本进程环境里拿掉凭据与个人针（GH_TOKEN、GITHUB_TOKEN、
-  GH_ENTERPRISE_TOKEN、PRIVACY_NEEDLES、RINNE_PRIVACY_LOCAL，以及任何 *_TOKEN、*_KEY、*_SECRET、*_PASSWORD、*_PAT），
+  凭据变量的判据全仓只有一份：仓里 scripts/build.ps1 的 $SecretEnv（按名字）与 $SecretEnvValue（按值），本模块所在的仓
+  （pr-merge 从主 clone 运行，即 feature 线上的那份）。用 PowerShell 的解析器取这两条赋值的字面量，不执行那个脚本；
+  取不到就抛错：宁可不跑，也不带着凭据跑。
+#>
+function Get-RinneSecretEnv {
+    param([string]$Path = (Join-Path $script:RepoRoot 'scripts/build.ps1'))
+    $errors = $null
+    $ast = (Test-Path -LiteralPath $Path -PathType Leaf) ? [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$errors) : $null
+    if (-not $ast -or @($errors).Count) { throw '解析不了仓里的 scripts/build.ps1，取不到凭据变量的判据' }
+    $get = {
+        param($name)
+        $a = @($ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and "$($_.Left)" -ceq "`$$name" })
+        $v = if ($a.Count -eq 1) { $a[0].Right.Expression } else { $null }
+        if ($v -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or -not $v.Value) { throw "scripts/build.ps1 里要恰好有一条 `$$name = '<正则>'" }
+        $v.Value
+    }
+    [pscustomobject]@{ Name = & $get 'SecretEnv'; Value = & $get 'SecretEnvValue' }
+}
+
+<#
+  合并后构建跑的是 PR 树里的脚本：子进程启动前从本进程环境里拿掉凭据与个人针（判据见 Get-RinneSecretEnv），
   结束后在 finally 里还原。这只挡住环境变量；本机 gh 的登录凭据与 git config 仍在，所以合并后构建只在其他判据都通过、
   且没碰基础设施时才跑。
 #>
-$script:SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY|.+_SECRET|.+_PASSWORD|.+_PAT)$'
-
 function Invoke-RinneWithoutSecrets {
     param([Parameter(Mandatory)][scriptblock]$Script)
+    $rules = Get-RinneSecretEnv
     $saved = @{}
-    foreach ($name in @([Environment]::GetEnvironmentVariables().Keys)) {
-        if ($name -match $script:SecretEnv) {
-            $saved[$name] = [Environment]::GetEnvironmentVariable($name)
-            [Environment]::SetEnvironmentVariable($name, $null)
+    foreach ($e in @([Environment]::GetEnvironmentVariables().GetEnumerator())) {
+        if ($e.Key -match $rules.Name -or "$($e.Value)" -match $rules.Value) {
+            $saved[$e.Key] = $e.Value
+            [Environment]::SetEnvironmentVariable($e.Key, $null)
         }
     }
     try { & $Script } finally {

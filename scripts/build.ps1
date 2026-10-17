@@ -9,19 +9,21 @@
 #   pwsh scripts/build.ps1 -SelfTest
 # 不带开关时只配置、构建、查第一方零 warning 与产物（合并后构建就这样调用）。-Test 跑 ctest；-Validate 用 pluginval 无 GUI 地验
 # 两个插件（strictness 5），-ValidateGui 带 GUI 验；-NoBuild 只跑这些后续步骤，构建目录里的记录必须是当前 HEAD 构建的。
-# -Stage 把两个插件与 tools-bin 下的可执行文件拷进一个新目录（CI 上传的就是它）。-CheckCache 断言 cache 里的段名前缀是默认值。
+# -Stage 把两个插件与 tools-bin 下的可执行文件拷进一个新目录（CI 上传的就是它）。-CheckCache 断言 cache 里的段名前缀是默认值，
+# 并读生成的 src/core/generated/util/RinneVersion.h，断言实际编进去的段名前缀与探针开关：cache 值会被同名的普通变量遮住。
 # 构建目录缺省 build，探针缺省 build-probe：两种身份的产物不同名，混在一个目录里会被产物断言拦下。
 # JUCE、ninja、pluginval：参数，其次环境变量 RINNE_JUCE_PATH / RINNE_NINJA / RINNE_PLUGINVAL，再次 git config rinne.jucePath /
 # rinne.ninja / rinne.pluginval，ninja 与 pluginval 最后找 PATH。
 # 段名前缀：本机构建一律用带 D 的 gates 前缀，与维护者 DAW 里装的正式版互不相见；-Ci 用默认值（正式版，探针时是探针前缀），
-# 本机的 -Probe 用探针前缀。真源与校验在根 CMakeLists.txt（这里只从那里读正式前缀），配置后再核一次 cache 里的值。
+# 只在 GITHUB_ACTIONS=true 时允许；本机的 -Probe 用探针前缀。真源与校验在根 CMakeLists.txt（这里只从那里读正式前缀），
+# 配置后再核一次 cache 里的值。
 # 构建槽：配置与构建持一把（同时最多两份编译），先等可用内存，再按内存折算并发。调用方已经持有一把时（gates 的构建、合并后
 # 构建）把 RINNE_BUILD_SLOT_HELD 设成持槽进程自己的 pid，这里就不再取：两个持槽的调用方各自的子进程再去取，会互相等到超时。
 # 这个 pid 不是本进程的祖先、或者两把槽都空着，说明标记是残留的，照常取槽并提示。-Ci 不取槽。
 # 输出：cmake、ninja、ctest、pluginval 的输出写进 <构建目录>/logs/ 下的文件，不经管道；本进程的标准句柄开跑前设为不可继承。
 # MSVC 的 mspdbsrv、编译缓存的服务进程会比构建活得久，它们继承了调用方的管道，调用方读 EOF 就要等它们退出，超时也就失效了。
 # 屏幕上只打印步骤、告警与失败步骤日志的末尾。
-# 环境：开跑前从本进程删掉凭据与个人针变量，CMake 配置期与编译器都看不到；VSLANG=1033 让 MSVC 输出英文，零 warning 才判得准；
+# 环境：开跑前从本进程删掉凭据与个人针变量（判据见 $SecretEnv），CMake 配置期与编译器都看不到；VSLANG=1033 让 MSVC 输出英文，零 warning 才判得准；
 # pluginval 会把同名环境变量（SKIP_GUI_TESTS 之类）当参数用，验之前一并删掉。
 # 退出码：0 通过；1 失败；2 -NoBuild 时构建目录里没有当前 HEAD 的构建；3 等构建槽超时。
 [CmdletBinding()]
@@ -35,8 +37,10 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ }
 $Root = Split-Path -Parent $PSScriptRoot
-# 与 maintainer/lib/RinneGh.psm1 拿掉的是同一组，另加个人访问令牌的 *_PAT
-$SecretEnv = '^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.+_TOKEN|.+_KEY|.+_SECRET|.+_PASSWORD|.+_PAT)$'
+# 凭据与个人针：名字带这些词或以 _KEY、_PAT、_AUTH 结尾的，值像带口令的 URL 或常见 token 前缀的，一律删掉。
+# 全仓只有这一份：合并后构建（maintainer/lib/RinneGh.psm1）从主 clone 的这个文件里读这两条，起子进程之前就拿掉。
+$SecretEnv = '^(?:PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|.*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|APIKEY|API_KEY).*|.+_(?:KEY|PAT|AUTH))$'
+$SecretEnvValue = '^(?:[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|gh[pousr]_[A-Za-z0-9]{20}|github_pat_\w{20}|sk-[\w-]{20})'
 $PluginvalEnv = '^(?:VALIDATE|VALIDATE_IN_PROCESS|STRICTNESS_LEVEL|TIMEOUT_MS|SKIP_GUI_TESTS|DISABLED_TESTS|REPEAT|RANDOMISE|RANDOM_SEED|SAMPLE_RATES|BLOCK_SIZES|DATA_FILE|VST3VALIDATOR|OUTPUT_DIR|OUTPUT_FILENAME|VERBOSE)$'
 
 class BuildStop : Exception {
@@ -58,8 +62,10 @@ function Set-StdHandleInherit([bool]$Inherit) {
 
 function Protect-StdHandles { Set-StdHandleInherit $false }
 
-function Remove-EnvMatching([string]$Pattern) {
-    foreach ($k in @([Environment]::GetEnvironmentVariables().Keys)) { if ($k -match $Pattern) { [Environment]::SetEnvironmentVariable($k, $null) } }
+function Remove-EnvMatching([string]$Pattern, [string]$ValuePattern = '(?!)') {
+    foreach ($e in @([Environment]::GetEnvironmentVariables().GetEnumerator())) {
+        if ($e.Key -match $Pattern -or "$($e.Value)" -match $ValuePattern) { [Environment]::SetEnvironmentVariable($e.Key, $null) }
+    }
 }
 
 function Get-Setting([string]$Value, [string]$EnvName, [string]$GitKey, [string]$Fallback = '') {
@@ -150,6 +156,16 @@ function Test-CachePrefix([string]$CacheText) {
     $have, $want = (Get-CacheValue $CacheText 'RINNE_SHM_PREFIX'), (Get-CacheValue $CacheText 'RINNE_SHM_PREFIX_DEFAULT')
     if (-not $have -or -not $want) { return 'CMakeCache.txt 里没有 RINNE_SHM_PREFIX 或 RINNE_SHM_PREFIX_DEFAULT' }
     ($have -ceq $want) ? '' : "RINNE_SHM_PREFIX 被覆盖成 $have，默认值是 $want"
+}
+
+# 生成的 RinneVersion.h 里实际编进去的段名前缀与探针开关：cache 里的值可能被同名的普通变量遮住（CMP0126），
+# 编进去的才算数。返回错误文字，对上了返回空。
+function Test-BuildConstants([string]$Header, [string]$WantPrefix, [bool]$WantProbe) {
+    $p = [regex]::Match($Header, '(?m)^\s*inline constexpr const char\* kShmPrefix = "([^"]*)";')
+    $b = [regex]::Match($Header, '(?m)^\s*inline constexpr bool kProbeBuild = (true|false);')
+    if (-not $p.Success -or -not $b.Success) { return '生成的 RinneVersion.h 里找不到 kShmPrefix 或 kProbeBuild' }
+    @(if ($p.Groups[1].Value -cne $WantPrefix) { "编进去的段名前缀是 $($p.Groups[1].Value)，应为 $WantPrefix" }
+        if (($b.Groups[1].Value -ceq 'true') -ne $WantProbe) { "编进去的 kProbeBuild 是 $($b.Groups[1].Value)，本次应为 $($WantProbe ? 'true' : 'false')" }) -join '；'
 }
 
 # 正式前缀只在根 CMakeLists.txt 里写一次；本机前缀与探针前缀是它加 D、加 P。
@@ -309,10 +325,17 @@ function Invoke-SelfTest {
     & $check 'cache 断言：缺条目' $true (Test-CachePrefix 'RINNE_SHM_PREFIX:STRING=SynchainRinne')
     $f = Get-ShmPrefix 'ci'
     & $check '段名前缀从根 CMakeLists.txt 读：本机加 D、探针加 P' $false ($f -and (Get-ShmPrefix 'dev') -ceq "${f}D" -and (Get-ShmPrefix 'probe') -ceq "${f}P")
-    $env:RINNE_SELFTEST_PAT, $env:RINNE_SELFTEST_KEEP = 'x', 'y'
-    Remove-EnvMatching $SecretEnv
-    & $check '凭据变量从环境里删掉，别的留着' $true (-not $env:RINNE_SELFTEST_PAT -and $env:RINNE_SELFTEST_KEEP -eq 'y')
-    $env:RINNE_SELFTEST_KEEP = $null
+    # 凭据：按名字（*_PAT、*_CREDENTIALS、不带下划线的 *APIKEY*、*_PASSPHRASE）与按值（带口令的 URL、GitHub token）都删，别的留着。
+    # 夹具的值在运行时拼出来，源码里没有完整的形态
+    $fake = @{ RINNE_SELFTEST_PAT = 'x'; RINNE_SELFTEST_CREDENTIALS = 'x'; RINNE_SELFTESTAPIKEY = 'x'; RINNE_SELFTEST_PASSPHRASE = 'x'
+        RINNE_SELFTEST_URL = 'https://u' + ':p@example.invalid/x'; RINNE_SELFTEST_GH = 'gh' + 'p_' + ('a' * 36) }
+    $keep = @{ RINNE_SELFTEST_KEEP = 'y'; RINNE_SELFTEST_PLAINURL = 'https://example.invalid/x' }
+    foreach ($e in @($fake.GetEnumerator()) + @($keep.GetEnumerator())) { [Environment]::SetEnvironmentVariable($e.Key, $e.Value) }
+    Remove-EnvMatching $SecretEnv $SecretEnvValue
+    $left = @($fake.Keys | Where-Object { [Environment]::GetEnvironmentVariable($_) })
+    $lost = @($keep.Keys | Where-Object { [Environment]::GetEnvironmentVariable($_) -cne $keep[$_] })
+    & $check "凭据变量按名字与按值从环境里删掉，别的留着$(if ($left.Count + $lost.Count) { "（漏删 $($left -join '、')；误删 $($lost -join '、')）" })" $true (-not ($left.Count + $lost.Count))
+    foreach ($k in $keep.Keys) { [Environment]::SetEnvironmentVariable($k, $null) }
     $pwsh = (Get-Process -Id $PID).Path
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-selftest-$PID-$(Get-Random)"
     $null = New-Item -ItemType Directory -Path $tmp
@@ -356,6 +379,46 @@ function Invoke-SelfTest {
         $lock = Enter-BuildSlot
         & $check '标记的 pid 不是本进程的祖先，另一把槽被别人占着：照常取槽' $true ((Test-Path -LiteralPath $ready) -and $null -ne $lock)
         Exit-RinneLock $lock
+        # -CheckCache 真跑（子进程，临时构建目录）：cache 是默认值还不够，编进去的段名前缀与探针开关也要对
+        $bd = Join-Path $tmp 'cc'
+        $null = New-Item -ItemType Directory -Path (Join-Path $bd 'src/core/generated/util')
+        Set-Content -LiteralPath (Join-Path $bd 'CMakeCache.txt') -Value (& $cache $f $f)
+        $cc = { param($p, $b) Set-Content -LiteralPath (Join-Path $bd 'src/core/generated/util/RinneVersion.h') -Value "inline constexpr const char* kShmPrefix = `"$p`";`ninline constexpr bool kProbeBuild = $b;"
+            $null = & $pwsh -NoProfile -NonInteractive -File $PSCommandPath -CheckCache -BuildDir $bd 2>&1; $LASTEXITCODE }
+        & $check '-CheckCache：cache 与编进去的段名前缀、探针开关都对' $false ((& $cc $f 'false') -eq 0)
+        & $check '-CheckCache：cache 是默认值，编进去的却被同名普通变量遮成本机前缀' $true ((& $cc "${f}D" 'false') -eq 1)
+        & $check '-CheckCache：正式构建编进去的 kProbeBuild 是 true' $true ((& $cc $f 'true') -eq 1)
+        # -Ci 只在 GitHub Actions 上：没有 GITHUB_ACTIONS=true 退出 1；有的话照常往下走（这里没有构建记录，退出 2）
+        $savedGa = $env:GITHUB_ACTIONS
+        $ci = { param($v) $env:GITHUB_ACTIONS = $v; $o = & $pwsh -NoProfile -NonInteractive -File $PSCommandPath -Ci -NoBuild -BuildDir $bd 2>&1 | Out-String; @($LASTEXITCODE, $o) }
+        $off, $on = (& $ci $null), (& $ci 'true')
+        $env:GITHUB_ACTIONS = $savedGa
+        & $check '-Ci 在 GitHub Actions 之外被拒' $true ($off[0] -eq 1 -and $off[1] -match 'GITHUB_ACTIONS=true')
+        & $check '-Ci 在 GITHUB_ACTIONS=true 时照常往下走' $false ($on[0] -eq 2)
+        # JUCE 守卫（真跑 CMake，配置一个不启用语言的小工程）：干净的检出通过，只多了未跟踪的文件也通过，跟踪的文件改过判 FATAL
+        $cmakeExe = (Get-Command cmake -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        $ninjaExe = (Get-Command (Get-Setting $Ninja 'RINNE_NINJA' 'rinne.ninja' 'ninja') -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if (-not $cmakeExe -or -not $ninjaExe) { & $check 'JUCE 守卫自测要 PATH 上的 cmake 与 ninja（或 RINNE_NINJA / git config rinne.ninja）' $true $false }
+        else {
+            $jx, $gs = (Join-Path $tmp 'juce'), (Join-Path $tmp 'guard')
+            $null = New-Item -ItemType Directory -Path $jx, $gs
+            Set-Content -LiteralPath (Join-Path $jx 'CMakeLists.txt') -Value 'project(JUCE VERSION 8.0.8)'
+            $g = { git -C $jx -c user.name=selftest -c user.email=selftest@example.invalid -c core.autocrlf=false -c commit.gpgsign=false @args 2>&1 }
+            $null = (& $g init -q), (& $g add -A), (& $g commit -q -m x)
+            Set-Content -LiteralPath (Join-Path $gs '.juce-commit') -Value "$(& $g rev-parse HEAD)".Trim()
+            Set-Content -LiteralPath (Join-Path $gs '.juce-version') -Value '8.0.8'
+            Set-Content -LiteralPath (Join-Path $gs 'CMakeLists.txt') -Value ("cmake_minimum_required(VERSION 3.22)`nproject(guard NONE)`n" +
+                "include(`"$((Join-Path $Root 'cmake/RinneJuceGuard.cmake') -replace '\\', '/')`")")
+            $guard = { param($n) $o = & $cmakeExe -S $gs -B (Join-Path $tmp "gb-$n") -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninjaExe" "-DJUCE_PATH=$jx" 2>&1 | Out-String; @($LASTEXITCODE, $o) }
+            $clean = & $guard 'clean'
+            Set-Content -LiteralPath (Join-Path $jx 'stray.txt') -Value 'x'
+            $stray = & $guard 'stray'
+            Add-Content -LiteralPath (Join-Path $jx 'CMakeLists.txt') -Value '# 改过'
+            $dirty = & $guard 'dirty'
+            & $check 'JUCE 守卫：干净的检出通过' $false ($clean[0] -eq 0)
+            & $check 'JUCE 守卫：只多了未跟踪的文件，不算改动' $false ($stray[0] -eq 0)
+            & $check 'JUCE 守卫：跟踪的文件被改过，配置期 FATAL' $true ($dirty[0] -ne 0 -and $dirty[1] -match '检出有改动')
+        }
     } catch {
         & $check "自测抛错：$($_.Exception.Message)" $true $false
     } finally {
@@ -372,7 +435,7 @@ function Invoke-SelfTest {
 
 if ($MyInvocation.InvocationName -eq '.') { return }   # 只取函数（自测的子进程这样用）
 Protect-StdHandles
-Remove-EnvMatching $SecretEnv
+Remove-EnvMatching $SecretEnv $SecretEnvValue
 if ($SelfTest) { exit (Invoke-SelfTest) }
 
 $code, $slot = 0, $null
@@ -385,11 +448,15 @@ try {
     $script:Jobs = $Jobs
     $script:Head = "$(git -C $Root rev-parse HEAD 2>$null)".Trim()
     $flavor = $Probe ? 'probe' : ($Ci ? 'ci' : 'dev')
+    if ($Ci -and $env:GITHUB_ACTIONS -cne 'true') { throw [BuildStop]::new('-Ci 只在 GitHub Actions 上用（GITHUB_ACTIONS=true）：本机构建要取构建槽、用带 D 的段名前缀', 1) }
     if ($CheckCache) {
         $f = Join-Path $BuildDir 'CMakeCache.txt'
-        $bad = (Test-Path -LiteralPath $f) ? (Test-CachePrefix (Get-Content -LiteralPath $f -Raw)) : "没有 $f"
-        if ($bad) { throw [BuildStop]::new($bad, 1) }
-        Write-Host "段名前缀是默认值：$(Get-CacheValue (Get-Content -LiteralPath $f -Raw) 'RINNE_SHM_PREFIX')"
+        $h = Join-Path $BuildDir 'src/core/generated/util/RinneVersion.h'
+        $read = { param($p) (Test-Path -LiteralPath $p) ? (Get-Content -LiteralPath $p -Raw) : $null }
+        $bad = @($(if ($null -eq ($c = & $read $f)) { "没有 $f" } else { Test-CachePrefix $c })
+            $(if ($null -eq ($t = & $read $h)) { "没有 $h" } else { Test-BuildConstants $t (Get-ShmPrefix ($Probe ? 'probe' : 'ci')) $Probe })) | Where-Object { $_ }
+        if ($bad) { throw [BuildStop]::new($bad -join '；', 1) }
+        Write-Host "段名前缀是默认值，编进去的也是它：$(Get-CacheValue $c 'RINNE_SHM_PREFIX')（探针 $($Probe ? '是' : '否')）"
     } else {
         if (-not $NoBuild) {
             $slot = Enter-BuildSlot

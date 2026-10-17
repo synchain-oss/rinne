@@ -29,10 +29,14 @@
 # （ReliedOn），用户能看到这次合并靠的是哪几条。
 #
 # 主 clone 的判据本身：-Check 断言 core.hooksPath 指向主 clone 的 scripts/hooks、rinne.waivers 指向一份存在的记录文件，
-# 而且它不在主 clone 与 <根>/wt/ 之下。wt/tip-<n> 与主 clone 共用 .git，PR 里的构建脚本与 CMake 配置期执行的代码都写得到
-# 这些文件，所以合并后构建前后各取一次 .git/config、用户级 git 配置、hooks 目录里每个文件与记录文件的 sha256，任一项
-# 变了就判红。这只防构建期间直接改这几类文件，不是隔离：脱离进程树的后台进程可以等核对之后再改。彻底的做法是独立 clone，
-# 或者换一个账户、容器来跑构建。
+# 而且它不在主 clone 与 <根>/wt/ 之下。位置按系统给出的最终路径判（junction、符号链接、短名都展开），并拒绝设备路径与 UNC
+# 写法、路径上的 reparse point 和多于一个的硬链接：只比字符串前缀的话，这几种写法都能把 wt/ 里的文件判成合格。没有把位置
+# 钉死成一个固定路径：工作区的布局不进公开仓，钉死的路径本身照样可以换成 junction 或硬链接。
+# wt/tip-<n> 与主 clone 共用 .git，PR 里的构建脚本与 CMake 配置期执行的代码都写得到这些文件，所以合并后构建前后各取一次
+# 指纹（见 Get-CloneIntegrityTargets）：git 实际读到的每个配置文件（含 include 进来的）、hooks 目录里每个文件（含隐藏的）、
+# 记录文件、构建之后还要用的 node 与卡片清单，任一项变了就判红；构建之后再断言主 clone 的工作树干净、HEAD 没变。squash
+# 消息的生成与公开文本检查（要跑 node）放在构建之前，构建之后只剩核对与合并请求。这只防构建期间直接改这些文件，不是隔离：
+# 脱离进程树的后台进程可以等核对之后再改。彻底的做法是独立 clone，或者换一个账户、容器来跑构建。
 #
 # 合并后构建（Standard 及以上）跑的是 PR 树里的脚本，所以是最后一道：其他判据全部通过、且没碰基础设施时才跑，
 # 子进程的环境里拿掉凭据与个人针。-Check 在那之前不会执行 PR 里的任何代码。每个 PR 用自己的 <根>/wt/tip-<n>，
@@ -64,9 +68,9 @@ $DispatchGlobs = @(
 
 <# 记录文件的位置：真跑只认主 clone 的 git config（--local）；-FromEnv（自测）只认 RINNE_WAIVERS。 #>
 function Get-RecordsPath {
-    param([switch]$FromEnv)
+    param([switch]$FromEnv, [string]$Repo = (Get-RinneRepoRoot))
     if ($FromEnv) { return $env:RINNE_WAIVERS }
-    $r = Invoke-RinneGit @('config', '--local', '--get', 'rinne.waivers') -AllowFail
+    $r = Invoke-RinneGit @('config', '--local', '--get', 'rinne.waivers') -Repo $Repo -AllowFail
     if ($r.Code -eq 0 -and $r.Out.Trim()) { return $r.Out.Trim() }
     return $null
 }
@@ -392,32 +396,84 @@ function Get-MergeVerdict {
 #>
 function Get-PremergeSlot { param([Parameter(Mandatory)][int]$Pr) "build-slot-$(1 + $Pr % 2)" }
 
-<# 主 clone 的判据文件：仓根、.git/config、core.hooksPath 指向的目录、记录文件。自测换成一组临时文件。 #>
+<#
+  主 clone 的判据文件（合并后构建前后各取一次指纹）：
+  - Configs：git 配置。先放 .git/config（common dir 的那份）、git var 报的用户级与系统级配置（还不存在的也算：构建可以新建），
+    再加 git config --list --show-origin 实际读到的每个文件（include / includeIf 引进来的都在里面），以及各配置里 include
+    指向、眼下还不存在的文件（新建出来就会被读到）。眼下存在却没被读到的（条件不满足的 includeIf）不算：条件只取决于
+    仓的位置、HEAD 所在的分支与配置本身，这几样都另有核对。
+  - Hooks、Records：core.hooksPath 目录与记录文件。
+  - Node、Cards：同一次 -Merge 在构建之后还会用到的 node（rinne.node，没配置时是 PATH 上的 node）与卡片清单（rinne.cards）。
+  -Repo 换一个仓（自测用临时仓）；自测也可以直接把 $script:IntegrityTargets 换成一组临时文件。
+#>
 $script:IntegrityTargets = $null
 function Get-CloneIntegrityTargets {
+    param([string]$Repo = (Get-RinneRepoRoot))
     if ($script:IntegrityTargets) { return $script:IntegrityTargets }
-    $git = (Invoke-RinneGit @('rev-parse', '--path-format=absolute', '--git-common-dir')).Out.Trim()
-    $hooks = (Invoke-RinneGit @('config', '--local', '--get', 'core.hooksPath') -AllowFail).Out.Trim()
-    # 用户级的 git 配置对主 clone 同样生效（--local 里没设的键都从这里取）。路径问 git 自己：它认 GIT_CONFIG_GLOBAL、
-    # Windows 上先看 %HOME% 再看 %USERPROFILE%、还有 XDG 的那一份；问不到（git 太旧）才按常见位置猜
-    $var = Invoke-RinneGit @('var', 'GIT_CONFIG_GLOBAL') -AllowFail
-    $files = if ($var.Code -eq 0 -and $var.Out.Trim()) { @($var.Out -split "`r?`n" | Where-Object { $_.Trim() }) }
-    else { @((Join-Path $HOME '.gitconfig'), (Join-Path ($env:XDG_CONFIG_HOME ? $env:XDG_CONFIG_HOME : (Join-Path $HOME '.config')) 'git/config')) }
-    $homeDir = ([IO.Path]::GetFullPath($HOME) -replace '\\', '/').TrimEnd('/')
-    $user = [ordered]@{}
-    foreach ($f in $files) { $user[((([IO.Path]::GetFullPath($f.Trim()) -replace '\\', '/') -ireplace "^$([regex]::Escape($homeDir))", '~'))] = $f.Trim() }
-    [pscustomobject]@{ Root = (Get-RinneRepoRoot); Config = (Join-Path $git 'config'); UserConfigs = $user; Hooks = $hooks; Records = (Get-RecordsPath) }
+    $git = (Invoke-RinneGit @('rev-parse', '--path-format=absolute', '--git-common-dir') -Repo $Repo).Out.Trim()
+    $hooks = (Invoke-RinneGit @('config', '--local', '--get', 'core.hooksPath') -Repo $Repo -AllowFail).Out.Trim()
+    $homeEnv = [Environment]::GetEnvironmentVariable('HOME') ?? $HOME
+    $norm = { param($p) [IO.Path]::GetFullPath($p, $Repo) -replace '\\', '/' }
+    $tilde = { param($p) (& $norm $p) -ireplace "^$([regex]::Escape((& $norm $homeEnv).TrimEnd('/')))(?=/)", '~' }
+    $configs = [ordered]@{}
+    $add = { param($label, $p) if ($p -and -not @($configs.Values | Where-Object { (& $norm $_) -ieq (& $norm $p) }).Count) { $configs[$label] = (& $norm $p) } }
+    & $add '.git/config' (Join-Path $git 'config')
+    # 路径问 git 自己：它认 GIT_CONFIG_GLOBAL、Windows 上先看 HOME 再看 USERPROFILE、还有 XDG 的那一份；问不到（git 太旧）才按常见位置猜
+    $var = Invoke-RinneGit @('var', 'GIT_CONFIG_GLOBAL') -Repo $Repo -AllowFail
+    $globals = if ($var.Code -eq 0 -and $var.Out.Trim()) { @($var.Out -split "`r?`n" | ForEach-Object Trim | Where-Object { $_ }) }
+    else { @((Join-Path $homeEnv '.gitconfig'), (Join-Path ($env:XDG_CONFIG_HOME ? $env:XDG_CONFIG_HOME : (Join-Path $homeEnv '.config')) 'git/config')) }
+    foreach ($f in $globals) { & $add "用户级 git 配置 $(& $tilde $f)" $f }
+    $sys = Invoke-RinneGit @('var', 'GIT_CONFIG_SYSTEM') -Repo $Repo -AllowFail
+    if ($sys.Code -eq 0 -and $sys.Out.Trim()) { & $add "系统级 git 配置 $(& $tilde $sys.Out.Trim())" $sys.Out.Trim() }
+    # -z：来源与键名之间、各条之间都用 NUL 分开；include 的值跟在键名后面、隔一个换行
+    $pairs = { param($out) $x = @("$out" -split "`0"); for ($i = 0; $i + 1 -lt $x.Count; $i += 2) { , @($x[$i], $x[$i + 1]) } }
+    $read = Invoke-RinneGit @('config', '--list', '--show-origin', '--name-only', '-z') -Repo $Repo -AllowFail
+    if ($read.Code -ne 0) { throw "git config --list --show-origin 失败：$($read.Err.Trim())" }
+    foreach ($p in @(& $pairs $read.Out | ForEach-Object { $_[0] } | Where-Object { $_ -like 'file:*' } | Select-Object -Unique)) {
+        & $add "git 配置 $(& $tilde $p.Substring(5))" $p.Substring(5)
+    }
+    $inc = Invoke-RinneGit @('config', '--show-origin', '-z', '--get-regexp', '^include(if\..*)?\.path$') -Repo $Repo -AllowFail
+    foreach ($pr in @(& $pairs $inc.Out)) {
+        if ($pr[0] -notlike 'file:*') { continue }
+        $v = ($pr[1] -split "`n", 2)[1]
+        if (-not $v) { continue }
+        $target = if ($v -match '^~[\\/]') { Join-Path $homeEnv $v.Substring(2) } elseif ([IO.Path]::IsPathRooted($v)) { $v } else { Join-Path (Split-Path -Parent (& $norm $pr[0].Substring(5))) $v }
+        if (-not (Test-Path -LiteralPath $target)) { & $add "git 配置（include，眼下不存在）$(& $tilde $target)" $target }
+    }
+    $node = Get-RinneNode
+    if (-not [IO.Path]::IsPathRooted($node)) { $node = (Get-Command $node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+    [pscustomobject]@{
+        Root = $Repo; Configs = $configs; Hooks = $hooks; Records = (Get-RecordsPath -Repo $Repo)
+        Node = $node; Cards = (Get-RinneSetting -Env 'RINNE_CARDS' -GitKey 'rinne.cards')
+    }
 }
 
-<# 每个判据文件的 sha256（hooks 目录里的逐个列出）；文件不在时记「（不存在）」，这样删掉也算变了。 #>
+<#
+  每个判据文件的指纹；文件不在时记「（不存在）」，这样新建、删掉都算变了。git 配置按 git 自己解析出的键值算（git config
+  --file <f> --list，不跟 include，引进来的文件各自单算），并剔除 branch.* 段：构建不在 git 锁里，这期间别的进程合法地
+  建带 track 的 worktree、git branch -u，都会往 .git/config 写 branch 段，不该把合并判红；其余的键一变就算。按 git 的解析
+  而不是按文本剔除，续行、引号之类的写法就骗不过去。hooks 目录里的文件连隐藏的、系统属性的一起列（git 照样执行它们）。
+#>
 function Get-CloneFingerprint {
     param([Parameter(Mandatory)]$Targets)
-    $sha = { param($p) ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) ? (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash : '（不存在）' }
-    $h = [ordered]@{ '.git/config' = (& $sha $Targets.Config); '记录文件' = (& $sha $Targets.Records) }
-    foreach ($k in @($Targets.UserConfigs.Keys)) { $h["用户级 git 配置 $k"] = & $sha $Targets.UserConfigs[$k] }
+    $there = { param($p) $p -and (Test-Path -LiteralPath $p -PathType Leaf) }
+    $sha = { param($p) (& $there $p) ? (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash : '（不存在）' }
+    $cfg = {
+        param($p)
+        if (-not (& $there $p)) { return '（不存在）' }
+        $out = @(& git config --file $p --list -z 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0) { return "（git 解析不了）$(& $sha $p)" }
+        $kept = @($out -split "`0" | Where-Object { $_ -and $_ -notmatch '^branch\.' }) -join "`0"
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($kept)))
+    }
+    $h = [ordered]@{}
+    foreach ($k in @($Targets.Configs.Keys)) { $h[$k] = & $cfg $Targets.Configs[$k] }
+    $h['记录文件'] = & $sha $Targets.Records
+    $h['node'] = & $sha $Targets.Node
+    $h['卡片清单'] = & $sha $Targets.Cards
     if ($Targets.Hooks -and (Test-Path -LiteralPath $Targets.Hooks -PathType Container)) {
         $base = [IO.Path]::GetFullPath($Targets.Hooks)
-        foreach ($f in Get-ChildItem -LiteralPath $base -File -Recurse | Sort-Object FullName) {
+        foreach ($f in Get-ChildItem -LiteralPath $base -File -Recurse -Force | Sort-Object FullName) {
             $h["hooks/$($f.FullName.Substring($base.Length).TrimStart('\', '/') -replace '\\', '/')"] = & $sha $f.FullName
         }
     }
@@ -430,21 +486,91 @@ function Compare-CloneFingerprint {
     @(@($Before.Keys) + @($After.Keys) | Select-Object -Unique | Where-Object { $Before[$_] -ne $After[$_] })
 }
 
+<#
+  路径在文件系统里的真实身份（Windows）：Final 是打开句柄后由系统给出的最终路径（junction、符号链接、短名都已展开，去掉 \\?\
+  前缀），Links 是硬链接数。路径不在时返回 $null。别的平台上只做 GetFullPath、硬链接数记 1。
+#>
+function Get-PathIdentity {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    if (-not $IsWindows) { return [pscustomobject]@{ Final = [IO.Path]::GetFullPath($Path); Links = 1 } }
+    if (-not ('Rinne.PathIdentity' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+namespace Rinne {
+    public static class PathIdentity {
+        [StructLayout(LayoutKind.Sequential)]
+        struct Info { public uint Attributes, CreatedLow, CreatedHigh, AccessedLow, AccessedHigh, WrittenLow, WrittenHigh, Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow; }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder buf, uint size, uint flags);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetFileInformationByHandle(SafeFileHandle h, out Info info);
+        // 只查属性：访问权限 0，读写删都共享；FILE_FLAG_BACKUP_SEMANTICS 让目录也打得开，不带 OPEN_REPARSE_POINT 所以跟随链接
+        static SafeFileHandle Open(string path) {
+            var h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+            if (h.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return h;
+        }
+        public static string Final(string path) {
+            using (var h = Open(path)) {
+                var sb = new StringBuilder(32768);
+                uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+                if (n == 0 || n >= sb.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
+                return sb.ToString();
+            }
+        }
+        public static uint Links(string path) {
+            using (var h = Open(path)) {
+                Info i;
+                if (!GetFileInformationByHandle(h, out i)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                return i.Links;
+            }
+        }
+    }
+}
+'@
+    }
+    $final = [Rinne.PathIdentity]::Final($Path) -replace '^\\\\\?\\UNC\\', '\\' -replace '^\\\\\?\\', ''
+    [pscustomobject]@{ Final = $final; Links = [Rinne.PathIdentity]::Links($Path) }
+}
+
+<# 路径本身与它的每一级上级目录里，第一个 reparse point（junction、符号链接、挂载点之类）；没有返回 $null。 #>
+function Find-ReparsePoint {
+    param([Parameter(Mandatory)][string]$Path)
+    for ($p = [IO.Path]::GetFullPath($Path); $p; $p = [IO.Path]::GetDirectoryName($p)) {
+        if ((Test-Path -LiteralPath $p) -and ([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint)) { return $p }
+    }
+    $null
+}
+
 <# 判据文件的位置（-Check 用）：返回问题列表，没有问题时为空。 #>
 function Test-CloneIntegrity {
     param([Parameter(Mandatory)]$Targets, [Parameter(Mandatory)][string]$WorkRoot)
     $full = { param($p) [IO.Path]::GetFullPath($p).TrimEnd('\', '/') }
-    $under = { param($p, $dir) (& $full $p).StartsWith((& $full $dir) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) }
+    # 目录按最终路径比（不存在时按 GetFullPath）：wt/ 或主 clone 本身经 junction 换了地方也认得出
+    $real = { param($p) $id = Get-PathIdentity $p; ($id ? $id.Final : [IO.Path]::GetFullPath($p)).TrimEnd('\', '/') }
+    $under = { param($p, $dir) $p.StartsWith((& $real $dir) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) }
     $want = Join-Path $Targets.Root 'scripts/hooks'
     # 相对路径按各自工作树的根解析：在 wt/tip-<n> 里跑 git 时会指到 PR 树里的那一份，所以一律要求绝对路径
     if (-not $Targets.Hooks) { '主 clone 没有设 core.hooksPath（应指向主 clone 的 scripts/hooks）' }
     elseif (-not [IO.Path]::IsPathFullyQualified($Targets.Hooks)) { "core.hooksPath 必须是绝对路径（相对路径在 wt/tip-<n> 里会指到 PR 树里的 hooks）：$($Targets.Hooks)" }
     elseif ((& $full $Targets.Hooks) -ine (& $full $want)) { "core.hooksPath 应指向主 clone 的 scripts/hooks，现在是 $($Targets.Hooks)" }
-    if (-not $Targets.Records) { '主 clone 没有设 rinne.waivers（git config --local）' }
-    elseif (-not [IO.Path]::IsPathFullyQualified($Targets.Records)) { "rinne.waivers 必须是绝对路径：$($Targets.Records)" }
-    elseif (-not (Test-Path -LiteralPath $Targets.Records -PathType Leaf)) { "rinne.waivers 指向的记录文件不存在：$($Targets.Records)" }
-    elseif ((& $under $Targets.Records $Targets.Root) -or (& $under $Targets.Records (Join-Path $WorkRoot 'wt'))) {
-        "记录文件必须在主 clone 与 wt/ 之外：$($Targets.Records)"
+    $r = $Targets.Records
+    if (-not $r) { '主 clone 没有设 rinne.waivers（git config --local）' }
+    elseif (-not [IO.Path]::IsPathFullyQualified($r)) { "rinne.waivers 必须是绝对路径：$r" }
+    elseif ($r -match '^[\\/]{2}') { "rinne.waivers 不能用设备路径或 UNC 路径（以两个斜杠开头）：$r" }
+    elseif (-not (Test-Path -LiteralPath $r -PathType Leaf)) { "rinne.waivers 指向的记录文件不存在：$r" }
+    elseif ($rp = Find-ReparsePoint $r) { "记录文件的路径上有 reparse point（junction、符号链接之类），位置判不准：$rp" }
+    else {
+        $id = Get-PathIdentity $r
+        if ($id.Links -ne 1) { "记录文件有 $($id.Links) 个硬链接（必须恰好 1 个，否则另一个名字可能就在 wt/ 里）：$r" }
+        elseif ((& $under $id.Final $Targets.Root) -or (& $under $id.Final (Join-Path $WorkRoot 'wt'))) { "记录文件必须在主 clone 与 wt/ 之外：$r" }
     }
 }
 
@@ -477,6 +603,7 @@ function Invoke-Premerge {
             if (-not (Test-Path -LiteralPath $build)) { $result.Reason = '合并后的树里没有 scripts/build.ps1，做不了合并后构建'; return }
             $targets = Get-CloneIntegrityTargets
             $before = Get-CloneFingerprint $targets
+            $cloneBefore = Get-RinneCloneState
             $pwsh = [Environment]::ProcessPath
             # 构建槽由本进程持着：告诉构建脚本持槽方的 pid，它就不再自己取槽（两个奇偶不同的 PR 同时构建时不会互等到超时）
             $savedHeld = $env:RINNE_BUILD_SLOT_HELD
@@ -491,6 +618,10 @@ function Invoke-Premerge {
             $result.Ok = $r.Code -eq 0
             $result.Reason = if ($r.ContainsKey('TimedOut') -and $r.TimedOut) { "合并后构建超过 $PremergeTimeoutSeconds 秒，已结束" } else { "合并后构建退出码 $($r.Code)" }
             $changed = @(Compare-CloneFingerprint $before (Get-CloneFingerprint $targets))
+            # 主 clone 的跟踪文件（下一次合并要跑的维护者脚本与检查都在里面）：工作树还是干净的、HEAD 没动
+            $cloneAfter = Get-RinneCloneState
+            if ($cloneAfter.Dirty) { $changed += '主 clone 的工作树（构建之后不干净了）' }
+            if ($cloneAfter.Sha -ne $cloneBefore.Sha) { $changed += '主 clone 的 HEAD' }
             if ($changed.Count) {
                 $result.Ok = $false
                 $result.Reason = "合并后构建改动了主 clone 的判据文件：$($changed -join '、')（$($result.Reason)）"
@@ -548,14 +679,17 @@ function New-MergeMessage {
 
 function Invoke-MergeUnlocked {
     param([int]$Pr, [string]$CardId, [string]$SummaryFile)
+    # squash 消息先生成、先过检查（要跑 node 与仓里的判据脚本）：合并后构建跑的是 PR 里的代码，构建之后只剩接口核对与合并请求
+    $pull = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
+    $msg = New-MergeMessage -Pull $pull -Summary (Get-Content -Raw -LiteralPath $SummaryFile)
     $v = Invoke-MergeCheck $Pr $CardId
     if ($v.Code -ne 'ready') {
         Write-Output (ConvertTo-RinneJsonText $v)
         throw "不能合并：code=$($v.Code)"
     }
-    $pull = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
-    if ($pull.head.sha -ne $v.Head) { throw '核对之后 PR head 变了，重新核对' }
-    $msg = New-MergeMessage -Pull $pull -Summary (Get-Content -Raw -LiteralPath $SummaryFile)
+    $now = Get-RinneApi "repos/$(Get-RinneRepo)/pulls/$Pr"
+    if ($now.head.sha -ne $v.Head -or $pull.head.sha -ne $v.Head) { throw '核对之后 PR head 变了，重新核对' }
+    if ([string]$now.title -cne [string]$pull.title) { throw 'PR 标题在生成 squash 消息之后改过，重新核对' }
     foreach ($x in @($v.ReliedOn)) { Write-Output "依据的用户记录（$($x.Kind)，原文，取自 $($x.File)）：$(ConvertTo-RinneJsonText $x.Record)" }
     # sha 钉住核对过的 head：其间再有推送，GitHub 拒绝合并（批准记录也只对这个 head 有效）
     $body = @{ merge_method = 'squash'; sha = $v.Head; commit_title = $msg.Title; commit_message = $msg.Body }
@@ -632,16 +766,20 @@ function Invoke-SelfTest {
         $env:RINNE_CARDS = $cardsFile
         $env:RINNE_WAIVERS = $recordsFile
         Set-Content -LiteralPath $recordsFile -Value '{}'
-        # 主 clone 的判据文件换成一组临时的：假仓根（带 scripts/hooks）、它的 .git/config，记录文件就是上面那份
+        # 主 clone 的判据文件换成一组临时的：假仓根（带 scripts/hooks）、它的 .git/config、用户级配置、node 与卡片清单，
+        # 记录文件就是上面那份
         $fakeClone = Join-Path $tmp 'clone'
-        New-Item -ItemType Directory -Force -Path (Join-Path $fakeClone '.git'), (Join-Path $fakeClone 'scripts/hooks'), (Join-Path $tmp 'wt') | Out-Null
-        Set-Content -LiteralPath (Join-Path $fakeClone '.git/config') -Value '[core]'
+        New-Item -ItemType Directory -Force -Path (Join-Path $fakeClone '.git'), (Join-Path $fakeClone 'scripts/hooks'), (Join-Path $tmp 'wt'), (Join-Path $tmp 'outside') | Out-Null
+        Set-Content -LiteralPath (Join-Path $fakeClone '.git/config') -Value "[core]`n`tbare = false"
         Set-Content -LiteralPath (Join-Path $fakeClone 'scripts/hooks/pre-push') -Value '#!/bin/sh'
-        Set-Content -LiteralPath (Join-Path $tmp 'user.gitconfig') -Value '[user]'
-        $integrity = [pscustomobject]@{ Root = $fakeClone; Config = (Join-Path $fakeClone '.git/config'); UserConfigs = [ordered]@{ '~/.gitconfig' = (Join-Path $tmp 'user.gitconfig') }
-            Hooks = (Join-Path $fakeClone 'scripts/hooks'); Records = $recordsFile }
+        Set-Content -LiteralPath (Join-Path $tmp 'user.gitconfig') -Value "[user]`n`tname = x"
+        Set-Content -LiteralPath (Join-Path $tmp 'node.exe') -Value 'node'
+        $integrity = [pscustomobject]@{
+            Root = $fakeClone; Configs = [ordered]@{ '.git/config' = (Join-Path $fakeClone '.git/config'); '用户级 git 配置 ~/.gitconfig' = (Join-Path $tmp 'user.gitconfig') }
+            Hooks = (Join-Path $fakeClone 'scripts/hooks'); Records = $recordsFile; Node = (Join-Path $tmp 'node.exe'); Cards = $cardsFile
+        }
         $script:IntegrityTargets = $integrity
-        # 假构建脚本要不要顺手改一样判据文件：'' / config / hook
+        # 假构建脚本要不要顺手改一样判据文件或主 clone 的状态（见下面构建的路由）
         $tamper = @{ What = '' }
         Clear-RinnePermCache
         $pull = Read-RinneFixture 'pr3-pull.json'
@@ -718,13 +856,24 @@ function Invoke-SelfTest {
                 $builds.Add([pscustomobject]@{
                         GhToken = & $getEnv 'GH_TOKEN'; OtherKey = & $getEnv 'RINNE_SELFTEST_KEY'; Secret = & $getEnv 'RINNE_SELFTEST_SECRET'
                         Password = & $getEnv 'RINNE_SELFTEST_PASSWORD'; Needles = & $getEnv 'RINNE_PRIVACY_LOCAL'; Plain = & $getEnv 'RINNE_SELFTEST_PLAIN'
-                        Pat = & $getEnv 'RINNE_SELFTEST_PAT'; SlotHeld = & $getEnv 'RINNE_BUILD_SLOT_HELD'
+                        Pat = & $getEnv 'RINNE_SELFTEST_PAT'; Credentials = & $getEnv 'RINNE_SELFTEST_CREDENTIALS'; ApiKey = & $getEnv 'RINNE_SELFTESTAPIKEY'
+                        Url = & $getEnv 'RINNE_SELFTEST_URL'; SlotHeld = & $getEnv 'RINNE_BUILD_SLOT_HELD'
                         Held = @($held); Cwd = $opts.Cwd; Timeout = $opts.TimeoutSeconds
                     })
+                $cfg = $integrity.Configs['.git/config']
                 switch ($tamper.What) {
-                    'config' { Add-Content -LiteralPath $integrity.Config '[remote "x"]' }
-                    'user' { Add-Content -LiteralPath $integrity.UserConfigs['~/.gitconfig'] '[core]' }
+                    'config' { Add-Content -LiteralPath $cfg "[remote `"x`"]`n`turl = https://example.invalid/x" }
+                    'user' { Add-Content -LiteralPath $integrity.Configs['用户级 git 配置 ~/.gitconfig'] "[core]`n`tautocrlf = input" }
                     'hook' { Add-Content -LiteralPath (Join-Path $integrity.Hooks 'pre-push') 'exit 0' }
+                    'hidden-hook' { $f = Join-Path $integrity.Hooks 'post-checkout'; Set-Content -LiteralPath $f 'exit 0'; (Get-Item -LiteralPath $f).Attributes = 'Hidden' }
+                    # 内容变了、仍是合法 JSON（后面的核对还要读它们）
+                    'records' { Set-Content -LiteralPath $integrity.Records ((Get-Content -Raw -LiteralPath $integrity.Records).Trim() + ' ') }
+                    'cards' { Set-Content -LiteralPath $integrity.Cards ((Get-Content -Raw -LiteralPath $integrity.Cards).Trim() + ' ') }
+                    'node' { Add-Content -LiteralPath $integrity.Node 'x' }
+                    # 合法的并发写：带 track 的 worktree add、git branch -u 只写 branch 段
+                    'branch' { Add-Content -LiteralPath $cfg "[branch `"feat/x`"]`n`tremote = origin`n`tmerge = refs/heads/feat/x" }
+                    'dirty' { $tree.Dirty = $true }
+                    'head' { $tree.Sha = 'e' * 40 }
                 }
                 $buildResult
             }
@@ -738,7 +887,7 @@ function Invoke-SelfTest {
         # 基础设施清单与匹配规则都用仓里真的 scripts/lib/infra-paths.mjs
         $base = Get-MergeFacts -Pr 3 -CardId $cid
         # 主 clone 的判据文件在预期位置：hooksPath 指向主 clone 的 scripts/hooks，记录文件存在、在主 clone 与 wt/ 之外
-        $ti = { param($patch) $t = [pscustomobject]@{ Root = $integrity.Root; Config = $integrity.Config; UserConfigs = $integrity.UserConfigs; Hooks = $integrity.Hooks; Records = $integrity.Records }
+        $ti = { param($patch) $t = [pscustomobject]@{ Root = $integrity.Root; Configs = $integrity.Configs; Hooks = $integrity.Hooks; Records = $integrity.Records }
             foreach ($k in $patch.Keys) { $t.$k = $patch[$k] }; @(Test-CloneIntegrity $t $tmp) }
         Add-RinneCase $cases '判据文件位置：hooksPath 与记录文件都对' $false (@(& $ti @{}).Count -ne 0)
         Add-RinneCase $cases '判据文件位置：hooksPath 指到别处' $true ((@(& $ti @{ Hooks = $tmp }) -match 'core\.hooksPath').Count -eq 1)
@@ -751,12 +900,79 @@ function Invoke-SelfTest {
         Set-Content -LiteralPath (Join-Path $fakeClone 'records.json') -Value '{}'
         Add-RinneCase $cases '判据文件位置：记录文件在 wt/ 之下' $true ((@(& $ti @{ Records = (Join-Path $tmp 'wt/records.json') }) -match 'wt/ 之外').Count -eq 1)
         Add-RinneCase $cases '判据文件位置：记录文件在主 clone 里' $true ((@(& $ti @{ Records = (Join-Path $fakeClone 'records.json') }) -match 'wt/ 之外').Count -eq 1)
+        # 指向 wt/ 里那份的各种写法：设备路径、UNC、junction、硬链接（路径在运行时拼出来）
+        $inWt = [IO.Path]::GetFullPath((Join-Path $tmp 'wt/records.json'))
+        $bs = [string][char]92
+        foreach ($p in @(($bs * 2 + '?' + $bs + $inWt), ($bs * 2 + '.' + $bs + $inWt), ('//?/' + ($inWt -replace '\\', '/')), ($bs * 2 + 'localhost' + $bs + ($inWt -replace '^([A-Za-z]):', '$1$')))) {
+            Add-RinneCase $cases "判据文件位置：记录文件写成设备路径或 UNC（$($p.Substring(0, 4))…）" $true ((@(& $ti @{ Records = $p }) -match '设备路径或 UNC').Count -eq 1)
+        }
+        $null = New-Item -ItemType Directory -Path (Join-Path $tmp 'elsewhere'), (Join-Path $tmp 'realwt'), (Join-Path $tmp 'wr')
+        Set-Content -LiteralPath (Join-Path $tmp 'elsewhere/records.json') -Value '{}'
+        Set-Content -LiteralPath (Join-Path $tmp 'realwt/records.json') -Value '{}'
+        $null = New-Item -ItemType Junction -Path (Join-Path $tmp 'outside/j') -Target (Join-Path $tmp 'wt')
+        $null = New-Item -ItemType Junction -Path (Join-Path $tmp 'outside/k') -Target (Join-Path $tmp 'elsewhere')
+        $null = New-Item -ItemType Junction -Path (Join-Path $tmp 'wr/wt') -Target (Join-Path $tmp 'realwt')
+        $null = New-Item -ItemType HardLink -Path (Join-Path $tmp 'outside/hard.json') -Target $inWt
+        Add-RinneCase $cases '判据文件位置：经 junction 指到 wt/ 里' $true (@(& $ti @{ Records = (Join-Path $tmp 'outside/j/records.json') }).Count -ge 1)
+        Add-RinneCase $cases '判据文件位置：路径上有 junction（哪怕指到仓外）也判红' $true ((@(& $ti @{ Records = (Join-Path $tmp 'outside/k/records.json') }) -match 'reparse point').Count -eq 1)
+        Add-RinneCase $cases '判据文件位置：硬链接到 wt/ 里的文件' $true ((@(& $ti @{ Records = (Join-Path $tmp 'outside/hard.json') }) -match '硬链接').Count -eq 1)
+        Add-RinneCase $cases '判据文件位置：仓外的普通文件（经过的目录都不是 reparse point）放行' $false (@(& $ti @{ Records = (Join-Path $tmp 'elsewhere/records.json') }).Count -ne 0)
+        $wr = [pscustomobject]@{ Root = $integrity.Root; Configs = $integrity.Configs; Hooks = $integrity.Hooks; Records = (Join-Path $tmp 'realwt/records.json') }
+        Add-RinneCase $cases '判据文件位置：wt/ 本身是 junction，记录文件放在它指向的目录里也认得出' $true ((@(Test-CloneIntegrity $wr (Join-Path $tmp 'wr')) -match 'wt/ 之外').Count -eq 1)
         $integrity.Hooks = $tmp
         $vh = Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid)
         $integrity.Hooks = Join-Path $fakeClone 'scripts/hooks'
         Add-RinneCase $cases '-Check：hooksPath 不对就判红' $true ($vh.Code -eq 'not-ready' -and @($vh.Failures | Where-Object { $_ -match 'core\.hooksPath' }).Count -eq 1)
         Add-RinneCase $cases 'PowerShell 低于 7.5 拒绝运行（-DateKind）' $true (-not (Test-RinnePwshVersion 7 4))
         Add-RinneCase $cases 'PowerShell 7.5 及以上照常运行' $false (-not ((Test-RinnePwshVersion 7 5) -and (Test-RinnePwshVersion 8 0)))
+        # 导入时的版本断言：子进程导入一份把当前版本换成 7.4 的模块副本，导入必须失败；原样的副本照常导入
+        $ghText = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'lib/RinneGh.psm1')
+        $pinned = '$PSVersionTable.PSVersion.Major $PSVersionTable.PSVersion.Minor'
+        $import = { param($text) $f = Join-Path $tmp "gh-$(Get-Random).psm1"; Set-Content -LiteralPath $f -Value $text
+            $o = & ([Environment]::ProcessPath) -NoProfile -NonInteractive -Command "Import-Module '$f'" 2>&1 | Out-String; @($LASTEXITCODE, $o) }
+        $old, $cur = (& $import $ghText.Replace($pinned, '7 4')), (& $import $ghText)
+        Add-RinneCase $cases '导入维护者模块：PowerShell 按 7.4 判时导入就失败' $true ($ghText.Contains($pinned) -and $old[0] -ne 0 -and $old[1] -match '需要 PowerShell 7\.5')
+        Add-RinneCase $cases '导入维护者模块：当前的 PowerShell 照常导入' $false ($cur[0] -ne 0)
+        # 判据文件的清单问 git 自己（真跑 git，临时仓）：用户级配置跟着 GIT_CONFIG_GLOBAL 与 HOME 走，还不存在的也列上；
+        # include 进来的文件与 include 指着、眼下还不存在的文件都在
+        $repo = Join-Path $tmp 'trepo'; $tHome = Join-Path $tmp 'thome'
+        $null = New-Item -ItemType Directory -Path $tHome
+        $null = git init -q $repo 2>&1
+        Set-Content -LiteralPath (Join-Path $tmp 'g.gitconfig') -Value "[include]`n`tpath = inc.gitconfig`n`tpath = later.gitconfig"
+        Set-Content -LiteralPath (Join-Path $tmp 'inc.gitconfig') -Value "[user]`n`tname = x"
+        Set-Content -LiteralPath (Join-Path $tHome '.gitconfig') -Value "[user]`n`tname = y"
+        $savedCfg = @{ G = $env:GIT_CONFIG_GLOBAL; H = $env:HOME; X = $env:XDG_CONFIG_HOME }
+        $paths = { param($t) @($t.Configs.Values | ForEach-Object { [IO.Path]::GetFullPath($_) }) }
+        $has = { param($t, $p) (& $paths $t) -contains [IO.Path]::GetFullPath($p) }
+        Set-RinneFake $null
+        $script:IntegrityTargets = $null
+        try {
+            $env:XDG_CONFIG_HOME = $null
+            $env:GIT_CONFIG_GLOBAL = Join-Path $tmp 'g.gitconfig'
+            $tg = Get-CloneIntegrityTargets -Repo $repo
+            $env:GIT_CONFIG_GLOBAL = Join-Path $tmp 'missing.gitconfig'
+            $tm = Get-CloneIntegrityTargets -Repo $repo
+            $env:GIT_CONFIG_GLOBAL = $null; $env:HOME = $tHome
+            $th = Get-CloneIntegrityTargets -Repo $repo
+        } finally {
+            $env:GIT_CONFIG_GLOBAL, $env:HOME, $env:XDG_CONFIG_HOME = $savedCfg.G, $savedCfg.H, $savedCfg.X
+            $script:IntegrityTargets = $integrity
+            Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
+        }
+        Add-RinneCase $cases '判据文件清单：GIT_CONFIG_GLOBAL 指的用户级配置、它 include 的文件、include 指着还不存在的文件都在' $false (-not (
+                (& $has $tg (Join-Path $tmp 'g.gitconfig')) -and (& $has $tg (Join-Path $tmp 'inc.gitconfig')) -and (& $has $tg (Join-Path $tmp 'later.gitconfig')) -and
+                (& $has $tg (Join-Path $repo '.git/config'))))
+        Add-RinneCase $cases '判据文件清单：GIT_CONFIG_GLOBAL 指着还不存在的文件，也照 git var 列上' $false (-not (& $has $tm (Join-Path $tmp 'missing.gitconfig')))
+        Add-RinneCase $cases '判据文件清单：用户级配置跟着 HOME 走（含还不存在的 XDG 那一份）' $false (-not (
+                (& $has $th (Join-Path $tHome '.gitconfig')) -and (& $has $th (Join-Path $tHome '.config/git/config')) -and -not (& $has $th (Join-Path $tmp 'g.gitconfig'))))
+        # 指纹按 git 的解析算：只加 branch 段不变。下面两份按文本看只有「branch 段」里那一行不同，git 按续行解析，那一行
+        # 却是 core 的键（第二份是 core.hooksPath）：按文本剔除 branch 段的话两份一样，按 git 的解析不一样
+        $fp = { param($text) $f = Join-Path $tmp "fp-$(Get-Random).config"; Set-Content -LiteralPath $f -Value $text
+            (Get-CloneFingerprint ([pscustomobject]@{ Configs = [ordered]@{ c = $f }; Hooks = $null; Records = $null; Node = $null; Cards = $null })).c }
+        $c0 = "[core]`n`tbare = false"
+        Add-RinneCase $cases '指纹：只多了 branch 段，git 配置的指纹不变' $false ((& $fp $c0) -ne (& $fp "$c0`n[branch `"feat/x`"]`n`tremote = origin"))
+        $hidden = { param($line) "$c0`n`teditor = vi \`n[branch `"y`"]`n`t$line" }
+        Add-RinneCase $cases '指纹：续行把 hooksPath 藏在「branch 段」里，指纹照样变' $true ((& $fp (& $hidden 'remote = origin')) -ne (& $fp (& $hidden 'hooksPath = /elsewhere')))
         # mergeable 先读到 null（GitHub 还在算）：稍等再读；一直是 null 就判不可合并
         $MergeablePoll.Seconds = 0
         $pullState.Nulls = 2
@@ -985,15 +1201,36 @@ function Invoke-SelfTest {
         $sw2.Stop()
         # 超时被结束的命令：结束前写出的输出也留着
         $partial = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', "'partial-out'; Start-Sleep -Seconds 120") -TimeoutSeconds 10 -AllowFail
-        # 一直刷屏的命令：超时照样生效，输出只留最后一段（上限临时调小）
+        # 一直刷屏的命令：超时照样生效，输出只留最后一段（上限临时调小，finally 里还原成原来的值）
+        $savedPump = & (Get-Module RinneGh) { $script:PumpMaxChars }
         & (Get-Module RinneGh) { $script:PumpMaxChars = 200000 }
         try {
             $sw3 = [Diagnostics.Stopwatch]::StartNew()
             $flood = Invoke-RinneExternal ([Environment]::ProcessPath) @('-NoProfile', '-NonInteractive', '-Command', "`$s = 'x' * 65536; while (`$true) { [Console]::Out.Write(`$s) }") -TimeoutSeconds 5 -AllowFail
             $sw3.Stop()
         } finally {
-            & (Get-Module RinneGh) { $script:PumpMaxChars = 4MB }
+            & (Get-Module RinneGh) { param($v) $script:PumpMaxChars = $v } $savedPump
         }
+        # 带超时的外部命令（合并后构建就这样起构建脚本）：起进程那一刻本进程的输出管道不可继承，构建留下的进程拖不住
+        # pr-merge 的调用方。真起一个中间层 pwsh（输出接管道），它导入本模块、用 Invoke-RinneTimed 起一个桩；桩只取
+        # scripts/build.ps1 的函数，留下一个活 12 秒的孙进程就退出。量的是读到中间层输出 EOF 的时间
+        $stub, $middle = (Join-Path $tmp 'eof-stub.ps1'), (Join-Path $tmp 'eof-middle.ps1')
+        $pw = [Environment]::ProcessPath
+        Set-Content -LiteralPath $stub -Value (". '$(Join-Path (Get-RinneRepoRoot) 'scripts/build.ps1')'; Protect-StdHandles; " +
+            "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pw', '-NoProfile', '-Command', 'Start-Sleep', '12') '$tmp\eof.log' 60)")
+        Set-Content -LiteralPath $middle -Value ("Import-Module '$(Join-Path $PSScriptRoot 'lib/RinneGh.psm1')'; " +
+            "`$null = Invoke-RinneTimed -Exe '$pw' -Arguments @('-NoProfile', '-NonInteractive', '-File', '$stub') -TimeoutSeconds 60; 'middle-done'")
+        $psi = [Diagnostics.ProcessStartInfo]::new($pw)
+        foreach ($x in '-NoProfile', '-NonInteractive', '-File', $middle) { $psi.ArgumentList.Add($x) }
+        $psi.UseShellExecute, $psi.RedirectStandardOutput, $psi.RedirectStandardError = $false, $true, $true
+        $sw4 = [Diagnostics.Stopwatch]::StartNew()
+        $mp = [Diagnostics.Process]::Start($psi)
+        $mOut, $mErr = $mp.StandardOutput.ReadToEndAsync(), $mp.StandardError.ReadToEndAsync()
+        $null = $mOut.Wait(40000) -and $mErr.Wait(40000)
+        $sw4.Stop()
+        Add-RinneCase $cases ('带超时的外部命令：构建留下的进程不拖住 pr-merge 的调用方（{0:N1} 秒读到 EOF）' -f $sw4.Elapsed.TotalSeconds) $false (
+            -not ($mOut.Result -match 'middle-done' -and $sw4.Elapsed.TotalSeconds -lt 8))
+        Add-RinneCase $cases '刷屏的用例之后，读取器的上限还原成原来的值' $false ((& (Get-Module RinneGh) { $script:PumpMaxChars }) -ne $savedPump)
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Add-RinneCase $cases '外部命令超时：到点结束进程、判超时' $true ($slow.TimedOut -and $slow.Code -ne 0 -and $sw.Elapsed.TotalSeconds -lt 30)
         Add-RinneCase $cases '外部命令没超时：照常返回退出码' $false (-not ($quick.Code -eq 3 -and -not $quick.TimedOut))
@@ -1018,20 +1255,34 @@ function Invoke-SelfTest {
         $slot = Get-PremergeSlot 3
         $card.tier = 'Standard'; & $writeCard
         $gates.tier = 'Standard'; & $writeGates
-        $secretNames = 'GH_TOKEN', 'RINNE_SELFTEST_KEY', 'RINNE_SELFTEST_SECRET', 'RINNE_SELFTEST_PASSWORD', 'RINNE_SELFTEST_PAT', 'RINNE_SELFTEST_PLAIN', 'RINNE_BUILD_SLOT_HELD'
+        $secretNames = 'GH_TOKEN', 'RINNE_SELFTEST_KEY', 'RINNE_SELFTEST_SECRET', 'RINNE_SELFTEST_PASSWORD', 'RINNE_SELFTEST_PAT', 'RINNE_SELFTEST_PLAIN', 'RINNE_BUILD_SLOT_HELD',
+            'RINNE_SELFTEST_CREDENTIALS', 'RINNE_SELFTESTAPIKEY', 'RINNE_SELFTEST_URL'
         $saveTok = @{}; foreach ($k in $secretNames) { $saveTok[$k] = [Environment]::GetEnvironmentVariable($k) }
         try {
             $env:GH_TOKEN = 'tok-selftest'; $env:RINNE_SELFTEST_KEY = 'key-selftest'; $env:RINNE_SELFTEST_PLAIN = 'kept'
             $env:RINNE_SELFTEST_SECRET = 'secret-selftest'; $env:RINNE_SELFTEST_PASSWORD = 'password-selftest'; $env:RINNE_SELFTEST_PAT = 'pat-selftest'
+            $env:RINNE_SELFTEST_CREDENTIALS = 'cred-selftest'; $env:RINNE_SELFTESTAPIKEY = 'apikey-selftest'
+            $env:RINNE_SELFTEST_URL = 'https://u' + ':p@example.invalid/x'
             $env:RINNE_BUILD_SLOT_HELD = $null
             $lockLog.Clear(); $tipOps.Clear()
             $vc = Invoke-MergeCheck 3 $cid
             $b = $builds | Select-Object -Last 1
             Add-RinneCase $cases '合并后构建：其余都通过时最后才跑' $false (-not ($vc.Code -eq 'ready' -and $builds.Count -eq 1 -and $vc.Premerge.Ok))
-            Add-RinneCase $cases '合并后构建：子进程看不到 GH_TOKEN、*_KEY、*_SECRET、*_PASSWORD、*_PAT 与个人针，其他变量照常' $false (-not (
-                    $b -and -not $b.GhToken -and -not $b.OtherKey -and -not $b.Secret -and -not $b.Password -and -not $b.Pat -and -not $b.Needles -and $b.Plain -eq 'kept'))
+            Add-RinneCase $cases '合并后构建：子进程看不到 GH_TOKEN、*_KEY、*_SECRET、*_PASSWORD、*_PAT、*_CREDENTIALS、*APIKEY*、带口令的 URL 与个人针，其他变量照常' $false (-not (
+                    $b -and -not $b.GhToken -and -not $b.OtherKey -and -not $b.Secret -and -not $b.Password -and -not $b.Pat -and -not $b.Credentials -and -not $b.ApiKey -and
+                    -not $b.Url -and -not $b.Needles -and $b.Plain -eq 'kept'))
+            # 凭据判据只有一份：取自 scripts/build.ps1 那两条赋值（与按文本读出来的一致）；文件里没有或有两条时抛错，宁可不跑
+            $buildText = Get-Content -Raw -LiteralPath (Join-Path (Get-RinneRepoRoot) 'scripts/build.ps1')
+            $rules = Get-RinneSecretEnv
+            Add-RinneCase $cases '凭据判据取自 scripts/build.ps1 的 $SecretEnv 与 $SecretEnvValue' $false (-not (
+                    $buildText.Contains("`$SecretEnv = '$($rules.Name)'") -and $buildText.Contains("`$SecretEnvValue = '$($rules.Value)'")))
+            $noRule = Join-Path $tmp 'no-rule.ps1'
+            Set-Content -LiteralPath $noRule -Value "`$SecretEnv = 'x'"
+            $twoRules = Join-Path $tmp 'two-rules.ps1'
+            Set-Content -LiteralPath $twoRules -Value "`$SecretEnv = 'x'`n`$SecretEnvValue = 'y'`n`$SecretEnv = 'z'"
+            Add-RinneCase $cases '凭据判据：build.ps1 里缺一条或有两条时抛错' $true ((Test-Throws { Get-RinneSecretEnv -Path $noRule }) -and (Test-Throws { Get-RinneSecretEnv -Path $twoRules }))
             Add-RinneCase $cases '合并后构建：构建脚本拿到持槽方（本进程）的 pid，不再自己取槽' $false (-not ($b -and $b.SlotHeld -eq "$PID"))
-            Add-RinneCase $cases '合并后构建：跑完还原环境' $false ($env:GH_TOKEN -ne 'tok-selftest' -or $env:RINNE_SELFTEST_KEY -ne 'key-selftest' -or $env:RINNE_SELFTEST_SECRET -ne 'secret-selftest' -or $env:RINNE_SELFTEST_PASSWORD -ne 'password-selftest' -or $env:RINNE_SELFTEST_PAT -ne 'pat-selftest' -or $env:RINNE_PRIVACY_LOCAL -ne $needles.File -or $env:RINNE_BUILD_SLOT_HELD)
+            Add-RinneCase $cases '合并后构建：跑完还原环境' $false ($env:GH_TOKEN -ne 'tok-selftest' -or $env:RINNE_SELFTEST_KEY -ne 'key-selftest' -or $env:RINNE_SELFTEST_SECRET -ne 'secret-selftest' -or $env:RINNE_SELFTEST_PASSWORD -ne 'password-selftest' -or $env:RINNE_SELFTEST_PAT -ne 'pat-selftest' -or $env:RINNE_SELFTEST_CREDENTIALS -ne 'cred-selftest' -or -not $env:RINNE_SELFTEST_URL -or $env:RINNE_PRIVACY_LOCAL -ne $needles.File -or $env:RINNE_BUILD_SLOT_HELD)
             Add-RinneCase $cases '合并后构建：在本 PR 自己的 wt/tip-3 里跑，带超时' $false (-not ($b.Cwd -eq $tip -and $b.Timeout -gt 0))
             Add-RinneCase $cases '合并后构建：构建持着构建槽，不在 git 锁里' $false (-not ($b.Held -contains $slot -and $b.Held -notcontains 'git'))
             Add-RinneCase $cases '合并后构建：第一次用时 worktree add 到 wt/tip-3' $false (-not ($tipOps.Count -ge 1 -and $tipOps[0].Line -match "worktree add --detach $([regex]::Escape($tip)) origin/feature/v1$"))
@@ -1040,17 +1291,35 @@ function Invoke-SelfTest {
                     @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -ge 1 -and
                     @($tipOps | Where-Object { $_.Held -notcontains $slot -or $_.Held -notcontains 'git' }).Count -eq 0))
             Add-RinneCase $cases '合并后构建：先取构建槽再取 git 锁' $false (-not ($lockLog.IndexOf($slot) -ge 0 -and $lockLog.LastIndexOf('git') -gt $lockLog.IndexOf($slot)))
-            # 构建脚本顺手改了主 clone 的判据文件：判红，Reason 写明是哪一项
-            $tamper.What = 'config'
-            $vt = Invoke-MergeCheck 3 $cid
-            $tamper.What = 'hook'
-            $vk = Invoke-MergeCheck 3 $cid
-            $tamper.What = 'user'
-            $vg = Invoke-MergeCheck 3 $cid
+            # 构建脚本顺手改了主 clone 的判据文件或状态：判红，Reason 写明是哪一项（每一项单独改、改完还原）
+            $snap = @{}
+            foreach ($f in @($integrity.Configs.Values) + @($integrity.Records, $integrity.Node, $integrity.Cards)) { $snap[$f] = Get-Content -Raw -LiteralPath $f }
+            $hit = {
+                param($what, $pattern)
+                $tamper.What = $what
+                try { $v = Invoke-MergeCheck 3 $cid } finally {
+                    $tamper.What = ''
+                    foreach ($f in $snap.Keys) { Set-Content -LiteralPath $f -Value $snap[$f] -NoNewline }
+                    $tree.Dirty = $false; $tree.Sha = $tipSha
+                    Get-ChildItem -LiteralPath $integrity.Hooks -Force | Where-Object Name -ne 'pre-push' | Remove-Item -Force
+                    Set-Content -LiteralPath (Join-Path $integrity.Hooks 'pre-push') -Value '#!/bin/sh'
+                }
+                $v.Code -eq 'not-ready' -and @($v.Failures | Where-Object { $_ -match "判据文件：[^（]*$pattern" }).Count -eq 1
+            }
+            Add-RinneCase $cases '合并后构建：构建改了主 clone 的 .git/config，判红并写明' $true (& $hit 'config' '\.git/config')
+            Add-RinneCase $cases '合并后构建：构建改了用户级 git 配置，判红并写明' $true (& $hit 'user' '用户级 git 配置 ~/\.gitconfig')
+            Add-RinneCase $cases '合并后构建：构建改了 hooks 目录里的文件，判红并写明' $true (& $hit 'hook' 'hooks/pre-push')
+            Add-RinneCase $cases '合并后构建：构建在 hooks 目录里加了隐藏文件，判红并写明' $true (& $hit 'hidden-hook' 'hooks/post-checkout')
+            Add-RinneCase $cases '合并后构建：构建改了记录文件，判红并写明' $true (& $hit 'records' '记录文件')
+            Add-RinneCase $cases '合并后构建：构建改了之后还要用的 node，判红并写明' $true (& $hit 'node' 'node')
+            Add-RinneCase $cases '合并后构建：构建改了卡片清单，判红并写明' $true (& $hit 'cards' '卡片清单')
+            Add-RinneCase $cases '合并后构建：构建之后主 clone 的工作树不干净，判红并写明' $true (& $hit 'dirty' '主 clone 的工作树')
+            Add-RinneCase $cases '合并后构建：构建之后主 clone 的 HEAD 变了，判红并写明' $true (& $hit 'head' '主 clone 的 HEAD')
+            $tamper.What = 'branch'
+            $vb = Invoke-MergeCheck 3 $cid
             $tamper.What = ''
-            Add-RinneCase $cases '合并后构建：构建改了主 clone 的 .git/config，判红并写明' $true ($vt.Code -eq 'not-ready' -and @($vt.Failures | Where-Object { $_ -match '判据文件：\.git/config（' }).Count -eq 1)
-            Add-RinneCase $cases '合并后构建：构建改了用户级 git 配置，判红并写明' $true ($vg.Code -eq 'not-ready' -and @($vg.Failures | Where-Object { $_ -match '判据文件：用户级 git 配置 ~/\.gitconfig（' }).Count -eq 1)
-            Add-RinneCase $cases '合并后构建：构建改了 hooks 目录里的文件，判红并写明' $true ($vk.Code -eq 'not-ready' -and @($vk.Failures | Where-Object { $_ -match '判据文件：hooks/pre-push（' }).Count -eq 1)
+            foreach ($f in $snap.Keys) { Set-Content -LiteralPath $f -Value $snap[$f] -NoNewline }
+            Add-RinneCase $cases '合并后构建：构建期间别的进程只往 .git/config 写了 branch 段，照常通过' $false ($vb.Code -ne 'ready')
             $vu = Invoke-MergeCheck 3 $cid
             Add-RinneCase $cases '合并后构建：没改判据文件时照常通过' $false ($vu.Code -ne 'ready')
             $tipOps.Clear()
@@ -1117,6 +1386,20 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-Merge：squash、sha=审过的 head、subject (#3)、body 末行唯一签名' $false (-not (
                 $m.merge_method -eq 'squash' -and $m.sha -eq $head -and $m.commit_title -match '\(#3\)$' -and
                 $m.commit_message -match "^加入示例检查。`n`nSigned-off-by: [^\n]+$"))
+        # 带合并后构建的 -Merge：squash 消息的生成与检查（node 跑的判据）都在构建之前，构建之后只剩接口核对与合并请求
+        $card.tier = 'Standard'; & $writeCard
+        $gates.tier = 'Standard'; & $writeGates
+        Set-Content -LiteralPath (Join-Path $tip 'scripts/build.ps1') -Value 'exit 0'
+        $log.Clear()
+        $n = $put.Count
+        Invoke-Merge -Pr 3 -CardId $cid -SummaryFile $sum | Out-Null
+        $idx = { param($re, [switch]$Last) $hits = @(for ($k = 0; $k -lt $log.Count; $k++) { if ($log[$k] -match $re) { $k } }); $hits.Count ? ($Last ? $hits[-1] : $hits[0]) : -1 }
+        $buildAt = & $idx 'build\.ps1$'
+        Add-RinneCase $cases '-Merge：squash 消息与文本检查在合并后构建之前，构建之后不再跑 node，最后才发合并请求' $false (-not (
+                $put.Count -eq $n + 1 -and $buildAt -ge 0 -and (& $idx 'maint\.mjs message') -ge 0 -and (& $idx 'maint\.mjs message') -lt $buildAt -and
+                (& $idx '\.mjs( |$)' -Last) -lt $buildAt -and (& $idx 'X PUT \S+/pulls/3/merge' -Last) -gt $buildAt))
+        $card.tier = 'Quick'; & $writeCard
+        $gates.tier = 'Quick'; & $writeGates
         # workflow 按规则至少是 Standard：gates 也按 Standard 跑过（基础设施 PR 不在本机做合并后构建）
         $files = @([pscustomobject]@{ filename = '.github/workflows/x.yml'; status = 'modified' })
         $card.owns = @('.github/workflows/x.yml'); & $writeCard
