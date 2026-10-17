@@ -21,15 +21,21 @@ const outDir = path.resolve(
     argv.includes("--out") ? argv[argv.indexOf("--out") + 1] : "build/web-preview-static",
 );
 
-/** 输出目录会被整个删掉重建，所以只允许放在仓库的 build/ 或系统临时目录之下，且不能就是这两个目录本身。 */
+/**
+ * 输出目录会被整个删掉重建，所以先排除仓库本身及其上级，再按位置判断：
+ * 在仓库之内只允许 build/ 之下；在仓库之外只允许系统临时目录之下。两种情况都不能是那个目录本身。
+ */
 function outDirProblem(dir) {
-    const under = (base) => {
-        const rel = path.relative(base, dir);
+    const under = (base, d) => {
+        const rel = path.relative(base, d);
         return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
     };
-    return under(path.join(root, "build")) || under(os.tmpdir())
-        ? null
-        : `--out 只能放在 build/ 或系统临时目录之下（不能是它们本身），实得 ${dir}`;
+    const same = (a, b) => path.relative(a, b) === "";
+    if (same(dir, root) || under(dir, root)) return `--out 不能是仓库根或它的上级，实得 ${dir}`;
+    if (under(root, dir)) {
+        return under(path.join(root, "build"), dir) ? null : `--out 在仓库内时只能放在 build/ 之下，实得 ${dir}`;
+    }
+    return under(os.tmpdir(), dir) ? null : `--out 在仓库外时只能放在系统临时目录之下，实得 ${dir}`;
 }
 
 /** 进入导出的目录与文件：web/ 全部，web-preview/ 去掉测试、截图、脚本。 */

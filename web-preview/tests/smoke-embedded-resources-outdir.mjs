@@ -6,6 +6,7 @@
 // 用法：node web-preview/tests/smoke-embedded-resources-outdir.mjs [仓库根]
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRun, repoRoot } from "./lib/harness.mjs";
@@ -19,6 +20,28 @@ for (const out of [".", "..", "web", "web-preview", "build", path.parse(ROOT).ro
     const r = spawnSync(process.execPath, [script, "--out", out], { cwd: ROOT, encoding: "utf8" });
     run.check(r.status === 1, `--out ${out}：应当被拒绝（退出码 1），实得 ${r.status}`);
     run.check(fs.existsSync(marker), `--out ${out}：被拒之后真源文件仍在`);
+}
+// 仓库本身在临时目录之下时（例如 CI 的检出目录），输出到仓库根或其上级也必须被拒：用一份拷贝模拟
+const fake = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-outdir-"));
+try {
+    fs.cpSync(path.join(ROOT, "web-preview"), path.join(fake, "web-preview"), {
+        recursive: true,
+        filter: (s) => !s.includes(".shots"),
+    });
+    fs.cpSync(path.join(ROOT, "web"), path.join(fake, "web"), { recursive: true });
+    for (const out of [".", "..", "web"]) {
+        const r2 = spawnSync(process.execPath, [path.join(fake, "web-preview", "build-static.mjs"), "--out", out], {
+            cwd: fake,
+            encoding: "utf8",
+        });
+        run.check(r2.status === 1, `仓库在临时目录之下：--out ${out} 仍应被拒绝，实得 ${r2.status}`);
+        run.check(
+            fs.existsSync(path.join(fake, "web", "shared", "bridge.js")),
+            `仓库在临时目录之下：--out ${out} 被拒之后真源仍在`,
+        );
+    }
+} finally {
+    fs.rmSync(fake, { recursive: true, force: true });
 }
 const ok = path.join(ROOT, "build", `outdir-smoke-${process.pid}`);
 const r = spawnSync(process.execPath, [script, "--out", ok], { cwd: ROOT, encoding: "utf8" });
