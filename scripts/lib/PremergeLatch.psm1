@@ -4,25 +4,40 @@
 # （配置、hooks、忽略文件）与主 clone 的工作树；改过的 git 配置可能带着会执行代码的项，之后任何一次 git 都会执行它。
 # - pr-merge 在构建之前写「进行中」标记（PR、时间、pid、构建前指纹摘要、一次性随机值），写不进去就不构建；构建期间一直握着它
 #   （只放行读：Windows 上构建删不掉、改不了、也换不成目录）。构建后的核对全部通过、标记内容也与写入时一字不差，才删掉它；
-#   有一项不过就经握着的句柄改写成「已篡改」。父进程被结束、核对之前抛错，标记都留着。
+#   有一项不过、或者核对途中抛错，就经握着的句柄改写成「已篡改」。父进程被结束、构建中途抛错，标记都留着。
 # - 标记在时，导入维护者模块（maintainer/lib/RinneGh.psm1，全部包装脚本都导入它）与 gates.ps1 开头就拒绝，之后一条 git、gh
-#   都不跑，直到维护者核对主 clone 与共享 .git 之后手动删掉。构建期间标记也在，别的 worktree 里的包装脚本与 gates 同样被拒，
-#   要等构建结束。
+#   都不跑，直到维护者核对主 clone 与共享 .git 之后手动删掉。构建期间标记也在，这时才开跑的包装脚本与 gates 同样被拒，要等
+#   构建结束。
+# - 已经在途的调用：维护者模块在每一条外部命令之前都再查一次（Assert-RinneGitAllowed；Invoke-RinneExternal 一处调用，git、gh、
+#   node 都经过它，查主 clone 工作区的 Get-RinneCloneState 也调），开跑之后才写下的标记，就停在下一条之前。本进程自己握着进行中
+#   标记时，要它原样还在；它被动过、改写成已篡改，或者没清除就放开（核对没走完），本进程之后一条外部命令都不再跑，哪怕标记随后
+#   被删掉。gates 只在开头查一次（它没有统一的 git 入口）：开跑之后才写下的标记，挡不住它已在途的 git。
+# - 指纹里有几项不只构建会改：记录文件、卡片清单、主 clone 的 HEAD 与工作树、用户级的 git 配置与忽略文件。构建期间别的进程
+#   （登记一条用户批准、改卡片清单、把主 clone 拉到新的 feature/v1）改了它们，一样判成已篡改、锁住整个工作区，直到维护者核对
+#   后删掉标记；拒绝消息列出变了的是哪几项。所以合并后构建进行中，不要改这几样。
 # - 位置只从调用方脚本或模块文件自己的路径推，不读环境变量与 git config（构建改得了它们）：仓根的 .git 是目录，仓根就是主
 #   clone；是文件（worktree），就按其中的 gitdir 与那里的 commondir 找到主 clone 的 .git，gitdir 必须是 <主 clone>/.git/worktrees/
 #   下的一个目录，否则报错（当作锁存）。标记在主 clone 的上一级（工作区根），在主 clone 与 wt/ 之外。
 #   那个位置上有任何东西（文件、目录、隐藏的都算）、或者连属性都读不了，都算锁存：构建伪造一个只会造成拒绝服务。
+# - 本模块自己的 $ErrorActionPreference 是 Stop：调用方把偏好设成 SilentlyContinue 时，没设偏好的模块里的 throw 会被吞掉，
+#   检查就形同虚设。
 # 边界：这是尽力而为，不是隔离。锁存防的是「构建期间被篡改之后，后续调用在不知情下继续跑 git」；同一用户身份下的后台进程
 # 可以在 pr-merge 退出之后直接删掉标记，也可以改 wt/ 下各 worktree 里的脚本（包括这份检查），这一点挡不住；直接敲的 git
 # 命令、单独跑的 build.ps1 与 node 检查也不经过这里。别的平台上握着句柄不妨碍删除，只剩内容核对。彻底的做法是独立 clone，
 # 或者换一个账户、容器来跑构建。
-#   Assert-RinneNoLatch [-RepoRoot <仓根>]    标记在就抛错（消息以「已锁存」开头）
-#   Test-PremergeLatch                        自测用例（gates 的自测调用）
+#   Assert-RinneNoLatch [-RepoRoot <仓根>]       标记在就抛错（消息以「已锁存」开头）
+#   Assert-RinneGitAllowed [-RepoRoot <仓根>]    外部命令之前的检查，拒绝时抛错（消息以「已锁存」开头）
+#   Get-RinneLatchRefusal [-RepoRoot <仓根>]     同一道检查，不抛错：拒绝时返回原因，放行时返回 $null
+#   Test-PremergeLatch                           自测用例（gates 的自测调用）
 
 Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
 $script:Override = $null
 $script:Hold = $true
+# 本进程正握着的进行中标记（New-RinneLatch 写下，清除或放开时还原），与本进程见过的锁存原因（之后一直拒绝）
+$script:Own = $null
+$script:Tainted = $null
 $script:LatchName = '.rinne-premerge-latch.json'
 $script:ModuleRepo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 
@@ -31,6 +46,9 @@ function Set-RinneLatchOverride { param([string]$Path) $script:Override = $Path 
 
 <# 自测用：构建期间不握着标记（模拟握不住它的平台），好验证后面的内容核对。 #>
 function Set-RinneLatchHold { param([bool]$On) $script:Hold = $On }
+
+<# 自测用：忘掉本进程握着的标记与见过的锁存原因（模拟「下一个进程」）。 #>
+function Reset-RinneLatchProcess { $script:Own, $script:Tainted = $null, $null }
 
 <#
   标记的位置：<主 clone 的上一级>/.rinne-premerge-latch.json。RepoRoot 缺省是本模块所在的仓。没有 .git 时按主 clone 算；
@@ -87,7 +105,12 @@ function Get-RinneLatchSummary {
                 $alive = $procId -gt 0 -and $null -ne (Get-Process -Id $procId -ErrorAction SilentlyContinue)
                 "合并后构建进行中或没有走完（PR #$pr，$at 起，pid $procId $(if ($alive) { '还在：等它结束' } else { '已不在：父进程没走到核对' })）"
             }
-            'tampered' { "合并后构建改过主 clone 的判据文件（PR #$pr，$at）" }
+            'tampered' {
+                # 变了的项：只取前 8 项，每项去掉控制字符、截到 60 字
+                $items = @(@($j['changed']) | ForEach-Object { "$_" -replace '\p{C}', '' } | Where-Object { $_ } | Select-Object -First 8 |
+                        ForEach-Object { ($_.Length -gt 60) ? ($_.Substring(0, 60) + '…') : $_ })
+                "合并后构建期间主 clone 的判据文件变了（PR #$pr，$at）：$(($items.Count) ? ($items -join '、') : '没有记下是哪几项')"
+            }
             default { '内容认不出' }
         }
     } catch { '内容读不出来' }
@@ -99,6 +122,32 @@ function Assert-RinneNoLatch {
     $latch = Get-RinneLatchPath -RepoRoot $RepoRoot
     if (-not (Test-RinneLatchPresent $latch)) { return }
     throw "已锁存（$latch）：$(Get-RinneLatchSummary $latch)。一条 git、gh 都不跑；构建还在跑就等它结束，否则维护者核对主 clone、共享 .git 的配置、hooks 与忽略文件之后，手动删掉这个文件才放行"
+}
+
+<#
+  每一条外部命令之前的检查：拒绝时返回原因（以「已锁存」开头），放行时返回 $null。
+  - 本进程见过锁存（自己的标记被动过、改写成已篡改、没清除就放开）：一直拒绝，不再看标记在不在；
+  - 本进程握着进行中标记：它原样还在才放行，不在原样就记下、之后一直拒绝；
+  - 都没有：位置上没有东西才放行（推不出位置也算拒绝）。
+#>
+function Get-RinneLatchRefusal {
+    param([string]$RepoRoot = $script:ModuleRepo)
+    $tail = '。本进程之后一条 git、gh 都不再跑；维护者核对主 clone、共享 .git 的配置、hooks 与忽略文件之后再继续'
+    if ($script:Tainted) { return "已锁存（本进程）：$($script:Tainted)$tail" }
+    if ($script:Own) {
+        if (Test-RinneLatchIntact $script:Own) { return $null }
+        $script:Tainted = "本进程写下的合并后构建标记被动过（删掉、换掉或改过：$($script:Own.Path)）"
+        return "已锁存（本进程）：$($script:Tainted)$tail"
+    }
+    try { Assert-RinneNoLatch -RepoRoot $RepoRoot; $null }
+    catch { $m = $_.Exception.Message; ($m -match '^已锁存') ? $m : "已锁存（推不出锁存标记的位置）：$m" }
+}
+
+<# 同一道检查，拒绝时抛错。 #>
+function Assert-RinneGitAllowed {
+    param([string]$RepoRoot = $script:ModuleRepo)
+    $m = Get-RinneLatchRefusal -RepoRoot $RepoRoot
+    if ($m) { throw $m }
 }
 
 <#
@@ -115,7 +164,8 @@ function New-RinneLatch {
     $fs = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
     try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } catch { $fs.Dispose(); throw }
     if (-not $script:Hold) { $fs.Dispose(); $fs = $null }
-    [pscustomobject]@{ Path = $path; Pr = $Pr; Text = $text; Stream = $fs }
+    $script:Own = [pscustomobject]@{ Path = $path; Pr = $Pr; Text = $text; Stream = $fs }
+    $script:Own
 }
 
 <# 标记还在、内容（含随机值）与写入时一字不差；不见了、换成了目录、读不出来都不算。 #>
@@ -124,28 +174,35 @@ function Test-RinneLatchIntact {
     try { (Read-RinneLatchText $Latch.Path) -ceq $Latch.Text } catch { $false }
 }
 
-<# 放开句柄，标记文件留着（核对没走完时用）。 #>
+<# 放开句柄，标记文件留着（核对没走完时用）。放开的是本进程握着的那一份时，之后本进程的外部命令一律拒绝。 #>
 function Close-RinneLatch {
     param([Parameter(Mandatory)]$Latch)
     if ($Latch.Stream) { $Latch.Stream.Dispose(); $Latch.Stream = $null }
+    if ([object]::ReferenceEquals($script:Own, $Latch)) {
+        $script:Own = $null
+        if (-not $script:Tainted) { $script:Tainted = "本进程的合并后构建（PR #$($Latch.Pr)）没有走完核对就放开了标记（$($Latch.Path)）" }
+    }
 }
 
 <# 核对全部通过之后删标记；标记被动过（Test-RinneLatchIntact 不过）就不删、返回 $false，句柄照样握着，由调用方处理。 #>
 function Clear-RinneLatch {
     param([Parameter(Mandatory)]$Latch)
     if (-not (Test-RinneLatchIntact $Latch)) { return $false }
-    Close-RinneLatch $Latch
+    if ($Latch.Stream) { $Latch.Stream.Dispose(); $Latch.Stream = $null }
     [IO.File]::Delete($Latch.Path)
+    # 删掉之后才算放下：删的时候抛错，标记还算本进程握着，之后的 Close-RinneLatch 照样记下锁存
+    if ([object]::ReferenceEquals($script:Own, $Latch)) { $script:Own = $null }
     $true
 }
 
 <#
-  构建改了判据文件或动了标记：改写成「已篡改」并记下变了的项，然后放开句柄。握着句柄时经它写（根目录被设成不可写也写得进去）；
-  没握着、经它写不进去、或者按路径读回来不是这份（别的平台上句柄可能指着已被删掉的旧文件），再按路径写。都写不进去时返回
-  报错文字，写明位置上还有没有东西。
+  构建改了判据文件或动了标记：改写成「已篡改」并记下变了的项，然后放开句柄；本进程之后的外部命令一律拒绝。握着句柄时经它写
+  （根目录被设成不可写也写得进去）；没握着、经它写不进去、或者按路径读回来不是这份（别的平台上句柄可能指着已被删掉的旧文件），
+  再按路径写。都写不进去时返回报错文字，写明位置上还有没有东西。
 #>
 function Set-RinneLatchTampered {
     param([Parameter(Mandatory)]$Latch, [string[]]$Changed = @())
+    if (-not $script:Tainted) { $script:Tainted = "本进程的合并后构建（PR #$($Latch.Pr)）核对出判据变了：$(@($Changed) -join '、')" }
     $text = [ordered]@{ state = 'tampered'; pr = $Latch.Pr; at = [datetime]::UtcNow.ToString('o'); changed = @($Changed) } | ConvertTo-Json -Depth 3
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes($text)
     if ($Latch.Stream) {
@@ -170,14 +227,13 @@ function Test-PremergeLatch {
     # 与维护者脚本的自测同一写法：第三个参数是「判红了没有」，坏样例要判红、正例不能判红
     $check = { param($Label, $Bad, $Flagged) [pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = $(if ($Bad) { [bool]$Flagged } else { -not [bool]$Flagged }) } }
     $thrown = { param($sb) try { & $sb | Out-Null; '' } catch { $_.Exception.Message } }
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-latch-selftest-$PID-$(Get-Random)"
-    $saved = @{ Path = $env:PATH; Root = $env:RINNE_ROOT; LogDir = $env:RINNE_LOG_DIR; Override = $script:Override; Hold = $script:Hold }
-    $held, $made = $null, $false
+    # 临时目录只经 TempDir.psm1 建与删：新建的、本进程的，删之前按真实路径核对
+    Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
+    $saved = @{ Path = $env:PATH; Root = $env:RINNE_ROOT; LogDir = $env:RINNE_LOG_DIR; Override = $script:Override; Hold = $script:Hold; Own = $script:Own; Tainted = $script:Tainted }
+    $held, $tmp = $null, $null
     try {
-        # 不带 -Force：目录已经在（不是本进程建的）就抛错，finally 里也就不删它
-        $null = New-Item -ItemType Directory -Path $tmp
-        $made = $true
-        $script:Override, $script:Hold = $null, $true
+        $tmp = New-RinneTempDir -Prefix 'rinne-latch-selftest-'
+        $script:Override, $script:Hold, $script:Own, $script:Tainted = $null, $true, $null, $null
         # 工作区根的两种配置（环境变量与 git config rinne.root）都指到别处的诱饵目录，诱饵目录里另放一个标记
         $decoy = Join-Path $tmp 'decoy'
         $env:RINNE_ROOT = $decoy
@@ -237,11 +293,15 @@ function Test-PremergeLatch {
         & $check '进行中标记：位置上已有没人握着的旧标记时不覆盖、抛错' $true ($refused -and (Read-RinneLatchText $want) -ceq '{}')
         Remove-Item -LiteralPath $want
         $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
-        $null = Set-RinneLatchTampered -Latch $held -Changed @('.git/config', '锁存标记')
+        $long = 'x' * 100
+        $null = Set-RinneLatchTampered -Latch $held -Changed @('.git/config', "卡片$([char]27)[31m清单", $long)
         $j = Read-RinneLatchText $want | ConvertFrom-Json
         & $check '已篡改：经握着的句柄改写成 tampered，记下变了的项，句柄放开' $false (-not ($j.state -eq 'tampered' -and $j.pr -eq 7 -and @($j.changed) -contains '.git/config' -and -not $held.Stream))
-        & $check '已篡改：拒绝的消息写明改过判据文件' $false ((& $thrown { Assert-RinneNoLatch -RepoRoot $main }) -notmatch '^已锁存.*改过主 clone 的判据文件')
+        $msg = & $thrown { Assert-RinneNoLatch -RepoRoot $main }
+        & $check '已篡改：拒绝的消息列出是哪几项变了（去掉控制字符、过长的截短）' $false (-not (
+                $msg -match '^已锁存.*判据文件变了.*：\.git/config、卡片\[31m清单、x{60}…' -and $msg -notmatch "$([char]27)|x{61}"))
         Remove-Item -LiteralPath $want
+        Reset-RinneLatchProcess
         if ($IsWindows) {
             # 构建把标记设成不可写（加一条拒绝写的权限）：按路径写不进去，经握着的句柄照样改写成功
             $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
@@ -273,6 +333,48 @@ function Test-PremergeLatch {
         & $check '不握句柄：位置上是目录时写不进去，报出来、写明照样锁存' $true ((Set-RinneLatchTampered -Latch $held -Changed @('x')) -match '写不进去.*照样锁存')
         Remove-Item -LiteralPath $want -Force
         $script:Hold, $held = $true, $null
+        Reset-RinneLatchProcess
+
+        # 外部命令之前的检查（维护者模块的 Invoke-RinneExternal 与 Get-RinneCloneState 调它）：在途的调用撞上之后才写下的标记、
+        # 本进程自己的标记被动过、改写成已篡改、没清除就放开，都拒绝；后三种之后一直拒绝，标记删掉、改回原样也不放行
+        $refusal = { Get-RinneLatchRefusal -RepoRoot $main }
+        $allowed = { (& $thrown { Assert-RinneGitAllowed -RepoRoot $main }) -eq '' }
+        & $check '外部命令前：没有标记时放行' $false (-not ((& $allowed) -and $null -eq (& $refusal)))
+        Set-Content -LiteralPath $want -Value '{}'
+        & $check '外部命令前：本进程没握标记、位置上有东西（在途时别的进程写下的）就拒绝' $true (-not (& $allowed) -and (& $refusal) -match '^已锁存')
+        Remove-Item -LiteralPath $want
+        $script:Hold = $false
+        $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
+        & $check '外部命令前：本进程握着的进行中标记原样还在时放行' $false (-not (& $allowed))
+        Set-Content -LiteralPath $want -Value ($held.Text -replace '"nonce":"[0-9a-f]+"', '"nonce":"0"') -NoNewline
+        $r1 = & $allowed
+        Set-Content -LiteralPath $want -Value $held.Text -NoNewline
+        $r2 = & $allowed
+        & $check '外部命令前：本进程握着的标记被动过就拒绝，改回原样也不再放行' $true (-not $r1 -and -not $r2 -and (& $refusal) -match '^已锁存（本进程）.*被动过')
+        Remove-Item -LiteralPath $want
+        Reset-RinneLatchProcess
+        & $check '外部命令前：换一个进程（这里是还原状态）、没有标记时放行' $false (-not (& $allowed))
+        $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
+        $null = Set-RinneLatchTampered -Latch $held -Changed @('x')
+        Remove-Item -LiteralPath $want
+        & $check '外部命令前：改写成已篡改之后，标记被删掉也不再放行' $true (-not (& $allowed) -and (& $refusal) -match '^已锁存（本进程）.*判据变了')
+        Reset-RinneLatchProcess
+        $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
+        Close-RinneLatch $held
+        Remove-Item -LiteralPath $want
+        & $check '外部命令前：没清除就放开（核对没走完）之后，标记被删掉也不再放行' $true (-not (& $allowed) -and (& $refusal) -match '^已锁存（本进程）.*没有走完核对')
+        Reset-RinneLatchProcess
+        $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
+        $cleared = Clear-RinneLatch $held
+        & $check '外部命令前：核对通过、清除之后照常放行' $false (-not ($cleared -and (& $allowed)))
+        $script:Hold, $held = $true, $null
+        # 调用方把 ErrorActionPreference 设成 SilentlyContinue：没设偏好的模块里的 throw 会被吞掉，这里照样拒绝（子进程里试）
+        Set-Content -LiteralPath $want -Value '{}'
+        $o = & ([Environment]::ProcessPath) -NoProfile -NonInteractive -Command (
+            "`$global:ErrorActionPreference = 'SilentlyContinue'; Import-Module '$($PSCommandPath -replace "'", "''")'; " +
+            "Assert-RinneNoLatch -RepoRoot '$($main -replace "'", "''")'; 'passed-through'") 2>&1 | Out-String
+        & $check '标记在时，调用方把 ErrorActionPreference 设成 SilentlyContinue 也照样抛错拒绝' $true ($o -match '已锁存' -and $o -notmatch 'passed-through')
+        Remove-Item -LiteralPath $want
 
         # 入口：主 clone 与 worktree 两种布局各放一份副本；主 clone 的副本是真的仓，rinne.root 指到诱饵目录。假的 git、gh
         # 被调用就往 $called 里写一行
@@ -283,7 +385,7 @@ function Test-PremergeLatch {
             $null = New-Item -ItemType Directory -Force -Path (Join-Path $c 'scripts/maintainer/lib'), (Join-Path $c 'scripts/lib')
             Copy-Item -Path (Join-Path $root 'scripts/maintainer/*.ps1') -Destination (Join-Path $c 'scripts/maintainer')
             Copy-Item -LiteralPath (Join-Path $root 'scripts/maintainer/lib/RinneGh.psm1') -Destination (Join-Path $c 'scripts/maintainer/lib')
-            foreach ($f in 'StdHandles.psm1', 'PremergeLatch.psm1', 'Locks.psm1', 'Tiers.psm1', 'tier-rules.json') { Copy-Item -LiteralPath (Join-Path $root "scripts/lib/$f") -Destination (Join-Path $c 'scripts/lib') }
+            foreach ($f in 'StdHandles.psm1', 'PremergeLatch.psm1', 'TempDir.psm1', 'Locks.psm1', 'Tiers.psm1', 'tier-rules.json') { Copy-Item -LiteralPath (Join-Path $root "scripts/lib/$f") -Destination (Join-Path $c 'scripts/lib') }
             Copy-Item -LiteralPath (Join-Path $root 'scripts/gates.ps1') -Destination (Join-Path $c 'scripts')
         }
         $null = git init -q (Join-Path $lt 'rinne') 2>&1
@@ -341,16 +443,14 @@ function Test-PremergeLatch {
     } finally {
         if ($held) { Close-RinneLatch $held }
         $env:PATH, $env:RINNE_ROOT, $script:Override, $script:Hold = $saved.Path, $saved.Root, $saved.Override, $saved.Hold
-        # 只删本进程刚建的那个临时目录：解析后在系统临时目录之下、名字是上面起的
-        $full = [IO.Path]::GetFullPath($tmp)
-        if ($made -and $full.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase) -and
-            (Split-Path -Leaf $full) -like "rinne-latch-selftest-$PID-*") {
-            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        $script:Own, $script:Tainted = $saved.Own, $saved.Tainted
+        $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 10
+        & $check '锁存自测的临时目录删掉了' $false ($left -or ($tmp -and (Test-Path -LiteralPath $tmp)))
     }
 }
 
 function Test-Throws { param([scriptblock]$Script) try { & $Script | Out-Null; $false } catch { $true } }
 
-Export-ModuleMember -Function Set-RinneLatchOverride, Set-RinneLatchHold, Get-RinneLatchPath, Assert-RinneNoLatch, Read-RinneLatchText,
-    New-RinneLatch, Test-RinneLatchIntact, Close-RinneLatch, Clear-RinneLatch, Set-RinneLatchTampered, Test-PremergeLatch
+Export-ModuleMember -Function Set-RinneLatchOverride, Set-RinneLatchHold, Reset-RinneLatchProcess, Get-RinneLatchPath, Assert-RinneNoLatch,
+    Get-RinneLatchRefusal, Assert-RinneGitAllowed, Read-RinneLatchText, New-RinneLatch, Test-RinneLatchIntact, Close-RinneLatch, Clear-RinneLatch,
+    Set-RinneLatchTampered, Test-PremergeLatch

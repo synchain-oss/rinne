@@ -10,7 +10,8 @@
 #   rinne.waivers（用户记录 JSON，没配置就是没有记录；pr-merge 真跑只认主 clone 的 git config，RINNE_WAIVERS 只给自测用）、
 #   RINNE_GITLEAKS / rinne.gitleaks；个人针由 Node 判据自己读（RINNE_PRIVACY_LOCAL / rinne.privacyLocal）。
 # - 判据不在这里重写：隐私、提交消息、尾注与处置汇总都经 lib/maint.mjs 调用仓内已有的 Node 判据。
-# - gh、git、node 都经 Invoke-RinneExternal 一处调用；-SelfTest 用 Set-RinneFake 换成读 fixture 的假实现。
+# - gh、git、node 都经 Invoke-RinneExternal 一处调用，每一条之前都再查一次合并后构建的锁存（Assert-RinneGitAllowed，见
+#   scripts/lib/PremergeLatch.psm1）；-SelfTest 用 Set-RinneFake 换成读 fixture 的假实现，查锁存在假实现之前。
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -63,9 +64,12 @@ function Get-RinneRoot {
   运行 gh / git / node，返回 @{ Code; Out; Err }。自测时 $script:Fake 先接手（第三个参数带上 Cwd 与 TimeoutSeconds）：
   返回 $null 表示放行给真实命令（Node 判据在自测里照常真跑）。非零退出码默认抛错，-AllowFail 时原样返回。
   -TimeoutSeconds 大于 0 时到点结束整棵进程树，返回 Code = -1、TimedOut = $true。
+  每一条之前都查锁存：已经在途的调用撞上之后才写下的标记、本进程自己的标记被动过，就在这里抛错（以「已锁存」开头），
+  这一条与之后的都不跑。
 #>
 function Invoke-RinneExternal {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$Cwd, [switch]$AllowFail, [int]$TimeoutSeconds = 0)
+    Assert-RinneGitAllowed -RepoRoot $script:RepoRoot
     $r = $null
     if ($script:Fake) { $r = & $script:Fake $Exe $Arguments ([pscustomobject]@{ Cwd = $Cwd; TimeoutSeconds = $TimeoutSeconds }) }
     if ($null -eq $r -and $TimeoutSeconds -gt 0) { $r = Invoke-RinneTimed -Exe $Exe -Arguments $Arguments -Cwd $Cwd -TimeoutSeconds $TimeoutSeconds }
@@ -688,7 +692,7 @@ function Get-RinneRequiredChecks {
   锁由本地 gates 的 scripts/lib/Locks.psm1 提供（Local\ 命名互斥体，在 finally 里释放；超时抛 TimeoutException）：
   - git 锁：所有 fetch / merge / worktree 操作包在 Invoke-WithGitLock 里；
   - merge 锁：pr-merge 的 -Merge 与 -After 整段持有 Invoke-WithRinneLock -Name merge，同一时间只合一个 PR；
-  - 构建槽：合并后构建（建树、清理、合并、构建、abort）整段持有一把 build-slot-1 / build-slot-2，与 gates 的编译共用。
+  - 构建槽：合并后构建（建树、清理、合并、构建、abort）整段持有 build-slot-1（同一时间只跑一个合并后构建），与 gates 的编译共用。
   顺序固定为 merge → 构建槽 → git；gates 持构建槽时不取 git 锁，所以不会互等。块里的 git 失败由 Invoke-RinneGit 自己按退出码抛错。
 #>
 function Import-RinneLocks {
@@ -761,6 +765,8 @@ function Get-RinneTierOrder {
 <# 仓库的 HEAD 与工作区是否干净（改动、未跟踪的文件，以及被忽略却会被构建读到的文件都算不干净）：{ Sha; Dirty; Ignored }。 #>
 function Get-RinneCloneState {
     param([string]$Root = $script:RepoRoot)
+    # Tiers.psm1 直接调 git，不经 Invoke-RinneExternal：先过同一道锁存检查
+    Assert-RinneGitAllowed -RepoRoot $script:RepoRoot
     if ($script:CloneStateImpl) { return & $script:CloneStateImpl $Root }
     Import-RinneTiers
     Get-RinneTreeState -Root $Root
@@ -863,7 +869,8 @@ function Copy-RinneObject {
 <#
   假的外部命令：routes 是有序表，键是对整条命令行（「exe 参数…」）的正则，值是 scriptblock，参数为 argv 与
   opts（Cwd、TimeoutSeconds），返回对象（转成 JSON）、字符串或 @{ Code; Out; Err }。没有命中的 node 命令与读本机
-  git config 的命令放行给真实命令（都不联网）；其余没有命中的一律失败，自测里能看出漏录了哪条。log 记录每条命令。
+  git config 的命令（rinne.* 设置、按文件解析配置）放行给真实命令（都不联网）；其余没有命中的一律失败，自测里能看出漏录了
+  哪条。log 记录每条命令。
 #>
 function New-RinneFake {
     param([Parameter(Mandatory)][System.Collections.Specialized.OrderedDictionary]$Routes, [System.Collections.Generic.List[string]]$Log)
@@ -880,7 +887,7 @@ function New-RinneFake {
                 return @{ Code = 0; Out = $out; Err = '' }
             }
         }
-        if ($exe -match '(^|[\\/])node(\.exe)?$' -or $line -match '^git -C \S+ config --get rinne\.') { return $null }
+        if ($exe -match '(^|[\\/])node(\.exe)?$' -or $line -match '^git (-C \S+ config --get rinne\.|config --file )') { return $null }
         return @{ Code = 1; Out = ''; Err = "fixture 里没有：$line" }
     }.GetNewClosure()
 }

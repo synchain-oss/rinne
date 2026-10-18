@@ -37,13 +37,14 @@
 # 记录文件、构建之后还要用的 node 与卡片清单，任一项变了就判红；构建之后再断言主 clone 的工作树干净、HEAD 没变。squash
 # 消息的生成与公开文本检查（要跑 node）放在构建之前，构建之后只剩核对与合并请求。构建之前写「进行中」锁存标记，核对
 # 全部通过才删；判据文件变了就改写成「已篡改」（见 scripts/lib/PremergeLatch.psm1）：标记在时，包装脚本与 gates 在跑任何 git
-# 之前就拒绝，直到维护者核对后手动删掉。指纹与锁存都是尽力而为，不是隔离：指纹只防构建期间直接改这些文件，脱离进程树的
+# 之前就拒绝，直到维护者核对后手动删掉；维护者脚本在每一条外部命令之前还会再查一次，在途的调用撞上之后才写下的标记、或者本
+# 进程自己的标记被动过，就停在下一条之前，finally 里的 abort 也不跑。指纹与锁存都是尽力而为，不是隔离：指纹只防构建期间直接改这些文件，脱离进程树的
 # 后台进程可以等核对之后再改；锁存防的是「构建期间被篡改之后，后续调用在不知情下继续跑 git」，同一用户身份下的后台进程在
 # pr-merge 退出之后能直接删掉标记，这一点挡不住。彻底的做法是独立 clone，或者换一个账户、容器来跑构建。
 #
 # 合并后构建（Standard 及以上）跑的是 PR 树里的脚本，所以是最后一道：其他判据全部通过、且没碰基础设施时才跑，
 # 子进程的环境里拿掉凭据与个人针。-Check 在那之前不会执行 PR 里的任何代码。每个 PR 用自己的 <根>/wt/tip-<n>，
-# 用前 reset 并 git clean；建树、合并、构建到 abort 整段持一把构建槽（同一个 PR 固定落在同一把上，两次核对彼此互斥），
+# 用前 reset 并 git clean；建树、合并、构建到 abort 整段持 build-slot-1（合并后构建同一时间只跑一个，见 Get-PremergeSlot），
 # 构建脚本经 RINNE_BUILD_SLOT_HELD（本进程的 pid）知道槽已经持着、不再自己取；构建有超时。
 
 [CmdletBinding()]
@@ -395,10 +396,12 @@ function Get-MergeVerdict {
 # ---- 合并后构建（最后一道，跑的是 PR 里的代码） ---------------------------------------------
 
 <#
-  同一个 PR 固定用同一把构建槽：两次核对同一个 PR（-Check 撞上 -Merge）在槽上互斥，不会同时动 wt/tip-<n>；
-  不同 PR 各用自己的目录，槽只限制同时编译的个数（与 gates 共用，同时 ≤ 2）。
+  合并后构建一律用同一把构建槽 build-slot-1，同一时间只跑一个。锁存标记是整个工作区的：构建期间别的调用在下一条外部命令处
+  就被拒（不等），奇偶不同的两个 PR 各持一把槽同时构建，后一个必然撞上前一个的标记失败，所以排成一队。在对方写下标记之前
+  已经走到取槽这一步的那一次，在槽上等对方整段（建树到清除或改写标记）结束；拿到槽之后的第一条 git 照样先查标记，对方已锁存
+  就一条都不跑。同一个 PR 的 -Check 撞上 -Merge 也因此互斥，不会同时动 wt/tip-<n>。gates 的编译仍可用另一把槽。
 #>
-function Get-PremergeSlot { param([Parameter(Mandatory)][int]$Pr) "build-slot-$(1 + $Pr % 2)" }
+function Get-PremergeSlot { 'build-slot-1' }
 
 <#
   主 clone 的判据文件（合并后构建前后各取一次指纹）：
@@ -487,9 +490,10 @@ function Get-CloneFingerprint {
     $cfg = {
         param($p)
         if (-not (& $there $p)) { return '（不存在）' }
-        $out = @(& git config --file $p --list -z 2>$null) -join "`n"
-        if ($LASTEXITCODE -ne 0) { return "（git 解析不了）$(& $sha $p)" }
-        $kept = @($out -split "`0" | Where-Object { $_ -and $_ -notmatch '^branch\.' }) -join "`0"
+        # 经 Invoke-RinneExternal：解析之前同样先查锁存
+        $r = Invoke-RinneExternal git @('config', '--file', $p, '--list', '-z') -AllowFail
+        if ($r.Code -ne 0) { return "（git 解析不了）$(& $sha $p)" }
+        $kept = @($r.Out -split "`0" | Where-Object { $_ -and $_ -notmatch '^branch\.' }) -join "`0"
         [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($kept)))
     }
     $h = [ordered]@{}
@@ -613,86 +617,101 @@ function Test-CloneIntegrity {
 
 <#
   在 <根>/wt/tip-<n> 把 PR 合到当前 feature/v1 上做一次构建，构建脚本取自合并后的树，环境里没有凭据与个人针。
-  建树、清理、合并、构建到 abort 整段持构建槽；用前 reset --hard 并 git clean -ffdx，上一次留下的未跟踪文件与构建产物
-  都不带进这一次；构建超时就结束整棵进程树、判红。构建之前写「进行中」锁存标记（写不进去就不构建），之后的核对（指纹、
-  标记原样还在、主 clone 干净且 HEAD 没动）全部通过才删；有一项不过就改写成「已篡改」。构建跑过、指纹却没核对过（中途抛错）
-  或者核对出判据文件变了，之后不再跑 git，也不 abort。
+  建树、清理、合并、构建到 abort 整段持构建槽（见 Get-PremergeSlot）；用前 reset --hard 并 git clean -ffdx，上一次留下的未跟踪
+  文件与构建产物都不带进这一次；构建超时就结束整棵进程树、判红。构建之前写「进行中」锁存标记（写不进去就不构建），之后的核对
+  （标记原样还在、指纹、主 clone 干净且 HEAD 没动）全部通过才删；有一项不过、或者核对途中抛错，就改写成「已篡改」。
+  每一条 git 之前都经 Invoke-RinneExternal 再查一次锁存：本进程的标记被动过、改写成已篡改、没走完核对，或者途中撞上别的
+  进程写下的标记，之后一条 git 都不跑，finally 里也不 abort；wt/tip-<n> 可能停在半路，Reason 里写明。
 #>
 function Invoke-Premerge {
     param([Parameter(Mandatory)][int]$Pr)
     $tip = Join-Path (Get-RinneRoot) "wt/tip-$Pr"
     # 结果写进这张表，不依赖锁函数的返回值
     $result = @{ Ok = $false; Merged = $false; Reason = '合并后构建没有跑完' }
-    Invoke-RinneBuildSlotLocked -Slot (Get-PremergeSlot $Pr) -TimeoutSeconds $SlotWaitSeconds -Script {
-        Invoke-RinneGitLocked {
-            if (-not (Test-Path -LiteralPath $tip)) { Invoke-RinneGit @('worktree', 'add', '--detach', $tip, 'origin/feature/v1') | Out-Null }
-            else {
-                # reset 也清掉上一次被杀时留下的合并状态
-                Invoke-RinneGit @('reset', '--hard', '--quiet') -Repo $tip | Out-Null
-                Invoke-RinneGit @('checkout', '--detach', '--force', 'origin/feature/v1') -Repo $tip | Out-Null
-                Invoke-RinneGit @('clean', '-ffdx', '--quiet') -Repo $tip | Out-Null
-            }
-            $m = Invoke-RinneGit @('merge', '--no-ff', '--no-commit', "refs/remotes/origin/pr/$Pr") -Repo $tip -AllowFail
-            if ($m.Code -ne 0) { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null }
-            $result.Merged = $m.Code -eq 0
-        } | Out-Null
-        if (-not $result.Merged) { $result.Reason = '与当前 feature/v1 合并有冲突'; return }
-        # 构建跑过之后，只有指纹核对过、判据文件没变才再跑 git：git 配置可能已经带上会执行代码的项（core.fsmonitor、过滤器之类）
-        $built, $verified, $latch = $false, $false, $null
-        try {
-            $build = Join-Path $tip 'scripts/build.ps1'
-            if (-not (Test-Path -LiteralPath $build)) { $result.Reason = '合并后的树里没有 scripts/build.ps1，做不了合并后构建'; return }
-            $targets = Get-CloneIntegrityTargets
-            $before = Get-CloneFingerprint $targets
-            $cloneBefore = Get-RinneCloneState
-            # 构建期间一直握着它（只放行读）：Windows 上构建删不掉、改不了
-            try { $latch = New-RinneLatch -Pr $Pr -Digest (Get-CloneFingerprintDigest $before) }
-            catch { $result.Reason = "锁存标记写不进去，不跑合并后构建：$($_.Exception.Message)"; return }
-            $built = $true
-            $pwsh = [Environment]::ProcessPath
-            # 构建槽由本进程持着：告诉构建脚本持槽方的 pid，它就不再自己取槽（两个奇偶不同的 PR 同时构建时不会互等到超时）
-            $savedHeld = $env:RINNE_BUILD_SLOT_HELD
-            $env:RINNE_BUILD_SLOT_HELD = "$PID"
+    try {
+        Invoke-RinneBuildSlotLocked -Slot (Get-PremergeSlot) -TimeoutSeconds $SlotWaitSeconds -Script {
+            Invoke-RinneGitLocked {
+                if (-not (Test-Path -LiteralPath $tip)) { Invoke-RinneGit @('worktree', 'add', '--detach', $tip, 'origin/feature/v1') | Out-Null }
+                else {
+                    # reset 也清掉上一次被杀时留下的合并状态
+                    Invoke-RinneGit @('reset', '--hard', '--quiet') -Repo $tip | Out-Null
+                    Invoke-RinneGit @('checkout', '--detach', '--force', 'origin/feature/v1') -Repo $tip | Out-Null
+                    Invoke-RinneGit @('clean', '-ffdx', '--quiet') -Repo $tip | Out-Null
+                }
+                $m = Invoke-RinneGit @('merge', '--no-ff', '--no-commit', "refs/remotes/origin/pr/$Pr") -Repo $tip -AllowFail
+                if ($m.Code -ne 0) { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null }
+                $result.Merged = $m.Code -eq 0
+            } | Out-Null
+            if (-not $result.Merged) { $result.Reason = '与当前 feature/v1 合并有冲突'; return }
+            $latch = $null
             try {
-                $r = Invoke-RinneWithoutSecrets {
-                    Invoke-RinneExternal $pwsh @('-NoProfile', '-NonInteractive', '-File', $build) -Cwd $tip -AllowFail -TimeoutSeconds $PremergeTimeoutSeconds
+                $build = Join-Path $tip 'scripts/build.ps1'
+                if (-not (Test-Path -LiteralPath $build)) { $result.Reason = '合并后的树里没有 scripts/build.ps1，做不了合并后构建'; return }
+                $targets = Get-CloneIntegrityTargets
+                $before = Get-CloneFingerprint $targets
+                $cloneBefore = Get-RinneCloneState
+                # 构建期间一直握着它（只放行读）：Windows 上构建删不掉、改不了。位置上已经有东西（别的进程刚写下的标记）时按锁存处理
+                try { $latch = New-RinneLatch -Pr $Pr -Digest (Get-CloneFingerprintDigest $before) }
+                catch {
+                    $busy = Get-RinneLatchRefusal
+                    $result.Reason = $busy ? "另一次合并后构建进行中或已锁存，不跑这一次：$busy" : "锁存标记写不进去，不跑合并后构建：$($_.Exception.Message)"
+                    return
+                }
+                $pwsh = [Environment]::ProcessPath
+                # 构建槽由本进程持着：告诉构建脚本持槽方的 pid，它就不再自己取槽（不然它会再占一把，一次合并后构建占满两把槽）
+                $savedHeld = $env:RINNE_BUILD_SLOT_HELD
+                $env:RINNE_BUILD_SLOT_HELD = "$PID"
+                try {
+                    $r = Invoke-RinneWithoutSecrets {
+                        Invoke-RinneExternal $pwsh @('-NoProfile', '-NonInteractive', '-File', $build) -Cwd $tip -AllowFail -TimeoutSeconds $PremergeTimeoutSeconds
+                    }
+                } finally {
+                    $env:RINNE_BUILD_SLOT_HELD = $savedHeld
+                }
+                $result.Ok = $r.Code -eq 0
+                $result.Reason = if ($r.ContainsKey('TimedOut') -and $r.TimedOut) { "合并后构建超过 $PremergeTimeoutSeconds 秒，已结束" } else { "合并后构建退出码 $($r.Code)" }
+                # 核对。标记先查（不跑 git）：不在原样就不再算指纹，指纹里的 git 配置要 git 解析。核对途中抛错（包括外部命令前的检查
+                # 发现标记被动过）同样算判据被动过
+                $changed = @()
+                try {
+                    if (-not (Test-RinneLatchIntact $latch)) { $changed += '锁存标记（构建期间被删掉、换掉或改过）' }
+                    else {
+                        $changed = @(Compare-CloneFingerprint $before (Get-CloneFingerprint $targets))
+                        if (-not $changed.Count) {
+                            # 主 clone 的跟踪文件（下一次合并要跑的维护者脚本与检查都在里面）：工作树还是干净的、HEAD 没动
+                            $cloneAfter = Get-RinneCloneState
+                            if ($cloneAfter.Dirty) { $changed += '主 clone 的工作树（构建之后不干净了）' }
+                            if ($cloneAfter.Sha -ne $cloneBefore.Sha) { $changed += '主 clone 的 HEAD' }
+                        }
+                    }
+                } catch { $changed += "核对没有走完（$($_.Exception.Message)）" }
+                if ($changed.Count) {
+                    $err = Set-RinneLatchTampered -Latch $latch -Changed $changed
+                    $note = if ($err) { "$err：$($latch.Path)；维护者先核对主 clone 再继续" } else { "已锁存 $($latch.Path)，维护者核对后手动删除" }
+                    $result.Ok = $false
+                    $result.Reason = "合并后构建改动了主 clone 的判据文件：$($changed -join '、')（$note）（$($result.Reason)）"
+                } elseif (-not (Clear-RinneLatch $latch)) {
+                    # 核对全部通过、清除之前标记又被动过：构建留下的进程还活着，核对过的判据文件之后也可能又被改过。同样改写成
+                    # 「已篡改」（被删掉时按路径写回）
+                    $err = Set-RinneLatchTampered -Latch $latch -Changed @('锁存标记（核对之后、清除之前被动过）')
+                    $note = if ($err) { "$err：$($latch.Path)；维护者先核对主 clone 再继续" } else { "已锁存 $($latch.Path)，维护者核对后手动删除" }
+                    $result.Ok = $false
+                    $result.Reason = "合并后构建改动了主 clone 的判据文件：锁存标记（核对之后、清除之前被动过）（$note）（$($result.Reason)）"
                 }
             } finally {
-                $env:RINNE_BUILD_SLOT_HELD = $savedHeld
+                # 没清除的标记放开句柄、留在原处。abort 也是一条 git，同样先查锁存：本进程的标记被动过、改写成已篡改、没走完核对，
+                # 或者位置上有别的进程的标记，就不 abort
+                if ($latch) { Close-RinneLatch $latch }
+                if (-not (Get-RinneLatchRefusal)) { Invoke-RinneGitLocked { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null } | Out-Null }
+                else { $result.Ok = $false; $result.Reason += "（之后没有再跑 git：wt/tip-$Pr 的合并没有 abort，可能是脏的）" }
             }
-            $result.Ok = $r.Code -eq 0
-            $result.Reason = if ($r.ContainsKey('TimedOut') -and $r.TimedOut) { "合并后构建超过 $PremergeTimeoutSeconds 秒，已结束" } else { "合并后构建退出码 $($r.Code)" }
-            $changed = @(Compare-CloneFingerprint $before (Get-CloneFingerprint $targets))
-            # 标记不见了、换成了目录、内容（含随机值）与写入时不一样，同样算判据被动过
-            if (-not (Test-RinneLatchIntact $latch)) { $changed += '锁存标记（构建期间被删掉、换掉或改过）' }
-            $verified = $changed.Count -eq 0
-            if ($verified) {
-                # 主 clone 的跟踪文件（下一次合并要跑的维护者脚本与检查都在里面）：工作树还是干净的、HEAD 没动
-                $cloneAfter = Get-RinneCloneState
-                if ($cloneAfter.Dirty) { $changed += '主 clone 的工作树（构建之后不干净了）' }
-                if ($cloneAfter.Sha -ne $cloneBefore.Sha) { $changed += '主 clone 的 HEAD' }
-            }
-            if ($changed.Count) {
-                $err = Set-RinneLatchTampered -Latch $latch -Changed $changed
-                if (-not $verified) { $changed += "（之后没有再跑 git：主 clone 的工作树没有核对，wt/tip-$Pr 的合并也没有 abort）" }
-                $changed += if ($err) { "（$err：$($latch.Path)；维护者先核对主 clone 再继续）" } else { "（已锁存 $($latch.Path)，维护者核对后手动删除）" }
-                $result.Ok = $false
-                $result.Reason = "合并后构建改动了主 clone 的判据文件：$($changed -join '、')（$($result.Reason)）"
-            } elseif (-not (Clear-RinneLatch $latch)) {
-                # 核对全部通过、清除之前标记又被动过：构建留下的进程还活着，核对过的判据文件之后也可能又被改过。同样改写成
-                # 「已篡改」（被删掉时按路径写回），之后不再跑 git，也不 abort
-                $verified = $false
-                $err = Set-RinneLatchTampered -Latch $latch -Changed @('锁存标记（核对之后、清除之前被动过）')
-                $note = if ($err) { "$err：$($latch.Path)；维护者先核对主 clone 再继续" } else { "已锁存 $($latch.Path)，维护者核对后手动删除" }
-                $result.Ok = $false
-                $result.Reason = "合并后构建改动了主 clone 的判据文件：锁存标记（核对之后、清除之前被动过）、（之后没有再跑 git，wt/tip-$Pr 的合并也没有 abort）、（$note）（$($result.Reason)）"
-            }
-        } finally {
-            # 放开句柄；没清掉的标记留在原处
-            if ($latch) { Close-RinneLatch $latch }
-            if (-not $built -or $verified) { Invoke-RinneGitLocked { Invoke-RinneGit @('merge', '--abort') -Repo $tip -AllowFail | Out-Null } | Out-Null }
-        }
-    } | Out-Null
+        } | Out-Null
+    } catch {
+        # 途中撞上锁存（别的进程写下的标记，或者本进程的标记被动过）：那一条 git 没有跑，之后也不再跑
+        if ($_.Exception.Message -notmatch '^已锁存') { throw }
+        $result.Ok = $false
+        $result.Reason = "$($_.Exception.Message)（之后没有再跑 git：wt/tip-$Pr 可能停在半路、是脏的）"
+    }
     $result
 }
 
@@ -819,7 +838,9 @@ function Invoke-After {
 
 function Invoke-SelfTest {
     $cases = New-RinneCases
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-merge-selftest-$PID"
+    # 临时目录只经 scripts/lib/TempDir.psm1 建与删：新建的、本进程的，删之前按真实路径核对
+    Import-Module (Join-Path $PSScriptRoot '../lib/TempDir.psm1') -ErrorAction Stop
+    $tmp = New-RinneTempDir -Prefix 'rinne-merge-selftest-'
     # 假卡号分开拼：源码里不出现完整的卡号形态（隐私规则表会拦）
     $cid = 'RN' + '-99a'
     $cardsFile = Join-Path $tmp 'card-list.json'
@@ -854,6 +875,12 @@ function Invoke-SelfTest {
         Set-RinneLatchOverride $latchFile
         # 假构建脚本要不要顺手改一样判据文件或主 clone 的状态（见下面构建的路由）
         $tamper = @{ What = ''; Refused = $null; Late = $false }
+        # 在途的调用撞上别的进程刚写下的标记：在 wt/tip-<n> 的哪一条 git（Tip）、拉 PR 信息（Facts）、构建前查主 clone 工作区
+        # （Clone）或解析用户级配置（Config）的时候写下 Text；At 是写下时日志的条数
+        $plant = @{ Text = ''; Tip = ''; Facts = $false; Clone = $false; Config = $false; At = -1 }
+        $putMarker = { Set-Content -LiteralPath $latchFile -Value $plant.Text -NoNewline; $plant.At = $log.Count }
+        # 并发用例：取构建槽时写这个文件，告诉另一个进程这一次已经在槽上等了
+        $concur = @{ Signal = $null }
         Clear-RinnePermCache
         $pull = Read-RinneFixture 'pr3-pull.json'
         $pull.state = 'open'; $pull.merged = $false; $pull.mergeable = $true; $pull.mergeable_state = 'clean'
@@ -902,7 +929,7 @@ function Invoke-SelfTest {
             'actions/runs/\d+/jobs'            = { Read-RinneFixture 'pr3-run-jobs.json' }
             'actions/runs/\d+$'                = { Read-RinneFixture 'pr3-run.json' }
             'actions/workflows/build\.yml/runs' = { @{ workflow_runs = @() } }
-            'check-runs'                       = { Read-RinneFixture 'pr3-check-runs.json' }
+            'check-runs'                       = { if ($plant.Facts) { $plant.Facts = $false; & $putMarker }; Read-RinneFixture 'pr3-check-runs.json' }
             '^git .* fetch '                   = { '' }
             '^git .* rev-parse refs/remotes/origin/pr/3' = { $head }
             '^git .* rev-parse (HEAD|origin/feature/v1)$' = { $tipSha }
@@ -912,14 +939,15 @@ function Invoke-SelfTest {
             # 合并后构建：wt/tip-<n> 的 git 操作与构建脚本；记下当时持有的锁、目录、超时与子进程能看到的凭据
             '^git .* worktree add --detach '   = {
                 param($argv)
-                $tipOps.Add([pscustomobject]@{ Line = $argv -join ' '; Held = @($held) })
+                $tipOps.Add([pscustomobject]@{ Line = $argv -join ' '; Held = @($held); At = [datetime]::UtcNow.Ticks })
                 New-Item -ItemType Directory -Force -Path (Join-Path $argv[-2] 'scripts') | Out-Null
                 Set-Content -LiteralPath (Join-Path $argv[-2] 'scripts/build.ps1') -Value 'exit 0'
                 ''
             }
             '^git -C .*tip-\d+ (reset --hard|checkout --detach|clean -ffdx|merge --no-ff|merge --abort)' = {
                 param($argv)
-                $tipOps.Add([pscustomobject]@{ Line = $argv -join ' '; Held = @($held) })
+                $tipOps.Add([pscustomobject]@{ Line = $argv -join ' '; Held = @($held); At = [datetime]::UtcNow.Ticks })
+                if ($plant.Tip -and $argv -contains $plant.Tip) { $plant.Tip = ''; & $putMarker }
                 if ($argv -contains '--no-ff') { return @{ Code = $tipMergeCode; Out = ''; Err = $(if ($tipMergeCode) { 'CONFLICT' } else { '' }) } }
                 ''
             }
@@ -964,9 +992,20 @@ function Invoke-SelfTest {
                 $buildResult
             }
             'check-commits\.mjs contract-guard' = { @{ Code = 0; Out = 'check-commits contract-guard：通过'; Err = '' } }
+            # 解析用户级配置照常真跑 git；用例要它在构建前算指纹的这一步写下别的进程的标记
+            '^git config --file .*user\.gitconfig' = {
+                param($argv)
+                if ($plant.Config) { $plant.Config = $false; & $putMarker }
+                $o = @(& git @argv 2>$null) -join "`n"
+                @{ Code = $LASTEXITCODE; Out = $o; Err = '' }
+            }
         }
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
-        Set-RinneLockImpl { param($name, $sb) $lockLog.Add($name); $held.Add($name); try { & $sb } finally { $held.RemoveAt($held.Count - 1) } }
+        Set-RinneLockImpl {
+            param($name, $sb)
+            if ($concur.Signal -and $name -like 'build-slot-*') { Set-Content -LiteralPath $concur.Signal -Value 'x' }
+            $lockLog.Add($name); $held.Add($name); try { & $sb } finally { $held.RemoveAt($held.Count - 1) }
+        }
         # 定档用仓里真的 scripts/lib/Tiers.psm1 与 tier-rules.json；只有主 clone 的工作区状态由 $tree 给出
         # Calls 数主 clone 的工作区状态被查了几次（每次都要跑 git）
         $tree = @{ Sha = $tipSha; Dirty = $false; Ignored = @(); Calls = 0 }
@@ -974,6 +1013,7 @@ function Invoke-SelfTest {
             param($root)
             $tree.Calls++
             if ($tamper.Late) { $tamper.Late = $false; Remove-Item -LiteralPath $latchFile -ErrorAction SilentlyContinue }
+            if ($plant.Clone -and @($tipOps | Where-Object { $_.Line -match 'merge --no-ff' }).Count) { $plant.Clone = $false; & $putMarker }
             [pscustomobject]@{ Sha = $tree.Sha; Dirty = $tree.Dirty; Ignored = $tree.Ignored }
         }
         # 基础设施清单与匹配规则都用仓里真的 scripts/lib/infra-paths.mjs
@@ -1368,11 +1408,12 @@ function Invoke-SelfTest {
         }
         # 带超时的外部命令（合并后构建就这样起构建脚本）：起进程那一刻本进程的输出管道不可继承，构建留下的进程拖不住
         # pr-merge 的调用方。真起一个中间层 pwsh（输出接管道），它导入本模块、用 Invoke-RinneTimed 起一个桩；桩只取
-        # scripts/build.ps1 的函数，留下一个活 12 秒的孙进程就退出。量的是读到中间层输出 EOF 的时间
-        $stub, $middle = (Join-Path $tmp 'eof-stub.ps1'), (Join-Path $tmp 'eof-middle.ps1')
+        # scripts/build.ps1 的函数，留下一个最多活 12 秒的孙进程就退出。量的是读到中间层输出 EOF 的时间；量完写停止文件，
+        # 孙进程退出、放开 eof.log，临时目录最后才删得掉
+        $stub, $middle, $eofStop = (Join-Path $tmp 'eof-stub.ps1'), (Join-Path $tmp 'eof-middle.ps1'), (Join-Path $tmp 'eof-stop')
         $pw = [Environment]::ProcessPath
         Set-Content -LiteralPath $stub -Value (". '$(Join-Path (Get-RinneRepoRoot) 'scripts/build.ps1')'; Protect-StdHandles; " +
-            "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pw', '-NoProfile', '-Command', 'Start-Sleep', '12') '$tmp\eof.log' 60)")
+            "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pw', '-NoProfile', '-EncodedCommand', '$(Get-RinneLingerCommand -Seconds 12 -StopFile $eofStop)') '$tmp\eof.log' 60)")
         Set-Content -LiteralPath $middle -Value ("Import-Module '$(Join-Path $PSScriptRoot 'lib/RinneGh.psm1')'; " +
             "`$null = Invoke-RinneTimed -Exe '$pw' -Arguments @('-NoProfile', '-NonInteractive', '-File', '$stub') -TimeoutSeconds 60; 'middle-done'")
         $psi = [Diagnostics.ProcessStartInfo]::new($pw)
@@ -1387,6 +1428,7 @@ function Invoke-SelfTest {
         if (-not $mEof) { try { $mp.Kill($true) } catch [InvalidOperationException] { $null = $_ } }
         $mDone = $mEof -and $mOut.Result -match 'middle-done'
         $mp.Dispose()
+        Set-Content -LiteralPath $eofStop -Value 'x'
         Add-RinneCase $cases ('带超时的外部命令：构建留下的进程不拖住 pr-merge 的调用方（{0:N1} 秒读到 EOF）' -f $sw4.Elapsed.TotalSeconds) $false (
             -not ($mDone -and $sw4.Elapsed.TotalSeconds -lt 8))
         Add-RinneCase $cases '刷屏的用例之后，读取器的上限还原成原来的值' $false ((& (Get-Module RinneGh) { $script:PumpMaxChars }) -ne $savedPump)
@@ -1411,7 +1453,7 @@ function Invoke-SelfTest {
         # 合并后构建：最后一道；只在其余判据都通过、没碰基础设施时跑；子进程看不到凭据与个人针；
         # 每个 PR 自己的 wt/tip-<n>，用前清理；整段持构建槽、构建本身不在 git 锁里；带超时
         $tip = Join-Path (Get-RinneRoot) 'wt/tip-3'
-        $slot = Get-PremergeSlot 3
+        $slot = Get-PremergeSlot
         $card.tier = 'Standard'; & $writeCard
         $gates.tier = 'Standard'; & $writeGates
         $secretNames = 'GH_TOKEN', 'RINNE_SELFTEST_KEY', 'RINNE_SELFTEST_SECRET', 'RINNE_SELFTEST_PASSWORD', 'RINNE_SELFTEST_PAT', 'RINNE_SELFTEST_PLAIN', 'RINNE_BUILD_SLOT_HELD',
@@ -1450,6 +1492,8 @@ function Invoke-SelfTest {
                     @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -ge 1 -and
                     @($tipOps | Where-Object { $_.Held -notcontains $slot -or $_.Held -notcontains 'git' }).Count -eq 0))
             Add-RinneCase $cases '合并后构建：先取构建槽再取 git 锁' $false (-not ($lockLog.IndexOf($slot) -ge 0 -and $lockLog.LastIndexOf('git') -gt $lockLog.IndexOf($slot)))
+            # 删掉标记、还原本进程的锁存状态（真跑时就是下一个进程）
+            $unlatch = { Remove-Item -LiteralPath $latchFile -Force -ErrorAction SilentlyContinue; Reset-RinneLatchProcess }
             # 构建脚本顺手改了主 clone 的判据文件或状态：判红，Reason 写明是哪一项（每一项单独改、改完还原）
             $snap = @{}
             foreach ($f in @($integrity.Configs.Values) + @($integrity.Info.Values) + @($integrity.Records, $integrity.Node, $integrity.Cards)) { $snap[$f] = Get-Content -Raw -LiteralPath $f }
@@ -1462,7 +1506,7 @@ function Invoke-SelfTest {
                     $tree.Dirty = $false; $tree.Sha = $tipSha
                     Get-ChildItem -LiteralPath $integrity.Hooks -Force | Where-Object Name -ne 'pre-push' | Remove-Item -Force
                     Set-Content -LiteralPath (Join-Path $integrity.Hooks 'pre-push') -Value '#!/bin/sh'
-                    Remove-Item -LiteralPath $latchFile -Force -ErrorAction SilentlyContinue
+                    & $unlatch
                 }
                 $v.Code -eq 'not-ready' -and @($v.Failures | Where-Object { $_ -match "判据文件：[^（]*$pattern" }).Count -eq 1
             }
@@ -1494,11 +1538,12 @@ function Invoke-SelfTest {
             $thrown = { param($sb) try { & $sb | Out-Null; '' } catch { $_.Exception.Message } }
             $note = & $readLatch
             Add-RinneCase $cases '合并后构建：判据文件变了，锁存标记改写成已篡改，记下 PR 号、时间与变了的项' $true ($note -and $note.state -eq 'tampered' -and $note.pr -eq 3 -and $note.at -and @($note.changed) -contains '.git/config')
+            Reset-RinneLatchProcess
             $n0 = $log.Count
             $latchCheck, $latchMerge, $latchAfter = (& $thrown { Invoke-MergeCheck 3 $cid }), (& $thrown { Invoke-MergeUnlocked -Pr 3 -CardId $cid -SummaryFile 'x' }), (& $thrown { Invoke-AfterUnlocked -Pr 3 -CardId $cid })
             Add-RinneCase $cases '锁存标记在：下一次 -Check / -Merge / -After 一条 git、gh 都不跑就拒绝' $true (
                 $latchCheck -match '^已锁存' -and $latchMerge -match '^已锁存' -and $latchAfter -match '^已锁存' -and (& $gitSince $n0) -eq 0)
-            Remove-Item -LiteralPath $latchFile
+            & $unlatch
             $vr = Invoke-MergeCheck 3 $cid
             $bn = (($builds | Select-Object -Last 1).Latch ?? '{}') | ConvertFrom-Json -AsHashtable
             Add-RinneCase $cases '维护者删掉锁存标记之后照常核对' $false ($vr.Code -ne 'ready')
@@ -1510,12 +1555,13 @@ function Invoke-SelfTest {
             $tamper.What = 'throw'
             try { $threw = Test-Throws { Invoke-MergeCheck 3 $cid } } finally { $tamper.What = '' }
             $left = & $readLatch
+            Reset-RinneLatchProcess
             $n0 = $log.Count
             $again = & $thrown { Invoke-MergeCheck 3 $cid }
             Add-RinneCase $cases '合并后构建：构建中途出错，进行中标记留着、不 abort；下一次 -Check 不跑 git、gh 就拒绝' $true (
                 $threw -and $left -and $left.state -eq 'building' -and @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -eq 0 -and
                 $again -match '^已锁存.*进行中' -and (& $gitSince $n0) -eq 0)
-            Remove-Item -LiteralPath $latchFile
+            & $unlatch
             # 握着句柄（Windows）：构建删不掉、换不成目录、改不了标记，核对照常通过、标记清掉
             if ($IsWindows) {
                 foreach ($w in 'latch-delete', 'latch-dir', 'latch-edit') {
@@ -1524,51 +1570,170 @@ function Invoke-SelfTest {
                     Add-RinneCase $cases "合并后构建：握着进行中标记，构建想 $w 也做不到" $true ($tamper.Refused -eq $true -and $vh.Code -eq 'ready' -and -not (Test-Path -LiteralPath $latchFile))
                 }
             }
-            # 握不住句柄的平台（这里关掉握持来模拟）：标记被删掉、换成目录、内容改过（随机值不同），都判红，下一次调用都拒绝
+            # 握不住句柄的平台（这里关掉握持来模拟）：标记被删掉、换成目录、内容改过（随机值不同），都判红，下一次调用（新进程）都
+            # 拒绝。标记先查：不在原样就不再算指纹、不查主 clone 的工作区（比平常少查一次），Failures 写的是「构建期间被动过」
+            $byBuild = '判据文件：锁存标记（构建期间被删掉、换掉或改过）'
             Set-RinneLatchHold $false
             try {
                 $tamper.What = 'latch-delete'
+                $s0 = $tree.Calls
                 try { $vd = Invoke-MergeCheck 3 $cid } finally { $tamper.What = '' }
+                $ds = $tree.Calls - $s0
                 $dn = & $readLatch
+                Reset-RinneLatchProcess
                 $n0 = $log.Count
                 $again = & $thrown { Invoke-MergeCheck 3 $cid }
-                Add-RinneCase $cases '合并后构建：构建删掉了进行中标记，判红，标记写回成已篡改，下一次拒绝' $true (
-                    $vd.Code -eq 'not-ready' -and @($vd.Failures | Where-Object { $_ -match '判据文件：锁存标记' }).Count -eq 1 -and $dn -and $dn.state -eq 'tampered' -and
-                    $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
-                Remove-Item -LiteralPath $latchFile
+                Add-RinneCase $cases '合并后构建：构建删掉了进行中标记，判红（不再算指纹、不查工作区），标记写回成已篡改，下一次拒绝' $true (
+                    $vd.Code -eq 'not-ready' -and @($vd.Failures | Where-Object { $_.Contains($byBuild) }).Count -eq 1 -and $ds -eq $plain - 1 -and
+                    $dn -and $dn.state -eq 'tampered' -and $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
+                & $unlatch
                 $tamper.What = 'latch-edit'
+                $s0 = $tree.Calls
                 try { $ve = Invoke-MergeCheck 3 $cid } finally { $tamper.What = '' }
+                $es = $tree.Calls - $s0
                 $en = & $readLatch
+                Reset-RinneLatchProcess
                 $n0 = $log.Count
                 $again = & $thrown { Invoke-MergeCheck 3 $cid }
-                Add-RinneCase $cases '合并后构建：构建改了进行中标记（随机值不同），判红，改写成已篡改，下一次拒绝' $true (
-                    $ve.Code -eq 'not-ready' -and @($ve.Failures | Where-Object { $_ -match '判据文件：锁存标记' }).Count -eq 1 -and $en -and $en.state -eq 'tampered' -and
-                    $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
-                Remove-Item -LiteralPath $latchFile
+                Add-RinneCase $cases '合并后构建：构建改了进行中标记（随机值不同），判红（不再算指纹、不查工作区），改写成已篡改，下一次拒绝' $true (
+                    $ve.Code -eq 'not-ready' -and @($ve.Failures | Where-Object { $_.Contains($byBuild) }).Count -eq 1 -and $es -eq $plain - 1 -and
+                    $en -and $en.state -eq 'tampered' -and $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
+                & $unlatch
                 # 换成同名目录：写不回去，但目录留在原处，下一次照样拒绝
                 $tamper.What = 'latch-dir'
+                $s0 = $tree.Calls
                 try { $vdir = Invoke-MergeCheck 3 $cid } finally { $tamper.What = '' }
+                $dirs = $tree.Calls - $s0
                 $dirLeft = Test-Path -LiteralPath $latchFile -PathType Container
+                Reset-RinneLatchProcess
                 $n0 = $log.Count
                 $again = & $thrown { Invoke-MergeCheck 3 $cid }
-                Add-RinneCase $cases '合并后构建：构建把进行中标记换成同名目录，判红；目录留着，下一次拒绝' $true (
-                    $vdir.Code -eq 'not-ready' -and @($vdir.Failures | Where-Object { $_ -match '判据文件：锁存标记' -and $_ -match '照样锁存' }).Count -eq 1 -and $dirLeft -and
-                    $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
+                Add-RinneCase $cases '合并后构建：构建把进行中标记换成同名目录，判红（不再算指纹、不查工作区）；目录留着，下一次拒绝' $true (
+                    $vdir.Code -eq 'not-ready' -and @($vdir.Failures | Where-Object { $_.Contains($byBuild) -and $_ -match '照样锁存' }).Count -eq 1 -and $dirs -eq $plain - 1 -and
+                    $dirLeft -and $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
                 # 只是测试建的空目录：不递归删
                 Remove-Item -LiteralPath $latchFile -Force
+                Reset-RinneLatchProcess
                 # 核对全部通过之后、清除之前标记被删掉（构建留下的进程还活着）：照样写回成已篡改、不 abort，下一次拒绝
                 $tipOps.Clear()
                 $tamper.What = 'latch-late'
                 try { $vl = Invoke-MergeCheck 3 $cid } finally { $tamper.What = ''; $tamper.Late = $false }
                 $ln = & $readLatch
+                Reset-RinneLatchProcess
                 $n0 = $log.Count
                 $again = & $thrown { Invoke-MergeCheck 3 $cid }
                 Add-RinneCase $cases '合并后构建：核对通过之后、清除之前标记被删掉，写回成已篡改、不 abort，下一次拒绝' $true (
                     $vl.Code -eq 'not-ready' -and @($vl.Failures | Where-Object { $_ -match '判据文件：锁存标记（核对之后' }).Count -eq 1 -and $ln -and $ln.state -eq 'tampered' -and
                     @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -eq 0 -and $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
-                Remove-Item -LiteralPath $latchFile -ErrorAction SilentlyContinue
+                & $unlatch
             } finally { Set-RinneLatchHold $true }
-            # 标记写不进去（目录不在、位置上已经有东西之类）：不跑构建
+            # 查工作区才发现不干净（指纹已经算过）：同样改写成已篡改；finally 里看到本进程已锁存，不 abort，Reason 写明
+            $tipOps.Clear()
+            $tamper.What = 'dirty'
+            try { $v5 = Invoke-MergeCheck 3 $cid } finally { $tamper.What = ''; $tree.Dirty = $false }
+            $n5 = & $readLatch
+            Add-RinneCase $cases '合并后构建：查工作区才发现不干净，改写成已篡改、不 abort，Reason 写明合并没有 abort' $true (
+                $v5.Code -eq 'not-ready' -and $n5 -and $n5.state -eq 'tampered' -and @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -eq 0 -and
+                @($v5.Failures | Where-Object { $_ -match '判据文件：主 clone 的工作树' -and $_ -match '之后没有再跑 git：wt/tip-3 的合并没有 abort' }).Count -eq 1)
+            & $unlatch
+            # 在途的调用撞上之后才写下的标记（别的进程这时写下进行中或已篡改的标记）：写下之后一条 git、gh 都不再跑，finally 里
+            # 也不 abort。Result 是返回值或抛出的消息；After 是写下之后日志里 git、gh 的条数；Calls 是查主 clone 工作区的次数
+            $other = '{"state":"building","pr":4,"at":"2026-01-01T00:00:00Z","pid":1,"fingerprint":"x","nonce":"y"}'
+            $otherTampered = '{"state":"tampered","pr":4,"at":"2026-01-01T00:00:00Z","changed":[".git/config"]}'
+            $midCall = {
+                param($mcSet)
+                $tipOps.Clear(); $plant.At = -1; $plant.Text = $mcSet.Text
+                foreach ($k in 'Tip', 'Facts', 'Clone', 'Config') { if ($mcSet.ContainsKey($k)) { $plant[$k] = $mcSet[$k] } }
+                $mcN, $mcS = $builds.Count, $tree.Calls
+                $mcR = try { Invoke-MergeCheck 3 $cid } catch { $_.Exception.Message }
+                $mcO = [pscustomobject]@{
+                    Result = $mcR; Thrown = $mcR -is [string]; Failures = @(($mcR -is [string]) ? @() : $mcR.Failures)
+                    After = ($plant.At -ge 0) ? @($log | Select-Object -Skip $plant.At | Where-Object { $_ -match '^(git|gh) ' }).Count : -1
+                    Builds = $builds.Count - $mcN; Calls = $tree.Calls - $mcS; Left = $(try { Read-RinneLatchText $latchFile } catch { $null })
+                    Aborts = @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count; Ops = @($tipOps)
+                }
+                $plant.Tip = ''; $plant.Facts = $false; $plant.Clone = $false; $plant.Config = $false
+                & $unlatch
+                $mcO
+            }
+            $f1 = & $midCall @{ Text = $other; Tip = 'reset' }
+            Add-RinneCase $cases '在途：wt/tip-3 的 reset 途中别的进程写下进行中标记，之后一条 git、gh 都不跑（不 abort、不构建），Reason 写明停在半路' $true (
+                $f1.Ops.Count -eq 1 -and $f1.Ops[0].Line -match 'reset --hard' -and $f1.After -eq 0 -and $f1.Builds -eq 0 -and $f1.Left -ceq $other -and
+                @($f1.Failures | Where-Object { $_ -match '已锁存' -and $_ -match '停在半路' }).Count -eq 1)
+            $f2 = & $midCall @{ Text = $otherTampered; Facts = $true }
+            Add-RinneCase $cases '在途：拉 PR 信息途中别的进程写下已篡改标记，之后一条 git、gh 都不跑' $true (
+                $f2.After -eq 0 -and $f2.Builds -eq 0 -and $f2.Left -ceq $otherTampered -and
+                (($f2.Thrown -and $f2.Result -match '^已锁存') -or @($f2.Failures | Where-Object { $_ -match '已锁存' }).Count -eq 1))
+            $f3 = & $midCall @{ Text = $other; Clone = $true }
+            Add-RinneCase $cases '在途：构建前查主 clone 工作区时别的进程写下标记，写自己的标记时认出是锁存（不是「写不进去」），不构建、不 abort' $true (
+                $f3.After -eq 0 -and $f3.Builds -eq 0 -and $f3.Aborts -eq 0 -and $f3.Left -ceq $other -and
+                @($f3.Failures | Where-Object { $_ -match '另一次合并后构建进行中或已锁存' -and $_ -notmatch '写不进去' }).Count -eq 1)
+            $f4 = & $midCall @{ Text = $other; Config = $true }
+            Add-RinneCase $cases '在途：构建前算指纹（git 解析用户级配置）时别的进程写下标记，之后不查工作区、不写标记、不构建、不 abort' $true (
+                $f4.Calls -eq $plain - 2 -and $f4.After -eq 0 -and $f4.Builds -eq 0 -and $f4.Aborts -eq 0 -and $f4.Left -ceq $other -and
+                @($f4.Failures | Where-Object { $_ -match '已锁存' -and $_ -match '停在半路' }).Count -eq 1)
+            # 并发：另一个进程先持着 build-slot-1；这一次在它写下标记之前已经走到取槽，就在槽上等它整段结束。它清掉了标记：照常
+            # 建树、构建，第一条 git 在它放开槽之后；它改写成已篡改：拿到槽之后的第一条 git 就拒绝，一条都不跑
+            $conc = Join-Path $tmp 'conc'
+            $null = New-Item -ItemType Directory -Path $conc
+            Set-Content -LiteralPath (Join-Path $conc 'building.json') -Value $other -NoNewline
+            Set-Content -LiteralPath (Join-Path $conc 'tampered.json') -Value $otherTampered -NoNewline
+            $child = Join-Path $tmp 'conc-child.ps1'
+            Set-Content -LiteralPath $child -Value @(
+                'param($Locks, $Scope, $Dir, $Latch, $Mode)'
+                '$ErrorActionPreference = ''Stop'''
+                'Import-Module $Locks'
+                '& (Get-Module Locks) { param($s) $script:Scope = $s } $Scope'
+                '$l = Enter-RinneLock ''build-slot-1'' -TimeoutSeconds 30 -Quiet'
+                'if (-not $l) { exit 2 }'
+                'try {'
+                '    Set-Content -LiteralPath (Join-Path $Dir ''holding'') -Value ''x'''
+                '    $d = [datetime]::UtcNow.AddSeconds(30)'
+                '    while (-not (Test-Path -LiteralPath (Join-Path $Dir ''waiting'')) -and [datetime]::UtcNow -lt $d) { Start-Sleep -Milliseconds 50 }'
+                '    Copy-Item -LiteralPath (Join-Path $Dir ''building.json'') -Destination $Latch'
+                '    Start-Sleep -Milliseconds 800'
+                '    if ($Mode -eq ''clear'') { Remove-Item -LiteralPath $Latch } else { Copy-Item -LiteralPath (Join-Path $Dir ''tampered.json'') -Destination $Latch -Force }'
+                '    Set-Content -LiteralPath (Join-Path $Dir ''released'') -Value ([datetime]::UtcNow.Ticks)'
+                '} finally { Exit-RinneLock $l }'
+            )
+            $runConc = {
+                param($mode)
+                foreach ($f in 'holding', 'waiting', 'released') { Remove-Item -LiteralPath (Join-Path $conc $f) -ErrorAction SilentlyContinue }
+                $psi = [Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
+                $scope = & (Get-Module Locks) { $script:Scope }
+                foreach ($x in '-NoProfile', '-NonInteractive', '-File', $child, (Join-Path $PSScriptRoot '../lib/Locks.psm1'), $scope, $conc, $latchFile, $mode) { $psi.ArgumentList.Add($x) }
+                $psi.UseShellExecute, $psi.CreateNoWindow, $psi.RedirectStandardOutput, $psi.RedirectStandardError = $false, $true, $true, $true
+                $p = [Diagnostics.Process]::Start($psi)
+                try {
+                    $pOut, $pErr = $p.StandardOutput.ReadToEndAsync(), $p.StandardError.ReadToEndAsync()
+                    $d = [datetime]::UtcNow.AddSeconds(30)
+                    while (-not (Test-Path -LiteralPath (Join-Path $conc 'holding')) -and -not $p.HasExited -and [datetime]::UtcNow -lt $d) { Start-Sleep -Milliseconds 50 }
+                    $tipOps.Clear(); $n = $builds.Count
+                    $concur.Signal = Join-Path $conc 'waiting'
+                    try { $r = try { Invoke-MergeCheck 3 $cid } catch { $_.Exception.Message } } finally { $concur.Signal = $null }
+                    $exited = $p.WaitForExit(30000)
+                    $rel = Join-Path $conc 'released'
+                    [pscustomobject]@{
+                        Exit = $exited ? $p.ExitCode : -1; Err = $exited ? $pErr.Result : ''; Result = $r; Builds = $builds.Count - $n; Ops = @($tipOps)
+                        Released = (Test-Path -LiteralPath $rel) ? [long](Get-Content -Raw -LiteralPath $rel).Trim() : 0
+                        Left = $(try { Read-RinneLatchText $latchFile } catch { $null })
+                    }
+                    $null = $pOut
+                } finally {
+                    if (-not $p.HasExited) { try { $p.Kill($true) } catch [InvalidOperationException] { $null = $_ } }
+                    $p.Dispose()
+                }
+            }
+            $ci = & $runConc 'clear'
+            Add-RinneCase $cases '并发：另一个进程持着 build-slot-1，这一次在槽上等它整段结束；它清掉了标记，照常构建' $false (-not (
+                    $ci.Exit -eq 0 -and $ci.Result -isnot [string] -and $ci.Result.Code -eq 'ready' -and $ci.Builds -eq 1 -and $ci.Released -gt 0 -and
+                    $ci.Ops.Count -ge 1 -and $ci.Ops[0].At -gt $ci.Released))
+            $ct = & $runConc 'tamper'
+            Add-RinneCase $cases '并发：在槽上等到的是改写成已篡改的标记，拿到槽之后一条 git 都不跑、不构建' $true (
+                $ct.Exit -eq 0 -and $ct.Result -isnot [string] -and $ct.Result.Code -eq 'not-ready' -and $ct.Ops.Count -eq 0 -and $ct.Builds -eq 0 -and
+                $ct.Left -ceq $otherTampered -and @($ct.Result.Failures | Where-Object { $_ -match '已锁存' }).Count -eq 1)
+            & $unlatch
+            # 标记写不进去（目录不在之类；位置上已经有东西的见上面）：不跑构建
             Set-RinneLatchOverride (Join-Path $tmp 'no-such-dir/latch.json')
             $n = $builds.Count
             try { $vw = Invoke-MergeCheck 3 $cid } finally { Set-RinneLatchOverride $latchFile }
@@ -1584,7 +1749,7 @@ function Invoke-SelfTest {
             $vc = Invoke-MergeCheck 3 $cid
             $ops = @($tipOps | ForEach-Object { ($_.Line -replace '^-C \S+ ', '') -replace ' (--quiet|origin/feature/v1|--no-commit refs/remotes/origin/pr/3)', '' })
             Add-RinneCase $cases '合并后构建：再用时先 reset --hard、回到 feature/v1、git clean -ffdx，再合并' $false (($ops -join ' | ') -ne 'reset --hard | checkout --detach --force | clean -ffdx | merge --no-ff | merge --abort')
-            Add-RinneCase $cases '合并后构建：同一个 PR 固定一把构建槽，相邻的 PR 用另一把' $false (-not ($slot -match '^build-slot-[12]$' -and (Get-PremergeSlot 3) -eq $slot -and (Get-PremergeSlot 4) -ne $slot))
+            Add-RinneCase $cases '合并后构建：都用同一把构建槽 build-slot-1（同一时间只跑一个，并发的见上面）' $false ($slot -ne 'build-slot-1')
             $buildResult = @{ Code = -1; Out = ''; Err = '超时'; TimedOut = $true }
             $vc = Invoke-MergeCheck 3 $cid
             $buildResult = @{ Code = 0; Out = 'built'; Err = '' }
@@ -1697,7 +1862,8 @@ function Invoke-SelfTest {
             ' symbolic-ref --quiet --short HEAD' = { $wtBranch }
             'ls-remote --exit-code'          = { "$('a' * 40)`trefs/heads/feat/review-bot" }
             ' push origin --delete refs/heads/feat/review-bot' = { '' }
-            ' worktree remove '              = { param($argv) Remove-Item -Recurse -Force -LiteralPath $argv[-1]; '' }
+            # 假的 worktree remove：挪进自测的临时目录（不递归删参数给的路径），最后随临时目录一起删
+            ' worktree remove '              = { param($argv) Move-Item -LiteralPath $argv[-1] -Destination (Join-Path $tmp "removed-$([guid]::NewGuid().ToString('N'))"); '' }
             'rev-parse --verify --quiet refs/heads/feat/review-bot' = { '' }
             ' branch -D feat/review-bot'     = { '' }
             '^git .* fetch '                 = { '' }
@@ -1746,10 +1912,13 @@ function Invoke-SelfTest {
         $script:IntegrityTargets = $null
         Set-RinneLatchOverride $null
         Set-RinneLatchHold $true
+        Reset-RinneLatchProcess
         $env:RINNE_ROOT = $saved.Root
         $env:RINNE_CARDS = $saved.Cards
         $env:RINNE_WAIVERS = $saved.Waivers
-        Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
+        # EOF 用例的孙进程量完就收到停止信号；万一它还握着 eof.log，最多再等 15 秒
+        $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 15
+        Add-RinneCase $cases '自测的临时目录删掉了（EOF 用例的孙进程量完就退出）' $false ($left -or (Test-Path -LiteralPath $tmp))
     }
     Complete-RinneSelfTest $cases 'pr-merge'
 }

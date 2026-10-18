@@ -49,16 +49,19 @@ function Invoke-CtestGate($Ctx) {
 }
 
 # 真起进程量一次：一个「中间层」pwsh 的输出接管道（像调用方读 gates 那样），它加载 gates.d 里的一个文件，执行 $Call 调起
-# 临时目录里的桩 build.ps1；桩只取真 build.ps1 的函数，留下一个活 12 秒的孙进程就退出。返回调用方读到中间层输出 EOF 的秒数。
+# 临时目录里的桩 build.ps1；桩只取真 build.ps1 的函数，留下一个最多活 12 秒的孙进程就退出。返回调用方读到中间层输出 EOF 的秒数，
+# 以及临时目录删掉了没有：量完写停止文件，孙进程退出、放开日志，临时目录才删得掉。临时目录经运行器导入的
+# scripts/lib/TempDir.psm1 建与删（新建的、本进程的，删之前按真实路径核对）。
 # 30-plugin.ps1 的 G8 也在这里量（它没有自己的自测）。中间层像运行器那样先导入 scripts/lib/StdHandles.psm1。
 function Measure-CallerEof([string]$Root, [string]$File, [string]$Call) {
     $pwsh = (Get-Process -Id $PID).Path
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-gates-eof-$PID-$(Get-Random)"
+    $tmp = New-RinneTempDir -Prefix 'rinne-gates-eof-'
+    $stop = Join-Path $tmp 'stop'
     $null = New-Item -ItemType Directory -Path (Join-Path $tmp 'scripts')
-    $p = $null
+    $p, $res, $left = $null, $null, $null
     try {
         Set-Content -LiteralPath (Join-Path $tmp 'scripts/build.ps1') -Value (". '$(Join-Path $Root 'scripts/build.ps1')'; Protect-StdHandles; " +
-            "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pwsh', '-NoProfile', '-Command', 'Start-Sleep', '12') '$tmp\l.log' 60)")
+            "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pwsh', '-NoProfile', '-EncodedCommand', '$(Get-RinneLingerCommand -Seconds 12 -StopFile $stop)') '$tmp\l.log' 60)")
         $middle = "Import-Module '$(Join-Path $Root 'scripts/lib/StdHandles.psm1')'; `$m = New-Module -ScriptBlock ([scriptblock]::Create((Get-Content -Raw -LiteralPath '$(Join-Path $Root "scripts/gates.d/$File")'))); " +
             "`$c = [pscustomobject]@{ Root = '$tmp'; BuildDir = 'b'; JucePath = '' }; `$null = & `$m { param(`$c) $Call } `$c; 'middle-done'"
         $psi = [Diagnostics.ProcessStartInfo]::new($pwsh)
@@ -71,11 +74,15 @@ function Measure-CallerEof([string]$Root, [string]$File, [string]$Call) {
         $eof = $out.Wait(30000) -and $err.Wait(30000)
         $s = $sw.Elapsed.TotalSeconds
         if (-not $eof) { try { $p.Kill($true) } catch [InvalidOperationException] { $null = $_ } }
-        [pscustomobject]@{ Seconds = $s; Done = $eof -and $out.Result -match 'middle-done' }
+        $res = [pscustomobject]@{ Seconds = $s; Done = $eof -and $out.Result -match 'middle-done'; Removed = $false }
     } finally {
         if ($p) { $p.Dispose() }
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        # 孙进程收到停止信号就退出；等的时间比它的时限短，没写停止文件就删不掉
+        Set-Content -LiteralPath $stop -Value 'x'
+        $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 5
     }
+    $res.Removed = -not $left -and -not (Test-Path -LiteralPath $tmp)
+    $res
 }
 
 # 自测（运行器传入仓根）：build.ps1 的自测，退出码到 gate 结论的映射，以及运行器的管道不被构建留下的进程拖住。
@@ -91,6 +98,7 @@ function Test-RinneGates([string]$Root) {
         [pscustomobject]@{ Label = ('反例：不改句柄继承时调用方要等孙进程退出（{0:N1} 秒）' -f $slow.Seconds); Bad = $true; Passed = $slow.Done -and $slow.Seconds -ge 10 }
         $plug = Measure-CallerEof $Root '30-plugin.ps1' "Invoke-PluginvalGate `$c '-Validate' 'x'"
         [pscustomobject]@{ Label = ('G8 调 build.ps1：pluginval 留下的进程不拖住运行器的调用方（{0:N1} 秒读到 EOF）' -f $plug.Seconds); Bad = $false; Passed = $plug.Done -and $plug.Seconds -lt 7 }
+        [pscustomobject]@{ Label = '三次测量量完都写停止文件，孙进程退出，临时目录都删掉了'; Bad = $false; Passed = $fast.Removed -and $slow.Removed -and $plug.Removed }
     }
     $map = { param($c) (ConvertTo-GateResult ([pscustomobject]@{ Code = $c; Lines = @(); Last = '失败：x' }) 'ok').Status }
     [pscustomobject]@{ Label = 'build.ps1 退出 0 记 PASS'; Bad = $false; Passed = (& $map 0) -eq 'PASS' }
