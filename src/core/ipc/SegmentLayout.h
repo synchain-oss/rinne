@@ -6,10 +6,11 @@
 //
 // 改动规则：
 //   - 任何字段的偏移、大小、类型或取值改了，都是布局改动：kIpcAbi + 1（数据段名随之换成 v2），按冻结契约流程走。
-//   - 永久冻结、连 abi 升级都不许动的只有两处：会合段头的前 16 字节（magic、abi、generation、layout_bytes），
-//     以及每个端点槽里 version 字段的绝对位置（1024·G + {0, 256} + 56）。会合段名不带 abi，新旧两个 abi 的实例
-//     打开的是同一个 rv：靠这两处，任何版本都能读出对方的 abi 与版本号，显示「版本不兼容」，而不是都停在「搜索中」。
-//     magic 字段里会出现的两个值（'RNRV' 与初始化标记 'RNIN'）也随之永久不变。
+//   - 永久冻结、连 abi 升级都不许动的只有这几处：会合段头的前 16 字节（magic、abi、generation、layout_bytes）与
+//     初始化者 pid（偏移 32），每个端点槽里 version 字段的绝对位置（1024·G + {0, 256} + 56），以及会合段大小的下限
+//     kRvMinBytes。会合段名不带 abi，新旧两个 abi 的实例打开的是同一个 rv：靠前 16 字节与 version，任何版本都能读出
+//     对方的 abi 与版本号，显示「版本不兼容」，而不是都停在「搜索中」；靠初始化者 pid，任何版本都能接管一个初始化者
+//     已经死掉的 rv。magic 字段里会出现的两个值（'RNRV' 与初始化标记 'RNIN'）也随之永久不变。
 //   - 保留区必须是 0；后续版本只能在保留区里加字段，加了也算布局改动。
 // 所有跨进程字段都是 std::atomic，并且 lock-free；结构体按段内的真实偏移排布，映射基址按页对齐，
 // 所以 8 字节字段的偏移都是 8 的倍数（字段表的对拍会检查）。
@@ -46,6 +47,9 @@ inline constexpr u32 kGroupCount = 8;
 inline constexpr u32 kMaxSegmentNameLength = 31;
 
 inline constexpr u32 kRvBytes = 16384;
+// 会合段在任何 abi 下都不小于它（永久冻结）。abi 不同的一方按字节读对方的 version（最远到 8504..8507）之前，
+// 先核自己的视图至少这么大
+inline constexpr u32 kRvMinBytes = 16384;
 inline constexpr u32 kRvHeaderBytes = 64;
 inline constexpr u32 kGroupStride = 1024;
 inline constexpr u32 kRoleSlotBytes = 256;
@@ -116,6 +120,7 @@ inline constexpr u32 kOutFading = 2;
 static_assert(kRingDataOffset == kRingHeaderBytes);
 static_assert(kRingBytes == kRingHeaderBytes + kRingFrames * kRingChannels * sizeof(float));
 static_assert(kGroupStride * (kGroupCount + 1) <= kRvBytes, "组块 G 在 1024·G，第 8 组要落在段内");
+static_assert(kRvBytes >= kRvMinBytes, "会合段永远不小于永久冻结的下限");
 static_assert(kLabelNameBytes == kLabelNameWords * 4);
 static_assert((kRingFrames & (kRingFrames - 1)) == 0, "环的帧数必须是 2 的幂，按位与取模");
 static_assert(kMaxWriteChunk <= kMaxSupportedBlock && kMaxSupportedBlock < kRingFrames);
@@ -145,17 +150,20 @@ constexpr u32 packVersion(u32 major, u32 minor, u32 patch) noexcept
 
 // ---- 会合段 rv（kRvBytes 字节） ----
 
-// 段头。前 16 字节永久冻结。probe_call_seq 只有探针构建写（每次回调 fetch_add），正式版恒为 0。
+// 段头。前 16 字节与 init_pid 永久冻结。probe_call_seq 只有探针构建写（每次回调 fetch_add），正式版恒为 0。
+// init_pid：认领了初始化的那个进程，认领之后立刻写；magic 停在初始化标记而它已经死了，别人才可以接管（见
+// ISegmentBackend::initHeader）。magic 为 0 时它恒为 0。
 struct alignas(64) RvHeader
 {
     std::atomic<u32> magic;
     std::atomic<u32> abi;
-    std::atomic<u32> generation; // 每次覆盖式重初始化 + 1
+    std::atomic<u32> generation; // 建段为 1，每次接管重初始化 + 1
     std::atomic<u32> layout_bytes;
     std::atomic<u32> groups;
     std::atomic<u32> group_stride;
     std::atomic<u64> probe_call_seq;
-    u32 reserved[8];
+    std::atomic<u32> init_pid;
+    u32 reserved[7];
 };
 
 // 端点槽：每组 Input、Output 各一个。前两条缓存行是属主的身份与配置（消息线程写），64..127 独占一条缓存行给
@@ -227,7 +235,7 @@ struct alignas(64) RingHeader
     std::atomic<u32> nonfinite_count;
     std::atomic<u32> clamp_count;
     std::atomic<u32> w_cas_fail;
-    u32 reserved0;
+    std::atomic<u32> init_pid; // 认领了初始化的进程，同 RvHeader::init_pid（数据段名带 abi，这里不永久冻结）
     std::atomic<u64> write_head; // W：段寿命内单调递增的帧位置
     std::atomic<u32> last_block_len;
     u32 reserved1;
@@ -255,7 +263,8 @@ struct alignas(64) RingSegment
     X(RvHeader, groups,            16,     4,      "u32",        false) \
     X(RvHeader, group_stride,      20,     4,      "u32",        false) \
     X(RvHeader, probe_call_seq,    24,     8,      "u64",        false) \
-    X(RvHeader, reserved,          32,     32,     "reserved",   false) \
+    X(RvHeader, init_pid,          32,     4,      "u32",        true)  \
+    X(RvHeader, reserved,          36,     28,     "reserved",   false) \
     X(RoleSlot, ctl,               0,      8,      "u64",        false) \
     X(RoleSlot, pid,               8,      4,      "u32",        false) \
     X(RoleSlot, host_ppid,         12,     4,      "u32",        false) \
@@ -304,7 +313,7 @@ struct alignas(64) RingSegment
     X(RingHeader, nonfinite_count, 48,     4,      "u32",        false) \
     X(RingHeader, clamp_count,     52,     4,      "u32",        false) \
     X(RingHeader, w_cas_fail,      56,     4,      "u32",        false) \
-    X(RingHeader, reserved0,       60,     4,      "reserved",   false) \
+    X(RingHeader, init_pid,        60,     4,      "u32",        false) \
     X(RingHeader, write_head,      64,     8,      "u64",        false) \
     X(RingHeader, last_block_len,  72,     4,      "u32",        false) \
     X(RingHeader, reserved1,       76,     4,      "reserved",   false) \
@@ -326,7 +335,7 @@ struct alignas(64) RingSegment
 // 进 golden 的常量（与上面的 inline constexpr 一一对应）
 #define RINNE_IPC_LAYOUT_CONSTANTS(X) \
     X(kIpcAbi) X(kRvMagic) X(kRingMagic) X(kInitMarker) X(kGroupCount) X(kMaxSegmentNameLength) \
-    X(kRvBytes) X(kRvHeaderBytes) X(kGroupStride) X(kRoleSlotBytes) X(kLabelNameWords) X(kLabelNameBytes) \
+    X(kRvBytes) X(kRvMinBytes) X(kRvHeaderBytes) X(kGroupStride) X(kRoleSlotBytes) X(kLabelNameWords) X(kLabelNameBytes) \
     X(kRingHeaderBytes) X(kRingFrames) X(kRingChannels) X(kRingDataOffset) X(kRingBytes) \
     X(kMaxSupportedBlock) X(kMaxWriteChunk) \
     X(kCtlPhaseMask) X(kCtlPhaseFree) X(kCtlPhaseClaiming) X(kCtlPhaseActive) X(kCtlPhaseDormant) X(kCtlProvisional) \
@@ -359,16 +368,34 @@ static_assert(sizeof(RingHeader) == kRingHeaderBytes && sizeof(RingSegment) == k
 static_assert(offsetof(RingSegment, data) == kRingDataOffset);
 static_assert(sizeof(RoleSlot::name_words) == kLabelNameBytes);
 
-// 组 G（1..8）的组块与端点槽在 rv 里的字节偏移；端点槽 version 的绝对位置由它决定，永久冻结
+// 永久冻结面的绝对位置，用字面量钉住（上面的字段表断言随表一起改就会跟着挪，这里不会）
+static_assert(offsetof(RvSegment, header) == 0, "会合段头在段首：前 16 字节与 init_pid 的绝对位置依赖它");
+static_assert(offsetof(RvHeader, magic) == 0 && offsetof(RvHeader, abi) == 4 && offsetof(RvHeader, generation) == 8 &&
+                  offsetof(RvHeader, layout_bytes) == 12,
+              "会合段头的前 16 字节永久冻结");
+static_assert(offsetof(RvHeader, init_pid) == 32, "初始化者 pid 的位置永久冻结");
+static_assert(offsetof(GroupBlock, input) == 0 && offsetof(GroupBlock, output) == kRoleSlotBytes,
+              "端点槽 version 的绝对位置依赖组块里两个槽的位置");
+static_assert(offsetof(RoleSlot, version) == 56, "端点槽 version 的槽内位置永久冻结");
+
+// 组 G（1..8）的组块与端点槽在 rv 里的字节偏移，按结构体的真实偏移算；端点槽 version 的绝对位置由它决定，永久冻结
 constexpr u32 groupBlockOffset(u32 group) noexcept
 {
-    return kGroupStride * group;
+    return static_cast<u32>(offsetof(RvSegment, groups) + sizeof(GroupBlock) * (group - 1));
 }
 constexpr u32 roleSlotOffset(u32 group, bool output) noexcept
 {
-    return groupBlockOffset(group) + (output ? kRoleSlotBytes : 0u);
+    return groupBlockOffset(group) +
+           static_cast<u32>(output ? offsetof(GroupBlock, output) : offsetof(GroupBlock, input));
 }
-static_assert(roleSlotOffset(1, false) + offsetof(RoleSlot, version) == 1080);
-static_assert(roleSlotOffset(8, true) + offsetof(RoleSlot, version) == 8504);
+// 按字节读任意 abi 的会合段里那个端点槽的 version：视图先要不小于 kRvMinBytes
+constexpr u32 slotVersionOffset(u32 group, bool output) noexcept
+{
+    return roleSlotOffset(group, output) + static_cast<u32>(offsetof(RoleSlot, version));
+}
+static_assert(groupBlockOffset(1) == 1024 && groupBlockOffset(8) == 8192);
+static_assert(slotVersionOffset(1, false) == 1080);
+static_assert(slotVersionOffset(8, true) == 8504);
+static_assert(slotVersionOffset(kGroupCount, true) + sizeof(u32) <= kRvMinBytes, "最远的 version 落在冻结下限之内");
 
 } // namespace rinne::ipc

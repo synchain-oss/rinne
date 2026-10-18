@@ -268,10 +268,10 @@ SegmentBackendPosix::SegmentBackendPosix(LockDirForTesting lockDir)
 
 SegmentBackendPosix::~SegmentBackendPosix()
 {
-    // 先让回收表忘掉自己：还在等宽限期的视图到时只差 munmap（见 orphanUnmapper），锁的那一半下面补做
+    // 先让映射表忘掉自己：句柄还活着的、在回收表里等宽限期的视图，到时只差 munmap（见 orphanUnmapper）
     forgetRetired();
-    // 视图没经 unmap 就被丢掉：映射留到进程退出，锁这一半在这里补做。全局锁挂住时，第一个映射等满 kLeaveLockWait
-    // 之后断路打开，其余映射各只试一次
+    // 还没 unmap 的视图：锁的那一半在这里补做，私有记录随之释放（收尾函数不碰它）。全局锁挂住时，第一个映射等满
+    // kLeaveLockWait 之后断路打开，其余映射各只试一次
     for (;;)
     {
         Mapping* m = nullptr;

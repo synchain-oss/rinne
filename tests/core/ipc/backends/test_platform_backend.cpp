@@ -2,18 +2,27 @@
 //
 // 本机的真后端（Windows 上是 Win32，其余平台是 POSIX；Linux 上它只编进单测）：两个后端实例按同一个名字建或开，
 // 看到的是同一块内存；同名段已存在时请求大小被忽略、回读真实大小；最后一个映射离开后段消失；坏名字与超长名字在
-// 碰操作系统之前就被拒。POSIX 另验锁文件的生命周期：残段清理、后端析构时补做离开、锁目录写不进去时归为被拒。
+// 碰操作系统之前就被拒；初始化者死在认领之后时，按契约退避重试的几个持有者在有限时间内恢复。
+// POSIX 另验锁文件的生命周期：残段清理、后端析构时补做离开、锁目录写不进去时归为被拒。
 // 段名一律用随机的测试作用域，与维护者 DAW 里的正式版、并行跑的其他测试互不相见。
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "DiagCapture.h"
 #include "ipc/ISegmentBackend.h"
 #include "ipc/Naming.h"
+#include "ipc/ProcessInfo.h"
 
 #if defined(_WIN32)
 #include "ipc/SegmentBackendWin32.h"
@@ -115,7 +124,7 @@ TEST_CASE("the full header protocol works across two backend instances", "[ipc][
     const SegmentHeaderSpec spec{kRvMagic, kIpcAbi, kRvBytes, kRvHeaderBytes};
     const auto init = [&](ISegmentBackend& backend, SegmentView& view, const SegmentHeaderSpec& s) {
         auto* rv = static_cast<RvSegment*>(view.base);
-        return backend.initHeader(view, &rv->header.magic, &rv->header.abi, &rv->header.generation, s,
+        return backend.initHeader(view, headerFields(rv->header), s,
                                   [&] { rv->header.layout_bytes.store(kRvBytes, std::memory_order_relaxed); });
     };
 
@@ -133,6 +142,177 @@ TEST_CASE("the full header protocol works across two backend instances", "[ipc][
     b->unmap(vc);
     b->unmap(vb);
     a->unmap(va);
+}
+
+namespace
+{
+
+// 一个按契约重试的持有者的结果：建或开 → 段头初始化；kBusy 就立刻解映射、按 RetryBackoff 退避后再试。
+// 拿到 kOk 就一直映射着（它在用这个段），直到所有持有者都拿到结果
+struct HolderOutcome
+{
+    InitResult result = InitResult::kBusy;
+    int attempts = 0;
+    int attemptsWhileStuck = 0; // 卡住的映射放手之前开始的尝试
+    bool succeededWhileStuck = false;
+    bool created = false; // 成功的那一次是不是它新建了段
+    std::uint32_t generation = 0;
+    std::chrono::steady_clock::duration doneAt{};
+    std::chrono::steady_clock::duration longestAttempt{};
+};
+
+std::vector<HolderOutcome> runRetryingHolders(const BackendFixture& fixture, const std::string& name, int holders,
+                                              const std::atomic<bool>& stuckGone,
+                                              const std::chrono::steady_clock::time_point start,
+                                              const std::function<void()>& whileRunning)
+{
+    const SegmentHeaderSpec spec{kRvMagic, kIpcAbi, kRvBytes, kRvHeaderBytes};
+    std::vector<HolderOutcome> outcomes(static_cast<std::size_t>(holders));
+    std::atomic<int> finished{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < holders; ++i)
+    {
+        threads.emplace_back([&, i] {
+            HolderOutcome& out = outcomes[static_cast<std::size_t>(i)];
+            auto backend = fixture.make();
+            RetryBackoff backoff(0x5eed0000u + static_cast<std::uint64_t>(i));
+            SegmentView kept;
+            const auto deadline = start + std::chrono::seconds(20);
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                if (!stuckGone.load())
+                {
+                    ++out.attemptsWhileStuck;
+                }
+                const auto t0 = std::chrono::steady_clock::now();
+                SegmentView view;
+                InitResult r = backend->createOrOpen(name, kRvBytes, view);
+                if (r == InitResult::kOk)
+                {
+                    auto* rv = static_cast<RvSegment*>(view.base);
+                    r = backend->initHeader(view, headerFields(rv->header), spec, [rv] {
+                        rv->header.layout_bytes.store(kRvBytes, std::memory_order_relaxed);
+                    });
+                }
+                out.longestAttempt = std::max(out.longestAttempt, std::chrono::steady_clock::now() - t0);
+                ++out.attempts;
+                out.result = r;
+                if (r == InitResult::kOk)
+                {
+                    // 标志在卡住的映射放手之前就置上：此刻仍为假，说明整次尝试期间它都还映射着
+                    out.succeededWhileStuck = !stuckGone.load();
+                    out.created = view.created;
+                    out.generation = static_cast<RvSegment*>(view.base)->header.generation.load();
+                    out.doneAt = std::chrono::steady_clock::now() - start;
+                    kept = std::move(view);
+                    break;
+                }
+                if (view.base != nullptr)
+                {
+                    backend->unmap(view); // 契约：先解映射，绝不在原映射上重试
+                }
+                if (r != InitResult::kBusy && r != InitResult::kFailed)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(backoff.nextDelayMs()));
+            }
+            finished.fetch_add(1);
+            while (finished.load() < holders)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (kept.base != nullptr)
+            {
+                backend->unmap(kept);
+            }
+        });
+    }
+    whileRunning();
+    for (auto& t : threads)
+    {
+        t.join();
+    }
+    return outcomes;
+}
+
+// 一定已经不存在的 pid：POSIX 上超出 pid_t 的正数范围，Windows 上没有这么大的进程号
+constexpr std::uint32_t kDeadPid = 0xfffffff0u;
+
+} // namespace
+
+TEST_CASE("retrying holders recover once a holder stuck in initialisation lets go",
+          "[ipc][backend][platform][recovery]")
+{
+    // 初始化者认领之后就死了，它记下的 pid 又接管不了（这里写成本进程：活着；被复用的 pid 也是这样）。
+    // 三个持有者按契约重试：看到 kBusy 立刻解映射、带抖动退避。卡住的映射（死者的句柄）放手之后，各持有者放手的空档
+    // 总会重叠，段消失，下一次尝试由内核新建：恰好一个持有者新建并初始化，其余附着到同一个段
+    BackendFixture fixture;
+    const std::string name = segName(SegmentId::rendezvous());
+    auto stuckBackend = fixture.make();
+    SegmentView stuck;
+    REQUIRE(stuckBackend->createOrOpen(name, kRvBytes, stuck) == InitResult::kOk);
+    auto* stuckRv = static_cast<RvSegment*>(stuck.base);
+    stuckRv->header.magic.store(kInitMarker);
+    stuckRv->header.init_pid.store(currentProcessId());
+
+    constexpr int kHolders = 3;
+    std::atomic<bool> stuckGone{false};
+    std::chrono::steady_clock::duration goneAt{};
+    const auto start = std::chrono::steady_clock::now();
+    const auto outcomes = runRetryingHolders(fixture, name, kHolders, stuckGone, start, [&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400)); // 卡住期间各持有者都只拿到 kBusy
+        goneAt = std::chrono::steady_clock::now() - start;
+        stuckGone.store(true);
+        stuckBackend->unmap(stuck); // 死者的句柄由内核关掉
+    });
+
+    int creators = 0;
+    std::chrono::steady_clock::duration lastDone{};
+    for (const auto& o : outcomes)
+    {
+        CHECK(o.result == InitResult::kOk);
+        CHECK_FALSE(o.succeededWhileStuck);
+        CHECK(o.attemptsWhileStuck >= 1);
+        CHECK(o.generation == 1u); // 内核新建的段，初始化一次
+        // 每次尝试都立刻返回，不在映射着段的情况下阻塞
+        CHECK(o.longestAttempt < std::chrono::milliseconds(200));
+        creators += o.created ? 1 : 0;
+        lastDone = std::max(lastDone, o.doneAt);
+    }
+    CHECK(creators == 1);
+    const auto recoveryMs = std::chrono::duration_cast<std::chrono::milliseconds>(lastDone - goneAt).count();
+    INFO("recovered " << recoveryMs << " ms after the stuck holder let go");
+    CHECK(recoveryMs < 5000);
+}
+
+TEST_CASE("retrying holders take over a segment whose initialiser died, without waiting for anyone to let go",
+          "[ipc][backend][platform][recovery]")
+{
+    // 初始化者记下的 pid 已经死了：不必等谁放手，恰好一个持有者用 CAS 接管、重初始化，其余附着到它发布的段
+    BackendFixture fixture;
+    REQUIRE_FALSE(isProcessAlive(kDeadPid));
+    const std::string name = segName(SegmentId::rendezvous());
+    auto stuckBackend = fixture.make();
+    SegmentView stuck;
+    REQUIRE(stuckBackend->createOrOpen(name, kRvBytes, stuck) == InitResult::kOk);
+    auto* stuckRv = static_cast<RvSegment*>(stuck.base);
+    stuckRv->header.magic.store(kInitMarker);
+    stuckRv->header.init_pid.store(kDeadPid);
+    stuckRv->groups[0].input.pid.store(4242); // 死者写了一半的东西
+
+    const std::atomic<bool> stuckGone{false};
+    const auto outcomes = runRetryingHolders(fixture, name, 3, stuckGone, std::chrono::steady_clock::now(), [] {});
+    for (const auto& o : outcomes)
+    {
+        CHECK(o.result == InitResult::kOk);
+        CHECK(o.generation == 1u); // 恰好一次接管：0 + 1
+        CHECK(o.doneAt < std::chrono::seconds(5));
+    }
+    CHECK(stuckRv->header.magic.load() == kRvMagic);
+    CHECK(stuckRv->header.init_pid.load() == currentProcessId());
+    CHECK(stuckRv->groups[0].input.pid.load() == 0u);
+    stuckBackend->unmap(stuck);
 }
 
 TEST_CASE("missing segments fail quietly, bad names fail loudly", "[ipc][backend][platform]")

@@ -5,7 +5,9 @@ status: draft
 ## Summary (EN)
 
 - **What**: the shared-memory contract between Rinne Input and Rinne Output: segment names, the rendezvous segment (`rv`, 16 384 bytes, endpoint slots and labels for groups A–H), one data segment per group (`g1`…`g8`, 540 672 bytes, a 65 536-frame stereo transfer ring with a monotonic write head and `write_intent`), the backends (Win32, POSIX, in-process) and how failures surface.
-- **Frozen forever**: the rendezvous name never carries the abi; the first 16 bytes of the rendezvous header and the absolute position of every endpoint slot's `version` field never move, so builds with different abis still see each other and report "incompatible" instead of searching forever.
+- **Frozen forever**: the rendezvous name never carries the abi; the rendezvous header sits at offset 0, its first 16 bytes and its `init_pid` word (offset 32) never move, the absolute position of every endpoint slot's `version` field never moves, and the rendezvous segment is never smaller than 16 384 bytes. Builds with different abis still see each other and report "incompatible" instead of searching forever, and any build can take over a rendezvous whose initialiser died.
+- **Initialisation**: never blocks. Whoever wins a CAS on `magic` (0 → `'RNIN'`) initialises and records its pid; a stuck `'RNIN'` is taken over by CAS on `init_pid` only when that pid is dead. Everyone else gets `kBusy`, unmaps at once and retries after a jittered exponential backoff (25–250 ms), so the holders' gaps overlap and a segment that cannot be taken over still disappears.
+- **Lifetime**: backends and handles may be destroyed in either order; handle control blocks are kept until process exit, so handles are created on load and regroup only, never per tick.
 - **Truth**: `src/core/ipc/SegmentLayout.h` mirrors this document; `tests/golden/ipc-layout.json` is checked against it twice (compiled in `rinne_core_tests`, uncompiled by `contract-static-ipc`). Any layout change bumps `kIpcAbi`.
 - **Status**: draft until the probe week; the memory-order rules and the slot ownership transition table are completed together with the rendezvous code.
 
@@ -44,18 +46,19 @@ status: draft
 | 1024·G（G = 1…8） | 组 G 的 `GroupBlock`（1024 字节） |
 | 9216–16383 | 保留 |
 
-**RvHeader**（前 16 字节永久冻结）
+**RvHeader**（在段首；前 16 字节与 `init_pid` 永久冻结）
 
 | 偏移 | 字段 | 类型 | 说明 |
 |---|---|---|---|
 | 0 | `magic` | u32 | `'RNRV'`，初始化完成的标志，最后以 release 发布 |
 | 4 | `abi` | u32 | 1 |
-| 8 | `generation` | u32 | 建段为 1，每次覆盖式重初始化 + 1 |
+| 8 | `generation` | u32 | 每次初始化 + 1：建段后第一次为 1，接管重初始化再 + 1 |
 | 12 | `layout_bytes` | u32 | 16384 |
 | 16 | `groups` | u32 | 8 |
 | 20 | `group_stride` | u32 | 1024 |
 | 24 | `probe_call_seq` | u64 | 只有探针构建写（每次回调 fetch_add），正式版恒为 0 |
-| 32–63 | 保留 | | |
+| 32 | `init_pid` | u32 | 认领了初始化的进程，认领之后立刻写；`magic` 为 0 时恒为 0（见「段头初始化」） |
+| 36–63 | 保留 | | |
 
 **GroupBlock**：+0 Input 的端点槽，+256 Output 的端点槽，+512 `panic_seq`（u32，预留给 Output 侧急停，现在恒为 0），+516–1023 保留。
 
@@ -119,7 +122,7 @@ status: draft
 | 48 | `nonfinite_count` | u32 | |
 | 52 | `clamp_count` | u32 | |
 | 56 | `w_cas_fail` | u32 | |
-| 60 | 保留 | | |
+| 60 | `init_pid` | u32 | 认领了初始化的进程，规则同 `RvHeader.init_pid`（数据段名带 abi，这里不永久冻结） |
 | 64 | `write_head` | u64 | W：段寿命内单调递增的帧位置；64–127 独占一条缓存行 |
 | 72 | `last_block_len` | u32 | |
 | 76 | 保留 | | |
@@ -132,20 +135,19 @@ status: draft
 
 ## 冻结与 abi
 
-- **永久冻结**（连 abi 升级都不许动）：会合段名不带 abi；`RvHeader` 的 0–15 字节；每个端点槽 `version` 的绝对位置 1024·G + {0, 256} + 56，以及它依赖的组块位置与步长、`'RNRV'` 与初始化标记 `'RNIN'`。`contract-static-ipc` 把这几项写死在检查里，不随 golden 改。
-- **随 abi**：其余字段、取值与段大小。任何改动都是布局改动：`kIpcAbi + 1`（数据段名随之变成 `v2`），同一个 PR 改头文件、golden 与本文，并按冻结契约流程附变更说明。保留区必须为 0，后续版本只能在保留区里加字段。
-- abi 不同的两端：读到对方的 `abi` 不同就停在「版本不兼容」（红），绝不写对方的段；只是版本号不同时可以连，界面给琥珀提示。
+- **永久冻结**（连 abi 升级都不许动）：会合段名不带 abi；`RvHeader` 在 `RvSegment` 的偏移 0；`RvHeader` 的 0–15 字节与 `init_pid`（偏移 32）；每个端点槽 `version` 的绝对位置 1024·G + {0, 256} + 56，以及它依赖的组块位置（组 G 在 1024·G，Input 槽在 +0、Output 槽在 +256）与步长；`'RNRV'` 与初始化标记 `'RNIN'`；会合段大小的下限 `kRvMinBytes` = 16384（任何 abi 的 rv 都不小于它）。`contract-static-ipc` 把这几项写死在检查里，不随 golden 改；`SegmentLayout.h` 另用字面量的 `static_assert` 钉住。
+- **随 abi**：其余字段、取值与段大小（rv 只许不小于下限）。任何改动都是布局改动：`kIpcAbi + 1`（数据段名随之变成 `v2`），同一个 PR 改头文件、golden 与本文，并按冻结契约流程附变更说明。保留区必须为 0，后续版本只能在保留区里加字段。
+- abi 不同的两端：读到对方的 `abi` 不同就停在「版本不兼容」（红），绝不写对方的段；只是版本号不同时可以连，界面给琥珀提示。按字节读对方端点槽的 `version` 之前，先核自己的视图不小于 `kRvMinBytes`（最远的 `version` 在 8504–8507，`slotVersionOffset()` 给出位置）。
 
 ## 段头初始化
 
-两种段头的开头都是 `magic`、`abi`、`generation`。`magic` 有三种状态：0（没初始化）、初始化标记 `'RNIN'`（有人认领了初始化、正在写）、真值（初始化完成）。谁来初始化只由一次 CAS 决定：把 `magic` 从 0 换成初始化标记的那一方是唯一的初始化者，别人只等；初始化者写完段头与几何字段，最后以 release 把 `magic` 换成真值。初始化标记与 `'RNRV'` 一样永久不变：任何版本读到它都按「还没初始化完」处理。
+两种段头的开头都是 `magic`、`abi`、`generation`，另有一个 `init_pid`（会合段在偏移 32、永久冻结；数据段在偏移 60）。`magic` 有三种状态：0（没初始化）、初始化标记 `'RNIN'`（有人认领了初始化、正在写）、真值（初始化完成）。初始化标记与 `'RNRV'` 一样永久不变：任何版本读到它都按「还没初始化完」处理。整个协议不阻塞、不睡眠，谁来初始化只由 CAS 决定：
 
-1. **建段者**（操作系统报告新建）：马上认领 → 逐页写触碰全段（绕开前 16 字节）→ 锁页（尽力而为）→ 写 `abi`、`generation = 1` 与几何字段 → 发布 `magic`。
-2. **附着方**，`magic` 已发布：逐页只读触碰（只在看到发布之后，用原子读；严禁写：对端可能正在写环）→ `magic` 不是我们的就不用（诊断 `kForeign`）；`abi` 不同 → `kAbiMismatch`；段的真实大小小于本 abi 的布局 → 不用（`kBadSize`）。
-3. **附着方**，`magic` 还没发布：只读探测的一方立刻返回失败、下一拍重试；建段的一方（Input 与 Output 都是）每 50 ms 看一次、最多 10 次。仍是 0 说明创建者死在认领之前：自己认领，覆盖式重初始化（从段头之后清零、`generation + 1`、写几何字段、发布）。认领输了、或看到的是初始化标记：别人正在初始化，再等一轮。输掉的一方从不清零，所以不会抹掉胜者已经开始用的槽与环。
-4. 等满仍没发布：初始化者死在认领与发布之间的那几微秒里。返回 `kFailed`（诊断 `kBusy`），调用方**解映射**后下一拍重试；所有持有者都放手后段就消失，下一个建段者重新建。
-
-等待只发生在附着到一个没初始化完的段时（建段者被杀之后），最多约 1 s，在调用它的非实时线程上。
+1. **认领**：`magic` 为 0 时，建段者（操作系统报告新建）与建段的一方（Input 与 Output 都是）里的附着方都可以用 CAS 把它从 0 换成初始化标记。赢的一方是唯一的初始化者，立刻把自己的 pid 写进 `init_pid`，然后：建段者逐页写触碰全段（绕开前 16 字节与 `init_pid`）、锁页（尽力而为）；附着方从段头之后清零（跳过 `init_pid`）。之后写 `abi`、`generation + 1` 与几何字段，最后以 release 发布 `magic`。认领先于任何写，`magic` 为 0 的段从没被谁用过，所以附着方抢在慢的建段者前面认领也无害；输了 CAS 的一方从不清零，也不重写 `generation`。`magic` 为 0 时 `init_pid` 恒为 0。
+2. **已发布**：逐页只读触碰（只在看到发布之后，用原子读；严禁写：对端可能正在写环）→ `magic` 不是我们的就不用（诊断 `kForeign`）；`abi` 不同 → `kAbiMismatch`；段的真实大小小于本 abi 的布局 → 不用（`kBadSize`）。
+3. **初始化标记**：`init_pid` 非 0、不是本进程、并且已经死了（探活拿不准的一律按活）时，建段的一方用 CAS 把 `init_pid` 从死者换成自己来接管：赢的一方按附着方的办法重初始化（`generation` 再 + 1）、发布；输的一方附着到胜者发布的段，什么都不动。其余情形（初始化者还活着、pid 还没写下、pid 被复用、接管输了而胜者还没发布）立刻返回 `kBusy`（诊断 `kBusy`）。只读探测的一方看到没发布一律 `kBusy`，从不认领、不接管、不报诊断。
+4. **`kBusy` 的重试**：调用方立刻**解映射**（不得在原映射上重试），按 `RetryBackoff` 等一段带抖动的时间再试：第 k 次（从 0 起）在 [25, min(250, 25·2^(k+1))] ms 里均匀取值，各实例的种子不同；拿到 `kBusy` 以外的结果就从头计。初始化者死了而接管不了时，段要等所有持有者同时放手才消失（Windows 随最后一个句柄由内核回收，POSIX 由下一个建段者清掉没有锁持有者的残段），之后下一个建段者重新建。每次尝试只映射几微秒，再加上抖动，各持有者放手的空档总会重叠；单测核三个持有者在卡住的映射放手后有限时间内恢复，且恰好一个持有者新建并初始化。
+5. 几何字段的写入（`initData`）不得抛出：抛出时 `magic` 停在初始化标记、`init_pid` 是活着的本进程，只能等所有持有者放手。
 
 后端一律回读段的真实大小：同名段已存在时请求的大小被忽略，拿请求值当真实值发布几何，小视图配大几何就会写越界。读不出真实大小时打开失败，不交出大小为 0 的视图。
 
@@ -157,13 +159,14 @@ status: draft
 | macOS | POSIX | `shm_open` + `mmap`（`fstat` 回读真实大小）；每个映射持有锁文件 `<锁目录>/<名字>.lock` 的共享 flock，所有建、附着、离开都在全局 `lifecycle.lock` 的独占 flock 下做，最后一个离开者 `shm_unlink`，崩溃留下的残段由下一个建段者清理（只清本用户名下的）。全局锁的等待：附着只试一次不等（25 Hz 重试路径），建段最多 2 s（只在加载与改组时），离开最多 200 ms；等满一次之后 1 s 内都只试一次。锁目录是真实 home 下的 `Library/Application Support/Synchain/Rinne/ipc`（不看 `HOME`，不放 `TMPDIR`）；测试只能经构造参数换目录 |
 | 单测、Linux core-only | 进程内 | 名字 → 清零的 64 字节对齐缓冲，跨进程不可见，不是可发布的形态 |
 
-选择在预处理期定死（`PlatformSegmentBackend`）。段操作只在持生命周期锁的非实时线程上做；音频线程只经映射句柄的按块租约拿裸指针，做原子读写，不碰任何系统调用。释放时先停发租约、等租约归零，再等 500 ms 宽限才解映射；宽限期按跨进程单调时钟算，时钟读不出或倒退时从头算。句柄析构或被覆盖时宽限期走不完的，映射交给进程级回收表，由持生命周期锁的非实时线程定时调用的回收（会合层的 25 Hz 定时器，任何句柄的释放也顺手回收一次）走完宽限期再解映射、关平台句柄；后端先于这些映射析构时，用后端事先给的、不依赖后端实例的收尾函数解映射（Win32 关视图与句柄，POSIX 只差 munmap，锁的那一半在后端析构时已做完）。映射的控制块（约百字节）到进程退出才释放：音频线程读到裸指针之后不管被挂起多久，加计数都落在活着的内存上，随后看到释放请求就退还，所以租约握手不依赖任何时间假设。
+选择在预处理期定死（`PlatformSegmentBackend`）。段操作只在持生命周期锁的非实时线程上做；音频线程只经映射句柄的按块租约拿裸指针，做原子读写，不碰任何系统调用。释放时先停发租约、等租约归零，再等 500 ms 宽限才解映射；宽限期按跨进程单调时钟算，时钟读不出或倒退时从头算。每个句柄的控制块都登记在进程级的映射表里（句柄独占的、句柄放下后等宽限期的、已解映射的各一条链）：句柄析构或被覆盖时宽限期走不完的，映射交给回收，由持生命周期锁的非实时线程定时调用的回收（会合层的 25 Hz 定时器，任何句柄的释放也顺手回收一次）走完宽限期再解映射、关平台句柄。**后端与句柄谁先析构都可以**（例如两者是同一个对象的成员、句柄声明在前）：后端析构时，映射表把指着它的映射（句柄还活着的与等宽限期的）都改成用后端事先给的、不依赖后端实例的收尾函数解映射（Win32 关视图与句柄，POSIX 只差 munmap，锁的那一半在后端析构时已做完）；一个视图只由映射它的那个后端实例解映射。映射的控制块（约百字节）到进程退出才释放：音频线程读到裸指针之后不管被挂起多久，加计数都落在活着的内存上，随后看到释放请求就退还，所以租约握手不依赖任何时间假设。因此**句柄只在插件加载、改组时新建，不按拍新建**：按拍新建会让内存线性增长，`SegmentHandle::retiredDone()` 给出已解映射、留着的控制块数，供诊断。
 
 **失败的去向**：任何打开或初始化失败都只让回送变成 0、干声照常（安全不变量 1）。
 
 | 返回 | 界面 | 来源 |
 |---|---|---|
 | `kAbiMismatch` | `abiMismatch`（红） | 段头 abi 不同 |
+| `kBusy` | 重试中，持续失败显示 `ipcUnavailable` | 段头还没发布：别人正在初始化，或初始化者死了而接管不了；解映射后按 `RetryBackoff` 退避重试 |
 | `kFailedDenied` | `ipcUnavailable`（红），「宿主沙盒限制」 | `EPERM` / `EACCES` / `ENOSYS`、Windows 的拒绝访问；本进程内不会自己好 |
 | `kFailedBadName` | `ipcUnavailable`（红） | 段名不合法或超长 |
 | `kFailed` | 重试中，持续失败显示 `ipcUnavailable` | 段还不存在、锁等待超时之类，下一拍重试 |
@@ -186,4 +189,4 @@ status: draft
 
 - [`tests/golden/ipc-layout.json`](../../tests/golden/ipc-layout.json)：常量、结构、字段（每字段一行、键序固定）、前缀族与 108 个段名。
 - `rinne_core_tests`（`tests/core/ipc/layout/`）：编译后用同一张字段表展开 `offsetof` 逐行比 golden；段名逐条比。
-- `contract-static-ipc`（`node scripts/run-checks.mjs --only contract-static-ipc`）：不编译读头文件比 golden；检查永久冻结面、段名长度、前缀族与 CMake 一致、发布代码不读环境变量。`--mutation-check` 证明改一个偏移、注入超长前缀、发布代码读环境变量都会变红。
+- `contract-static-ipc`（`node scripts/run-checks.mjs --only contract-static-ipc`）：不编译读头文件比 golden；检查永久冻结面、段名长度、前缀族与 CMake 一致、发布代码不读环境变量、测试钩子不出声明它的文件。每条判据都有自己的名字，`--self-test` 的每个坏样例写明它要触发哪几条，并核对每条判据至少被一个坏样例点名：删掉任何一条判据都有用例变红。`--mutation-check` 证明改一个偏移、注入超长前缀、发布代码读环境变量都会变红。

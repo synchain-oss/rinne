@@ -7,22 +7,25 @@
 //
 // 线程：所有段操作只在持生命周期锁的非实时线程上做；音频线程只经 SegmentHandle::lease() 拿到映射后的裸指针，
 // 做原子读写，不碰任何系统调用。
+// 寿命：后端与句柄谁先析构都可以（后端析构时进程级的映射表把它忘掉，指着它的映射改用不依赖后端实例的收尾函数）；
+// 一个视图只由映射它的那个后端实例解映射。句柄只在插件加载、改组时新建，不按拍新建：每个句柄的控制块
+// （约百字节）到进程退出才释放。
 #pragma once
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 
 #include "ipc/IpcDiag.h"
 #include "ipc/Naming.h"
+#include "ipc/ProcessInfo.h"
 #include "ipc/SegmentLayout.h"
 #include "util/MonoClock.h"
 
@@ -34,7 +37,8 @@ enum class InitResult : std::uint8_t
 {
     kOk,
     kAbiMismatch, // magic 是我们的、abi 不同：读得出对方的版本，但绝不写
-    kFailed, // 暂时性或未归类的失败（段还不存在、别人还在初始化、锁等待超时……），解映射后下一拍重试
+    kBusy, // 段头还没发布（别人正在初始化，或初始化者死了而接管不了）：立刻解映射，按 RetryBackoff 退避后重试
+    kFailed, // 暂时性或未归类的失败（段还不存在、锁等待超时……），解映射后下一拍重试
     kFailedDenied, // 操作系统拒绝（多半是宿主沙盒），本进程内不会自己好
     kFailedBadName, // 段名不合法或超长：配置错误
 };
@@ -70,23 +74,90 @@ constexpr bool magicPublished(u32 magic) noexcept
     return magic != 0 && magic != kInitMarker;
 }
 
+// kBusy 之后的重试间隔（契约的一部分）：调用方先解映射，等 nextDelayMs() 毫秒再试；拿到 kBusy 以外的结果就 reset()。
+// 第 k 次（从 0 起）在 [25, min(250, 25·2^(k+1))] 毫秒里均匀取值：指数退避，下限 25 ms，封顶 250 ms。
+// 抖动让各持有者放手的空档错开相位：初始化者死了而 pid 接管不了时，段要等所有持有者同时放手才消失。
+// 不读时钟、不分配、不加锁；种子由调用方给（例如本进程 pid 与实例地址混合），同一个种子给出同一串间隔。
+class RetryBackoff
+{
+public:
+    static constexpr u32 kMinDelayMs = 25;
+    static constexpr u32 kMaxDelayMs = 250;
+
+    explicit RetryBackoff(u64 seed) noexcept : state_(seed) {}
+
+    u32 nextDelayMs() noexcept
+    {
+        const u32 ceiling = std::min<u32>(kMaxDelayMs, kMinDelayMs << std::min<u32>(attempt_ + 1, 4));
+        if (attempt_ < 8)
+        {
+            ++attempt_;
+        }
+        return kMinDelayMs + static_cast<u32>(next() % (ceiling - kMinDelayMs + 1));
+    }
+
+    void reset() noexcept { attempt_ = 0; }
+
+private:
+    // splitmix64
+    u64 next() noexcept
+    {
+        u64 z = (state_ += 0x9e3779b97f4a7c15ull);
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+        return z ^ (z >> 31);
+    }
+
+    u64 state_;
+    u32 attempt_ = 0;
+};
+
 namespace detail
 {
 
 constexpr std::size_t kPageSize = 4096;
+constexpr std::size_t kNoOffset = static_cast<std::size_t>(-1);
 
-// 初始化者逐页写触碰：此刻只有它在写，段里没有有效数据，页面提前提交，音频线程第一次访问时不缺页。
-// 每页写最后一个字节，绕开段头的前 16 字节：magic 此刻是初始化标记，不能被按字节清掉
-inline void writeTouchPages(void* base, std::size_t size) noexcept
+// 初始化者在发布之前绝不按字节写的地方：段头的前 16 字节（magic 此刻是初始化标记）与 init_pid（记着初始化者，
+// 清掉了别人就无从判定它死没死）
+struct ProtectedBytes
+{
+    std::size_t pidAt = kNoOffset; // init_pid 在段内的偏移；不在视图里时为 kNoOffset
+
+    bool covers(std::size_t at) const noexcept
+    {
+        return at < kSegmentPrologueBytes || (pidAt != kNoOffset && at >= pidAt && at - pidAt < sizeof(u32));
+    }
+};
+
+// 建段的初始化者逐页写触碰：此刻只有它在写，段里没有有效数据，页面提前提交，音频线程第一次访问时不缺页。
+// 每页写最后一个字节，绕开受保护的字节
+inline void writeTouchPages(void* base, std::size_t size, ProtectedBytes keep) noexcept
 {
     auto* p = static_cast<volatile unsigned char*>(base);
     for (std::size_t off = 0; off < size; off += kPageSize)
     {
         const std::size_t at = std::min(off + kPageSize, size) - 1;
-        if (at >= kSegmentPrologueBytes)
+        if (!keep.covers(at))
         {
             p[at] = 0;
         }
+    }
+}
+
+// 接管或附着认领的初始化者从 from 清零到段尾，跳过 init_pid（from 不小于 16，前 16 字节本来就不在范围里）
+inline void clearBody(void* base, std::size_t from, std::size_t size, ProtectedBytes keep) noexcept
+{
+    auto* p = static_cast<unsigned char*>(base);
+    from = std::max(from, kSegmentPrologueBytes);
+    if (keep.pidAt != kNoOffset && keep.pidAt >= from && keep.pidAt < size)
+    {
+        std::memset(p + from, 0, keep.pidAt - from);
+        from = std::min(size, keep.pidAt + sizeof(u32));
+    }
+    if (from < size)
+    {
+        std::memset(p + from, 0, size - from);
     }
 }
 
@@ -150,19 +221,39 @@ struct SegmentHeaderSpec
     u32 magic = 0;
     u32 abi = 0;
     std::size_t layoutBytes = 0; // 本 abi 的段大小；真实大小小于它就不用（abi 相同时）
-    std::size_t clearFrom = 0; // 覆盖式重初始化从这里清零到段尾；小于 16 时按 16 算，段头前 16 字节从不按字节写
+    // 接管或附着认领时从这里清零到段尾；小于 16 时按 16 算，前 16 字节与 init_pid 从不按字节写
+    std::size_t clearFrom = 0;
 };
 
-// 不经后端实例解映射一个视图：后端先于它映射出去、还在等宽限期的视图析构时，回收表走完宽限期后用它收尾。
+// 初始化协议用到的段头字段，都指向视图里的段头。initPid 为空时没有接管，初始化者死了只能等所有持有者放手
+struct SegmentHeaderFields
+{
+    std::atomic<u32>* magic = nullptr;
+    std::atomic<u32>* abi = nullptr;
+    std::atomic<u32>* generation = nullptr;
+    std::atomic<u32>* initPid = nullptr;
+};
+
+inline SegmentHeaderFields headerFields(RvHeader& h) noexcept
+{
+    return {&h.magic, &h.abi, &h.generation, &h.init_pid};
+}
+
+inline SegmentHeaderFields headerFields(RingHeader& h) noexcept
+{
+    return {&h.magic, &h.abi, &h.generation, &h.init_pid};
+}
+
+// 不经后端实例解映射一个视图：后端先于它映射出去、还没解映射的视图析构时，映射表到时用它收尾。
 // 只许用视图里的字段，不许碰后端的状态。
 using OrphanUnmap = void (*)(SegmentView& view) noexcept;
 
 class ISegmentBackend
 {
 public:
-    // 析构时让回收表忘掉自己：还在等宽限期、指着自己的映射改用 orphanUnmapper() 收尾。定义在文件末尾。
-    // 具体后端在自己的析构函数开头先调 forgetRetired()（派生部分析构之后就不能再经它解映射了），这里再兜一次。
-    // 后端析构与 SegmentHandle::reapRetired 都在持生命周期锁的非实时线程上，两者不并发。
+    // 析构时让映射表忘掉自己：指着自己、还没解映射的映射（句柄还活着的、交给回收表的）改用 orphanUnmapper() 收尾。
+    // 定义在文件末尾。具体后端在自己的析构函数开头先调 forgetRetired()（派生部分析构之后就不能再经它解映射了），
+    // 这里再兜一次。后端析构与句柄的释放、回收都在持生命周期锁的非实时线程上。
     virtual ~ISegmentBackend();
 
     // 建或开命名段。created = true 时内核已把整段清零；created = false 时要经 initHeader 判定能不能用。
@@ -187,8 +278,16 @@ public:
     // 初始化者写触碰之后锁页，尽力而为：失败只报诊断、不失败。附着方不锁。
     virtual void tryLock(const SegmentView& view) { (void)view; }
 
+    // initHeader 里的两个交错点（见 onInitStageForTesting）：看到 magic 为 0、马上认领之前；看到死掉的初始化者、
+    // 马上接管之前
+    enum class InitStage : std::uint8_t
+    {
+        kBeforeClaim,
+        kBeforeTakeover,
+    };
+
     // 只读附着方的段头校验：只读触碰，单次 acquire 读 magic 与 abi，绝不写。参数是 const 引用，类型上就写不了，
-    // 落在只读映射上也不会崩。还没初始化完（magic 为 0 或初始化标记）→ kFailed，下一拍重试。
+    // 落在只读映射上也不会崩。还没初始化完（magic 为 0 或初始化标记）→ kBusy，不报诊断。
     InitResult checkHeaderReadOnly(const SegmentView& view, const std::atomic<u32>& magic, const std::atomic<u32>& abi,
                                    const SegmentHeaderSpec& spec) const
     {
@@ -199,30 +298,32 @@ public:
         const u32 m = magic.load(std::memory_order_acquire);
         if (!magicPublished(m))
         {
-            return InitResult::kFailed;
+            return InitResult::kBusy;
         }
         detail::readTouchPages(view.base, view.size);
         return verdict(view, m, abi.load(std::memory_order_acquire), spec);
     }
 
-    // 段头初始化协议（会合段与数据段通用）。谁来初始化由一次 CAS 决定：magic 从 0 换成初始化标记 kInitMarker 的那一方
-    // 是唯一的初始化者，别人只等；初始化者写完 abi、generation 与几何字段，最后以 release 把 magic 换成真值。
-    //   建段者（created）   马上认领：写触碰全段 → 锁页 → abi、generation = 1、initData() → 发布 magic；
-    //   附着、已发布        只读触碰（只在看到发布之后）→ 比对 magic、abi 与真实大小（不是我们的 magic → kFailed；
-    //                       abi 不同 → kAbiMismatch；段比本 abi 的布局小 → kFailed）；
-    //   附着、没发布        allowOverwrite = false 时直接 kFailed（下一拍重试）；否则每 50 ms 看一次、最多 10 次。
-    //                       仍是 0：创建者死在认领之前，自己认领并覆盖式重初始化（从 clearFrom 清零、generation + 1、
-    //                       initData()、发布）；认领失败或看到的是初始化标记：别人正在初始化，再等一轮。
-    //                       等满仍没发布：初始化者死在那几微秒里，返回 kFailed（诊断 kBusy）。调用方解映射后重试：
-    //                       所有持有者都放手后段就消失，下一个建段者重新建。
-    // 认领只有一次 CAS，所以恰好一个初始化者；输掉的一方从不清零，不会抹掉胜者已经开始用的槽与环。
-    // 覆盖分支只给建段的一方（Input 与 Output 都是）；只读探测的一方一律 allowOverwrite = false。
-    // 等待会阻塞调用线程最多约 1 s，只在附着到一个没初始化完的段时发生（建段者被杀之后）；它在非实时线程上。
-    InitResult initHeader(SegmentView& view, std::atomic<u32>* magic, std::atomic<u32>* abi,
-                          std::atomic<u32>* generation, const SegmentHeaderSpec& spec,
+    // 段头初始化协议（会合段与数据段通用）。从不阻塞、从不睡眠；谁来初始化只由 CAS 决定：
+    //   magic 为 0       建段者，或者 allowOverwrite 的附着方：CAS 把 magic 从 0 换成初始化标记 kInitMarker，赢的一方
+    //                    是唯一的初始化者，立刻写下自己的 pid（init_pid），然后初始化：建段者（内核刚清零的新段）逐页
+    //                    写触碰并锁页，附着方从 clearFrom 清零到段尾；再写 abi、generation + 1、initData()，最后以
+    //                    release 发布 magic。认领先于任何写，magic 为 0 的段从没被谁用过，所以附着方抢在慢的建段者
+    //                    前面认领也无害；输了 CAS 的一方从不清零。
+    //   初始化标记        别人认领了。init_pid 非 0、不是本进程、并且已经死了：allowOverwrite 的一方用 CAS 把 init_pid
+    //                    从死者换成自己来接管，赢了就按附着方的办法重初始化（generation 再 + 1）、发布；输了、
+    //                    初始化者还活着、pid 还没写下、探活拿不准（一律按活）：kBusy（诊断 kBusy）。
+    //   已发布           只读触碰（只在看到发布之后）→ 比对 magic、abi 与真实大小（不是我们的 magic → kFailed；
+    //                    abi 不同 → kAbiMismatch；段比本 abi 的布局小 → kFailed）。
+    // kBusy：调用方立刻解映射，按 RetryBackoff 退避后重试，不得在原映射上重试。初始化者死了而接管不了时（pid 被复用、
+    // 拿不准），靠所有持有者同时放手让段消失（Windows 随最后一个句柄回收，POSIX 由下一个建段者清掉残段）：每次尝试只
+    // 映射几微秒，再加上抖动，各持有者放手的空档总会重叠。
+    // initData 不得抛出：抛出时 magic 停在初始化标记、init_pid 是活着的本进程，只能等所有持有者放手。
+    // 只读探测的一方一律 allowOverwrite = false：只初始化自己新建的段，不认领别人建的、不接管。
+    InitResult initHeader(SegmentView& view, const SegmentHeaderFields& h, const SegmentHeaderSpec& spec,
                           const std::function<void()>& initData = {}, bool allowOverwrite = true)
     {
-        if (view.base == nullptr || magic == nullptr || abi == nullptr)
+        if (view.base == nullptr || h.magic == nullptr || h.abi == nullptr)
         {
             return InitResult::kFailed;
         }
@@ -231,93 +332,103 @@ public:
             report(view, IpcDiagCode::kBadSize, "segment is smaller than its header or layout");
             return InitResult::kFailed;
         }
-        const auto claim = [magic] {
-            u32 expected = 0;
-            return magic->compare_exchange_strong(expected, kInitMarker, std::memory_order_acq_rel,
-                                                  std::memory_order_acquire);
-        };
+        detail::ProtectedBytes keep;
+        if (h.initPid != nullptr)
+        {
+            const auto at = reinterpret_cast<std::uintptr_t>(h.initPid) - reinterpret_cast<std::uintptr_t>(view.base);
+            keep.pidAt = at < view.size ? static_cast<std::size_t>(at) : detail::kNoOffset;
+        }
+        const u32 self = currentProcessId();
         const auto initialise = [&](bool fresh) {
             if (fresh)
             {
-                detail::writeTouchPages(view.base, view.size);
+                detail::writeTouchPages(view.base, view.size, keep);
                 tryLock(view);
             }
             else
             {
-                const std::size_t from = std::max(spec.clearFrom, kSegmentPrologueBytes);
-                if (from < view.size)
-                {
-                    std::memset(static_cast<char*>(view.base) + from, 0, view.size - from);
-                }
+                detail::clearBody(view.base, spec.clearFrom, view.size, keep);
             }
-            abi->store(spec.abi, std::memory_order_relaxed);
-            if (generation != nullptr)
+            h.abi->store(spec.abi, std::memory_order_relaxed);
+            if (h.generation != nullptr)
             {
-                if (fresh)
-                {
-                    generation->store(1, std::memory_order_relaxed);
-                }
-                else
-                {
-                    generation->fetch_add(1, std::memory_order_relaxed);
-                }
+                h.generation->fetch_add(1, std::memory_order_relaxed);
             }
             if (initData)
             {
                 initData();
             }
-            magic->store(spec.magic, std::memory_order_release);
+            h.magic->store(spec.magic, std::memory_order_release);
             return InitResult::kOk;
         };
-        const auto waitPublished = [magic] {
-            u32 m = magic->load(std::memory_order_acquire);
-            for (int i = 0; i < 10 && !magicPublished(m); ++i)
+        const auto tooSmallToInitialise = [&] {
+            if (view.size >= spec.layoutBytes)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                m = magic->load(std::memory_order_acquire);
+                return false;
             }
-            return m;
+            report(view, IpcDiagCode::kBadSize, "unpublished segment is smaller than the layout; not initialising");
+            return true;
         };
 
-        if (view.created && claim())
+        u32 m = h.magic->load(std::memory_order_acquire);
+        if (m == 0 && (view.created || allowOverwrite))
         {
-            return initialise(true);
-        }
-        // 附着方（或者慢到被附着方抢先认领的建段者）：发布之前只读 magic，什么都不碰
-        u32 m = magic->load(std::memory_order_acquire);
-        if (!magicPublished(m))
-        {
-            if (!allowOverwrite)
+            if (tooSmallToInitialise())
             {
                 return InitResult::kFailed;
             }
-            m = waitPublished();
-            if (m == 0)
+            onInitStageForTesting(InitStage::kBeforeClaim, view);
+            if (h.magic->compare_exchange_strong(m, kInitMarker, std::memory_order_acq_rel, std::memory_order_acquire))
             {
-                if (view.size < spec.layoutBytes)
+                if (h.initPid != nullptr)
                 {
-                    report(view, IpcDiagCode::kBadSize,
-                           "uninitialised segment is smaller than the layout; not overwriting");
+                    h.initPid->store(self, std::memory_order_release);
+                }
+                return initialise(view.created);
+            }
+            // 输了：m 是别人写下的值（初始化标记或已发布），往下按它判定
+        }
+        if (m == kInitMarker && allowOverwrite && h.initPid != nullptr)
+        {
+            const u32 owner = h.initPid->load(std::memory_order_acquire);
+            if (owner != 0 && owner != self && !isProcessAlive(owner))
+            {
+                if (tooSmallToInitialise())
+                {
                     return InitResult::kFailed;
                 }
-                if (claim())
+                onInitStageForTesting(InitStage::kBeforeTakeover, view);
+                u32 expected = owner;
+                if (h.initPid->compare_exchange_strong(expected, self, std::memory_order_acq_rel,
+                                                       std::memory_order_acquire))
                 {
                     return initialise(false);
                 }
             }
-            m = waitPublished();
-            if (!magicPublished(m))
+            m = h.magic->load(std::memory_order_acquire); // 接管输了时，胜者可能已经发布
+        }
+        if (!magicPublished(m))
+        {
+            if (m == kInitMarker)
             {
-                report(view, IpcDiagCode::kBusy, "segment initialisation did not finish; unmap and retry");
-                return InitResult::kFailed;
+                report(view, IpcDiagCode::kBusy, "segment is being initialised by another holder; unmap and back off");
             }
+            return InitResult::kBusy;
         }
         detail::readTouchPages(view.base, view.size);
-        return verdict(view, m, abi->load(std::memory_order_acquire), spec);
+        return verdict(view, m, h.abi->load(std::memory_order_acquire), spec);
     }
 
 protected:
-    // 让回收表忘掉本后端：具体后端的析构函数开头调用。幂等。定义在文件末尾
+    // 只给单测的后端覆盖，在两个交错点上停住调用线程，确定性地构造竞争（发布代码不覆盖，contract-static-ipc 扫描
+    // src/** 判红）
+    virtual void onInitStageForTesting(InitStage stage, const SegmentView& view) noexcept
+    {
+        (void)stage;
+        (void)view;
+    }
+
+    // 让映射表忘掉本后端：具体后端的析构函数开头调用。幂等。定义在文件末尾
     void forgetRetired() noexcept;
 
     // 后端在碰操作系统之前核对名字：不合格时报诊断（超长归 kNameTooLong）并返回 kFailedBadName，合格返回 kOk
@@ -374,13 +485,20 @@ private:
 namespace detail
 {
 
-// 映射控制块：持有视图与租约计数。音频线程只经裸指针增减 leaseCount、读 view.base；其余字段只在非实时线程上碰
-// （由句柄独占时归句柄，挂进回收表之后归回收表的锁）。
-// 控制块一经分配就到进程退出才释放：解映射之后它仍留在回收表里（约百字节）。这样 lease() 里「读到裸指针」与
+// 映射控制块：持有视图与租约计数。音频线程只经裸指针增减 leaseCount、读 view.base；其余字段只在非实时线程上、
+// 持映射表的锁时碰。
+// 控制块一经分配就到进程退出才释放：解映射之后它仍留在映射表里（约百字节）。这样 lease() 里「读到裸指针」与
 // 「计数 + 1」之间不管被挂起多久，加计数时碰到的都是活着的内存；随后看到 releaseRequested 就退还计数，
 // 从不去读已经解映射的 base。两道保护都不再依赖时间。
 struct SegmentMapping
 {
+    enum class Bucket : std::uint8_t
+    {
+        kLive, // 句柄还独占着它
+        kPending, // 句柄放下了，宽限期还没走完
+        kDone, // 已解映射，留到进程退出
+    };
+
     SegmentView view;
     std::atomic<u32> leaseCount{0};
     std::atomic<bool> releaseRequested{false};
@@ -389,13 +507,17 @@ struct SegmentMapping
     u64 graceStartMs = 0;
     bool graceStarted = false;
     bool unmapped = false;
-    SegmentMapping* next = nullptr; // 在回收表里的链
+    Bucket bucket = Bucket::kLive;
+    SegmentMapping* prev = nullptr; // 在映射表里的双向链
+    SegmentMapping* next = nullptr;
 
     SegmentMapping(SegmentView&& v, ISegmentBackend* b)
         : view(std::move(v)), backend(b), orphanUnmap(b != nullptr ? b->orphanUnmapper() : nullptr)
     {
     }
 };
+static_assert(std::atomic<bool>::is_always_lock_free, "音频线程在 lease() 里读释放请求");
+static_assert(std::atomic<SegmentMapping*>::is_always_lock_free, "音频线程在 lease() 里读控制块指针");
 
 // 宽限期的判定：租约归零之后再过 500 ms。时钟读出 0 时既不开始也不推进；时间倒退时从现在重新计，
 // 绝不因为无符号相减回绕而提前结束。
@@ -446,66 +568,87 @@ inline bool unmapIfReady(SegmentMapping& m, u64 nowMs) noexcept
     return true;
 }
 
-// 进程级的回收表（每个链接了 rinne_core 的二进制一张，永不析构）：
-//   pending  句柄析构或被覆盖时宽限期还没走完的映射，由 reap() 在之后的某一拍走完宽限期再解映射；
-//            后端先析构了也留在这里，到时用收尾函数解映射、关平台句柄，不靠后端实例；
-//   done     已解映射的控制块，留到进程退出。
-// 侵入式单链，插入与摘除不分配；一把锁，只在非实时线程上取（取锁失败按不可恢复处理）。
+// 进程级的映射表（每个链接了 rinne_core 的二进制一张，永不析构），登记每一个句柄建出的控制块：
+//   live     句柄还独占着；
+//   pending  句柄析构或被覆盖时宽限期还没走完，由 reap() 在之后的某一拍走完宽限期再解映射；
+//   done     已解映射，留到进程退出。
+// 后端析构时 forget() 把 live 与 pending 里指着它的都改成用收尾函数解映射、关平台句柄，不靠后端实例。
+// 侵入式双向链，插入与摘除不分配；一把锁，只在非实时线程上取（取锁失败按不可恢复处理）。
 // 泄漏检测把这些控制块当可达内存。
-class RetiredMappings
+class MappingRegistry
 {
 public:
-    static RetiredMappings& instance() noexcept
+    using Bucket = SegmentMapping::Bucket;
+
+    static MappingRegistry& instance() noexcept
     {
-        static RetiredMappings* table = new RetiredMappings();
+        static MappingRegistry* table = new MappingRegistry();
         return *table;
     }
 
-    void retire(SegmentMapping* m) noexcept
+    void adopt(SegmentMapping* m) noexcept
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        push(m->unmapped ? done_ : pending_, m);
+        push(Bucket::kLive, m);
+    }
+
+    // 句柄的释放：宽限期满就解映射，控制块挪进 done
+    bool releaseLive(SegmentMapping& m, u64 nowMs) noexcept
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (!unmapIfReady(m, nowMs))
+        {
+            return false;
+        }
+        moveTo(Bucket::kDone, m);
+        return true;
+    }
+
+    // 句柄放下了还没释放完的控制块：交给回收表
+    void retire(SegmentMapping& m) noexcept
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        moveTo(m.unmapped ? Bucket::kDone : Bucket::kPending, m);
     }
 
     std::size_t reap(u64 nowMs) noexcept
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         std::size_t unmapped = 0;
-        for (SegmentMapping** link = &pending_; *link != nullptr;)
+        for (SegmentMapping* m = head(Bucket::kPending); m != nullptr;)
         {
-            SegmentMapping* m = *link;
+            SegmentMapping* const next = m->next;
             if (unmapIfReady(*m, nowMs))
             {
-                *link = m->next;
-                push(done_, m);
+                moveTo(Bucket::kDone, *m);
                 ++unmapped;
             }
-            else
-            {
-                link = &m->next;
-            }
+            m = next;
         }
         return unmapped;
     }
 
-    // 后端析构：还在等宽限期、指着它的映射不再经它解映射，留在 pending 里，到时用收尾函数（orphanUnmap）解映射
+    // 后端析构：句柄还活着的、交给回收表的映射都不再经它解映射，到时用收尾函数（orphanUnmap）解映射
     void forget(const ISegmentBackend* backend) noexcept
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        for (SegmentMapping* m = pending_; m != nullptr; m = m->next)
+        for (const Bucket b : {Bucket::kLive, Bucket::kPending})
         {
-            if (m->backend == backend)
+            for (SegmentMapping* m = head(b); m != nullptr; m = m->next)
             {
-                m->backend = nullptr;
+                if (m->backend == backend)
+                {
+                    m->backend = nullptr;
+                }
             }
         }
     }
 
-    std::size_t pendingCount() noexcept
+    std::size_t count(Bucket b) noexcept
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         std::size_t n = 0;
-        for (const SegmentMapping* m = pending_; m != nullptr; m = m->next)
+        for (const SegmentMapping* m = head(b); m != nullptr; m = m->next)
         {
             ++n;
         }
@@ -513,17 +656,41 @@ public:
     }
 
 private:
-    RetiredMappings() = default;
+    MappingRegistry() = default;
 
-    static void push(SegmentMapping*& head, SegmentMapping* m) noexcept
+    SegmentMapping*& head(Bucket b) noexcept { return heads_[static_cast<std::size_t>(b)]; }
+
+    void push(Bucket b, SegmentMapping* m) noexcept
     {
-        m->next = head;
-        head = m;
+        m->bucket = b;
+        m->prev = nullptr;
+        m->next = head(b);
+        if (m->next != nullptr)
+        {
+            m->next->prev = m;
+        }
+        head(b) = m;
+    }
+
+    void moveTo(Bucket b, SegmentMapping& m) noexcept
+    {
+        if (m.prev != nullptr)
+        {
+            m.prev->next = m.next;
+        }
+        else
+        {
+            head(m.bucket) = m.next;
+        }
+        if (m.next != nullptr)
+        {
+            m.next->prev = m.prev;
+        }
+        push(b, &m);
     }
 
     std::mutex mutex_;
-    SegmentMapping* pending_ = nullptr;
-    SegmentMapping* done_ = nullptr;
+    SegmentMapping* heads_[3] = {nullptr, nullptr, nullptr};
 };
 
 } // namespace detail
@@ -535,17 +702,19 @@ inline ISegmentBackend::~ISegmentBackend()
 
 inline void ISegmentBackend::forgetRetired() noexcept
 {
-    detail::RetiredMappings::instance().forget(this);
+    detail::MappingRegistry::instance().forget(this);
 }
 
 // 映射句柄：独占控制块 + 按块租约 + 宽限期释放。
 //   - 控制块只在非实时线程上碰；音频线程经原子裸指针 implPtr_ 拿到它，增减 leaseCount。
 //   - release(now)：先置 releaseRequested，再摘掉 implPtr_（不再发放新租约），然后在 leaseCount 归零、且又过了
-//     kReleaseGraceMs 之后经后端解映射。控制块不释放，交给回收表留到进程退出。
-//   - 析构、或者移动赋值覆盖一个还没释放完的句柄：映射挂进回收表，由 reapRetired() 在之后的某一拍走完宽限期再
+//     kReleaseGraceMs 之后经后端解映射。控制块不释放，留在映射表里到进程退出。
+//   - 析构、或者移动赋值覆盖一个还没释放完的句柄：映射交给回收表，由 reapRetired() 在之后的某一拍走完宽限期再
 //     解映射、关平台句柄（插件卸载时这是常态）。持生命周期锁的非实时线程要定时调用 reapRetired()（会合层的 25 Hz
-//     定时器）；任何句柄的 release() 也顺手回收一次。后端先于这些映射析构也不漏：到时用后端事先给的收尾函数
+//     定时器）；任何句柄的 release() 也顺手回收一次。
+//   - 后端先于句柄析构也可以（例如句柄与后端是同一个对象的成员、句柄声明在前）：到时用后端事先给的收尾函数
 //     解映射、关平台句柄。
+//   - 只在插件加载、改组时新建，不按拍新建：控制块永不释放，按拍新建会让内存线性增长（retiredDone() 供诊断）。
 // 时间由调用方传入，必须是 util::monoNowMs() 那一个跨进程单调时钟。
 class SegmentHandle
 {
@@ -559,6 +728,7 @@ public:
     SegmentHandle(SegmentView&& view, ISegmentBackend* backend)
         : impl_(new detail::SegmentMapping(std::move(view), backend))
     {
+        detail::MappingRegistry::instance().adopt(impl_);
         implPtr_.store(impl_, std::memory_order_release);
     }
 
@@ -634,16 +804,55 @@ public:
 
     // 音频线程每块调用：读裸指针 → leaseCount + 1 → 查 releaseRequested，已置就退还并返回空租约。
     // 与 release() 构成 Dekker 式握手：音频「加计数，再读请求」，非实时线程「置请求，再读计数」。
-    // 四个访问（这里的 fetch_add 与 load、release() 的 store、graceElapsed() 的 load）一律 seq_cst：
+    // 四个访问（finishLease 的 fetch_add 与 load、release() 的 store、graceElapsed() 的 load）一律 seq_cst：
     // 只用 acquire / release 时，C++ 允许两边的 store→load 重排、同时读到旧值，音频拿到租约的同时
     // 非实时线程判「没有在途租约」开始计宽限期。四个都在同一个全序里时，至少有一边看得见另一边。
     // 代价：x86 上只有 release() 的那条 store 从 mov 变成 xchg（不在音频热路径）；arm64 上两条 load 编成 LDAR，
     // 不会被编成可以越过前面 STLR / LDADDAL 提前读的 LDAPR。
     // 读到裸指针之后被挂起多久都不要紧：控制块永不释放，加计数总落在活着的内存上，之后看到释放请求就退还，
     // 不去读已经解映射的 base。
-    Lease lease() const
+    Lease lease() const { return finishLease(implPtr_.load(std::memory_order_acquire)); }
+
+    // 非实时线程请求释放。返回 true = 已解映射；false = 租约在途或宽限期未满，下一拍再调。幂等。
+    // 顺手回收一次被丢下的映射。
+    bool release(u64 nowMs)
     {
-        detail::SegmentMapping* p = implPtr_.load(std::memory_order_acquire);
+        auto& table = detail::MappingRegistry::instance();
+        table.reap(nowMs);
+        if (impl_ == nullptr)
+        {
+            return true;
+        }
+        impl_->releaseRequested.store(true, std::memory_order_seq_cst); // 握手的这一侧，见 lease()
+        implPtr_.store(nullptr, std::memory_order_release);
+        if (!table.releaseLive(*impl_, nowMs))
+        {
+            return false;
+        }
+        impl_ = nullptr; // 已解映射，控制块留到进程退出
+        return true;
+    }
+
+    // 走完被丢下的映射的宽限期并解映射；返回这一次解映射的个数。持生命周期锁的非实时线程定时调用。
+    static std::size_t reapRetired(u64 nowMs) { return detail::MappingRegistry::instance().reap(nowMs); }
+
+    // 诊断与单测用：还在等宽限期的被丢下的映射数；已解映射、留到进程退出的控制块数（按拍新建句柄时它会一直涨）
+    static std::size_t retiredPending()
+    {
+        return detail::MappingRegistry::instance().count(detail::SegmentMapping::Bucket::kPending);
+    }
+    static std::size_t retiredDone()
+    {
+        return detail::MappingRegistry::instance().count(detail::SegmentMapping::Bucket::kDone);
+    }
+
+private:
+    friend struct LeaseSeamForTesting;
+
+    // lease() 的第二步，握手的音频一侧：加计数，再查释放请求。单独拆出来只为单测在「读到裸指针」与这一步之间
+    // 插入完整的释放与解映射
+    static Lease finishLease(detail::SegmentMapping* p) noexcept
+    {
         if (p == nullptr)
         {
             return Lease{};
@@ -657,34 +866,7 @@ public:
         return Lease(p);
     }
 
-    // 非实时线程请求释放。返回 true = 已解映射；false = 租约在途或宽限期未满，下一拍再调。幂等。
-    // 顺手回收一次被丢下的映射。
-    bool release(u64 nowMs)
-    {
-        detail::RetiredMappings::instance().reap(nowMs);
-        if (impl_ == nullptr)
-        {
-            return true;
-        }
-        impl_->releaseRequested.store(true, std::memory_order_seq_cst); // 握手的这一侧，见 lease()
-        implPtr_.store(nullptr, std::memory_order_release);
-        if (!detail::unmapIfReady(*impl_, nowMs))
-        {
-            return false;
-        }
-        detail::RetiredMappings::instance().retire(impl_); // 已解映射，控制块留到进程退出
-        impl_ = nullptr;
-        return true;
-    }
-
-    // 走完被丢下的映射的宽限期并解映射；返回这一次解映射的个数。持生命周期锁的非实时线程定时调用。
-    static std::size_t reapRetired(u64 nowMs) { return detail::RetiredMappings::instance().reap(nowMs); }
-
-    // 还在等宽限期的被丢下的映射数（诊断与单测用）
-    static std::size_t retiredPending() { return detail::RetiredMappings::instance().pendingCount(); }
-
-private:
-    // 放下自己的那一块：这一拍能释放完就释放，否则交给回收表。noexcept：回收表的锁取不到（std::system_error）
+    // 放下自己的那一块：这一拍能释放完就释放，否则交给回收表。noexcept：映射表的锁取不到（std::system_error）
     // 与 unmap 一样按不可恢复处理
     void abandon() noexcept
     {
@@ -694,7 +876,7 @@ private:
         }
         if (!release(util::monoNowMs()) && impl_ != nullptr)
         {
-            detail::RetiredMappings::instance().retire(impl_);
+            detail::MappingRegistry::instance().retire(*impl_);
         }
         impl_ = nullptr;
     }

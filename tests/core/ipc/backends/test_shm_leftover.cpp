@@ -73,13 +73,11 @@ bool createInitialised(ISegmentBackend& backend, const std::string& name, std::u
     {
         auto* rv = static_cast<RvSegment*>(view.base);
         const SegmentHeaderSpec spec{kRvMagic, kIpcAbi, kRvBytes, kRvHeaderBytes};
-        return backend.initHeader(view, &rv->header.magic, &rv->header.abi, &rv->header.generation, spec) ==
-               InitResult::kOk;
+        return backend.initHeader(view, headerFields(rv->header), spec) == InitResult::kOk;
     }
     auto* ring = static_cast<RingSegment*>(view.base);
     const SegmentHeaderSpec spec{kRingMagic, kIpcAbi, kRingBytes, 64};
-    return backend.initHeader(view, &ring->header.magic, &ring->header.abi, &ring->header.generation, spec) ==
-           InitResult::kOk;
+    return backend.initHeader(view, headerFields(ring->header), spec) == InitResult::kOk;
 }
 
 #if defined(_WIN32)

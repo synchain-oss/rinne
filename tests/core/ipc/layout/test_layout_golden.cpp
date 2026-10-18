@@ -141,7 +141,7 @@ TEST_CASE("fields of each struct are contiguous and fill it exactly", "[ipc][lay
     }
 }
 
-TEST_CASE("the permanently frozen fields are exactly the rv header prologue and the slot version",
+TEST_CASE("the permanently frozen fields are exactly the rv header prologue, its init pid and the slot version",
           "[ipc][layout][frozen]")
 {
     std::set<std::string> permanent;
@@ -153,11 +153,17 @@ TEST_CASE("the permanently frozen fields are exactly the rv header prologue and 
         }
     }
     CHECK(permanent == std::set<std::string>{"RvHeader::magic", "RvHeader::abi", "RvHeader::generation",
-                                             "RvHeader::layout_bytes", "RoleSlot::version"});
+                                             "RvHeader::layout_bytes", "RvHeader::init_pid", "RoleSlot::version"});
+    CHECK(offsetof(RvSegment, header) == 0);
     CHECK(offsetof(RvHeader, magic) == 0);
     CHECK(offsetof(RvHeader, abi) == 4);
     CHECK(offsetof(RvHeader, generation) == 8);
     CHECK(offsetof(RvHeader, layout_bytes) == 12);
+    CHECK(offsetof(RvHeader, init_pid) == 32);
+    // 任何 abi 的会合段都不小于这个下限：最远的 version 落在它里面
+    CHECK(kRvMinBytes == 16384u);
+    CHECK(kRvBytes >= kRvMinBytes);
+    CHECK(slotVersionOffset(kGroupCount, true) + 4 <= kRvMinBytes);
     // 端点槽 version 的绝对位置：1024·G + {0, 256} + 56
     for (u32 g = 1; g <= kGroupCount; ++g)
     {
@@ -165,6 +171,8 @@ TEST_CASE("the permanently frozen fields are exactly the rv header prologue and 
                   offsetof(RoleSlot, version) ==
               1024u * g + 56u);
         CHECK(roleSlotOffset(g, true) + offsetof(RoleSlot, version) == 1024u * g + 256u + 56u);
+        CHECK(slotVersionOffset(g, false) == 1024u * g + 56u);
+        CHECK(slotVersionOffset(g, true) == 1024u * g + 256u + 56u);
     }
     CHECK(kRvMagic == rinne::util::fourcc('R', 'N', 'R', 'V'));
     // magic 字段里的初始化标记：任何版本读到它都按「还没初始化完」处理
