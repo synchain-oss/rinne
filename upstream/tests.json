@@ -1,0 +1,25 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "f80e1c99271db1c7a85d2a300a8b154b2d45d2a7"
+    }
+  },
+  "files": [
+    {
+      "path": "scripts/check-ctest-timeouts.ps1",
+      "source": "scvb-dev",
+      "from": "scripts/check-ctest-timeouts.ps1",
+      "fromBlob": "b189b1c13daf436eaf8783c72187650243b6bdf0",
+      "mode": "adapted"
+    },
+    {
+      "path": "tests/CMakeLists.txt",
+      "source": "scvb-dev",
+      "from": "tests/CMakeLists.txt",
+      "fromBlob": "642e07dcaf7b2ac17d708927b88ea35fbc3d90e1",
+      "mode": "forked"
+    }
+  ]
+}

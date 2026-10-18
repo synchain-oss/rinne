@@ -1,0 +1,18 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "f80e1c99271db1c7a85d2a300a8b154b2d45d2a7"
+    }
+  },
+  "files": [
+    {
+      "path": "tools/rinne_nulltest.cpp",
+      "source": "scvb-dev",
+      "from": "tests/tools/scvb_nulltest.cpp",
+      "fromBlob": "0802f3d77a4512545b539d302be2da1d295ac34d",
+      "mode": "forked"
+    }
+  ]
+}
