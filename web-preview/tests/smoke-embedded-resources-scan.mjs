@@ -32,6 +32,8 @@ bad("css url(//) 主机名不带点", "web/a.css", "a { background: url(//cdn/a.
 bad("@import 字符串 // 主机名不带点", "web/a.css", '@import "//cdn/a.css";');
 bad("srcset 第二个地址", "web/a.html", '<img srcset="a.png 1x, //cdn/b.png 2x">');
 bad("meta refresh 跳到 //", "web/a.html", '<meta http-equiv="refresh" content="0;url=//cdn/a">');
+bad("meta refresh 逗号分隔", "web/a.html", '<meta http-equiv="refresh" content="0, url=//cdn/a">');
+bad("meta refresh 省略 url=", "web/a.html", '<meta http-equiv="refresh" content="0; //cdn/a">');
 bad("js img.src = '//'", "web/a.js", "const i = new Image(); i.src = '//cdn.example.invalid/p.gif';");
 bad("js 字符串里的 //host", "web/a.js", 'const u = "//cdn.example.invalid/x";');
 // 坏例：网络调用
@@ -61,6 +63,8 @@ good(
     "web/a.html",
     '<script type="module" src="./a.js"></script><link href="../shared/x.css" rel="stylesheet">',
 );
+good("meta refresh 只刷新不跳转", "web/a.html", '<meta http-equiv="refresh" content="5">');
+good("meta refresh 跳相对地址", "web/a.html", '<meta http-equiv="refresh" content="0; url=web-preview/input.html">');
 good("普通 import", "web/a.js", 'import { a } from "./a.js";');
 good("JUCE 的宿主伪源", "web/js/juce/index.js", 'const origin = "https://juce.backend/";');
 good("JUCE 副本里的网络词不查", "web/js/juce/index.js", "new XMLHttpRequest();");

@@ -106,8 +106,8 @@ const PROTOCOL_RELATIVE = [
     /@import\s+(?:url\(\s*)?["']?\s*\/\//i,
     // srcset 逗号后的第二个及之后的地址
     /\bsrcset\s*=\s*["'][^"']*,\s*\/\//i,
-    // <meta http-equiv="refresh" content="0;url=//…">
-    /\bcontent\s*=\s*["'][^"']*;\s*url\s*=\s*["']?\s*\/\//i,
+    // <meta http-equiv="refresh" content="0;url=//…">：分隔符可以是 ; 或 ,，url= 前缀可省略
+    /\bcontent\s*=\s*["']\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?["']?\s*\/\//i,
     /["'`]\s*\/\/[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)+/,
 ];
 
