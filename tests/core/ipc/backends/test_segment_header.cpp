@@ -3,7 +3,7 @@
 // 段头初始化协议（平台无关的那一半），在进程内后端上验：建段者认领后记下自己的 pid、最后发布 magic；附着方比对
 // magic、abi 与真实大小；abi 不同的一方读得出对方的 abi 与版本、但拿到 kAbiMismatch；magic 不是我们的不碰；
 // 没人认领的段由附着方认领；初始化者死了（pid 已死）时恰好一个附着方接管，活着或 pid 还没写下时立刻 kBusy、不清零；
-// 只读校验绝不写；kBusy 之后的退避间隔。
+// 只读探测的一方看到初始化标记只返回 kBusy、不接管、不报诊断；只读校验绝不写；kBusy 之后的退避间隔。
 // 竞争用测试钩子确定性地构造：输家停在「看到 0、认领之前」或「看到死者、接管之前」，等胜者发布并开始用这个段之后
 // 才放行，断言胜者写下的东西一个字节都没被动过。
 
@@ -527,6 +527,45 @@ TEST_CASE("an initialiser that is alive or has not recorded its pid yet is never
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(50)); // 立刻返回，不阻塞
     CHECK(diag.has(IpcDiagCode::kBusy));
     CHECK(probe.calls.load() == 0);
+    CHECK(rv->header.magic.load() == kInitMarker);
+    CHECK(rv->header.init_pid.load() == owner);
+    CHECK(rv->groups[0].input.pid.load() == 7u);
+}
+
+TEST_CASE("a read-only probe that meets the init marker gets kBusy without a diagnostic",
+          "[ipc][backend][header][busy]")
+{
+    // 只读探测的一方（allowOverwrite = false）看到初始化标记：不认领、不接管（连死掉的初始化者也不接管）、不清零，
+    // 立刻返回 kBusy，并且不报诊断：它在 25 Hz 的重试路径上，卡住的段不能一直往限流器里送诊断
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    const std::string name = segName(naming, SegmentId::rendezvous());
+    SegmentBackendInProcess backend;
+    SegmentView stuck;
+    REQUIRE(backend.createOrOpen(name, kRvBytes, stuck) == InitResult::kOk);
+    auto* rv = static_cast<RvSegment*>(stuck.base);
+    rv->header.magic.store(kInitMarker);
+    rv->groups[0].input.pid.store(7);
+    std::uint32_t owner = 0;
+    SECTION("initialiser alive")
+    {
+        owner = currentProcessId();
+    }
+    SECTION("initialiser dead")
+    {
+        REQUIRE_FALSE(isProcessAlive(kDeadPid));
+        owner = kDeadPid;
+    }
+    rv->header.init_pid.store(owner);
+
+    rinne::test::DiagCapture diag;
+    SegmentView probe;
+    REQUIRE(backend.createOrOpen(name, kRvBytes, probe) == InitResult::kOk);
+    REQUIRE_FALSE(probe.created);
+    InitProbe calls;
+    CHECK(initRv(backend, probe, kRvSpec, false, &calls) == InitResult::kBusy);
+    CHECK(diag.events().empty());
+    CHECK(calls.calls.load() == 0);
     CHECK(rv->header.magic.load() == kInitMarker);
     CHECK(rv->header.init_pid.load() == owner);
     CHECK(rv->groups[0].input.pid.load() == 7u);

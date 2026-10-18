@@ -312,14 +312,15 @@ public:
     //                    前面认领也无害；输了 CAS 的一方从不清零。
     //   初始化标记        别人认领了。init_pid 非 0、不是本进程、并且已经死了：allowOverwrite 的一方用 CAS 把 init_pid
     //                    从死者换成自己来接管，赢了就按附着方的办法重初始化（generation 再 + 1）、发布；输了、
-    //                    初始化者还活着、pid 还没写下、探活拿不准（一律按活）：kBusy（诊断 kBusy）。
+    //                    初始化者还活着、pid 还没写下、探活拿不准（一律按活）：kBusy（allowOverwrite 时诊断 kBusy）。
     //   已发布           只读触碰（只在看到发布之后）→ 比对 magic、abi 与真实大小（不是我们的 magic → kFailed；
     //                    abi 不同 → kAbiMismatch；段比本 abi 的布局小 → kFailed）。
     // kBusy：调用方立刻解映射，按 RetryBackoff 退避后重试，不得在原映射上重试。初始化者死了而接管不了时（pid 被复用、
     // 拿不准），靠所有持有者同时放手让段消失（Windows 随最后一个句柄回收，POSIX 由下一个建段者清掉残段）：每次尝试只
     // 映射几微秒，再加上抖动，各持有者放手的空档总会重叠。
     // initData 不得抛出：抛出时 magic 停在初始化标记、init_pid 是活着的本进程，只能等所有持有者放手。
-    // 只读探测的一方一律 allowOverwrite = false：只初始化自己新建的段，不认领别人建的、不接管。
+    // 只读探测的一方一律 allowOverwrite = false：只初始化自己新建的段，不认领别人建的、不接管，看到初始化标记
+    // 也只返回 kBusy、不报诊断。
     InitResult initHeader(SegmentView& view, const SegmentHeaderFields& h, const SegmentHeaderSpec& spec,
                           const std::function<void()>& initData = {}, bool allowOverwrite = true)
     {
@@ -409,7 +410,7 @@ public:
         }
         if (!magicPublished(m))
         {
-            if (m == kInitMarker)
+            if (m == kInitMarker && allowOverwrite) // 只读探测的一方不报诊断（25 Hz 重试路径）
             {
                 report(view, IpcDiagCode::kBusy, "segment is being initialised by another holder; unmap and back off");
             }
