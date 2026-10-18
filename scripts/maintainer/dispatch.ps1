@@ -218,10 +218,12 @@ function Invoke-SelfTest {
         & $later { param($p) @((& $byName 56 "Build $($p.inputs.nonce) on $tip"), (& $byName 57 (& $title $p))) }
         $rn = try { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 5 } catch { $null }
         Add-RinneCase $cases '有 nonce：run-name 模板换了写法，按新模板算出的运行名认领' $false (-not ($rn -and $rn.id -eq 56))
-        # 声明了 nonce、run-name 却没用到它：运行名认不出是哪一次，退回「触发前已有的运行不算」
+        # 声明了 nonce、run-name 却没用到它：运行名认不出是哪一次（前一次对同一提交的运行同名），退回「触发前已有的运行不算」
         $doc.Yml = 'run-name: Build & Validate ${{ github.sha }}' + "`n$nonceYml"
-        $box.Runs, $box.OnPost, $box.Later, $box.Posted = @($older), { @() }, @(@{ id = 58; head_sha = $tip; display_title = "Build & Validate $tip"; created_at = $now.ToString('o'); status = 'queued'; conclusion = $null; html_url = 'u' }), $false
-        Add-RinneCase $cases '有 nonce、run-name 没用到它：退回按触发前后的差认领' $false ((Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 5).id -ne 58)
+        $same = $older.Clone(); $same['display_title'] = "Build & Validate $tip"
+        $box.Runs, $box.OnPost, $box.Later, $box.Posted = @($same), { @() }, @(@{ id = 58; head_sha = $tip; display_title = "Build & Validate $tip"; created_at = $now.ToString('o'); status = 'queued'; conclusion = $null; html_url = 'u' }), $false
+        $rn = try { Invoke-Dispatch -Ref 'feature/v1' -Sha $tip -Now $now -FindSeconds 5 } catch { $null }
+        Add-RinneCase $cases '有 nonce、run-name 没用到它：退回按触发前后的差认领，不认前一次同名的运行' $false (-not ($rn -and $rn.id -eq 58))
         # 模板求值：几种写法与认不出的表达式
         $sx, $nx = ('a' * 40), ('b' * 32)
         $ev = { param($line, $in) Get-DispatchRunName -Text "$line`n$nonceYml" -Sha $sx -Inputs $in }

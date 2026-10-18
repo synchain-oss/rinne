@@ -226,6 +226,13 @@ function Test-PremergeLatch {
             & $check '进行中标记：握着的时候别的进程删不掉、改不了（也就换不成目录）' $true ($del -and $over -and (Test-RinneLatchIntact $held))
         }
         & $check '进行中标记：原样还在时清除' $false (-not ((Clear-RinneLatch $held) -and -not (Test-Path -LiteralPath $want)))
+        # 没人握着的旧标记（上一次留下的已篡改标记之类）：上面那条在 Windows 上靠共享冲突就会抛错，这条才看得出是不是覆盖
+        Set-Content -LiteralPath $want -Value '{}' -NoNewline
+        $stray = $null
+        $refused = try { $stray = New-RinneLatch -Pr 8 -Digest 'x' -RepoRoot $main; $false } catch { $true }
+        if ($stray) { Close-RinneLatch $stray }
+        & $check '进行中标记：位置上已有没人握着的旧标记时不覆盖、抛错' $true ($refused -and (Read-RinneLatchText $want) -ceq '{}')
+        Remove-Item -LiteralPath $want
         $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
         $null = Set-RinneLatchTampered -Latch $held -Changed @('.git/config', '锁存标记')
         $j = Read-RinneLatchText $want | ConvertFrom-Json
