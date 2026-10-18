@@ -1,0 +1,45 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  外壳自适配夹具页：一个设计盒大小的空外壳，用 web/shared/shell-fit.js 钉成「刚好装进视口」。
+  占位页还没有真实外壳，页面级冒烟需要一个会用 installShellFit 的页面来量倍率与溢出。
+  ?role=input|output 选设计盒。不是产品界面，不进插件包。
+-->
+<!doctype html>
+<html lang="zh">
+    <head>
+        <meta charset="utf-8" />
+        <title>shell-fit fixture</title>
+        <style>
+            html,
+            body {
+                margin: 0;
+                height: 100%;
+                overflow: hidden;
+            }
+            body {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            #shell {
+                flex: none;
+                background: #888;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="shell"></div>
+        <script type="module">
+            import { DESIGN } from "../../../web/shared/design-box.js";
+            import { installShellFit } from "../../../web/shared/shell-fit.js";
+
+            const role = new URLSearchParams(location.search).get("role") === "output" ? "output" : "input";
+            const box = DESIGN[role];
+            const el = document.getElementById("shell");
+            el.style.width = `${box.w}px`;
+            el.style.height = `${box.h}px`;
+            window.__fit = installShellFit({ el, box });
+            window.__fitReady = true;
+        </script>
+    </body>
+</html>

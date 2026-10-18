@@ -1,0 +1,39 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Derived from synchain-oss/scvb; see upstream/web-preview.json -->
+<!--
+  Output 的预览薄壳页。画面完全来自真源 web/output/index.html（同源 iframe 引用），壳页只负责注入 mock 和一条预览工具条。
+  注入机制、时序假设与回退见 shell.js 文件头；本文件里没有一行复制来的界面代码。
+
+  查询参数（由 mock/state-driver.js 解析，壳页只透传）：
+    ?scenario=<场景 ID>   场景表见 mock/scenarios.js
+    ?lang=zh|en|fr        只覆盖本次预览的语言
+    ?scale=<档位>         开窗档位
+    ?fresh=1              先清空全局位
+    ?role=input           让本页装载另一个角色
+    ?page=probe           装载夹具页而不是真源页面（自动化冒烟用）
+
+  必须经 serve.ps1（http://127.0.0.1:8833）打开；file:// 下 iframe 变跨源，注入不成立。
+-->
+<!doctype html>
+<html lang="zh">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Rinne Output · web-preview</title>
+    </head>
+    <body>
+        <header class="pv-bar">
+            <strong>Rinne Output</strong>
+            <span class="pv-meta"></span>
+            <span class="pv-status" data-ok="wait" role="status">初始化…</span>
+            <span class="pv-warn"></span>
+            <button type="button" class="pv-reload">重载</button>
+        </header>
+        <!-- iframe 由 shell.js 建，尺寸是设计盒 × 当前档位，所以这里只留舞台容器 -->
+        <main class="pv-stage"></main>
+        <script type="module">
+            import { mountPreview } from "./shell.js";
+            mountPreview({ role: "output" });
+        </script>
+    </body>
+</html>

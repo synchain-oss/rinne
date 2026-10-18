@@ -1,0 +1,370 @@
+{
+  "about": "预览场景表的钉死清单：mock/scenarios.js 的 SCENES 必须与它逐个一致（scripts/check-scenes.mjs 对拍）。增删场景时两处同批改；设计稿入库后再与设计稿的机读清单对拍。",
+  "scenes": [
+    {
+      "id": "in-lang",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-rules",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-tour-1",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-tour-2",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-tour-3",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-tour-4",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-tour-5",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-tour-6",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-searching",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-switch-hint",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-waiting-audio",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-linked-zero",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-playing",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-unverified",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-cross-track",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-stale",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-over100",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-guard",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-limiter-confirm",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-limiter-cap",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-mix-mode",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-loop-off",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-bypassed",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-delay-beats",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-delay-raised",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-export-mismatch",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-conflict",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-unassigned",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-abi",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-takeover-confirm",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-panic",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-nan-latched",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-ring-nan",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-cut-runaway",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-preset-menu",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-preset-save",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-about",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-scale-confirm",
+      "role": "input",
+      "lang": "zh"
+    },
+    {
+      "id": "in-en",
+      "role": "input",
+      "lang": "en"
+    },
+    {
+      "id": "in-fr-worst",
+      "role": "input",
+      "lang": "fr"
+    },
+    {
+      "id": "out-lang",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-rules",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-tour-1",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-tour-2",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-tour-3",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-tour-4",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-searching",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-connected",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-unverified",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-cross-track",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-stale",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-conflict",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-takeover-confirm",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-abi",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-bypassed",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-input-muted",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-waiting-audio",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-about",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-scale-confirm",
+      "role": "output",
+      "lang": "zh"
+    },
+    {
+      "id": "out-en",
+      "role": "output",
+      "lang": "en"
+    },
+    {
+      "id": "out-fr-worst",
+      "role": "output",
+      "lang": "fr"
+    },
+    {
+      "id": "cat-pair",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-band",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-knobs",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-delay",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-safety",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-meters",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-header",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-preset",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-overlays",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-footer",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-submark",
+      "role": "catalog",
+      "lang": "zh"
+    },
+    {
+      "id": "cat-tokens",
+      "role": "catalog",
+      "lang": "zh"
+    }
+  ]
+}

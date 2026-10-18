@@ -1,0 +1,45 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  桥探针夹具页：占位页还没有接桥，自动化冒烟需要一个真的会 createBridge 的页面，来验证 mock 注入、
+  首帧、事件分发在浏览器里端到端通。本页只做三件事：按 ?role= 建桥、订阅本角色的全部事件、请求初始状态。
+  观察结果挂在 window.__bridgeProbe 上，由冒烟脚本读取。它不是产品界面，不进插件包。
+-->
+<!doctype html>
+<html lang="zh">
+    <head>
+        <meta charset="utf-8" />
+        <title>bridge probe</title>
+    </head>
+    <body>
+        <pre id="out">probe</pre>
+        <script type="module">
+            import { createBridge, BRIDGE_EVENTS } from "../../../web/shared/bridge.js";
+
+            const role = new URLSearchParams(location.search).get("role") === "output" ? "output" : "input";
+            const probe = (window.__bridgeProbe = {
+                role,
+                ready: false,
+                error: null,
+                counts: {},
+                last: {},
+                bridge: null,
+            });
+            try {
+                // 不传 mockBackend：由 bridge.js 取壳页注入的 window.__RINNE_MOCK__
+                const bridge = createBridge({ role });
+                probe.bridge = bridge;
+                for (const name of BRIDGE_EVENTS[role]) {
+                    bridge.on(name, (payload) => {
+                        probe.counts[name] = (probe.counts[name] || 0) + 1;
+                        probe.last[name] = payload;
+                    });
+                }
+                await bridge.requestInitialState();
+                probe.ready = true;
+            } catch (e) {
+                probe.error = String(e && e.message ? e.message : e);
+            }
+            document.getElementById("out").textContent = probe.error ? `error: ${probe.error}` : "ready";
+        </script>
+    </body>
+</html>
