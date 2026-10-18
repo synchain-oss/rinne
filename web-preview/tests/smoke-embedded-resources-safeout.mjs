@@ -13,6 +13,16 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 
+/**
+ * 只摘掉链接本身：先确认路径确实是符号链接或 junction，再 unlink。
+ * Windows 上 libuv 的 unlink 也能摘目录 junction；POSIX 上 "junction" 类型会被忽略、建出来的是普通符号链接，
+ * rmdir 摘不掉它。不是链接就抛错，绝不退回递归删除。
+ */
+function unlinkLink(p) {
+    if (!fs.lstatSync(p).isSymbolicLink()) throw new Error(`不是符号链接或 junction，拒绝摘除：${p}`);
+    fs.unlinkSync(p);
+}
+
 const ROOT = repoRoot();
 const run = createRun("输出文件护栏");
 const { outVerdict, resolveOutFile } = await import(
@@ -129,7 +139,7 @@ try {
         "输出目录是 junction：拒绝",
     );
     run.check(!fs.existsSync(path.join(outside, "b.png")), "junction 被拒之后外部目录里没有新文件");
-    fs.rmdirSync(path.join(tmp, ...baseRel)); // 只摘掉假仓库里的 junction
+    unlinkLink(path.join(tmp, ...baseRel)); // 只摘掉假仓库里的链接本身
     // build/ 整个是 junction
     fs.rmdirSync(path.join(tmp, "build"));
     fs.symlinkSync(outside, path.join(tmp, "build"), "junction");
@@ -138,7 +148,7 @@ try {
         "build/ 本身是 junction：拒绝",
     );
     run.check(!fs.existsSync(path.join(outside, "web-preview-shots")), "build/ 是 junction 被拒之后没有穿过去建目录");
-    fs.rmdirSync(path.join(tmp, "build"));
+    unlinkLink(path.join(tmp, "build"));
 } finally {
     fs.rmSync(tmp, { recursive: true }); // 只删上面 mkdtemp 出来的目录
     fs.rmSync(outside, { recursive: true });
