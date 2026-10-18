@@ -28,6 +28,10 @@ bad("img src 无引号", "web/a.html", "<img src=//cdn.example.invalid/p.gif>");
 bad("@import url(//)", "web/a.css", "@import url(//x.invalid/a.css);");
 bad("@import 字符串 //", "web/a.css", '@import "//x.invalid/a.css";');
 bad("css url(//)", "web/a.css", "a { background: url('//x.invalid/p.png'); }");
+bad("css url(//) 主机名不带点", "web/a.css", "a { background: url(//cdn/a.css); }");
+bad("@import 字符串 // 主机名不带点", "web/a.css", '@import "//cdn/a.css";');
+bad("srcset 第二个地址", "web/a.html", '<img srcset="a.png 1x, //cdn/b.png 2x">');
+bad("meta refresh 跳到 //", "web/a.html", '<meta http-equiv="refresh" content="0;url=//cdn/a">');
 bad("js img.src = '//'", "web/a.js", "const i = new Image(); i.src = '//cdn.example.invalid/p.gif';");
 bad("js 字符串里的 //host", "web/a.js", 'const u = "//cdn.example.invalid/x";');
 // 坏例：网络调用

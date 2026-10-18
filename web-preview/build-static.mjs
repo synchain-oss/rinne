@@ -95,11 +95,19 @@ const ALLOWED_URL = /^https?:\/\/(?:www\.w3\.org\/2000\/svg|juce\.backend\/?)$/;
  */
 const NETWORK_CALLS = /\b(?:fetch|sendBeacon|XMLHttpRequest|WebSocket|EventSource|importScripts|Worker|SharedWorker)\b/;
 
-/** 协议相对地址（//host/…）：属性、url()、@import 与 JS 字符串里的形态。 */
+/**
+ * 协议相对地址（//host/…）：属性、url()、@import、srcset 多地址、meta refresh 与 JS 字符串里的形态。
+ * 盲区：反斜杠写法、HTML 实体写法、运行时拼出来的名字或地址，静态扫描不处理，由页面冒烟里
+ * Network.requestWillBeSent 的同源断言兜底。
+ */
 const PROTOCOL_RELATIVE = [
     /\b(?:src|href|action|poster|formaction|srcset|data)\s*=\s*["']?\s*\/\//i,
     /url\(\s*["']?\s*\/\//i,
     /@import\s+(?:url\(\s*)?["']?\s*\/\//i,
+    // srcset 逗号后的第二个及之后的地址
+    /\bsrcset\s*=\s*["'][^"']*,\s*\/\//i,
+    // <meta http-equiv="refresh" content="0;url=//…">
+    /\bcontent\s*=\s*["'][^"']*;\s*url\s*=\s*["']?\s*\/\//i,
     /["'`]\s*\/\/[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)+/,
 ];
 
