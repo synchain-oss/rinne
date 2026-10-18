@@ -4,8 +4,8 @@
 # 期望变红的格子（FAIL）同样要检查：工具若把它们判成 PASS，这里就变红。
 #   cmake -DNULLTEST=<可执行文件> -DWORK_DIR=<父目录，脚本在其下新建本次运行的子目录> -P selftest.cmake
 
-if(NOT NULLTEST OR NOT WORK_DIR)
-  message(FATAL_ERROR "需要 -DNULLTEST=<rinne_nulltest> 和 -DWORK_DIR=<父目录，脚本在其下新建本次运行的子目录>")
+if(NOT NULLTEST OR NOT FIXTURES OR NOT WORK_DIR)
+  message(FATAL_ERROR "需要 -DNULLTEST=<rinne_nulltest>、-DFIXTURES=<夹具生成器> 和 -DWORK_DIR=<父目录，脚本在其下新建本次运行的子目录>")
 endif()
 # WORK_DIR 从 -D 传入，只当父目录：不清空、不递归删。本次运行的 WAV 都写在它下面新建的
 # run-<时间戳>-<随机> 子目录里，跑完只删这个自己新建的子目录；子目录已存在就报错，不复用。
@@ -29,6 +29,14 @@ function(run expect_rc expect_text)
   # 工具把用法错误、文件打不开一类的提示写到 stderr，正常报告写到 stdout，两者合起来匹配
   if(NOT "${out}${err}" MATCHES "${expect_text}")
     message(FATAL_ERROR "输出里没有 ${expect_text}：rinne_nulltest ${ARGN}\n${out}${err}")
+  endif()
+endfunction()
+
+# fx(<夹具名> <输出文件>)：用夹具生成器写一个手工拼的 WAV
+function(fx name out)
+  execute_process(COMMAND "${FIXTURES}" "${name}" "${out}" RESULT_VARIABLE rc ERROR_VARIABLE err)
+  if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "夹具 ${name} 生成失败（${rc}）：${err}")
   endif()
 endfunction()
 
@@ -84,7 +92,7 @@ foreach(fmt IN ITEMS f64 i16 i24 i32)
 endforeach()
 run(1 "--format 只能是" make-signal --out "${RUN_DIR}/bad.wav" --format i8)
 # 原始字节判据：两份 i32 文件只差冲激的 1 个整数码，解码成 float 后完全相同，必须仍报「逐位相同：否」。
-# 结果仍是 PASS：差 1 个码远低于 -120 dB 的残差门限，判 PASS 与否看残差，逐位相同单列在报告里
+# 结果仍是 PASS：解码成 float 后残差恰好为 0，判 PASS 与否看残差，逐位相同单列在报告里
 run(0 "已生成" make-signal --out "${RUN_DIR}/lsb.wav" --format i32 --lsb-flip)
 run(0 "逐位相同：否.*结果：PASS" compare --a "${RUN_DIR}/fmt-i32-a.wav" --b "${RUN_DIR}/lsb.wav")
 run(1 "--lsb-flip 只用于" make-signal --out "${RUN_DIR}/bad.wav" --lsb-flip)
@@ -115,6 +123,59 @@ run(1 "放不下" make-signal --out "${RUN_DIR}/toolong.wav" --kind impulse-trai
 run(2 "对不上" echo --in "${RUN_DIR}/train.wav" --d 2048 --sr 44100)
 run(0 "已生成" make-signal --out "${RUN_DIR}/one.wav" --kind impulse)
 run(2 "回声峰不足" echo --in "${RUN_DIR}/one.wav" --d 2048 --sr 48000)
+
+# echo 至少要量到 2 个间隔（3 个峰）才下结论；D 太小、非整数的 D 与 sr 是用法错误；录音含 NaN 也不下结论
+run(0 "已生成" make-signal --out "${RUN_DIR}/train2.wav" --kind impulse-train --d 2048 --count 2)
+run(2 "回声峰不足 3 个" echo --in "${RUN_DIR}/train2.wav" --d 2048 --sr 48000)
+run(0 "共验证 5 个间隔.*结果：PASS" echo --in "${RUN_DIR}/train.wav" --d 2048 --sr 48000)
+run(1 "至少要 2" echo --in "${RUN_DIR}/train.wav" --d 1 --sr 48000)
+run(1 "必须是整数" echo --in "${RUN_DIR}/train.wav" --d 2048.5 --sr 48000)
+run(1 "必须是整数" echo --in "${RUN_DIR}/train.wav" --d 2048 --sr 48000.5)
+fx(nan "${RUN_DIR}/nan.wav")
+run(2 "NaN 或 Inf" echo --in "${RUN_DIR}/nan.wav" --d 2048 --sr 48000)
+
+# compare 要求里面真有声音：空文件、全静音、含 NaN、信号太弱（含静音对微弱噪声）一律 FAIL，不能因为"一模一样"就 PASS
+fx(empty "${RUN_DIR}/empty.wav")
+fx(silence "${RUN_DIR}/silence.wav")
+fx(weak "${RUN_DIR}/weak.wav")
+run(2 "结果：FAIL.*0 帧" compare --a "${RUN_DIR}/empty.wav" --b "${RUN_DIR}/empty.wav")
+run(2 "信号太弱，无法判定" compare --a "${RUN_DIR}/silence.wav" --b "${RUN_DIR}/silence.wav")
+run(2 "信号太弱，无法判定" compare --a "${RUN_DIR}/silence.wav" --b "${RUN_DIR}/weak.wav")
+run(2 "信号太弱，无法判定" compare --a "${RUN_DIR}/weak.wav" --b "${RUN_DIR}/weak.wav")
+run(2 "NaN 或 Inf" compare --a "${RUN_DIR}/nan.wav" --b "${RUN_DIR}/nan.wav")
+# 长度不同：即使多出来的尾部是静音也 FAIL（make-signal 3 秒 vs 4 秒，前 3 秒完全相同）
+run(0 "已生成" make-signal --out "${RUN_DIR}/three.wav" --seconds 3)
+run(2 "两份长度不同，导出范围不一致" compare --a "${sig}" --b "${RUN_DIR}/three.wav")
+
+# 残差门限（默认 -120 dBFS）本身：lag = 0、不逐位相同的两份，差 -118 dB 要 FAIL，差 -122 dB 要 PASS
+fx(noise-a "${RUN_DIR}/noise-a.wav")
+fx(noise-bm118 "${RUN_DIR}/noise-b-118.wav")
+fx(noise-bm122 "${RUN_DIR}/noise-b-122.wav")
+run(2 "逐位相同：否.*对齐偏移（lag）：0 样本.*结果：FAIL.*高于门限"
+    compare --a "${RUN_DIR}/noise-a.wav" --b "${RUN_DIR}/noise-b-118.wav")
+run(0 "逐位相同：否.*对齐偏移（lag）：0 样本.*结果：PASS" compare --a "${RUN_DIR}/noise-a.wav" --b "${RUN_DIR}/noise-b-122.wav")
+# 门限可调，方向也要对：同一份 -118 dB 的差，门限放宽到 -100 就 PASS
+run(0 "结果：PASS" compare --a "${RUN_DIR}/noise-a.wav" --b "${RUN_DIR}/noise-b-118.wav" --threshold-db -100)
+
+# 读入路径：真实 DAW 导出的头形状。和 ref-f32 逐值相同的 24 位文件，用不同容器写出来，解码后必须逐位相同
+fx(ref-f32 "${RUN_DIR}/ref.wav")
+foreach(fix IN ITEMS plain24 ext24 data-ffff)
+  fx(${fix} "${RUN_DIR}/fix-${fix}.wav")
+  run(0 "逐位相同：是.*结果：PASS" compare --a "${RUN_DIR}/ref.wav" --b "${RUN_DIR}/fix-${fix}.wav")
+endforeach()
+# RF64 不支持、头被截断：退出码 1 并说人话，不能判通过
+fx(rf64 "${RUN_DIR}/fix-rf64.wav")
+fx(trunc "${RUN_DIR}/fix-trunc.wav")
+run(1 "这不是 WAV 文件" compare --a "${RUN_DIR}/ref.wav" --b "${RUN_DIR}/fix-rf64.wav")
+run(1 "被截断" compare --a "${RUN_DIR}/ref.wav" --b "${RUN_DIR}/fix-trunc.wav")
+
+# 24 位、单声道、总样本数为奇数：data 长度是奇数，后面要补一个 0 字节（文件 = 44 + 12003 + 1）
+run(0 "已生成" make-signal --out "${RUN_DIR}/odd24.wav" --kind impulse --format i24 --channels 1 --sr 8000 --seconds 0.5001)
+file(SIZE "${RUN_DIR}/odd24.wav" odd_size)
+if(NOT odd_size EQUAL 12048)
+  message(FATAL_ERROR "奇数长度的 24 位 data 没有补字节：文件大小 ${odd_size}，期望 12048")
+endif()
+run(0 "逐位相同：是.*结果：PASS" compare --a "${RUN_DIR}/odd24.wav" --b "${RUN_DIR}/odd24.wav")
 
 # 用法错误：退出码 1，且说人话
 run(1 "不认识的子命令" nonsense)

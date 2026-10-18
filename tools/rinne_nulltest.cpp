@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <exception>
 #include <vector>
 
 #if defined(_WIN32)
@@ -263,7 +264,7 @@ bool writeWav(const std::string& path, uint32_t sampleRate, uint16_t channels, c
     const uint32_t bytesPerSample = bits / 8u;
     const uint16_t blockAlign = static_cast<uint16_t>(channels * bytesPerSample);
     const uint64_t dataBytes64 = static_cast<uint64_t>(samples.size()) * bytesPerSample;
-    if (dataBytes64 > std::numeric_limits<uint32_t>::max() - 36u)
+    if (dataBytes64 > std::numeric_limits<uint32_t>::max() - 38u)
     {
         err = "生成的文件超过 WAV 4 GiB 的上限，请减小 --seconds、--sr 或 --channels";
         return false;
@@ -272,7 +273,8 @@ bool writeWav(const std::string& path, uint32_t sampleRate, uint16_t channels, c
 
     std::vector<uint8_t> h;
     putTag(h, "RIFF");
-    putU32(h, 36u + dataBytes);
+    const uint32_t padBytes = dataBytes & 1u; // 块按偶数字节对齐：奇数长度的 data 后补一个 0
+    putU32(h, 36u + dataBytes + padBytes);
     putTag(h, "WAVE");
     putTag(h, "fmt ");
     putU32(h, 16);
@@ -323,6 +325,8 @@ bool writeWav(const std::string& path, uint32_t sampleRate, uint16_t channels, c
         }
         f.write(reinterpret_cast<const char*>(frame.data()), static_cast<std::streamsize>(frame.size()));
     }
+    if (padBytes != 0)
+        f.put('\0');
     f.flush();
     if (!f)
     {
@@ -572,7 +576,7 @@ int runMakeSignal(int argc, char** argv)
 
     // 分配之前先查：数据超过 WAV 的 4 GiB 上限就直接报错，不先去申请几个 GB 内存
     const uint64_t dataBytes = static_cast<uint64_t>(total + shift) * ch * (fmtBits / 8u);
-    if (dataBytes > std::numeric_limits<uint32_t>::max() - 36u)
+    if (dataBytes > std::numeric_limits<uint32_t>::max() - 38u)
     {
         std::cerr
             << "出错：生成的文件会超过 WAV 4 GiB 的上限，请减小 --seconds、--sr、--channels 或 --offset-samples\n";
@@ -594,6 +598,16 @@ int runMakeSignal(int argc, char** argv)
     {
         std::cerr << "出错：--seconds 太短，放不下 1.0 s 到 1.2 s 的噪声突发（至少 1.2 s）\n";
         return kExitError;
+    }
+    size_t lsbFlipAt = std::numeric_limits<size_t>::max();
+    if (hasFlag(a, "lsb-flip"))
+    {
+        if (fmtTag != 1 || fmtBits != 32)
+        {
+            std::cerr << "出错：--lsb-flip 只用于 --format i32\n";
+            return kExitError;
+        }
+        lsbFlipAt = (impulseAt + shift) * ch; // 冲激所在帧第 0 声道的整数码加 1
     }
     std::vector<float> samples((total + shift) * ch, 0.0f);
 
@@ -622,16 +636,6 @@ int runMakeSignal(int argc, char** argv)
         }
     }
 
-    size_t lsbFlipAt = std::numeric_limits<size_t>::max();
-    if (hasFlag(a, "lsb-flip"))
-    {
-        if (fmtTag != 1 || fmtBits != 32)
-        {
-            std::cerr << "出错：--lsb-flip 只用于 --format i32\n";
-            return kExitError;
-        }
-        lsbFlipAt = (impulseAt + shift) * ch; // 冲激所在帧第 0 声道的整数码加 1
-    }
     if (!writeWav(outPath, static_cast<uint32_t>(sr), static_cast<uint16_t>(channels), samples, fmtTag, fmtBits,
                   lsbFlipAt, err))
     {
@@ -757,6 +761,25 @@ int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundS
     return bestLag;
 }
 
+// 参考信号（A）的峰值低于它就算「里面没有声音」：两份静音互比什么也说明不了
+constexpr double kMinSignalPeak = 0.001; // -60 dBFS
+
+bool hasNonFinite(const WavData& w)
+{
+    for (const float s : w.samples)
+        if (!std::isfinite(s))
+            return true;
+    return false;
+}
+
+double peakOf(const WavData& w)
+{
+    double p = 0.0;
+    for (const float s : w.samples)
+        p = std::max(p, static_cast<double>(std::fabs(s)));
+    return p;
+}
+
 bool loadWav(const std::string& path, WavData& w)
 {
     std::string err;
@@ -820,6 +843,22 @@ int runCompare(int argc, char** argv)
         return kExitFail;
     }
 
+    // 对拍的前提是里面真有声音：空文件、含 NaN / Inf、参考信号太弱都不下结论，直接 FAIL
+    if (wa.frames == 0 || wb.frames == 0)
+        reasons.push_back("有一份文件没有任何采样（0 帧），里面没有声音，对拍没有意义");
+    else if (hasNonFinite(wa) || hasNonFinite(wb))
+        reasons.push_back("文件里有 NaN 或 Inf，对拍没有意义");
+    else if (peakOf(wa) < kMinSignalPeak)
+        reasons.push_back("信号太弱，无法判定：A 的峰值 " + dbText(toDb(peakOf(wa))) + " 低于 " +
+                          fixed(toDb(kMinSignalPeak), 0) + " dBFS，里面没有声音，对拍没有意义");
+    if (!reasons.empty())
+    {
+        std::cout << "结果：FAIL\n";
+        for (const std::string& r : reasons)
+            std::cout << "原因：" << r << "\n";
+        return kExitFail;
+    }
+
     // 解码成 float 后相同，且两份格式一样时再看原始字节（32 位整数、64 位浮点解码会丢低位）
     const bool sameFormat = wa.fmtTag == wb.fmtTag && wa.bits == wb.bits;
     const bool identical = wa.frames == wb.frames &&
@@ -877,6 +916,12 @@ int runCompare(int argc, char** argv)
         pass = false;
         reasons.push_back("两份有 " + std::to_string(lag) + " 样本的错位（如果错位是预期的，加 --allow-lag）");
     }
+    // B 应该刚好比 A 长 lag 个样本；长度对不上说明导出范围不一致，尾部本来是静音也不放过
+    if (static_cast<int64_t>(wb.frames) != static_cast<int64_t>(wa.frames) + lag)
+    {
+        pass = false;
+        reasons.push_back("两份长度不同，导出范围不一致");
+    }
     std::cout << "结果：" << (pass ? "PASS" : "FAIL");
     if (pass)
         std::cout << (identical ? "（逐位相同）" : "（残差不高于 " + fixed(thresholdDb, 1) + " dBFS）");
@@ -911,10 +956,15 @@ bool parseDelay(const std::string& text, double sampleRate, int64_t& samples, st
         err = "--d 需要一个正数，写法如 2048、2048samples 或 42.67ms，收到：" + text;
         return false;
     }
-    samples = static_cast<int64_t>(std::llround(inMs ? v * sampleRate / 1000.0 : v));
-    if (samples < 1)
+    if (!inMs && v != std::floor(v))
     {
-        err = "--d 换算成样本数后不足 1";
+        err = "--d 按样本数写时必须是整数，收到：" + text + "（要写毫秒请加 ms 后缀）";
+        return false;
+    }
+    samples = static_cast<int64_t>(std::llround(inMs ? v * sampleRate / 1000.0 : v));
+    if (samples < 2)
+    {
+        err = "--d 换算成样本数后至少要 2：间隔 1 样本时相邻冲激连在一起，分不出峰";
         return false;
     }
     return true;
@@ -943,6 +993,11 @@ int runEcho(int argc, char** argv)
         std::cerr << "出错：需要 --sr <采样率 Hz>，例如 --sr 48000\n";
         return kExitError;
     }
+    if (sr != std::floor(sr))
+    {
+        std::cerr << "出错：--sr 必须是整数 Hz，例如 --sr 48000\n";
+        return kExitError;
+    }
     int64_t d = 0;
     if (!parseDelay(dText, sr, d, err))
     {
@@ -962,6 +1017,11 @@ int runEcho(int argc, char** argv)
         return kExitFail;
     }
 
+    if (hasNonFinite(w))
+    {
+        std::cout << "结果：FAIL\n原因：录音里有 NaN 或 Inf，没法找峰\n";
+        return kExitFail;
+    }
     // 每帧取各声道绝对值的最大者，作为包络
     std::vector<double> env(w.frames, 0.0);
     double top = 0.0;
@@ -996,9 +1056,10 @@ int runEcho(int argc, char** argv)
     }
 
     std::cout << "找到 " << peaks.size() << " 个回声峰（门限：最大峰值以下 " << fixed(-minPeakDb, 1) << " dB）\n";
-    if (peaks.size() < 2)
+    if (peaks.size() < 3)
     {
-        std::cout << "结果：FAIL\n原因：回声峰不足 2 个，量不出间隔。检查录音里是否真的有回声，或把 --min-peak-db "
+        std::cout << "结果：FAIL\n原因：回声峰不足 3 个，至少要量到 2 个间隔才下结论。检查录音里是否真的有回声，或把 "
+                     "--min-peak-db "
                      "调低（如 -40）\n";
         return kExitFail;
     }
@@ -1022,6 +1083,7 @@ int runEcho(int argc, char** argv)
             pass = false;
         worst = std::max(worst, diff);
     }
+    std::cout << "共验证 " << gaps.size() << " 个间隔\n";
     std::cout << "最大偏差：" << worst << " 样本（允许 " << tol << "）\n";
     std::cout << "结果：" << (pass ? "PASS" : "FAIL") << "\n";
     if (!pass)
@@ -1051,14 +1113,20 @@ void printHelp(std::ostream& os)
           "compare       对比两份 WAV\n"
           "    rinne_nulltest compare --a 原始.wav --b 导出.wav [--head-seconds 2]\n"
           "    报告：是否逐位相同、B 相对 A 的错位（lag，单位样本）、残差峰值与 RMS（dBFS）。\n"
-          "    --head-seconds <秒>   再单独报告开头这一段的残差\n"
+          "    --head-seconds <秒>   再单独报告开头这一段的残差（整体残差已包含这一段，不是额外的门）\n"
+          "    A 要有声音（峰值不低于 -60 dBFS），两份都不能是空文件或含 NaN / Inf，长度要对得上（B 比 A 长 lag "
+          "个样本），"
+          "否则 FAIL。\n"
           "    --threshold-db <dB>   残差不高于它才算 PASS，默认 -120\n"
           "    --max-lag <样本>      找错位时的搜索范围，默认 4800\n"
           "    --allow-lag           错位是预期的时候加上，否则有错位就是 FAIL\n"
           "\n"
           "echo          量回声间隔\n"
           "    rinne_nulltest echo --in 录音.wav --d 2048 --sr 48000\n"
-          "    在录音里找冲激回声，相邻间隔都等于 D 才是 PASS。录音要用只有冲激的信号（make-signal --kind impulse）。\n"
+          "    在录音里找冲激回声，相邻间隔都等于 D 才是 PASS。录音必须是纯冲激串（make-signal --kind "
+          "impulse-train）。\n"
+          "    默认的 test-signal.wav 带噪声突发，是给 compare 用的，拿去过 echo 会因为噪声峰判 FAIL。\n"
+          "    至少要有 3 个回声峰（量到 2 个间隔）才下结论；--d 至少 2 样本，按样本写必须是整数，--sr 也必须是整数。\n"
           "    --d 的写法：2048（样本）、2048samples、42.67ms\n"
           "    --min-peak-db <dB>    比最大峰值低多少以内的峰都算回声，默认 -20\n"
           "    --tol-samples <N>     允许的偏差，默认 0（必须完全相等）\n"
@@ -1092,12 +1160,21 @@ int main(int argc, char** argv)
             return kExitPass;
         }
     }
-    if (cmd == "make-signal")
-        return runMakeSignal(argc, argv);
-    if (cmd == "compare")
-        return runCompare(argc, argv);
-    if (cmd == "echo")
-        return runEcho(argc, argv);
+    try
+    {
+        if (cmd == "make-signal")
+            return runMakeSignal(argc, argv);
+        if (cmd == "compare")
+            return runCompare(argc, argv);
+        if (cmd == "echo")
+            return runEcho(argc, argv);
+    }
+    catch (const std::exception&)
+    {
+        std::cerr
+            << "出错：运行中途失败，多半是内存不够（文件太大，或参数把信号开得太长）。请换小一点的文件或参数再试\n";
+        return kExitError;
+    }
     std::cerr << "出错：不认识的子命令 " << cmd << "（可用：make-signal、compare、echo；--help 看用法）\n";
     return kExitError;
 }

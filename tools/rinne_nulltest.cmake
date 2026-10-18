@@ -12,9 +12,17 @@ if(NOT MSVC)
 endif()
 
 if(RINNE_BUILD_TESTS)
+  # 自测用的 WAV 夹具生成器：只给自测用，输出到测试目录，不进 tools-bin（CI 只上传 tools-bin 里的工具）
+  add_executable(rinne_nulltest_fixtures "${CMAKE_SOURCE_DIR}/tests/tools/nulltest/make_fixtures.cpp")
+  rinne_target_warnings(rinne_nulltest_fixtures PRIVATE)
+  rinne_warnings_as_errors(rinne_nulltest_fixtures)
+  set_target_properties(rinne_nulltest_fixtures PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/nulltest-fixtures-bin/$<CONFIG>")
+
   add_test(NAME rinne_nulltest_selftest
     COMMAND "${CMAKE_COMMAND}"
             "-DNULLTEST=$<TARGET_FILE:rinne_nulltest>"
+            "-DFIXTURES=$<TARGET_FILE:rinne_nulltest_fixtures>"
             "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/nulltest-selftest"
             -P "${CMAKE_SOURCE_DIR}/tests/tools/nulltest/selftest.cmake")
   set_tests_properties(rinne_nulltest_selftest PROPERTIES TIMEOUT 120)
