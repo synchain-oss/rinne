@@ -2,15 +2,23 @@
 #
 # rinne_nulltest 自测，用合成 WAV 跑三格：通过；D 差 1 样本 -> FAIL；两份不一致 -> FAIL。
 # 期望变红的格子（FAIL）同样要检查：工具若把它们判成 PASS，这里就变红。
-#   cmake -DNULLTEST=<可执行文件> -DWORK_DIR=<临时目录> -P selftest.cmake
+#   cmake -DNULLTEST=<可执行文件> -DWORK_DIR=<父目录，脚本在其下新建本次运行的子目录> -P selftest.cmake
 
 if(NOT NULLTEST OR NOT WORK_DIR)
-  message(FATAL_ERROR "需要 -DNULLTEST=<rinne_nulltest> 和 -DWORK_DIR=<临时目录>")
+  message(FATAL_ERROR "需要 -DNULLTEST=<rinne_nulltest> 和 -DWORK_DIR=<父目录，脚本在其下新建本次运行的子目录>")
 endif()
-file(REMOVE_RECURSE "${WORK_DIR}")
+# WORK_DIR 从 -D 传入，只当父目录：不清空、不递归删。本次运行的 WAV 都写在它下面新建的
+# run-<时间戳>-<随机> 子目录里，跑完只删这个自己新建的子目录；子目录已存在就报错，不复用。
 file(MAKE_DIRECTORY "${WORK_DIR}")
+string(TIMESTAMP run_stamp "%Y%m%d-%H%M%S" UTC)
+string(RANDOM LENGTH 12 ALPHABET "0123456789abcdef" run_random)
+set(RUN_DIR "${WORK_DIR}/run-${run_stamp}-${run_random}")
+if(EXISTS "${RUN_DIR}")
+  message(FATAL_ERROR "本次运行的子目录已存在，不复用也不清空：${RUN_DIR}")
+endif()
+file(MAKE_DIRECTORY "${RUN_DIR}")
 
-# run(<期望退出码> <输出里必须出现的正则> <参数...>)
+# run(<期望退出码> <stdout 与 stderr 合起来必须出现的正则> <参数...>)
 function(run expect_rc expect_text)
   execute_process(COMMAND "${NULLTEST}" ${ARGN}
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
@@ -18,13 +26,14 @@ function(run expect_rc expect_text)
   if(NOT rc EQUAL expect_rc)
     message(FATAL_ERROR "期望退出码 ${expect_rc}，实际 ${rc}：rinne_nulltest ${ARGN}\n${out}${err}")
   endif()
-  if(NOT out MATCHES "${expect_text}")
+  # 工具把用法错误、文件打不开一类的提示写到 stderr，正常报告写到 stdout，两者合起来匹配
+  if(NOT "${out}${err}" MATCHES "${expect_text}")
     message(FATAL_ERROR "输出里没有 ${expect_text}：rinne_nulltest ${ARGN}\n${out}${err}")
   endif()
 endfunction()
 
-set(sig "${WORK_DIR}/sig.wav")
-set(sig2 "${WORK_DIR}/sig2.wav")
+set(sig "${RUN_DIR}/sig.wav")
+set(sig2 "${RUN_DIR}/sig2.wav")
 
 # make-signal：同参数逐字节一致；格式是 48 kHz、32 位浮点、立体声（头 44 字节 + 4 秒 * 48000 * 8 字节）
 run(0 "已生成" make-signal --out "${sig}")
@@ -50,34 +59,45 @@ run(0 "48000 Hz，2 声道" compare --a "${sig}" --b "${sig}")
 run(0 "逐位相同：是.*开头 2.00 秒残差.*结果：PASS" compare --a "${sig}" --b "${sig2}" --head-seconds 2)
 
 # 第 3 格：两份不一致 -> FAIL。种子不同的噪声，以及错位 3 样本，都必须判红并报出 lag
-run(0 "已生成" make-signal --out "${WORK_DIR}/other.wav" --seed 2)
-run(2 "逐位相同：否.*结果：FAIL" compare --a "${sig}" --b "${WORK_DIR}/other.wav")
-run(0 "已生成" make-signal --out "${WORK_DIR}/late.wav" --offset-samples 3)
-run(2 "对齐偏移（lag）：3 样本.*结果：FAIL" compare --a "${sig}" --b "${WORK_DIR}/late.wav")
+run(0 "已生成" make-signal --out "${RUN_DIR}/other.wav" --seed 2)
+run(2 "逐位相同：否.*结果：FAIL" compare --a "${sig}" --b "${RUN_DIR}/other.wav")
+run(0 "已生成" make-signal --out "${RUN_DIR}/late.wav" --offset-samples 3)
+run(2 "对齐偏移（lag）：3 样本.*结果：FAIL" compare --a "${sig}" --b "${RUN_DIR}/late.wav")
 # 错位是预期时加 --allow-lag 才算过（对齐后残差为 0）
-run(0 "结果：PASS" compare --a "${sig}" --b "${WORK_DIR}/late.wav" --allow-lag)
+run(0 "结果：PASS" compare --a "${sig}" --b "${RUN_DIR}/late.wav" --allow-lag)
 
 # 采样率不同 -> FAIL
-run(0 "已生成" make-signal --out "${WORK_DIR}/s44.wav" --sr 44100)
-run(2 "采样率不同" compare --a "${sig}" --b "${WORK_DIR}/s44.wav")
+run(0 "已生成" make-signal --out "${RUN_DIR}/s44.wav" --sr 44100)
+run(2 "采样率不同" compare --a "${sig}" --b "${RUN_DIR}/s44.wav")
 
 # echo：等间隔冲激串，D = 2048 样本
-run(0 "已生成" make-signal --out "${WORK_DIR}/train.wav" --kind impulse-train --d 2048 --count 6)
-run(0 "结果：PASS" echo --in "${WORK_DIR}/train.wav" --d 2048 --sr 48000)
-run(0 "结果：PASS" echo --in "${WORK_DIR}/train.wav" --d 2048samples --sr 48000)
-run(0 "结果：PASS" echo --in "${WORK_DIR}/train.wav" --d 42.6667ms --sr 48000)
+run(0 "已生成" make-signal --out "${RUN_DIR}/train.wav" --kind impulse-train --d 2048 --count 6)
+run(0 "结果：PASS" echo --in "${RUN_DIR}/train.wav" --d 2048 --sr 48000)
+run(0 "结果：PASS" echo --in "${RUN_DIR}/train.wav" --d 2048samples --sr 48000)
+run(0 "结果：PASS" echo --in "${RUN_DIR}/train.wav" --d 42.6667ms --sr 48000)
 # 第 2 格：D 差 1 样本 -> FAIL，两个方向都试
-run(2 "最大偏差：1 样本.*结果：FAIL" echo --in "${WORK_DIR}/train.wav" --d 2049 --sr 48000)
-run(2 "最大偏差：1 样本.*结果：FAIL" echo --in "${WORK_DIR}/train.wav" --d 2047 --sr 48000)
+run(2 "最大偏差：1 样本.*结果：FAIL" echo --in "${RUN_DIR}/train.wav" --d 2049 --sr 48000)
+run(2 "最大偏差：1 样本.*结果：FAIL" echo --in "${RUN_DIR}/train.wav" --d 2047 --sr 48000)
 # 录音里只有一个间隔不对（2047）-> FAIL
-run(0 "已生成" make-signal --out "${WORK_DIR}/train2047.wav" --kind impulse-train --d 2047 --count 6)
-run(2 "结果：FAIL" echo --in "${WORK_DIR}/train2047.wav" --d 2048 --sr 48000)
+run(0 "已生成" make-signal --out "${RUN_DIR}/train2047.wav" --kind impulse-train --d 2047 --count 6)
+run(2 "结果：FAIL" echo --in "${RUN_DIR}/train2047.wav" --d 2048 --sr 48000)
 # 采样率对不上 -> FAIL；没有回声 -> FAIL
-run(2 "对不上" echo --in "${WORK_DIR}/train.wav" --d 2048 --sr 44100)
-run(0 "已生成" make-signal --out "${WORK_DIR}/one.wav" --kind impulse)
-run(2 "回声峰不足" echo --in "${WORK_DIR}/one.wav" --d 2048 --sr 48000)
+run(2 "对不上" echo --in "${RUN_DIR}/train.wav" --d 2048 --sr 44100)
+run(0 "已生成" make-signal --out "${RUN_DIR}/one.wav" --kind impulse)
+run(2 "回声峰不足" echo --in "${RUN_DIR}/one.wav" --d 2048 --sr 48000)
 
 # 用法错误：退出码 1，且说人话
 run(1 "不认识的子命令" nonsense)
-run(1 "打不开文件" compare --a "${WORK_DIR}/nope.wav" --b "${sig}")
+run(1 "打不开文件" compare --a "${RUN_DIR}/nope.wav" --b "${sig}")
 run(0 "用法" --help)
+
+# 用例全部通过：只删本进程这次新建的 RUN_DIR。删之前断言它的真实路径确实是 WORK_DIR 真实路径
+# 下带 run- 前缀的子目录（用的就是上面 MAKE_DIRECTORY 新建的那个变量，不重算）；断言不过就
+# 报错、不删，失败的现场留着便于排查。
+file(REAL_PATH "${WORK_DIR}" work_real)
+file(REAL_PATH "${RUN_DIR}" run_real)
+string(FIND "${run_real}" "${work_real}/run-" prefix_pos)
+if(NOT prefix_pos EQUAL 0)
+  message(FATAL_ERROR "拒绝删除：${run_real} 不是 ${work_real} 下本次新建的 run- 子目录")
+endif()
+file(REMOVE_RECURSE "${RUN_DIR}")
