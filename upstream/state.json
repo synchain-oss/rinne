@@ -1,0 +1,39 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "a9e93731a3d36f59224db4f029756713e6093471"
+    }
+  },
+  "files": [
+    {
+      "path": "src/core/state/StateCodec.h",
+      "source": "scvb-dev",
+      "from": "src/core/state/StateCodec.h",
+      "fromBlob": "36d3dc88be6a65b386ff56db3e893c714c20097c",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/state/StateCodec.cpp",
+      "source": "scvb-dev",
+      "from": "src/core/state/StateCodec.cpp",
+      "fromBlob": "508236cc36d4783d16999657920d80d06fd3e778",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/state/StateMigration.h",
+      "source": "scvb-dev",
+      "from": "src/core/state/StateMigration.h",
+      "fromBlob": "02592e784c33a61afe9a491054d1e81293565c84",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/state/StateMigration.cpp",
+      "source": "scvb-dev",
+      "from": "src/core/state/StateMigration.cpp",
+      "fromBlob": "d8c8bfca9cb225be4c573d39ba34662a938ced37",
+      "mode": "forked"
+    }
+  ]
+}
