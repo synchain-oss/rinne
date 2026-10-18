@@ -105,7 +105,8 @@ template<std::size_t N>
 StateLoadResult loadAs(const Bytes& bytes, Role role, StateDocument& out, std::uint32_t currentAbi,
                        const std::array<MigrateFn, N>& chain)
 {
-    return rinne::state::loadStateWith(bytes.data(), bytes.size(), role, out, currentAbi, chain.data(), chain.size());
+    return rinne::state::testing::loadStateWith(bytes.data(), bytes.size(), role, out, currentAbi, chain.data(),
+                                                chain.size());
 }
 
 } // namespace
@@ -169,12 +170,18 @@ TEST_CASE("load: 高 abi 拒载，原字节一个不改地交回", "[state][migr
         CHECK(result.sourceAbi == abi);
     }
 
-    // 只有头的形状对，后面是垃圾、role 也不符：一样原样交回，宁可留着也不替用户丢掉新版数据
-    Bytes garbage = rinne::test::rawContainer(9, 7, {});
+    // 头之后是什么都不看：块数超限、后面是垃圾，一样原样交回，宁可留着也不替用户丢掉新版数据
+    Bytes garbage = rinne::test::rawContainer(9, 2, {});
     garbage[12] = 0xff;
     garbage.resize(64u, 0x5au);
     requireUntouched(garbage, Role::Output, StateLoadStatus::RejectedNewer);
-    requireUntouched(Bytes(garbage.begin(), garbage.begin() + 16), Role::Input, StateLoadStatus::RejectedNewer);
+    requireUntouched(Bytes(garbage.begin(), garbage.begin() + 16), Role::Output, StateLoadStatus::RejectedNewer);
+
+    // 只有 role 照样比对（它的位置不随 abi 变）：对端的高版本字节判坏字节，不原样固化进本端的工程
+    CHECK(requireUntouched(garbage, Role::Input, StateLoadStatus::Corrupt).sourceAbi == 9u);
+    requireUntouched(withAbi(current, 2u), Role::Output, StateLoadStatus::Corrupt);
+    // 头里写的、调用方期望的都是同一个不认识的 role：也不认
+    requireUntouched(rinne::test::rawContainer(9, 9, {}), static_cast<Role>(9), StateLoadStatus::Corrupt);
 
     // 交回的字节下次再读，还是同一份高版本数据
     const Bytes newer = withAbi(current, 3u);

@@ -4,9 +4,10 @@
 // state 的加载入口：先判头（magic 与 abi），再按 abi 分流，最后解成整份文档。判读的先后是有意的：
 //   1. 零字节：没有可恢复的东西（例如还没接上 state 的构建存下的工程）。保持默认，不提示。
 //   2. 头读不出来、magic 不符：不是这个格式。保持默认，提示 state 未能恢复。
-//   3. abi 高于本构建：整份拒载，把原字节交回调用方，保存时一个字节都不改地写回去。这一步先于 role 与块结构的
-//      检查：更高的 abi 可能换了布局，按本构建的规则挑它的错，代价是把用户的新版数据丢掉。提示「工程由更新的版本
-//      保存」由调用方负责。
+//   3. abi 高于本构建：整份拒载，把原字节交回调用方，保存时一个字节都不改地写回去。这一步先于块结构的检查：
+//      更高的 abi 可能换了布局，按本构建的规则挑它的错，代价是把用户的新版数据丢掉。只有 role 照样比对：magic、
+//      abi、role 三个字段的位置永不改变，role 不符说明这是对端的字节，不该原样固化进本端的工程（判坏字节）。
+//      提示「工程由更新的版本保存」由调用方负责。
 //   4. abi 0：探针构建写的 state，只在探针身份下有效。只认头，内容一概不用，保持默认，不提示。
 //   5. abi 1 起低于本构建的：按 kMigrators 一级一级升到本构建的 abi，任何一级失败即整份失败。
 //   6. 解成文档；容器或载荷不合规时整份失败（保持默认，提示 state 未能恢复）。
@@ -63,9 +64,15 @@ bool runMigrations(Container& container, std::uint32_t fromAbi, std::uint32_t to
 // 完整加载。只有 Ok 与 Migrated 会写 out。
 StateLoadResult loadState(const std::uint8_t* data, std::size_t size, Role role, StateDocument& out) noexcept;
 
+// 只给单测用，处理器一律调 loadState。
+namespace testing
+{
+
 // 同 loadState，只是「本构建的 abi」与迁移链由参数给出：loadState 就是 loadStateWith(…, kAbi, kMigrators)。
-// 只给单测用：abi 1 时迁移链为空，迁移分支要假装本构建是更高的 abi、配上假链才走得到。
+// abi 1 时迁移链为空，迁移分支要假装本构建是更高的 abi、配上假链才走得到。
 StateLoadResult loadStateWith(const std::uint8_t* data, std::size_t size, Role role, StateDocument& out,
                               std::uint32_t currentAbi, const MigrateFn* chain, std::size_t chainLength) noexcept;
+
+} // namespace testing
 
 } // namespace rinne::state

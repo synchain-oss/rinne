@@ -29,6 +29,9 @@ StateLoadResult loadStateImpl(const std::uint8_t* data, std::size_t size, Role r
 
     if (header.abi > currentAbi)
     {
+        // magic、abi、role 的位置不随 abi 变，更高的 abi 也比得了 role：对端的字节不原样固化进本端的工程
+        if (!isKnownRole(role) || header.role != static_cast<std::uint32_t>(role))
+            return withStatus(StateLoadStatus::Corrupt, header.abi);
         StateLoadResult result = withStatus(StateLoadStatus::RejectedNewer, header.abi);
         result.preservedOriginal.assign(data, data + size);
         return result;
@@ -76,11 +79,12 @@ bool runMigrations(Container& container, std::uint32_t fromAbi, std::uint32_t to
 
 StateLoadResult loadState(const std::uint8_t* data, std::size_t size, Role role, StateDocument& out) noexcept
 {
-    return loadStateWith(data, size, role, out, kAbi, kMigrators.data(), kMigrators.size());
+    return testing::loadStateWith(data, size, role, out, kAbi, kMigrators.data(), kMigrators.size());
 }
 
-StateLoadResult loadStateWith(const std::uint8_t* data, std::size_t size, Role role, StateDocument& out,
-                              std::uint32_t currentAbi, const MigrateFn* chain, std::size_t chainLength) noexcept
+StateLoadResult testing::loadStateWith(const std::uint8_t* data, std::size_t size, Role role, StateDocument& out,
+                                       std::uint32_t currentAbi, const MigrateFn* chain,
+                                       std::size_t chainLength) noexcept
 {
     try
     {

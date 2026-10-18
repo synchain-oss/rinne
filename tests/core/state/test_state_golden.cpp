@@ -94,6 +94,7 @@ std::string schemaText()
            "\"output\" } }," +
            n + "    { \"offset\": 12, \"field\": \"chunkCount\", \"type\": \"u32\", \"max\": " +
            std::to_string(rinne::state::kMaxChunkCount) + " }" + n + "  ]," + n +
+           "  \"headerFixedAcrossAbi\": [\"magic\", \"abi\", \"role\"]," + n +
            "  \"chunk\": { \"layout\": [\"u32 fourcc\", \"u32 sizeBytes\", \"payload\", \"zero padding to 4 bytes\"], "
            "\"maxSizeBytes\": " +
            std::to_string(rinne::state::kMaxChunkBytes) + ", \"bytesAfterLastChunk\": \"rejected\" }," + n +
@@ -101,9 +102,9 @@ std::string schemaText()
            "after the known chunks in their original order\" }," +
            n + "  \"load\": [" + n + "    { \"case\": \"zero bytes\", \"result\": \"empty\" }," + n +
            "    { \"case\": \"short header or wrong magic\", \"result\": \"corrupt\" }," + n +
-           "    { \"case\": \"abi above this build\", \"result\": \"rejectedNewer\", \"note\": \"original bytes "
-           "written back unchanged\" }," +
-           n +
+           "    { \"case\": \"abi above this build, role of this end\", \"result\": \"rejectedNewer\", \"note\": "
+           "\"original bytes written back unchanged\" }," +
+           n + "    { \"case\": \"abi above this build, other role\", \"result\": \"corrupt\" }," + n +
            "    { \"case\": \"abi equal to probeAbi\", \"result\": \"ignoredProbe\", \"note\": \"only the header is "
            "read\" }," +
            n +

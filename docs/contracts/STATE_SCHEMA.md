@@ -11,7 +11,8 @@ status: draft
 - **Payloads**: `PRMS` (Input only) is a list of `{parameter ID, f32 plain value}`; `CFGS` (both roles) is a key/value
   table with 11 numbered keys, of which Output knows 1, 2, 4, 8 and 9.
 - **Compatibility rules**: unknown chunks, parameter IDs and keys are kept and written back unchanged. A higher abi
-  is refused and its original bytes are written back untouched. Probe builds' abi 0 is recognised and ignored. A
+  is refused and its original bytes are written back untouched, as long as the header names this end's role (magic,
+  abi and role never move). Probe builds' abi 0 is recognised and ignored. A
   lower abi is migrated one step at a time. Anything else that fails leaves the instance on its defaults; nothing is
   ever half applied.
 - **Sources of truth**: the key table in `src/core/state/StateCodec.h`. `tests/golden/state-schema.json` is
@@ -53,6 +54,8 @@ status: draft
 ```
 
 - role 写在头里：Input 的字节交给 Output（或反过来）时整份拒收，不会把对端的设置套到本端。
+- 头的前 12 字节（magic、abi、role）的位置与含义永不改变，更高的 abi 也靠它们判读；块数字段与之后的布局可以随
+  abi 改。
 - 块数与单块长度的上限在读任何块之前就生效，坏字节换不来大块内存。
 - 每一端认识的块：Input = `PRMS` + `CFGS`；Output = `CFGS`。其余的块（未知 fourcc，以及 Output 收到的 `PRMS`）
   连原始字节一起保留，保存时写在已知块之后、彼此顺序不变。
@@ -69,14 +72,16 @@ status: draft
 |---|---|---|---|
 | 零字节 | `Empty` | 保持默认，不提示 | 否 |
 | 不足 16 字节，或 magic 不符 | `Corrupt` | 保持默认，提示 state 未能恢复 | 否 |
-| abi 高于本构建 | `RejectedNewer` | 保持默认，提示工程由更新的版本保存 | 是，整份 |
+| abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持默认，提示工程由更新的版本保存 | 是，整份 |
+| abi 高于本构建，role 不是这一端 | `Corrupt` | 保持默认，提示 state 未能恢复 | 否 |
 | abi 0（探针） | `IgnoredProbe` | 保持默认，不提示 | 否 |
 | abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state | 否 |
 | abi 等于本构建 | 解码，`Ok` | 读入的 state | 否 |
 | 以上任何一步之后失败 | `Corrupt` | 保持默认，提示 state 未能恢复 | 否 |
 
-- **高 abi 先于一切结构检查**：更高的 abi 可能换了布局，按本构建的规则挑它的错，代价是把用户的新版数据丢掉。
+- **高 abi 先于块结构检查**：更高的 abi 可能换了布局，按本构建的规则挑它的错，代价是把用户的新版数据丢掉。
   拒载时交回的字节与收到的逐字节相同；处理器保存工程时把它们原样写回去，不用实例当前的 state 覆盖。
+  只有 role 照样比对：它的位置不随 abi 变，role 不符说明这是对端的字节，原样写回只会把它固化进本端的工程。
 - **探针只认头**：探针构建写的 state 只在探针身份下有效。头之后是什么、role 写的什么都不看。
 - **逐级迁移**：迁移在容器层上做，从 abi n 升到 n + 1 用第 n 个迁移函数，任何一级失败即整份失败。迁移完再按本构建
   的规则解码：低版本的载荷未必过得了本构建的载荷校验，先迁移才不会把能迁移的旧工程当成坏字节。abi 1 是第一版，
@@ -194,6 +199,7 @@ count × { u8 idLen | id（idLen 字节）| f32 值 }
 ## 改格式
 
 - 加新的 CFGS 键、新的块或新的参数不必升 abi：旧版把它们当未知项原样保留。新键只能用没用过的键号。
+- 头的前 12 字节（magic、abi、role）不能动；块数字段与之后的布局可以变。
 - 改已有字段的布局或含义必须升 abi：把 `kAbi` 加一，在 `kMigrators` 末尾追加一个从旧 abi 升上来的迁移函数，
   新增一份新 abi 的基线；旧的基线保留，作迁移测试的输入。
 - 已冻结之后，改到本文、`src/core/state/` 或 `tests/golden/state*` 的 PR 要按契约变更的规程走。

@@ -10,12 +10,14 @@
     { "offset": 8, "field": "role", "type": "u32", "values": { "1": "input", "2": "output" } },
     { "offset": 12, "field": "chunkCount", "type": "u32", "max": 64 }
   ],
+  "headerFixedAcrossAbi": ["magic", "abi", "role"],
   "chunk": { "layout": ["u32 fourcc", "u32 sizeBytes", "payload", "zero padding to 4 bytes"], "maxSizeBytes": 65536, "bytesAfterLastChunk": "rejected" },
   "chunks": { "input": ["PRMS", "CFGS"], "output": ["CFGS"], "unknown": "kept, written back after the known chunks in their original order" },
   "load": [
     { "case": "zero bytes", "result": "empty" },
     { "case": "short header or wrong magic", "result": "corrupt" },
-    { "case": "abi above this build", "result": "rejectedNewer", "note": "original bytes written back unchanged" },
+    { "case": "abi above this build, role of this end", "result": "rejectedNewer", "note": "original bytes written back unchanged" },
+    { "case": "abi above this build, other role", "result": "corrupt" },
     { "case": "abi equal to probeAbi", "result": "ignoredProbe", "note": "only the header is read" },
     { "case": "abi below this build", "result": "migrated", "note": "one step at a time" },
     { "case": "any other failure", "result": "corrupt", "note": "nothing applied" }
