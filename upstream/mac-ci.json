@@ -1,0 +1,39 @@
+{
+  "sources": {
+    "scvb-macos-au": {
+      "repo": "synchain-oss/scvb",
+      "ref": "feature/macos-au",
+      "sha": "e8a956907203f2285e9f691ca56f09f700d0328a"
+    }
+  },
+  "files": [
+    {
+      "path": "scripts/ci/mac/au-gate.sh",
+      "source": "scvb-macos-au",
+      "from": ".github/workflows/build-macos.yml",
+      "fromBlob": "ec4351f1c4f21f7444556eacf412883c697fd6be",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/ci/mac/pluginval-gate.sh",
+      "source": "scvb-macos-au",
+      "from": ".github/workflows/build-macos.yml",
+      "fromBlob": "ec4351f1c4f21f7444556eacf412883c697fd6be",
+      "mode": "forked"
+    },
+    {
+      "path": "tests/oop/rinne_auhost.cpp",
+      "source": "scvb-macos-au",
+      "from": "tests/macos/auhost/scvb_auhost.cpp",
+      "fromBlob": "8dc3da2d69c3bc218d4481629389059ac91e8de1",
+      "mode": "forked"
+    },
+    {
+      "path": "tests/oop/CMakeLists.txt",
+      "source": "scvb-macos-au",
+      "from": "tests/macos/auhost/CMakeLists.txt",
+      "fromBlob": "911cdc222983f9a963ac969a5dcd396b1fb58917",
+      "mode": "adapted"
+    }
+  ]
+}
