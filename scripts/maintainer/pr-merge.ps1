@@ -679,9 +679,13 @@ function Invoke-Premerge {
                 $result.Ok = $false
                 $result.Reason = "合并后构建改动了主 clone 的判据文件：$($changed -join '、')（$($result.Reason)）"
             } elseif (-not (Clear-RinneLatch $latch)) {
-                # 核对与清除之间标记又被动过：留着它（若还在），判红
+                # 核对全部通过、清除之前标记又被动过：构建留下的进程还活着，核对过的判据文件之后也可能又被改过。同样改写成
+                # 「已篡改」（被删掉时按路径写回），之后不再跑 git，也不 abort
+                $verified = $false
+                $err = Set-RinneLatchTampered -Latch $latch -Changed @('锁存标记（核对之后、清除之前被动过）')
+                $note = if ($err) { "$err：$($latch.Path)；维护者先核对主 clone 再继续" } else { "已锁存 $($latch.Path)，维护者核对后手动删除" }
                 $result.Ok = $false
-                $result.Reason = "合并后构建改动了主 clone 的判据文件：锁存标记（核对之后被动过，$($latch.Path)）（$($result.Reason)）"
+                $result.Reason = "合并后构建改动了主 clone 的判据文件：锁存标记（核对之后、清除之前被动过）、（之后没有再跑 git，wt/tip-$Pr 的合并也没有 abort）、（$note）（$($result.Reason)）"
             }
         } finally {
             # 放开句柄；没清掉的标记留在原处
@@ -849,7 +853,7 @@ function Invoke-SelfTest {
         $latchFile = Join-Path $tmp 'premerge-latch.json'
         Set-RinneLatchOverride $latchFile
         # 假构建脚本要不要顺手改一样判据文件或主 clone 的状态（见下面构建的路由）
-        $tamper = @{ What = ''; Refused = $null }
+        $tamper = @{ What = ''; Refused = $null; Late = $false }
         Clear-RinnePermCache
         $pull = Read-RinneFixture 'pr3-pull.json'
         $pull.state = 'open'; $pull.merged = $false; $pull.mergeable = $true; $pull.mergeable_state = 'clean'
@@ -954,6 +958,8 @@ function Invoke-SelfTest {
                     'latch-dir' { $tamper.Refused = Test-Throws { Remove-Item -LiteralPath $latchFile -ErrorAction Stop; $null = New-Item -ItemType Directory -Path $latchFile } }
                     'latch-edit' { $tamper.Refused = Test-Throws { [IO.File]::WriteAllText($latchFile, ((Read-RinneLatchText $latchFile) -replace '"nonce":"[0-9a-f]+"', '"nonce":"0"')) } }
                     'throw' { throw '构建中途出错' }
+                    # 构建留下的进程等核对过了再删标记：下一次查主 clone 的工作区（核对之后、清除之前）时删
+                    'latch-late' { $tamper.Late = $true }
                 }
                 $buildResult
             }
@@ -964,7 +970,12 @@ function Invoke-SelfTest {
         # 定档用仓里真的 scripts/lib/Tiers.psm1 与 tier-rules.json；只有主 clone 的工作区状态由 $tree 给出
         # Calls 数主 clone 的工作区状态被查了几次（每次都要跑 git）
         $tree = @{ Sha = $tipSha; Dirty = $false; Ignored = @(); Calls = 0 }
-        Set-RinneCloneStateImpl { param($root) $tree.Calls++; [pscustomobject]@{ Sha = $tree.Sha; Dirty = $tree.Dirty; Ignored = $tree.Ignored } }
+        Set-RinneCloneStateImpl {
+            param($root)
+            $tree.Calls++
+            if ($tamper.Late) { $tamper.Late = $false; Remove-Item -LiteralPath $latchFile -ErrorAction SilentlyContinue }
+            [pscustomobject]@{ Sha = $tree.Sha; Dirty = $tree.Dirty; Ignored = $tree.Ignored }
+        }
         # 基础设施清单与匹配规则都用仓里真的 scripts/lib/infra-paths.mjs
         $base = Get-MergeFacts -Pr 3 -CardId $cid
         # 主 clone 的判据文件在预期位置：hooksPath 指向主 clone 的 scripts/hooks，记录文件存在、在主 clone 与 wt/ 之外
@@ -1451,7 +1462,7 @@ function Invoke-SelfTest {
                     $tree.Dirty = $false; $tree.Sha = $tipSha
                     Get-ChildItem -LiteralPath $integrity.Hooks -Force | Where-Object Name -ne 'pre-push' | Remove-Item -Force
                     Set-Content -LiteralPath (Join-Path $integrity.Hooks 'pre-push') -Value '#!/bin/sh'
-                    Remove-Item -LiteralPath $latchFile -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $latchFile -Force -ErrorAction SilentlyContinue
                 }
                 $v.Code -eq 'not-ready' -and @($v.Failures | Where-Object { $_ -match "判据文件：[^（]*$pattern" }).Count -eq 1
             }
@@ -1543,7 +1554,19 @@ function Invoke-SelfTest {
                 Add-RinneCase $cases '合并后构建：构建把进行中标记换成同名目录，判红；目录留着，下一次拒绝' $true (
                     $vdir.Code -eq 'not-ready' -and @($vdir.Failures | Where-Object { $_ -match '判据文件：锁存标记' -and $_ -match '照样锁存' }).Count -eq 1 -and $dirLeft -and
                     $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
-                Remove-Item -LiteralPath $latchFile -Recurse -Force
+                # 只是测试建的空目录：不递归删
+                Remove-Item -LiteralPath $latchFile -Force
+                # 核对全部通过之后、清除之前标记被删掉（构建留下的进程还活着）：照样写回成已篡改、不 abort，下一次拒绝
+                $tipOps.Clear()
+                $tamper.What = 'latch-late'
+                try { $vl = Invoke-MergeCheck 3 $cid } finally { $tamper.What = ''; $tamper.Late = $false }
+                $ln = & $readLatch
+                $n0 = $log.Count
+                $again = & $thrown { Invoke-MergeCheck 3 $cid }
+                Add-RinneCase $cases '合并后构建：核对通过之后、清除之前标记被删掉，写回成已篡改、不 abort，下一次拒绝' $true (
+                    $vl.Code -eq 'not-ready' -and @($vl.Failures | Where-Object { $_ -match '判据文件：锁存标记（核对之后' }).Count -eq 1 -and $ln -and $ln.state -eq 'tampered' -and
+                    @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -eq 0 -and $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
+                Remove-Item -LiteralPath $latchFile -ErrorAction SilentlyContinue
             } finally { Set-RinneLatchHold $true }
             # 标记写不进去（目录不在、位置上已经有东西之类）：不跑构建
             Set-RinneLatchOverride (Join-Path $tmp 'no-such-dir/latch.json')

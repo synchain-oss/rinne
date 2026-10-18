@@ -172,8 +172,11 @@ function Test-PremergeLatch {
     $thrown = { param($sb) try { & $sb | Out-Null; '' } catch { $_.Exception.Message } }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-latch-selftest-$PID-$(Get-Random)"
     $saved = @{ Path = $env:PATH; Root = $env:RINNE_ROOT; LogDir = $env:RINNE_LOG_DIR; Override = $script:Override; Hold = $script:Hold }
-    $held = $null
+    $held, $made = $null, $false
     try {
+        # 不带 -Force：目录已经在（不是本进程建的）就抛错，finally 里也就不删它
+        $null = New-Item -ItemType Directory -Path $tmp
+        $made = $true
         $script:Override, $script:Hold = $null, $true
         # 工作区根的两种配置（环境变量与 git config rinne.root）都指到别处的诱饵目录，诱饵目录里另放一个标记
         $decoy = Join-Path $tmp 'decoy'
@@ -290,7 +293,15 @@ function Test-PremergeLatch {
         Set-Content -LiteralPath (Join-Path $lt 'wt/k/.git') -Value "gitdir: $((Join-Path $lt 'rinne/.git/worktrees/k') -replace '\\', '/')"
         $bin, $called, $marker = (Join-Path $tmp 'bin'), (Join-Path $tmp 'called.txt'), (Join-Path $lt $script:LatchName)
         $null = New-Item -ItemType Directory -Force -Path $bin
-        foreach ($n in 'git', 'gh') { Set-Content -LiteralPath (Join-Path $bin "$n.cmd") -Value "@echo %0 %*>>`"$called`"`r`n@exit /b 1" }
+        foreach ($n in 'git', 'gh') {
+            if ($IsWindows) { Set-Content -LiteralPath (Join-Path $bin "$n.cmd") -Value "@echo %0 %*>>`"$called`"`r`n@exit /b 1" }
+            else {
+                # 别的平台上 PATH 不认 .cmd：写成带可执行位的 sh 脚本
+                $f = Join-Path $bin $n
+                Set-Content -LiteralPath $f -Value "#!/bin/sh`necho `"`$0 `$*`" >> '$called'`nexit 1"
+                & chmod +x $f
+            }
+        }
         $cid = 'RN' + '-99a'
         $run = {
             param($where, [string[]]$argv)
@@ -330,7 +341,12 @@ function Test-PremergeLatch {
     } finally {
         if ($held) { Close-RinneLatch $held }
         $env:PATH, $env:RINNE_ROOT, $script:Override, $script:Hold = $saved.Path, $saved.Root, $saved.Override, $saved.Hold
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        # 只删本进程刚建的那个临时目录：解析后在系统临时目录之下、名字是上面起的
+        $full = [IO.Path]::GetFullPath($tmp)
+        if ($made -and $full.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase) -and
+            (Split-Path -Leaf $full) -like "rinne-latch-selftest-$PID-*") {
+            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
