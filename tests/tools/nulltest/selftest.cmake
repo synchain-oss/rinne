@@ -83,9 +83,10 @@ foreach(fmt IN ITEMS f64 i16 i24 i32)
   run(2 "逐位相同：否.*结果：FAIL" compare --a "${RUN_DIR}/fmt-${fmt}-a.wav" --b "${RUN_DIR}/fmt-${fmt}-c.wav")
 endforeach()
 run(1 "--format 只能是" make-signal --out "${RUN_DIR}/bad.wav" --format i8)
-# 原始字节判据：两份 i32 文件只差冲激的 1 个整数码，解码成 float 后完全相同，必须仍判「逐位相同：否」
+# 原始字节判据：两份 i32 文件只差冲激的 1 个整数码，解码成 float 后完全相同，必须仍报「逐位相同：否」。
+# 结果仍是 PASS：差 1 个码远低于 -120 dB 的残差门限，判 PASS 与否看残差，逐位相同单列在报告里
 run(0 "已生成" make-signal --out "${RUN_DIR}/lsb.wav" --format i32 --lsb-flip)
-run(2 "逐位相同：否.*结果：FAIL" compare --a "${RUN_DIR}/fmt-i32-a.wav" --b "${RUN_DIR}/lsb.wav")
+run(0 "逐位相同：否.*结果：PASS" compare --a "${RUN_DIR}/fmt-i32-a.wav" --b "${RUN_DIR}/lsb.wav")
 run(1 "--lsb-flip 只用于" make-signal --out "${RUN_DIR}/bad.wav" --lsb-flip)
 # --seconds 太短，放不下冲激或噪声突发：报错，不能静默生成残缺的文件
 run(1 "放不下 0.5 s" make-signal --out "${RUN_DIR}/short.wav" --kind impulse --seconds 0.4)
