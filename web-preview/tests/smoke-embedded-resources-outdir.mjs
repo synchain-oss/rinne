@@ -15,6 +15,16 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 
+/**
+ * 只摘掉链接本身：先确认路径确实是符号链接或 junction，再 unlink。
+ * Windows 上 libuv 的 unlink 也能摘目录 junction；POSIX 上 "junction" 类型会被忽略、建出来的是普通符号链接，
+ * rmdir 摘不掉它。不是链接就抛错，绝不退回递归删除。
+ */
+function unlinkLink(p) {
+    if (!fs.lstatSync(p).isSymbolicLink()) throw new Error(`不是符号链接或 junction，拒绝摘除：${p}`);
+    fs.unlinkSync(p);
+}
+
 const ROOT = repoRoot();
 const run = createRun("静态导出清空守卫");
 const { cleanVerdict, OUT_REL, MARKER } = await import(
@@ -144,7 +154,7 @@ try {
             fs.readdirSync(outside).sort().join() === `${MARKER},keep.txt`,
             "junction 指向的外部目录：什么都没被写或删",
         );
-        fs.rmdirSync(out); // 只摘掉副本里的 junction 本身
+        unlinkLink(out); // 只摘掉副本里的链接本身
         const gone = path.join(outside, "gone");
         fs.mkdirSync(gone);
         fs.symlinkSync(gone, out, "junction");
@@ -152,7 +162,7 @@ try {
         r = exec();
         run.check(r.status === 1, `固定目录是悬空的 junction：应当拒绝，实得 ${r.status}`);
         run.check(!fs.existsSync(gone), "悬空 junction：没有穿过链接创建任何东西");
-        fs.rmdirSync(out);
+        unlinkLink(out);
     } finally {
         fs.rmSync(outside, { recursive: true }); // 只删上面 mkdtemp 出来的目录
     }
