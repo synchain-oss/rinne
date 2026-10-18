@@ -595,8 +595,11 @@ void SafetyChain::processBack(float& left, float& right, float dryLeft, float dr
     }
 
     SafetyObservation o;
-    // 超大值只计回送路径自己放大出来的电平（见 SafetyMachine.h 里 kHugeLevel 的说明），用逐格判定、不带保持；
+    // 超大值只计回送路径自己放大出来的电平（见 SafetyMachine.h 里 kHugeLevel 的说明），逐样本判定、不带保持：
+    // 本样本的 |tap| 要高于送出窗口与正在累计的这一格里的全部送出。D 短于一格时回读来自当前格，所以当前格也要比；
     // g = 0 时状态机整个不计
+    const float sentPartial = sentHistory_.currentPeak();
+    chainAmplifiesNow_ = tapPeak_ > (sentMax_ > sentPartial ? sentMax_ : sentPartial);
     const float tapTerm = chainAmplifiesNow_ ? tapPeak_ : 0.0f;
     const float gainTerm = (chainAmplifiesNow_ || gain > 1.0f) ? xPeak : 0.0f;
     o.contributing = gain > 0.0f;
@@ -625,9 +628,6 @@ void SafetyChain::updateChainGain() noexcept
     sentMax_ = sentHistory_.maxOfLast(safety::kChainTapHops + static_cast<int>(lagHops));
     // 判为放大之后保持 3 s：送出窗口里的干声瞬态会让估计间歇地偏小，不能让它把整段真失控放过去
     const std::int64_t now = machine_.samplesProcessed();
-    // 逐格判定只看刚收尾这一格的回读峰值：100 ms 的回读窗口会把一次 10 ms 的突发拉长成 110 ms 的「放大」，
-    // 热干声正好凑满超大值的 100 ms。防误报门的判定仍看整个 100 ms 窗口，再加 3 s 保持
-    chainAmplifiesNow_ = tapHistory_.maxOfLast(1) > sentMax_;
     if (tapMax_ > sentMax_)
         amplifyUntil_ = now + amplifyHold_;
     chainAmplifies_ = now < amplifyUntil_;

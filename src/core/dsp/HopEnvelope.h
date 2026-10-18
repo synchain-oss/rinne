@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 10 ms 格上的滑动统计，安全判据用的「最近一段时间」都在这里算：
-//   HopPeakHistory   每格记一个峰值，查询最近 n 个整格的最大值（链增益估计用）；
+//   HopPeakHistory   每格记一个峰值，查询最近 n 个整格的最大值（链增益估计用）与正在累计的这一格的峰值；
 //   HopCountWindow   每格记命中样本数，给出「最近 n 个整格 + 正在累计的这一格」里的命中总数（失控保护的 3 s 窗用）。
 // 格长 round(0.01·sr)
 // 个样本，从锚点（prepare、复位、起播沿复位）起逐样本计数，所以格界只由样本数决定，与宿主怎么切块无关。
@@ -73,6 +73,9 @@ public:
         }
         return m;
     }
+
+    // 正在累计的这一格到目前为止的峰值；本样本刚收尾一格时为 0（那一格已进 maxOfLast）
+    float currentPeak() const noexcept { return partial_; }
 
     int completedHops() const noexcept { return filled_; }
     std::int64_t hopSamples() const noexcept { return hop_; }

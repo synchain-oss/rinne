@@ -90,7 +90,8 @@ TEST_CASE("a new target mid-ramp starts from the current value", "[dsp][smoother
     CHECK_FALSE(s.isSmoothing());
 }
 
-TEST_CASE("hop peak history matches a brute-force sliding maximum", "[dsp][hop]")
+TEST_CASE("hop peak history matches brute force: sliding maximum of whole hops and the partial hop's peak",
+          "[dsp][hop]")
 {
     constexpr int cap = 64;
     const std::int64_t hop = 37;
@@ -105,6 +106,10 @@ TEST_CASE("hop peak history matches a brute-force sliding maximum", "[dsp][hop]"
         const bool done = h.push(v);
         const auto count = static_cast<std::int64_t>(samples.size());
         REQUIRE(done == (count % hop == 0));
+        float partial = 0.0f; // 正在累计的这一格；刚收尾时为空
+        for (std::int64_t k = (count / hop) * hop; k < count; ++k)
+            partial = std::fmax(partial, samples[static_cast<std::size_t>(k)]);
+        REQUIRE(h.currentPeak() == partial);
         if (!done)
             continue;
         const auto completed = count / hop;
