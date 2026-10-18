@@ -258,7 +258,7 @@ bool parseFormat(const std::string& name, uint16_t& tag, uint16_t& bits)
 
 // 样本按位原样写出（浮点）或四舍五入到整数（PCM），所以同样的样本得到逐字节相同的文件。
 bool writeWav(const std::string& path, uint32_t sampleRate, uint16_t channels, const std::vector<float>& samples,
-              uint16_t fmtTag, uint16_t bits, std::string& err)
+              uint16_t fmtTag, uint16_t bits, size_t lsbFlipAt, std::string& err)
 {
     const uint32_t bytesPerSample = bits / 8u;
     const uint16_t blockAlign = static_cast<uint16_t>(channels * bytesPerSample);
@@ -293,8 +293,9 @@ bool writeWav(const std::string& path, uint32_t sampleRate, uint16_t channels, c
     }
     f.write(reinterpret_cast<const char*>(h.data()), static_cast<std::streamsize>(h.size()));
     std::vector<uint8_t> frame;
-    for (const float s : samples)
+    for (size_t idx = 0; idx < samples.size(); ++idx)
     {
+        const float s = samples[idx];
         frame.clear();
         if (fmtTag == 3 && bits == 32)
         {
@@ -314,7 +315,9 @@ bool writeWav(const std::string& path, uint32_t sampleRate, uint16_t channels, c
         {
             const double scale = static_cast<double>(1ull << (bits - 1));
             const double q = std::max(-scale, std::min(scale - 1.0, std::nearbyint(static_cast<double>(s) * scale)));
-            const uint32_t u = static_cast<uint32_t>(static_cast<int32_t>(q));
+            uint32_t u = static_cast<uint32_t>(static_cast<int32_t>(q));
+            if (idx == lsbFlipAt)
+                u += 1u; // 自测用：整数码差 1，解码成 float 后看不出来
             for (uint32_t i = 0; i < bytesPerSample; ++i)
                 frame.push_back(static_cast<uint8_t>((u >> (8 * i)) & 0xFF));
         }
@@ -519,8 +522,8 @@ int runMakeSignal(int argc, char** argv)
     Args a;
     std::string err;
     if (!parseArgs(argc, argv, 2,
-                   {"out", "kind", "format", "sr", "channels", "seconds", "seed", "offset-samples", "d", "count"}, {},
-                   a, err))
+                   {"out", "kind", "format", "sr", "channels", "seconds", "seed", "offset-samples", "d", "count"},
+                   {"lsb-flip"}, a, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
@@ -566,14 +569,33 @@ int runMakeSignal(int argc, char** argv)
     const size_t burstLen = static_cast<size_t>(sr) / 5; // 200 ms
     const size_t shift = static_cast<size_t>(offset);
     const size_t ch = static_cast<size_t>(channels);
-    std::vector<float> samples((total + shift) * ch, 0.0f);
 
+    // 分配之前先查：数据超过 WAV 的 4 GiB 上限就直接报错，不先去申请几个 GB 内存
+    const uint64_t dataBytes = static_cast<uint64_t>(total + shift) * ch * (fmtBits / 8u);
+    if (dataBytes > std::numeric_limits<uint32_t>::max() - 36u)
+    {
+        std::cerr
+            << "出错：生成的文件会超过 WAV 4 GiB 的上限，请减小 --seconds、--sr、--channels 或 --offset-samples\n";
+        return kExitError;
+    }
     if (kind == "impulse-train" && impulseAt + static_cast<size_t>(count - 1) * static_cast<size_t>(dSamples) >= total)
     {
         std::cerr << "出错：冲激串放不下：" << count << " 个冲激、间隔 " << dSamples
                   << " 样本，超出了 --seconds 的长度。请加大 --seconds 或减小 --count / --d\n";
         return kExitError;
     }
+    // 冲激在 0.5 s，粉噪突发占 1.0 s 到 1.2 s；--seconds 太短会把它们丢掉或截短，也要报错
+    if (kind == "impulse" && impulseAt >= total)
+    {
+        std::cerr << "出错：--seconds 太短，放不下 0.5 s 处的冲激（需要大于 0.5 s）\n";
+        return kExitError;
+    }
+    if (kind == "impulse-noise" && burstAt + burstLen > total)
+    {
+        std::cerr << "出错：--seconds 太短，放不下 1.0 s 到 1.2 s 的噪声突发（至少 1.2 s）\n";
+        return kExitError;
+    }
+    std::vector<float> samples((total + shift) * ch, 0.0f);
 
     auto put = [&](size_t frame, size_t c, double v) {
         const size_t f = frame + shift;
@@ -600,7 +622,18 @@ int runMakeSignal(int argc, char** argv)
         }
     }
 
-    if (!writeWav(outPath, static_cast<uint32_t>(sr), static_cast<uint16_t>(channels), samples, fmtTag, fmtBits, err))
+    size_t lsbFlipAt = std::numeric_limits<size_t>::max();
+    if (hasFlag(a, "lsb-flip"))
+    {
+        if (fmtTag != 1 || fmtBits != 32)
+        {
+            std::cerr << "出错：--lsb-flip 只用于 --format i32\n";
+            return kExitError;
+        }
+        lsbFlipAt = (impulseAt + shift) * ch; // 冲激所在帧第 0 声道的整数码加 1
+    }
+    if (!writeWav(outPath, static_cast<uint32_t>(sr), static_cast<uint16_t>(channels), samples, fmtTag, fmtBits,
+                  lsbFlipAt, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
@@ -1010,7 +1043,9 @@ void printHelp(std::ostream& os)
           "    --format f32|f64|i16|i24|i32   输出样本格式，默认 f32（32 位浮点）\n"
           "    --sr 48000  --channels 2  --seconds 4  --seed 1\n"
           "    --d <样本数>  --count <个数>   冲激串的间隔与个数（默认 2048、6）\n"
-          "    --offset-samples <N>           在最前面加 N 个样本的静音（用来造错位）\n"
+          "    --lsb-flip                     只用于 --format i32：冲激的整数码加 1（自测用，造出解码成 float "
+          "后看不出的差异）\n"
+          "    --offset-samples <N>          在最前面加 N 个样本的静音（用来造错位）\n"
           "    同样的参数每次生成的文件逐字节相同。\n"
           "\n"
           "compare       对比两份 WAV\n"
