@@ -74,7 +74,7 @@
 - 冻结面：`docs/contracts/**`、`tests/golden/**`，以及 `scripts/check-commits.mjs` 登记的源码（IPC 布局头文件、`src/core/state/**`、`src/input/ParamTable.h` 的 `RINNE_PARAM` 行、各 CMake 文件里的插件身份行；`scripts/lib/rules.mjs` 以 `CONTRACT_SOURCES` 转出）。
 - 每份契约文档有一行 `status: draft` 或 `status: frozen`。frozen 之后，碰到冻结面的 PR 二选一：同一个 PR 新增 `docs/contract-changes/<YYYYMMDD>-<slug>.md`（照 `TEMPLATE.md` 写），或在 PR 正文写一行 `contract-neutral: <理由>`。branch-gate 的 contract-guard 读 base 上的状态，同一个 PR 把 frozen 改回 draft 不能给自己放行。
 - 首个公开 rc 起永久冻结：另加 `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。
-- 永不改：插件身份（PLUGIN_CODE、BUNDLE_ID、AU 三元组）与参数 ID；会合段名永不带 abi；会合段头部前 16 字节与端点槽的 version 字段永不移动；state 读到更高 abi 时拒载并原样回写字节。
+- 永不改：插件身份（PLUGIN_CODE、BUNDLE_ID、AU 三元组）与参数 ID；会合段名永不带 abi；会合段头在段首（偏移 0），它的前 16 字节与 `init_pid`（偏移 32）、端点槽的 version 字段（及其依赖的组块位置与步长）永不移动，`'RNRV'` 与初始化标记 `'RNIN'` 不变，会合段永不小于 `kRvMinBytes`（16384 字节）；state 读到更高 abi 时拒载并原样回写字节。
 - 合并冲突落在冻结契约文件上：停下上报，不自行解决。
 
 ## §6 环境与钉版
