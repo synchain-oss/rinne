@@ -1,0 +1,18 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "f80e1c99271db1c7a85d2a300a8b154b2d45d2a7"
+    }
+  },
+  "files": [
+    {
+      "path": "src/core/dsp/LinearSmoother.h",
+      "source": "scvb-dev",
+      "from": "src/core/dsp/ParamSmoother.h",
+      "fromBlob": "45aeca8aa84e2c28d9cb5add52e2b31b65cc3fdc",
+      "mode": "forked"
+    }
+  ]
+}
