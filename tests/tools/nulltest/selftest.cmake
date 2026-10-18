@@ -66,6 +66,24 @@ run(2 "对齐偏移（lag）：3 样本.*结果：FAIL" compare --a "${sig}" --b
 # 错位是预期时加 --allow-lag 才算过（对齐后残差为 0）
 run(0 "结果：PASS" compare --a "${sig}" --b "${RUN_DIR}/late.wav" --allow-lag)
 
+# 其他样本格式：64 位浮点、16 / 24 / 32 位整数各生成两份，对拍必须逐位相同（噪声里有负数，覆盖符号扩展）；
+# 文件大小 = 头 44 字节 + 4 秒 * 48000 * 2 声道 * 每样本字节数
+foreach(fmt IN ITEMS f64 i16 i24 i32)
+  string(REGEX REPLACE "^[fi]" "" fmt_bits "${fmt}")
+  math(EXPR fmt_bytes "${fmt_bits} / 8")
+  run(0 "已生成" make-signal --out "${RUN_DIR}/fmt-${fmt}-a.wav" --format ${fmt})
+  run(0 "已生成" make-signal --out "${RUN_DIR}/fmt-${fmt}-b.wav" --format ${fmt})
+  file(SIZE "${RUN_DIR}/fmt-${fmt}-a.wav" fmt_size)
+  math(EXPR fmt_expect "44 + 4 * 48000 * 2 * ${fmt_bytes}")
+  if(NOT fmt_size EQUAL fmt_expect)
+    message(FATAL_ERROR "--format ${fmt} 的文件大小 ${fmt_size}，期望 ${fmt_expect}")
+  endif()
+  run(0 "逐位相同：是.*结果：PASS" compare --a "${RUN_DIR}/fmt-${fmt}-a.wav" --b "${RUN_DIR}/fmt-${fmt}-b.wav")
+  run(0 "已生成" make-signal --out "${RUN_DIR}/fmt-${fmt}-c.wav" --format ${fmt} --seed 2)
+  run(2 "逐位相同：否.*结果：FAIL" compare --a "${RUN_DIR}/fmt-${fmt}-a.wav" --b "${RUN_DIR}/fmt-${fmt}-c.wav")
+endforeach()
+run(1 "--format 只能是" make-signal --out "${RUN_DIR}/bad.wav" --format i8)
+
 # 采样率不同 -> FAIL
 run(0 "已生成" make-signal --out "${RUN_DIR}/s44.wav" --sr 44100)
 run(2 "采样率不同" compare --a "${sig}" --b "${RUN_DIR}/s44.wav")
@@ -81,6 +99,8 @@ run(2 "最大偏差：1 样本.*结果：FAIL" echo --in "${RUN_DIR}/train.wav" 
 # 录音里只有一个间隔不对（2047）-> FAIL
 run(0 "已生成" make-signal --out "${RUN_DIR}/train2047.wav" --kind impulse-train --d 2047 --count 6)
 run(2 "结果：FAIL" echo --in "${RUN_DIR}/train2047.wav" --d 2048 --sr 48000)
+# 冲激串放不下（超出 --seconds）要报错，不能静默少生成
+run(1 "放不下" make-signal --out "${RUN_DIR}/toolong.wav" --kind impulse-train --d 2048 --count 1000)
 # 采样率对不上 -> FAIL；没有回声 -> FAIL
 run(2 "对不上" echo --in "${RUN_DIR}/train.wav" --d 2048 --sr 44100)
 run(0 "已生成" make-signal --out "${RUN_DIR}/one.wav" --kind impulse)

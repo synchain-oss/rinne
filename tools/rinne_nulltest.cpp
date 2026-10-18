@@ -42,6 +42,9 @@ struct WavData
     uint16_t channels = 0;
     size_t frames = 0;
     std::vector<float> samples; // 交错存放，大小 = frames * channels
+    uint16_t fmtTag = 0; // 1 整数 PCM，3 浮点
+    uint16_t bits = 0;
+    std::vector<uint8_t> raw; // data 块里的原始字节：32 位整数和 64 位浮点解码成 float 会丢位，逐位比对要看它
 
     float at(size_t frame, size_t ch) const { return samples[frame * channels + ch]; }
 };
@@ -175,8 +178,11 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
     out.channels = channels;
     out.frames = dataSize / blockAlign;
     out.samples.assign(out.frames * channels, 0.0f);
+    out.fmtTag = isFloat ? 3 : 1;
+    out.bits = bits;
 
     const uint8_t* d = bytes.data() + dataOffset;
+    out.raw.assign(d, d + out.frames * blockAlign);
     for (size_t fr = 0; fr < out.frames; ++fr)
     {
         for (size_t ch = 0; ch < channels; ++ch)
@@ -217,12 +223,52 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
     return true;
 }
 
-// 固定写 32 位浮点（IEEE float）。样本按位原样写出，所以同样的样本得到逐字节相同的文件。
-bool writeWavFloat(const std::string& path, uint32_t sampleRate, uint16_t channels, const std::vector<float>& samples,
-                   std::string& err)
+// 格式名 -> (格式码, 位深)；make-signal 的 --format 用，默认 f32
+bool parseFormat(const std::string& name, uint16_t& tag, uint16_t& bits)
 {
-    const uint16_t blockAlign = static_cast<uint16_t>(channels * 4u);
-    const uint32_t dataBytes = static_cast<uint32_t>(samples.size() * sizeof(float));
+    if (name == "f32")
+    {
+        tag = 3;
+        bits = 32;
+    }
+    else if (name == "f64")
+    {
+        tag = 3;
+        bits = 64;
+    }
+    else if (name == "i16")
+    {
+        tag = 1;
+        bits = 16;
+    }
+    else if (name == "i24")
+    {
+        tag = 1;
+        bits = 24;
+    }
+    else if (name == "i32")
+    {
+        tag = 1;
+        bits = 32;
+    }
+    else
+        return false;
+    return true;
+}
+
+// 样本按位原样写出（浮点）或四舍五入到整数（PCM），所以同样的样本得到逐字节相同的文件。
+bool writeWav(const std::string& path, uint32_t sampleRate, uint16_t channels, const std::vector<float>& samples,
+              uint16_t fmtTag, uint16_t bits, std::string& err)
+{
+    const uint32_t bytesPerSample = bits / 8u;
+    const uint16_t blockAlign = static_cast<uint16_t>(channels * bytesPerSample);
+    const uint64_t dataBytes64 = static_cast<uint64_t>(samples.size()) * bytesPerSample;
+    if (dataBytes64 > std::numeric_limits<uint32_t>::max() - 36u)
+    {
+        err = "生成的文件超过 WAV 4 GiB 的上限，请减小 --seconds、--sr 或 --channels";
+        return false;
+    }
+    const uint32_t dataBytes = static_cast<uint32_t>(dataBytes64);
 
     std::vector<uint8_t> h;
     putTag(h, "RIFF");
@@ -230,12 +276,12 @@ bool writeWavFloat(const std::string& path, uint32_t sampleRate, uint16_t channe
     putTag(h, "WAVE");
     putTag(h, "fmt ");
     putU32(h, 16);
-    putU16(h, 3);
+    putU16(h, fmtTag);
     putU16(h, channels);
     putU32(h, sampleRate);
     putU32(h, sampleRate * blockAlign);
     putU16(h, blockAlign);
-    putU16(h, 32);
+    putU16(h, bits);
     putTag(h, "data");
     putU32(h, dataBytes);
 
@@ -246,13 +292,33 @@ bool writeWavFloat(const std::string& path, uint32_t sampleRate, uint16_t channe
         return false;
     }
     f.write(reinterpret_cast<const char*>(h.data()), static_cast<std::streamsize>(h.size()));
+    std::vector<uint8_t> frame;
     for (const float s : samples)
     {
-        uint32_t u = 0;
-        std::memcpy(&u, &s, sizeof(u));
-        uint8_t le[4] = {static_cast<uint8_t>(u & 0xFF), static_cast<uint8_t>((u >> 8) & 0xFF),
-                         static_cast<uint8_t>((u >> 16) & 0xFF), static_cast<uint8_t>((u >> 24) & 0xFF)};
-        f.write(reinterpret_cast<const char*>(le), 4);
+        frame.clear();
+        if (fmtTag == 3 && bits == 32)
+        {
+            uint32_t u = 0;
+            std::memcpy(&u, &s, sizeof(u));
+            putU32(frame, u);
+        }
+        else if (fmtTag == 3)
+        {
+            const double dv = static_cast<double>(s);
+            uint64_t u = 0;
+            std::memcpy(&u, &dv, sizeof(u));
+            putU32(frame, static_cast<uint32_t>(u & 0xFFFFFFFFu));
+            putU32(frame, static_cast<uint32_t>(u >> 32));
+        }
+        else
+        {
+            const double scale = static_cast<double>(1ull << (bits - 1));
+            const double q = std::max(-scale, std::min(scale - 1.0, std::nearbyint(static_cast<double>(s) * scale)));
+            const uint32_t u = static_cast<uint32_t>(static_cast<int32_t>(q));
+            for (uint32_t i = 0; i < bytesPerSample; ++i)
+                frame.push_back(static_cast<uint8_t>((u >> (8 * i)) & 0xFF));
+        }
+        f.write(reinterpret_cast<const char*>(frame.data()), static_cast<std::streamsize>(frame.size()));
     }
     f.flush();
     if (!f)
@@ -452,8 +518,9 @@ int runMakeSignal(int argc, char** argv)
 {
     Args a;
     std::string err;
-    if (!parseArgs(argc, argv, 2, {"out", "kind", "sr", "channels", "seconds", "seed", "offset-samples", "d", "count"},
-                   {}, a, err))
+    if (!parseArgs(argc, argv, 2,
+                   {"out", "kind", "format", "sr", "channels", "seconds", "seed", "offset-samples", "d", "count"}, {},
+                   a, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
@@ -465,6 +532,13 @@ int runMakeSignal(int argc, char** argv)
         return kExitError;
     }
     const std::string kind = a.values.count("kind") ? a.values["kind"] : "impulse-noise";
+    const std::string formatName = a.values.count("format") ? a.values["format"] : "f32";
+    uint16_t fmtTag = 0, fmtBits = 0;
+    if (!parseFormat(formatName, fmtTag, fmtBits))
+    {
+        std::cerr << "出错：--format 只能是 f32、f64、i16、i24 或 i32，收到：" << formatName << "\n";
+        return kExitError;
+    }
     int64_t sr = 0, channels = 0, seed = 0, offset = 0, dSamples = 0, count = 0;
     double seconds = 0.0;
     if (!getInt(a, "sr", 48000, 8000, 384000, sr, err) || !getInt(a, "channels", 2, 1, 8, channels, err) ||
@@ -494,6 +568,13 @@ int runMakeSignal(int argc, char** argv)
     const size_t ch = static_cast<size_t>(channels);
     std::vector<float> samples((total + shift) * ch, 0.0f);
 
+    if (kind == "impulse-train" && impulseAt + static_cast<size_t>(count - 1) * static_cast<size_t>(dSamples) >= total)
+    {
+        std::cerr << "出错：冲激串放不下：" << count << " 个冲激、间隔 " << dSamples
+                  << " 样本，超出了 --seconds 的长度。请加大 --seconds 或减小 --count / --d\n";
+        return kExitError;
+    }
+
     auto put = [&](size_t frame, size_t c, double v) {
         const size_t f = frame + shift;
         if (f < total + shift)
@@ -519,13 +600,14 @@ int runMakeSignal(int argc, char** argv)
         }
     }
 
-    if (!writeWavFloat(outPath, static_cast<uint32_t>(sr), static_cast<uint16_t>(channels), samples, err))
+    if (!writeWav(outPath, static_cast<uint32_t>(sr), static_cast<uint16_t>(channels), samples, fmtTag, fmtBits, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
     }
     std::cout << "已生成 " << outPath << "（" << kind << "，" << sr << " Hz，" << channels << " 声道，"
-              << fixed(static_cast<double>(total + shift) / static_cast<double>(sr), 3) << " 秒，32 位浮点）\n";
+              << fixed(static_cast<double>(total + shift) / static_cast<double>(sr), 3) << " 秒，"
+              << (fmtTag == 3 ? "" : "整数 PCM ") << fmtBits << " 位" << (fmtTag == 3 ? "浮点" : "") << "）\n";
     return kExitPass;
 }
 
@@ -705,9 +787,12 @@ int runCompare(int argc, char** argv)
         return kExitFail;
     }
 
+    // 解码成 float 后相同，且两份格式一样时再看原始字节（32 位整数、64 位浮点解码会丢低位）
+    const bool sameFormat = wa.fmtTag == wb.fmtTag && wa.bits == wb.bits;
     const bool identical = wa.frames == wb.frames &&
-                           (wa.samples.empty() ||
-                            std::memcmp(wa.samples.data(), wb.samples.data(), wa.samples.size() * sizeof(float)) == 0);
+                           (wa.samples.empty() || std::memcmp(wa.samples.data(), wb.samples.data(),
+                                                              wa.samples.size() * sizeof(float)) == 0) &&
+                           (!sameFormat || wa.raw == wb.raw);
     std::cout << "逐位相同：" << (identical ? "是" : "否") << "\n";
 
     int64_t lag = 0;
@@ -922,6 +1007,7 @@ void printHelp(std::ostream& os)
           "make-signal   生成测试信号\n"
           "    rinne_nulltest make-signal --out test-signal.wav\n"
           "    --kind impulse-noise   冲激加 200 ms 粉噪突发（默认）；impulse 只有冲激；impulse-train 是等间隔冲激串\n"
+          "    --format f32|f64|i16|i24|i32   输出样本格式，默认 f32（32 位浮点）\n"
           "    --sr 48000  --channels 2  --seconds 4  --seed 1\n"
           "    --d <样本数>  --count <个数>   冲激串的间隔与个数（默认 2048、6）\n"
           "    --offset-samples <N>           在最前面加 N 个样本的静音（用来造错位）\n"
