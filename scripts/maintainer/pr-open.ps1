@@ -6,12 +6,15 @@
 # （标题格式、隐私、AI 署名、末行签名）与公开文本检查，首行自动加 agent 隐藏标记。同一 head 已有打开的 PR 时只报编号。
 #   pwsh scripts/maintainer/pr-open.ps1 -Head feat/<slug> [-Base feature/v1] -Title "<type(scope): 描述>" -BodyFile <f>
 #        [-Role impl] [-Round 0]
+#   pwsh scripts/maintainer/pr-open.ps1 -Update -Pr <n> -BodyFile <f> [-Title "<新标题>"] [-Role impl] [-Round <r>]
 #   pwsh scripts/maintainer/pr-open.ps1 -SelfTest
+# -Update 改已有 PR 的正文（给了 -Title 时连标题一起改）：PR 必须打开着、head 是本仓的 feat/ 子支线、base 是 feature 线；
+# 正文与标题过同一套判据，首行标记的 head 取这个 PR 此刻的 head。正文过期时用它改，不靠评论更正。
 
 [CmdletBinding()]
 param(
     [switch]$SelfTest, [string]$Head, [string]$Base = 'feature/v1', [string]$Title, [string]$BodyFile,
-    [switch]$Draft, [string]$Role = 'impl', [int]$Round = 0
+    [switch]$Draft, [string]$Role = 'impl', [int]$Round = 0, [switch]$Update, [int]$Pr
 )
 
 Set-StrictMode -Version Latest
@@ -62,6 +65,22 @@ function Invoke-Open {
     "已开 PR #$($r.number)：$($r.html_url)（head $($sha.Substring(0, 7))）"
 }
 
+<# 改已有 PR 的正文（与标题）：判据与开 PR 相同，标记的 head 是这个 PR 此刻的 head。 #>
+function Invoke-Update {
+    param([int]$Pr, [string]$Title, [string]$Body, [string]$Role, [int]$Round)
+    $repo = Get-RinneRepo
+    $pull = Get-RinneApi "repos/$repo/pulls/$Pr"
+    if ($pull.state -ne 'open') { throw "#$Pr 不是打开状态，不改正文" }
+    if ($pull.head.repo.full_name -ne $repo) { throw "#$Pr 的 head 不是本仓的分支" }
+    $sha = [string]$pull.head.sha
+    $t = $Title ? $Title : [string]$pull.title
+    $full = Test-OpenRequest -Head $pull.head.ref -Base $pull.base.ref -Title $t -Body $Body -Draft ([bool]$pull.draft) -Role $Role -Round $Round -HeadSha $sha
+    $payload = @{ body = $full }
+    if ($Title) { $payload.title = $Title }
+    Invoke-RinneApiWrite -Method PATCH -Path "repos/$repo/pulls/$Pr" -Body $payload | Out-Null
+    "已更新 #$Pr 的$(if ($Title) { '标题与' })正文（head $($sha.Substring(0, 7))）"
+}
+
 function Invoke-SelfTest {
     $cases = New-RinneCases
     $needles = Enter-RinneSelfTestNeedles
@@ -70,12 +89,19 @@ function Invoke-SelfTest {
         $good = (($template -replace '(?s)<!--.*?-->', '') -replace '(?m)^Signed-off-by: .*$', (Invoke-RinneMaint -Command 'signoff' -Content '').signoff).Trim()
         $sha = 'a' * 40
         $posted = [System.Collections.Generic.List[object]]::new()
+        $patched = [System.Collections.Generic.List[object]]::new()
         $open = @()
+        $existing = [pscustomobject]@{ number = 12; state = 'open'; draft = $false; title = 'ci(example): 加入示例'
+            head = [pscustomobject]@{ ref = 'feat/example-card'; sha = 'b' * 40; repo = [pscustomobject]@{ full_name = (Get-RinneRepo) } }
+            base = [pscustomobject]@{ ref = 'feature/v1' }
+        }
         $routes = [ordered]@{
             'branches/feat%2Fexample-card' = { @{ commit = @{ sha = $sha } } }
             'branches/'                    = { @{ Code = 1; Out = ''; Err = 'Branch not found' } }
             'pulls\?state=open'            = { , $open }
             'api -X POST \S+/pulls --input' = { param($argv) $posted.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); @{ number = 9; html_url = 'https://github.com/x/y/pull/9' } }
+            'api -X PATCH \S+/pulls/12 --input' = { param($argv) $patched.Add((Get-Content -Raw ($argv[-1]) | ConvertFrom-Json)); @{ number = 12 } }
+            'pulls/12$'                    = { $existing }
         }
         Set-RinneFake (New-RinneFake -Routes $routes)
         $title = 'ci(example): 加入示例'
@@ -104,6 +130,29 @@ function Invoke-SelfTest {
         $again = Invoke-Open -Head 'feat/example-card' -Base 'feature/v1' -Title $title -Body $good -Draft $false -Role impl -Round 0
         Add-RinneCase $cases '同一 head 已有打开的 PR 时不重开' $false (-not ($again -match '#7' -and $posted.Count -eq $n))
         Add-RinneCase $cases '远端没有这个分支' $true (Test-Throws { Invoke-Open -Head 'feat/missing' -Base 'feature/v1' -Title $title -Body $good -Draft $false -Role impl -Round 0 })
+
+        # 改已有 PR 的正文：同一套判据；标记的 head 取 PR 此刻的 head；只给正文时不动标题
+        $up = Invoke-Update -Pr 12 -Title '' -Body $good -Role impl -Round 2
+        $q = $patched[-1]
+        Add-RinneCase $cases '-Update：正文过判据后发出，首行标记带本轮与 PR 此刻的 head，不动标题' $false (-not (
+                $up -match '#12' -and $q.body -match '^<!-- rinne-agent v1 role=impl kind=pr-body round=2 head=bbbbbbb -->' -and
+                $q.body.TrimEnd() -match 'Signed-off-by: [^\n]+$' -and @($q.PSObject.Properties.Name) -notcontains 'title'))
+        $n = $patched.Count
+        $upd = { param($body, $t = '') -not (Test-Throws { Invoke-Update -Pr 12 -Title $t -Body $body -Role impl -Round 2 }) }
+        Add-RinneCase $cases '-Update：正文缺模板栏目不发' $true (-not (& $upd ($good -replace '(?m)^## DCO\s*$', '')))
+        Add-RinneCase $cases '-Update：正文含本机路径不发' $true (-not (& $upd ($good -replace '(?m)^## DCO', ('## DCO' + "`n" + 'C:' + '\Users\someone'))))
+        Add-RinneCase $cases '-Update：正文末行不是签名不发' $true (-not (& $upd "$good`n补一句"))
+        Add-RinneCase $cases '-Update：新标题带卡号不发' $true (-not (& $upd $good ('ci(example): 完成 RN' + '-03a')))
+        Add-RinneCase $cases '-Update：判据不过时一条也没发出' $true ($patched.Count -eq $n)
+        Add-RinneCase $cases '-Update：给了新标题时连标题一起改' $false (-not ((& $upd $good 'ci(example): 改个标题') -and $patched[-1].title -eq 'ci(example): 改个标题'))
+        $existing.state = 'closed'
+        Add-RinneCase $cases '-Update：已关闭的 PR 不改' $true (-not (& $upd $good))
+        $existing.state = 'open'; $existing.base.ref = 'dev'
+        Add-RinneCase $cases '-Update：开到 dev 的 PR 不改' $true (-not (& $upd $good))
+        $existing.base.ref = 'feature/v1'
+        $existing.head.repo.full_name = 'someone/rinne'; $n = $patched.Count
+        Add-RinneCase $cases '-Update：head 是 fork 的分支（不在本仓）的 PR 不改' $true ((-not (& $upd $good)) -and $patched.Count -eq $n)
+        $existing.head.repo.full_name = (Get-RinneRepo)
     } finally {
         Set-RinneFake $null
         Exit-RinneSelfTestNeedles $needles
@@ -112,6 +161,12 @@ function Invoke-SelfTest {
 }
 
 if ($SelfTest) { exit (Invoke-SelfTest) }
+if ($Update) {
+    if ($Pr -le 0 -or -not $BodyFile) { throw '-Update 需要 -Pr 与 -BodyFile（-Title 可选）' }
+    Initialize-RinneIdentity
+    Write-Output (Invoke-Update -Pr $Pr -Title $Title -Body ([IO.File]::ReadAllText($BodyFile, [Text.UTF8Encoding]::new($false))) -Role $Role -Round $Round)
+    exit 0
+}
 if (-not $Head -or -not $Title -or -not $BodyFile) { throw '需要 -Head、-Title 与 -BodyFile' }
 Initialize-RinneIdentity
 $body = [IO.File]::ReadAllText($BodyFile, [Text.UTF8Encoding]::new($false))

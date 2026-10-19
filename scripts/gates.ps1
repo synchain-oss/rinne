@@ -16,8 +16,10 @@
 # Standard 及以上直接 DEFER。开跑与收尾各读一次 HEAD 与工作区，中途变了判 FAIL。结果 json 写到 -ResultJson，缺省
 # <LogDir>/gates-<sha40>.json（LogDir 缺省 RINNE_LOG_DIR，再缺省仓内被忽略的 build/gates），完整输出写同名 .log。
 # json 是自报的：pr-merge 只能把它与 head 绑定，证明不了它出自本脚本，所以合并时会用主 clone 的 Tiers.psm1 按 PR 的
-# 文件清单重算最低档。最后一行固定为 `PASS n / FAIL n / SKIP n / FLAKY n  EXIT=x  @<sha7>  <档>  <耗时>`，不含路径。
-# 退出码：0 通过；1 有 FAIL 或工作区不干净；3 等锁超时；4 DEFER。
+# 文件清单重算最低档。字体检查要用的 Python：RINNE_PYTHON 没设时取 git config rinne.python（bootstrap-tools 建的 venv）
+# 设进本进程的 RINNE_PYTHON，交给各 gate 起的检查。最后一行固定为 `PASS n / FAIL n / SKIP n / FLAKY n  EXIT=x  @<sha7>  <档>  <耗时>`，不含路径。
+# 合并后构建的锁存标记（lib/PremergeLatch.psm1）在时，开头就打印原因、退出 1，一条 git 都不跑（-SelfTest 也一样）。
+# 退出码：0 通过；1 有 FAIL、工作区不干净或锁存；3 等锁超时；4 DEFER。
 [CmdletBinding()]
 param(
     [switch]$Quick, [switch]$Standard, [switch]$Full, [switch]$SelfTest, [switch]$Fetch,
@@ -30,10 +32,18 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ }
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $Root = Split-Path -Parent $PSScriptRoot
+# 合并后构建的锁存标记在时（lib/PremergeLatch.psm1），在跑任何 git 之前停下
+Import-Module (Join-Path $PSScriptRoot 'lib/PremergeLatch.psm1') -Force -ErrorAction Stop
+try { Assert-RinneNoLatch -RepoRoot $Root } catch { Write-Host $_.Exception.Message; exit 1 }
 Import-Module (Join-Path $PSScriptRoot 'lib/Locks.psm1') -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'lib/Tiers.psm1') -Force -ErrorAction Stop
+# gates.d 里起构建脚本的 gate 用它的 Invoke-WithoutStdInherit：子进程拿不到运行器调用方的管道
+Import-Module (Join-Path $PSScriptRoot 'lib/StdHandles.psm1') -Force -ErrorAction Stop
+# 自测（本文件与 gates.d 的）的临时目录只经它建与删：新建的、本进程的，删之前按真实路径核对
+Import-Module (Join-Path $PSScriptRoot 'lib/TempDir.psm1') -Force -ErrorAction Stop
 $Rules = Get-RinneTierRules
 $Tiers = [string[]]$Rules.tiers
+if (-not $env:RINNE_PYTHON) { $env:RINNE_PYTHON = "$(git -C $Root config --get rinne.python 2>$null)".Trim() }
 
 function Get-RinneSetting([string]$EnvName, [string]$GitKey) {
     $v = [Environment]::GetEnvironmentVariable($EnvName)
@@ -154,6 +164,11 @@ function Invoke-SelfTest {
     & $check '退出码：FAIL 优先于资源超时，DEFER 优先于一切，只有工作区不干净也是 1' $true ((@($ec)[0..2] -join ',') -eq '1,4,1')
     & $check '退出码：只有资源超时是 3，全过是 0' $false ((@($ec)[3..4] -join ',') -eq '3,0')
     Test-RinneLocks | ForEach-Object { $cases.Add($_) }
+    Test-StdHandles | ForEach-Object { $cases.Add($_) }
+    Test-RinneTempDir | ForEach-Object { $cases.Add($_) }
+    Test-PremergeLatch | ForEach-Object { $cases.Add($_) }
+    $null = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'bootstrap-tools.ps1') -SelfTest 2>&1
+    & $check 'bootstrap-tools.ps1 -SelfTest 通过' $false ($LASTEXITCODE -eq 0)
     Invoke-EndToEnd $check
     $failed = @($cases | Where-Object { -not $_.Passed })
     $failed | ForEach-Object { Write-Host "自测未通过：$($_.Label)" }
@@ -165,12 +180,12 @@ function Invoke-SelfTest {
 # 端到端：临时仓里放一份本运行器、Tiers 与定档规则、锁名前缀换成自测专用的 Locks，再加夹具模块，起子进程跑，
 # 核对 json、退出码与最后一行。运行器本身没有给自测开的参数或环境变量。
 function Invoke-EndToEnd($Check) {
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-gates-selftest-$PID-$(Get-Random)"
+    $tmp = New-RinneTempDir -Prefix 'rinne-gates-selftest-'
     $repo, $held = (Join-Path $tmp 'repo'), $null
     try {
         $null = New-Item -ItemType Directory -Path (Join-Path $repo 'scripts/lib'), (Join-Path $repo 'scripts/gates.d'), (Join-Path $tmp '_logs')
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $repo 'scripts/gates.ps1')
-        foreach ($f in 'Tiers.psm1', 'tier-rules.json') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/$f") -Destination (Join-Path $repo "scripts/lib/$f") }
+        foreach ($f in 'Tiers.psm1', 'tier-rules.json', 'StdHandles.psm1', 'PremergeLatch.psm1', 'TempDir.psm1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/$f") -Destination (Join-Path $repo "scripts/lib/$f") }
         $locks = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lib/Locks.psm1') -Raw).Replace("`$script:Scope = 'Rinne'", "`$script:Scope = 'Rinne-selftest-$PID'")
         Set-Content -LiteralPath (Join-Path $repo 'scripts/lib/Locks.psm1') -Value $locks
         $quick = ($Rules.gates | Where-Object tier -ceq 'Quick' | ForEach-Object { "'$($_.id)'" }) -join ', '
@@ -179,6 +194,7 @@ function Register-RinneGates {
     foreach (`$id in $quick) { @{ Id = `$id; Tier = 'Quick'; Run = { @{ Status = 'PASS' } } } }
     @{ Id = 'fx-build'; Tier = 'Quick'; Lock = 'build'; Run = { param(`$c) @{ Status = 'PASS'; Reason = "jobs=`$(`$c.Jobs)" } } }
     if (`$env:RINNE_FX -eq 'gui') { @{ Id = 'fx-gui'; Tier = 'Quick'; Lock = 'gui'; Run = { @{ Status = 'PASS' } } } }
+    if (`$env:RINNE_FX -eq 'py') { @{ Id = 'fx-py'; Tier = 'Quick'; Run = { @{ Status = 'PASS'; Reason = "py=`$(`$env:RINNE_PYTHON)" } } } }
     if (`$env:RINNE_FX -eq 'touch') { @{ Id = 'fx-touch'; Tier = 'Quick'; Run = { param(`$c) Add-Content (Join-Path `$c.Root 'README.md') 'y'; @{ Status = 'PASS' } } } }
 }
 "@
@@ -210,6 +226,12 @@ function Register-RinneGates {
         $r = & $run
         & $Check '工作区不干净：dirty=true、EXIT=1' $true ($r.Exit -eq 1 -and $r.J.exit -eq 1 -and $r.J.dirty -eq $true)
         Remove-Item -LiteralPath (Join-Path $repo 'stray.txt')
+        # RINNE_PYTHON 没设时取 git config rinne.python，交给各 gate
+        & $git config rinne.python rinne-selftest-python
+        $savedPy, $env:RINNE_PYTHON, $env:RINNE_FX = $env:RINNE_PYTHON, $null, 'py'
+        try { $r = & $run } finally { $env:RINNE_PYTHON, $env:RINNE_FX = $savedPy, '' }
+        & $git config --unset rinne.python
+        & $Check 'RINNE_PYTHON 没设时取 git config rinne.python 交给各 gate' $false ($r.Exit -eq 0 -and @($r.J.gates | Where-Object id -ceq 'fx-py')[0].reason -ceq 'py=rinne-selftest-python')
         $null = New-Item -ItemType Directory -Path (Join-Path $repo 'src')
         & $commit 'src/a.cpp'
         $r = & $run @('-Quick')
@@ -231,7 +253,9 @@ function Register-RinneGates {
     } finally {
         if ($held) { & $m { param($l) Exit-RinneLock $l } $held }
         Remove-Item Env:RINNE_FX -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 10
+        if ($left) { Write-Host (Format-Redacted "  $left") }
+        & $Check '端到端自测的临时目录删掉了' $false (-not $left -and -not (Test-Path -LiteralPath $tmp))
     }
 }
 
