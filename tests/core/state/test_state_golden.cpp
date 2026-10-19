@@ -139,6 +139,8 @@ std::vector<Invariant> schemaInvariants()
         {"migrations-payload-only", "迁移只改载荷", "migrations only change payloads"},
         {"prms-limits", "读入与写出用同一组上限：条数不超过 " + maxCount + "、载荷不超过 " + maxBytes + " 字节",
          "PRMS reads and writes share one limit: at most " + maxCount + " entries and " + maxBytes + " bytes"},
+        {"prms-limits-need-abi", "超过必须升 abi",
+         "growing PRMS past these limits requires an abi bump, because the limits are part of the format"},
         {"prms-trim", "编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢",
          "trimToDecodable before encoding drops only unknown PRMS ids, from the end, never a known parameter"},
         {"write-back-scope", "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来",
@@ -522,6 +524,7 @@ TEST_CASE("golden: 契约文档写清 PRMS 读写共用的上限与裁剪规则"
     const std::string doc = contractDoc();
     const std::string schema = schemaText();
     checkInvariant(doc, schema, "prms-limits");
+    checkInvariant(doc, schema, "prms-limits-need-abi");
     checkInvariant(doc, schema, "prms-trim");
     checkInvariant(doc, schema, "write-back-scope");
     CHECK(schema.find("\"maxCount\": " + std::to_string(rinne::state::kMaxParamCount)) != std::string::npos);
