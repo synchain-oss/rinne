@@ -63,7 +63,7 @@ function New-RinneTempDir {
             throw
         }
         if (-not $IsWindows) {
-            & chmod 700 -- $dir
+            $null = & chmod 700 -- $dir
             if ($LASTEXITCODE -ne 0) {
                 # 刚建出来的空目录：只做不递归的删除
                 try { [IO.Directory]::Delete($dir) } catch { $null = $_ }
