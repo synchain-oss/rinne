@@ -69,8 +69,10 @@
     { "id": "prms-limits-need-abi", "rule": "growing PRMS past these limits requires an abi bump, because the limits are part of the format" },
     { "id": "prms-trim", "rule": "trimToDecodable before encoding drops only unknown PRMS ids, from the end, never a known parameter" },
     { "id": "write-back-scope", "rule": "a document from decodeDocument with nothing added always encodes" },
-    { "id": "first-setstate", "rule": "the first setState of an instance applies everything" },
-    { "id": "later-setstate", "rule": "later setState calls (host presets, A/B, undo) only change parameters" },
+    { "id": "apply-before-settle", "rule": "before the instance settles every successfully loaded state is applied in full, the last one wins" },
+    { "id": "apply-after-settle", "rule": "after it settles, later states only change parameters" },
+    { "id": "settle-definition", "rule": "settling happens at the first user edit or when the smart defaults finish claiming, whichever is first; a project restore claiming does not count" },
+    { "id": "not-a-load", "rule": "Empty, IgnoredProbe, Corrupt and RejectedNewer neither apply anything nor settle the instance" },
     { "id": "rejected-newer-any-setstate", "rule": "any setState that gets RejectedNewer for this role keeps the original bytes, regardless of call order" },
     { "id": "write-back-replaced", "rule": "kept bytes are replaced only by a successfully loaded state (Ok or Migrated)" },
     { "id": "write-back-edits-lost", "rule": "parameter edits made while bytes are kept do not enter the state and are lost on save" }

@@ -18,8 +18,11 @@ status: draft
   compared as a whole u32: Input writes 1, Output writes 2; new values only for new ends, no flag bits). Probe
   builds' abi 0 is recognised and ignored. A lower abi is migrated one step at a time; migrations only change
   payloads. Anything else that fails leaves the instance on its current state; nothing is ever half applied.
-- **State application and write-back**: the first `setState` of an instance applies everything; later calls (host
-  presets, A/B, undo) only take parameter values and fade as `FADE_IN` in ARCHITECTURE.md describes. Write-back
+- **State application and write-back**: before an instance settles, every successfully loaded state (`Ok` or
+  `Migrated`) is applied in full, parameters and settings, over the smart defaults; the last one wins. After it
+  settles, calls (host presets, A/B, undo) only take parameter values and fade as `FADE_IN` in ARCHITECTURE.md
+  describes. An instance settles at the first user edit (parameter or setting) or when the smart defaults finish
+  claiming, whichever comes first; a project restore claiming does not count. Write-back
   protection does not depend on call order: any `setState` that gets `RejectedNewer` keeps the original bytes, and
   `getState` hands them back until a successfully loaded state (`Ok` or `Migrated`) replaces them. While they are
   kept, parameter edits do not enter the state and are lost on save, so the UI must say so permanently.
@@ -82,16 +85,21 @@ status: draft
 
 | 情形 | 结果 | 实例的 state | 交回原字节 |
 |---|---|---|---|
-| 零字节 | `Empty` | 保持当前（第一次 setState 时即默认），不提示 | 否 |
+| 零字节 | `Empty` | 保持当前（尚未定型时即默认），不提示 | 否 |
 | 不足 16 字节，或 magic 不符 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |
 | abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持当前，提示工程由更新的版本保存 | 是，整份；任何一次 setState 都保留，保存时原样写回，直到被成功读入的 state 取代 |
 | abi 高于本构建，role 不是这一端 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |
 | abi 0（探针） | `IgnoredProbe` | 保持当前，不提示 | 否 |
-| abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（第一次）；之后的 setState 只取参数 | 否 |
-| abi 等于本构建 | 解码，`Ok` | 读入的 state（第一次）；之后的 setState 只取参数 | 否 |
+| abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（定型之前全量应用）；定型之后只取参数 | 否 |
+| abi 等于本构建 | 解码，`Ok` | 读入的 state（定型之前全量应用）；定型之后只取参数 | 否 |
 | 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |
 
-- **第一次与之后的 setState**：这是应用方式的区分，与写回保护无关。实例一生的第一次 setState 全量应用（参数与全部设置）；之后的 setState（宿主预设、A/B、撤销）只改参数，并按 ARCHITECTURE.md 的 `FADE_IN` 淡变。加载表里的「保持当前」对第一次就是默认值，对之后就是实例当前的设置。
+- **定型之前与之后**：这是应用方式的区分，与写回保护无关，也不按第几次 setState 区分。
+  定型之前，每一份成功读入（`Ok`、`Migrated`）的 state 都全量应用（参数与全部设置，覆盖智能默认），有多份时以最后一份为准；定型之后收到的 state（宿主预设、A/B、撤销）只改参数，并按 ARCHITECTURE.md 的 `FADE_IN` 淡变。
+  定型指下面两件事里先发生的那一件：第一次用户改动（参数或非参数设置），或智能默认完成认领；工程恢复的认领不算定型。
+  `Empty`、`IgnoredProbe`、`Corrupt`、`RejectedNewer` 不算成功读入，既不触发全量应用，也不让实例定型。
+  加载表里的「保持当前」对尚未定型的实例就是默认值，对已定型的就是实例当前的设置。
+  接线时要验两条 setState 序列：默认预设或旧 state 在前、工程在后，工程的 CFGS 要生效；用户改过之后再来宿主预设或 A/B，只改参数，组不动。
 - **高 abi 先于块结构检查**：更高的 abi 可能换了载荷，按本构建的规则挑它的错，代价是把用户的新版数据丢掉。
   拒载时交回的字节与收到的逐字节相同。role 照样比对：它的位置不随 abi 变，role 不符说明这是对端的字节，原样写回
   只会把它固化进本端的工程，所以判 `Corrupt`，不保留。
@@ -109,8 +117,8 @@ status: draft
   载荷（改块的载荷、增删块都算），容器框架（头的长度、块头、补齐、块数的含义）不动。迁移完再按本构建的规则解码：低版本的载荷未必过得了本构建的
   载荷校验，先迁移才不会把能迁移的旧工程当成坏字节；迁移之后再核对一遍容器上限（块数、单块长度），越界判
   `Corrupt`（块数超限同时会被解码时的块数预算拦下，单块长度只有这一遍查得到）。abi 1 是第一版，还没有迁移函数。
-- **不留半份状态**：失败与忽略时加载入口不碰出参，调用方传进去的是什么（第一次 setState 时是新实例的默认 state，
-  之后是实例当前的 state），出来还是什么。只有 `Ok` 与 `Migrated` 会写出参。表中的提示由处理器按结果给出。
+- **不留半份状态**：失败与忽略时加载入口不碰出参，调用方传进去的是什么（尚未定型时是新实例的默认 state，
+  定型之后是实例当前的 state），出来还是什么。只有 `Ok` 与 `Migrated` 会写出参。表中的提示由处理器按结果给出。
 - **坏字节不交回**：`Corrupt` 的字节不该被原样存回工程文件，下一次保存写的是实例当前的 state。
 
 ## PRMS：参数值（只有 Input）

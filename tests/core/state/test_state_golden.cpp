@@ -95,7 +95,7 @@ struct LoadRow
 };
 
 const std::array<LoadRow, 8> kLoadRows{{
-    {"zero bytes", "empty", "", "| 零字节 | `Empty` | 保持当前（第一次 setState 时即默认），不提示 | 否 |"},
+    {"zero bytes", "empty", "", "| 零字节 | `Empty` | 保持当前（尚未定型时即默认），不提示 | 否 |"},
     {"short header or wrong magic", "corrupt", "",
      "| 不足 16 字节，或 magic 不符 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
     {"abi above this build, role of this end", "rejectedNewer",
@@ -107,10 +107,10 @@ const std::array<LoadRow, 8> kLoadRows{{
     {"abi equal to probeAbi", "ignoredProbe", "only the header is read",
      "| abi 0（探针） | `IgnoredProbe` | 保持当前，不提示 | 否 |"},
     {"abi below this build", "migrated", "one step at a time",
-     "| abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（第一次）；之后的 setState 只取参数 | "
+     "| abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（定型之前全量应用）；定型之后只取参数 | "
      "否 |"},
     {"abi equal to this build", "ok", "decoded as is",
-     "| abi 等于本构建 | 解码，`Ok` | 读入的 state（第一次）；之后的 setState 只取参数 | 否 |"},
+     "| abi 等于本构建 | 解码，`Ok` | 读入的 state（定型之前全量应用）；定型之后只取参数 | 否 |"},
     {"any other failure", "corrupt", "nothing applied",
      "| 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
 }};
@@ -145,10 +145,16 @@ std::vector<Invariant> schemaInvariants()
          "trimToDecodable before encoding drops only unknown PRMS ids, from the end, never a known parameter"},
         {"write-back-scope", "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来",
          "a document from decodeDocument with nothing added always encodes"},
-        {"first-setstate", "实例一生的第一次 setState 全量应用",
-         "the first setState of an instance applies everything"},
-        {"later-setstate", "之后的 setState（宿主预设、A/B、撤销）只改参数",
-         "later setState calls (host presets, A/B, undo) only change parameters"},
+        {"apply-before-settle", "定型之前，每一份成功读入（`Ok`、`Migrated`）的 state 都全量应用",
+         "before the instance settles every successfully loaded state is applied in full, the last one wins"},
+        {"apply-after-settle", "定型之后收到的 state（宿主预设、A/B、撤销）只改参数",
+         "after it settles, later states only change parameters"},
+        {"settle-definition", "第一次用户改动（参数或非参数设置），或智能默认完成认领；工程恢复的认领不算定型",
+         "settling happens at the first user edit or when the smart defaults finish claiming, whichever is first; a "
+         "project restore claiming does not count"},
+        {"not-a-load",
+         "`Empty`、`IgnoredProbe`、`Corrupt`、`RejectedNewer` 不算成功读入，既不触发全量应用，也不让实例定型",
+         "Empty, IgnoredProbe, Corrupt and RejectedNewer neither apply anything nor settle the instance"},
         {"rejected-newer-any-setstate", "任何一次 `setState` 收到 `RejectedNewer`（role 是这一端）都拒载并保留原字节",
          "any setState that gets RejectedNewer for this role keeps the original bytes, regardless of call order"},
         {"write-back-replaced", "被后来一份成功读入的 state（`Ok`、`Migrated`）取代",
@@ -558,8 +564,11 @@ TEST_CASE("golden: 契约文档区分应用方式与写回保护", "[state][gold
 {
     const std::string doc = contractDoc();
     const std::string schema = schemaText();
-    checkInvariant(doc, schema, "first-setstate");
-    checkInvariant(doc, schema, "later-setstate");
+    checkInvariant(doc, schema, "apply-before-settle");
+    checkInvariant(doc, schema, "apply-after-settle");
+    checkInvariant(doc, schema, "settle-definition");
+    checkInvariant(doc, schema, "not-a-load");
+    CHECK(doc.find("接线时要验两条 setState 序列") != std::string::npos);
     checkInvariant(doc, schema, "rejected-newer-any-setstate");
     checkInvariant(doc, schema, "write-back-replaced");
     checkInvariant(doc, schema, "write-back-edits-lost");
