@@ -270,7 +270,7 @@ function Get-DeferredSevere {
             $decision = if ($at -ge 0) { $row.Cells[$at] } else { $row.Cells -join ' ' }
             # 「附提交」只在处置列和它右边的列里找，而且串里至少有一个 a-f 字母（评论编号、运行编号这类纯数字不算）
             $proof = @($row.Cells | Select-Object -Skip ([Math]::Max($at, 0)) | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count
-            if ($decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修') {
+            if (-not $decision -or $decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略') {
                 $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $true }
             } elseif (($decision -match '已修|修复|已改|采纳') -and $proof) {
                 # 后来写明已修 / 采纳并附提交：这条不再要用户豁免
@@ -372,7 +372,7 @@ function Get-MergeVerdict {
                 if ([string]$F.Posted.Id -ne [string]$s.id -or [string]$F.Posted.Sha256 -ne [string]$s.sha256) {
                     # 逃生口：GitHub 若系统性地改写了回读的正文（换行、Unicode），所有 PR 都会对不上；用户对这个 head 登记
                     # "summaryHash": true 的豁免后放行，并在 Warnings 里写明（updated_at 的核对不受影响）
-                    if ($waiver -and [bool](Get-RinneProp $waiver 'summaryHash')) {
+                    if ($waiver -and (Get-RinneProp $waiver 'summaryHash') -is [bool] -and (Get-RinneProp $waiver 'summaryHash')) {
                         $warn.Add("bot 总结的评论编号或正文哈希与发帖记录不一致，已有用户对这个 head 的哈希豁免：$(Get-RinneProp $waiver 'note')")
                         & $rely 'waiver' $waiver
                     } else {
@@ -1371,6 +1371,7 @@ function Invoke-SelfTest {
         & $bad 'bot 总结在贴出之后被改过（updated_at 变了）' { param($f) $f.State.summary.updatedAt = '2026-10-12T06:00:00Z' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '被改过' }).Count -eq 1 }
         & $bad '发帖记录里的正文哈希与总结对不上' { param($f) $f.State.summary.sha256 = '0' * 64 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '发帖记录' }).Count -eq 1 }
         & $bad '发帖记录里的正文哈希对不上、用户对这个 head 登记了哈希豁免：放行' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = @([pscustomobject]@{ head = $head; by = 'user'; red = 0; important = 0; deferred = $false; summaryHash = $true; note = '用户同意跳过哈希核对' }) } 'ready' { param($r) @($r.Warnings | Where-Object { $_ -match '哈希豁免' }).Count -eq 1 }
+        & $bad '发帖记录里的正文哈希对不上、哈希豁免写成字符串 "false"：仍判红' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = @([pscustomobject]@{ head = $head; by = 'user'; red = 0; important = 0; deferred = $false; summaryHash = 'false'; note = '' }) } 'not-ready'
         & $bad '发帖记录里的正文哈希对不上、哈希豁免不是 by=user：仍判红' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = @([pscustomobject]@{ head = $head; by = 'orchestrator'; red = 0; important = 0; deferred = $false; summaryHash = $true; note = '' }) } 'not-ready'
         & $bad '发帖记录里的评论编号与总结对不上' { param($f) $f.Posted.Id = '1' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '发帖记录' }).Count -eq 1 }
         # pr-agent 的 check：head 上有时要求它 completed（任何结论都接受）；head 上没有时不要求
@@ -1477,6 +1478,10 @@ function Invoke-SelfTest {
         & $bad '已修的行里只有纯数字的编号：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 '| 7000000101 | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
         & $bad '已修的提交串是纯数字：不算附了提交，仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修' '12345678') } 'needs-user'
         & $bad '处置写未采纳（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '未采纳' 'd62c5dc') } 'needs-user'
+        & $bad '处置写搁置：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '搁置') } 'needs-user'
+        & $bad '处置写驳回（带提交串）：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '驳回' 'd62c5dc') } 'needs-user'
+        & $bad '处置写不处理、延后：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '不处理'); & $addRow $f 1 '| 8 | bot | 【重要】 | b.mjs:2 | y | 延后 | 理由 |' } 'needs-user'
+        & $bad '处置列是空的：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '') } 'needs-user'
         & $bad '处置写不修复（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '不修复' 'd62c5dc') } 'needs-user'
         & $bad '先挂账、后写已修但没附提交：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修') } 'needs-user'
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
