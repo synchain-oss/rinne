@@ -549,7 +549,6 @@ export default {
                 true,
                 call("      api_key: ${{ secrets.OPENAI_API_KEY }}", "      api_key: literal"),
             ],
-            // 目录通配只认 owner/repo/<目录>/* 这种三段以上的前缀，且文件名不能为空
             [
                 "调用可复用 workflow 时 with 传了 needs 输出",
                 true,
@@ -570,6 +569,7 @@ export default {
                 ),
             ],
             ["调用可复用 workflow 时权限项写成别的值", true, call("      contents: read", "      contents: admin")],
+            // 目录通配只认 owner/repo/<目录>/* 这种三段以上的前缀，且文件名不能为空
             ["两段式的 owner/repo/* 不算目录通配", true, subPath("owner/repo/*@*")],
             ["目录通配不放行空文件名", true, emptyFile("Synchain-oss/ci-workflows/.github/workflows/*@*")],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
