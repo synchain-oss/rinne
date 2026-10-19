@@ -246,6 +246,72 @@ TEST_CASE("document: 满额 PRMS 补上参数层仍写得回去", "[state][docum
     CHECK(rinne::test::sameDocument(rejected, sentinelDocument(Role::Input)));
 }
 
+TEST_CASE("document: 写出的 PRMS 压到下次读得回来", "[state][document]")
+{
+    // 224 个未知 id（读得进来的上限），参数层补上自己的 11 个参数：235 条，写出来下次读不回来。
+    std::vector<rinne::test::RawParam> raw;
+    for (std::size_t i = 0; i < rinne::state::kMaxDecodedParamCount; ++i)
+        raw.push_back({"u" + std::to_string(i), 0u});
+    const Bytes bytes =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(raw)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument document = sentinelDocument(Role::Input);
+    REQUIRE(rinne::state::loadState(bytes.data(), bytes.size(), Role::Input, document).status ==
+            rinne::state::StateLoadStatus::Ok);
+
+    std::vector<std::string> known;
+    for (int i = 0; i < 11; ++i)
+        known.push_back("k" + std::to_string(i));
+    for (const auto& id : known)
+        document.params.set(id, 1.0f);
+    REQUIRE(document.params.entries.size() == rinne::state::kMaxDecodedParamCount + 11u);
+
+    Bytes untrimmed;
+    REQUIRE(rinne::state::encodeDocument(document, untrimmed));
+    StateDocument reread = sentinelDocument(Role::Input);
+    CHECK(rinne::state::loadState(untrimmed.data(), untrimmed.size(), Role::Input, reread).status ==
+          rinne::state::StateLoadStatus::Corrupt);
+
+    REQUIRE(rinne::state::trimToDecodable(document.params, known));
+    CHECK(document.params.entries.size() == rinne::state::kMaxDecodedParamCount);
+    for (const auto& id : known)
+        CHECK(document.params.find(id) != nullptr);
+    CHECK(document.params.find("u0") != nullptr);
+    CHECK(document.params.find("u" + std::to_string(rinne::state::kMaxDecodedParamCount - 1u)) == nullptr);
+
+    Bytes trimmed;
+    REQUIRE(rinne::state::encodeDocument(document, trimmed));
+    StateDocument back = sentinelDocument(Role::Input);
+    CHECK(rinne::state::loadState(trimmed.data(), trimmed.size(), Role::Input, back).status ==
+          rinne::state::StateLoadStatus::Ok);
+
+    // 载荷字节同理：220 个 255 字节 id 读得进来，补 11 个最长的参数后超过读入的字节上限。
+    rinne::state::Params wide;
+    for (std::size_t i = 0; i < 220u; ++i)
+        wide.set(rinne::test::longestParamId(i), 0.0f);
+    std::vector<std::string> wideKnown;
+    for (std::size_t i = 0; i < 11u; ++i)
+    {
+        wideKnown.push_back(rinne::test::longestParamId(1000u + i));
+        wide.set(wideKnown.back(), 1.0f);
+    }
+    REQUIRE(rinne::state::trimToDecodable(wide, wideKnown));
+    Bytes payload;
+    REQUIRE(rinne::state::encodeParams(wide, payload));
+    CHECK(payload.size() <= rinne::state::kMaxDecodedParamBytes);
+    for (const auto& id : wideKnown)
+        CHECK(wide.find(id) != nullptr);
+
+    // 认识的条目自己就超限：压不下去，返回 false
+    rinne::state::Params onlyKnown;
+    std::vector<std::string> allKnown;
+    for (std::uint32_t i = 0; i <= rinne::state::kMaxDecodedParamCount; ++i)
+    {
+        allKnown.push_back("k" + std::to_string(i));
+        onlyKnown.set(allKnown.back(), 0.0f);
+    }
+    CHECK_FALSE(rinne::state::trimToDecodable(onlyKnown, allKnown));
+}
+
 TEST_CASE("document: 编码拒绝会写出两份已知块或不认识的 role", "[state][document]")
 {
     StateDocument document = rinne::state::makeDefaultDocument(Role::Input);

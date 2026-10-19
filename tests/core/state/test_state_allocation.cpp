@@ -3,7 +3,8 @@
 // 内存不足：把全局 operator new/delete 换成一个受开关控制的版本，从第 N 次分配起抛 std::bad_alloc，逐个 N 扫
 // loadState 与 encodeDocument。判据：不崩（异常被公开入口的 catch 接住）、失败时出参保持调用前的样子、成功时结果
 // 完整。开关默认关，关闭时直接转发 malloc/free，行为与默认分配器相同；只在下面的用例里短暂打开，不影响其他用例。
-// new/delete 成对替换；对齐版本在 malloc 出来的块里自己算对齐，ASan 构建下也留在 malloc/free 这一套里。
+// 全局替换只能有一处：同一个测试可执行文件里再有别的翻译单元或库替换分配器，会链接冲突（重复定义），到时要改成单独的\n//
+// 测试目标。new/delete 成对替换；对齐版本在 malloc 出来的块里自己算对齐，ASan 构建下也留在 malloc/free 这一套里。
 
 #include <catch2/catch_test_macros.hpp>
 
