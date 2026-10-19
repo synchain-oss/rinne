@@ -62,7 +62,14 @@ function New-RinneTempDir {
             if (Test-Path -LiteralPath $dir) { continue }
             throw
         }
-        if (-not $IsWindows) { $null = & chmod 700 -- $dir }
+        if (-not $IsWindows) {
+            & chmod 700 -- $dir
+            if ($LASTEXITCODE -ne 0) {
+                # 刚建出来的空目录：只做不递归的删除
+                try { [IO.Directory]::Delete($dir) } catch { $null = $_ }
+                throw "收紧 $dir 的权限失败（chmod 退出码 $LASTEXITCODE）"
+            }
+        }
         $script:Made[(Resolve-RinneRealPath $dir)] = $Prefix
         return $dir
     }
