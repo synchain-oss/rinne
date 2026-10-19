@@ -204,17 +204,31 @@ function Test-RinneGates([string]$Root) {
     [pscustomobject]@{ Label = 'G3 的 --only 清单与 compliance.yml 逐项一致'; Bad = $false; Passed = $real.Count -gt 0 -and (& $same $real $script:ComplianceOnly) }
     [pscustomobject]@{ Label = 'compliance.yml 新增一项检查时 G3 对不上'; Bad = $true; Passed = -not (& $same $extra $script:ComplianceOnly) }
     [pscustomobject]@{ Label = 'G3 少跑一项时对不上'; Bad = $true; Passed = -not (& $same $real @($script:ComplianceOnly | Select-Object -SkipLast 1)) }
+    [pscustomobject]@{ Label = 'G4 子支线上要查分支名'; Bad = $false; Passed = $null -eq (Get-BranchCheckSkip 'feat/gate-followups' 'origin/feature/v1') }
+    [pscustomobject]@{ Label = 'G4 HEAD 就是 base 分支时跳过分支名检查并写明原因'; Bad = $true; Passed = (Get-BranchCheckSkip 'feature/v1' 'origin/feature/v1') -match 'base 分支 feature/v1' }
+    [pscustomobject]@{ Label = 'G4 游离 HEAD 仍跳过分支名检查'; Bad = $true; Passed = (Get-BranchCheckSkip '' 'origin/feature/v1') -match '游离' }
+    [pscustomobject]@{ Label = 'G4 名字只是以 base 分支名开头的分支仍要查'; Bad = $false; Passed = $null -eq (Get-BranchCheckSkip 'feature/v1-x' 'origin/feature/v1') }
+}
+
+# 分支名检查的去留：HEAD 游离、或 HEAD 就是 base 分支本身（在主 clone 的 feature/v1 上跑 gates）时不查——
+# 长期分支的名字不必是 feat/<slug>。返回 $null 表示要查，否则返回跳过的原因。
+function Get-BranchCheckSkip([string]$Branch, [string]$Base) {
+    $baseName = $Base -replace '^[^/]+/', ''
+    if (-not $Branch) { return 'HEAD 是游离的，没有查分支名' }
+    if ($Branch -ceq $baseName) { return "HEAD 就是 base 分支 $baseName，没有查分支名" }
+    $null
 }
 
 function Invoke-Commits($Ctx) {
     $node, $cc, $range = (Get-ToolCommand $Ctx node), 'scripts/check-commits.mjs', "$($Ctx.Base)..HEAD"
     $branch = "$(git -C $Ctx.Root symbolic-ref --quiet --short HEAD 2>$null)".Trim()
+    $skip = Get-BranchCheckSkip $branch $Ctx.Base
     $steps = @(Step '自测' $node @($cc, '--self-test'))
-    if ($branch) { $steps += Step '分支名' $node @($cc, 'branch', '--head', $branch, '--base', ($Ctx.Base -replace '^[^/]+/', '')) }
+    if (-not $skip) { $steps += Step '分支名' $node @($cc, 'branch', '--head', $branch, '--base', ($Ctx.Base -replace '^[^/]+/', '')) }
     $steps += Step '提交' $node @($cc, 'commits', '--range', $range, '--tier', 'same')
     $steps += Step '冻结契约' $node @($cc, 'contract-guard', '--base', $Ctx.Base, '--head', 'HEAD')
     $r = Invoke-Steps $Ctx $steps
-    if (-not $branch) { $r.Reason += '；HEAD 是游离的，没有查分支名' }
+    if ($skip) { $r.Reason += "；$skip" }
     $r
 }
 

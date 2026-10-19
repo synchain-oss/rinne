@@ -21,7 +21,7 @@
 #   { "waivers":          { "<pr>": [{ "head": "<sha40>", "by": "user", "red": 0, "important": 1, "deferred": false, "note": "…" }] },
 #     "approvals":        { "<pr>": [{ "head": "<sha40>", "by": "user", "note": "…" }] },
 #     "external-handled": { "<pr>": [{ "head": "<sha40>", "by": "user", "comments": [{ "id": "<评论编号>", "updated_at": "<处理时它的 updated_at>" }], "note": "…" }] } }
-# waivers 放过尾注里的【红旗】【重要】与判为不改 / 挂账的条目；approvals 是对基础设施改动的批准；
+# waivers 放过尾注里的【红旗】【重要】与判为不改 / 挂账的条目（"summaryHash": true 放过 bot 总结与发帖记录对不上的哈希核对）；approvals 是对基础设施改动的批准；
 # external-handled 是用户已处理过的外部评论，绑定处理时那条评论的 updated_at（pr-comment -List 列出），之后再改过就作废。
 #
 # 信任模型：记录给的是「绑定到一个 head」与「留下书面痕迹」，不是认证。by 只是标签：能写这个文件的进程都能写出
@@ -370,7 +370,14 @@ function Get-MergeVerdict {
             # 老运行没有这一行、日志过期或取不到时退化为只核对 updated_at，并明确注明未核对哈希
             if ($F.Posted) {
                 if ([string]$F.Posted.Id -ne [string]$s.id -or [string]$F.Posted.Sha256 -ne [string]$s.sha256) {
-                    $fail.Add('bot 总结的评论编号或正文哈希与运行日志里的发帖记录不一致（贴出之后被改过）')
+                    # 逃生口：GitHub 若系统性地改写了回读的正文（换行、Unicode），所有 PR 都会对不上；用户对这个 head 登记
+                    # "summaryHash": true 的豁免后放行，并在 Warnings 里写明（updated_at 的核对不受影响）
+                    if ($waiver -and [bool](Get-RinneProp $waiver 'summaryHash')) {
+                        $warn.Add("bot 总结的评论编号或正文哈希与发帖记录不一致，已有用户对这个 head 的哈希豁免：$(Get-RinneProp $waiver 'note')")
+                        & $rely 'waiver' $waiver
+                    } else {
+                        $fail.Add('bot 总结的评论编号或正文哈希与运行日志里的发帖记录不一致（贴出之后被改过）')
+                    }
                 }
             } elseif ($s.ok) {
                 $warn.Add("未核对哈希：运行 $($s.runId) 的日志里没有 review-bot 的发帖记录（老运行或取不到日志），只核对了 updated_at")
@@ -1363,6 +1370,8 @@ function Invoke-SelfTest {
         # SEC：bot 总结只建不改，updated_at 与 created_at 不同说明贴出之后被改过；发帖记录里的编号与正文哈希也要对得上
         & $bad 'bot 总结在贴出之后被改过（updated_at 变了）' { param($f) $f.State.summary.updatedAt = '2026-10-12T06:00:00Z' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '被改过' }).Count -eq 1 }
         & $bad '发帖记录里的正文哈希与总结对不上' { param($f) $f.State.summary.sha256 = '0' * 64 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '发帖记录' }).Count -eq 1 }
+        & $bad '发帖记录里的正文哈希对不上、用户对这个 head 登记了哈希豁免：放行' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = @([pscustomobject]@{ head = $head; by = 'user'; red = 0; important = 0; deferred = $false; summaryHash = $true; note = '用户同意跳过哈希核对' }) } 'ready' { param($r) @($r.Warnings | Where-Object { $_ -match '哈希豁免' }).Count -eq 1 }
+        & $bad '发帖记录里的正文哈希对不上、哈希豁免不是 by=user：仍判红' { param($f) $f.State.summary.sha256 = '0' * 64; $f.Records.Waivers = @([pscustomobject]@{ head = $head; by = 'orchestrator'; red = 0; important = 0; deferred = $false; summaryHash = $true; note = '' }) } 'not-ready'
         & $bad '发帖记录里的评论编号与总结对不上' { param($f) $f.Posted.Id = '1' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '发帖记录' }).Count -eq 1 }
         # pr-agent 的 check：head 上有时要求它 completed（任何结论都接受）；head 上没有时不要求
         & $bad 'pr-agent 的 check 还没跑完' { param($f) $f.Checks['pr-agent-claude / pr-agent'] = [pscustomobject]@{ name = 'pr-agent-claude / pr-agent'; status = 'in_progress'; conclusion = $null } } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'pr-agent-claude / pr-agent' -and $_ -match '没跑完' }).Count -eq 1 }
