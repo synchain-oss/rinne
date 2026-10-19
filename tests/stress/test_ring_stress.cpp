@@ -192,11 +192,13 @@ bool nonVacuous(const Config& cfg, const Result& r) noexcept
            r.raced >= minRaced(cfg) && (!needsInFlight(cfg) || r.inFlight >= kMinInFlight);
 }
 
-// 每个写方各自发布自己被挡住的次数，各占一条缓存行，主线程只拿它判断能不能提前收尾
+// 每个写方各自发布自己被挡住的次数，主线程只拿它判断能不能提前收尾。手工填到 128 字节（alignas 在 MSVC 上触发
+// C4324）：两个计数相隔 128 字节，缓存行不论 64 还是 128 字节（Apple M），两个写方都不会争同一条线。只影响节奏，
+// 不影响判据
 struct PaddedCounter
 {
     std::atomic<u64> value{0};
-    unsigned char pad[64 - sizeof(std::atomic<u64>)] = {};
+    unsigned char pad[128 - sizeof(std::atomic<u64>)] = {};
 };
 
 Result runRound(const Config& cfg, u64 seed)

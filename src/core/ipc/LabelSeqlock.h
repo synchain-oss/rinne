@@ -165,8 +165,10 @@ inline bool writeLabel(RoleSlot& slot, const LabelPayload& p) noexcept
     {
         return false;
     }
-    // 接管瞬间旧属主可能还在写：CAS 只让一个写方进临界区，另一个退回而不是把序号再 + 1
-    if (!slot.label_seq.compare_exchange_strong(s, s + 1, std::memory_order_relaxed, std::memory_order_relaxed))
+    // 接管瞬间旧属主可能还在写：CAS 只让一个写方进临界区，另一个退回而不是把序号再 + 1。
+    // acquire 与上一版以 release 收尾的那次 CAS 配对：上一版的字段写先于本版的字段写，每个字段的修改次序里
+    // 新值一定排在旧值之后（上一版若出自另一个进程，单靠程序次序给不了这一点）
+    if (!slot.label_seq.compare_exchange_strong(s, s + 1, std::memory_order_acquire, std::memory_order_relaxed))
     {
         return false;
     }
@@ -176,7 +178,9 @@ inline bool writeLabel(RoleSlot& slot, const LabelPayload& p) noexcept
 // 新属主接手一个停在奇数上的标签（上一任写到一半就死了）：把序号从 stuckOdd CAS 到 stuckOdd + 2（仍是奇数，表示
 // 「现在是我在写」），写完整的一份，再从 stuckOdd + 2 CAS 成偶数。上一任确实死了时，读方只会看到奇数或完整的新版；
 // 上一任只是慢的话，它晚到的字段写可能留在这一版后面（见文件头），由属主按心跳重读自己的标签来修。
-// 只许属主调用，而且只在同一个奇数已经停了足够久之后（会合层按心跳判断）：序号变过、或者不是奇数都返回 false
+// 只许属主调用，而且只在同一个奇数连续停满两个心跳之后（会合层判断）：序号变过、或者不是奇数都返回 false。
+// 进奇数的 CAS 同样用 acquire：停住的奇数是上一任在一个 release 收尾之上做的 RMW，读到它就与那次收尾同步，
+// 更早那一版的字段写都先于这里的字段写
 inline bool rewriteStuckLabel(RoleSlot& slot, u32 stuckOdd, const LabelPayload& p) noexcept
 {
     if ((stuckOdd & 1u) == 0)
@@ -184,7 +188,7 @@ inline bool rewriteStuckLabel(RoleSlot& slot, u32 stuckOdd, const LabelPayload& 
         return false;
     }
     u32 expected = stuckOdd;
-    if (!slot.label_seq.compare_exchange_strong(expected, stuckOdd + 2, std::memory_order_relaxed,
+    if (!slot.label_seq.compare_exchange_strong(expected, stuckOdd + 2, std::memory_order_acquire,
                                                 std::memory_order_relaxed))
     {
         return false;
