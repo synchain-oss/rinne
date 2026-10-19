@@ -4,16 +4,16 @@
 # PR 评论的读与写。写：我方评论、线程回复、处置汇总只经这里发出，一律过公开文本检查并在首行加 agent 隐藏标记。
 #   -List -Pr <n> [-Since <ISO>] [-Json]
 #        四个来源（issue comments、review comments、reviews、GraphQL reviewThreads）摊成一张表：作者分类
-#        （agent / bot-summary / bot / user / external，按仓库权限认人）、按 updated_at 判新、是否已回应；
-#        另列出每条 bot 总结里的逐条意见（含没开 thread 的）
+#        （agent / bot-summary / bot / pr-agent / user / external，按仓库权限认人）、按 updated_at 判新、是否已回应；
+#        另列出每条 bot 总结里的逐条意见（含没开 thread 的）与 pr-agent 的审查输出（标明未回应）
 #   -Footer -Pr <n> [-Head <sha40>]
 #        最近一条 bot 总结的机读尾注；缺失、多于一行、条数与正文不符或审的不是该 head → 「bot 结论不可用」，退出 2
 #   -Wait -Pr <n> -Head <sha40> [-TimeoutMin 9]
-#        等 feature 线的 required checks 与 claude-pr-review 在该 head 上都跑完；单次最多 9 分钟，没跑完退出 3，
-#        head 变了退出 4
+#        等 feature 线的 required checks 与 claude-pr-review 在该 head 上都跑完；head 上已经有 pr-agent-claude 的
+#        check 时也等它（任何 completed 结论都接受）。单次最多 9 分钟，没跑完退出 3，head 变了退出 4
 #   -WaitMerged -Pr <n> [-TimeoutMin 9]        等 PR 合入；单次最多 9 分钟，没合入退出 3
 #   -Sweep -Since <ISO>
-#        全仓（含已合并 / 已关闭的 PR 与 issue）晚于该时间、我方还没回应的评论
+#        全仓（含已合并 / 已关闭的 PR 与 issue）晚于该时间、我方还没回应的评论（含 pr-agent 的）
 #   -Post -Pr <n> -BodyFile <f> -Role <impl|review|orchestrator> -Kind <…> -Round <n> -Head <sha> [-BotRun <id>] [-InReplyTo <id,…>]
 #        发一条 issue comment；-Kind disposition（评审处置汇总）必须带 -BotRun；-InReplyTo 点名它回应的评论
 #        （写进标记的 in-reply-to，pr-merge 与 -Sweep 只认这个）
@@ -55,8 +55,12 @@ function Get-ListReport {
     $findings = foreach ($s in @($state.summaries)) {
         foreach ($f in @($s.items)) { [pscustomobject]@{ Summary = [string]$s.id; Run = $s.runId; Head = $s.head; Level = $f.level; Text = $f.text } }
     }
+    # pr-agent 的审查输出与 BotFindings 列在一起：逐条标明回应了没有
+    $prAgent = foreach ($r in @($rows | Where-Object Kind -eq 'pr-agent')) {
+        [pscustomobject]@{ Id = $r.Id; Author = $r.Author; Updated = $r.Updated; Responded = $r.Responded; Url = $r.Url }
+    }
     [pscustomobject]@{
-        Pr = $Pr; Items = @($rows); BotFindings = @($findings)
+        Pr = $Pr; Items = @($rows); BotFindings = @($findings); PrAgent = @($prAgent)
         OpenThreads = @($activity.Threads | Where-Object { -not $_.isResolved }).Count
         External = @($rows | Where-Object Kind -eq 'external').Count
         Unanswered = @($rows | Where-Object { -not $_.Responded }).Count
@@ -81,6 +85,9 @@ function Get-WaitState {
     $runs = Get-RinneCheckRuns $Head
     $required = Get-RinneRequiredChecks
     $want = @($required) + @('claude-pr-review')
+    # pr-agent-claude 不是 required check：只在这次 head 上已经出现时才等它；任何 completed 结论都接受
+    $prAgent = Get-RinnePrAgentCheck
+    if ($runs.ContainsKey($prAgent)) { $want += $prAgent }
     $checks = foreach ($n in $want) {
         $c = if ($runs.ContainsKey($n)) { $runs[$n] } else { $null }
         [pscustomobject]@{ Name = $n; Status = $(if ($c) { $c.status } else { 'missing' }); Conclusion = $(if ($c) { $c.conclusion } else { $null }) }
@@ -297,18 +304,57 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-Footer 条数与正文不符 → 不可用' $true (-not (Get-FooterResult 3 $head).Ok)
         $last.body = $orig
 
+        $savedChecks = Copy-RinneObject $checks
         $w = Get-WaitState 3 $head
         Add-RinneCase $cases '-Wait 全部 check 已完成' $false ($w.State -ne 'done')
         Add-RinneCase $cases '-Wait head 变了' $true ((Get-WaitState 3 ('b' * 40)).State -eq 'moved')
         $checks.check_runs[0].status = 'in_progress'
         $checks.check_runs = @($checks.check_runs | Where-Object name -ne 'claude-pr-review')
         Add-RinneCase $cases '-Wait bot 还没跑完' $true ((Get-WaitState 3 $head).State -eq 'pending')
+        # pr-agent-claude 不是 required check：head 上出现这个 check 才等它；任何 completed 结论都接受；没有就不要求
+        $checks.check_runs = @($savedChecks.check_runs | ForEach-Object { Copy-RinneObject $_ })
+        $checks.check_runs += [pscustomobject]@{ id = 9; name = 'pr-agent-claude / pr-agent'; status = 'in_progress'; conclusion = $null; head_sha = $head; details_url = 'u' }
+        Add-RinneCase $cases '-Wait pr-agent 的 check 还在跑时等它' $true ((Get-WaitState 3 $head).State -eq 'pending')
+        $checks.check_runs[-1].status = 'completed'; $checks.check_runs[-1].conclusion = 'failure'
+        Add-RinneCase $cases '-Wait pr-agent 的 check 跑完（failure 也接受）' $false ((Get-WaitState 3 $head).State -ne 'done')
+        $checks.check_runs = @($checks.check_runs | Where-Object name -ne 'pr-agent-claude / pr-agent')
+        Add-RinneCase $cases '-Wait head 上没有 pr-agent 的 check 时不要求' $false ((Get-WaitState 3 $head).State -ne 'done')
 
         $sw = Get-SweepReport '2026-10-12T04:00:00Z'
         Add-RinneCase $cases '-Sweep 已合并的 PR 也扫，已回应的不列' $false (@($sw.Unanswered).Count -ne 0 -or -not ($log | Where-Object { $_ -match 'issues\?state=all' }))
         $issue += [pscustomobject]@{ id = 7000000001; user = @{ login = 'someone'; type = 'User' }; author_association = 'NONE'; created_at = '2026-10-12T06:00:00Z'; updated_at = '2026-10-12T06:00:00Z'; body = '合并后发现一个问题'; html_url = 'u' }
         $sw = Get-SweepReport '2026-10-12T04:00:00Z'
         Add-RinneCase $cases '-Sweep 列出合并后的外部评论' $true (@($sw.Unanswered | Where-Object Id -eq '7000000001').Count -eq 1)
+
+        # pr-agent 的审查输出单独一类：前 5 行的标记 / 标题认得出；通知免回应；回应只认 in-reply-to 且晚于 updated_at
+        $prAgent = { param($id, $body, $updated = '2026-10-12T06:00:00Z') [pscustomobject]@{ id = [long]$id; user = @{ login = 'github-actions[bot]'; type = 'Bot' }; author_association = 'NONE'; created_at = '2026-10-12T06:00:00Z'; updated_at = $updated; body = $body; html_url = "https://github.com/x/y/pull/3#issuecomment-$id" } }
+        $agentReply = { param($id, $to, $created) [pscustomobject]@{ id = [long]$id; user = @{ login = 'DLsnows'; type = 'User' }; author_association = 'MEMBER'; created_at = $created; updated_at = $created; body = "<!-- rinne-agent v1 role=review kind=reply round=3 head=f35523c in-reply-to=$to -->`n已核对。" ; html_url = 'u' } }
+        $reviewBody = "<!-- pr-agent:review:full -->`n## PR Reviewer Guide`n`n**Recommended focus areas**`n`n- Possible Issue: x"
+        $issue += & $prAgent 7000000101 $reviewBody
+        $issue += & $prAgent 7000000102 $reviewBody '2026-10-12T06:20:00Z'
+        $issue += & $agentReply 7000000202 7000000102 '2026-10-12T06:10:00Z'
+        $issue += & $prAgent 7000000103 $reviewBody
+        $issue += & $agentReply 7000000203 7000000103 '2026-10-12T06:10:00Z'
+        $issue += & $prAgent 7000000104 "<!-- pr-agent:review:full -->`n**[Persistent review]（旧）** updated to latest commit abc1234"
+        $issue += & $prAgent 7000000105 "Failed to generate PR review: timeout`n<!-- pr-agent:improve:summary -->"
+        $issue += & $prAgent 7000000106 "第一行`n第二行`n第三行`n第四行`n第五行`n<!-- pr-agent:review:full -->`n## PR Reviewer Guide"
+        $issue += & $prAgent 7000000107 "[pr-agent:improve:summary]: https://github.com/The-PR-Agent/pr-agent`n## PR Code Suggestions"
+        $issue += & $prAgent 7000000108 '## PR Reviewer Guide'
+        $rep = Get-ListReport 3 '2026-10-12T05:00:00Z'
+        $byId = { param($i) @($rep.Items | Where-Object { [string]$_.Id -eq "$i" })[0] }
+        Add-RinneCase $cases '-List pr-agent 评论单独一类：没有回应时标明未回应' $false (-not ((& $byId 7000000101).Kind -eq 'pr-agent' -and -not (& $byId 7000000101).Responded))
+        Add-RinneCase $cases '-List 回应点名了 id、但发在 updated_at 之前：仍算未回应' $false (-not ((& $byId 7000000102).Kind -eq 'pr-agent' -and -not (& $byId 7000000102).Responded))
+        Add-RinneCase $cases '-List 回应晚于 updated_at：算已回应' $false (-not ((& $byId 7000000103).Kind -eq 'pr-agent' -and (& $byId 7000000103).Responded))
+        Add-RinneCase $cases '-List 两种通知仍属免回应的 bot 类' $false (-not ((& $byId 7000000104).Kind -eq 'bot' -and (& $byId 7000000104).Responded -and (& $byId 7000000105).Kind -eq 'bot' -and (& $byId 7000000105).Responded))
+        Add-RinneCase $cases '-List 标记出现在前 5 行之外（正文引用）不算 pr-agent' $false ((& $byId 7000000106).Kind -eq 'pr-agent')
+        Add-RinneCase $cases '-List 链接引用形式的 pr-agent 标记也认' $false (-not ((& $byId 7000000107).Kind -eq 'pr-agent' -and (& $byId 7000000108).Kind -eq 'pr-agent'))
+        $prRow = @($rep.PrAgent | Where-Object { [string]$_.Id -eq '7000000101' })
+        Add-RinneCase $cases '-List pr-agent 评论与 BotFindings 列在一起' $false (-not ($prRow.Count -eq 1 -and -not $prRow[0].Responded))
+        $sw = Get-SweepReport '2026-10-12T05:00:00Z'
+        Add-RinneCase $cases '-Sweep 列出未回应的 pr-agent 评论、不列已回应的' $false (-not (
+                @($sw.Unanswered | Where-Object { [string]$_.Id -eq '7000000101' }).Count -eq 1 -and
+                @($sw.Unanswered | Where-Object { [string]$_.Id -eq '7000000103' }).Count -eq 0 -and
+                @($sw.Unanswered | Where-Object { [string]$_.Id -eq '7000000104' }).Count -eq 0))
 
         Invoke-Post -Pr 3 -Text "## 评审处置汇总`n全部采纳。" -Role review -Kind disposition -Round 2 -Head $head -BotRun '38203700274' | Out-Null
         $b = $posted[-1].body
@@ -360,6 +406,7 @@ if ($List) {
         Write-Output ("{0,-14} {1,-12} {2,-16} {3,-11} {4} {5}" -f $i.Source, $i.Id, $i.Author, $i.Kind, $i.Updated, ($flag -join ' '))
     }
     foreach ($f in $rep.BotFindings) { Write-Output "  bot 意见（运行 $($f.Run)）【$($f.Level)】$($f.Text)" }
+    foreach ($a in @($rep.PrAgent)) { Write-Output "  pr-agent 评论 $($a.Id)（$($a.Updated)）$(if ($a.Responded) { '已回应' } else { '未回应' }) $($a.Url)" }
     Write-Output "未关线程 $($rep.OpenThreads)，未回应 $($rep.Unanswered)，外部评论 $($rep.External)"
     exit 0
 }

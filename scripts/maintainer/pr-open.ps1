@@ -71,6 +71,8 @@ function Invoke-Update {
     $repo = Get-RinneRepo
     $pull = Get-RinneApi "repos/$repo/pulls/$Pr"
     if ($pull.state -ne 'open') { throw "#$Pr 不是打开状态，不改正文" }
+    # 源仓库被删（fork 没了）时接口返回的 head.repo 是 null，不是「不是本仓的分支」
+    if ($null -eq (Get-RinneProp $pull.head 'repo')) { throw "#$Pr 的源仓库已被删除，无法更新；请直接处理该 PR" }
     if ($pull.head.repo.full_name -ne $repo) { throw "#$Pr 的 head 不是本仓的分支" }
     $sha = [string]$pull.head.sha
     $t = $Title ? $Title : [string]$pull.title
@@ -153,6 +155,12 @@ function Invoke-SelfTest {
         $existing.head.repo.full_name = 'someone/rinne'; $n = $patched.Count
         Add-RinneCase $cases '-Update：head 是 fork 的分支（不在本仓）的 PR 不改' $true ((-not (& $upd $good)) -and $patched.Count -eq $n)
         $existing.head.repo.full_name = (Get-RinneRepo)
+        # fork 已删：接口返回的 head.repo 是 null。不能报「找不到属性」，要写明原因，也不发任何请求
+        $existing.head.repo = $null; $n = $patched.Count
+        $gone = $(try { Invoke-Update -Pr 12 -Title '' -Body $good -Role impl -Round 2 } catch { $_.Exception.Message })
+        Add-RinneCase $cases '-Update：源仓库已被删除（head.repo 为 null）时写明原因、不发请求' $true (
+            $gone -match '源仓库已被删除' -and $gone -notmatch '找不到属性' -and $patched.Count -eq $n)
+        $existing.head.repo = [pscustomobject]@{ full_name = (Get-RinneRepo) }
     } finally {
         Set-RinneFake $null
         Exit-RinneSelfTestNeedles $needles

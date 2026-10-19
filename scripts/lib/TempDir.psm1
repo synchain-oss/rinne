@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # 自测用的临时目录：递归删除只删本进程经 New-RinneTempDir 建出来的目录，删之前按真实路径核对。
-# - New-RinneTempDir 用 [IO.Directory]::CreateTempSubdirectory 建目录（与 mkdtemp 一样：名字随机，同名的已经在就换一个，
-#   建不出来抛错），所以「是本进程建的」不取决于调用方的 ErrorActionPreference；建好就记下它的真实路径。
+# - New-RinneTempDir 在系统临时目录下一层建目录（名字是前缀 + 32 位随机十六进制，同名的已经在就换一个，建不出来抛错），
+#   所以「是本进程建的」不取决于调用方的 ErrorActionPreference；建好就记下它的真实路径。不用 .NET 7 才有的
+#   [IO.Directory]::CreateTempSubdirectory：脚本的 #Requires 只到 7.0，这里自己拼路径、用 CreateDirectory 建。
 # - 真实路径逐级解析：路径上每一级是 junction 或符号链接的，换成它最终指向的位置再往下走（Windows 与别的平台同一套，macOS
 #   的 /var 指向 /private/var 这类系统自带的链接也照样解析）。
 # - Remove-RinneTempDir 每次动手之前重新解析：真实路径必须是建的时候记下的那一个，而且就在系统临时目录（同样按真实路径）
@@ -45,12 +46,34 @@ function Resolve-RinneRealPath {
     $cur
 }
 
-<# 在系统临时目录下一层新建一个目录（名字是 <前缀><随机>），记下它的真实路径，返回完整路径。 #>
+<#
+  在系统临时目录下一层新建一个目录（名字是 <前缀><32 位随机十六进制>），记下它的真实路径，返回完整路径。
+  名字靠随机数（32 位十六进制，猜不到），再用 New-Item 建：目录已经在（包括指向目录的符号链接）就报错，换一个名字；
+  不用 .NET 7 才有的 [IO.Directory]::CreateTempSubdirectory，脚本的下限仍是 PowerShell 7.0。
+  非 Windows 上建好后收紧成 0700（CreateTempSubdirectory 就是这个权限，CreateDirectory 默认跟 umask 走）。
+#>
 function New-RinneTempDir {
     param([Parameter(Mandatory)][ValidatePattern('^rinne-[a-z0-9-]+-$')][string]$Prefix)
-    $dir = [IO.Directory]::CreateTempSubdirectory($Prefix).FullName
-    $script:Made[(Resolve-RinneRealPath $dir)] = $Prefix
-    $dir
+    $root = [IO.Path]::GetTempPath()
+    for ($i = 0; $i -lt 100; $i++) {
+        $dir = [IO.Path]::Join($root, $Prefix + [guid]::NewGuid().ToString('N'))
+        try { $null = New-Item -ItemType Directory -Path $dir -ErrorAction Stop }
+        catch {
+            if (Test-Path -LiteralPath $dir) { continue }
+            throw
+        }
+        if (-not $IsWindows) {
+            $null = & chmod 700 -- $dir
+            if ($LASTEXITCODE -ne 0) {
+                # 刚建出来的空目录：只做不递归的删除
+                try { [IO.Directory]::Delete($dir) } catch { $null = $_ }
+                throw "收紧 $dir 的权限失败（chmod 退出码 $LASTEXITCODE）"
+            }
+        }
+        $script:Made[(Resolve-RinneRealPath $dir)] = $Prefix
+        return $dir
+    }
+    throw "在 $root 下建不出 $Prefix 开头的临时目录（同名的太多）"
 }
 
 <# 这个目录能不能删：能删返回 @{ Real }，不能删返回原因（字符串）。 #>
@@ -132,7 +155,8 @@ function Test-RinneTempDir {
         & $check '删除：目录已经不在时什么都不做' $false ($null -ne (Remove-RinneTempDir -Path $a))
 
         # 名字形态一样、也在系统临时目录下一层，但不是经 New-RinneTempDir 建的：不删
-        $foreign = [IO.Directory]::CreateTempSubdirectory('rinne-tempdir-selftest-').FullName
+        $foreign = [IO.Path]::Join([IO.Path]::GetTempPath(), 'rinne-tempdir-selftest-' + [guid]::NewGuid().ToString('N'))
+        $null = [IO.Directory]::CreateDirectory($foreign)
         $r = Remove-RinneTempDir -Path $foreign
         & $check '拒绝：不是经 New-RinneTempDir 建的目录不删' $true ($r -match '不是本进程' -and (Test-Path -LiteralPath $foreign))
         $victim = Join-Path $b 'victim'

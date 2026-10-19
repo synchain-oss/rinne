@@ -2,7 +2,8 @@
 //
 // 工具钉版文件：每个文件恰好一行版本号；同一工具在多处出现时版本必须一致
 // （.clang-format 头注释、requirements-tools.txt 与 .clang-format-version 对拍）。
-// 构建用的五个钉版文件与工具钉版一样是必需的，缺一个就判红。WebView2 包的版本与 sha256 钉在 CMake 里，
+// 构建用的钉版文件与工具钉版一样是必需的，缺一个就判红。mac 的 pluginval 包 sha256 也在这里：它登记的是
+// .pluginval-version 所指那个 tag 的包，两者对不上就判红。WebView2 包的版本与 sha256 钉在 CMake 里，
 // 与 THIRD-PARTY-NOTICES.md、third_party/notices/README.md 写的对拍。requirements-tools.txt 里字体检查要用的
 // fontTools 与 brotli 必须在位、带版本与 sha256。tests/CMakeLists.txt 存在时，Catch2 的 GIT_TAG 必须是 40 位小写十六进制
 // 提交号，行尾注释写明版本（# vX.Y.Z），并与 THIRD-PARTY-NOTICES.md、third_party/notices/README.md 写的版本与提交对拍。
@@ -23,6 +24,7 @@ export const PINS = {
     ".pluginval-version": /^v?\d+\.\d+\.\d+$/,
     ".sccache-version": SEMVER,
     ".sccache-sha256": /^[0-9a-f]{64}$/,
+    "scripts/ci/mac/pluginval-macos.sha256": /^v\d+\.\d+\.\d+ [0-9a-f]{64}$/,
 };
 const WEBVIEW2 = {
     cmake: "cmake/RinneDeps.cmake",
@@ -116,6 +118,14 @@ export function checkPins(read) {
     if (!new RegExp(`^# clang-format ${cf?.replace(/\./g, "\\.")}\\b`, "m").test(read(".clang-format") || "")) {
         errors.push(".clang-format 头注释里的版本与 .clang-format-version 不一致");
     }
+    // mac 的 pluginval 包按 .pluginval-version 的 tag 下载，sha256 登记里写的 tag 必须原样就是它：
+    // pluginval-gate.sh 原样比较并直接拿 tag 拼下载地址，不带 v 的钉版在那边会当场失败
+    const macPluginval = /^(\S+) [0-9a-f]{64}$/.exec(value["scripts/ci/mac/pluginval-macos.sha256"] || "");
+    if (macPluginval && macPluginval[1] !== value[".pluginval-version"]) {
+        errors.push(
+            `scripts/ci/mac/pluginval-macos.sha256 登记的是 ${macPluginval[1]}，与 .pluginval-version 的 ${value[".pluginval-version"] || "（没有）"} 不一致`,
+        );
+    }
     const req = requirementEntries(read("requirements-tools.txt") || "");
     const entry = (name) => req.find((e) => e.name === name);
     if (entry("clang-format")?.version !== cf) errors.push("requirements-tools.txt 的 clang-format 版本不一致");
@@ -145,6 +155,7 @@ const GOOD = {
     ".pluginval-version": "v1.0.4\n",
     ".sccache-version": "0.17.0\n",
     ".sccache-sha256": `${"e9".repeat(32)}\n`,
+    "scripts/ci/mac/pluginval-macos.sha256": `v1.0.4 ${"3c".repeat(32)}\n`,
     ".clang-format": "# SPDX\n# clang-format 18.1.8：说明\nBasedOnStyle: LLVM\n",
     "requirements-tools.txt": `clang-format==18.1.8\nreuse==6.2.0\n${FONT_REQ}`,
     [WEBVIEW2.cmake]: `if(WIN32)\n  set(WEBVIEW2_VERSION "1.0.2957.106")\n  set(WEBVIEW2_SHA256 "${"4c".repeat(32)}")\n`,
@@ -228,10 +239,40 @@ export default {
             ["sccache 版本带 v 前缀", true, with_({ ".sccache-version": "v0.17.0\n" })],
             ["sccache 的 sha256 是大写", true, with_({ ".sccache-sha256": `${"E9".repeat(32)}\n` })],
             ["sccache 的 sha256 少一位", true, with_({ ".sccache-sha256": `${"e".repeat(63)}\n` })],
+            // mac 的 pluginval sha256 是必需项：tag 与 .pluginval-version 对不上、格式不对、多一行都要红
+            [
+                "mac pluginval sha256 的 tag 与 .pluginval-version 不一致",
+                true,
+                with_({ "scripts/ci/mac/pluginval-macos.sha256": `v1.0.5 ${"3c".repeat(32)}\n` }),
+            ],
+            // 钉版不带 v、登记带 v：pluginval-gate.sh 原样比较，会当场失败，这里必须先判红
+            ["mac pluginval 钉版不带 v，与 gate 的原样比较不符", true, with_({ ".pluginval-version": "1.0.4\n" })],
+            [
+                "mac pluginval sha256 不是 64 位小写十六进制",
+                true,
+                with_({ "scripts/ci/mac/pluginval-macos.sha256": `v1.0.4 ${"3C".repeat(32)}\n` }),
+            ],
+            [
+                "mac pluginval sha256 少一位",
+                true,
+                with_({ "scripts/ci/mac/pluginval-macos.sha256": `v1.0.4 ${"3c".repeat(31)}\n` }),
+            ],
+            [
+                "mac pluginval sha256 多出一行",
+                true,
+                with_({
+                    "scripts/ci/mac/pluginval-macos.sha256": `v1.0.4 ${"3c".repeat(32)}\nv1.0.3 ${"3c".repeat(32)}\n`,
+                }),
+            ],
             // 构建钉版是必需的：逐个删掉都要红
-            ...[".juce-commit", ".juce-version", ".pluginval-version", ".sccache-version", ".sccache-sha256"].map(
-                (f) => [`缺构建钉版 ${f}`, true, with_({ [f]: null })],
-            ),
+            ...[
+                ".juce-commit",
+                ".juce-version",
+                ".pluginval-version",
+                ".sccache-version",
+                ".sccache-sha256",
+                "scripts/ci/mac/pluginval-macos.sha256",
+            ].map((f) => [`缺构建钉版 ${f}`, true, with_({ [f]: null })]),
             // fontTools 与 brotli：在位、钉版本、带 sha256
             [
                 "缺 fonttools",
