@@ -143,6 +143,33 @@ TEST_CASE("configs: 键表与键号裁定一致", "[state][configs]")
     CHECK(rinne::state::findConfigField(static_cast<Role>(9), 1) == nullptr);
 }
 
+TEST_CASE("configs: 键表放得进 32 位位图且键号严格升序", "[state][configs]")
+{
+    // 与 StateCodec.h 里的两条 static_assert 同义：运行时再钉一遍，表被改乱时用例也变红。
+    REQUIRE(rinne::state::kConfigFields.size() <= rinne::state::kMaxConfigFields);
+    for (std::size_t i = 1; i < rinne::state::kConfigFields.size(); ++i)
+    {
+        INFO("下标 " << i);
+        CHECK(static_cast<std::uint16_t>(rinne::state::kConfigFields[i - 1u].key) <
+              static_cast<std::uint16_t>(rinne::state::kConfigFields[i].key));
+    }
+
+    // 编码按数组顺序写出：默认载荷里的键号必须一路升序。
+    const Bytes encoded = encodeOk(Configs{});
+    std::size_t at = 0;
+    std::uint16_t previous = 0;
+    while (at + 4u <= encoded.size())
+    {
+        const std::uint16_t key = static_cast<std::uint16_t>(encoded[at] | (encoded[at + 1u] << 8));
+        const std::size_t length = static_cast<std::size_t>(encoded[at + 2u] | (encoded[at + 3u] << 8));
+        INFO("键 " << key);
+        CHECK(key > previous);
+        previous = key;
+        at += 4u + length;
+    }
+    CHECK(at == encoded.size());
+}
+
 TEST_CASE("configs: 默认值逐字节固定", "[state][configs]")
 {
     CHECK(encodeOk(Configs{}, Role::Input) == defaultInputPayload());

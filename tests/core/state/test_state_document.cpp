@@ -11,6 +11,7 @@
 #include "StateTestKit.h"
 #include "state/StateCodec.h"
 #include "state/StateDocument.h"
+#include "state/StateMigration.h"
 
 namespace
 {
@@ -199,6 +200,200 @@ TEST_CASE("document: 块数预算保证写得回去", "[state][document]")
     const StateDocument output = decodeOk(containerOf(Role::Output, unknownChunks(63)), Role::Output);
     CHECK(encodeToContainer(output).chunks.size() == rinne::state::kMaxChunkCount);
     requireRejected(containerOf(Role::Output, unknownChunks(64)), Role::Output);
+}
+
+TEST_CASE("document: 满额 PRMS 读得进来也写得回去", "[state][document]")
+{
+    // 256 个未知 id：条数上限正好，读得进来，原样写回也成功。
+    std::vector<rinne::test::RawParam> full;
+    for (std::uint32_t i = 0; i < rinne::state::kMaxParamCount; ++i)
+        full.push_back({"p" + std::to_string(i), 0u});
+    const Bytes fullBytes =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(full)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument document = sentinelDocument(Role::Input);
+    REQUIRE(rinne::state::loadState(fullBytes.data(), fullBytes.size(), Role::Input, document).status ==
+            rinne::state::StateLoadStatus::Ok);
+    CHECK(document.params.entries.size() == rinne::state::kMaxParamCount);
+    Bytes encoded;
+    REQUIRE(rinne::state::encodeDocument(document, encoded));
+    StateDocument fullBack = sentinelDocument(Role::Input);
+    REQUIRE(rinne::state::loadState(encoded.data(), encoded.size(), Role::Input, fullBack).status ==
+            rinne::state::StateLoadStatus::Ok);
+    CHECK(rinne::test::sameDocument(fullBack, document));
+
+    // 257 条：只有条数上限这一条拦它。
+    full.push_back({"p256", 0u});
+    const Bytes tooMany =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(full)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument untouched = sentinelDocument(Role::Input);
+    CHECK(rinne::state::loadState(tooMany.data(), tooMany.size(), Role::Input, untouched).status ==
+          rinne::state::StateLoadStatus::Corrupt);
+    CHECK(rinne::test::sameDocument(untouched, sentinelDocument(Role::Input)));
+
+    // 252 个 255 字节 id：PRMS 共 65524 字节，在 64 KiB 之内，读得进来也写得回去。
+    std::vector<rinne::test::RawParam> wide;
+    for (std::size_t i = 0; i < 252; ++i)
+        wide.push_back({rinne::test::longestParamId(i), 0u});
+    const Bytes wideBytes =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(wide)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument wideDocument = sentinelDocument(Role::Input);
+    REQUIRE(rinne::state::loadState(wideBytes.data(), wideBytes.size(), Role::Input, wideDocument).status ==
+            rinne::state::StateLoadStatus::Ok);
+    REQUIRE(rinne::state::encodeDocument(wideDocument, encoded));
+    StateDocument wideBack = sentinelDocument(Role::Input);
+    REQUIRE(rinne::state::loadState(encoded.data(), encoded.size(), Role::Input, wideBack).status ==
+            rinne::state::StateLoadStatus::Ok);
+    CHECK(rinne::test::sameDocument(wideBack, wideDocument));
+
+    // 253 个：PRMS 超过 64 KiB，只有载荷上限这一条拦它（条数仍在 256 之内）。
+    wide.push_back({rinne::test::longestParamId(252u), 0u});
+    const Bytes oversized =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(wide)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument rejected = sentinelDocument(Role::Input);
+    CHECK(rinne::state::loadState(oversized.data(), oversized.size(), Role::Input, rejected).status ==
+          rinne::state::StateLoadStatus::Corrupt);
+    CHECK(rinne::test::sameDocument(rejected, sentinelDocument(Role::Input)));
+}
+
+TEST_CASE("document: 写出的 PRMS 压进读写共用的上限", "[state][document]")
+{
+    std::vector<std::string> known;
+    for (int i = 0; i < 11; ++i)
+        known.push_back("k" + std::to_string(i));
+
+    // 256 个未知 id 读进来，参数层补上自己的 11 个参数：267 条，不裁剪就写不出去。
+    std::vector<rinne::test::RawParam> raw;
+    for (std::size_t i = 0; i < rinne::state::kMaxParamCount; ++i)
+        raw.push_back({"u" + std::to_string(i), 0u});
+    const Bytes bytes =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(raw)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument document = sentinelDocument(Role::Input);
+    REQUIRE(rinne::state::loadState(bytes.data(), bytes.size(), Role::Input, document).status ==
+            rinne::state::StateLoadStatus::Ok);
+    for (const auto& id : known)
+        document.params.set(id, 1.0f);
+    REQUIRE(document.params.entries.size() == rinne::state::kMaxParamCount + 11u);
+    Bytes encoded = byteList({0xff});
+    CHECK_FALSE(rinne::state::encodeDocument(document, encoded));
+    CHECK(encoded == byteList({0xff}));
+
+    std::size_t dropped = 99;
+    REQUIRE(rinne::state::trimToDecodable(document.params, known, dropped));
+    CHECK(dropped == 11u);
+    CHECK(document.params.entries.size() == rinne::state::kMaxParamCount);
+    for (const auto& id : known)
+        CHECK(document.params.find(id) != nullptr);
+    CHECK(document.params.find("u0") != nullptr);
+    CHECK(document.params.find("u244") != nullptr);
+    CHECK(document.params.find("u245") == nullptr);
+
+    // 裁剪之后写得出去，也读得回来。
+    REQUIRE(rinne::state::encodeDocument(document, encoded));
+    StateDocument back = sentinelDocument(Role::Input);
+    CHECK(rinne::state::loadState(encoded.data(), encoded.size(), Role::Input, back).status ==
+          rinne::state::StateLoadStatus::Ok);
+    for (const auto& id : known)
+        CHECK(back.params.find(id) != nullptr);
+
+    // 临界：245 个未知 id 加 11 个认识的正好 256 条，一条不丢；多 1 条未知，丢的恰是最末那条未知 id，认识的一个不少。
+    for (const std::size_t unknownCount : {std::size_t{245}, std::size_t{246}})
+    {
+        rinne::state::Params edge;
+        for (std::size_t i = 0; i < unknownCount; ++i)
+            edge.set("u" + std::to_string(i), 0.0f);
+        for (const auto& id : known)
+            edge.set(id, 1.0f);
+        std::size_t edgeDropped = 99;
+        REQUIRE(rinne::state::trimToDecodable(edge, known, edgeDropped));
+        CHECK(edgeDropped == (unknownCount == 245u ? 0u : 1u));
+        CHECK(edge.entries.size() == rinne::state::kMaxParamCount);
+        CHECK(edge.find("u245") == nullptr);
+        CHECK(edge.find("u244") != nullptr);
+        for (const auto& id : known)
+            CHECK(edge.find(id) != nullptr);
+    }
+
+    // 载荷字节同理：245 个 255 字节 id 加 11 个最长的认识的参数，条数正好 256 但超过 64 KiB，按字节裁掉最末的 4 个未知
+    // id。
+    rinne::state::Params wide;
+    for (std::size_t i = 0; i < 245u; ++i)
+        wide.set(rinne::test::longestParamId(i), 0.0f);
+    std::vector<std::string> wideKnown;
+    for (std::size_t i = 0; i < 11u; ++i)
+    {
+        wideKnown.push_back(rinne::test::longestParamId(1000u + i));
+        wide.set(wideKnown.back(), 1.0f);
+    }
+    REQUIRE(rinne::state::trimToDecodable(wide, wideKnown, dropped));
+    CHECK(dropped == 4u);
+    CHECK(wide.find(rinne::test::longestParamId(240u)) != nullptr);
+    CHECK(wide.find(rinne::test::longestParamId(241u)) == nullptr);
+    Bytes payload;
+    REQUIRE(rinne::state::encodeParams(wide, payload));
+    CHECK(payload.size() <= rinne::state::kMaxParamBytes);
+    for (const auto& id : wideKnown)
+        CHECK(wide.find(id) != nullptr);
+
+    // 精确字节边界：全是未知 id，正好 65536 字节不丢；65537 字节丢最末那一条（条数远没到上限，只有字节在起作用）。
+    {
+        const auto widthOf = [](const rinne::state::Params& params) {
+            Bytes payload;
+            REQUIRE(rinne::state::encodeParams(params, payload));
+            return payload.size();
+        };
+        for (const bool over : {false, true})
+        {
+            const std::size_t shortIds = over ? 247u : 248u;
+            const std::size_t longIds = over ? 6u : 5u;
+            rinne::state::Params edge;
+            std::size_t index = 0;
+            for (std::size_t i = 0; i < shortIds; ++i, ++index)
+                edge.set(rinne::test::paramIdOfLength(254u, index), 0.0f);
+            for (std::size_t i = 0; i < longIds; ++i, ++index)
+                edge.set(rinne::test::paramIdOfLength(255u, index), 0.0f);
+            const std::string last = edge.entries.back().id;
+            if (!over)
+                CHECK(widthOf(edge) == rinne::state::kMaxParamBytes);
+            std::size_t edgeDropped = 99;
+            REQUIRE(rinne::state::trimToDecodable(edge, {}, edgeDropped));
+            CHECK(edgeDropped == (over ? 1u : 0u));
+            CHECK((edge.find(last) == nullptr) == over);
+            CHECK(widthOf(edge) <= rinne::state::kMaxParamBytes);
+        }
+    }
+
+    // 丢光了未知 id 还是超限：返回 false，但未知的已经被丢掉（这是「失败不碰出参」的例外），认识的一个不少。
+    {
+        rinne::state::Params partial;
+        std::vector<std::string> partialKnown;
+        for (std::uint32_t i = 0; i <= rinne::state::kMaxParamCount; ++i)
+        {
+            partialKnown.push_back("k" + std::to_string(i));
+            partial.set(partialKnown.back(), 0.0f);
+        }
+        for (int i = 0; i < 3; ++i)
+            partial.set("u" + std::to_string(i), 0.0f);
+        std::size_t partialDropped = 99;
+        CHECK_FALSE(rinne::state::trimToDecodable(partial, partialKnown, partialDropped));
+        CHECK(partialDropped == 3u);
+        CHECK(partial.entries.size() == partialKnown.size());
+        CHECK(partial.find("u0") == nullptr);
+        CHECK(partial.find("u2") == nullptr);
+        for (const auto& id : partialKnown)
+            CHECK(partial.find(id) != nullptr);
+    }
+
+    // 认识的条目自己就超限：压不下去，返回 false，也不丢任何认识的。
+    rinne::state::Params onlyKnown;
+    std::vector<std::string> allKnown;
+    for (std::uint32_t i = 0; i <= rinne::state::kMaxParamCount; ++i)
+    {
+        allKnown.push_back("k" + std::to_string(i));
+        onlyKnown.set(allKnown.back(), 0.0f);
+    }
+    CHECK_FALSE(rinne::state::trimToDecodable(onlyKnown, allKnown, dropped));
+    CHECK(dropped == 0u);
+    CHECK(onlyKnown.entries.size() == rinne::state::kMaxParamCount + 1u);
 }
 
 TEST_CASE("document: 编码拒绝会写出两份已知块或不认识的 role", "[state][document]")

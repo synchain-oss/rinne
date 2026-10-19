@@ -125,6 +125,24 @@ inline std::uint32_t floatBits(float value)
     return bits;
 }
 
+// 255 字节的参数 id：上限用例用它把一条参数顶到最长。序号放在结尾，保证两两不同。
+inline std::string longestParamId(std::size_t index)
+{
+    std::string id(rinne::state::kMaxParamIdBytes, 'a');
+    const std::string tail = std::to_string(index);
+    id.replace(id.size() - tail.size(), tail.size(), tail);
+    return id;
+}
+
+// 指定长度的参数 id（1..255 字节）：序号放在结尾，保证同一长度下两两不同。拿它凑出 PRMS 载荷的精确字节数。
+inline std::string paramIdOfLength(std::size_t length, std::size_t index)
+{
+    std::string id(length, 'a');
+    const std::string tail = std::to_string(index);
+    id.replace(id.size() - tail.size(), tail.size(), tail);
+    return id;
+}
+
 inline float bitsFloat(std::uint32_t bits)
 {
     float value = 0.0f;

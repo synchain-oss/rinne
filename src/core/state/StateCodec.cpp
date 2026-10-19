@@ -497,6 +497,8 @@ bool encodeParamsImpl(const Params& params, std::vector<std::uint8_t>& out)
         writer.bytes(entry.id);
         writer.f32(entry.value);
     }
+    if (writer.size() > kMaxParamBytes)
+        return false;
     out = writer.take();
     return true;
 }
@@ -504,6 +506,8 @@ bool encodeParamsImpl(const Params& params, std::vector<std::uint8_t>& out)
 bool decodeParamsImpl(const std::uint8_t* data, std::size_t size, Params& out)
 {
     if (data == nullptr && size != 0u)
+        return false;
+    if (size > kMaxParamBytes)
         return false;
     ByteReader reader(data, size);
     const std::uint32_t count = reader.u32();
@@ -661,6 +665,34 @@ void Params::set(const std::string& id, float value)
 bool isValidParamId(const std::string& id) noexcept
 {
     return isParamIdBytes(bytesOf(id), id.size());
+}
+
+bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, std::size_t& dropped) noexcept
+{
+    dropped = 0;
+    std::size_t bytes = 4u; // u32 count
+    for (const auto& entry : params.entries)
+        bytes += 1u + entry.id.size() + 4u;
+    const auto isKnown = [&](const std::string& id) {
+        for (const auto& known : knownIds)
+        {
+            if (known == id)
+                return true;
+        }
+        return false;
+    };
+    for (std::size_t i = params.entries.size(); i > 0u;)
+    {
+        if (params.entries.size() <= kMaxParamCount && bytes <= kMaxParamBytes)
+            break;
+        --i;
+        if (isKnown(params.entries[i].id))
+            continue;
+        bytes -= 1u + params.entries[i].id.size() + 4u;
+        params.entries.erase(params.entries.begin() + static_cast<std::ptrdiff_t>(i));
+        ++dropped;
+    }
+    return params.entries.size() <= kMaxParamCount && bytes <= kMaxParamBytes;
 }
 
 const ConfigField* findConfigField(Role role, std::uint16_t key) noexcept

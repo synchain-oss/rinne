@@ -130,20 +130,78 @@ TEST_CASE("params: f32 按位存取", "[state][params]")
     CHECK(floatBits(decoded.entries[3].value) == 0x00000001u);
 }
 
-TEST_CASE("params: 条数上限 256", "[state][params]")
+TEST_CASE("params: 条数上限 256，读写同一个上限", "[state][params]")
 {
+    // 256 条：编码写得出来，解码读得回来。
     Bytes encoded;
     REQUIRE(rinne::state::encodeParams(manyParams(rinne::state::kMaxParamCount), encoded));
     Params decoded;
     REQUIRE(rinne::state::decodeParams(encoded.data(), encoded.size(), decoded));
     CHECK(decoded.entries.size() == rinne::state::kMaxParamCount);
 
-    // 257 条都真的在：只有上限这一条拦它
+    // 257 条都真的在：只有条数上限这一条拦它，编码端同样拒绝。
     std::vector<rinne::test::RawParam> raw;
     for (std::uint32_t i = 0; i <= rinne::state::kMaxParamCount; ++i)
         raw.push_back({"p" + std::to_string(i), 0u});
     requireRejected(rawParams(raw));
     requireEncodeFails(manyParams(rinne::state::kMaxParamCount + 1u));
+}
+
+TEST_CASE("params: 载荷上限 64 KiB，读写同一个上限", "[state][params]")
+{
+    // 252 条 255 字节 id：载荷 4 + 252 × 260 = 65524 字节，在 64 KiB 之内。
+    std::vector<rinne::test::RawParam> raw;
+    for (std::size_t i = 0; i < 252; ++i)
+        raw.push_back({rinne::test::longestParamId(i), 0u});
+    const Bytes atLimit = rawParams(raw);
+    CHECK(atLimit.size() == 65524u);
+    Params decoded;
+    REQUIRE(rinne::state::decodeParams(atLimit.data(), atLimit.size(), decoded));
+    REQUIRE(decoded.entries.size() == 252u);
+    Bytes encoded;
+    REQUIRE(rinne::state::encodeParams(decoded, encoded));
+    CHECK(encoded == atLimit);
+
+    // 253 条：4 + 253 × 260 = 65784 字节，超过 64 KiB，条数仍在 256 之内。读写两端都拒绝。
+    raw.push_back({rinne::test::longestParamId(252u), 0u});
+    requireRejected(rawParams(raw));
+    Params tooWide;
+    for (std::size_t i = 0; i < 253; ++i)
+        tooWide.entries.push_back(ParamValue{rinne::test::longestParamId(i), 0.0f});
+    requireEncodeFails(tooWide);
+}
+
+TEST_CASE("params: 载荷字节上限的精确边界 65536 / 65537", "[state][params]")
+{
+    // 每条 = 1 + id 长度 + 4。253 条里 a 条 254 字节 id、b 条 255 字节 id：
+    //   248 × 259 + 5 × 260 + 4 = 65536（正好）；247 × 259 + 6 × 260 + 4 = 65537（多 1 字节）。
+    const auto build = [](std::size_t shortIds, std::size_t longIds) {
+        Params params;
+        std::size_t index = 0;
+        for (std::size_t i = 0; i < shortIds; ++i, ++index)
+            params.entries.push_back(ParamValue{rinne::test::paramIdOfLength(254u, index), 0.0f});
+        for (std::size_t i = 0; i < longIds; ++i, ++index)
+            params.entries.push_back(ParamValue{rinne::test::paramIdOfLength(255u, index), 0.0f});
+        return params;
+    };
+
+    const Params exact = build(248u, 5u);
+    Bytes encoded;
+    REQUIRE(rinne::state::encodeParams(exact, encoded));
+    CHECK(encoded.size() == rinne::state::kMaxParamBytes);
+    Params decoded;
+    REQUIRE(rinne::state::decodeParams(encoded.data(), encoded.size(), decoded));
+    CHECK(decoded.entries.size() == 253u);
+
+    const Params over = build(247u, 6u);
+    requireEncodeFails(over);
+    // 同一份内容手工编成 65537 字节，读入端同样只拒绝多出来的这 1 字节
+    std::vector<rinne::test::RawParam> raw;
+    for (const auto& entry : over.entries)
+        raw.push_back({entry.id, 0u});
+    const Bytes oversized = rawParams(raw);
+    CHECK(oversized.size() == rinne::state::kMaxParamBytes + 1u);
+    requireRejected(oversized);
 }
 
 TEST_CASE("params: id 的长度与字符集", "[state][params]")

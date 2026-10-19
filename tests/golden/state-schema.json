@@ -4,27 +4,33 @@
   "abi": 1,
   "probeAbi": 0,
   "byteOrder": "little-endian",
+  "minBytes": 16,
   "header": [
     { "offset": 0, "field": "magic", "type": "u32", "value": "RNST" },
     { "offset": 4, "field": "abi", "type": "u32" },
     { "offset": 8, "field": "role", "type": "u32", "values": { "1": "input", "2": "output" } },
     { "offset": 12, "field": "chunkCount", "type": "u32", "max": 64 }
   ],
-  "headerFixedAcrossAbi": ["magic", "abi", "role"],
+  "headerFixedBytes": 16,
+  "headerFixedAcrossAbi": ["magic", "abi", "role", "chunkCount"],
+  "roleCompare": "whole u32: input writes 1, output writes 2; new values only for new ends; no flag bits",
+  "containerFramingAcrossAbi": "fixed: header length, chunk header, padding, chunk count meaning; migrations change payloads only",
   "chunk": { "layout": ["u32 fourcc", "u32 sizeBytes", "payload", "zero padding to 4 bytes"], "maxSizeBytes": 65536, "bytesAfterLastChunk": "rejected" },
   "chunks": { "input": ["PRMS", "CFGS"], "output": ["CFGS"], "unknown": "kept, written back after the known chunks in their original order" },
   "load": [
     { "case": "zero bytes", "result": "empty" },
     { "case": "short header or wrong magic", "result": "corrupt" },
-    { "case": "abi above this build, role of this end", "result": "rejectedNewer", "note": "original bytes written back unchanged" },
+    { "case": "abi above this build, role of this end", "result": "rejectedNewer", "note": "original bytes kept by any setState and written back unchanged until a successfully loaded state replaces them" },
     { "case": "abi above this build, other role", "result": "corrupt" },
     { "case": "abi equal to probeAbi", "result": "ignoredProbe", "note": "only the header is read" },
     { "case": "abi below this build", "result": "migrated", "note": "one step at a time" },
+    { "case": "abi equal to this build", "result": "ok", "note": "decoded as is" },
     { "case": "any other failure", "result": "corrupt", "note": "nothing applied" }
   ],
-  "prms": { "layout": ["u32 count", "count x { u8 idLen, id, f32 value }"], "maxCount": 256, "idBytes": [1, 255], "idChars": "0x21-0x7e", "duplicateIds": "rejected", "value": "plain saved value" },
+  "prms": { "layout": ["u32 count", "count x { u8 idLen, id, f32 value }"], "maxCount": 256, "maxBytes": 65536, "trimDropsOnly": "unknown PRMS ids, from the end", "idBytes": [1, 255], "idChars": "0x21-0x7e", "duplicateIds": "rejected", "value": "plain saved value" },
   "cfgs": {
     "layout": ["repeat to end of payload: u16 key, u16 len, bytes[len]"],
+    "keyTableMax": 32,
     "knownKeyWrongLength": "rejected",
     "knownKeyRepeated": "rejected",
     "missingKnownKey": "default",
@@ -53,5 +59,30 @@
       "preset_name": "well-formed UTF-8 without control characters"
     }
   },
+  "invariants": [
+    { "id": "minimum-bytes", "rule": "a state is at least 16 bytes" },
+    { "id": "header-fixed", "rule": "the first 16 bytes (magic, abi, role, chunk count) never move or change meaning" },
+    { "id": "role-whole-value", "rule": "role is compared as a whole u32: input writes 1, output writes 2" },
+    { "id": "framing-fixed", "rule": "the container framing is fixed across abi" },
+    { "id": "migrations-payload-only", "rule": "migrations only change payloads" },
+    { "id": "prms-limits", "rule": "PRMS reads and writes share one limit: at most 256 entries and 65536 bytes" },
+    { "id": "prms-limits-need-abi", "rule": "growing PRMS past these limits requires an abi bump, because the limits are part of the format" },
+    { "id": "prms-trim", "rule": "trimToDecodable before encoding drops only unknown PRMS ids, from the end, never a known parameter" },
+    { "id": "write-back-scope", "rule": "a document from decodeDocument with nothing added always encodes" },
+    { "id": "apply-before-settle", "rule": "before the instance settles every successfully loaded state is applied in full, the last one wins" },
+    { "id": "apply-after-settle", "rule": "after it settles, later states only change parameters" },
+    { "id": "settle-definition", "rule": "settling happens at the first user action in the UI: a parameter edit sent from the UI through the bridge (a beginParamGesture drag or a setLimiter click), a setting edit in the UI, a manually picked group, confirming a takeover; host-sent values and automation do not count" },
+    { "id": "sequence-default-then-project", "rule": "wiring sequence: a default preset or old state first, the project second, the project's CFGS takes effect" },
+    { "id": "sequence-claim-then-project", "rule": "wiring sequence: smart default claims first, project state arrives later, the project's group takes effect" },
+    { "id": "sequence-newer-then-ok", "rule": "wiring sequence: higher abi first, older Ok second, the Ok applies in full, kept bytes are cleared, save writes the older state" },
+    { "id": "sequence-ok-then-newer", "rule": "wiring sequence: older Ok first, higher abi second, write-back starts, save hands back the newer original bytes" },
+    { "id": "sequence-edit-then-preset", "rule": "wiring sequence: after a UI edit, a host preset or A/B changes parameters only, the group stays" },
+    { "id": "claims-not-settle", "rule": "no claim settles the instance, because a provisional claim is meant to be preempted by a later project state" },
+    { "id": "settle-residue", "rule": "known residue: an instance never touched in the UI still applies a host preset or A/B in full, group included" },
+    { "id": "not-a-load", "rule": "Empty, IgnoredProbe, Corrupt and RejectedNewer neither apply anything nor settle the instance" },
+    { "id": "rejected-newer-any-setstate", "rule": "any setState that gets RejectedNewer for this role keeps the original bytes, regardless of call order" },
+    { "id": "write-back-replaced", "rule": "kept bytes stay until a successfully loaded state (Ok or Migrated) replaces them; a later RejectedNewer replaces them with its own bytes" },
+    { "id": "write-back-edits-lost", "rule": "parameter edits made while bytes are kept do not enter the state and are lost on save" }
+  ],
   "notInProject": ["guide_seen", "rules_ack_version", "diag_log"]
 }
