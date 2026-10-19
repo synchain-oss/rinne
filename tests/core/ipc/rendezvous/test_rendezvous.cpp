@@ -377,6 +377,44 @@ TEST_CASE("smart claims carry the provisional bit, only restore preempts them, c
     CHECK(binding->myCtl == confirmed.myCtl());
 }
 
+TEST_CASE("a smart claim stays provisional through a dormant round trip and restore still preempts it",
+          "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+
+    Rendezvous smart(configFor(Role::kInput, backend, naming.scope(), 35));
+    smart.setGroup(4, ClaimIntent::kSmart, kT0);
+    smart.prepare(format, kT0);
+    smart.tick(kT0);
+    REQUIRE(smart.state() == RendezvousState::kActive);
+    REQUIRE((ctlState(smart.myCtl()) & kCtlProvisional) != 0);
+
+    // 宿主改采样率、切离线渲染时常走这一来回：provisional 位两次都要留着
+    smart.releaseResources(kT0 + 10);
+    REQUIRE(ctlPhase(smart.myCtl()) == kCtlPhaseDormant);
+    CHECK((ctlState(smart.myCtl()) & kCtlProvisional) != 0);
+    CHECK(roleSlot(rv, 4, Role::kInput).ctl.load() == smart.myCtl());
+    smart.prepare(format, kT0 + 20);
+    REQUIRE(ctlPhase(smart.myCtl()) == kCtlPhaseActive);
+    CHECK((ctlState(smart.myCtl()) & kCtlProvisional) != 0);
+    CHECK(roleSlot(rv, 4, Role::kInput).ctl.load() == smart.myCtl());
+    smart.tick(kT0 + 30);
+    REQUIRE(smart.state() == RendezvousState::kActive);
+
+    Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 36));
+    restore.setGroup(4, ClaimIntent::kRestore, kT0 + 40);
+    restore.prepare(format, kT0 + 40);
+    restore.tick(kT0 + 40);
+    CHECK(restore.state() == RendezvousState::kActive);
+    smart.tick(kT0 + 50);
+    CHECK(smart.state() == RendezvousState::kConflict);
+}
+
 TEST_CASE("a validator host keeps IPC entirely closed", "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();
@@ -531,7 +569,43 @@ TEST_CASE("a denied backend is permanent and never retried", "[ipc][rendezvous]"
     CHECK(backend.createOrOpenCalls == 1);
     r.tick(kT0 + 100000);
     CHECK(backend.createOrOpenCalls == 1);
+    // 先换到组 0、再换回来：仍是永久不可用，不再多试一次
     backend.forced = InitResult::kOk;
+    r.setGroup(0, ClaimIntent::kManual, kT0 + 100001);
+    r.tick(kT0 + 100002);
+    CHECK(r.state() == RendezvousState::kUnassigned);
+    r.setGroup(3, ClaimIntent::kManual, kT0 + 100003);
+    r.tick(kT0 + 100004);
+    r.tick(kT0 + 200000);
+    CHECK(r.state() == RendezvousState::kIpcUnavailable);
+    CHECK(backend.createOrOpenCalls == 1);
+}
+
+TEST_CASE("a data segment that can never open gives the claimed slot back", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    backend.forcedSize = kRingBytes;
+    backend.forcedForSize = InitResult::kFailedDenied;
+
+    Rendezvous r(configFor(Role::kOutput, backend, naming.scope()));
+    r.setGroup(5, ClaimIntent::kManual, kT0);
+    r.prepare({48000, 512, 2}, kT0);
+    r.tick(kT0);
+    CHECK(r.state() == RendezvousState::kIpcUnavailable);
+    CHECK(r.lastResult() == InitResult::kFailedDenied);
+    // 认领到了，但数据段被拒：槽立刻放回空闲，别人能认领；我们不再持有、也不再发布绑定
+    CHECK(ctlPhase(roleSlot(rv, 5, Role::kOutput).ctl.load()) == kCtlPhaseFree);
+    CHECK(r.myCtl() == 0u);
+    CHECK(r.bindings().current() == nullptr);
+    const std::size_t calls = backend.createOrOpenCalls;
+    r.tick(kT0 + 100000);
+    CHECK(r.state() == RendezvousState::kIpcUnavailable);
+    CHECK(backend.createOrOpenCalls == calls);
+    backend.forcedSize = 0;
 }
 
 TEST_CASE("tick reaps retired mappings even when the instance is unassigned", "[ipc][rendezvous]")

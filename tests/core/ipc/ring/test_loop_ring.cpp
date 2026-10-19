@@ -13,7 +13,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <thread>
 
 #include "ipc/LoopRing.h"
 
@@ -407,87 +406,7 @@ TEST_CASE("a writer that wakes after its chunk was reclaimed loses the head", "[
     CHECK(seg->header.w_cas_fail.load() == 1u);
 }
 
-// 回收填零的途中，卡住的写方醒来把自己那一段发布了：回收每 1024 帧看一眼写头，看到它动了就停手，写方的真帧
-// 只有开头一小段被盖成静音。另一个线程盯着第一帧变成 0 的那一刻发布，所以哪一拍停手取决于调度：跑若干次，
-// 只要有一次停在半路就说明在看；不看写头的回收每一次都把整圈填零（这条用例就是这一处的变异判据）。
-// 每一次都核：段里只有 0 与写方本位置的值
-TEST_CASE("a reclaim stops zeroing once the stalled writer publishes", "[ipc][ring]")
-{
-    if (std::thread::hardware_concurrency() < 2)
-    {
-        SKIP("需要两个硬件线程");
-    }
-    auto seg = makeRing();
-    const u64 mask = static_cast<u64>(kRingFrames - 1);
-    bool stoppedEarly = false;
-    for (u64 trial = 1; trial <= 50 && !stoppedEarly; ++trial)
-    {
-        // 写方公告了整整一圈、样本都写好了，只差发布写头
-        const u64 w0 = trial * kRingFrames;
-        const u64 intent = w0 + kRingFrames;
-        for (u64 p = w0; p != intent; ++p)
-        {
-            seg->data[2 * (p & mask)].store(encodeL(p));
-            seg->data[2 * (p & mask) + 1].store(encodeR(p));
-        }
-        seg->header.write_head.store(w0);
-        seg->header.write_intent.store(intent);
-
-        std::atomic<bool> watching{false};
-        std::atomic<bool> giveUp{false}; // 回收若一帧都没填就返回，写方别永远等下去
-        std::thread writer([&] {
-            watching.store(true);
-            while (seg->data[2 * (w0 & mask)].load(std::memory_order_relaxed) != 0.0f)
-            {
-                if (giveUp.load())
-                {
-                    return;
-                }
-            }
-            u64 expected = w0;
-            (void)seg->header.write_head.compare_exchange_strong(expected, intent, std::memory_order_release,
-                                                                 std::memory_order_relaxed);
-        });
-        while (!watching.load())
-        {
-        }
-        const bool reclaimed = LoopRing::reclaimStalled(*seg);
-        giveUp.store(true);
-        writer.join();
-        CHECK(LoopRing::writeHead(*seg) == intent);
-
-        u32 zeros = 0;
-        u32 own = 0;
-        u32 other = 0;
-        for (u64 p = w0; p != intent; ++p)
-        {
-            const float l = seg->data[2 * (p & mask)].load();
-            const float r = seg->data[2 * (p & mask) + 1].load();
-            if (l == 0.0f && r == 0.0f)
-            {
-                ++zeros;
-            }
-            else if (decode(p, l, r))
-            {
-                ++own;
-            }
-            else
-            {
-                ++other;
-            }
-        }
-        INFO("trial " << trial << " reclaimed " << reclaimed << " zeros " << zeros << " own " << own);
-        CHECK(other == 0u);
-        CHECK(zeros >= 1u);
-        if (reclaimed)
-        {
-            CHECK(own == 0u); // 回收赢了写头：整圈都是 0，写方随后的 CAS 落空
-        }
-        stoppedEarly = !reclaimed && own > 0;
-    }
-    CHECK(stoppedEarly);
-}
-
+// 回收填零途中写方自己发布、回收停手的那条要靠调度，放在压测 tests/stress/test_reclaim_stress.cpp 里
 TEST_CASE("reclaiming a stall more than a lap ahead only zeroes the last lap", "[ipc][ring]")
 {
     auto seg = makeRing();

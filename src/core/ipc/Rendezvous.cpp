@@ -164,8 +164,8 @@ void Rendezvous::prepare(const StreamFormat& format, u64 nowMs)
     bool becameActive = false;
     if (ctlPhase(myCtl_) == kCtlPhaseDormant)
     {
-        // 休眠 -> active：claim_ms 不变（同一次认领），换一个新的整字
-        const CtlCas cas = casCtl(slot.ctl, myCtl_, kCtlPhaseActive);
+        // 休眠 -> active：claim_ms 不变（同一次认领），换一个新的整字；provisional 位跟着认领走，不因休眠而丢
+        const CtlCas cas = casCtl(slot.ctl, myCtl_, kCtlPhaseActive | (ctlState(myCtl_) & kCtlProvisional));
         if (!cas.ok)
         {
             lostOwnership(nowMs);
@@ -201,7 +201,8 @@ void Rendezvous::releaseResources(u64 nowMs)
     RoleSlot& slot = roleSlot(*static_cast<RvSegment*>(rv_->base()), group_, role());
     if (ctlPhase(myCtl_) == kCtlPhaseActive)
     {
-        const CtlCas cas = casCtl(slot.ctl, myCtl_, kCtlPhaseDormant);
+        // active -> 休眠：provisional 位保留，恢复之后工程恢复照样能抢占这次智能默认的认领
+        const CtlCas cas = casCtl(slot.ctl, myCtl_, kCtlPhaseDormant | (ctlState(myCtl_) & kCtlProvisional));
         if (!cas.ok)
         {
             lostOwnership(nowMs);
@@ -287,8 +288,10 @@ void Rendezvous::tick(u64 nowMs)
         state_ = RendezvousState::kUnassigned;
         return;
     }
-    if (state_ == RendezvousState::kIpcUnavailable && permanent_)
+    // 后端拒绝过就一直不可用：只看 permanent_，组 0 那一拍把状态改成 unassigned 之后换回来也不再试
+    if (permanent_)
     {
+        state_ = RendezvousState::kIpcUnavailable;
         return;
     }
     // 退避没到点就什么都不做；时钟倒退得比整个退避窗口还多时不卡住，立刻重试
@@ -428,6 +431,7 @@ bool Rendezvous::openRing(u64 nowMs)
         state_ = RendezvousState::kIpcUnavailable;
         lastResult_ = InitResult::kFailedBadName;
         ++failures_;
+        letGo(nowMs); // 永久打不开：认领到的槽立刻放开，不能占着它又停了心跳（活着的进程永远不会被接管）
         return false;
     }
     SegmentView view;
@@ -438,6 +442,7 @@ bool Rendezvous::openRing(u64 nowMs)
         state_ = RendezvousState::kIpcUnavailable;
         lastResult_ = result;
         ++failures_;
+        letGo(nowMs); // 同上：放开认领到的槽
         return false;
     }
     if (result != InitResult::kOk)

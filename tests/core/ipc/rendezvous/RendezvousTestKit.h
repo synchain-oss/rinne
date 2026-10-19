@@ -36,6 +36,10 @@ public:
         {
             return forced;
         }
+        if (forcedSize != 0 && size == forcedSize)
+        {
+            return forcedForSize; // 只让某一种段打不开（例如数据段），会合段照常
+        }
         return inner_.createOrOpen(name, size, view);
     }
 
@@ -88,6 +92,8 @@ public:
     }
 
     InitResult forced = InitResult::kOk;
+    std::size_t forcedSize = 0;
+    InitResult forcedForSize = InitResult::kOk;
     std::size_t createOrOpenCalls = 0;
     std::size_t openExistingCalls = 0;
     std::size_t openExistingReadOnlyCalls = 0;
