@@ -523,6 +523,16 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
         if (latest.ctl == observed)
         {
             tier = takeoverTier(latest, nowMs, currentProcessId(), effective, &isProcessAlive);
+            // 工程恢复进了冲突重试，仍然抢得动 provisional（provisional 让位给工程恢复，不论第几次试），但只保留
+            // 这一档：休眠槽照旧不拿。不传探活：这里只认抢占 provisional，用不着它。工程恢复认领到的槽不带
+            // provisional，两个工程恢复争同一个槽时，后到的只会进冲突，不会来回抢
+            if (tier == TakeoverTier::kNone && effective == ClaimIntent::kConflictRetry &&
+                intent_ == ClaimIntent::kRestore &&
+                takeoverTier(latest, nowMs, currentProcessId(), ClaimIntent::kRestore, nullptr) ==
+                    TakeoverTier::kPreemptProvisional)
+            {
+                tier = TakeoverTier::kPreemptProvisional;
+            }
         }
     }
     if (tier == TakeoverTier::kNone)

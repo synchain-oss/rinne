@@ -276,6 +276,14 @@ TEST_CASE("a preempted output's late writer publish is repaired on the new owner
     CHECK(ring.header.sample_rate.load() == 48000u);
     CHECK(ring.header.epoch.load() == epoch + 1u);
     CHECK(LoopRing::isWriter(ring, b.writerToken()));
+
+    // token 与采样率都还是自己的、只有源声道数被换掉：也在心跳上改回来，采样率没变所以 epoch 不动
+    ring.header.src_channels.store(1);
+    const u64 epochKept = ring.header.epoch.load();
+    b.tick(claimAt + 3 * RendezvousTiming::kHeartbeatMs);
+    CHECK(ring.header.src_channels.load() == 2u);
+    CHECK(ring.header.epoch.load() == epochKept);
+    CHECK(LoopRing::isWriter(ring, b.writerToken()));
 }
 
 TEST_CASE("a smart claim won by a conflict retry stays provisional and restore still preempts it", "[ipc][rendezvous]")
@@ -313,6 +321,74 @@ TEST_CASE("a smart claim won by a conflict retry stays provisional and restore s
     CHECK(restore.state() == RendezvousState::kActive);
     smart.tick(kT0 + 1110);
     CHECK(smart.state() == RendezvousState::kConflict);
+}
+
+TEST_CASE("a restore that missed its first try still preempts a provisional claim on retry, never a dormant slot",
+          "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+
+    Rendezvous smart(configFor(Role::kInput, backend, naming.scope(), 41));
+    smart.setGroup(3, ClaimIntent::kSmart, kT0);
+    smart.prepare(format, kT0);
+    smart.tick(kT0);
+    REQUIRE(smart.state() == RendezvousState::kActive);
+
+    // 工程恢复的实例先扫到 smart 的整字（还没 prepare，不认领）；之后 smart 走一次休眠来回，整字换了，
+    // 观察者还没到下一次扫描：首拍的样本与活字对不上，这一拍跳过，进冲突
+    Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 42));
+    restore.setGroup(3, ClaimIntent::kRestore, kT0);
+    restore.tick(kT0);
+    smart.releaseResources(kT0 + 10);
+    smart.prepare(format, kT0 + 20);
+    REQUIRE((ctlState(smart.myCtl()) & kCtlProvisional) != 0);
+    restore.prepare(format, kT0 + 30);
+    restore.tick(kT0 + 30);
+    REQUIRE(restore.state() == RendezvousState::kConflict);
+    REQUIRE(roleSlot(rv, 3, Role::kInput).ctl.load() == smart.myCtl());
+
+    // 自动重试仍然抢得动 provisional
+    restore.tick(kT0 + 30 + RendezvousTiming::kConflictRetryMs);
+    CHECK(restore.state() == RendezvousState::kActive);
+    CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == restore.myCtl());
+    CHECK((ctlState(restore.myCtl()) & kCtlProvisional) == 0);
+    smart.tick(kT0 + 1040);
+    CHECK(smart.state() == RendezvousState::kConflict);
+
+    // 工程恢复认领到的槽不带 provisional：另一个工程恢复首拍与重试都只进冲突，不会来回抢
+    Rendezvous rival(configFor(Role::kInput, backend, naming.scope(), 45));
+    rival.setGroup(3, ClaimIntent::kRestore, kT0 + 1050);
+    rival.prepare(format, kT0 + 1050);
+    rival.tick(kT0 + 1050);
+    CHECK(rival.state() == RendezvousState::kConflict);
+    rival.tick(kT0 + 1050 + RendezvousTiming::kConflictRetryMs);
+    CHECK(rival.state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == restore.myCtl());
+
+    // 工程恢复的重试只保留这一档：休眠满 2 s 的槽照旧不拿
+    Rendezvous sleeper(configFor(Role::kInput, backend, naming.scope(), 43));
+    sleeper.setGroup(6, ClaimIntent::kManual, kT0);
+    sleeper.prepare(format, kT0);
+    sleeper.tick(kT0);
+    REQUIRE(sleeper.state() == RendezvousState::kActive);
+    sleeper.releaseResources(kT0 + 10);
+    REQUIRE(ctlPhase(roleSlot(rv, 6, Role::kInput).ctl.load()) == kCtlPhaseDormant);
+    Rendezvous late(configFor(Role::kInput, backend, naming.scope(), 44));
+    late.setGroup(6, ClaimIntent::kRestore, kT0 + 100);
+    late.prepare(format, kT0 + 100);
+    late.tick(kT0 + 100); // 休眠还不满 2 s：进冲突
+    REQUIRE(late.state() == RendezvousState::kConflict);
+    for (u64 t = kT0 + 1100; t <= kT0 + 5100; t += RendezvousTiming::kConflictRetryMs)
+    {
+        late.tick(t);
+    }
+    CHECK(late.state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 6, Role::kInput).ctl.load() == sleeper.myCtl());
 }
 
 TEST_CASE("a conflict retry does not wait out a clock that went backwards", "[ipc][rendezvous]")

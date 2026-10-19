@@ -211,7 +211,7 @@ status: draft
 | 空闲 | 认领中 | 已 prepare 的认领方 | 无；智能默认（`kSmart`）的认领带 provisional 位，包括它在冲突期间的自动重试：provisional 位与 `kCfgSmartOrigin` 按认领的来源取，不按这一拍的重试意图取 |
 | 认领中（自己的） | 活跃 | 认领方 | 先写 `heartbeat_ms` 与身份字段（`pid`、`host_ppid`、`claim_ms`、`dormant_ms`、`format`、`version`、`cfg_flags`、格式字段），再 CAS（release 让这些字段对读方可见）；provisional 位保留 |
 | 认领中（别人的） | 认领中 | 认领方 | 幽灵：同一个 `ctl` 静止 ≥ 1 s，`claim_ms` 也老于 1 s |
-| 活跃 + provisional | 认领中 | 意图为工程恢复（`kRestore`）的认领方 | 不看 pid 与年龄 |
+| 活跃 + provisional | 认领中 | 意图为工程恢复（`kRestore`）的认领方 | 不看 pid 与年龄；工程恢复进了冲突重试之后仍保留这一档（只这一档，休眠槽照旧不拿）。工程恢复认领到的槽不带 provisional，两个工程恢复争同一个槽时后到的只会进冲突，不会来回抢 |
 | 活跃或休眠，外进程 | 认领中 | 认领方 | `heartbeat_ms` 的年龄、`block_seq` 与 `ctl` 的静止都 ≥ 5 s，且 pid 已死（探活放在最后，拿不准一律按活） |
 | 活跃或休眠，本进程 | 认领中 | 认领方 | 同上三项都 ≥ 30 s |
 | 休眠 | 认领中 | 意图为 `kRestore` 或用户确认（`kManualConfirmed`）的认领方 | `dormant_ms` 的年龄与 `ctl` 的静止都 ≥ 2 s |
@@ -221,7 +221,7 @@ status: draft
 | 自己的任何阶段 | 空闲 | 属主（换组、析构） | 先撤下绑定；Output 先把 `writer_token` 从自己的 token CAS 到 0 |
 
 - 活着的外进程持有（活跃或休眠）的槽只在两种情形下被拿走：provisional 被工程恢复抢占，休眠槽被工程恢复或用户确认拿走；无论看起来多陈旧，都不会被自动接管。已知限制：死进程的 pid 被别的进程复用之后，探活一直返回活，那个槽同样不会被自动接管；用户确认只对休眠槽生效，目前没有拿走这种活跃槽的手动出口。
-- 判定之外的情形一律进冲突（`kConflict`）：每 1 s 用 `kConflictRetry` 重试一次（时钟倒退得比一个间隔还多时立刻重试），它永远不拿休眠槽。同一组再调 `setGroup`、给出 `kConflictRetry` 以外的意图（例如工程恢复、用户确认）时不等这 1 s，下一拍就按新意图试。
+- 判定之外的情形一律进冲突（`kConflict`）：每 1 s 用 `kConflictRetry` 重试一次（时钟倒退得比一个间隔还多时立刻重试），它永远不拿休眠槽；工程恢复的重试另外保留抢占 provisional 那一档。同一组再调 `setGroup`、给出 `kConflictRetry` 以外的意图（例如工程恢复、用户确认）时不等这 1 s，下一拍就按新意图试。
 - 输了认领 CAS，或自己的认领中被别人判成幽灵（换活跃的 CAS 失败）：什么都不写，进冲突。
 
 **属主的每一拍**
