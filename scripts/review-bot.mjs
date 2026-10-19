@@ -279,7 +279,7 @@ export function argValue(args, flag) {
     return m ? (m[1] ?? m[2]) : null;
 }
 
-/** 结构核对：review-dispatch 与 deepseek-review 依赖这些前提，模板改坏了宁可判红也不带着残缺的 prompt 跑。 */
+/** 结构核对：claude-review 与 review-dispatch 依赖这些前提，模板改坏了宁可判红也不带着残缺的 prompt 跑。 */
 export function checkConfig({ prompt, args }) {
     const errors = [];
     if (!prompt.includes("PR NUMBER: ${{ github.event.pull_request.number }}")) errors.push("prompt 缺 PR NUMBER 行");
