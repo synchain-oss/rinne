@@ -10,5 +10,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 bash "$here/expect-red.sh" --self-test
 bash "$here/au-gate.sh" --self-test
 bash "$here/check-cache.sh" --self-test
+bash "$here/shm-leftover.sh" --self-test
 bash "$here/alloc-canary.sh" --self-test
 node "$here/check-bundles.mjs" --self-test

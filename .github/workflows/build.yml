@@ -14,7 +14,8 @@
 # build-mac（macos-15、arm64 原生）：配置、构建、ctest，零分配计数器的反例，bundle 身份（2 个 .vst3 + 2 个 .component），
 # ad-hoc 签名与 codesign --verify，auval ×2 与 auval -a 唯一性，pluginval ×4，前后各一次共享内存残段检查，进程外自测（非门禁），
 # arm64 压测与变异构建。判据都在 scripts/ci/mac/，每个有自测。artifact：Rinne-macos-arm64-{pr<N>|dispatch}-<sha40>
-# （release 为 Rinne-release-macos-arm64-<tag>），里面是 ditto 打的 zip；probe 另出 universal 的 Rinne-probe-macos-universal-<sha40>。
+# （release 为 Rinne-release-macos-arm64-<tag>），插件的 ditto zip 在顶层，tools/ 下放 rinne_nulltest；probe 另出 universal 的
+# Rinne-probe-macos-universal-<sha40>。
 # core-sanitizers（ubuntu、clang-18、RINNE_CORE_ONLY=ON）：asan_ubsan 与 tsan 两个配置各自配置、构建、跑全部 ctest；不需要 JUCE。
 # web-smoke：web-preview/tests/run-all.mjs 存在就跑，不存在时打印 SKIP 注记并通过（页面冒烟随 web 预览一起到）。
 # 这四个 job 的名字就是 dev / prod ruleset 里 required check 的 context（见 .github/required-checks.json），不要改名，也不要加 job 级 if。
@@ -345,9 +346,10 @@ jobs:
         id: build
         run: cmake --build build --parallel
 
+      # -V 让每个测试的输出也进日志：Catch2 的 console reporter 结尾会打印 test cases / assertions 两行汇总
       - name: ctest
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: ctest --test-dir build --output-on-failure --no-tests=error
+        run: ctest --test-dir build --output-on-failure --no-tests=error -V
 
       # 零分配计数器的反例：计数器对 malloc、calloc、realloc、free 之一视而不见时，对应用例必须变红
       - name: Allocation counter canaries must fire
@@ -373,7 +375,8 @@ jobs:
         if: ${{ !cancelled() && steps.bundles.outcome == 'success' }}
         run: bash scripts/ci/mac/sign-and-verify.sh bundles.txt
 
-      # 上传的是 ditto 打的 zip：upload-artifact 会丢可执行位和符号链接，bundle 里的签名就对不上了
+      # 上传的是 ditto 打的 zip：upload-artifact 会丢可执行位和符号链接，bundle 里的签名就对不上了。
+      # tools/ 里的可执行文件是单独放进去的：Build 的 all 目标已经包含 tools/rinne_nulltest，这里缺了就判红。
       - name: Stage
         id: stage
         if: ${{ !cancelled() && steps.sign.outcome == 'success' }}
@@ -383,7 +386,12 @@ jobs:
           rm -rf "$dist"
           mkdir -p "$dist"
           while IFS= read -r b; do ditto -c -k --keepParent "$b" "$dist/$(basename "$b").zip"; done < bundles.txt
-          ls -l "$dist"
+          tool=$(find build/tools-bin -type f -name rinne_nulltest -perm -u+x -not -path '*/_deps/*' -print -quit)
+          if [ -z "$tool" ]; then echo '::error::构建目录里没有 rinne_nulltest（tools 目标没建？）'; exit 1; fi
+          mkdir -p "$dist/tools"
+          ditto "$tool" "$dist/tools/rinne_nulltest"
+          [ -x "$dist/tools/rinne_nulltest" ] || { echo '::error::tools/rinne_nulltest 没有可执行位'; exit 1; }
+          ls -l "$dist" "$dist/tools"
 
       - name: Upload plugins
         if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
@@ -521,7 +529,7 @@ jobs:
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
             -DRINNE_CORE_ONLY=ON -DRINNE_SANITIZE=asan_ubsan
           cmake --build build-asan_ubsan --parallel
-          ctest --test-dir build-asan_ubsan --output-on-failure --no-tests=error
+          ctest --test-dir build-asan_ubsan --output-on-failure --no-tests=error -V
 
       # 金丝雀：故意有问题的小程序必须被拦住，否则上面的绿不可信（脚本里每个程序不报就失败）
       - name: asan_ubsan canaries must fire
@@ -534,7 +542,7 @@ jobs:
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
             -DRINNE_CORE_ONLY=ON -DRINNE_SANITIZE=tsan
           cmake --build build-tsan --parallel
-          ctest --test-dir build-tsan --output-on-failure --no-tests=error
+          ctest --test-dir build-tsan --output-on-failure --no-tests=error -V
 
       - name: tsan canary must fire
         run: bash tests/sanitizer-canary/run.sh tsan

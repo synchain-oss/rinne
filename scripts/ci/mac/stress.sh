@@ -29,7 +29,7 @@ fi
 
 configure "$work"
 cmake --build "$work" --target rinne_stress --parallel
-ctest --test-dir "$work" -R '^rinne_stress$' --output-on-failure --no-tests=error
+ctest --test-dir "$work" -R '^rinne_stress$' --output-on-failure --no-tests=error -V
 echo "- 压测（arm64 原生）：通过" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 for mutation in no_read_fence no_intent; do
@@ -38,6 +38,7 @@ for mutation in no_read_fence no_intent; do
   cmake --build "$dir" --target rinne_stress --parallel
   exe=$(find "$dir" -type f -name rinne_stress -perm -u+x -not -path '*/_deps/*' -print -quit)
   [ -n "$exe" ] || { echo "::error::变异构建 $mutation 里找不到 rinne_stress"; exit 1; }
-  bash "$here/expect-red.sh" --catch2 "变异 $mutation" -- "$exe"
+  # --timeout 与 ctest 的 TIMEOUT 600 同值：变异挂住时单次运行就结束，不拖到 job 超时
+  bash "$here/expect-red.sh" --catch2 --timeout 600 "变异 $mutation" -- "$exe"
   echo "- 变异构建 ${mutation}：压测按预期变红" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 done
