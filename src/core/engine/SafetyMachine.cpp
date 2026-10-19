@@ -596,10 +596,12 @@ void SafetyChain::processBack(float& left, float& right, float dryLeft, float dr
 
     SafetyObservation o;
     // 超大值只计回送路径自己放大出来的电平（见 SafetyMachine.h 里 kHugeLevel 的说明），逐样本判定、不带保持：
-    // 本样本的 |tap| 要高于送出窗口与正在累计的这一格里的全部送出。D 短于一格时回读来自当前格，所以当前格也要比；
-    // g = 0 时状态机整个不计
+    // 本样本的 |tap| 要高于送出窗口与正在累计的这一格里的全部送出，再乘 0.5 dB 余量（kHugeSentMargin）：只改相位的链
+    // 会让回读采样峰比送出峰高零点几 dB，那不是放大。D 短于一格时回读来自当前格，所以当前格也要比；送出为 0 时
+    // 余量乘出 0，tap > 0 即判为放大；g = 0 时状态机整个不计
     const float sentPartial = sentHistory_.currentPeak();
-    chainAmplifiesNow_ = tapPeak_ > (sentMax_ > sentPartial ? sentMax_ : sentPartial);
+    const float sentPeak = sentMax_ > sentPartial ? sentMax_ : sentPartial;
+    chainAmplifiesNow_ = tapPeak_ > safety::kHugeSentMargin * sentPeak;
     const float tapTerm = chainAmplifiesNow_ ? tapPeak_ : 0.0f;
     const float gainTerm = (chainAmplifiesNow_ || gain > 1.0f) ? xPeak : 0.0f;
     o.contributing = gain > 0.0f;

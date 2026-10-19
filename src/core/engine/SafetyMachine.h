@@ -53,8 +53,9 @@ inline constexpr float kCeilingDefaultDb = -6.0f;
 // 超大值：电平 ≥ +12 dBFS（10^(12/20)），连续 100 ms；两个超限样本相隔不超过 50 ms 仍算连续。
 // 50 ms 是 10 Hz 的半周期：|x| 的峰每半个周期出现一次，间隔取它，10 Hz 及以上的低频热信号都能连续计满 100 ms
 // （DC 阻断在 10 Hz 只衰减约 1 dB，更低的成分越来越弱；5 Hz 的半周期就是整整 100 ms，判据会退化成两个孤立的峰）。
-// 看的电平是 max(|tap|, |x|)，但只计「回送路径自己放大出来的」部分：|tap| 只在本样本的 |tap| 高于送出峰值时计入，
-// |x|（×g 之后）只在这一条成立或 g > 1 时计入；回送不活动（g = 0）时两项都不计。
+// 看的电平是 max(|tap|, |x|)，但只计「回送路径自己放大出来的」部分：|tap| 只在本样本的 |tap| 高于送出峰值
+// × kHugeSentMargin（0.5 dB 余量）时计入，|x|（×g 之后）只在这一条成立或 g > 1 时计入；回送不活动（g = 0）时
+// 两项都不计。
 // 理由：干声随整条通道进环，恒等链下 |tap| 就约等于干声，单看绝对阈值会对热轨道误跳；链不放大且 g ≤ 1 时
 // |x| ≤ |tap|，同理。
 // 「送出峰值」取送出窗口（与链增益估计同一个，覆盖 [0, D + 1 s] 时延）与正在累计的这一格两者中较大的：回读样本
@@ -62,11 +63,17 @@ inline constexpr float kCeilingDefaultDb = -6.0f;
 // 误计。判定逐样本做，不带下面给防误报门用的 3 s 保持：超大值一跳就锁存，估计偏大一格不该让之后的热干声凑满
 // 100 ms 误跳。也不按 10 ms 格判：格收尾才算出的判定只能管下一格，从不连续占两格的放大（例如每 20 ms 以上一下的
 // 咔嗒串）永远计不进去。
-// 50 ms 间隔的后果：g > 1 时每 ≤ 50 ms 一个 |x| 超过 +12 dBFS 的孤立尖峰，或者每 ≤ 50 ms 一个高于送出峰值、
-// 超过 +12 dBFS 的回读尖峰（坏插件在静音环里吐的咔嗒串），凑满 100 ms 都会跳闸；前一种偏保守，接受。
+// 50 ms 间隔的后果：g > 1 时每 ≤ 50 ms 一个 |x| 超过 +12 dBFS 的孤立尖峰，或者每 ≤ 50 ms 一个高于送出峰值
+// （过了下面 0.5 dB 余量之后）超过 +12 dBFS 的回读尖峰（坏插件在静音环里吐的咔嗒串），凑满 100 ms 都会跳闸；
+// 前一种偏保守，接受。
 inline constexpr float kHugeLevel = 3.98107171f;
 inline constexpr double kHugeSeconds = 0.100;
 inline constexpr double kHugeGapSeconds = 0.050;
+// 超大值的送出余量：回读要高于「送出峰值 × 10^(0.5/20)」才算放大。全通等只改相位的链会改变采样点上的取值，
+// 回读采样峰因此可能比窗口里的送出峰高零点几 dB（实测在 0.5 dB 内），这不是放大，不该跳超大值。反例都远超这个
+// 余量：咔嗒串是 +24 dBFS 对 ≤ 0 dBFS 的送出，链增益 ≥ +1 dB 的真放大让回读持续高于送出。余量只影响干声本身
+// ≥ +12 dBFS、且链增益停在 0 dB 附近的情形；相位差超过 0.5 dB 的高频组合不在覆盖范围内。
+inline constexpr float kHugeSentMargin = 1.05925373f; // 10^(0.5/20)
 
 // 失控保护
 inline constexpr int kGuardWindowHops = 300; // 3 s 窗（10 ms 格）
@@ -83,7 +90,9 @@ inline constexpr float kGuardFeedbackLimit = 0.90f;
 
 // 链增益估计：最近 100 ms 回读的峰值 ÷ 覆盖 [0, D + 1 s] 时延的送出峰值。恒等链与衰减链下它必然 ≤ 1。
 // 两个方向都会偏：
-//   偏大：环内插件延迟超过 1 s、或链有相位变化时，可能把不放大的链判成放大，只会多介入；
+//   偏大：环内插件延迟超过 1 s、或链有相位变化时，可能把不放大的链判成放大。这一侧只有防误报门在读，门偏大
+//     只会多介入；超大值一侧不读这个判定，靠逐样本比较上的 0.5 dB 余量（kHugeSentMargin）吸收相位变化引起的
+//     零点几 dB 回读差，不会被误计成放大；
 //   偏小：送出窗口比回读窗口长，里面更响的干声瞬态（鼓点）会盖住真放大的链，真失控就逃过防误报门。
 // 所以给防误报门用的「判为放大」一旦成立就保持 3 s（失控保护的窗长）才允许回落：间歇的瞬态盖不住整段失控。
 // 超大值不读这个判定，用的是不保持的逐样本比较（见上面 kHugeLevel 的说明）。
@@ -263,8 +272,8 @@ public:
     // 链增益估计（线性）；送出为 0 而回读不为 0 时是 +∞，两者都为 0 时是 0。每 10 ms 格更新一次。
     // 三个量的关系：chainGainEstimate() 是最近 100 ms 回读峰值与送出峰值之比；chainAmplifies() 是防误报门看的
     // 判定（估计 > 1，再保持 3 s），保持期间估计可能已经 ≤ 1 而它仍为 true；chainAmplifiesNow() 是超大值看的逐样本
-    // 判定（刚处理的那个样本的 |tap| 是否高于送出窗口与当前格的送出峰值，不保持）。诊断或界面要显示时把估计值与
-    // 两个判定一起带上
+    // 判定（刚处理的那个样本的 |tap| 是否高于送出窗口与当前格的送出峰值乘上 0.5 dB 余量，不保持）。诊断或界面要
+    // 显示时把估计值与两个判定一起带上
     float chainGainEstimate() const noexcept;
     bool chainAmplifies() const noexcept { return chainAmplifies_; }
     bool chainAmplifiesNow() const noexcept { return chainAmplifiesNow_; }
@@ -306,7 +315,7 @@ private:
     float tapMax_ = 0.0f;
     float sentMax_ = 0.0f;
     bool chainAmplifies_ = false; // 带 3 s 保持，给防误报门
-    bool chainAmplifiesNow_ = false; // 逐样本判定，给超大值
+    bool chainAmplifiesNow_ = false; // 逐样本判定，给超大值：|tap| 高于送出峰值 × 0.5 dB 余量
     std::int64_t amplifyHold_ = 1;
     std::int64_t amplifyUntil_ = -1; // 「判为放大」保持到这个样本
 
