@@ -134,11 +134,13 @@ struct Params
 // 参数 ID：1..255 字节的可打印 ASCII，不含空格。
 bool isValidParamId(const std::string& id) noexcept;
 
+// clang-format off
 // 写出之前把列表压到不超过上限：不在 knownIds 里的条目从末尾起丢，直到条数 ≤ kMaxParamCount 且载荷 ≤ kMaxParamBytes；
-// knownIds 里的条目一个不丢。参数层在解出来的列表上补完自己的参数、编码之前要调用它，否则「未知 id +
-// 认识的参数」超过上限时 保存会失败。返回 false 表示认识的条目自己就超过上限（列表已尽量压缩）。 dropped
-// 带回丢掉的条数（没丢就是 0）：丢弃不能悄悄发生，参数层要把它记进诊断计数。只有 PRMS 会丢；CFGS 的未知键读入时
-// 已经按写回预算整份校验过，读得进来就写得回去，不需要这一步。
+// knownIds 里的条目一个不丢。参数层在解出来的列表上补完自己的参数、编码之前要调用它，
+// 否则「未知 id + 认识的参数」超过上限时保存会失败。返回 false 表示认识的条目自己就超过上限（列表已尽量压缩）。
+// dropped 带回丢掉的条数（没丢就是 0）：丢弃不能悄悄发生，参数层要把它记进诊断计数。
+// 只有 PRMS 会丢；CFGS 的未知键读入时已经按写回预算整份校验过，读得进来就写得回去，不需要这一步。
+// clang-format on
 bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, std::size_t& dropped) noexcept;
 
 // 失败：条数超过 kMaxParamCount、载荷超过 kMaxParamBytes、某个 id 不合规、id 重复。
