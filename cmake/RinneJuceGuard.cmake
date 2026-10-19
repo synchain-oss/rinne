@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# JUCE 检出的硬性守卫。JUCE 只经 -DJUCE_PATH 传入，检出必须恰好是仓根 .juce-commit 记的提交（唯一真源）；
+# JUCE 检出的硬性守卫。JUCE 只经 -DJUCE_PATH 传入，检出必须恰好是仓根 .juce-commit 记的提交（唯一真源），跟踪的文件没有改动；
 # JUCE 自己 CMakeLists.txt 的版本行再与 .juce-version 对一遍，作为第二道检查。对不上一律 FATAL_ERROR：
 # 同一台机器上可能放着别的 JUCE 版本，只给警告挡不住误用。两个钉版文件改了会自动重新配置。
 
@@ -34,6 +34,19 @@ if(NOT _rinne_juce_rc EQUAL 0)
 endif()
 if(NOT _rinne_juce_have STREQUAL _rinne_juce_want)
   message(FATAL_ERROR "JUCE_PATH 的 HEAD 是 ${_rinne_juce_have}，.juce-commit 要求 ${_rinne_juce_want}")
+endif()
+# HEAD 对了，检出的文件也必须没被改过（本机误改，或 CI 恢复了被改过的缓存）；未跟踪的文件不影响构建，不算
+execute_process(
+  COMMAND "${GIT_EXECUTABLE}" -C "${_rinne_juce_dir}" status --porcelain --untracked-files=no
+  OUTPUT_VARIABLE _rinne_juce_changes
+  ERROR_VARIABLE _rinne_juce_err
+  RESULT_VARIABLE _rinne_juce_rc
+  OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _rinne_juce_rc EQUAL 0)
+  message(FATAL_ERROR "读不出 ${_rinne_juce_dir} 的 git status（${_rinne_juce_err}）")
+endif()
+if(NOT _rinne_juce_changes STREQUAL "")
+  message(FATAL_ERROR "JUCE 检出有改动（git status --porcelain --untracked-files=no 不为空），先还原：\n${_rinne_juce_changes}")
 endif()
 
 file(READ "${CMAKE_SOURCE_DIR}/.juce-version" _rinne_juce_version)

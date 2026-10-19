@@ -13,7 +13,7 @@
 # 本 workflow 不改为调用 Synchain-oss/ci-workflows 的共享 claude-review：那边是 tag 模式加追踪评论，做不了这里的
 # 轮次与增量审查、总结代发与尾注核对，check 名也会变成「调用方 / 被调用方」，合并判据（pr-merge.ps1）对不上。
 # deepseek-review.yml 已改为调用共享的手动审查，它的 focus 抄自下面的「重点」一节，改这里时同步改它（docs-truth 核对）。
-name: Claude PR Review
+name: Claude PR Review (Opus 5.5)
 
 on:
   pull_request:

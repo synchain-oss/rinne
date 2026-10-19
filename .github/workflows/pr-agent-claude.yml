@@ -9,7 +9,7 @@
 # 两者共用一个评论身份，在 dev 上两个都每次推送发新评论（那边设了 persistent_comments: false），互不覆盖；
 # 其他 base 上只有这一个 pr-agent，评论原地更新。
 # 引用钉 40 位 SHA、行尾注明 tag；改 SHA 时重跑 node scripts/lock-actions.mjs。
-name: PR Agent (Claude Haiku)
+name: PR Agent (Claude Haiku 5.5)
 
 on:
   pull_request:
