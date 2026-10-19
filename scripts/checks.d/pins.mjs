@@ -118,9 +118,11 @@ export function checkPins(read) {
     if (!new RegExp(`^# clang-format ${cf?.replace(/\./g, "\\.")}\\b`, "m").test(read(".clang-format") || "")) {
         errors.push(".clang-format 头注释里的版本与 .clang-format-version 不一致");
     }
-    // mac 的 pluginval 包按 .pluginval-version 的 tag 下载，sha256 登记里写的 tag 必须就是它
+    // mac 的 pluginval 包按 .pluginval-version 的 tag 下载，sha256 登记里写的 tag 必须就是它；
+    // 钉版文件允许不带 v，登记的 tag 带 v：去掉 v 再比，同一版本不误判
+    const noV = (v) => (v || "").replace(/^v/, "");
     const macPluginval = /^(\S+) [0-9a-f]{64}$/.exec(value["scripts/ci/mac/pluginval-macos.sha256"] || "");
-    if (macPluginval && macPluginval[1] !== value[".pluginval-version"]) {
+    if (macPluginval && noV(macPluginval[1]) !== noV(value[".pluginval-version"])) {
         errors.push(
             `scripts/ci/mac/pluginval-macos.sha256 登记的是 ${macPluginval[1]}，与 .pluginval-version 的 ${value[".pluginval-version"] || "（没有）"} 不一致`,
         );
@@ -244,6 +246,8 @@ export default {
                 true,
                 with_({ "scripts/ci/mac/pluginval-macos.sha256": `v1.0.5 ${"3c".repeat(32)}\n` }),
             ],
+            // 钉版文件不带 v、登记的 tag 带 v，是同一个版本：不判红
+            ["mac pluginval 钉版不带 v 但版本相同", false, with_({ ".pluginval-version": "1.0.4\n" })],
             [
                 "mac pluginval sha256 不是 64 位小写十六进制",
                 true,
