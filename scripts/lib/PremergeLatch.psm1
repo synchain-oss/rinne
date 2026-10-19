@@ -129,15 +129,16 @@ function Assert-RinneNoLatch {
   - 本进程见过锁存（自己的标记被动过、改写成已篡改、没清除就放开）：一直拒绝，不再看标记在不在；
   - 本进程握着进行中标记：它原样还在才放行，不在原样就记下、之后一直拒绝；
   - 都没有：位置上没有东西才放行（推不出位置也算拒绝）。
+  前两种是本进程记住的，换一个进程就看不到；标记本身还在的话新进程照样拒绝。
 #>
 function Get-RinneLatchRefusal {
     param([string]$RepoRoot = $script:ModuleRepo)
-    $tail = '。本进程之后一条 git、gh 都不再跑；维护者核对主 clone、共享 .git 的配置、hooks 与忽略文件之后再继续'
-    if ($script:Tainted) { return "已锁存（本进程）：$($script:Tainted)$tail" }
+    $ownTail = '。本进程之后一条 git、gh 都不再跑；换一个新的 pwsh 进程再试（标记还在的话新进程照样拒绝），维护者核对主 clone、共享 .git 的配置、hooks 与忽略文件之后再继续'
+    if ($script:Tainted) { return "已锁存（本进程）：$($script:Tainted)$ownTail" }
     if ($script:Own) {
         if (Test-RinneLatchIntact $script:Own) { return $null }
         $script:Tainted = "本进程写下的合并后构建标记被动过（删掉、换掉或改过：$($script:Own.Path)）"
-        return "已锁存（本进程）：$($script:Tainted)$tail"
+        return "已锁存（本进程）：$($script:Tainted)$ownTail"
     }
     try { Assert-RinneNoLatch -RepoRoot $RepoRoot; $null }
     catch { $m = $_.Exception.Message; ($m -match '^已锁存') ? $m : "已锁存（推不出锁存标记的位置）：$m" }
@@ -351,6 +352,7 @@ function Test-PremergeLatch {
         Set-Content -LiteralPath $want -Value $held.Text -NoNewline
         $r2 = & $allowed
         & $check '外部命令前：本进程握着的标记被动过就拒绝，改回原样也不再放行' $true (-not $r1 -and -not $r2 -and (& $refusal) -match '^已锁存（本进程）.*被动过')
+        & $check '外部命令前：本进程记住的拒绝写明换一个新进程再试' $true ((& $refusal) -match '换一个新的 pwsh 进程再试')
         Remove-Item -LiteralPath $want
         Reset-RinneLatchProcess
         & $check '外部命令前：换一个进程（这里是还原状态）、没有标记时放行' $false (-not (& $allowed))
