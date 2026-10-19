@@ -4,8 +4,9 @@
 //   |tap| 只在本样本高于送出峰值 × 0.5 dB 余量（送出窗口与正在累计的这一格）时计入；|x|（×g 之后）只在这一条
 //   成立或 g > 1 时计入；回送不活动（g = 0）时都不计。
 // 干声随整条通道进环：恒等链下热干声绕一圈回来就是 |tap|，绝对阈值单看 tap 会误跳（按字面公式 max(|tap|, |x|)
-// 无条件计入时，+12 dBFS 干声、反馈 90 %、恒等链的 9 格里有 8 格误跳）；该放大的情形照样在 100 ms 级跳闸。
-// 0.5 dB 余量留给只改相位的链：全通链会改变采样点上的取值，回读采样峰比送出峰高零点几 dB，那不是放大。
+// 无条件计入时，+12 dBFS 干声、反馈 90 %、恒等链的 9 格里有 8 格误跳）；该放大的情形照样跳闸。
+// 0.5 dB 余量留给接近纯正弦的信号经只改相位的链：全通链会改变采样点上的取值，回读采样峰比送出峰高零点几 dB，
+// 那不是放大。谐波丰富的信号（削波、锯齿、方波）经全通后可高出 1–8 dB，不在覆盖范围内。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -292,7 +293,7 @@ TEST_CASE("a +12.5 dBFS dry at 90 % feedback does not trip through a first-order
           "[safety][loop][huge][fp][allpass]")
 {
     // 幅度恒为 1、只改相位的一阶全通链：回读采样峰比窗口里的送出峰高零点几 dB，逐样本比较要留 0.5 dB 余量才不误计。
-    // 7 种干声频率 × 全通 200 / 1000 Hz × D 为 48 / 480 / 4800 样本共 42 格，与评审实测误跳的那一组网格相同。
+    // 7 种干声频率 × 全通 200 / 1000 Hz × D 为 48 / 480 / 4800 样本共 42 格。没有余量时这组网格里有 11 格误跳。
     // 删除式验证：把 kHugeSentMargin 改成 1.0f，这些格里有格变红。
     // 已知边界：更高的频率（例如 8 kHz 干声过 1 kHz 全通）相位变化引起的采样峰差可达约 1 dB，超出 0.5 dB 余量，
     // 不在覆盖范围内，这里不放进用例
@@ -312,7 +313,8 @@ TEST_CASE("a +12.5 dBFS dry at 90 % feedback does not trip through a first-order
 TEST_CASE("hot music peaking at +14 dBFS through a first-order all-pass chain does not trip",
           "[safety][loop][huge][fp][allpass]")
 {
-    // 110 / 440 / 1250 Hz 三个分量叠成的、幅度被 0.7 Hz 慢包络调制的热音乐，8 s，反馈 90 %
+    // 110 / 440 / 1250 Hz 三个分量叠成的、幅度被 0.7 Hz 慢包络调制的热音乐，8 s，反馈 90 %。这是回归保护：
+    // 没有余量时它也不跳，不算余量的证据
     const auto music = [](std::int64_t n) {
         const double t = static_cast<double>(n) / kRate;
         const double env = 0.6 + 0.4 * std::sin(2.0 * kPi * 0.7 * t);
@@ -336,7 +338,8 @@ TEST_CASE("a hot crescendo from +12 to +15 dBFS through a 1 kHz all-pass chain d
           "[safety][loop][huge][fp][allpass]")
 {
     // 反馈 90 %、全通链、干声 1 s 内从 +12 渐强到 +15 dBFS，之后保持：回读采样峰持续比送出峰高零点几 dB，
-    // 落在 0.5 dB 余量之内，不该被当成放大。D 取短于一格的 24 样本，另加 48 / 480 / 4800
+    // 落在 0.5 dB 余量之内，不该被当成放大。D 取短于一格的 24 样本，另加 48 / 480 / 4800。
+    // D = 24 一格没有余量也不跳，是既有「当前格也要比」机制的回归保护，不算余量的证据
     const auto dry = [](std::int64_t n) {
         const double t = static_cast<double>(n) / kRate;
         const double db = 12.0 + 3.0 * std::min(1.0, t / 1.0);
@@ -356,7 +359,8 @@ TEST_CASE("a hot crescendo from +12 to +15 dBFS through a 1 kHz all-pass chain d
 TEST_CASE("a +1 dB chain at 90 % feedback with hot dry trips as huge", "[safety][loop][huge][threshold]")
 {
     // 反例：链增益 +1 dB 的真放大（恒定 1.122），反馈 90 %，热干声绕环后每个回读峰都比送出高约 1 dB，
-    // 远在 0.5 dB 余量之外，照样在 100 ms 级跳闸。参照「a +24 dB chain at 20 % feedback」与
+    // 远在 0.5 dB 余量之外，照样跳闸。淡入刚开始时送出逐渐变大，比值会短暂低于余量、计数中断，所以不是 100 ms 级，
+    // 而是首个有效读样本后约 0.25 s；这里断言 0.5 s 内。参照「a +24 dB chain at 20 % feedback」与
     // 「|x| counts only when g exceeds 1」的写法
     for (const double freq : {100.0, 1000.0, 8000.0})
         for (const std::int64_t delay : {48, 480, 4800})
@@ -368,13 +372,14 @@ TEST_CASE("a +1 dB chain at 90 % feedback with hot dry trips as huge", "[safety]
             const LoopResult r = runLoop(s, hotDry(12.5, freq));
             CHECK(r.tripped);
             CHECK(r.reason == TripReason::Huge);
+            CHECK(r.tripSample - s.delay < samplesOf(0.5));
         }
 }
 
 TEST_CASE("a +0.7 dB chain at 90 % feedback with hot dry still trips, +0.3 dB stays under the margin",
           "[safety][loop][huge][threshold]")
 {
-    // 余量的两侧：+0.7 dB 的链（1.084）高于 0.5 dB 余量（1.059），回读每个峰都被计入，照样在 100 ms 级跳闸；
+    // 余量的两侧：+0.7 dB 的链（1.084）高于 0.5 dB 余量（1.059），稳态下回读每个峰都被计入，照样跳闸（0.5 s 内）；
     // +0.3 dB 的链（1.035）低于余量，不计入。余量若被悄悄放宽到 0.7 dB 以上，前一半会变红
     for (const std::int64_t delay : {48, 480, 4800})
     {
@@ -385,6 +390,7 @@ TEST_CASE("a +0.7 dB chain at 90 % feedback with hot dry still trips, +0.3 dB st
         const LoopResult r = runLoop(s, hotDry(12.5, 1000.0));
         CHECK(r.tripped);
         CHECK(r.reason == TripReason::Huge);
+        CHECK(r.tripSample - s.delay < samplesOf(0.5));
 
         LoopSetup under = loop(0.90f, 1.0f, dbfs(0.3));
         under.seconds = 4.0;

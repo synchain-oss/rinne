@@ -230,6 +230,7 @@ TEST_CASE("huge trips after exactly 100 ms at +12 dBFS", "[safety][huge][thresho
         CHECK_FALSE(rig.m.latched());
     }
     CHECK(std::fabs(20.0 * std::log10(static_cast<double>(rinne::engine::safety::kHugeLevel)) - 12.0) < 1.0e-6);
+    CHECK(std::fabs(20.0 * std::log10(static_cast<double>(rinne::engine::safety::kHugeSentMargin)) - 0.5) < 1.0e-6);
 }
 
 TEST_CASE("huge treats hits up to 50 ms apart as continuous", "[safety][huge][threshold]")
