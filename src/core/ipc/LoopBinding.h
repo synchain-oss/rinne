@@ -62,6 +62,7 @@ public:
     ~BoundBlock() = default;
 
     bool ok() const noexcept { return ok_; }
+    // 下面这些访问只许在 ok() 为真时调用：否则绑定或映射可能为空
     const LoopBinding& binding() const noexcept { return *b_; }
     RvSegment& rv() const noexcept;
     RoleSlot& mine() const noexcept;
@@ -95,6 +96,7 @@ public:
     std::size_t retained() const noexcept { return keep_.size(); }
 
 private:
+    static_assert(std::atomic<const LoopBinding*>::is_always_lock_free, "音频线程每块都读绑定快照");
     std::atomic<const LoopBinding*> current_{nullptr};
     std::vector<std::unique_ptr<LoopBinding>> keep_;
     u64 nextSeq_ = 1;

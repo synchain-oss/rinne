@@ -129,7 +129,26 @@ inline std::string labelDisplayName(const LabelPayload& p)
 
 // 写标签。调用方必须先核过 ctl 仍是自己最后写下的整字（只有属主写标签），这里不重复那道检查。
 // 序号是奇数时（别人正在写，或者上一版写了一半就死掉）直接放弃：宁可这一版不写，也不打断别人的写。
-// 写了一半就死掉的属主留下的奇数由接手这个槽的新属主处理，不在这里猜
+// 写了一半就死掉的属主留下的奇数由接手这个槽的新属主用 rewriteStuckLabel 处理，不在这里猜
+namespace detail
+{
+// 序号已经由调用方 CAS 成奇数 odd 之后：写字段，再以 release 存成 odd + 1（偶数）
+inline void finishLabelWrite(RoleSlot& slot, u32 odd, const LabelPayload& p) noexcept
+{
+    // 序号先变成奇数，字段才能开始动；否则读方可能读到新旧混在一起的一版
+    std::atomic_thread_fence(std::memory_order_release);
+    slot.colour_argb.store(p.colourArgb, std::memory_order_relaxed);
+    slot.name_len.store(p.nameLen, std::memory_order_relaxed);
+    slot.name_hash.store(p.nameHash, std::memory_order_relaxed);
+    for (u32 i = 0; i < kLabelNameWords; ++i)
+    {
+        slot.name_words[i].store(p.words[i], std::memory_order_relaxed);
+    }
+    // 偶数收尾以 release 发布：看到这个序号的读方，它之前的字段写都已经可见
+    slot.label_seq.store(odd + 1, std::memory_order_release);
+}
+} // namespace detail
+
 inline bool writeLabel(RoleSlot& slot, const LabelPayload& p) noexcept
 {
     u32 s = slot.label_seq.load(std::memory_order_relaxed);
@@ -142,17 +161,26 @@ inline bool writeLabel(RoleSlot& slot, const LabelPayload& p) noexcept
     {
         return false;
     }
-    // 序号先变成奇数，字段才能开始动；否则读方可能读到新旧混在一起的一版
-    std::atomic_thread_fence(std::memory_order_release);
-    slot.colour_argb.store(p.colourArgb, std::memory_order_relaxed);
-    slot.name_len.store(p.nameLen, std::memory_order_relaxed);
-    slot.name_hash.store(p.nameHash, std::memory_order_relaxed);
-    for (u32 i = 0; i < kLabelNameWords; ++i)
+    detail::finishLabelWrite(slot, s + 1, p);
+    return true;
+}
+
+// 新属主接手一个停在奇数上的标签（上一任写到一半就死了）：把序号从 stuckOdd CAS 到 stuckOdd + 2（仍是奇数，表示
+// 「现在是我在写」），写完整的一份，再存成偶数。整个过程序号都不会是偶数配着半份字段，读方照常只拿到完整的版本。
+// 只许属主调用，而且只在同一个奇数已经停了足够久之后（会合层按心跳判断）：序号变过、或者不是奇数都返回 false
+inline bool rewriteStuckLabel(RoleSlot& slot, u32 stuckOdd, const LabelPayload& p) noexcept
+{
+    if ((stuckOdd & 1u) == 0)
     {
-        slot.name_words[i].store(p.words[i], std::memory_order_relaxed);
+        return false;
     }
-    // 偶数收尾以 release 发布：看到这个序号的读方，它之前的字段写都已经可见
-    slot.label_seq.store(s + 2, std::memory_order_release);
+    u32 expected = stuckOdd;
+    if (!slot.label_seq.compare_exchange_strong(expected, stuckOdd + 2, std::memory_order_relaxed,
+                                                std::memory_order_relaxed))
+    {
+        return false;
+    }
+    detail::finishLabelWrite(slot, stuckOdd + 2, p);
     return true;
 }
 

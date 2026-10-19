@@ -4,10 +4,18 @@
 // W = write_head 是段寿命内单调递增的 u64 帧位置，帧 p 的槽是 p & (kRingFrames - 1)，样本是左右交错的
 // std::atomic<float>，一律 relaxed 访问。整个协议只靠 fence 配对，不靠「写头至少领先一个块长」这类安全余量：
 //
-//   写方：把 write_intent 推到 W + k（relaxed 的 CAS-max）→ release fence → 逐帧写样本（relaxed）→ W 从旧值
-//         CAS 到 W + k（release）。intent 先于样本、W 在样本之后；单写方时 intent <= W 恒成立，那一步 CAS 一次就成功。
+//   写方：读 W（acquire）→ 把 write_intent 从 <= W 的值 CAS 到 W + k（relaxed）→ release fence → 逐帧写样本
+//         （relaxed）→ W 从旧值 CAS 到 W + k（release）。intent 先于样本、W 在样本之后。
 //   读方：先 acquire 读 W（调用方保证 to 不超过它），再逐帧 relaxed 读样本，然后 acquire fence，最后 relaxed 读
 //         intent，把 p < intent - kRingFrames 的帧全部丢弃。
+//
+// intent 同时是写方之间的互斥：intent > W 说明有一段已经公告、还没发布（别的写方正在写，或者写到一半死了），这时谁都
+// 不碰样本，直接返回 kInFlight。只有一个写方时 intent 恒等于 W，这道检查从不触发。接管瞬间新旧两个写方都活着时，它们
+// 因此按段轮流写，谁也不会把对方已经发布的帧改掉；intent 也只会从 <= W 往前推，从不后退。写到一半死掉的写方会把
+// intent 留在 W 之前：现任写方连续被挡满 1 s 的音频（RingWriter 按帧计，不读时钟）就调用 reclaimStalled，把卡住的
+// 那一段填零发布，环不会被永远卡住。剩下的唯一窗口是：旧写方在公告之后、写样本之前被挂起超过 1 s，被回收之后又醒来
+// 接着写。接管只发生在旧写方死了（跨进程要 >= 5 s 的证据且 pid 已死）或旧写方每块自检写权、下一块就停下的情况下，
+// 这一窗口不在正常运行的路径上。
 //
 // 为什么对：写方的 release CAS 与读方的 acquire 读 W 配对，单写方程序序里先写的每一帧 < W 都对读方可见，所以读到的
 // 要么是自己的值、要么是之后某一圈的值。若拷贝里某帧的样本是之后的块 C 写的（落在 C 的 release fence 之后），读方的
@@ -25,6 +33,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <utility>
 
 #include "ipc/SegmentLayout.h"
 
@@ -39,11 +48,13 @@ constexpr i64 frameDiff(u64 a, u64 b) noexcept
     return static_cast<i64>(a - b);
 }
 
-// 写一块的结果。kOk = 已发布；kCasLost = 写头被别人推过（接管瞬间的双写），这一块丢弃，它已经写下的样本由
-// write_intent 覆盖，读方会把它们当作被覆盖的帧排除；kBadLength = 块长为 0 或超过 kMaxWriteChunk，什么都没碰
+// 写一块的结果。kOk = 已发布；kInFlight = 别人公告的一段还没发布，这一块什么都没写；kCasLost = 样本写完时写头已被
+// reclaimStalled 推过（只在旧写方卡了 >= 1 s 之后才会出现，记一次 w_cas_fail）；kBadLength = 块长为 0 或超过
+// kMaxWriteChunk，什么都没碰
 enum class RingWriteResult : std::uint8_t
 {
     kOk,
+    kInFlight,
     kCasLost,
     kBadLength,
 };
@@ -92,10 +103,15 @@ public:
     // 诊断与测试用：写方在动样本之前公告的目标
     static u64 writeIntent(const RingSegment& seg) noexcept;
 
-    // 写一块，帧数在 [1, kMaxWriteChunk]；更长的块由调用方切开。source(u32 i, float& l, float& r) 填第 i 帧。
-    // 顺序不能改：见文件头。写头 CAS 失败只记一次 w_cas_fail 并丢弃这一块
+    // 写一块，帧数在 [1, kMaxWriteChunk]；更长的块由调用方切开。source(u32 i, u64 p, float& l, float& r) 填这一块的
+    // 第 i 帧，p 是它的绝对位置。顺序不能改：见文件头。写方音频线程通常经 RingWriter 调用，它负责卡住时的回收
     template<typename Source>
     static RingWriteResult write(RingSegment& seg, u32 frames, Source&& source) noexcept;
+
+    // 回收写到一半就停下的那一段：intent 领先 W 时把 [W, intent) 的最后一圈填零（更早的帧读方本来就不收），再把 W
+    // CAS 到 intent。返回是否推动了 W。只许现任写方在连续被挡满 1 s 之后调用（见 RingWriter）：对一个还在写的写方
+    // 调用，会把它正在写的帧换成 0
+    static bool reclaimStalled(RingSegment& seg) noexcept;
 
     // 读 [from, to)，逐帧交给 sink(p, l, r)。调用方保证 to 不超过自己之前用 writeHead()（acquire）读到的 W。
     // 比 to 早一圈的帧与负位置一定已经不存在，不读；读完之后用 acquire fence 与写方的 release fence 配对，
@@ -118,13 +134,17 @@ RingWriteResult LoopRing::write(RingSegment& seg, u32 frames, Source&& source) n
     u64 w0 = seg.header.write_head.load(std::memory_order_acquire);
     const u64 target = w0 + frames;
 #if !defined(RINNE_STRESS_MUTATE_NO_INTENT)
-    // intent 用 CAS-max 而不是普通 store：接管瞬间新旧两个写方可能同时在这里推进，普通 store 会让 intent 倒退，
-    // 把「已经有一方覆盖过的帧」重新说成完整数据。单写方时 intent <= w0 恒成立，第一次 CAS 就成功，代价与 store 相同
+    // 公告这一段：intent 只从 <= W 的值推进（从不后退，也不用普通 store）。intent 已经领先 W 就是别人公告了一段还没
+    // 发布，样本一个都不碰；CAS 输了就重看一次，多半也是这种情况。读到的 W 过时了也一样：那时 intent 已经领先它
     u64 intent = seg.header.write_intent.load(std::memory_order_relaxed);
-    while (frameDiff(target, intent) > 0 && !seg.header.write_intent.compare_exchange_weak(
-                                                intent, target, std::memory_order_relaxed, std::memory_order_relaxed))
+    do
     {
-    }
+        if (frameDiff(intent, w0) > 0)
+        {
+            return RingWriteResult::kInFlight;
+        }
+    } while (!seg.header.write_intent.compare_exchange_weak(intent, target, std::memory_order_relaxed,
+                                                            std::memory_order_relaxed));
 #endif
     // 公告先于样本：读方在样本之后读 intent，只要它看见这一块写下的任何一帧，就必须看见至少 target
     std::atomic_thread_fence(std::memory_order_release);
@@ -133,12 +153,12 @@ RingWriteResult LoopRing::write(RingSegment& seg, u32 frames, Source&& source) n
     {
         float l = 0.0f;
         float r = 0.0f;
-        source(i, l, r);
+        source(i, w0 + i, l, r);
         const u64 slot = (w0 + i) & mask;
         seg.data[2 * slot].store(l, std::memory_order_relaxed);
         seg.data[2 * slot + 1].store(r, std::memory_order_relaxed);
     }
-    // 样本全部写完才推 W；输给另一个写方就丢弃这一块，它已经覆盖的帧由 intent 兜住
+    // 样本全部写完才推 W。失败只可能是这一段卡了 >= 1 s、已被现任写方 reclaimStalled 推过：丢弃这一块
     if (!seg.header.write_head.compare_exchange_strong(w0, target, std::memory_order_release,
                                                        std::memory_order_relaxed))
     {
@@ -169,5 +189,51 @@ RingPull LoopRing::pull(const RingSegment& seg, i64 from, i64 to, Sink&& sink) n
     const i64 intent = static_cast<i64>(seg.header.write_intent.load(std::memory_order_relaxed));
     return {intent, std::max(lo, intent - lap)};
 }
+
+// 现任写方（Output 的音频线程）的写环助手：记下连续被 kInFlight 挡住的帧数，挡满 kStallReclaimMs 的音频就调用
+// reclaimStalled。按帧计而不读时钟（音频线程不读墙钟）；正常的接管重叠只有一块，远不到 1 s。调用方先核过写权
+// （每块 LoopRing::isWriter），换写方、换段或采样率改变时 reset。
+class RingWriter
+{
+public:
+    static constexpr u32 kStallReclaimMs = 1000;
+
+    void reset(u32 sampleRate) noexcept
+    {
+        // 采样率还不知道时按 48 kHz 计：只影响回收要等多久，不影响对错
+        stallLimitFrames_ = static_cast<u64>(sampleRate != 0 ? sampleRate : 48000u) * kStallReclaimMs / 1000u;
+        stalledFrames_ = 0;
+    }
+
+    template<typename Source>
+    RingWriteResult write(RingSegment& seg, u32 frames, Source&& source) noexcept
+    {
+        const RingWriteResult result = LoopRing::write(seg, frames, std::forward<Source>(source));
+        if (result == RingWriteResult::kInFlight)
+        {
+            stalledFrames_ += frames;
+            if (stalledFrames_ >= stallLimitFrames_)
+            {
+                LoopRing::reclaimStalled(seg);
+                stalledFrames_ = 0;
+                ++reclaims_;
+            }
+        }
+        else if (result == RingWriteResult::kOk)
+        {
+            stalledFrames_ = 0;
+        }
+        return result;
+    }
+
+    u64 stalledFrames() const noexcept { return stalledFrames_; }
+    // 诊断用：回收过几次
+    u32 reclaims() const noexcept { return reclaims_; }
+
+private:
+    u64 stallLimitFrames_ = 48000;
+    u64 stalledFrames_ = 0;
+    u32 reclaims_ = 0;
+};
 
 } // namespace rinne::ipc

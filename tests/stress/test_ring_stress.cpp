@@ -10,6 +10,8 @@
 //
 // 为什么专读边缘：帧 p 的槽在下一次写到 p + kRingFrames 时被覆盖。窗口取在 W - kRingFrames 附近（edge 模式），
 // 就是写方此刻正在覆盖的那一段，validFrom 的判定在这里最吃紧；randomLag 模式补上任意滞后位置的读。
+// two-writers 模式让两个写方同时写（接管瞬间新旧写方都活着）：样本按绝对位置编码，谁写都一样，只要一方把对方
+// 已经发布的帧换成别的位置的值，badOlder / badNewer 就会变红；写方之间互相挡住的次数另有下限。
 //
 // x86 能证明什么、不能证明什么：x86 是 TSO，两道 fence 在那里都只编译成编译器屏障，样本的读写在硬件上本来就
 // 不重排，所以 no_read_fence 在 x86 上仍然是绿的——它只能由原生 arm64 的 CI 变红。no_intent 在任何 CPU 上都会
@@ -45,6 +47,8 @@ constexpr u64 kMinReads = 1000;
 // 边缘读必须真的撞上覆盖：没有这个下限，读方一次都没碰到正在被覆盖的窗口时压测也是绿的（什么都没测到）
 constexpr u64 kMinRacedEdge = 50;
 constexpr u64 kMinRacedRandomLag = 1;
+// 两个写方的配置里，写方之间至少要互相挡住这么多次
+constexpr u64 kMinInFlight = 100;
 // 一次 pull 最多拷这么多帧：randomLag 的 m 上限是 2048，edge 的上限更小
 constexpr std::size_t kMaxPull = 2048;
 
@@ -107,6 +111,7 @@ struct Config
     u32 edgeMaxM;
     u32 burst; // 每写这么多块就空转一阵（0 = 不空转）
     u32 pauseSpins;
+    u32 writers; // 2 = 两个写方同时写（接管瞬间的重叠）
 };
 
 u32 pickChunk(const Config& c, Prng& rng) noexcept
@@ -134,6 +139,7 @@ struct Result
     u64 chunks = 0;
     u64 frames = 0;
     u64 writeFails = 0;
+    u64 inFlight = 0;
     u64 reads = 0;
     u64 acceptedFrames = 0;
     u64 rejectedFrames = 0;
@@ -156,9 +162,6 @@ Result runRound(const Config& cfg, u64 seed)
     std::atomic<u64> publishedAccepted{0};
     std::atomic<u64> publishedRaced{0};
 
-    u64 wChunks = 0;
-    u64 wFrames = 0;
-    u64 wFails = 0;
     u64 rReads = 0;
     u64 rAccepted = 0;
     u64 rRejected = 0;
@@ -167,30 +170,40 @@ Result runRound(const Config& cfg, u64 seed)
     u64 rOther = 0;
     u64 rRaced = 0;
 
-    std::thread writer([&] {
-        Prng rng(seed ^ 0x9e3779b97f4a7c15ull);
-        u64 pos = 0;
+    // 每个写方各记各的；两个写方的配置模拟接管瞬间新旧写方都活着：intent 让它们按段轮流写，被挡住的一段记 inFlight
+    struct WriterCounts
+    {
+        u64 chunks = 0;
+        u64 frames = 0;
+        u64 fails = 0;
+        u64 inFlight = 0;
+    };
+    WriterCounts counts[2];
+    const auto writerLoop = [&](u64 salt, WriterCounts& c) {
+        Prng rng(seed ^ salt);
         u64 sink = 0;
         while (!stop.load(std::memory_order_acquire))
         {
             const u32 k = pickChunk(cfg, rng);
-            const RingWriteResult result = LoopRing::write(*seg, k, [pos](u32 i, float& l, float& r) {
-                const u64 p = pos + i;
+            const RingWriteResult result = LoopRing::write(*seg, k, [](u32, u64 p, float& l, float& r) {
                 l = encodeL(p);
                 r = encodeR(p);
             });
             if (result == RingWriteResult::kOk)
             {
-                pos += k;
-                ++wChunks;
-                wFrames += k;
+                ++c.chunks;
+                c.frames += k;
+                publishedChunks.fetch_add(1, std::memory_order_relaxed);
+            }
+            else if (result == RingWriteResult::kInFlight)
+            {
+                ++c.inFlight;
             }
             else
             {
-                ++wFails; // 只有一个写方，任何非 kOk 都是缺陷
+                ++c.fails; // 没有回收，kCasLost 与 kBadLength 都是缺陷
             }
-            publishedChunks.store(wChunks, std::memory_order_relaxed);
-            if (cfg.burst != 0 && (wChunks % cfg.burst) == 0)
+            if (cfg.burst != 0 && (c.chunks % cfg.burst) == 0)
             {
                 // 空转一阵：让读方追上来，把窗口钉在「写方正要覆盖的那一段」上
                 for (u32 s = 0; s < cfg.pauseSpins; ++s)
@@ -200,7 +213,13 @@ Result runRound(const Config& cfg, u64 seed)
             }
         }
         (void)sink;
-    });
+    };
+    std::thread writer([&] { writerLoop(0x9e3779b97f4a7c15ull, counts[0]); });
+    std::thread second;
+    if (cfg.writers > 1)
+    {
+        second = std::thread([&] { writerLoop(0xc2b2ae3d27d4eb4full, counts[1]); });
+    }
 
     std::thread reader([&] {
         Prng rng(seed ^ 0x2545f4914f6cdd1dull);
@@ -297,12 +316,20 @@ Result runRound(const Config& cfg, u64 seed)
     }
     stop.store(true, std::memory_order_release);
     writer.join();
+    if (second.joinable())
+    {
+        second.join();
+    }
     reader.join();
 
     Result r;
-    r.chunks = wChunks;
-    r.frames = wFrames;
-    r.writeFails = wFails;
+    for (const WriterCounts& c : counts)
+    {
+        r.chunks += c.chunks;
+        r.frames += c.frames;
+        r.writeFails += c.fails;
+        r.inFlight += c.inFlight;
+    }
     r.reads = rReads;
     r.acceptedFrames = rAccepted;
     r.rejectedFrames = rRejected;
@@ -319,10 +346,11 @@ Result runRound(const Config& cfg, u64 seed)
 TEST_CASE("the transfer ring never accepts a frame a newer lap has overwritten", "[stress][ring]")
 {
     const Config configs[] = {
-        {"edge-small-chunks", false, 1, 64, false, 1024, 64, 0, 0},
-        {"edge-loguniform", true, 1, 8192, false, 4096, 64, 0, 0},
-        {"randomlag-loguniform", true, 1, 8192, true, 0, 0, 0, 0},
-        {"edge-large-burst", false, 4096, 8192, false, 8192, 256, 4, 20000},
+        {"edge-small-chunks", false, 1, 64, false, 1024, 64, 0, 0, 1},
+        {"edge-loguniform", true, 1, 8192, false, 4096, 64, 0, 0, 1},
+        {"randomlag-loguniform", true, 1, 8192, true, 0, 0, 0, 0, 1},
+        {"edge-large-burst", false, 4096, 8192, false, 8192, 256, 4, 20000, 1},
+        {"edge-two-writers", false, 1, 256, false, 2048, 64, 0, 0, 2},
     };
 
     u64 seed = 0x5eed1234u;
@@ -337,6 +365,15 @@ TEST_CASE("the transfer ring never accepts a frame a newer lap has overwritten",
         CHECK(r.badOlder == 0);
         CHECK(r.badOther == 0);
         CHECK(r.writeFails == 0);
+        // 单写方从不被挡；两个写方必须真的互相挡过，否则这一轮没测到接管重叠
+        if (cfg.writers > 1)
+        {
+            CHECK(r.inFlight >= kMinInFlight);
+        }
+        else
+        {
+            CHECK(r.inFlight == 0);
+        }
         // 非空转下限：这一轮真的写够、读够、并且真的撞上过覆盖
         CHECK(r.chunks >= kMinChunks);
         CHECK(r.acceptedFrames >= kMinAccepted);
@@ -344,13 +381,13 @@ TEST_CASE("the transfer ring never accepts a frame a newer lap has overwritten",
         CHECK(r.raced >= (cfg.randomLag ? kMinRacedRandomLag : kMinRacedEdge));
 
         std::printf("[stress][ring] %-21s chunks=%llu frames=%llu reads=%llu accepted=%llu rejected=%llu "
-                    "badNewer=%llu badOlder=%llu badOther=%llu raced=%llu writeFails=%llu ms=%llu\n",
+                    "badNewer=%llu badOlder=%llu badOther=%llu raced=%llu writeFails=%llu inFlight=%llu ms=%llu\n",
                     cfg.name, static_cast<unsigned long long>(r.chunks), static_cast<unsigned long long>(r.frames),
                     static_cast<unsigned long long>(r.reads), static_cast<unsigned long long>(r.acceptedFrames),
                     static_cast<unsigned long long>(r.rejectedFrames), static_cast<unsigned long long>(r.badNewer),
                     static_cast<unsigned long long>(r.badOlder), static_cast<unsigned long long>(r.badOther),
                     static_cast<unsigned long long>(r.raced), static_cast<unsigned long long>(r.writeFails),
-                    static_cast<unsigned long long>(r.millis));
+                    static_cast<unsigned long long>(r.inFlight), static_cast<unsigned long long>(r.millis));
         std::fflush(stdout);
     }
 }

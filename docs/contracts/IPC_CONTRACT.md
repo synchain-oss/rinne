@@ -9,7 +9,7 @@ status: draft
 - **Initialisation**: never blocks. Whoever wins a CAS on `magic` (0 → `'RNIN'`) initialises and records its pid; a stuck `'RNIN'` is taken over by CAS on `init_pid` only when that pid is dead. Everyone else gets `kBusy`, unmaps at once and retries after a jittered exponential backoff (25–250 ms), so the holders' gaps overlap and a segment that cannot be taken over still disappears.
 - **Lifetime**: backends and handles may be destroyed in either order; handle control blocks are kept until process exit, so handles are created on load and regroup only, never per tick.
 - **Truth**: `src/core/ipc/SegmentLayout.h` mirrors this document; `tests/golden/ipc-layout.json` is checked against it twice (compiled in `rinne_core_tests`, uncompiled by `contract-static-ipc`). Any layout change bumps `kIpcAbi`.
-- **Memory order**: the data plane is specified here: the ring (write intent advanced by CAS-max, release fence, samples, release CAS on the write head; readers discard every frame older than one lap before the intent they load after an acquire fence), the label seqlock and the binding snapshot the audio thread reads. Two mutation builds (no read fence, no write intent) must turn the native arm64 stress red.
+- **Memory order**: the data plane is specified here: the ring (the write intent is advanced from at most the write head, so a second writer stays out while a chunk is announced but not yet published, and a chunk abandoned by a dead writer is zero-filled and published after one second of blocked audio; release fence, samples, release CAS on the write head; readers discard every frame older than one lap before the intent they load after an acquire fence), the label seqlock and the binding snapshot the audio thread reads. Two mutation builds (no read fence, no write intent) must turn the native arm64 stress red.
 - **Status**: draft until the probe week; the slot ownership transition table and its time thresholds are completed together with the rendezvous code.
 
 ## 范围
@@ -132,7 +132,7 @@ status: draft
 
 - 环只有 2¹⁶ 帧：它只做块间传输，环路延迟 D 的延迟线放在 Input 本地，D 的范围与节拍同步都不进冻结布局。
 - 两端声明的最大块长超过 32 768 时只出干声并显示红字（诊断 `kUnsupportedBlock`）；写环按不超过 8192 帧分段。
-- 写权用独立的 `writer_token`；W 的 CAS 只防写头被推两次，接管瞬间的双写靠 `write_intent` 判撕裂兜住。
+- 写权用独立的 `writer_token`；接管瞬间的双写由 `write_intent` 按段串行（见「内存序」），W 的 CAS 只防写头被推两次。
 
 ## 冻结与 abi
 
@@ -182,16 +182,17 @@ status: draft
 
 **环**（[`src/core/ipc/LoopRing.h`](../../src/core/ipc/LoopRing.h)）。写方只有槽属主 Output 的音频线程，每段不超过 8192 帧，更长的块由调用方切段。
 
-- 写：读 W（acquire）→ 把 `write_intent` 推进到 W + k（relaxed 的 CAS 取大，只进不退）→ release fence → 样本 relaxed 写 → W 从旧值 CAS 到 W + k（release）。CAS 失败说明别人推过 W（接管瞬间的两个写方）：这一段作废、`w_cas_fail + 1`，它已经写下的样本由 `write_intent` 兜住。
+- 写：读 W（acquire）→ 读 `write_intent`：它已经领先 W，说明别人公告的一段还没发布（另一个写方正在写，或者写到一半死了），这一段一个样本都不写，返回 `kInFlight`；否则把它从这个不大于 W 的值 CAS 到 W + k（relaxed）→ release fence → 样本 relaxed 写 → W 从旧值 CAS 到 W + k（release）。
 - 读：先 acquire 读 W，只读 p < W 的帧，也不读比 W − 65536 更早的帧 → 样本 relaxed 读 → acquire fence → 读 `write_intent`（relaxed）。凡 p < `write_intent` − 65536（有符号运算）的帧都视为可能已被覆盖，按 0 处理。
 - 为什么对：W 的 acquire 与写方 W 的 release CAS 配对，读到的每一帧至少是它自己那一圈的值，否则就是更晚一圈的。拷贝中若读到更晚的某段 C 写下的样本，那个样本写在 C 的 release fence 之后，读侧的 acquire fence 与 C 的 fence 同步，随后读到的 `write_intent` 不小于 C 的目标位置；C 覆盖掉的每一帧都小于 C 的目标 − 65536，于是落进判废范围。正确性只靠这对 fence，不靠「余量大于块长」之类的假设。
-- `write_intent` 用 CAS 取大而不直接写：接管瞬间两个写方交错时，直接写可能让它后退，把其中一方已经覆盖的帧又判成有效。只有一个写方时 `write_intent` 恒不大于 W，第一次 CAS 就成，等价于直接写。
+- `write_intent` 同时是写方之间的互斥，而且只进不退：只有一个写方时它恒等于 W，检查从不触发；接管瞬间新旧两个写方都活着时，它们按段轮流写，谁也不会把对方已经发布的帧换成别的位置的数据（压测有两个写方同时写的一组）。写到一半死掉的写方会把 `write_intent` 留在 W 之前：现任写方连续被挡满 1 s 的音频（按帧计，不读时钟）就把 [W, `write_intent`) 的最后一圈填零，再把 W CAS 到 `write_intent`，环不会被永远卡住；填零之前的 release fence 让读方照常排除被覆盖的旧帧。W 的 CAS 失败（`w_cas_fail + 1`）只会出现在这次回收与那个卡住的写方之间。剩下的窗口是旧写方在公告之后、写样本之前被挂起超过 1 s，回收之后又醒来接着写；接管只发生在旧写方已死（跨进程要 ≥ 5 s 的证据且 pid 已死）或旧写方每块自检写权、下一块就停下的情况下，这一窗口不在正常运行的路径上。
 - `epoch`、`writer_token` 与 `sample_rate`：写方先写 `sample_rate` 与 `src_channels`（relaxed），再以 release 写 `epoch`（只在采样率改变或首次发布时 + 1）与 `writer_token`；读方先 acquire 读 `epoch` 与 `writer_token`，再读 `sample_rate`。发布写权从不动 W 与 `write_intent`（W 不清零）。交出写权是 `writer_token` 从自己的 token 到 0 的 CAS，别人的 token 不动。
 
 **标签 seqlock**（[`src/core/ipc/LabelSeqlock.h`](../../src/core/ipc/LabelSeqlock.h)，端点槽 128–255 字节）
 
 - 写：只有属主、只在 `ctl` 仍是自己最后写下的整字时写。`label_seq` 是偶数 s 时 CAS 到 s + 1（relaxed）→ release fence → 各字段 relaxed 写 → `label_seq` 以 release 写 s + 2。读到奇数或 CAS 输了就放弃这一次：接管瞬间旧属主与新属主撞上时后到的一方退让，序号不会被两个写方搅乱。
 - 读：`label_seq` acquire 读到 s1，奇数就放弃 → 各字段 relaxed 读 → acquire fence → 再读 `label_seq`（relaxed），等于 s1 才算读到完整的一份。读到的字段若被下一次写改过，那次写的 release fence 与读侧的 acquire fence 同步，第二次读到的序号必然已经变了。
+- 接手：上一任写到一半就死了、`label_seq` 停在奇数 s 上时，普通的写一直退让。新属主等同一个奇数停够之后（由会合层按心跳判断），把它从 s CAS 到 s + 2（仍是奇数，表示正在写），写完整的一份再以 release 存成 s + 3；整个过程序号都不会是偶数配着半份字段。
 
 **绑定的发布**（[`src/core/ipc/LoopBinding.h`](../../src/core/ipc/LoopBinding.h)）
 

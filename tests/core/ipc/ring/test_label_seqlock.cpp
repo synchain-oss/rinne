@@ -142,3 +142,28 @@ TEST_CASE("an odd sequence makes both sides back off without touching the payloa
     CHECK(slot.name_hash.load() == payload.nameHash);
     CHECK(slot.name_words[0].load() == payload.words[0]);
 }
+
+TEST_CASE("a new owner rewrites a label left odd by a dead writer", "[ipc][label]")
+{
+    auto rv = makeRendezvous();
+    RoleSlot& slot = rv->groups[0].output;
+    REQUIRE(writeLabel(slot, makeLabelPayload("Old", 1u)));
+    // 上一任写到一半就死了：序号停在奇数，字段是半份
+    slot.label_seq.store(5u);
+    slot.colour_argb.store(0xbadu);
+
+    const LabelPayload mine = makeLabelPayload("Lead Vox", 0xff336699u);
+    CHECK_FALSE(writeLabel(slot, mine)); // 普通写照样退让
+    CHECK_FALSE(rewriteStuckLabel(slot, 4u, mine)); // 不是奇数
+    CHECK_FALSE(rewriteStuckLabel(slot, 3u, mine)); // 序号已经不是观察到的那个
+    CHECK(slot.label_seq.load() == 5u);
+
+    REQUIRE(rewriteStuckLabel(slot, 5u, mine));
+    CHECK(slot.label_seq.load() == 8u); // 5 → 7（我在写）→ 8
+    LabelPayload out;
+    REQUIRE(readLabel(slot, out));
+    CHECK(out == mine);
+    // 之后回到普通的写
+    REQUIRE(writeLabel(slot, makeLabelPayload("Bass", 2u)));
+    CHECK(slot.label_seq.load() == 10u);
+}

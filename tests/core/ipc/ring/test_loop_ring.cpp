@@ -41,11 +41,11 @@ bool decode(u64 p, float l, float r) noexcept
            er == ((p >> 24) & 0xFFFFFFu);
 }
 
-// 从 pos 起写 frames 帧，每帧编码自己的位置
+// 在写头处写 frames 帧，每帧编码自己的绝对位置；pos 是调用方以为的写头，必须对得上
 void writeAt(RingSegment& seg, u64 pos, u32 frames)
 {
-    const RingWriteResult result = LoopRing::write(seg, frames, [pos](u32 i, float& l, float& r) {
-        const u64 p = pos + i;
+    REQUIRE(LoopRing::writeHead(seg) == pos);
+    const RingWriteResult result = LoopRing::write(seg, frames, [](u32, u64 p, float& l, float& r) {
         l = encodeL(p);
         r = encodeR(p);
     });
@@ -81,7 +81,7 @@ TEST_CASE("a zero or oversized chunk is rejected without touching the segment", 
 
     for (const u32 frames : {0u, kMaxWriteChunk + 1})
     {
-        const RingWriteResult result = LoopRing::write(*seg, frames, [](u32, float& l, float& r) {
+        const RingWriteResult result = LoopRing::write(*seg, frames, [](u32, u64, float& l, float& r) {
             l = 9.0f;
             r = 9.0f;
         });
@@ -240,51 +240,146 @@ TEST_CASE("a copy raced by an overwriting write reports the overwritten frames t
     CHECK(decode(static_cast<u64>(from + 1) + kRingFrames, left[1], right[1]));
 }
 
-TEST_CASE("write_intent never moves backwards when two writers interleave", "[ipc][ring]")
+TEST_CASE("a second writer stays out while a chunk is in flight", "[ipc][ring]")
 {
     auto seg = makeRing();
     const u64 w0 = 777;
     seg->header.write_head.store(w0);
     seg->header.write_intent.store(w0);
+    std::unique_ptr<float[]> left(new float[600]);
+    std::unique_ptr<float[]> right(new float[600]);
 
-    // 外层 500 帧：第一次填样本时嵌套写 50 帧（第二个写方）。嵌套先拿到写头，外层 CAS 输掉
-    const RingWriteResult outer = LoopRing::write(*seg, 500, [&](u32 i, float& l, float& r) {
-        if (i == 0)
+    // 外层 500 帧公告之后、第一次填样本时，嵌套一个第二写方：它看见 intent 领先 W，什么都不写
+    for (const u32 nestedFrames : {50u, 500u})
+    {
+        INFO("nested " << nestedFrames);
+        const u64 start = LoopRing::writeHead(*seg);
+        RingWriteResult nested = RingWriteResult::kOk;
+        const RingWriteResult outer = LoopRing::write(*seg, 500, [&](u32 i, u64 p, float& l, float& r) {
+            if (i == 0)
+            {
+                nested = LoopRing::write(*seg, nestedFrames, [](u32, u64, float& nl, float& nr) {
+                    nl = 1.0f;
+                    nr = 1.0f;
+                });
+            }
+            l = encodeL(p);
+            r = encodeR(p);
+        });
+        CHECK(nested == RingWriteResult::kInFlight);
+        CHECK(outer == RingWriteResult::kOk);
+        CHECK(seg->header.w_cas_fail.load() == 0u);
+        CHECK(LoopRing::writeHead(*seg) == start + 500);
+        CHECK(LoopRing::writeIntent(*seg) == start + 500);
+        // 发布出去的每一帧都是外层自己的值：第二写方一个样本都没动
+        const RingRead r = LoopRing::read(*seg, static_cast<i64>(start), 500, left.get(), right.get());
+        CHECK(r.validFrom == static_cast<i64>(start));
+        CHECK(r.validTo == static_cast<i64>(start + 500));
+        u32 wrong = 0;
+        for (u32 i = 0; i < 500; ++i)
         {
-            const RingWriteResult nested = LoopRing::write(*seg, 50, [](u32, float& nl, float& nr) {
-                nl = 1.0f;
-                nr = 1.0f;
-            });
-            CHECK(nested == RingWriteResult::kOk);
+            wrong += decode(start + i, left[i], right[i]) ? 0u : 1u;
         }
-        l = 2.0f;
-        r = 2.0f;
-    });
-    CHECK(outer == RingWriteResult::kCasLost);
-    CHECK(seg->header.w_cas_fail.load() == 1u);
-    CHECK(seg->header.write_head.load() == w0 + 50);
-    CHECK(seg->header.write_intent.load() == w0 + 500);
+        CHECK(wrong == 0u);
+    }
+}
 
-    // 镜像：外层 50 帧、嵌套 500 帧，结果一样（intent 停在外层公告的目标上）
+TEST_CASE("a chunk abandoned after its announcement blocks writers until it is reclaimed", "[ipc][ring]")
+{
+    auto seg = makeRing();
+    const u64 w0 = 5000;
+    // 一个写方公告了 [w0, w0 + 300)、写了一半样本就死了：intent 停在 W 之前，槽里是半份垃圾
     seg->header.write_head.store(w0);
-    seg->header.write_intent.store(w0);
-    seg->header.w_cas_fail.store(0);
-    const RingWriteResult outer2 = LoopRing::write(*seg, 50, [&](u32 i, float& l, float& r) {
-        if (i == 0)
-        {
-            const RingWriteResult nested = LoopRing::write(*seg, 500, [](u32, float& nl, float& nr) {
-                nl = 3.0f;
-                nr = 3.0f;
-            });
-            CHECK(nested == RingWriteResult::kOk);
-        }
-        l = 4.0f;
-        r = 4.0f;
-    });
-    CHECK(outer2 == RingWriteResult::kCasLost);
-    CHECK(seg->header.w_cas_fail.load() == 1u);
-    CHECK(seg->header.write_head.load() == w0 + 500);
-    CHECK(seg->header.write_intent.load() == w0 + 500);
+    seg->header.write_intent.store(w0 + 300);
+    for (u64 p = w0; p < w0 + 150; ++p)
+    {
+        seg->data[2 * (p & (kRingFrames - 1))].store(-7.0f);
+        seg->data[2 * (p & (kRingFrames - 1)) + 1].store(-7.0f);
+    }
+    const auto encode = [](u32, u64 p, float& l, float& r) {
+        l = encodeL(p);
+        r = encodeR(p);
+    };
+
+    // 采样率 1000 Hz：挡满 1000 帧才回收。前 9 次每次 100 帧都被挡住，什么都没写
+    RingWriter writer;
+    writer.reset(1000);
+    for (int attempt = 0; attempt < 9; ++attempt)
+    {
+        CHECK(writer.write(*seg, 100, encode) == RingWriteResult::kInFlight);
+    }
+    CHECK(writer.stalledFrames() == 900u);
+    CHECK(writer.reclaims() == 0u);
+    CHECK(LoopRing::writeHead(*seg) == w0);
+    CHECK(seg->data[2 * (w0 & (kRingFrames - 1))].load() == -7.0f);
+
+    // 第 10 次挡满 1000 帧：卡住的那一段填零发布，写头推到 intent
+    CHECK(writer.write(*seg, 100, encode) == RingWriteResult::kInFlight);
+    CHECK(writer.reclaims() == 1u);
+    CHECK(writer.stalledFrames() == 0u);
+    CHECK(LoopRing::writeHead(*seg) == w0 + 300);
+    CHECK(LoopRing::writeIntent(*seg) == w0 + 300);
+    std::unique_ptr<float[]> left(new float[400]);
+    std::unique_ptr<float[]> right(new float[400]);
+    const RingRead zeros = LoopRing::read(*seg, static_cast<i64>(w0), 300, left.get(), right.get());
+    CHECK(zeros.validFrom == static_cast<i64>(w0));
+    CHECK(zeros.validTo == static_cast<i64>(w0 + 300));
+    u32 nonZero = 0;
+    for (u32 i = 0; i < 300; ++i)
+    {
+        nonZero += (left[i] != 0.0f || right[i] != 0.0f) ? 1u : 0u;
+    }
+    CHECK(nonZero == 0u);
+
+    // 之后照常写；没有卡住的段时回收是空操作
+    CHECK(writer.write(*seg, 100, encode) == RingWriteResult::kOk);
+    CHECK(LoopRing::writeHead(*seg) == w0 + 400);
+    CHECK_FALSE(LoopRing::reclaimStalled(*seg));
+    CHECK(LoopRing::writeHead(*seg) == w0 + 400);
+    const RingRead fresh = LoopRing::read(*seg, static_cast<i64>(w0 + 300), 100, left.get(), right.get());
+    CHECK(fresh.validFrom == static_cast<i64>(w0 + 300));
+    u32 wrong = 0;
+    for (u32 i = 0; i < 100; ++i)
+    {
+        wrong += decode(w0 + 300 + i, left[i], right[i]) ? 0u : 1u;
+    }
+    CHECK(wrong == 0u);
+}
+
+TEST_CASE("reclaiming a stall more than a lap ahead only zeroes the last lap", "[ipc][ring]")
+{
+    auto seg = makeRing();
+    const u64 w0 = 3ull * kRingFrames;
+    const u64 intent = w0 + kRingFrames + 500;
+    seg->header.write_head.store(w0);
+    seg->header.write_intent.store(intent);
+    for (u32 i = 0; i < 2 * kRingFrames; ++i)
+    {
+        seg->data[i].store(-3.0f);
+    }
+    REQUIRE(LoopRing::reclaimStalled(*seg));
+    CHECK(LoopRing::writeHead(*seg) == intent);
+    u32 nonZero = 0;
+    for (u32 i = 0; i < 2 * kRingFrames; ++i)
+    {
+        nonZero += seg->data[i].load() != 0.0f ? 1u : 0u;
+    }
+    CHECK(nonZero == 0u);
+
+    // RingWriter 在写成功之后清零计数；采样率 0 按 48 kHz 计
+    RingWriter writer;
+    writer.reset(0);
+    CHECK(writer.write(*seg, 10, [](u32, u64, float& l, float& r) { l = r = 0.5f; }) == RingWriteResult::kOk);
+    CHECK(writer.stalledFrames() == 0u);
+    seg->header.write_intent.store(LoopRing::writeHead(*seg) + 10);
+    for (int attempt = 0; attempt < 4799; ++attempt)
+    {
+        REQUIRE(writer.write(*seg, 10, [](u32, u64, float& l, float& r) { l = r = 0.5f; }) ==
+                RingWriteResult::kInFlight);
+    }
+    CHECK(writer.reclaims() == 0u);
+    CHECK(writer.write(*seg, 10, [](u32, u64, float& l, float& r) { l = r = 0.5f; }) == RingWriteResult::kInFlight);
+    CHECK(writer.reclaims() == 1u);
 }
 
 TEST_CASE("the writer publishes its format with a rising epoch and retires only its own token", "[ipc][ring]")

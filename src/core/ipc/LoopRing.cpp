@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 数据段头侧的非模板部分：几何的初始化与校验、写权（writer_token 与 epoch）的发布与交还，以及把 pull 包成
-// 「拷进左右声道缓冲、顺手清零无效帧」的便利读取。协议与内存序的说明在 LoopRing.h 的文件头；这里只做不涉及
+// 数据段头侧的非模板部分：几何的初始化与校验、写权（writer_token 与 epoch）的发布与交还、卡住那一段的回收，以及把 pull
+// 包成 「拷进左右声道缓冲、顺手清零无效帧」的便利读取。协议与内存序的说明在 LoopRing.h 的文件头；这里只做不涉及
 // 模板的那一半，写环与读环的热路径都在头文件里内联到调用点。
 #include "ipc/LoopRing.h"
 
@@ -52,6 +52,32 @@ bool LoopRing::retireWriter(RingSegment& seg, u64 writerToken) noexcept
     u64 expected = writerToken;
     return seg.header.writer_token.compare_exchange_strong(expected, 0, std::memory_order_acq_rel,
                                                            std::memory_order_relaxed);
+}
+
+bool LoopRing::reclaimStalled(RingSegment& seg) noexcept
+{
+    u64 w0 = seg.header.write_head.load(std::memory_order_acquire);
+    const u64 intent = seg.header.write_intent.load(std::memory_order_relaxed);
+    const i64 ahead = frameDiff(intent, w0);
+    if (ahead <= 0)
+    {
+        return false;
+    }
+    // 这一段的公告早已在 intent 里，填零就像一次普通的写：release fence 在样本之前，读方读到这些 0 时也必然看见
+    // 不小于 intent 的公告，被覆盖的旧帧照样被排除。比 intent 早一圈以上的帧读方本来就不收，只填最后一圈
+    std::atomic_thread_fence(std::memory_order_release);
+    const i64 lap = static_cast<i64>(kRingFrames);
+    const u64 first = ahead > lap ? intent - static_cast<u64>(lap) : w0;
+    const u64 mask = static_cast<u64>(kRingFrames - 1);
+    for (u64 p = first; p != intent; ++p)
+    {
+        const u64 slot = p & mask;
+        seg.data[2 * slot].store(0.0f, std::memory_order_relaxed);
+        seg.data[2 * slot + 1].store(0.0f, std::memory_order_relaxed);
+    }
+    // 卡住的写方恰好在这时写完并发布了：它赢，它的帧里可能夹着这里填的 0（静音，不是旧数据）
+    return seg.header.write_head.compare_exchange_strong(w0, intent, std::memory_order_release,
+                                                         std::memory_order_relaxed);
 }
 
 RingFormat LoopRing::readFormat(const RingSegment& seg) noexcept
