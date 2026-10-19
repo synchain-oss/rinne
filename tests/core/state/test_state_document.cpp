@@ -11,6 +11,7 @@
 #include "StateTestKit.h"
 #include "state/StateCodec.h"
 #include "state/StateDocument.h"
+#include "state/StateMigration.h"
 
 namespace
 {
@@ -199,6 +200,50 @@ TEST_CASE("document: 块数预算保证写得回去", "[state][document]")
     const StateDocument output = decodeOk(containerOf(Role::Output, unknownChunks(63)), Role::Output);
     CHECK(encodeToContainer(output).chunks.size() == rinne::state::kMaxChunkCount);
     requireRejected(containerOf(Role::Output, unknownChunks(64)), Role::Output);
+}
+
+TEST_CASE("document: 满额 PRMS 补上参数层仍写得回去", "[state][document]")
+{
+    // 220 个 255 字节 id：PRMS 载荷 57204 字节，读得进来。
+    std::vector<rinne::test::RawParam> raw;
+    for (std::size_t i = 0; i < 220; ++i)
+        raw.push_back({rinne::test::longestParamId(i), 0u});
+    const Bytes bytes =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(raw)}, {kFourCcCfgs, kGroupThree}});
+
+    StateDocument document = sentinelDocument(Role::Input);
+    const auto result = rinne::state::loadState(bytes.data(), bytes.size(), Role::Input, document);
+    REQUIRE(result.status == rinne::state::StateLoadStatus::Ok);
+    REQUIRE(document.params.entries.size() == 220u);
+
+    // 参数层补满 32 个预留槽：252 条、65524 字节，整份仍编得出来。
+    for (std::uint32_t i = 0; i < rinne::state::kReservedParamSlots; ++i)
+        document.params.set(rinne::test::longestParamId(1000u + i), 1.0f);
+    Bytes encoded;
+    REQUIRE(rinne::state::encodeDocument(document, encoded));
+    CHECK(encoded.size() > 0u);
+
+    // 满额 256 条读不进来：参数层没有地方补自己的参数。
+    std::vector<rinne::test::RawParam> full;
+    for (std::uint32_t i = 0; i < rinne::state::kMaxParamCount; ++i)
+        full.push_back({"p" + std::to_string(i), 0u});
+    const Bytes tooMany =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(full)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument untouched = sentinelDocument(Role::Input);
+    CHECK(rinne::state::loadState(tooMany.data(), tooMany.size(), Role::Input, untouched).status ==
+          rinne::state::StateLoadStatus::Corrupt);
+    CHECK(rinne::test::sameDocument(untouched, sentinelDocument(Role::Input)));
+
+    // 252 个 255 字节 id 的 PRMS 共 65524 字节：容器收得下，但解码为参数层留余量后拒收。
+    std::vector<rinne::test::RawParam> wide;
+    for (std::size_t i = 0; i < 252; ++i)
+        wide.push_back({rinne::test::longestParamId(i), 0u});
+    const Bytes oversized =
+        rinne::test::rawContainer(1, 1, {{kFourCcPrms, rinne::test::rawParams(wide)}, {kFourCcCfgs, kGroupThree}});
+    StateDocument rejected = sentinelDocument(Role::Input);
+    CHECK(rinne::state::loadState(oversized.data(), oversized.size(), Role::Input, rejected).status ==
+          rinne::state::StateLoadStatus::Corrupt);
+    CHECK(rinne::test::sameDocument(rejected, sentinelDocument(Role::Input)));
 }
 
 TEST_CASE("document: 编码拒绝会写出两份已知块或不认识的 role", "[state][document]")

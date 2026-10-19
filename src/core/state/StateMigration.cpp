@@ -4,6 +4,8 @@
 
 #include <utility>
 
+#include "state/StateMigrationTesting.h"
+
 namespace rinne::state
 {
 namespace
@@ -15,6 +17,19 @@ StateLoadResult withStatus(StateLoadStatus status, std::uint32_t sourceAbi) noex
     result.status = status;
     result.sourceAbi = sourceAbi;
     return result;
+}
+
+// 容器上限：块数与单块长度。解码时查过一次；迁移函数可能改容器，迁移之后要再查一次。
+bool containerWithinLimits(const Container& container) noexcept
+{
+    if (container.chunks.size() > kMaxChunkCount)
+        return false;
+    for (const auto& chunk : container.chunks)
+    {
+        if (chunk.payload.size() > kMaxChunkBytes)
+            return false;
+    }
+    return true;
 }
 
 StateLoadResult loadStateImpl(const std::uint8_t* data, std::size_t size, Role role, StateDocument& out,
@@ -29,7 +44,7 @@ StateLoadResult loadStateImpl(const std::uint8_t* data, std::size_t size, Role r
 
     if (header.abi > currentAbi)
     {
-        // magic、abi、role 的位置不随 abi 变，更高的 abi 也比得了 role：对端的字节不原样固化进本端的工程
+        // 头的前 16 字节位置与含义不随 abi 变，更高的 abi 也比得了 role：对端的字节不原样固化进本端的工程
         if (!isKnownRole(role) || header.role != static_cast<std::uint32_t>(role))
             return withStatus(StateLoadStatus::Corrupt, header.abi);
         StateLoadResult result = withStatus(StateLoadStatus::RejectedNewer, header.abi);
@@ -42,8 +57,14 @@ StateLoadResult loadStateImpl(const std::uint8_t* data, std::size_t size, Role r
     Container container;
     if (!decodeContainer(data, size, role, container))
         return withStatus(StateLoadStatus::Corrupt, header.abi);
-    if (header.abi < currentAbi && !runMigrations(container, header.abi, currentAbi, chain, chainLength))
-        return withStatus(StateLoadStatus::Corrupt, header.abi);
+    if (header.abi < currentAbi)
+    {
+        if (!runMigrations(container, header.abi, currentAbi, chain, chainLength))
+            return withStatus(StateLoadStatus::Corrupt, header.abi);
+        // 迁移函数是以后加进来的代码，不能假定它守上限：越界的容器写不回去，按坏字节处理。out 还没动过。
+        if (!containerWithinLimits(container))
+            return withStatus(StateLoadStatus::Corrupt, header.abi);
+    }
 
     StateDocument document;
     if (!decodeDocument(container, role, document))

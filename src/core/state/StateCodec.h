@@ -8,6 +8,7 @@
 //   头 16 B：u32 magic 'RNST' | u32 abi | u32 role（1 Input / 2 Output）| u32 chunkCount（≤ 64）
 //   块 × chunkCount：u32 fourcc | u32 sizeBytes（≤ 64 KiB）| payload | 补 0 到 4 字节对齐
 //   最后一块之后不能再有字节。补齐字节写 0；读入时不看它的内容，它不承载信息。
+// 整份 state 至少 16 B；前 16 B 跨 abi 不变（见 StateMigration.h），迁移只改载荷。
 //
 // 分两层：
 //   · 容器层（parseHeader / decodeContainer / encodeContainer）只认头与块的边界，不解读载荷。
@@ -15,10 +16,11 @@
 //     一起留着，编码时原样写回。旧版插件打开新版存的工程再保存，不会抹掉新版多出来的东西。
 // 把两层拼成一个角色的整份 state 在 StateDocument.h；abi 判读与迁移在 StateMigration.h。
 //
-// 字节来自用户的工程文件，是不可信输入：长度与计数都先校验再用于分配或索引，任何分配都不超过输入本身的长度。
+// 字节来自用户的工程文件，是不可信输入：长度与计数都先校验再用于分配或索引。分配量有常数上限：容器层最多按
+// 64 个块预留，载荷层最多按 256 条参数预留；载荷的复制不超过输入本身的长度。
 // 编解码函数都不抛异常（内存不足也只是返回失败），失败时不碰出参：调用方拿到的要么是完整的结果，要么还是调用前
 // 的样子，不会有填了一半的状态。只有 Container::set / remove 与 Params::set 这几个改内容的小工具会在内存不足时
-// 抛 std::bad_alloc。这里的函数都会分配内存，只在消息线程上用，不能进音频回调。
+// 抛 std::bad_alloc。这里的函数都会分配内存，不能进音频回调；可在任意非实时线程上调用。
 #pragma once
 
 #include <array>
@@ -52,6 +54,7 @@ inline constexpr std::uint32_t kFourCcPrms = makeFourCc('P', 'R', 'M', 'S');
 inline constexpr std::uint32_t kFourCcCfgs = makeFourCc('C', 'F', 'G', 'S');
 
 // 这份 state 属于哪一端。role 写在头里：Input 的字节交给 Output（或反过来）时整份拒收，不会把对端的设置套到本端。
+// role 按整字（u32）比较：Input 恒写 1，Output 恒写 2；新值只分给新的端；不得拿 role 的高位做标志位。
 enum class Role : std::uint32_t
 {
     Input = 1,
@@ -107,6 +110,17 @@ bool encodeContainer(const Container& container, std::vector<std::uint8_t>& out)
 inline constexpr std::uint32_t kMaxParamCount = 256u;
 inline constexpr std::size_t kMaxParamIdBytes = 255u; // idLen 是 u8
 
+// 读入时为参数层留的写回余量：解出来的列表加上参数层自己的参数，仍要写得回去。
+// 预留槽数取参数表里 Input 参数个数的上界：参数层在解出来的列表上 set 时，认识的一律是已有 id（不增条），真正会
+// 增条的只有参数层补进来的那几个参数，以及参数表将来可能再加的参数。留 32 个槽够覆盖这张表翻倍还有余；每个槽按
+// 「1 字节 idLen + 255 字节 id + 4 字节值」共 260 字节计载荷，与 CFGS 给已知键留预算同理。
+inline constexpr std::uint32_t kReservedParamSlots = 32u;
+inline constexpr std::size_t kReservedParamSlotBytes = 1u + kMaxParamIdBytes + 4u; // 260
+
+// 解码时允许的最大条数与最大载荷：留下的余量就是上面那 32 个槽。
+inline constexpr std::uint32_t kMaxDecodedParamCount = kMaxParamCount - kReservedParamSlots;
+inline constexpr std::size_t kMaxDecodedParamBytes = kMaxChunkBytes - kReservedParamSlots * kReservedParamSlotBytes;
+
 struct ParamValue
 {
     std::string id;
@@ -126,9 +140,10 @@ struct Params
 // 参数 ID：1..255 字节的可打印 ASCII，不含空格。
 bool isValidParamId(const std::string& id) noexcept;
 
-// 失败：条数超上限、某个 id 不合规、id 重复。
+// 失败：条数超上限、某个 id 不合规、id 重复。上限是 kMaxParamCount（写回时的上限）。
 bool encodeParams(const Params& params, std::vector<std::uint8_t>& out) noexcept;
 // 失败：同上，另有载荷截断、最后一条之后还有字节。重复的 id 让「按 id 匹配」有歧义，所以整份拒收。
+// 解码比编码严：条数不超过 kMaxDecodedParamCount、载荷不超过 kMaxDecodedParamBytes，给参数层留下写回余量。
 bool decodeParams(const std::uint8_t* data, std::size_t size, Params& out) noexcept;
 
 // ---- CFGS：非参数设置 ----
@@ -216,6 +231,8 @@ struct ConfigField
 };
 
 // CFGS 的唯一真源：解码规则、编码规则、默认值与 golden 里的 schema 都由这张表推出来。
+// 解码用 u32 位图记录已出现的键，所以键表最多 32 项；编码按数组顺序写出，所以键号必须严格递增。
+inline constexpr std::size_t kMaxConfigFields = 32u;
 inline constexpr std::array<ConfigField, 11> kConfigFields{{
     {ConfigKey::Group, "group", ConfigType::U8, 1, 0, kMaxGroup, 0, OutOfRange::UseDefault, true, true},
     {ConfigKey::GroupOrigin, "group_origin", ConfigType::U8, 1, 0, 2, 0, OutOfRange::UseDefault, true, true},
@@ -231,6 +248,21 @@ inline constexpr std::array<ConfigField, 11> kConfigFields{{
      false},
     {ConfigKey::PresetDirty, "preset_dirty", ConfigType::U8, 1, 0, 1, 0, OutOfRange::UseDefault, true, false},
 }};
+
+// 键表的两条隐含前提，放在编译期：解码用 u32 的位记录「这个键出现过了」，编码按数组顺序写出、文档承诺按键号升序。
+// 表长到 33 项、或键号不是严格递增时，这里先编译不过，不必等运行时用例。
+constexpr bool configKeysStrictlyIncreasing() noexcept
+{
+    for (std::size_t i = 1; i < kConfigFields.size(); ++i)
+    {
+        if (static_cast<std::uint16_t>(kConfigFields[i - 1].key) >= static_cast<std::uint16_t>(kConfigFields[i].key))
+            return false;
+    }
+    return true;
+}
+
+static_assert(kConfigFields.size() <= kMaxConfigFields, "键表最多 32 项：解码用 u32 的位记录已出现的键");
+static_assert(configKeysStrictlyIncreasing(), "键表必须按键号严格递增：编码按数组顺序写，文档承诺升序");
 
 // 这一端认识的键；不认识（含只有对端才认识的键）返回 nullptr。
 const ConfigField* findConfigField(Role role, std::uint16_t key) noexcept;
@@ -270,6 +302,7 @@ bool decodeConfigs(const std::uint8_t* data, std::size_t size, Role role, Config
 // 先按键号升序写这一端认识的全部键，再按原序写 unknown。字段值按解码的同一套规则纠正后再写；预置名超长时在
 // UTF-8 字符边界上截到上限，语言代码不合规或超长时写空串。
 // 失败：role 不认识、unknown 里混进这一端的已知键、某条 unknown 放不进 u16 长度、整份超过单块上限。
+// 键号升序由 kConfigFields 的 static_assert 保证：编码就是按数组顺序写的。
 bool encodeConfigs(const Configs& configs, Role role, std::vector<std::uint8_t>& out) noexcept;
 
 } // namespace rinne::state

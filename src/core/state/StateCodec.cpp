@@ -505,9 +505,12 @@ bool decodeParamsImpl(const std::uint8_t* data, std::size_t size, Params& out)
 {
     if (data == nullptr && size != 0u)
         return false;
+    // 参数层要在这份列表上补自己的参数：条数与载荷都得给写回留出余量，否则解得开却写不回去。
+    if (size > kMaxDecodedParamBytes)
+        return false;
     ByteReader reader(data, size);
     const std::uint32_t count = reader.u32();
-    if (!reader.ok() || count > kMaxParamCount)
+    if (!reader.ok() || count > kMaxDecodedParamCount)
         return false;
 
     Params result;

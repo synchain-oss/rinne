@@ -130,20 +130,50 @@ TEST_CASE("params: f32 按位存取", "[state][params]")
     CHECK(floatBits(decoded.entries[3].value) == 0x00000001u);
 }
 
-TEST_CASE("params: 条数上限 256", "[state][params]")
+TEST_CASE("params: 条数上限：写回 256，读入 224", "[state][params]")
 {
+    // 编码端按线格式收到 256 条；解码端为参数层留出 32 个槽，只收 224 条。
     Bytes encoded;
     REQUIRE(rinne::state::encodeParams(manyParams(rinne::state::kMaxParamCount), encoded));
     Params decoded;
-    REQUIRE(rinne::state::decodeParams(encoded.data(), encoded.size(), decoded));
-    CHECK(decoded.entries.size() == rinne::state::kMaxParamCount);
+    CHECK_FALSE(rinne::state::decodeParams(encoded.data(), encoded.size(), decoded));
 
-    // 257 条都真的在：只有上限这一条拦它
+    REQUIRE(rinne::state::encodeParams(manyParams(rinne::state::kMaxDecodedParamCount), encoded));
+    REQUIRE(rinne::state::decodeParams(encoded.data(), encoded.size(), decoded));
+    CHECK(decoded.entries.size() == rinne::state::kMaxDecodedParamCount);
+
+    // 225 条都真的在：只有读入余量这一条拦它
     std::vector<rinne::test::RawParam> raw;
-    for (std::uint32_t i = 0; i <= rinne::state::kMaxParamCount; ++i)
+    for (std::uint32_t i = 0; i <= rinne::state::kMaxDecodedParamCount; ++i)
         raw.push_back({"p" + std::to_string(i), 0u});
     requireRejected(rawParams(raw));
     requireEncodeFails(manyParams(rinne::state::kMaxParamCount + 1u));
+}
+
+TEST_CASE("params: 解码给参数层留出载荷余量", "[state][params]")
+{
+    // 220 条 255 字节 id：载荷 4 + 220 × 260 = 57204 字节，正好在 57216 之内。
+    std::vector<rinne::test::RawParam> raw;
+    for (std::size_t i = 0; i < 220; ++i)
+        raw.push_back({rinne::test::longestParamId(i), 0u});
+    const Bytes atLimit = rawParams(raw);
+    CHECK(atLimit.size() == 57204u);
+
+    Params decoded;
+    REQUIRE(rinne::state::decodeParams(atLimit.data(), atLimit.size(), decoded));
+    REQUIRE(decoded.entries.size() == 220u);
+
+    // 参数层补满预留的 32 个最长槽：252 条、65524 字节，仍在单块上限内。
+    for (std::uint32_t i = 0; i < rinne::state::kReservedParamSlots; ++i)
+        decoded.set(rinne::test::longestParamId(1000u + i), 1.0f);
+    Bytes encoded;
+    REQUIRE(rinne::state::encodeParams(decoded, encoded));
+    CHECK(encoded.size() == 65524u);
+    CHECK(encoded.size() <= rinne::state::kMaxChunkBytes);
+
+    // 221 条 255 字节 id：4 + 221 × 260 = 57464 字节，超过读入余量。
+    raw.push_back({rinne::test::longestParamId(221u), 0u});
+    requireRejected(rawParams(raw));
 }
 
 TEST_CASE("params: id 的长度与字符集", "[state][params]")

@@ -6,13 +6,18 @@
 //     以后升 abi 时它们保留下来，作迁移测试的输入。
 //   · schema 由这里按代码里的键表与常量生成，与文件逐字节比较：改了键表、上限或取值就必须重新生成，diff 落在
 //     冻结面上，评审看得见。
-//   · docs/contracts/STATE_SCHEMA.md 是手写的，但其中的 CFGS 键表必须与这里按键表生成的那张逐字相同。
+//   · docs/contracts/STATE_SCHEMA.md 是手写的，但其中的 CFGS 键表、两份基线的逐字节注解、加载表与固定条款都由
+//     这里逐字比对：注解的每一行偏移与字节要和 bin 相同，加载表与 schema 的 load 数组同源，固定条款与 schema 的
+//     机读字段由同一组常量生成。删掉或改错其中任何一条，用例就变红。
 // 重新生成：设环境变量 RINNE_STATE_GOLDEN_REGEN=1 跑 [golden] 用例，再看一眼 diff。
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "StateTestKit.h"
@@ -66,7 +71,72 @@ std::string keyLine(const rinne::state::ConfigField& field)
     return line + "\"input\": " + boolText(field.input) + ", \"output\": " + boolText(field.output) + " }";
 }
 
-// schema 的全文。键表、上限与 abi 来自代码；枚举的名字写在这里，数值由下面的断言钉住。
+// 加载表的唯一来源：schema 的 load 数组与文档里的表都由这张表生成，逐行对照。
+struct LoadRow
+{
+    const char* caseName;
+    const char* result;
+    const char* doc;
+};
+
+const std::array<LoadRow, 8> kLoadRows{{
+    {"zero bytes", "empty", "| 零字节 | `Empty` | 保持当前（第一次 setState 时即默认），不提示 | 否 |"},
+    {"short header or wrong magic", "corrupt",
+     "| 不足 16 字节，或 magic 不符 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
+    {"abi above this build, role of this end", "rejectedNewer",
+     "| abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持当前，提示工程由更新的版本保存 | 是，整份；只有第一次 "
+     "setState 会原样写回 |"},
+    {"abi above this build, other role", "corrupt",
+     "| abi 高于本构建，role 不是这一端 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
+    {"abi equal to probeAbi", "ignoredProbe", "| abi 0（探针） | `IgnoredProbe` | 保持当前，不提示 | 否 |"},
+    {"abi below this build", "migrated",
+     "| abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（第一次）；之后的 setState 只取参数 | "
+     "否 |"},
+    {"abi equal to this build", "ok",
+     "| abi 等于本构建 | 解码，`Ok` | 读入的 state（第一次）；之后的 setState 只取参数 | 否 |"},
+    {"any other failure", "corrupt", "| 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
+}};
+
+// 文档里必须逐字出现的固定条款。数值从代码常量来，schema 的 invariants 数组也由这里生成。
+std::vector<std::pair<std::string, std::string>> schemaInvariants()
+{
+    return {
+        {"minimum-bytes", "整份 state 至少 " + std::to_string(rinne::state::kHeaderBytes) + " 字节"},
+        {"header-fixed",
+         "前 " + std::to_string(rinne::state::kHeaderBytes) + " 字节（magic、abi、role、块数）的位置与含义永不改变"},
+        {"role-whole-value", "role 按整字（u32）比较：Input 恒写 1，Output 恒写 2"},
+        {"framing-fixed", "容器框架跨 abi 不变"},
+        {"migrations-payload-only", "迁移只改载荷"},
+        {"prms-headroom", "条数不超过 " + std::to_string(rinne::state::kMaxDecodedParamCount) + "、载荷不超过 " +
+                              std::to_string(rinne::state::kMaxDecodedParamBytes) + " 字节"},
+        {"write-back-scope", "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来"},
+        {"first-setstate", "实例一生的第一次 setState 全量应用"},
+        {"later-setstate", "之后的 setState（宿主预设、A/B、撤销）只改参数"},
+        {"later-rejected-newer", "之后的 setState 收到 `RejectedNewer` 只提示，不替换要写回的字节"},
+    };
+}
+
+std::string loadJsonLines()
+{
+    std::string lines;
+    for (std::size_t i = 0; i < kLoadRows.size(); ++i)
+    {
+        lines += "    { \"case\": \"" + std::string(kLoadRows[i].caseName) + "\", \"result\": \"" +
+                 kLoadRows[i].result + "\", \"doc\": \"" + kLoadRows[i].doc + "\" }" +
+                 (i + 1u < kLoadRows.size() ? ",\n" : "\n");
+    }
+    return lines;
+}
+
+std::string docLoadTable()
+{
+    std::string table = "| 情形 | 结果 | 实例的 state | 交回原字节 |\n|---|---|---|---|\n";
+    for (const auto& row : kLoadRows)
+        table += std::string(row.doc) + "\n";
+    return table;
+}
+
+// schema 的全文。键表、上限与 abi 来自代码；加载表与固定条款由上面两张表生成。
 std::string schemaText()
 {
     using rinne::state::DelayUnit;
@@ -81,53 +151,78 @@ std::string schemaText()
     for (std::size_t i = 0; i < rinne::state::kConfigFields.size(); ++i)
         keys += keyLine(rinne::state::kConfigFields[i]) + (i + 1u < rinne::state::kConfigFields.size() ? ",\n" : "\n");
 
+    std::string invariants;
+    const auto rules = schemaInvariants();
+    for (std::size_t i = 0; i < rules.size(); ++i)
+    {
+        invariants += "    { \"id\": \"" + rules[i].first + "\", \"doc\": \"" + rules[i].second + "\" }" +
+                      (i + 1u < rules.size() ? ",\n" : "\n");
+    }
+
     const std::string n = "\n";
-    return "{" + n + //
-           "  \"status\": \"draft\"," + n + //
-           "  \"format\": \"RNST\"," + n + //
-           "  \"abi\": " + std::to_string(rinne::state::kAbi) + "," + n + //
-           "  \"probeAbi\": " + std::to_string(rinne::state::kProbeAbi) + "," + n +
-           "  \"byteOrder\": \"little-endian\"," + n + "  \"header\": [" + n +
-           "    { \"offset\": 0, \"field\": \"magic\", \"type\": \"u32\", \"value\": \"RNST\" }," + n +
-           "    { \"offset\": 4, \"field\": \"abi\", \"type\": \"u32\" }," + n +
-           "    { \"offset\": 8, \"field\": \"role\", \"type\": \"u32\", \"values\": { \"1\": \"input\", \"2\": "
-           "\"output\" } }," +
-           n + "    { \"offset\": 12, \"field\": \"chunkCount\", \"type\": \"u32\", \"max\": " +
-           std::to_string(rinne::state::kMaxChunkCount) + " }" + n + "  ]," + n +
-           "  \"headerFixedAcrossAbi\": [\"magic\", \"abi\", \"role\"]," + n +
-           "  \"chunk\": { \"layout\": [\"u32 fourcc\", \"u32 sizeBytes\", \"payload\", \"zero padding to 4 bytes\"], "
-           "\"maxSizeBytes\": " +
-           std::to_string(rinne::state::kMaxChunkBytes) + ", \"bytesAfterLastChunk\": \"rejected\" }," + n +
-           "  \"chunks\": { \"input\": [\"PRMS\", \"CFGS\"], \"output\": [\"CFGS\"], \"unknown\": \"kept, written back "
-           "after the known chunks in their original order\" }," +
-           n + "  \"load\": [" + n + "    { \"case\": \"zero bytes\", \"result\": \"empty\" }," + n +
-           "    { \"case\": \"short header or wrong magic\", \"result\": \"corrupt\" }," + n +
-           "    { \"case\": \"abi above this build, role of this end\", \"result\": \"rejectedNewer\", \"note\": "
-           "\"original bytes written back unchanged\" }," +
-           n + "    { \"case\": \"abi above this build, other role\", \"result\": \"corrupt\" }," + n +
-           "    { \"case\": \"abi equal to probeAbi\", \"result\": \"ignoredProbe\", \"note\": \"only the header is "
-           "read\" }," +
-           n +
-           "    { \"case\": \"abi below this build\", \"result\": \"migrated\", \"note\": \"one step at a time\" }," +
-           n + "    { \"case\": \"any other failure\", \"result\": \"corrupt\", \"note\": \"nothing applied\" }" + n +
-           "  ]," + n +
-           "  \"prms\": { \"layout\": [\"u32 count\", \"count x { u8 idLen, id, f32 value }\"], \"maxCount\": " +
-           std::to_string(rinne::state::kMaxParamCount) + ", \"idBytes\": [1, " +
-           std::to_string(rinne::state::kMaxParamIdBytes) +
-           "], \"idChars\": \"0x21-0x7e\", \"duplicateIds\": \"rejected\", \"value\": \"plain saved value\" }," + n +
-           "  \"cfgs\": {" + n + "    \"layout\": [\"repeat to end of payload: u16 key, u16 len, bytes[len]\"]," + n +
-           "    \"knownKeyWrongLength\": \"rejected\"," + n + "    \"knownKeyRepeated\": \"rejected\"," + n +
-           "    \"missingKnownKey\": \"default\"," + n +
-           "    \"unknownKeys\": \"kept, written back after the known keys in their original order\"," + n +
-           "    \"keys\": [" + n + keys + "    ]," + n + "    \"values\": {" + n +
-           "      \"group\": { \"0\": \"unset\", \"1-8\": \"groups A-H\" }," + n +
-           "      \"group_origin\": { \"0\": \"undecided\", \"1\": \"user\", \"2\": \"smart\" }," + n +
-           "      \"tail_mode\": { \"0\": \"auto\", \"1\": \"infinite\", \"2\": \"30 s\" }," + n +
-           "      \"delay_unit\": { \"0\": \"ms\", \"1\": \"samples\" }," + n +
-           "      \"fb_unit\": { \"0\": \"percent\", \"1\": \"dB\" }," + n + "      \"ui_scale\": \"percent\"," + n +
-           "      \"ui_lang\": \"letters, digits and '-'\"," + n +
-           "      \"preset_name\": \"well-formed UTF-8 without control characters\"" + n + "    }" + n + "  }," + n +
-           "  \"notInProject\": [\"guide_seen\", \"rules_ack_version\", \"diag_log\"]" + n + "}" + n;
+    std::string text;
+    text += "{" + n;
+    text += "  \"status\": \"draft\"," + n;
+    text += "  \"format\": \"RNST\"," + n;
+    text += "  \"abi\": " + std::to_string(rinne::state::kAbi) + "," + n;
+    text += "  \"probeAbi\": " + std::to_string(rinne::state::kProbeAbi) + "," + n;
+    text += "  \"byteOrder\": \"little-endian\"," + n;
+    text += "  \"minBytes\": " + std::to_string(rinne::state::kHeaderBytes) + "," + n;
+    text += "  \"header\": [" + n;
+    text += "    { \"offset\": 0, \"field\": \"magic\", \"type\": \"u32\", \"value\": \"RNST\" }," + n;
+    text += "    { \"offset\": 4, \"field\": \"abi\", \"type\": \"u32\" }," + n;
+    text += "    { \"offset\": 8, \"field\": \"role\", \"type\": \"u32\", \"values\": { \"1\": \"input\", \"2\": "
+            "\"output\" } }," +
+            n;
+    text += "    { \"offset\": 12, \"field\": \"chunkCount\", \"type\": \"u32\", \"max\": " +
+            std::to_string(rinne::state::kMaxChunkCount) + " }" + n;
+    text += "  ]," + n;
+    text += "  \"headerFixedBytes\": " + std::to_string(rinne::state::kHeaderBytes) + "," + n;
+    text += "  \"headerFixedAcrossAbi\": [\"magic\", \"abi\", \"role\", \"chunkCount\"]," + n;
+    text += "  \"roleCompare\": \"whole u32: input writes 1, output writes 2; new values only for new ends; no flag "
+            "bits\"," +
+            n;
+    text += "  \"containerFramingAcrossAbi\": \"fixed: header length, chunk header, padding, chunk count meaning; "
+            "migrations change payloads only\"," +
+            n;
+    text += "  \"chunk\": { \"layout\": [\"u32 fourcc\", \"u32 sizeBytes\", \"payload\", \"zero padding to 4 "
+            "bytes\"], \"maxSizeBytes\": " +
+            std::to_string(rinne::state::kMaxChunkBytes) + ", \"bytesAfterLastChunk\": \"rejected\" }," + n;
+    text += "  \"chunks\": { \"input\": [\"PRMS\", \"CFGS\"], \"output\": [\"CFGS\"], \"unknown\": \"kept, written "
+            "back after the known chunks in their original order\" }," +
+            n;
+    text += "  \"load\": [" + n + loadJsonLines() + "  ]," + n;
+    text += "  \"prms\": { \"layout\": [\"u32 count\", \"count x { u8 idLen, id, f32 value }\"], \"maxCount\": " +
+            std::to_string(rinne::state::kMaxParamCount) +
+            ", \"decodeMaxCount\": " + std::to_string(rinne::state::kMaxDecodedParamCount) +
+            ", \"decodeMaxBytes\": " + std::to_string(rinne::state::kMaxDecodedParamBytes) +
+            ", \"reservedSlots\": " + std::to_string(rinne::state::kReservedParamSlots) +
+            ", \"reservedSlotBytes\": " + std::to_string(rinne::state::kReservedParamSlotBytes) +
+            ", \"idBytes\": [1, " + std::to_string(rinne::state::kMaxParamIdBytes) +
+            "], \"idChars\": \"0x21-0x7e\", \"duplicateIds\": \"rejected\", \"value\": \"plain saved value\" }," + n;
+    text += "  \"cfgs\": {" + n;
+    text += "    \"layout\": [\"repeat to end of payload: u16 key, u16 len, bytes[len]\"]," + n;
+    text += "    \"keyTableMax\": " + std::to_string(rinne::state::kMaxConfigFields) + "," + n;
+    text += "    \"knownKeyWrongLength\": \"rejected\"," + n;
+    text += "    \"knownKeyRepeated\": \"rejected\"," + n;
+    text += "    \"missingKnownKey\": \"default\"," + n;
+    text += "    \"unknownKeys\": \"kept, written back after the known keys in their original order\"," + n;
+    text += "    \"keys\": [" + n + keys + "    ]," + n;
+    text += "    \"values\": {" + n;
+    text += "      \"group\": { \"0\": \"unset\", \"1-8\": \"groups A-H\" }," + n;
+    text += "      \"group_origin\": { \"0\": \"undecided\", \"1\": \"user\", \"2\": \"smart\" }," + n;
+    text += "      \"tail_mode\": { \"0\": \"auto\", \"1\": \"infinite\", \"2\": \"30 s\" }," + n;
+    text += "      \"delay_unit\": { \"0\": \"ms\", \"1\": \"samples\" }," + n;
+    text += "      \"fb_unit\": { \"0\": \"percent\", \"1\": \"dB\" }," + n;
+    text += "      \"ui_scale\": \"percent\"," + n;
+    text += "      \"ui_lang\": \"letters, digits and '-'\"," + n;
+    text += "      \"preset_name\": \"well-formed UTF-8 without control characters\"" + n;
+    text += "    }" + n;
+    text += "  }," + n;
+    text += "  \"invariants\": [" + n + invariants + "  ]," + n;
+    text += "  \"notInProject\": [\"guide_seen\", \"rules_ack_version\", \"diag_log\"]" + n;
+    text += "}" + n;
+    return text;
 }
 
 void compareWithFile(const std::string& path, const Bytes& expected)
@@ -160,6 +255,149 @@ std::string docKeyTable()
                  (field.input ? "是" : "—") + " | " + (field.output ? "是" : "—") + " |\n";
     }
     return table;
+}
+
+std::string contractDoc()
+{
+    Bytes bytes;
+    REQUIRE(rinne::test::readFileBytes(rinne::test::goldenDir() + "../../docs/contracts/STATE_SCHEMA.md", bytes));
+    std::string doc;
+    for (const std::uint8_t byte : bytes)
+    {
+        if (byte != '\r') // 检出成 CRLF 的工作树也照样比
+            doc.push_back(static_cast<char>(byte));
+    }
+    return doc;
+}
+
+// 文档里某个标题之后的第一段 ```text 块。
+std::string textBlockAfter(const std::string& doc, const std::string& marker)
+{
+    const std::size_t markerAt = doc.find(marker);
+    if (markerAt == std::string::npos)
+        return {};
+    const std::size_t fenceAt = doc.find("```text", markerAt);
+    if (fenceAt == std::string::npos)
+        return {};
+    const std::size_t bodyAt = doc.find('\n', fenceAt);
+    if (bodyAt == std::string::npos)
+        return {};
+    const std::size_t endAt = doc.find("```", bodyAt + 1u);
+    if (endAt == std::string::npos)
+        return {};
+    return doc.substr(bodyAt + 1u, endAt - bodyAt - 1u);
+}
+
+bool isHexDigit(char c) noexcept
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+int hexValue(char c) noexcept
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return c - 'A' + 10;
+}
+
+struct AnnotationLine
+{
+    std::size_t offset = 0;
+    Bytes bytes;
+};
+
+// 逐字节注解：行首 4 位十六进制偏移，两个空格之后是若干两位十六进制的字节，两个空格之后是含义。
+// 字节列只认「两位十六进制 + 一个空格」；遇到连续两个空格（含义列）或行尾就停。
+std::vector<AnnotationLine> parseAnnotations(const std::string& block)
+{
+    std::vector<AnnotationLine> lines;
+    std::size_t pos = 0;
+    while (pos < block.size())
+    {
+        std::size_t end = block.find('\n', pos);
+        if (end == std::string::npos)
+            end = block.size();
+        const std::string line = block.substr(pos, end - pos);
+        pos = end + 1u;
+
+        if (line.size() < 6u)
+            continue;
+        std::size_t at = 0;
+        std::size_t offset = 0;
+        while (at < 4u && at < line.size() && isHexDigit(line[at]))
+        {
+            offset = offset * 16u + static_cast<std::size_t>(hexValue(line[at]));
+            ++at;
+        }
+        if (at != 4u || at + 1u >= line.size() || line[at] != ' ' || line[at + 1u] != ' ')
+            continue;
+        at += 2u;
+
+        Bytes bytes;
+        while (at < line.size())
+        {
+            if (at + 1u >= line.size() || !isHexDigit(line[at]) || !isHexDigit(line[at + 1u]))
+                break;
+            bytes.push_back(static_cast<std::uint8_t>(hexValue(line[at]) * 16 + hexValue(line[at + 1u])));
+            at += 2u;
+            if (at >= line.size())
+                break;
+            if (line[at] != ' ')
+                break;
+            if (at + 1u < line.size() && line[at + 1u] == ' ')
+                break; // 两个空格：含义列开始
+            ++at;
+        }
+        if (!bytes.empty())
+            lines.push_back(AnnotationLine{offset, bytes});
+    }
+    return lines;
+}
+
+void checkBaselineAnnotations(const std::string& doc, const std::string& marker, const std::string& file, bool complete)
+{
+    INFO("基线：" << file);
+    const std::string block = textBlockAfter(doc, marker);
+    REQUIRE_FALSE(block.empty());
+
+    Bytes bin;
+    REQUIRE(rinne::test::readFileBytes(rinne::test::goldenDir() + "state/" + file, bin));
+    CHECK(doc.find("`" + file + "`（" + std::to_string(bin.size()) + " 字节）") != std::string::npos);
+
+    const std::vector<AnnotationLine> lines = parseAnnotations(block);
+    REQUIRE_FALSE(lines.empty());
+    CHECK(lines.front().offset == 0u);
+
+    std::size_t expected = 0;
+    for (const auto& line : lines)
+    {
+        INFO("偏移 " << line.offset);
+        REQUIRE(line.offset + line.bytes.size() <= bin.size());
+        CHECK(line.offset >= expected);
+        if (complete)
+            CHECK(line.offset == expected);
+        CHECK(Bytes(bin.begin() + static_cast<std::ptrdiff_t>(line.offset),
+                    bin.begin() + static_cast<std::ptrdiff_t>(line.offset + line.bytes.size())) == line.bytes);
+        expected = line.offset + line.bytes.size();
+    }
+    CHECK(expected == bin.size());
+}
+
+// 文档里的固定条款与 schema 的机读字段对拍：条款丢了、schema 字段没了都变红。
+void checkInvariant(const std::string& doc, const std::string& schema, const std::string& id)
+{
+    for (const auto& rule : schemaInvariants())
+    {
+        if (rule.first != id)
+            continue;
+        INFO("条款：" << id);
+        CHECK(doc.find(rule.second) != std::string::npos);
+        CHECK(schema.find("\"id\": \"" + id + "\"") != std::string::npos);
+        return;
+    }
+    FAIL("schema 里没有这条固定条款：" << id);
 }
 
 } // namespace
@@ -207,16 +445,78 @@ TEST_CASE("golden: state-schema.json 由代码生成", "[state][golden]")
 
 TEST_CASE("golden: STATE_SCHEMA.md 的键表与代码一致", "[state][golden]")
 {
-    const std::string path = rinne::test::goldenDir() + "../../docs/contracts/STATE_SCHEMA.md";
-    Bytes bytes;
-    REQUIRE(rinne::test::readFileBytes(path, bytes));
-    std::string doc;
-    for (const std::uint8_t byte : bytes)
-    {
-        if (byte != '\r') // 检出成 CRLF 的工作树也照样比
-            doc.push_back(static_cast<char>(byte));
-    }
+    const std::string doc = contractDoc();
     const std::string table = docKeyTable();
     INFO("文档里应当逐字出现这张表：\n" << table);
     CHECK(doc.find(table) != std::string::npos);
+}
+
+TEST_CASE("golden: STATE_SCHEMA.md 的逐字节注解与基线一致", "[state][golden]")
+{
+    const std::string doc = contractDoc();
+    checkBaselineAnnotations(doc, "`output-abi1.bin`（", "output-abi1.bin", true);
+    checkBaselineAnnotations(doc, "`input-abi1.bin`（", "input-abi1.bin", false);
+}
+
+TEST_CASE("golden: STATE_SCHEMA.md 的加载表与 schema 的 load 数组一致", "[state][golden]")
+{
+    const std::string doc = contractDoc();
+    const std::string table = docLoadTable();
+    INFO("文档里应当逐字出现这张表：\n" << table);
+    CHECK(doc.find(table) != std::string::npos);
+
+    // schema 与文档必须同源：schema 里每条 doc 都在表里。
+    const std::string schema = schemaText();
+    for (const auto& row : kLoadRows)
+    {
+        const std::string entry = "\"doc\": \"" + std::string(row.doc) + "\"";
+        INFO("load 行：" << row.caseName);
+        CHECK(schema.find(entry) != std::string::npos);
+    }
+}
+
+TEST_CASE("golden: 契约文档写清参数层的写回余量", "[state][golden]")
+{
+    const std::string doc = contractDoc();
+    const std::string schema = schemaText();
+    checkInvariant(doc, schema, "prms-headroom");
+    checkInvariant(doc, schema, "write-back-scope");
+    CHECK(schema.find("\"decodeMaxCount\": " + std::to_string(rinne::state::kMaxDecodedParamCount)) !=
+          std::string::npos);
+    CHECK(schema.find("\"decodeMaxBytes\": " + std::to_string(rinne::state::kMaxDecodedParamBytes)) !=
+          std::string::npos);
+    CHECK(schema.find("\"reservedSlots\": " + std::to_string(rinne::state::kReservedParamSlots)) != std::string::npos);
+}
+
+TEST_CASE("golden: 契约文档写死容器框架跨 abi 不变", "[state][golden]")
+{
+    const std::string doc = contractDoc();
+    const std::string schema = schemaText();
+    checkInvariant(doc, schema, "framing-fixed");
+    checkInvariant(doc, schema, "migrations-payload-only");
+    CHECK(schema.find("\"containerFramingAcrossAbi\":") != std::string::npos);
+    CHECK(doc.find("容器框架跨 abi 不变") != std::string::npos);
+}
+
+TEST_CASE("golden: 契约文档写死 16 字节头与 role 整字比较", "[state][golden]")
+{
+    const std::string doc = contractDoc();
+    const std::string schema = schemaText();
+    checkInvariant(doc, schema, "minimum-bytes");
+    checkInvariant(doc, schema, "header-fixed");
+    checkInvariant(doc, schema, "role-whole-value");
+    CHECK(schema.find("\"minBytes\": " + std::to_string(rinne::state::kHeaderBytes)) != std::string::npos);
+    CHECK(schema.find("\"headerFixedBytes\": " + std::to_string(rinne::state::kHeaderBytes)) != std::string::npos);
+    CHECK(schema.find("\"headerFixedAcrossAbi\": [\"magic\", \"abi\", \"role\", \"chunkCount\"]") != std::string::npos);
+    CHECK(schema.find("\"roleCompare\":") != std::string::npos);
+}
+
+TEST_CASE("golden: 契约文档区分第一次与之后的 setState", "[state][golden]")
+{
+    const std::string doc = contractDoc();
+    const std::string schema = schemaText();
+    checkInvariant(doc, schema, "first-setstate");
+    checkInvariant(doc, schema, "later-setstate");
+    checkInvariant(doc, schema, "later-rejected-newer");
+    CHECK(doc.find("之后的 setState 收到 `RejectedNewer` 只提示，不替换要写回的字节") != std::string::npos);
 }

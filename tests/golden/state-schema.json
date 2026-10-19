@@ -4,27 +4,33 @@
   "abi": 1,
   "probeAbi": 0,
   "byteOrder": "little-endian",
+  "minBytes": 16,
   "header": [
     { "offset": 0, "field": "magic", "type": "u32", "value": "RNST" },
     { "offset": 4, "field": "abi", "type": "u32" },
     { "offset": 8, "field": "role", "type": "u32", "values": { "1": "input", "2": "output" } },
     { "offset": 12, "field": "chunkCount", "type": "u32", "max": 64 }
   ],
-  "headerFixedAcrossAbi": ["magic", "abi", "role"],
+  "headerFixedBytes": 16,
+  "headerFixedAcrossAbi": ["magic", "abi", "role", "chunkCount"],
+  "roleCompare": "whole u32: input writes 1, output writes 2; new values only for new ends; no flag bits",
+  "containerFramingAcrossAbi": "fixed: header length, chunk header, padding, chunk count meaning; migrations change payloads only",
   "chunk": { "layout": ["u32 fourcc", "u32 sizeBytes", "payload", "zero padding to 4 bytes"], "maxSizeBytes": 65536, "bytesAfterLastChunk": "rejected" },
   "chunks": { "input": ["PRMS", "CFGS"], "output": ["CFGS"], "unknown": "kept, written back after the known chunks in their original order" },
   "load": [
-    { "case": "zero bytes", "result": "empty" },
-    { "case": "short header or wrong magic", "result": "corrupt" },
-    { "case": "abi above this build, role of this end", "result": "rejectedNewer", "note": "original bytes written back unchanged" },
-    { "case": "abi above this build, other role", "result": "corrupt" },
-    { "case": "abi equal to probeAbi", "result": "ignoredProbe", "note": "only the header is read" },
-    { "case": "abi below this build", "result": "migrated", "note": "one step at a time" },
-    { "case": "any other failure", "result": "corrupt", "note": "nothing applied" }
+    { "case": "zero bytes", "result": "empty", "doc": "| 零字节 | `Empty` | 保持当前（第一次 setState 时即默认），不提示 | 否 |" },
+    { "case": "short header or wrong magic", "result": "corrupt", "doc": "| 不足 16 字节，或 magic 不符 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |" },
+    { "case": "abi above this build, role of this end", "result": "rejectedNewer", "doc": "| abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持当前，提示工程由更新的版本保存 | 是，整份；只有第一次 setState 会原样写回 |" },
+    { "case": "abi above this build, other role", "result": "corrupt", "doc": "| abi 高于本构建，role 不是这一端 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |" },
+    { "case": "abi equal to probeAbi", "result": "ignoredProbe", "doc": "| abi 0（探针） | `IgnoredProbe` | 保持当前，不提示 | 否 |" },
+    { "case": "abi below this build", "result": "migrated", "doc": "| abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（第一次）；之后的 setState 只取参数 | 否 |" },
+    { "case": "abi equal to this build", "result": "ok", "doc": "| abi 等于本构建 | 解码，`Ok` | 读入的 state（第一次）；之后的 setState 只取参数 | 否 |" },
+    { "case": "any other failure", "result": "corrupt", "doc": "| 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |" }
   ],
-  "prms": { "layout": ["u32 count", "count x { u8 idLen, id, f32 value }"], "maxCount": 256, "idBytes": [1, 255], "idChars": "0x21-0x7e", "duplicateIds": "rejected", "value": "plain saved value" },
+  "prms": { "layout": ["u32 count", "count x { u8 idLen, id, f32 value }"], "maxCount": 256, "decodeMaxCount": 224, "decodeMaxBytes": 57216, "reservedSlots": 32, "reservedSlotBytes": 260, "idBytes": [1, 255], "idChars": "0x21-0x7e", "duplicateIds": "rejected", "value": "plain saved value" },
   "cfgs": {
     "layout": ["repeat to end of payload: u16 key, u16 len, bytes[len]"],
+    "keyTableMax": 32,
     "knownKeyWrongLength": "rejected",
     "knownKeyRepeated": "rejected",
     "missingKnownKey": "default",
@@ -53,5 +59,17 @@
       "preset_name": "well-formed UTF-8 without control characters"
     }
   },
+  "invariants": [
+    { "id": "minimum-bytes", "doc": "整份 state 至少 16 字节" },
+    { "id": "header-fixed", "doc": "前 16 字节（magic、abi、role、块数）的位置与含义永不改变" },
+    { "id": "role-whole-value", "doc": "role 按整字（u32）比较：Input 恒写 1，Output 恒写 2" },
+    { "id": "framing-fixed", "doc": "容器框架跨 abi 不变" },
+    { "id": "migrations-payload-only", "doc": "迁移只改载荷" },
+    { "id": "prms-headroom", "doc": "条数不超过 224、载荷不超过 57216 字节" },
+    { "id": "write-back-scope", "doc": "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来" },
+    { "id": "first-setstate", "doc": "实例一生的第一次 setState 全量应用" },
+    { "id": "later-setstate", "doc": "之后的 setState（宿主预设、A/B、撤销）只改参数" },
+    { "id": "later-rejected-newer", "doc": "之后的 setState 收到 `RejectedNewer` 只提示，不替换要写回的字节" }
+  ],
   "notInProject": ["guide_seen", "rules_ack_version", "diag_log"]
 }

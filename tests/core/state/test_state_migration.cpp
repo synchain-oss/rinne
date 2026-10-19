@@ -8,12 +8,16 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
 #include "StateTestKit.h"
 #include "state/StateCodec.h"
 #include "state/StateMigration.h"
+#include "state/StateMigrationTesting.h"
 
 namespace
 {
@@ -42,6 +46,13 @@ Bytes withAbi(Bytes bytes, std::uint32_t abi)
 {
     for (int i = 0; i < 4; ++i)
         bytes[4 + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((abi >> (8 * i)) & 0xffu);
+    return bytes;
+}
+
+Bytes withRole(Bytes bytes, std::uint32_t role)
+{
+    for (int i = 0; i < 4; ++i)
+        bytes[8 + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((role >> (8 * i)) & 0xffu);
     return bytes;
 }
 
@@ -97,6 +108,30 @@ bool widenUiScale(Container& container)
 bool duplicateConfigs(Container& container)
 {
     container.chunks.push_back(Chunk{rinne::state::kFourCcCfgs, {}});
+    return true;
+}
+
+// 假的坏迁移：追加一个超过单块上限的未知块。
+bool appendOversizedChunk(Container& container)
+{
+    container.chunks.push_back(
+        Chunk{makeFourCc('B', 'I', 'G', 'X'), rinne::test::Bytes(rinne::state::kMaxChunkBytes + 16u, 0x5au)});
+    return true;
+}
+
+// 假的坏迁移：把块数撑过 64 的上限。
+bool appendTooManyChunks(Container& container)
+{
+    while (container.chunks.size() <= rinne::state::kMaxChunkCount)
+        container.chunks.push_back(Chunk{makeFourCc('M', 'A', 'N', 'Y'), {}});
+    return true;
+}
+
+// 正常迁移：追加一个正好顶到单块上限的未知块。
+bool appendChunkAtLimit(Container& container)
+{
+    container.chunks.push_back(
+        Chunk{makeFourCc('L', 'I', 'M', 'T'), rinne::test::Bytes(rinne::state::kMaxChunkBytes, 0x33u)});
     return true;
 }
 
@@ -258,6 +293,139 @@ TEST_CASE("load: 迁移失败或迁移后解不开，什么都不改", "[state][
     requireCorrupt(std::array<MigrateFn, 2>{nullptr, &recordStep<2>});
     requireCorrupt(std::array<MigrateFn, 1>{&recordStep<1>}); // 链不够长
     requireCorrupt(std::array<MigrateFn, 2>{&duplicateConfigs, &recordStep<2>});
+}
+
+TEST_CASE("load: 迁移后的容器重新受块数与单块上限约束", "[state][migration]")
+{
+    const Bytes abi1 = encodeOf(rinne::test::sampleOutputDocument());
+    const auto requireCorrupt = [&](const auto& chain) {
+        StateDocument out = sentinelDocument(Role::Output);
+        const StateLoadResult result = loadAs(abi1, Role::Output, out, 2u, chain);
+        CHECK(result.status == StateLoadStatus::Corrupt);
+        CHECK(result.sourceAbi == 1u);
+        CHECK(result.preservedOriginal.empty());
+        CHECK(sameDocument(out, sentinelDocument(Role::Output)));
+    };
+
+    // 追加一个 65552 字节的未知块：不重查上限的话这里会返回 Migrated，保存时才失败。
+    requireCorrupt(std::array<MigrateFn, 1>{&appendOversizedChunk});
+    // 块数撑过 64：迁移后的容器同样判坏字节。
+    requireCorrupt(std::array<MigrateFn, 1>{&appendTooManyChunks});
+
+    // 边界之内照常迁移：63 块加一个顶到单块上限的未知块，正好 64 块，写回去仍然成功。
+    std::vector<rinne::test::RawChunk> chunks;
+    for (std::uint32_t i = 0; i < 62u; ++i)
+    {
+        chunks.push_back(
+            {makeFourCc('U', 'N', static_cast<char>('A' + i / 26u), static_cast<char>('A' + i % 26u)), {}});
+    }
+    chunks.push_back({rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))});
+    const Bytes atBudget = rinne::test::rawContainer(1, 2, chunks);
+
+    StateDocument out = sentinelDocument(Role::Output);
+    const StateLoadResult result =
+        loadAs(atBudget, Role::Output, out, 2u, std::array<MigrateFn, 1>{&appendChunkAtLimit});
+    CHECK(result.status == StateLoadStatus::Migrated);
+    CHECK(out.unknownChunks.size() == 63u);
+    Bytes encoded;
+    CHECK(rinne::state::encodeDocument(out, encoded));
+}
+
+TEST_CASE("load: 整份 state 至少 16 字节，role 按整字比较", "[state][migration]")
+{
+    const Bytes current = encodeOf(rinne::test::sampleInputDocument());
+
+    // abi 5、role 相符，但长度只有 12..15 字节：头读不满，四种长度都判 Corrupt。
+    for (std::size_t size = 12u; size < 16u; ++size)
+    {
+        INFO("长度 " << size);
+        requireUntouched(withAbi(Bytes(current.begin(), current.begin() + static_cast<std::ptrdiff_t>(size)), 5u),
+                         Role::Input, StateLoadStatus::Corrupt);
+    }
+    // 16 字节就够判 abi 与 role：高 abi 照样拒载并交回原字节。
+    requireUntouched(withAbi(Bytes(current.begin(), current.begin() + 16), 5u), Role::Input,
+                     StateLoadStatus::RejectedNewer);
+
+    // role 是整字：高位置 1 不是「Input + 标志位」，而是另一个不认识的值。
+    requireUntouched(withRole(current, 0x80000001u), Role::Input, StateLoadStatus::Corrupt);
+    requireUntouched(withAbi(withRole(current, 0x80000001u), 9u), Role::Input, StateLoadStatus::Corrupt);
+    // 对端的 role 照样拒收。
+    requireUntouched(withRole(current, 2u), Role::Input, StateLoadStatus::Corrupt);
+}
+
+TEST_CASE("load: 满额 PRMS 判坏字节，参数层补完仍可写回", "[state][migration]")
+{
+    // 256 个未知 id：原来的证据是 loadState 返回 Ok，补一个参数后 257 条写不回去；现在读入就拒收。
+    std::vector<rinne::test::RawParam> full;
+    for (std::uint32_t i = 0; i < rinne::state::kMaxParamCount; ++i)
+        full.push_back({"p" + std::to_string(i), 0u});
+    const Bytes fullBytes = rinne::test::rawContainer(1, 1,
+                                                      {{rinne::state::kFourCcPrms, rinne::test::rawParams(full)},
+                                                       {rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))}});
+    requireUntouched(fullBytes, Role::Input, StateLoadStatus::Corrupt);
+
+    // 252 个 255 字节 id 的 PRMS 共 65524 字节：同样拒收，参数层没有余量。
+    std::vector<rinne::test::RawParam> wide;
+    for (std::size_t i = 0; i < 252; ++i)
+        wide.push_back({rinne::test::longestParamId(i), 0u});
+    const Bytes wideBytes = rinne::test::rawContainer(1, 1,
+                                                      {{rinne::state::kFourCcPrms, rinne::test::rawParams(wide)},
+                                                       {rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))}});
+    requireUntouched(wideBytes, Role::Input, StateLoadStatus::Corrupt);
+
+    // 预算之内：220 个最长 id 解得开，参数层补 32 个槽之后整份仍编得出来。
+    std::vector<rinne::test::RawParam> budget;
+    for (std::size_t i = 0; i < 220; ++i)
+        budget.push_back({rinne::test::longestParamId(i), 0u});
+    const Bytes budgetBytes =
+        rinne::test::rawContainer(1, 1,
+                                  {{rinne::state::kFourCcPrms, rinne::test::rawParams(budget)},
+                                   {rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))}});
+    StateDocument out = sentinelDocument(Role::Input);
+    REQUIRE(rinne::state::loadState(budgetBytes.data(), budgetBytes.size(), Role::Input, out).status ==
+            StateLoadStatus::Ok);
+    for (std::uint32_t i = 0; i < rinne::state::kReservedParamSlots; ++i)
+        out.params.set(rinne::test::longestParamId(1000u + i), 1.0f);
+    Bytes encoded;
+    CHECK(rinne::state::encodeDocument(out, encoded));
+}
+
+TEST_CASE("state: testing 入口只经 StateMigrationTesting.h 暴露", "[state][source]")
+{
+    const std::filesystem::path root = std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "..";
+    const auto readText = [](const std::filesystem::path& path) {
+        std::ifstream file(path, std::ios::binary);
+        REQUIRE(file);
+        return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    };
+
+    // 公开头里不能再有测试入口；测试头里必须还声明着它。
+    const std::string publicHeader = readText(root / "src/core/state/StateMigration.h");
+    CHECK(publicHeader.find("loadStateWith") == std::string::npos);
+    CHECK(publicHeader.find("namespace testing") == std::string::npos);
+    const std::string testingHeader = readText(root / "src/core/state/StateMigrationTesting.h");
+    CHECK(testingHeader.find("loadStateWith") != std::string::npos);
+
+    // src 下除 core/state 之外，一个文件都不许提到测试入口。
+    std::size_t scanned = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root / "src"))
+    {
+        if (!entry.is_regular_file())
+            continue;
+        const auto extension = entry.path().extension();
+        if (extension != std::filesystem::path(".h") && extension != std::filesystem::path(".cpp") &&
+            extension != std::filesystem::path(".mm"))
+            continue;
+        const std::filesystem::path relative = entry.path().lexically_relative(root / "src/core/state");
+        if (!relative.empty() && relative.string().rfind("..", 0) != 0)
+            continue; // core/state 自己持有测试入口
+        ++scanned;
+        const std::string text = readText(entry.path());
+        INFO(entry.path().lexically_relative(root).generic_string());
+        CHECK(text.find("state::testing") == std::string::npos);
+        CHECK(text.find("StateMigrationTesting.h") == std::string::npos);
+    }
+    CHECK(scanned > 10u);
 }
 
 TEST_CASE("migration: 迁移链的骨架", "[state][migration]")
