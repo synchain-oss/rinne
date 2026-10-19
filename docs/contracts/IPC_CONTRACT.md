@@ -9,7 +9,8 @@ status: draft
 - **Initialisation**: never blocks. Whoever wins a CAS on `magic` (0 → `'RNIN'`) initialises and records its pid; a stuck `'RNIN'` is taken over by CAS on `init_pid` only when that pid is dead. Everyone else gets `kBusy`, unmaps at once and retries after a jittered exponential backoff (25–250 ms), so the holders' gaps overlap and a segment that cannot be taken over still disappears.
 - **Lifetime**: backends and handles may be destroyed in either order; handle control blocks are kept until process exit, so handles are created on load and regroup only, never per tick.
 - **Truth**: `src/core/ipc/SegmentLayout.h` mirrors this document; `tests/golden/ipc-layout.json` is checked against it twice (compiled in `rinne_core_tests`, uncompiled by `contract-static-ipc`). Any layout change bumps `kIpcAbi`.
-- **Status**: draft until the probe week; the memory-order rules and the slot ownership transition table are completed together with the rendezvous code.
+- **Memory order**: the data plane is specified here: the ring (the write intent is advanced from at most the write head, so a second writer stays out while a chunk is announced but not yet published, and a chunk abandoned by a dead writer is zero-filled and published after one second of blocked audio, which is why writers must go through `RingWriter`; release fence, samples, release CAS on the write head; readers discard every frame older than one lap before the intent they load after an acquire fence), the label seqlock and the binding snapshot the audio thread reads. Two mutation builds (no read fence, no write intent) must turn the native arm64 stress red, and each stress case must first prove its own mechanism was hit at least 20 times, otherwise the run ends without a test summary and does not count as caught. The one residual window (a writer suspended mid-chunk while its chunk is reclaimed and lapped) is the only exception to never reading aliased data. Labels are untrusted cross-process data.
+- **Status**: draft until the probe week; the slot ownership transition table and its time thresholds are completed together with the rendezvous code.
 
 ## 范围
 
@@ -131,7 +132,7 @@ status: draft
 
 - 环只有 2¹⁶ 帧：它只做块间传输，环路延迟 D 的延迟线放在 Input 本地，D 的范围与节拍同步都不进冻结布局。
 - 两端声明的最大块长超过 32 768 时只出干声并显示红字（诊断 `kUnsupportedBlock`）；写环按不超过 8192 帧分段。
-- 写权用独立的 `writer_token`；W 的 CAS 只防写头被推两次，接管瞬间的双写靠 `write_intent` 判撕裂兜住。
+- 写权用独立的 `writer_token`；接管瞬间的双写由 `write_intent` 按段串行（见「内存序」），W 的 CAS 只防写头被推两次。
 
 ## 冻结与 abi
 
@@ -177,13 +178,32 @@ status: draft
 
 ## 内存序
 
-本节先写数据面的规则；会合段的转移与标签 seqlock 的细则随会合实现补入。
+本节规定数据面的内存序：环、标签 seqlock 与绑定的发布。会合段端点槽的转移表与时间阈值随会合实现补入。
 
-- 写环（每段不超过 8192 帧）：读 W（acquire）→ `write_intent` 写成 W + k（relaxed）→ release fence → 样本 relaxed 写 → W 从旧值 CAS 到 W + k（release）。
-- 读环：W（acquire）→ 样本 relaxed 读 → acquire fence → 读 `write_intent`（relaxed）；凡帧位置 p < `write_intent` − 65536（有符号运算）的都视为可能已被覆盖、按 0 处理。只依赖 fence 的配对，不依赖额外的安全余量。
-- `epoch`、`writer_token` 与 `sample_rate`：写方先写 `sample_rate` 与 `src_channels`，再以 release 写 `epoch` 或 `writer_token`；读方先 acquire 读它们，再读 `sample_rate`。
+**环**（[`src/core/ipc/LoopRing.h`](../../src/core/ipc/LoopRing.h)）。写方只有槽属主 Output 的音频线程，每段不超过 8192 帧，更长的块由调用方切段。**写方必须经 `RingWriter` 写环**：每块先查 `isWriter`，换写方、换段或采样率改变时 `reset`；它负责下面说的回收。直接调用 `LoopRing::write` 的写方碰上写到一半死掉的上一任，会永远拿到 `kInFlight`，这一组从此静音。
+
+- 写：读 W（acquire）→ 读 `write_intent`：它已经领先 W，说明别人公告的一段还没发布（另一个写方正在写，或者写到一半死了），这一段一个样本都不写，返回 `kInFlight`；否则把它从这个不大于 W 的值 CAS 到 W + k（relaxed）→ release fence → 样本 relaxed 写 → W 从旧值 CAS 到 W + k（release）。
+- 读：先 acquire 读 W，只读 p < to ≤ W 的帧，也不读比 to − 65536 更早的帧（W − 65536 之前的帧随后一定被判废）→ 样本 relaxed 读 → acquire fence → 读 `write_intent`（relaxed）。凡 p < `write_intent` − 65536（有符号运算）的帧都视为可能已被覆盖，按 0 处理。
+- 为什么对：W 的 acquire 与写方 W 的 release CAS 配对，读到的每一帧至少是它自己那一圈的值，否则就是更晚一圈的。拷贝中若读到更晚的某段 C 写下的样本，那个样本写在 C 的 release fence 之后，读侧的 acquire fence 与 C 的 fence 同步，随后读到的 `write_intent` 不小于 C 的目标位置；C 覆盖掉的每一帧都小于 C 的目标 − 65536，于是落进判废范围。正确性只靠这对 fence，不靠「余量大于块长」之类的假设。
+- `write_intent` 同时是写方之间的互斥，而且只进不退：只有一个写方时它恒等于 W，检查从不触发；接管瞬间新旧两个写方都活着时，它们按段轮流写，谁也不会把对方已经发布的帧换成别的位置的数据（压测有两个写方同时写的一组）。写到一半死掉的写方会让 `write_intent` 一直领先 W：现任写方连续被挡满 1 s 的音频（`RingWriter` 按本写方的帧数计，不读时钟）就把 [W, `write_intent`) 的最后一圈填零，再把 W CAS 到 `write_intent`，环不会被永远卡住；填零之前的 release fence 让读方照常排除被覆盖的旧帧。W 的 CAS 失败（`w_cas_fail + 1`）只会出现在这次回收与那个卡住的写方之间。
+- 剩下的唯一窗口：旧写方在公告之后、写完样本之前被挂起，挂起期间它那一段被回收、新写方又写满一圈，它醒来接着写，晚到的样本落进新一圈已经发布的槽。读方排除不了这些帧，会把别的位置的数据当成有效数据，这是安全不变量「永不读旧数据或别名数据」的唯一例外。量级：实时速率下旧写方要被挂起 ≥ 1 s 加一圈（48 kHz 约 2.4 s）；回收阈值按帧计，比实时快的渲染（离线导出）会把它压到几十毫秒的墙钟。两个写方同时活着只出现在接管之后：外进程死了（≥ 5 s 的静止证据且 pid 已死，不会再醒）、本进程内的实例 30 s 没有任何动静、provisional 的认领被工程恢复抢占、休眠槽被工程恢复或用户确认拿走（旧写方已停用，不在写）；第二、三种情形里旧写方还活着，下一块自检写权就停下，窗口只在它恰好挂在一段中间时才打开。
+- `epoch`、`writer_token` 与 `sample_rate`：写方先写 `sample_rate` 与 `src_channels`（relaxed），再以 release 写 `epoch`（只在采样率改变或首次发布时 + 1）与 `writer_token`；读方先 acquire 读 `epoch` 与 `writer_token`，再读 `sample_rate`。发布写权从不动 W 与 `write_intent`（W 不清零）。交出写权是 `writer_token` 从自己的 token 到 0 的 CAS，别人的 token 不动。
+
+**标签 seqlock**（[`src/core/ipc/LabelSeqlock.h`](../../src/core/ipc/LabelSeqlock.h)，端点槽 128–255 字节）
+
+- 写：只有属主、只在 `ctl` 仍是自己最后写下的整字时写。`label_seq` 是偶数 s 时 CAS 到 s + 1（relaxed）→ release fence → 各字段 relaxed 写 → `label_seq` 以 release 从 s + 1 CAS 到 s + 2。读到奇数或 CAS 输了就放弃这一次：接管瞬间旧属主与新属主撞上时后到的一方退让，序号不会被两个写方搅乱。
+- 读：`label_seq` acquire 读到 s1，奇数就放弃 → 各字段 relaxed 读 → acquire fence → 再读 `label_seq`（relaxed），等于 s1 才算读到完整的一份。读到的字段若被下一次写改过，那次写的 release fence 与读侧的 acquire fence 同步，第二次读到的序号必然已经变了。
+- 接手：上一任写到一半就死了、`label_seq` 停在奇数 s 上时，普通的写一直退让。新属主等同一个奇数停够之后（由会合层按心跳判断），把它从 s CAS 到 s + 2（仍是奇数，表示正在写），写完整的一份再以 release 从 s + 2 CAS 到 s + 3。上一任确实死了时，读方只会看到奇数（放弃）或 s + 3 配完整的新版。上一任若只是慢、并没有死，它醒来后的收尾 CAS 会失败，序号不会退回偶数，但它晚到的字段写可能落在新属主的字段之后，s + 3 之后读到的就是混写的一份。标签只用于显示，属主每个心跳重读自己的标签，不一致就重写，混写的一份在下一个心跳内修好。
+- 标签是跨进程的不可信数据：混写的一份、别的版本或有缺陷的对端都可能留下被切断或拼接的 UTF-8。显示之前必须校验或清洗 UTF-8，用 `name_hash` 核对名字时以连续两次读到一致为准。
+
+**绑定的发布**（[`src/core/ipc/LoopBinding.h`](../../src/core/ipc/LoopBinding.h)）
+
+- 消息线程把 rv 与环的句柄、组、角色、自己最后写下的 `ctl` 整字与写权 token 装成不可变的快照，以 release 发布；音频线程每块 acquire 读一次，再经映射句柄的租约拿裸指针，块末退还。快照与句柄外壳留到实例析构；换组或失去端点槽时先撤下快照，句柄再过 250 ms 才释放，之后映射表还有自己的 500 ms 宽限。
+
+**其余**
+
 - `ctl`：acq_rel 的 CAS。映射句柄的租约握手四处访问一律 seq_cst。
-- 内存序的缺陷在 x86 上查不出来，压测必须在原生 arm64 上跑，并用去掉读侧 fence、去掉 `write_intent` 的两个变异构建证明判据会变红。
+- 内存序的缺陷在 x86（TSO）上查不出来，压测必须在原生 arm64 上跑。两个变异构建只许在 core-only 构建里打开，发布构建从不定义：`RINNE_STRESS_MUTATE=no_read_fence` 去掉环与标签读侧的 acquire fence，`no_intent` 去掉 `write_intent` 的推进。环的判据是每个判为有效的帧都解码回它自己的位置（左右两个声道各带一份圈号，撕开的一帧也认得出），标签的判据是读成功的每一份都自洽、且落在读前后两次序号夹住的那次写上；arm64 上两个变异都必须判红，`no_intent` 在任何 CPU 上都红。变异构建里每个用例先对自己那套机制做正向取证：跑到判据命中够 20 次为止（封顶 25 s），环在两个变异下都要，标签只在 `no_read_fence` 下要；不够、或者某一轮的非空转计数没达标，进程直接退出、不出测试汇总，CI 判「没有按预期变红」。`no_intent` 下两个写方本来就没有互斥，那一组跳过与 `write_intent` 有关的两条检查，也不计入命中。
 
 ## 对拍
 
