@@ -165,8 +165,18 @@ export function buildComment({ summary, head, bot, runUrl }) {
     const tail = v.ok ? `\n\n${v.footer}` : "";
     const cut = "\n\n（审查总结超过 GitHub 评论上限，已截断；完整内容见运行记录的摘要页）";
     const room = MAX - top.length - note.length - tail.length;
-    if (main.length > room) main = main.slice(0, Math.max(0, room - cut.length)) + cut;
+    if (main.length > room) main = sliceChars(main, Math.max(0, room - cut.length)) + cut;
     return { body: `${top}${note}${main}${tail}`, ok: v.ok, reason: v.reason };
+}
+
+/** 取前 n 个 UTF-16 码元；n 正好落在代理对中间时少取一个，免得留下孤立的高位代理（GitHub 存下来会变成 U+FFFD，哈希对不上）。 */
+export function sliceChars(s, n) {
+    let end = Math.min(n, s.length);
+    if (end > 0 && end < s.length) {
+        const c = s.charCodeAt(end - 1);
+        if (c >= 0xd800 && c <= 0xdbff) end--;
+    }
+    return s.slice(0, end);
 }
 
 /** 评论作者的 author_association 是仓库成员。只作离线默认值：见 findPrevious 的说明。 */
@@ -612,6 +622,9 @@ export function selfTest() {
     t("评论最后一行就是尾注", false, !(built.ok && FOOTER.test(built.body.split("\n").at(-1))));
     t("评论带 head 标记", false, headMark(built.body)?.sha !== head);
     const long = comment(`${"字".repeat(70000)}\n${S([], [], [])}\n${F(0, 0, 0)}`);
+    t("截断不把代理对从中间切开", false, sliceChars("ab😀cd", 3) !== "ab");
+    t("截断正好落在字符边界时照常", false, sliceChars("ab😀cd", 4) !== "ab😀");
+    t("截断长度超过全文时原样返回", false, sliceChars("ab", 9) !== "ab");
     t("超长总结截断后尾注仍在最后一行", false, !(long.body.length <= MAX && FOOTER.test(long.body.split("\n").at(-1))));
     const footerLines = (body) => body.split("\n").filter((l) => l.includes("rinne-review v1"));
     const missing = comment(S([], [], []));

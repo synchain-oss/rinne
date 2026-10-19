@@ -262,13 +262,17 @@ function Get-DeferredSevere {
             $severe = if ($level) { $level -match '红旗|重要' } else { @($row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0 }
             if (-not $severe) { continue }
             $loc, $sum = (& $cell '位置'), (& $cell '摘要')
-            $key = if ($loc) { $loc } elseif ($sum) { $sum } else { $row.Line }
-            $decision = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) {
-                $row.Cells[$row.Cols['处置']]
-            } else { $row.Cells -join ' ' }
-            if ($decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)') {
+            # 「位置 + 摘要」才算同一条：同一个位置上的两条不同意见（或位置写成 —、全局）不会互相冲掉；
+            # 改写了摘要的行认不成同一条，已修清不掉原来的挂账——宁可多问用户一次
+            $key = (@($loc, $sum) | Where-Object { $_ }) -join ' | '
+            if (-not $key) { $key = $row.Line }
+            $at = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) { $row.Cols['处置'] } else { -1 }
+            $decision = if ($at -ge 0) { $row.Cells[$at] } else { $row.Cells -join ' ' }
+            # 「附提交」只在处置列和它右边的列里找，而且串里至少有一个 a-f 字母（评论编号、运行编号这类纯数字不算）
+            $proof = @($row.Cells | Select-Object -Skip ([Math]::Max($at, 0)) | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count
+            if ($decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修') {
                 $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $true }
-            } elseif (($decision -match '已修|修复|已改|采纳') -and @($row.Cells | Where-Object { $_ -match '(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count) {
+            } elseif (($decision -match '已修|修复|已改|采纳') -and $proof) {
                 # 后来写明已修 / 采纳并附提交：这条不再要用户豁免
                 $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $false }
             }
@@ -1459,6 +1463,11 @@ function Invoke-SelfTest {
         # 同一条意见按最后一次处置判：后来已修并附提交的不再要豁免；后来才挂账的仍要
         & $bad '先挂账、后已修（附提交）：不再要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修' 'd62c5dc') } 'ready'
         & $bad '先已修、后挂账：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'd62c5dc'); & $addRow $f 3 (& $deferCell '【重要】' '挂账') } 'needs-user'
+        & $bad '同一位置的两条意见：一条挂账、另一条（摘要不同）已修，挂账的仍要豁免' { param($f) & $addRow $f 1 '| 9 | bot | 【重要】 | a.mjs:1 | 甲 | 挂账 | 理由 |'; & $addRow $f 3 '| 10 | bot | 【重要】 | a.mjs:1 | 乙 | 已修 | d62c5dc |' } 'needs-user'
+        & $bad '已修只在无关的列里有十六进制串（纯数字的编号）：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 '| 7000000101 | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
+        & $bad '已修的提交串是纯数字：不算附了提交，仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修' '12345678') } 'needs-user'
+        & $bad '处置写未采纳（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '未采纳' 'd62c5dc') } 'needs-user'
+        & $bad '处置写不修复（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '不修复' 'd62c5dc') } 'needs-user'
         & $bad '先挂账、后写已修但没附提交：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修') } 'needs-user'
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
         & $bad '缺 gates json' { param($f) $f.Gates = $null }

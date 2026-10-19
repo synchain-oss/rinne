@@ -48,16 +48,21 @@ function Resolve-RinneRealPath {
 
 <#
   在系统临时目录下一层新建一个目录（名字是 <前缀><32 位随机十六进制>），记下它的真实路径，返回完整路径。
-  名字靠随机数，同名的已经在就换一个；这里不用 .NET 7 才有的 [IO.Directory]::CreateTempSubdirectory，
-  脚本的下限仍是 PowerShell 7.0。
+  名字靠随机数（32 位十六进制，猜不到），再用 New-Item 建：目录已经在（包括指向目录的符号链接）就报错，换一个名字；
+  不用 .NET 7 才有的 [IO.Directory]::CreateTempSubdirectory，脚本的下限仍是 PowerShell 7.0。
+  非 Windows 上建好后收紧成 0700（CreateTempSubdirectory 就是这个权限，CreateDirectory 默认跟 umask 走）。
 #>
 function New-RinneTempDir {
     param([Parameter(Mandatory)][ValidatePattern('^rinne-[a-z0-9-]+-$')][string]$Prefix)
     $root = [IO.Path]::GetTempPath()
     for ($i = 0; $i -lt 100; $i++) {
         $dir = [IO.Path]::Join($root, $Prefix + [guid]::NewGuid().ToString('N'))
-        if (Test-Path -LiteralPath $dir) { continue }
-        $null = [IO.Directory]::CreateDirectory($dir)
+        try { $null = New-Item -ItemType Directory -Path $dir -ErrorAction Stop }
+        catch {
+            if (Test-Path -LiteralPath $dir) { continue }
+            throw
+        }
+        if (-not $IsWindows) { $null = & chmod 700 -- $dir }
         $script:Made[(Resolve-RinneRealPath $dir)] = $Prefix
         return $dir
     }
