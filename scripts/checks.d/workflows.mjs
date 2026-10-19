@@ -2,7 +2,7 @@
 //
 // workflow 加固检查（docs-truth 的一部分），扫 .github/workflows/*.yml 与本地 action：
 //   - 远程 uses 一律钉 40 位 SHA，行尾注明版本；本地 uses 只能指向 ./.github/workflows 或 ./.github/actions
-//   - 远程 action 必须在 .github/actions-allowlist.json 里：org 的白名单比计划宽，Rinne 以这一份为准
+//   - 远程 action 与可复用 workflow 必须在 .github/actions-allowlist.json 里：org 的白名单比计划宽，Rinne 以这一份为准
 //   - 全仓零 pull_request_target、零 workflow_run
 //   - 每个 workflow 有顶层 permissions（不许 read-all / write-all）与 concurrency；每个 job 有 timeout-minutes
 //     （调用可复用 workflow 的 job 不能写 timeout，由被调用方各自设）
@@ -109,10 +109,23 @@ export function remoteUses(text) {
         });
 }
 
-/** allowlist 的格式与 GitHub selected-actions 相同：github_owned_allowed 加 patterns_allowed（owner/repo@*）。 */
-export function allowed(repo, allowlist) {
-    if (allowlist.github_owned_allowed && /^(?:actions|github)\//.test(repo)) return true;
-    return (allowlist.patterns_allowed || []).some((p) => p === `${repo}@*`);
+/**
+ * allowlist 的格式与 GitHub selected-actions 相同：github_owned_allowed 加 patterns_allowed。target 是 uses 去掉 @ref 的
+ * 部分（owner/repo 或 owner/repo/路径）。认两种写法：owner/repo@*（整个仓），以及 GitHub 给可复用 workflow 的
+ * owner/repo/<目录>/*@*（只放行该目录下一层的文件，例如 Synchain-oss/ci-workflows/.github/workflows/*@*）。
+ * 其余一律逐字比较，不做别的通配。
+ */
+export function allowed(target, allowlist) {
+    const [owner, name] = target.split("/");
+    const repo = `${owner}/${name}`;
+    if (allowlist.github_owned_allowed && /^(?:actions|github)$/.test(owner)) return true;
+    return (allowlist.patterns_allowed || []).some((p) => {
+        if (p === `${repo}@*`) return true;
+        const dir = /^([^@*]+)\/\*@\*$/.exec(p)?.[1];
+        if (!dir || dir.split("/").length < 3 || !target.startsWith(`${dir}/`)) return false;
+        const file = target.slice(dir.length + 1);
+        return file.length > 0 && !file.includes("/");
+    });
 }
 
 /**
@@ -193,8 +206,8 @@ export function inspectWorkflow(file, text, { required = new Set(), allowlist })
         const at = ref.lastIndexOf("@");
         if (at < 0 || !/^[0-9a-f]{40}$/.test(ref.slice(at + 1))) err(l.no, `没有钉 40 位 SHA：${ref}`);
         else if (!/^v?\d/.test(l.comment)) err(l.no, `钉 SHA 的 uses 要在行尾注明版本：${ref}`);
-        const repo = (at < 0 ? ref : ref.slice(0, at)).split("/").slice(0, 2).join("/");
-        if (!allowed(repo, allowlist)) err(l.no, `${repo} 不在 .github/actions-allowlist.json 里`);
+        const target = at < 0 ? ref : ref.slice(0, at);
+        if (!allowed(target, allowlist)) err(l.no, `${target} 不在 .github/actions-allowlist.json 里`);
     }
     return errors;
 }
@@ -279,13 +292,17 @@ export default {
         return { ok: false, lines: `${r.stdout}${r.stderr}`.trim().split("\n").slice(-30) };
     },
     selfTest() {
-        const allowlist = { github_owned_allowed: true, patterns_allowed: ["anthropics/claude-code-action@*"] };
+        const allowlist = {
+            github_owned_allowed: true,
+            patterns_allowed: ["anthropics/claude-code-action@*", "Synchain-oss/ci-workflows/.github/workflows/*@*"],
+        };
         const required = new Set(["gate"]);
         const check = (text) => inspectWorkflow("f.yml", text, { required, allowlist });
         const swap = (a, b) => {
             if (!GOOD.includes(a)) throw new Error(`自测夹具里找不到要替换的片段：${a}`);
             return GOOD.replace(a, b);
         };
+        const shared = (p) => check(swap(`actions/checkout@${PIN}`, `Synchain-oss/${p}@${PIN}`));
         const checkout = `      - uses: actions/checkout@${PIN} # v7.0.1`;
         const cases = [
             ["加固齐全的 workflow", false, check(GOOD)],
@@ -305,6 +322,12 @@ export default {
                 false,
                 check(swap(`actions/checkout@${PIN}`, `anthropics/claude-code-action@${PIN}`)),
             ],
+            // GitHub 给可复用 workflow 的目录通配：只放行那个目录下一层的文件
+            ["目录通配放行的共享 workflow", false, shared("ci-workflows/.github/workflows/pr-agent.yml")],
+            ["目录通配不放行同仓的别的目录", true, shared("ci-workflows/.github/actions/x")],
+            ["目录通配不放行更深一层", true, shared("ci-workflows/.github/workflows/sub/x.yml")],
+            ["目录通配不放行同 owner 的别的仓", true, shared("other/.github/workflows/pr-agent.yml")],
+            ["目录通配不放行整个仓", true, shared("ci-workflows")],
             ["缺顶层 permissions", true, check(swap("permissions:\n  contents: read\n", ""))],
             [
                 "permissions 写成 write-all",

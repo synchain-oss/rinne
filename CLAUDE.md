@@ -65,6 +65,7 @@
 ## §4 CI
 
 - 子 PR（base = `feature/**`）：`branch-gate`、`clang-format`、`docs-truth`、`compliance` 四个 required check，外加评审 bot 的 `claude-pr-review`。bot 不是 required check，但合并判据要求它在当前 head 上 success；纯文档 PR 也跑。
+- 另有两个 pr-agent 交叉审查，调用 `Synchain-oss/ci-workflows` 的共享 workflow：`pr-agent`（进 `dev` 的 PR，DeepSeek 经 OpenCode Go）与 `pr-agent-claude`（各个 base，Claude Haiku）。它们只发评论（照 §2 读、回应），不改 PR 正文、不打标签（describe 与 review 标签都关掉），不是 required check，也不进合并判据。`deepseek-review.yml` 是 Claude 额度用完时的应急审查，只能手动触发、默认停用，结论同样不进合并判据。
 - 进 `dev`、`prod` 的 PR 另跑完整构建（`build.yml`）。子 PR 的触发规则是有意如此，不要改。
 - 改到 mac 代码、CMake、CI 或打包脚本的子支线，合入前对该子支线 head 手动 dispatch 一次构建。
 - workflow 加固由 docs-truth 机检：最小 permissions、concurrency、每个 job 有 timeout；不可信文本只经 `env:` 传入；required job 不带 job 级 `if:`，所在 workflow 不设 paths 过滤。

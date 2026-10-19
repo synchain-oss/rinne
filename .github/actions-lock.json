@@ -1,5 +1,18 @@
 {
   "actions": {
+    "Synchain-oss/ci-workflows/.github/workflows/deepseek-review.yml@8028e34628bc2276ca978d87ccfc364432742820": {
+      "version": "v1.3.1",
+      "using": "",
+      "nested": [
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "anthropics/claude-code-action@5eb090f3c3afd701a0672cd32981197ca27688f6"
+      ]
+    },
+    "Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@8028e34628bc2276ca978d87ccfc364432742820": {
+      "version": "v1.3.1",
+      "using": "",
+      "nested": []
+    },
     "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": {
       "version": "v6.1.0",
       "using": "node24",
@@ -22,6 +35,11 @@
     },
     "anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc": {
       "version": "v1.0.248",
+      "using": "composite",
+      "nested": ["oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"]
+    },
+    "anthropics/claude-code-action@5eb090f3c3afd701a0672cd32981197ca27688f6": {
+      "version": "v1.0.253",
       "using": "composite",
       "nested": ["oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"]
     },

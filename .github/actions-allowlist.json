@@ -1,6 +1,10 @@
 {
   "github_owned_allowed": true,
   "verified_allowed": false,
-  "patterns_allowed": ["anthropics/claude-code-action@*", "oven-sh/setup-bun@*"],
+  "patterns_allowed": [
+    "anthropics/claude-code-action@*",
+    "oven-sh/setup-bun@*",
+    "Synchain-oss/ci-workflows/.github/workflows/*@*"
+  ],
   "org_inherited_unused": ["qodo-ai/pr-agent@*", "softprops/action-gh-release@*"]
 }
