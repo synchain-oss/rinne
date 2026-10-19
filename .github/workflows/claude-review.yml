@@ -34,7 +34,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     # 写权限只有评论两项：pull-requests 给 inline comment，issues 给审查总结（issue comments 接口）。
     # 真正挡住推送的是 contents: read，不要改成 write。不给 id-token（github_token 已传入，不走 OIDC 换 App token），
     # 也不给 actions: read（agent 模式下没点名就不装 CI 工具，少一个能读日志的入口）。
@@ -44,6 +44,8 @@ jobs:
       issues: write
     # Claude Code 单个 API 请求默认 10 分钟就放弃重来；放宽到 15 分钟（与 Synchain-oss/ci-workflows 一致），
     # 长回复不会被中途丢掉重算。写在 job 级，action 的步骤从这里继承。
+    # 取舍：一次请求停滞要等满 15 分钟才会重试，所以审查步骤的超时必须容得下两次，再留一点余量；
+    # 失败只是浪费一次重跑，比把还能重试的审查提前掐掉、逼维护者再 /review 一次要好。
     env:
       API_TIMEOUT_MS: "900000"
     steps:
@@ -67,10 +69,11 @@ jobs:
           node scripts/review-bot.mjs prepare --pr "$PR" --repo "$GITHUB_REPOSITORY"
           --base "$BASE_SHA" --head "$HEAD_SHA"
       # 这一步自己的超时比 job 短：超时按这一步失败处理，不会把整个 job 的时间吃光。
+      # 35 分钟 = 两次 15 分钟的 API 请求加余量；调 API_TIMEOUT_MS 时一起改。
       # classify_inline_comments 关掉：行内评论即时发出，不在会话结束后再调一次模型做分类。
       - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
         id: review
-        timeout-minutes: 25
+        timeout-minutes: 35
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}

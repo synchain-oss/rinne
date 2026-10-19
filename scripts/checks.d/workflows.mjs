@@ -6,6 +6,9 @@
 //   - 全仓零 pull_request_target、零 workflow_run
 //   - 每个 workflow 有顶层 permissions（不许 read-all / write-all）与 concurrency；每个 job 有 timeout-minutes
 //     （调用可复用 workflow 的 job 不能写 timeout，由被调用方各自设）
+//   - 调用可复用 workflow 的 job：必须显式写 job 级 permissions（只许读权限与评论两项写权限）、secrets 逐项传
+//     （不许 inherit）、with 里不许出现 github.event.* / github.head_ref / inputs.*（pr_number 一项例外）；
+//     引用同样钉 40 位 SHA 并注明版本
 //   - required job（.github/required-checks.json 里的 context）不带 job 级 if（`!cancelled()` 除外），
 //     所在 workflow 的触发器不带 paths 过滤：被跳过的 required job 会被当成通过
 //   - run 脚本里不插值 ${{ }}：标题、正文、分支名这类不可信文本只经 env 传入
@@ -147,10 +150,55 @@ export function parseWorkflow(text) {
     const jobs = heads.map((head, k) => {
         const own = body.slice(body.indexOf(head) + 1, k + 1 < heads.length ? body.indexOf(heads[k + 1]) : body.length);
         const get = (key) => own.find((l) => l.indent === 4 && l.key === key);
-        return { id: head.key, no: head.no, name: get("name") ? unquote(get("name").value) : head.key, get };
+        return { id: head.key, no: head.no, name: get("name") ? unquote(get("name").value) : head.key, own, get };
     });
     return { lines, plain, top, section, jobs };
 }
+
+/** job 级映射（`with:`、`secrets:`、`permissions:`）：{ head, entries, inline }。entries 是六格缩进的键行。 */
+export function jobMap(job, key) {
+    const at = job.own.findIndex((l) => l.indent === 4 && l.key === key);
+    if (at < 0) return null;
+    const head = job.own[at];
+    const rest = job.own.slice(at + 1);
+    const end = rest.findIndex((l) => l.indent <= 4);
+    return {
+        head,
+        entries: rest.slice(0, end < 0 ? rest.length : end).filter((l) => l.indent === 6 && l.key),
+        inline: unquote(head.value),
+    };
+}
+
+/** 一行映射值的完整文本：块标量连正文一起取。 */
+function valueText(lines, line) {
+    if (!/^[|>][+-]?\d*$/.test(line.value)) return line.value;
+    const at = lines.indexOf(line);
+    const body = [];
+    for (let i = at + 1; i < lines.length && lines[i].scalar === line.key; i++) body.push(lines[i].raw.trim());
+    return body.join("\n");
+}
+
+/** `with:` 值里可以出现的一个表达式：PR 号是调用方与被调用方约定的数字，其余的 ${{ }} 一律不许（认不出的宁可判红）。 */
+const ALLOWED_WITH_EXPR = /\$\{\{\s*inputs\.pr_number\s*\}\}/g;
+/** job 级 permissions 的已知权限项。 */
+const SCOPES = new Set([
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+]);
+/** 调用可复用 workflow 的 job 只许这两个写权限：都是发评论要用的。 */
+const WRITE_SCOPES = new Set(["issues", "pull-requests"]);
 
 /** 一个 workflow 的加固问题。required：必须满足 required 规则的 job 名集合。 */
 export function inspectWorkflow(file, text, { required = new Set(), allowlist }) {
@@ -182,6 +230,41 @@ export function inspectWorkflow(file, text, { required = new Set(), allowlist })
         const jobPerm = job.get("permissions");
         if (jobPerm && /^(?:read|write)-all$/.test(unquote(jobPerm.value))) {
             err(jobPerm.no, `job ${job.id} 的 permissions 要逐项写最小权限`);
+        }
+        if (job.get("uses")) {
+            // 调用可复用 workflow：权限、secret 与 with 的取值都经被调用方之手，逐项收紧
+            if (!jobPerm) err(job.no, `job ${job.id} 调用可复用 workflow，必须显式写 job 级 permissions`);
+            else {
+                const map = jobMap(job, "permissions");
+                if (!map.entries.length && map.inline && map.inline !== "{}")
+                    err(jobPerm.no, `job ${job.id} 的 permissions 要逐项写`);
+                for (const p of map.entries) {
+                    if (!SCOPES.has(p.key)) err(p.no, `job ${job.id} 的 permissions 里有未知的权限项 ${p.key}`);
+                    const value = unquote(p.value);
+                    if (value === "write" && !WRITE_SCOPES.has(p.key)) {
+                        err(p.no, `job ${job.id} 调用可复用 workflow，${p.key} 不许给写权限`);
+                    } else if (value !== "read" && value !== "write" && value !== "none") {
+                        err(p.no, `job ${job.id} 的 ${p.key} 只能是 read、write 或 none`);
+                    }
+                }
+            }
+            const secrets = jobMap(job, "secrets");
+            if (secrets && secrets.inline)
+                err(secrets.head.no, `job ${job.id} 的 secrets 只能逐项传，不能是 ${secrets.inline}`);
+            else if (secrets)
+                for (const s of secrets.entries) {
+                    if (!/^\$\{\{\s*secrets\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}$/.test(unquote(s.value))) {
+                        err(s.no, `job ${job.id} 的 secret ${s.key} 只能取自 \${{ secrets.X }}`);
+                    }
+                }
+            const withMap = jobMap(job, "with");
+            if (withMap)
+                for (const w of withMap.entries) {
+                    const text = valueText(lines, w).replace(ALLOWED_WITH_EXPR, "");
+                    if (text.includes("${{")) {
+                        err(w.no, `job ${job.id} 的 with.${w.key} 带了表达式，只许静态值与 inputs.pr_number`);
+                    }
+                }
         }
         if (required.has(job.name)) {
             const cond = job.get("if");
@@ -263,6 +346,24 @@ const GOOD = [
     "          echo uses: in a script is not a step",
 ].join("\n");
 
+/** 调用可复用 workflow 的 job：权限逐项、secret 逐项、with 里只有静态值与 inputs.pr_number。 */
+const SHARED = [
+    "jobs:",
+    "  shared:",
+    "    permissions:",
+    "      contents: read",
+    "      issues: write",
+    "      pull-requests: write",
+    `    uses: Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@${PIN} # v1.3.1`,
+    "    with:",
+    "      provider: opencode-go",
+    "      describe: false",
+    "      pr_number: ${{ inputs.pr_number }}",
+    "    secrets:",
+    "      api_key: ${{ secrets.OPENAI_API_KEY }}",
+].join("\n");
+const WORKFLOW = `${GOOD.split("\njobs:")[0]}\n${SHARED}`;
+
 export default {
     name: "workflows",
     group: "docs",
@@ -304,6 +405,23 @@ export default {
         };
         const shared = (p) => check(swap(`actions/checkout@${PIN}`, `Synchain-oss/${p}@${PIN}`));
         const checkout = `      - uses: actions/checkout@${PIN} # v7.0.1`;
+        const call = (a, b) => {
+            if (!SHARED.includes(a)) throw new Error(`自测夹具里找不到要替换的片段：${a}`);
+            return check(WORKFLOW.replace(a, b));
+        };
+        const dropLine = (line) => call(`${line}\n`, "");
+        /** 换一份 allowlist 再检查同一份 workflow。 */
+        const withAllow = (patterns, text = WORKFLOW) =>
+            inspectWorkflow("f.yml", text, {
+                required,
+                allowlist: { github_owned_allowed: true, patterns_allowed: patterns },
+            });
+        const subPath = (p) => withAllow([p], GOOD.replace(`actions/checkout@${PIN}`, `owner/repo/sub@${PIN} # v1`));
+        const emptyFile = (p) =>
+            withAllow(
+                [p],
+                GOOD.replace(`actions/checkout@${PIN}`, `Synchain-oss/ci-workflows/.github/workflows/@${PIN} # v1`),
+            );
         const cases = [
             ["加固齐全的 workflow", false, check(GOOD)],
             ["pull_request_target 触发", true, check(swap("  pull_request:", "  pull_request_target:"))],
@@ -384,6 +502,84 @@ export default {
                 false,
                 check(swap("permissions:\n  contents: read", "permissions: {}")),
             ],
+            // 调用可复用 workflow 的 job
+            ["调用可复用 workflow 的 job", false, check(WORKFLOW)],
+            [
+                "org 的白名单 owner 必须整段相等，前缀不算",
+                true,
+                check(swap(`actions/checkout@${PIN}`, `actions-x/foo@${PIN}`)),
+            ],
+            ["调用可复用 workflow 时 secrets: inherit", true, call("    secrets:\n", "    secrets: inherit\n")],
+            [
+                "调用可复用 workflow 时缺 job 级 permissions",
+                true,
+                dropLine("    permissions:\n      contents: read\n      issues: write\n      pull-requests: write"),
+            ],
+            [
+                "调用可复用 workflow 时 with 传了 PR 标题",
+                true,
+                call("      describe: false", "      describe: ${{ github.event.pull_request.title }}"),
+            ],
+            [
+                "调用可复用 workflow 时 with 写成行内映射",
+                true,
+                call(
+                    "    with:\n      provider: opencode-go\n      describe: false\n      pr_number: ${{ inputs.pr_number }}",
+                    '    with: {describe: "${{ github.head_ref }}"}',
+                ),
+            ],
+            [
+                "调用可复用 workflow 时 with 传了 head_ref",
+                true,
+                call("      describe: false", "      describe: ${{ github.head_ref }}"),
+            ],
+            [
+                "调用可复用 workflow 时 with 传了别的 inputs",
+                true,
+                call("      pr_number: ${{ inputs.pr_number }}", "      pr_number: ${{ inputs.other }}"),
+            ],
+            [
+                "调用可复用 workflow 的 uses 没钉 SHA",
+                true,
+                call(
+                    `Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@${PIN} # v1.3.1`,
+                    "Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@main",
+                ),
+            ],
+            ["调用可复用 workflow 的 uses 没注明 tag", true, call(" # v1.3.1", "")],
+            [
+                "调用可复用 workflow 时多给了 contents 写权限",
+                true,
+                call("      contents: read", "      contents: write"),
+            ],
+            [
+                "调用可复用 workflow 时 secret 不是逐项取自 secrets",
+                true,
+                call("      api_key: ${{ secrets.OPENAI_API_KEY }}", "      api_key: literal"),
+            ],
+            [
+                "调用可复用 workflow 时 with 传了 needs 输出",
+                true,
+                call("      describe: false", "      describe: ${{ needs.x.outputs.y }}"),
+            ],
+            [
+                "调用可复用 workflow 时 with 用下标写法取 event",
+                true,
+                call("      describe: false", "      describe: ${{ github['event'].pull_request.title }}"),
+            ],
+            ["调用可复用 workflow 时权限项写 none", false, call("      contents: read", "      contents: none")],
+            [
+                "调用可复用 workflow 时 permissions 写成空映射",
+                false,
+                call(
+                    "    permissions:\n      contents: read\n      issues: write\n      pull-requests: write",
+                    "    permissions: {}",
+                ),
+            ],
+            ["调用可复用 workflow 时权限项写成别的值", true, call("      contents: read", "      contents: admin")],
+            // 目录通配只认 owner/repo/<目录>/* 这种三段以上的前缀，且文件名不能为空
+            ["两段式的 owner/repo/* 不算目录通配", true, subPath("owner/repo/*@*")],
+            ["目录通配不放行空文件名", true, emptyFile("Synchain-oss/ci-workflows/.github/workflows/*@*")],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
         return caseResult(cases);
     },
