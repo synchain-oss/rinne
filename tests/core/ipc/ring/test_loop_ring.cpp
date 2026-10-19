@@ -406,6 +406,7 @@ TEST_CASE("a writer that wakes after its chunk was reclaimed loses the head", "[
     CHECK(seg->header.w_cas_fail.load() == 1u);
 }
 
+// 回收填零途中写方自己发布、回收停手的那条要靠调度，放在压测 tests/stress/test_reclaim_stress.cpp 里
 TEST_CASE("reclaiming a stall more than a lap ahead only zeroes the last lap", "[ipc][ring]")
 {
     auto seg = makeRing();

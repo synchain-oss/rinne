@@ -3,6 +3,10 @@
 // 测试用的外进程：起一个只会睡着的子进程，给「活着的外进程」一类用例提供一个真实的 pid。析构时一定杀掉并收尸，
 // 用例中途失败也不会把它留下；测试进程自己被强杀时，Windows 上它在作业对象里随句柄关闭一起结束，POSIX 上它
 // 30 秒后自己退出。
+//
+// Windows 上按 System32 的绝对路径起 ping：按相对名起会先搜 exe 所在目录与当前目录，那里放一个同名程序就会被
+// 当成子进程跑起来。POSIX 上子进程是 fork 出来的、不 exec，一出生就关掉 3 以上的全部 fd：flock 锁跟着打开的文件
+// 描述走，子进程留着继承来的 fd，父进程解锁、关闭之后锁仍然被它握着，会让 POSIX 后端的用例看到一把不该在的锁。
 #pragma once
 
 #include <cstdint>
@@ -15,6 +19,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+
+#include <string>
 #else
 #include <cerrno>
 #include <signal.h>
@@ -82,13 +88,20 @@ private:
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             ::SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
         }
-        // 直接起 ping（不经 cmd）：杀掉的就是 pid 指的那个进程，不会留下孙进程
-        wchar_t command[] = L"ping.exe -n 31 127.0.0.1";
+        // 直接起 ping（不经 cmd）：杀掉的就是 pid 指的那个进程，不会留下孙进程。程序名给绝对路径，不走搜索
+        wchar_t systemDir[MAX_PATH];
+        const UINT length = ::GetSystemDirectoryW(systemDir, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH)
+        {
+            return;
+        }
+        const std::wstring application = std::wstring(systemDir, length) + L"\\PING.EXE";
+        std::wstring command = L"\"" + application + L"\" -n 31 127.0.0.1";
         STARTUPINFOW si{};
         si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
-        if (::CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
-                             nullptr, &si, &pi) == FALSE)
+        if (::CreateProcessW(application.c_str(), &command[0], nullptr, nullptr, FALSE,
+                             CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi) == FALSE)
         {
             return;
         }
@@ -101,6 +114,12 @@ private:
         process_ = pi.hProcess;
         pid_ = static_cast<std::uint32_t>(pi.dwProcessId);
 #else
+        // 要关到哪个 fd 在 fork 之前算好：子进程里只许异步信号安全的调用，sysconf 不在其列
+        long maxFd = ::sysconf(_SC_OPEN_MAX);
+        if (maxFd <= 0 || maxFd > 65536)
+        {
+            maxFd = 65536;
+        }
         const pid_t child = ::fork();
         if (child < 0)
         {
@@ -109,6 +128,10 @@ private:
         if (child == 0)
         {
             // 子进程里只用异步信号安全的调用
+            for (int fd = 3; fd < static_cast<int>(maxFd); ++fd)
+            {
+                ::close(fd);
+            }
             ::alarm(30);
             for (;;)
             {
