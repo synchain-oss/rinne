@@ -61,6 +61,7 @@ export const ANCHORS = [
     ".pr_agent.toml",
     "sub/.pr_agent.toml",
     "AGENTS.md",
+    "sub/AGENTS.md",
     // 只差大小写的写法：在不区分大小写的文件系统上检出后就是上面的文件
     "Scripts/hooks/pre-push.mjs",
     ".GITHUB/workflows/x.yml",
@@ -126,6 +127,7 @@ export function selfTest() {
         [".pr_agent.toml 入库且没有豁免", true, { ...base, botFiles: [".pr_agent.toml"] }],
         ["子目录里的 .pr_agent.toml 同样不许入库", true, { ...base, botFiles: ["sub/.pr_agent.toml"] }],
         ["AGENTS.md 入库且没有豁免", true, { ...base, botFiles: ["AGENTS.md"] }],
+        ["子目录里的 AGENTS.md 同样不许入库", true, { ...base, botFiles: ["sub/AGENTS.md"] }],
         [
             ".pr_agent.toml 已登记豁免",
             false,

@@ -178,10 +178,8 @@ function valueText(lines, line) {
     return body.join("\n");
 }
 
-/** `with:` 值里可以出现的一个表达式：PR 号是调用方与被调用方约定的数字，其余一律不许。 */
+/** `with:` 值里可以出现的一个表达式：PR 号是调用方与被调用方约定的数字，其余的 ${{ }} 一律不许（认不出的宁可判红）。 */
 const ALLOWED_WITH_EXPR = /\$\{\{\s*inputs\.pr_number\s*\}\}/g;
-/** 不可信的上下文：PR 标题、正文、分支名这类由 PR 作者决定的值。 */
-const UNTRUSTED = /\bgithub\.event\b|\bgithub\.head_ref\b|\binputs\./;
 /** job 级 permissions 的已知权限项。 */
 const SCOPES = new Set([
     "actions",
@@ -238,14 +236,15 @@ export function inspectWorkflow(file, text, { required = new Set(), allowlist })
             if (!jobPerm) err(job.no, `job ${job.id} 调用可复用 workflow，必须显式写 job 级 permissions`);
             else {
                 const map = jobMap(job, "permissions");
-                if (!map.entries.length && map.inline) err(jobPerm.no, `job ${job.id} 的 permissions 要逐项写`);
+                if (!map.entries.length && map.inline && map.inline !== "{}")
+                    err(jobPerm.no, `job ${job.id} 的 permissions 要逐项写`);
                 for (const p of map.entries) {
                     if (!SCOPES.has(p.key)) err(p.no, `job ${job.id} 的 permissions 里有未知的权限项 ${p.key}`);
                     const value = unquote(p.value);
                     if (value === "write" && !WRITE_SCOPES.has(p.key)) {
                         err(p.no, `job ${job.id} 调用可复用 workflow，${p.key} 不许给写权限`);
-                    } else if (value !== "read" && value !== "write") {
-                        err(p.no, `job ${job.id} 的 ${p.key} 只能是 read 或 write`);
+                    } else if (value !== "read" && value !== "write" && value !== "none") {
+                        err(p.no, `job ${job.id} 的 ${p.key} 只能是 read、write 或 none`);
                     }
                 }
             }
@@ -262,8 +261,8 @@ export function inspectWorkflow(file, text, { required = new Set(), allowlist })
             if (withMap)
                 for (const w of withMap.entries) {
                     const text = valueText(lines, w).replace(ALLOWED_WITH_EXPR, "");
-                    if (UNTRUSTED.test(text)) {
-                        err(w.no, `job ${job.id} 的 with.${w.key} 传了不可信值，只许静态值与 inputs.pr_number`);
+                    if (text.includes("${{")) {
+                        err(w.no, `job ${job.id} 的 with.${w.key} 带了表达式，只许静态值与 inputs.pr_number`);
                     }
                 }
         }
@@ -551,6 +550,26 @@ export default {
                 call("      api_key: ${{ secrets.OPENAI_API_KEY }}", "      api_key: literal"),
             ],
             // 目录通配只认 owner/repo/<目录>/* 这种三段以上的前缀，且文件名不能为空
+            [
+                "调用可复用 workflow 时 with 传了 needs 输出",
+                true,
+                call("      describe: false", "      describe: ${{ needs.x.outputs.y }}"),
+            ],
+            [
+                "调用可复用 workflow 时 with 用下标写法取 event",
+                true,
+                call("      describe: false", "      describe: ${{ github['event'].pull_request.title }}"),
+            ],
+            ["调用可复用 workflow 时权限项写 none", false, call("      contents: read", "      contents: none")],
+            [
+                "调用可复用 workflow 时 permissions 写成空映射",
+                false,
+                call(
+                    "    permissions:\n      contents: read\n      issues: write\n      pull-requests: write",
+                    "    permissions: {}",
+                ),
+            ],
+            ["调用可复用 workflow 时权限项写成别的值", true, call("      contents: read", "      contents: admin")],
             ["两段式的 owner/repo/* 不算目录通配", true, subPath("owner/repo/*@*")],
             ["目录通配不放行空文件名", true, emptyFile("Synchain-oss/ci-workflows/.github/workflows/*@*")],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));

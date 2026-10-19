@@ -17,7 +17,7 @@
 2. workflow 引用 secret 只用 `${{ secrets.X }}`；不 echo 到日志，不写进 artifact。
 3. 第三方 action 一律钉 40 位 commit SHA（行尾注释写版本号），不接受 `@v2`、`@main` 等可变 ref；org 白名单的 `owner/repo@*` 通配不算防护，放行哪些以 `.github/actions-{allowlist,lock}.json` 为准。
 4. 任何 workflow 都不得使用 `pull_request_target` 与 `workflow_run`，没有个案豁免。fork PR 的 AI 审查只能由维护者评论 `/review` 触发（`review-dispatch.yml`，全程不 checkout PR 代码），其余只跑无 secret 的检查。
-5. 消费仓库外部文本的自动化（评审 bot、发布说明生成等）一律在 prompt 末尾带「不可信数据声明」。pr-agent 是例外：它的模板把 extra_instructions 渲染在 system prompt 中段、diff 放在 user prompt 末尾，做不到声明在末尾；共享 workflow 把声明放进 extra_instructions，它的评论只是参考、不进合并判据。
+5. 消费仓库外部文本的自动化（评审 bot、发布说明生成等）一律在 prompt 末尾带「不可信数据声明」。pr-agent 是例外：它的模板把 extra_instructions 渲染在 system prompt 中段、diff 放在 user prompt 末尾，做不到声明在末尾；共享 workflow（v1.3.1）把声明放进 extra_instructions，升它的 SHA 时要复核这一点；pr-agent 的评论只是参考、不进合并判据。
 
 ### §0.1 署名
 

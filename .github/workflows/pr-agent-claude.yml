@@ -8,7 +8,8 @@
 # 标签（标签以 .github/labels.json 为唯一真源）。secondary_on_bases 是 OpenCode Go 那个 pr-agent 跑的 base（dev）：
 # 两者共用一个评论身份。persistent_comments: false 与 pr-agent.yml 一致：持久模式会改「最新一条带 pr-agent 标记的
 # 评论」，不管是哪个 pr-agent 写的，每次推送也会原地改评论；这里每次推送发新评论，互不覆盖。
-# 引用钉 40 位 SHA、行尾注明 tag；改 SHA 时重跑 node scripts/lock-actions.mjs。
+# 引用钉 40 位 SHA、行尾注明 tag；改 SHA 时重跑 node scripts/lock-actions.mjs，
+# 并复核共享 workflow 仍把不可信数据声明放在 extra_instructions 里（CLAUDE.md 安全铁律 5 的例外靠它成立）。
 name: PR Agent (Claude Haiku 5.5)
 
 on:

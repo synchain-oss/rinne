@@ -44,6 +44,7 @@ export const INFRA_PATHS = [
     ".pr_agent.toml",
     "**/.pr_agent.toml",
     "AGENTS.md",
+    "**/AGENTS.md",
     "requirements-tools.txt",
     ".*-version",
     ".juce-commit",
@@ -53,7 +54,7 @@ export const INFRA_PATHS = [
 ];
 
 /** 评审 bot 会从默认分支读取、能重新配置自己的文件；入库等于绕过基础设施批准。 */
-export const BOT_CONFIG_PATHS = [".pr_agent.toml", "**/.pr_agent.toml", "AGENTS.md"];
+export const BOT_CONFIG_PATHS = [".pr_agent.toml", "**/.pr_agent.toml", "AGENTS.md", "**/AGENTS.md"];
 /** 豁免登记：只写仓内相对路径。空数组表示一份都不许入库。 */
 export const ALLOWED_BOT_CONFIG = [];
 
