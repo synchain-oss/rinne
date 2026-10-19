@@ -14,7 +14,7 @@
 # build-mac（macos-15、arm64 原生）：配置、构建、ctest，零分配计数器的反例，bundle 身份（2 个 .vst3 + 2 个 .component），
 # ad-hoc 签名与 codesign --verify，auval ×2 与 auval -a 唯一性，pluginval ×4，前后各一次共享内存残段检查，进程外自测（非门禁），
 # arm64 压测与变异构建。判据都在 scripts/ci/mac/，每个有自测。artifact：Rinne-macos-arm64-{pr<N>|dispatch}-<sha40>
-# （release 为 Rinne-release-macos-arm64-<tag>），插件的 ditto zip 在顶层，tools/ 下放 rinne_nulltest；probe 另出 universal 的
+# （release 为 Rinne-release-macos-arm64-<tag>），插件的 ditto zip 在顶层，tools/ 下是 ditto 打的 rinne_nulltest.zip；probe 另出 universal 的
 # Rinne-probe-macos-universal-<sha40>。
 # core-sanitizers（ubuntu、clang-18、RINNE_CORE_ONLY=ON）：asan_ubsan 与 tsan 两个配置各自配置、构建、跑全部 ctest；不需要 JUCE。
 # web-smoke：web-preview/tests/run-all.mjs 存在就跑，不存在时打印 SKIP 注记并通过（页面冒烟随 web 预览一起到）。
@@ -376,7 +376,7 @@ jobs:
         run: bash scripts/ci/mac/sign-and-verify.sh bundles.txt
 
       # 上传的是 ditto 打的 zip：upload-artifact 会丢可执行位和符号链接，bundle 里的签名就对不上了。
-      # tools/ 里的可执行文件是单独放进去的：Build 的 all 目标已经包含 tools/rinne_nulltest，这里缺了就判红。
+      # tools/ 里的可执行文件是单独放进去的，同样打成 zip（upload-artifact 会丢可执行位）：Build 的 all 目标已经包含 tools/rinne_nulltest，这里缺了就判红。
       - name: Stage
         id: stage
         if: ${{ !cancelled() && steps.sign.outcome == 'success' }}
@@ -389,8 +389,7 @@ jobs:
           tool=$(find build/tools-bin -type f -name rinne_nulltest -perm -u+x -not -path '*/_deps/*' -print -quit)
           if [ -z "$tool" ]; then echo '::error::构建目录里没有 rinne_nulltest（tools 目标没建？）'; exit 1; fi
           mkdir -p "$dist/tools"
-          ditto "$tool" "$dist/tools/rinne_nulltest"
-          [ -x "$dist/tools/rinne_nulltest" ] || { echo '::error::tools/rinne_nulltest 没有可执行位'; exit 1; }
+          ditto -c -k --keepParent "$tool" "$dist/tools/rinne_nulltest.zip"
           ls -l "$dist" "$dist/tools"
 
       - name: Upload plugins

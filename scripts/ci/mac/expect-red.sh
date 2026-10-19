@@ -137,7 +137,7 @@ rc=0
 if [ "$timeout" -gt 0 ]; then
   "$@" >"$out" 2>&1 &
   pid=$!
-  ( sleep "$timeout"; : > "$out.timedout"; kill -TERM "$pid" 2>/dev/null; sleep 5; kill -KILL "$pid" 2>/dev/null ) &
+  ( sleep "$timeout"; : > "$out.timedout"; kill -TERM "$pid" 2>/dev/null; sleep 5; kill -KILL "$pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
   watchdog=$!
   wait "$pid" || rc=$?
   kill "$watchdog" 2>/dev/null || true
