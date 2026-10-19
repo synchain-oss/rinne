@@ -54,6 +54,12 @@ bool LoopRing::retireWriter(RingSegment& seg, u64 writerToken) noexcept
                                                            std::memory_order_relaxed);
 }
 
+namespace
+{
+// 回收填零时每隔多少帧重看一次写头（2 的幂）
+constexpr u64 kReclaimCheckFrames = 1024;
+} // namespace
+
 bool LoopRing::reclaimStalled(RingSegment& seg) noexcept
 {
     u64 w0 = seg.header.write_head.load(std::memory_order_acquire);
@@ -71,11 +77,17 @@ bool LoopRing::reclaimStalled(RingSegment& seg) noexcept
     const u64 mask = static_cast<u64>(kRingFrames - 1);
     for (u64 p = first; p != intent; ++p)
     {
+        // 每填 1024 帧看一眼写头：卡住的写方要是在这期间自己发布了，它的帧是真的，立刻停手，
+        // 盖成静音的最多是这一小段
+        if ((p & (kReclaimCheckFrames - 1)) == 0 && seg.header.write_head.load(std::memory_order_relaxed) != w0)
+        {
+            return false;
+        }
         const u64 slot = p & mask;
         seg.data[2 * slot].store(0.0f, std::memory_order_relaxed);
         seg.data[2 * slot + 1].store(0.0f, std::memory_order_relaxed);
     }
-    // 卡住的写方恰好在这时写完并发布了：它赢，它的帧里可能夹着这里填的 0（静音，不是旧数据）
+    // 卡住的写方恰好在最后一段里写完并发布了：它赢，它的帧里可能夹着这里填的 0（静音，不是旧数据）
     return seg.header.write_head.compare_exchange_strong(w0, intent, std::memory_order_release,
                                                          std::memory_order_relaxed);
 }

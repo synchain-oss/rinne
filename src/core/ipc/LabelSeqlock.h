@@ -83,7 +83,7 @@ inline u32 fnv1a32(std::string_view bytes) noexcept
 }
 
 // 不超过 maxBytes、又不切断码点的最长前缀：从 min(size, maxBytes) 往回退到不是续字节（10xxxxxx）的位置。
-// UTF-8 的续字节最多 3 个，所以最多退 3 步
+// 合法的 UTF-8 续字节最多 3 个，所以最多退 3 步；不合法的输入一直退到不是续字节的位置，前缀里绝不留半个码点
 inline std::size_t utf8PrefixLength(std::string_view utf8, std::size_t maxBytes) noexcept
 {
     std::size_t n = utf8.size() < maxBytes ? utf8.size() : maxBytes;
