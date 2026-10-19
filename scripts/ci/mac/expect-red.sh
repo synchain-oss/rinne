@@ -18,7 +18,7 @@
 set -uo pipefail
 
 # 失败断言是否落在指定的 section：console reporter 在每个失败断言前先打印标题块
-# （分隔线、test case 名、若干缩进的 section 名、分隔线），最后一条 FAILED 用最近这个块判断。
+# （分隔线、test case 名、若干缩进的 section 名、分隔线），只要有一条失败断言的标题块里出现同名 section 就算通过。
 section_ok() { # $1 输出文件 $2 section 名
   awk -v want="$2" '
     /^--+$/ {

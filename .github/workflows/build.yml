@@ -386,7 +386,7 @@ jobs:
           rm -rf "$dist"
           mkdir -p "$dist"
           while IFS= read -r b; do ditto -c -k --keepParent "$b" "$dist/$(basename "$b").zip"; done < bundles.txt
-          tool=$(find build/tools-bin -type f -name rinne_nulltest -perm -u+x -not -path '*/_deps/*' -print -quit)
+          tool=$(find build/tools-bin -type f -name rinne_nulltest -perm -u+x -not -path '*/_deps/*' -print -quit 2>/dev/null || true)
           if [ -z "$tool" ]; then echo '::error::构建目录里没有 rinne_nulltest（tools 目标没建？）'; exit 1; fi
           mkdir -p "$dist/tools"
           ditto -c -k --keepParent "$tool" "$dist/tools/rinne_nulltest.zip"
