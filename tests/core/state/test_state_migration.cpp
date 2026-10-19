@@ -239,7 +239,7 @@ TEST_CASE("写回: 任何一次 setState 的高 abi 都接管写回，成功读�
     const Bytes garbage = byteList({1, 2, 3});
 
     StateDocument doc = sentinelDocument(Role::Input);
-    // 宿主按序列喂 state，返回每一步之后的写回状态。
+    // 宿主按序列喂 state：加载一份，再把结果交给写回状态（无返回值）。
     const auto feed = [&](rinne::state::RawWriteBack& writeBack, const Bytes& bytes, Role role = Role::Input) {
         writeBack.onLoad(loadAs(bytes, role, doc, 2u, chain));
     };
@@ -324,7 +324,8 @@ TEST_CASE("写回: 任何一次 setState 的高 abi 都接管写回，成功读�
         feed(writeBack, ok);
         feed(writeBack, newer3);
         doc.params.entries.front().value += 0.25f; // 保留期间用户改了参数
-        // getState 的规则：保留着就原样交回，否则编码实例当前的 state
+        // 这里的 getState 规则是在测试里模拟的；实装的验证在之后的处理器接线里。
+        // 规则：保留着就原样交回，否则编码实例当前的 state
         const auto saved = [&]() {
             if (writeBack.holding())
                 return writeBack.bytes();

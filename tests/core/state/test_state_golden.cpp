@@ -149,16 +149,24 @@ std::vector<Invariant> schemaInvariants()
          "before the instance settles every successfully loaded state is applied in full, the last one wins"},
         {"apply-after-settle", "定型之后收到的 state（宿主预设、A/B、撤销）只改参数",
          "after it settles, later states only change parameters"},
-        {"settle-definition", "第一次用户改动（参数或非参数设置），或智能默认完成认领；工程恢复的认领不算定型",
-         "settling happens at the first user edit or when the smart defaults finish claiming, whichever is first; a "
-         "project restore claiming does not count"},
+        {"settle-definition",
+         "定型指第一次界面上的用户动作，只算这几类：`beginGesture` 起的参数改动、界面上的设置改动、手选组、确认接管",
+         "settling happens at the first user action in the UI: a gesture-begun parameter edit, a setting edit in the "
+         "UI, a manually picked group, confirming a takeover; host-sent values and automation do not count"},
+        {"claims-not-settle", "任何认领（包括智能默认的 provisional 认领和工程恢复的认领）也不算定型",
+         "no claim settles the instance, because a provisional claim is meant to be preempted by a later project "
+         "state"},
+        {"settle-residue", "已知残留：用户从未在界面上动过的实例，收到宿主预设或 A/B 时仍会全量应用，包括组",
+         "known residue: an instance never touched in the UI still applies a host preset or A/B in full, group "
+         "included"},
         {"not-a-load",
          "`Empty`、`IgnoredProbe`、`Corrupt`、`RejectedNewer` 不算成功读入，既不触发全量应用，也不让实例定型",
          "Empty, IgnoredProbe, Corrupt and RejectedNewer neither apply anything nor settle the instance"},
         {"rejected-newer-any-setstate", "任何一次 `setState` 收到 `RejectedNewer`（role 是这一端）都拒载并保留原字节",
          "any setState that gets RejectedNewer for this role keeps the original bytes, regardless of call order"},
         {"write-back-replaced", "被后来一份成功读入的 state（`Ok`、`Migrated`）取代",
-         "kept bytes are replaced only by a successfully loaded state (Ok or Migrated)"},
+         "kept bytes stay until a successfully loaded state (Ok or Migrated) replaces them; a later RejectedNewer "
+         "replaces them with its own bytes"},
         {"write-back-edits-lost", "保留期间的参数改动不进 state：保存交回的仍是原字节",
          "parameter edits made while bytes are kept do not enter the state and are lost on save"},
     };
@@ -567,8 +575,11 @@ TEST_CASE("golden: 契约文档区分应用方式与写回保护", "[state][gold
     checkInvariant(doc, schema, "apply-before-settle");
     checkInvariant(doc, schema, "apply-after-settle");
     checkInvariant(doc, schema, "settle-definition");
+    checkInvariant(doc, schema, "claims-not-settle");
+    checkInvariant(doc, schema, "settle-residue");
     checkInvariant(doc, schema, "not-a-load");
-    CHECK(doc.find("接线时要验两条 setState 序列") != std::string::npos);
+    CHECK(doc.find("接线时要验四条 setState 序列") != std::string::npos);
+    CHECK(doc.find("正在保留原字节时仍交回保留的那份") != std::string::npos);
     checkInvariant(doc, schema, "rejected-newer-any-setstate");
     checkInvariant(doc, schema, "write-back-replaced");
     checkInvariant(doc, schema, "write-back-edits-lost");

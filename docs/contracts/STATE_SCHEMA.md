@@ -21,8 +21,11 @@ status: draft
 - **State application and write-back**: before an instance settles, every successfully loaded state (`Ok` or
   `Migrated`) is applied in full, parameters and settings, over the smart defaults; the last one wins. After it
   settles, calls (host presets, A/B, undo) only take parameter values and fade as `FADE_IN` in ARCHITECTURE.md
-  describes. An instance settles at the first user edit (parameter or setting) or when the smart defaults finish
-  claiming, whichever comes first; a project restore claiming does not count. Write-back
+  describes. An instance settles at the first user action in the UI (a parameter edit begun by a gesture, a
+  setting edit in the UI, a manually picked group, confirming a takeover). Host-sent parameter values and automation
+  replay do not count, and no claim counts, neither a provisional smart-default claim nor a project restore claim,
+  because a provisional claim is meant to be preempted by a project state that arrives later. Known residue: an
+  instance the user never touched in the UI still applies a host preset or A/B in full, group included. Write-back
   protection does not depend on call order: any `setState` that gets `RejectedNewer` keeps the original bytes, and
   `getState` hands them back until a successfully loaded state (`Ok` or `Migrated`) replaces them. While they are
   kept, parameter edits do not enter the state and are lost on save, so the UI must say so permanently.
@@ -96,10 +99,12 @@ status: draft
 
 - **定型之前与之后**：这是应用方式的区分，与写回保护无关，也不按第几次 setState 区分。
   定型之前，每一份成功读入（`Ok`、`Migrated`）的 state 都全量应用（参数与全部设置，覆盖智能默认），有多份时以最后一份为准；定型之后收到的 state（宿主预设、A/B、撤销）只改参数，并按 ARCHITECTURE.md 的 `FADE_IN` 淡变。
-  定型指下面两件事里先发生的那一件：第一次用户改动（参数或非参数设置），或智能默认完成认领；工程恢复的认领不算定型。
+  定型指第一次界面上的用户动作，只算这几类：`beginGesture` 起的参数改动、界面上的设置改动、手选组、确认接管。宿主下发的参数值与自动化回放不算。
+  任何认领（包括智能默认的 provisional 认领和工程恢复的认领）也不算定型，因为 provisional 认领本来就要被后到的工程 state 抢占。
+  已知残留：用户从未在界面上动过的实例，收到宿主预设或 A/B 时仍会全量应用，包括组。
   `Empty`、`IgnoredProbe`、`Corrupt`、`RejectedNewer` 不算成功读入，既不触发全量应用，也不让实例定型。
   加载表里的「保持当前」对尚未定型的实例就是默认值，对已定型的就是实例当前的设置。
-  接线时要验两条 setState 序列：默认预设或旧 state 在前、工程在后，工程的 CFGS 要生效；用户改过之后再来宿主预设或 A/B，只改参数，组不动。
+  接线时要验四条 setState 序列：默认预设或旧 state 在前、工程在后，工程的 CFGS 要生效；智能默认先认领、工程 state 后到，工程的组要生效；更高 abi 在前、旧版 `Ok` 在后，旧版 `Ok` 全量应用并清掉保留的字节；用户在界面上改过之后再来宿主预设或 A/B，只改参数，组不动。
 - **高 abi 先于块结构检查**：更高的 abi 可能换了载荷，按本构建的规则挑它的错，代价是把用户的新版数据丢掉。
   拒载时交回的字节与收到的逐字节相同。role 照样比对：它的位置不随 abi 变，role 不符说明这是对端的字节，原样写回
   只会把它固化进本端的工程，所以判 `Corrupt`，不保留。
@@ -119,7 +124,7 @@ status: draft
   `Corrupt`（块数超限同时会被解码时的块数预算拦下，单块长度只有这一遍查得到）。abi 1 是第一版，还没有迁移函数。
 - **不留半份状态**：失败与忽略时加载入口不碰出参，调用方传进去的是什么（尚未定型时是新实例的默认 state，
   定型之后是实例当前的 state），出来还是什么。只有 `Ok` 与 `Migrated` 会写出参。表中的提示由处理器按结果给出。
-- **坏字节不交回**：`Corrupt` 的字节不该被原样存回工程文件，下一次保存写的是实例当前的 state。
+- **坏字节不交回**：`Corrupt` 的字节不该被原样存回工程文件；下一次保存写的是实例当前的 state，正在保留原字节时仍交回保留的那份。
 
 ## PRMS：参数值（只有 Input）
 

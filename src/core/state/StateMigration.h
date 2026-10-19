@@ -18,8 +18,9 @@
 // 默认 state，定型之后是实例当前的 state），出来还是什么，不会留下填了一半的状态。
 // 应用方式与写回保护是两件事。应用方式按「定型」区分：定型之前每一份成功读入（Ok、Migrated）的 state 全量应用，
 // 以最后一份为准；定型之后的 state（宿主预设、A/B、撤销）只改参数，并按 ARCHITECTURE.md 的 FADE_IN 淡变。定型指
-// 第一次用户改动或智能默认完成认领，先发生的那一件；工程恢复的认领不算。Empty、探针、Corrupt、RejectedNewer 不算
-// 成功读入。定型由调用方判断，本层不管。写回保护：与第几次 setState 无关，见 RawWriteBack。
+// 第一次界面上的用户动作（beginGesture 起的参数改动、界面上的设置改动、手选组、确认接管）；宿主下发的参数与自动化
+// 不算，任何认领也不算（provisional 的认领本来就要被后到的工程 state 抢占）。Empty、探针、Corrupt、RejectedNewer
+// 不算成功读入。定型由调用方判断，本层不管。写回保护：与第几次 setState 无关，见 RawWriteBack。
 // 坏字节不交回调用方：它们不该被原样存回工程文件。
 #pragma once
 
@@ -79,6 +80,7 @@ StateLoadResult loadState(const std::uint8_t* data, std::size_t size, Role role,
 //   Ok / Migrated：一份成功读入的 state 取代保留的字节，之后保存的是实例当前的 state；
 //   Empty / Corrupt / IgnoredProbe：什么都没读进来，保持原状：正在保留的继续保留，没在保留的仍不保留。
 //   role 是对端的高 abi 字节判 Corrupt，所以不会接管。
+// 线程：自身不做同步，调用方要和实例 state 用同一把锁（或者都在消息线程上）。
 // 保留期间 setState 的参数改动不进 state：getState 交回的仍是原字节，这些改动保存时会丢。界面要常驻提示
 // 「这份工程由更新版本保存，本版本不会改写它」（界面卡负责）。
 class RawWriteBack
