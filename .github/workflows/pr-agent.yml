@@ -35,7 +35,7 @@ jobs:
       # dev 上 pr-agent-claude 也在跑，两者共用一个评论身份。持久模式会改「最新一条带 pr-agent 标记的评论」，
       # 不管是哪个 pr-agent 写的，所以这里也每次推送发新评论，不去改写 Haiku 的评论。
       persistent_comments: false
-      # 改这里时同步改 pr-agent-claude.yml
-      ignore_globs: '["scripts/probe/fixtures/**", "scripts/maintainer/fixtures/**", "web/fonts/**", "web/js/juce/**", "LICENSES/**", "third_party/notices/**"]'
+      # 改这里时同步改 pr-agent-claude.yml。夹具是合并闸门的判据样例，评审应该看到，不 ignore。
+      ignore_globs: '["scripts/probe/fixtures/**", "web/fonts/**", "web/js/juce/**", "LICENSES/**", "third_party/notices/**"]'
     secrets:
       api_key: ${{ secrets.OPENCODE_GO_API_KEY_FOR_REVIEW }}

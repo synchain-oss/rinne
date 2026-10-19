@@ -40,6 +40,10 @@ export const INFRA_PATHS = [
     ".editorconfig",
     ".gitattributes",
     ".gitleaks.toml",
+    // pr-agent 会从默认分支读这些文件重新配置自己，等于绕过基础设施要维护者批准
+    ".pr_agent.toml",
+    "**/.pr_agent.toml",
+    "AGENTS.md",
     "requirements-tools.txt",
     ".*-version",
     ".juce-commit",
@@ -47,6 +51,20 @@ export const INFRA_PATHS = [
     "REUSE.toml",
     "CLAUDE.md",
 ];
+
+/** 评审 bot 会从默认分支读取、能重新配置自己的文件；入库等于绕过基础设施批准。 */
+export const BOT_CONFIG_PATHS = [".pr_agent.toml", "**/.pr_agent.toml", "AGENTS.md"];
+/** 豁免登记：只写仓内相对路径。空数组表示一份都不许入库。 */
+export const ALLOWED_BOT_CONFIG = [];
+
+/** files 是仓内相对路径；返回未登记豁免的评审 bot 配置文件。 */
+export function botConfigErrors(files, allowed = ALLOWED_BOT_CONFIG) {
+    const hit = infraMatcher(BOT_CONFIG_PATHS);
+    const ok = (p) => allowed.some((a) => a.toLowerCase() === p.toLowerCase());
+    return files
+        .filter((p) => hit(p) && !ok(p))
+        .map((p) => `${p} 会被评审 bot 从默认分支读取并重新配置自己，入库要在 ALLOWED_BOT_CONFIG 里登记`);
+}
 
 const globRe = (g, flags) =>
     new RegExp(

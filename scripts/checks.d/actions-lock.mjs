@@ -30,6 +30,7 @@ export function checkLock(uses, lock, allowlist) {
         const ref = queue.shift();
         for (const n of entries[ref]?.nested || []) {
             const at = n.lastIndexOf("@");
+            // target 保留路径：可复用 workflow 靠 allowlist 的目录通配放行，只取 owner/repo 就匹配不上了
             const target = n.slice(0, at < 0 ? n.length : at);
             if (at < 0 || !/^[0-9a-f]{40}$/.test(n.slice(at + 1))) errors.push(`${ref} 嵌套的 ${n} 没有钉 40 位 SHA`);
             if (!allowed(target, allowlist)) errors.push(`${ref} 嵌套的 ${target} 不在 actions-allowlist.json 里`);
@@ -48,9 +49,16 @@ export function checkLock(uses, lock, allowlist) {
 const SHA = (c) => c.repeat(40);
 const ACTION = `anthropics/claude-code-action@${SHA("a")}`;
 const BUN = `oven-sh/setup-bun@${SHA("b")}`;
+/** 嵌套的可复用 workflow：ref 带路径，allowlist 靠目录通配放行。 */
+const WF = `Synchain-oss/ci-workflows/.github/workflows/x.yml@${SHA("d")}`;
+const OTHER_WF = `other/repo/.github/workflows/x.yml@${SHA("e")}`;
 const ALLOW = {
     github_owned_allowed: true,
-    patterns_allowed: ["anthropics/claude-code-action@*", "oven-sh/setup-bun@*"],
+    patterns_allowed: [
+        "anthropics/claude-code-action@*",
+        "oven-sh/setup-bun@*",
+        "Synchain-oss/ci-workflows/.github/workflows/*@*",
+    ],
 };
 const LOCK = {
     actions: {
@@ -77,12 +85,23 @@ export default {
             actions: Object.fromEntries(Object.entries(LOCK.actions).filter(([k]) => k !== ref)),
         });
         const nested = (n) => ({ actions: { ...LOCK.actions, [ACTION]: { ...LOCK.actions[ACTION], nested: [n] } } });
+        /** 嵌套的可复用 workflow：自己也要有锁条目，否则会先撞上「没有自己的条目」。 */
+        const withWf = (ref) => ({
+            actions: {
+                ...LOCK.actions,
+                [ACTION]: { ...LOCK.actions[ACTION], nested: [BUN, ref] },
+                [ref]: { version: "", using: "", nested: [] },
+            },
+        });
         const cases = [
             ["锁齐全", false, checkLock(use, LOCK, ALLOW)],
             ["workflow 引用了锁里没有的 action", true, checkLock(use, without(ACTION), ALLOW)],
             ["缺嵌套的 setup-bun 条目", true, checkLock(use, without(BUN), ALLOW)],
             ["嵌套 uses 没钉 SHA", true, checkLock(use, nested("oven-sh/setup-bun@v2"), ALLOW)],
             ["嵌套 uses 不在白名单", true, checkLock(use, nested(`softprops/action-gh-release@${SHA("c")}`), ALLOW)],
+            // 带路径的 ref：还原成 owner/repo 会丢掉 .github/workflows/x.yml，目录通配就匹配不上
+            ["嵌套的共享 workflow 由目录通配放行", false, checkLock(use, withWf(WF), ALLOW)],
+            ["嵌套的共享 workflow 来自白名单外的仓", true, checkLock(use, withWf(OTHER_WF), ALLOW)],
             ["版本注释与锁不一致", true, checkLock([{ ...use[0], version: "v2.0.0" }], LOCK, ALLOW)],
             ["锁里有没人引用的条目", true, checkLock([], LOCK, ALLOW)],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));

@@ -37,13 +37,15 @@ jobs:
       startsWith(github.event.comment.body, '/review') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     permissions:
       contents: read
       pull-requests: write
       issues: write
     # Claude Code 单个 API 请求默认 10 分钟就放弃重来；放宽到 15 分钟（与 Synchain-oss/ci-workflows 一致），
     # 长回复不会被中途丢掉重算。写在 job 级，action 的步骤从这里继承。
+    # 取舍：一次请求停滞要等满 15 分钟才会重试，所以审查步骤的超时必须容得下两次，再留一点余量；
+    # 失败只是浪费一次重跑，比把还能重试的审查提前掐掉、逼维护者再 /review 一次要好。
     env:
       API_TIMEOUT_MS: "900000"
     steps:
@@ -137,9 +139,10 @@ jobs:
       # 不开 track_progress：在 issue_comment 上它会把 action 切到 tag 模式，而 tag 模式会自己签出 PR head、
       # 追加改文件与 git 的工具，正是这里要避开的。给了 prompt 就是 agent 模式，不切分支。
       # base_branch：action 从这个分支还原 CLAUDE.md、.claude/ 等配置，不传就取默认分支，会和上面签出的目标分支对不上。
+      # 35 分钟 = 两次 15 分钟的 API 请求加余量；调 API_TIMEOUT_MS 时一起改。
       - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
         id: review
-        timeout-minutes: 17
+        timeout-minutes: 35
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}

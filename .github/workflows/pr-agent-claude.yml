@@ -6,8 +6,8 @@
 # describe: false：describe 会把生成的段落接在 PR 正文后面，而本仓 PR 正文的最后一行必须是签名行（branch-gate 与
 # pr-merge 都核对），所以哪个 base 都不跑。review_labels: false：不打 Review effort / Possible security concern
 # 标签（标签以 .github/labels.json 为唯一真源）。secondary_on_bases 是 OpenCode Go 那个 pr-agent 跑的 base（dev）：
-# 两者共用一个评论身份，在 dev 上两个都每次推送发新评论（那边设了 persistent_comments: false），互不覆盖；
-# 其他 base 上只有这一个 pr-agent，评论原地更新。
+# 两者共用一个评论身份。persistent_comments: false 与 pr-agent.yml 一致：持久模式会改「最新一条带 pr-agent 标记的
+# 评论」，不管是哪个 pr-agent 写的，每次推送也会原地改评论；这里每次推送发新评论，互不覆盖。
 # 引用钉 40 位 SHA、行尾注明 tag；改 SHA 时重跑 node scripts/lock-actions.mjs。
 name: PR Agent (Claude Haiku 5.5)
 
@@ -34,7 +34,8 @@ jobs:
       secondary_on_bases: '["dev"]'
       describe: false
       review_labels: false
-      # 与 pr-agent.yml 保持一致
-      ignore_globs: '["scripts/probe/fixtures/**", "scripts/maintainer/fixtures/**", "web/fonts/**", "web/js/juce/**", "LICENSES/**", "third_party/notices/**"]'
+      persistent_comments: false
+      # 与 pr-agent.yml 保持一致。夹具是合并闸门的判据样例，评审应该看到，不 ignore。
+      ignore_globs: '["scripts/probe/fixtures/**", "web/fonts/**", "web/js/juce/**", "LICENSES/**", "third_party/notices/**"]'
     secrets:
       api_key: ${{ secrets.CLAUDE_API_KEY_FOR_PR_REVIEW }}
