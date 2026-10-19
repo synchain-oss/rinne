@@ -170,7 +170,8 @@ inline bool writeLabel(RoleSlot& slot, const LabelPayload& p) noexcept
 }
 
 // 新属主接手一个停在奇数上的标签（上一任写到一半就死了）：把序号从 stuckOdd CAS 到 stuckOdd + 2（仍是奇数，表示
-// 「现在是我在写」），写完整的一份，再存成偶数。整个过程序号都不会是偶数配着半份字段，读方照常只拿到完整的版本。
+// 「现在是我在写」），写完整的一份，再从 stuckOdd + 2 CAS 成偶数。上一任确实死了时，读方只会看到奇数或完整的新版；
+// 上一任只是慢的话，它晚到的字段写可能留在这一版后面（见文件头），由属主按心跳重读自己的标签来修。
 // 只许属主调用，而且只在同一个奇数已经停了足够久之后（会合层按心跳判断）：序号变过、或者不是奇数都返回 false
 inline bool rewriteStuckLabel(RoleSlot& slot, u32 stuckOdd, const LabelPayload& p) noexcept
 {
