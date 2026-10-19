@@ -521,6 +521,14 @@ export default {
                 call("      describe: false", "      describe: ${{ github.event.pull_request.title }}"),
             ],
             [
+                "调用可复用 workflow 时 with 写成行内映射",
+                true,
+                call(
+                    "    with:\n      provider: opencode-go\n      describe: false\n      pr_number: ${{ inputs.pr_number }}",
+                    '    with: {describe: "${{ github.head_ref }}"}',
+                ),
+            ],
+            [
                 "调用可复用 workflow 时 with 传了 head_ref",
                 true,
                 call("      describe: false", "      describe: ${{ github.head_ref }}"),
