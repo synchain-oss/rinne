@@ -18,9 +18,11 @@ status: draft
   compared as a whole u32: Input writes 1, Output writes 2; new values only for new ends, no flag bits). Probe
   builds' abi 0 is recognised and ignored. A lower abi is migrated one step at a time; migrations only change
   payloads. Anything else that fails leaves the instance on its current state; nothing is ever half applied.
-- **State application**: the first `setState` of an instance applies everything. Later calls (host presets, A/B,
-  undo) only take parameter values and crossfade via `presetSeq`; a `RejectedNewer` result on a later call is only
-  reported and does not replace the bytes to write back.
+- **State application and write-back**: the first `setState` of an instance applies everything; later calls (host
+  presets, A/B, undo) only take parameter values and fade as `FADE_IN` in ARCHITECTURE.md describes. Write-back
+  protection does not depend on call order: any `setState` that gets `RejectedNewer` keeps the original bytes, and
+  `getState` hands them back until a successfully loaded state (`Ok` or `Migrated`) replaces them. While they are
+  kept, parameter edits do not enter the state and are lost on save, so the UI must say so permanently.
 - **Sources of truth**: the key table in `src/core/state/StateCodec.h`. `tests/golden/state-schema.json` is
   generated from it and the key table below must match it; both are checked by unit tests. The two baselines
   `tests/golden/state/{input,output}-abi1.bin` pin the byte layout, and the unit tests parse the byte annotations
@@ -82,24 +84,31 @@ status: draft
 |---|---|---|---|
 | 零字节 | `Empty` | 保持当前（第一次 setState 时即默认），不提示 | 否 |
 | 不足 16 字节，或 magic 不符 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |
-| abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持当前，提示工程由更新的版本保存 | 是，整份；只有第一次 setState 会原样写回 |
+| abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持当前，提示工程由更新的版本保存 | 是，整份；任何一次 setState 都保留，保存时原样写回，直到被成功读入的 state 取代 |
 | abi 高于本构建，role 不是这一端 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |
 | abi 0（探针） | `IgnoredProbe` | 保持当前，不提示 | 否 |
 | abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（第一次）；之后的 setState 只取参数 | 否 |
 | abi 等于本构建 | 解码，`Ok` | 读入的 state（第一次）；之后的 setState 只取参数 | 否 |
 | 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |
 
-- **第一次与之后的 setState**：实例一生的第一次 setState 全量应用（参数与全部设置）；之后的 setState（宿主预设、A/B、撤销）只改参数，并走 `presetSeq` 的两段式淡变。加载表里的「保持当前」对第一次就是默认值，对之后就是实例当前的设置。
+- **第一次与之后的 setState**：这是应用方式的区分，与写回保护无关。实例一生的第一次 setState 全量应用（参数与全部设置）；之后的 setState（宿主预设、A/B、撤销）只改参数，并按 ARCHITECTURE.md 的 `FADE_IN` 淡变。加载表里的「保持当前」对第一次就是默认值，对之后就是实例当前的设置。
 - **高 abi 先于块结构检查**：更高的 abi 可能换了载荷，按本构建的规则挑它的错，代价是把用户的新版数据丢掉。
-  拒载时交回的字节与收到的逐字节相同；只有第一次 setState 会在处理器保存工程时把它们原样写回去，不用实例当前的
-  state 覆盖。之后的 setState 收到 `RejectedNewer` 只提示，不替换要写回的字节：旧版载入新版存的 .vstpreset 时，
-  保存工程不能拿这份旧版读不了的预设替换实例的真实设置。只有 role 照样比对：它的位置不随 abi 变，role 不符说明
-  这是对端的字节，原样写回只会把它固化进本端的工程。
+  拒载时交回的字节与收到的逐字节相同。role 照样比对：它的位置不随 abi 变，role 不符说明这是对端的字节，原样写回
+  只会把它固化进本端的工程，所以判 `Corrupt`，不保留。
+- **原字节的保留与取代**：与第几次 setState 无关。
+  任何一次 `setState` 收到 `RejectedNewer`（role 是这一端）都拒载并保留原字节，处理器保存工程时把它们原样交回，不用实例当前的 state 覆盖。
+  宿主可能先套默认预设、再给工程，或者加载工程时调两次 setState，所以不能认「第一次」。规则：
+  - 保留着的原字节，被后来一份成功读入的 state（`Ok`、`Migrated`）取代：此后保存的是实例当前的 state。
+  - 连续收到两份更高 abi 的字节，以最后一份为准。
+  - `Empty`、`IgnoredProbe`、`Corrupt`（含对端的高 abi 字节）什么都没读进来，不动保留状态：正在保留的继续保留，
+    没在保留的仍不保留。
+  - 保留期间的参数改动不进 state：保存交回的仍是原字节，这些改动保存时会丢。
+    界面必须常驻提示「这份工程由更新版本保存，本版本不会改写它」（界面卡负责）。
 - **探针只认头**：探针构建写的 state 只在探针身份下有效。头之后是什么、role 写的什么都不看。
 - **逐级迁移**：迁移在容器层上做，从 abi n 升到 n + 1 用第 n 个迁移函数，任何一级失败即整份失败。迁移函数只读写
-  载荷，容器框架（头的长度、块头、补齐、块数）不动。迁移完再按本构建的规则解码：低版本的载荷未必过得了本构建的
+  载荷（改块的载荷、增删块都算），容器框架（头的长度、块头、补齐、块数的含义）不动。迁移完再按本构建的规则解码：低版本的载荷未必过得了本构建的
   载荷校验，先迁移才不会把能迁移的旧工程当成坏字节；迁移之后再核对一遍容器上限（块数、单块长度），越界判
-  `Corrupt`。abi 1 是第一版，还没有迁移函数。
+  `Corrupt`（块数超限同时会被解码时的块数预算拦下，单块长度只有这一遍查得到）。abi 1 是第一版，还没有迁移函数。
 - **不留半份状态**：失败与忽略时加载入口不碰出参，调用方传进去的是什么（第一次 setState 时是新实例的默认 state，
   之后是实例当前的 state），出来还是什么。只有 `Ok` 与 `Migrated` 会写出参。表中的提示由处理器按结果给出。
 - **坏字节不交回**：`Corrupt` 的字节不该被原样存回工程文件，下一次保存写的是实例当前的 state。
@@ -116,8 +125,8 @@ count × { u8 idLen | id（idLen 字节）| f32 值 }
 - id 是 1..255 字节的可打印 ASCII（0x21..0x7E），不含空格；id 重复时「按 id 匹配」有歧义，整份失败。
 - 本层只搬运：按 id 匹配、夹到合法范围、缺失的补默认、非有限值的处理都归参数层。不认识的 id 原样留在列表里、
   顺序不变，保存时写回。
-- 读入与写出用同一组上限：条数不超过 256、载荷不超过 65536 字节，超过则整份失败。写得出的就读得回来；将来的版本写出 225 到 256 条，本版本也能整份读进来。
-- 参数层在解出来的列表上补自己的参数，「未知 id + 认识的参数」可能超过上限。编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢，直到不超过上限；丢了几条由它的 `dropped` 带回，参数层要记进诊断计数。这是「不认识的 id 原样写回」唯一的例外，只在未知 id 加上认识的参数超过 256 条（或 65536 字节）时才触发；CFGS 的未知键不会被丢，读入时已按写回预算整份校验。正常的 Rinne 只写 11 个参数，这条只会在手工构造或损坏的字节上触发。
+- 读入与写出用同一组上限：条数不超过 256、载荷不超过 65536 字节，超过则整份失败。写得出的就读得回来：任何版本写出的、不超过这两个上限的 PRMS，本版本都能整份读进来。
+- 参数层在解出来的列表上补自己的参数，「未知 id + 认识的参数」可能超过上限。编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢，直到不超过上限；丢了几条由它的 `dropped` 带回，参数层要记进诊断计数。这是「不认识的 id 原样写回」唯一的例外，只在未知 id 加上认识的参数超过 256 条（或 65536 字节）时才触发；CFGS 的未知键不会被丢，读入时已按写回预算整份校验。正常的 Rinne 只写参数表里的参数（远少于 256 条），这条只会在手工构造或损坏的字节上触发。
 
 ## CFGS：非参数设置
 
@@ -217,6 +226,8 @@ count × { u8 idLen | id（idLen 字节）| f32 值 }
 ## 改格式
 
 - 加新的 CFGS 键、新的块或新的参数不必升 abi：旧版把它们当未知项原样保留。新键只能用没用过的键号。
+  限定：PRMS 的条数（256）与载荷（64 KiB）上限是格式的一部分，新增参数只在总数不超过 256 条、载荷不超过
+  65536 字节时可以不升 abi；超过必须升 abi，否则旧版整份按 `Corrupt` 拒收，连 CFGS 一起丢。
 - 前 16 字节（magic、abi、role、块数）不能动，容器框架（头的长度、块头、补齐、块数的含义）跨 abi 不变；迁移只
   改载荷。
 - 改已有载荷字段的布局或含义必须升 abi：把 `kAbi` 加一，在 `kMigrators` 末尾追加一个从旧 abi 升上来的迁移函数，

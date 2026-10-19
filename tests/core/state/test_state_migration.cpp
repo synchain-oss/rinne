@@ -226,6 +226,116 @@ TEST_CASE("load: 高 abi 拒载，原字节一个不改地交回", "[state][migr
     requireUntouched(loaded.preservedOriginal, Role::Input, StateLoadStatus::RejectedNewer);
 }
 
+TEST_CASE("写回: 任何一次 setState 的高 abi 都接管写回，成功读入的 state 取代它", "[state][migration]")
+{
+    // 假装本构建是 abi 2，有一级迁移：abi 1 迁移成功，abi 2 直接解，abi 3 起拒载。
+    const std::array<MigrateFn, 1> chain{&recordStep<1>};
+    const Bytes base = encodeOf(rinne::test::sampleInputDocument());
+    const Bytes migrated = withAbi(base, 1u); // Migrated
+    const Bytes ok = withAbi(base, 2u); // Ok
+    const Bytes probe = withAbi(base, 0u); // IgnoredProbe
+    const Bytes newer3 = withAbi(base, 3u);
+    const Bytes newer5 = withAbi(base, 5u);
+    const Bytes garbage = byteList({1, 2, 3});
+
+    StateDocument doc = sentinelDocument(Role::Input);
+    // 宿主按序列喂 state，返回每一步之后的写回状态。
+    const auto feed = [&](rinne::state::RawWriteBack& writeBack, const Bytes& bytes, Role role = Role::Input) {
+        writeBack.onLoad(loadAs(bytes, role, doc, 2u, chain));
+    };
+
+    SECTION("默认或旧 state 在前，更高 abi 在后：新版原字节被保留")
+    {
+        for (const Bytes* first : {&ok, &migrated, &probe})
+        {
+            rinne::state::RawWriteBack writeBack;
+            feed(writeBack, *first);
+            CHECK_FALSE(writeBack.holding());
+            const StateDocument before = doc;
+            feed(writeBack, newer3);
+            CHECK(writeBack.holding());
+            CHECK(writeBack.bytes() == newer3);
+            CHECK(sameDocument(doc, before)); // 拒载不碰实例的 state
+        }
+        rinne::state::RawWriteBack empty;
+        feed(empty, Bytes{}); // 零字节：默认
+        feed(empty, newer3);
+        CHECK(empty.bytes() == newer3);
+    }
+
+    SECTION("更高 abi 在前，同版或低版在后：清掉保留的字节，之后保存的是新读入的")
+    {
+        for (const Bytes* later : {&ok, &migrated})
+        {
+            rinne::state::RawWriteBack writeBack;
+            feed(writeBack, newer3);
+            REQUIRE(writeBack.holding());
+            feed(writeBack, *later);
+            CHECK_FALSE(writeBack.holding());
+            CHECK(writeBack.bytes().empty());
+        }
+    }
+
+    SECTION("什么都没读进来的加载不动写回状态")
+    {
+        // 正在保留：零字节、探针、坏字节、对端的高 abi 字节（判 Corrupt）都不清掉，也不被替换
+        for (const Bytes& noop : {Bytes{}, probe, garbage, withRole(newer5, 2u)})
+        {
+            rinne::state::RawWriteBack writeBack;
+            feed(writeBack, newer3);
+            feed(writeBack, noop);
+            CHECK(writeBack.bytes() == newer3);
+        }
+        // 没在保留：仍然不保留，对端的高 abi 字节尤其不能接管
+        for (const Bytes& noop : {Bytes{}, probe, garbage, withRole(newer5, 2u)})
+        {
+            rinne::state::RawWriteBack writeBack;
+            feed(writeBack, noop);
+            CHECK_FALSE(writeBack.holding());
+        }
+    }
+
+    SECTION("role 是这一端才接管，是对端判 Corrupt 不接管")
+    {
+        rinne::state::RawWriteBack input;
+        feed(input, newer5, Role::Input);
+        CHECK(input.bytes() == newer5);
+
+        rinne::state::RawWriteBack peer;
+        feed(peer, newer5, Role::Output); // 头里写的是 Input，本端是 Output
+        CHECK_FALSE(peer.holding());
+        feed(peer, withRole(newer5, 2u), Role::Output);
+        CHECK(peer.bytes() == withRole(newer5, 2u));
+    }
+
+    SECTION("连续两份更高 abi：以最后一份为准")
+    {
+        rinne::state::RawWriteBack writeBack;
+        feed(writeBack, newer3);
+        feed(writeBack, newer5);
+        CHECK(writeBack.bytes() == newer5);
+        feed(writeBack, newer3);
+        CHECK(writeBack.bytes() == newer3);
+    }
+
+    SECTION("保留期间参数改动不进 state：保存交回的仍是原字节")
+    {
+        rinne::state::RawWriteBack writeBack;
+        feed(writeBack, ok);
+        feed(writeBack, newer3);
+        doc.params.entries.front().value += 0.25f; // 保留期间用户改了参数
+        // getState 的规则：保留着就原样交回，否则编码实例当前的 state
+        const auto saved = [&]() {
+            if (writeBack.holding())
+                return writeBack.bytes();
+            return encodeOf(doc);
+        };
+        CHECK(saved() == newer3);
+        feed(writeBack, ok); // 成功读入的 state 取代它之后，保存的又是实例当前的 state
+        CHECK(saved() == encodeOf(doc));
+    }
+}
+
 TEST_CASE("load: 探针的 abi 0 只认头，内容一概不用", "[state][migration]")
 {
     const Bytes current = encodeOf(rinne::test::sampleInputDocument());
@@ -309,7 +419,8 @@ TEST_CASE("load: 迁移后的容器重新受块数与单块上限约束", "[stat
 
     // 追加一个 65552 字节的未知块：不重查上限的话这里会返回 Migrated，保存时才失败。
     requireCorrupt(std::array<MigrateFn, 1>{&appendOversizedChunk});
-    // 块数撑过 64：迁移后的容器同样判坏字节。
+    // 块数撑过 64：同样判坏字节。这一格拦在 decodeDocument 的块数预算，容器重查的块数检查是防御性的，
+    // 单独覆盖不到；单块长度那一格才是只有容器重查拦得住的。
     requireCorrupt(std::array<MigrateFn, 1>{&appendTooManyChunks});
 
     // 边界之内照常迁移：63 块加一个顶到单块上限的未知块，正好 64 块，写回去仍然成功。

@@ -171,6 +171,39 @@ TEST_CASE("params: 载荷上限 64 KiB，读写同一个上限", "[state][params
     requireEncodeFails(tooWide);
 }
 
+TEST_CASE("params: 载荷字节上限的精确边界 65536 / 65537", "[state][params]")
+{
+    // 每条 = 1 + id 长度 + 4。253 条里 a 条 254 字节 id、b 条 255 字节 id：
+    //   248 × 259 + 5 × 260 + 4 = 65536（正好）；247 × 259 + 6 × 260 + 4 = 65537（多 1 字节）。
+    const auto build = [](std::size_t shortIds, std::size_t longIds) {
+        Params params;
+        std::size_t index = 0;
+        for (std::size_t i = 0; i < shortIds; ++i, ++index)
+            params.entries.push_back(ParamValue{rinne::test::paramIdOfLength(254u, index), 0.0f});
+        for (std::size_t i = 0; i < longIds; ++i, ++index)
+            params.entries.push_back(ParamValue{rinne::test::paramIdOfLength(255u, index), 0.0f});
+        return params;
+    };
+
+    const Params exact = build(248u, 5u);
+    Bytes encoded;
+    REQUIRE(rinne::state::encodeParams(exact, encoded));
+    CHECK(encoded.size() == rinne::state::kMaxParamBytes);
+    Params decoded;
+    REQUIRE(rinne::state::decodeParams(encoded.data(), encoded.size(), decoded));
+    CHECK(decoded.entries.size() == 253u);
+
+    const Params over = build(247u, 6u);
+    requireEncodeFails(over);
+    // 同一份内容手工编成 65537 字节，读入端同样只拒绝多出来的这 1 字节
+    std::vector<rinne::test::RawParam> raw;
+    for (const auto& entry : over.entries)
+        raw.push_back({entry.id, 0u});
+    const Bytes oversized = rawParams(raw);
+    CHECK(oversized.size() == rinne::state::kMaxParamBytes + 1u);
+    requireRejected(oversized);
+}
+
 TEST_CASE("params: id 的长度与字符集", "[state][params]")
 {
     SECTION("解码端")

@@ -71,49 +71,88 @@ std::string keyLine(const rinne::state::ConfigField& field)
     return line + "\"input\": " + boolText(field.input) + ", \"output\": " + boolText(field.output) + " }";
 }
 
-// 加载表的唯一来源：schema 的 load 数组与文档里的表都由这张表生成，逐行对照。
+// schema 是机读文件，只放英文与常量；文档里的中文措辞留在测试里逐字比对，不写进 schema。拼进 JSON 的字符串都过
+// 这个转义，将来措辞里出现引号或反斜杠也不会写出非法的 JSON。
+std::string jsonText(const std::string& text)
+{
+    std::string escaped;
+    for (const char c : text)
+    {
+        if (c == '"' || c == '\\')
+            escaped.push_back('\\');
+        escaped.push_back(c);
+    }
+    return escaped;
+}
+
+// 加载表的唯一来源：schema 的 load 数组（case、result、note）与文档里的表（doc）都由这张表生成，逐行对照。
 struct LoadRow
 {
     const char* caseName;
     const char* result;
+    const char* note; // 空串表示不写 note
     const char* doc;
 };
 
 const std::array<LoadRow, 8> kLoadRows{{
-    {"zero bytes", "empty", "| 零字节 | `Empty` | 保持当前（第一次 setState 时即默认），不提示 | 否 |"},
-    {"short header or wrong magic", "corrupt",
+    {"zero bytes", "empty", "", "| 零字节 | `Empty` | 保持当前（第一次 setState 时即默认），不提示 | 否 |"},
+    {"short header or wrong magic", "corrupt", "",
      "| 不足 16 字节，或 magic 不符 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
     {"abi above this build, role of this end", "rejectedNewer",
-     "| abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持当前，提示工程由更新的版本保存 | 是，整份；只有第一次 "
-     "setState 会原样写回 |"},
-    {"abi above this build, other role", "corrupt",
+     "original bytes kept by any setState and written back unchanged until a successfully loaded state replaces them",
+     "| abi 高于本构建，role 是这一端 | `RejectedNewer` | 保持当前，提示工程由更新的版本保存 | "
+     "是，整份；任何一次 setState 都保留，保存时原样写回，直到被成功读入的 state 取代 |"},
+    {"abi above this build, other role", "corrupt", "",
      "| abi 高于本构建，role 不是这一端 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
-    {"abi equal to probeAbi", "ignoredProbe", "| abi 0（探针） | `IgnoredProbe` | 保持当前，不提示 | 否 |"},
-    {"abi below this build", "migrated",
+    {"abi equal to probeAbi", "ignoredProbe", "only the header is read",
+     "| abi 0（探针） | `IgnoredProbe` | 保持当前，不提示 | 否 |"},
+    {"abi below this build", "migrated", "one step at a time",
      "| abi 低于本构建（≥ 1） | 逐级迁移后解码，`Migrated` | 迁移后的 state（第一次）；之后的 setState 只取参数 | "
      "否 |"},
-    {"abi equal to this build", "ok",
+    {"abi equal to this build", "ok", "decoded as is",
      "| abi 等于本构建 | 解码，`Ok` | 读入的 state（第一次）；之后的 setState 只取参数 | 否 |"},
-    {"any other failure", "corrupt", "| 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
+    {"any other failure", "corrupt", "nothing applied",
+     "| 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
 }};
 
-// 文档里必须逐字出现的固定条款。数值从代码常量来，schema 的 invariants 数组也由这里生成。
-std::vector<std::pair<std::string, std::string>> schemaInvariants()
+// 文档里必须逐字出现的固定条款（doc，中文）。数值从代码常量来；schema 的 invariants 数组放 id 与英文 rule，
+// 中文措辞只在这里与文档对拍，不进 schema。
+struct Invariant
 {
+    std::string id;
+    std::string doc;
+    std::string rule;
+};
+
+std::vector<Invariant> schemaInvariants()
+{
+    const std::string headerBytes = std::to_string(rinne::state::kHeaderBytes);
+    const std::string maxCount = std::to_string(rinne::state::kMaxParamCount);
+    const std::string maxBytes = std::to_string(rinne::state::kMaxParamBytes);
     return {
-        {"minimum-bytes", "整份 state 至少 " + std::to_string(rinne::state::kHeaderBytes) + " 字节"},
-        {"header-fixed",
-         "前 " + std::to_string(rinne::state::kHeaderBytes) + " 字节（magic、abi、role、块数）的位置与含义永不改变"},
-        {"role-whole-value", "role 按整字（u32）比较：Input 恒写 1，Output 恒写 2"},
-        {"framing-fixed", "容器框架跨 abi 不变"},
-        {"migrations-payload-only", "迁移只改载荷"},
-        {"prms-limits", "读入与写出用同一组上限：条数不超过 " + std::to_string(rinne::state::kMaxParamCount) +
-                            "、载荷不超过 " + std::to_string(rinne::state::kMaxParamBytes) + " 字节"},
-        {"prms-trim", "编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢"},
-        {"write-back-scope", "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来"},
-        {"first-setstate", "实例一生的第一次 setState 全量应用"},
-        {"later-setstate", "之后的 setState（宿主预设、A/B、撤销）只改参数"},
-        {"later-rejected-newer", "之后的 setState 收到 `RejectedNewer` 只提示，不替换要写回的字节"},
+        {"minimum-bytes", "整份 state 至少 " + headerBytes + " 字节", "a state is at least " + headerBytes + " bytes"},
+        {"header-fixed", "前 " + headerBytes + " 字节（magic、abi、role、块数）的位置与含义永不改变",
+         "the first " + headerBytes + " bytes (magic, abi, role, chunk count) never move or change meaning"},
+        {"role-whole-value", "role 按整字（u32）比较：Input 恒写 1，Output 恒写 2",
+         "role is compared as a whole u32: input writes 1, output writes 2"},
+        {"framing-fixed", "容器框架跨 abi 不变", "the container framing is fixed across abi"},
+        {"migrations-payload-only", "迁移只改载荷", "migrations only change payloads"},
+        {"prms-limits", "读入与写出用同一组上限：条数不超过 " + maxCount + "、载荷不超过 " + maxBytes + " 字节",
+         "PRMS reads and writes share one limit: at most " + maxCount + " entries and " + maxBytes + " bytes"},
+        {"prms-trim", "编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢",
+         "trimToDecodable before encoding drops only unknown PRMS ids, from the end, never a known parameter"},
+        {"write-back-scope", "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来",
+         "a document from decodeDocument with nothing added always encodes"},
+        {"first-setstate", "实例一生的第一次 setState 全量应用",
+         "the first setState of an instance applies everything"},
+        {"later-setstate", "之后的 setState（宿主预设、A/B、撤销）只改参数",
+         "later setState calls (host presets, A/B, undo) only change parameters"},
+        {"rejected-newer-any-setstate", "任何一次 `setState` 收到 `RejectedNewer`（role 是这一端）都拒载并保留原字节",
+         "any setState that gets RejectedNewer for this role keeps the original bytes, regardless of call order"},
+        {"write-back-replaced", "被后来一份成功读入的 state（`Ok`、`Migrated`）取代",
+         "kept bytes are replaced only by a successfully loaded state (Ok or Migrated)"},
+        {"write-back-edits-lost", "保留期间的参数改动不进 state：保存交回的仍是原字节",
+         "parameter edits made while bytes are kept do not enter the state and are lost on save"},
     };
 }
 
@@ -122,8 +161,10 @@ std::string loadJsonLines()
     std::string lines;
     for (std::size_t i = 0; i < kLoadRows.size(); ++i)
     {
-        lines += "    { \"case\": \"" + std::string(kLoadRows[i].caseName) + "\", \"result\": \"" +
-                 kLoadRows[i].result + "\", \"doc\": \"" + kLoadRows[i].doc + "\" }" +
+        const std::string note = kLoadRows[i].note;
+        lines += "    { \"case\": \"" + jsonText(kLoadRows[i].caseName) + "\", \"result\": \"" +
+                 jsonText(kLoadRows[i].result) + "\"" +
+                 (note.empty() ? std::string() : ", \"note\": \"" + jsonText(note) + "\"") + " }" +
                  (i + 1u < kLoadRows.size() ? ",\n" : "\n");
     }
     return lines;
@@ -156,8 +197,8 @@ std::string schemaText()
     const auto rules = schemaInvariants();
     for (std::size_t i = 0; i < rules.size(); ++i)
     {
-        invariants += "    { \"id\": \"" + rules[i].first + "\", \"doc\": \"" + rules[i].second + "\" }" +
-                      (i + 1u < rules.size() ? ",\n" : "\n");
+        invariants += "    { \"id\": \"" + jsonText(rules[i].id) + "\", \"rule\": \"" + jsonText(rules[i].rule) +
+                      "\" }" + (i + 1u < rules.size() ? ",\n" : "\n");
     }
 
     const std::string n = "\n";
@@ -389,10 +430,10 @@ void checkInvariant(const std::string& doc, const std::string& schema, const std
 {
     for (const auto& rule : schemaInvariants())
     {
-        if (rule.first != id)
+        if (rule.id != id)
             continue;
         INFO("条款：" << id);
-        CHECK(doc.find(rule.second) != std::string::npos);
+        CHECK(doc.find(rule.doc) != std::string::npos);
         CHECK(schema.find("\"id\": \"" + id + "\"") != std::string::npos);
         return;
     }
@@ -464,11 +505,13 @@ TEST_CASE("golden: STATE_SCHEMA.md 的加载表与 schema 的 load 数组一致"
     INFO("文档里应当逐字出现这张表：\n" << table);
     CHECK(doc.find(table) != std::string::npos);
 
-    // schema 与文档必须同源：schema 里每条 doc 都在表里。
+    // schema 与文档同源：每一行都按 case 与 result 出现在 schema 的 load 数组里；中文措辞不进 schema。
     const std::string schema = schemaText();
+    CHECK(schema.find("\"doc\":") == std::string::npos);
     for (const auto& row : kLoadRows)
     {
-        const std::string entry = "\"doc\": \"" + std::string(row.doc) + "\"";
+        const std::string entry =
+            "{ \"case\": \"" + std::string(row.caseName) + "\", \"result\": \"" + row.result + "\"";
         INFO("load 行：" << row.caseName);
         CHECK(schema.find(entry) != std::string::npos);
     }
@@ -508,12 +551,15 @@ TEST_CASE("golden: 契约文档写死 16 字节头与 role 整字比较", "[stat
     CHECK(schema.find("\"roleCompare\":") != std::string::npos);
 }
 
-TEST_CASE("golden: 契约文档区分第一次与之后的 setState", "[state][golden]")
+TEST_CASE("golden: 契约文档区分应用方式与写回保护", "[state][golden]")
 {
     const std::string doc = contractDoc();
     const std::string schema = schemaText();
     checkInvariant(doc, schema, "first-setstate");
     checkInvariant(doc, schema, "later-setstate");
-    checkInvariant(doc, schema, "later-rejected-newer");
-    CHECK(doc.find("之后的 setState 收到 `RejectedNewer` 只提示，不替换要写回的字节") != std::string::npos);
+    checkInvariant(doc, schema, "rejected-newer-any-setstate");
+    checkInvariant(doc, schema, "write-back-replaced");
+    checkInvariant(doc, schema, "write-back-edits-lost");
+    CHECK(doc.find("界面必须常驻提示「这份工程由更新版本保存，本版本不会改写它」") != std::string::npos);
+    CHECK(doc.find("宿主可能先套默认预设、再给工程") != std::string::npos);
 }

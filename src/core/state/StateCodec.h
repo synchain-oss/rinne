@@ -111,8 +111,8 @@ bool encodeContainer(const Container& container, std::vector<std::uint8_t>& out)
 inline constexpr std::uint32_t kMaxParamCount = 256u;
 inline constexpr std::size_t kMaxParamIdBytes = 255u; // idLen 是 u8
 
-// 读入与写出用同一组上限：条数 ≤ 256、载荷 ≤ 64 KiB（单块上限）。写得出的就读得回；将来的版本写出 225..256 条，
-// 本版本也能整份读进来。
+// 读入与写出用同一组上限：条数 ≤ 256、载荷 ≤ 64 KiB（单块上限）。写得出的就读得回：任何版本写出的
+// 不超过这两个上限的 PRMS，本版本都能整份读进来。这组上限是格式的一部分，超过要升 abi。
 inline constexpr std::size_t kMaxParamBytes = kMaxChunkBytes;
 
 struct ParamValue

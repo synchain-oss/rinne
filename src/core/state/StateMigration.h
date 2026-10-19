@@ -7,7 +7,8 @@
 //   3. abi 高于本构建：整份拒载，把原字节交回调用方。这一步先于块结构的检查：更高的 abi 可能换了载荷，按本构建的
 //      规则挑它的错，代价是把用户的新版数据丢掉。头的前 16 字节（magic、abi、role、块数）位置与含义永不改变，
 //      所以 role 照样比得了：role 按整字比较，不符说明这是对端的字节，不该原样固化进本端的工程（判坏字节）。
-//      提示「工程由更新的版本保存」由调用方负责。原样写回只属于实例一生的第一次 setState（见下）。
+//      提示「工程由更新的版本保存」由调用方负责。任何一次 setState 遇到它都拒载并保留原字节，保存时原样交回，
+//      直到一份成功读入的 state 取代它（见 RawWriteBack）。
 //   4. abi 0：探针构建写的 state，只在探针身份下有效。只认头，内容一概不用，保持当前，不提示。
 //   5. abi 1 起低于本构建的：按 kMigrators 一级一级升到本构建的 abi，任何一级失败即整份失败。迁移只改载荷：容器
 //      框架（头的长度、块头、补齐、块数的含义）跨 abi 不变，所以本构建的 decodeContainer 一定解得出旧字节；迁移
@@ -15,15 +16,15 @@
 //   6. 解成文档；容器或载荷不合规时整份失败（保持当前，提示 state 未能恢复）。
 // 「保持当前」由调用方实现：失败与忽略时 loadState 不碰 out，调用方传进来的是什么（第一次 setState 时是新实例的
 // 默认 state，之后是实例当前的 state），出来还是什么，不会留下填了一半的状态。
-// 第一次 setState 与之后的不同：实例一生的第一次 setState 全量应用；之后的 setState（宿主预设、A/B、撤销）只改
-// 参数并走 presetSeq 的两段式淡变。拒载时交回的原字节只在第一次 setState 时当作要写回的 state；之后收到
-// RejectedNewer 只提示，不替换要写回的字节（见 STATE_SCHEMA.md 的加载一节）。
+// 应用方式与写回保护是两件事。应用方式：实例一生的第一次 setState 全量应用；之后的 setState（宿主预设、A/B、
+// 撤销）只改参数，并按 ARCHITECTURE.md 的 FADE_IN 淡变。写回保护：与第几次 setState 无关，见 RawWriteBack。
 // 坏字节不交回调用方：它们不该被原样存回工程文件。
 #pragma once
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "state/StateDocument.h"
@@ -70,5 +71,32 @@ bool runMigrations(Container& container, std::uint32_t fromAbi, std::uint32_t to
 
 // 完整加载。只有 Ok 与 Migrated 会写 out。
 StateLoadResult loadState(const std::uint8_t* data, std::size_t size, Role role, StateDocument& out) noexcept;
+
+// 宿主序列里「保存时交回什么」。每次 loadState 之后用它的结果调一次 onLoad：
+//   RejectedNewer：接管。保存时交回这份原字节，先前保留的那份被替换（用户最近给的工程为准）；
+//   Ok / Migrated：一份成功读入的 state 取代保留的字节，之后保存的是实例当前的 state；
+//   Empty / Corrupt / IgnoredProbe：什么都没读进来，保持原状：正在保留的继续保留，没在保留的仍不保留。
+//   role 是对端的高 abi 字节判 Corrupt，所以不会接管。
+// 保留期间 setState 的参数改动不进 state：getState 交回的仍是原字节，这些改动保存时会丢。界面要常驻提示
+// 「这份工程由更新版本保存，本版本不会改写它」（界面卡负责）。
+class RawWriteBack
+{
+public:
+    void onLoad(StateLoadResult&& result) noexcept
+    {
+        if (result.status == StateLoadStatus::RejectedNewer)
+            held_ = std::move(result.preservedOriginal);
+        else if (result.status == StateLoadStatus::Ok || result.status == StateLoadStatus::Migrated)
+            held_.clear();
+    }
+
+    bool holding() const noexcept { return !held_.empty(); }
+
+    // 保留着的原字节；没在保留时为空。
+    const std::vector<std::uint8_t>& bytes() const noexcept { return held_; }
+
+private:
+    std::vector<std::uint8_t> held_;
+};
 
 } // namespace rinne::state

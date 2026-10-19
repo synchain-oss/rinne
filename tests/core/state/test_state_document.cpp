@@ -334,6 +334,55 @@ TEST_CASE("document: 写出的 PRMS 压进读写共用的上限", "[state][docum
     for (const auto& id : wideKnown)
         CHECK(wide.find(id) != nullptr);
 
+    // 精确字节边界：全是未知 id，正好 65536 字节不丢；65537 字节丢最末那一条（条数远没到上限，只有字节在起作用）。
+    {
+        const auto widthOf = [](const rinne::state::Params& params) {
+            Bytes payload;
+            REQUIRE(rinne::state::encodeParams(params, payload));
+            return payload.size();
+        };
+        for (const bool over : {false, true})
+        {
+            const std::size_t shortIds = over ? 247u : 248u;
+            const std::size_t longIds = over ? 6u : 5u;
+            rinne::state::Params edge;
+            std::size_t index = 0;
+            for (std::size_t i = 0; i < shortIds; ++i, ++index)
+                edge.set(rinne::test::paramIdOfLength(254u, index), 0.0f);
+            for (std::size_t i = 0; i < longIds; ++i, ++index)
+                edge.set(rinne::test::paramIdOfLength(255u, index), 0.0f);
+            const std::string last = edge.entries.back().id;
+            if (!over)
+                CHECK(widthOf(edge) == rinne::state::kMaxParamBytes);
+            std::size_t edgeDropped = 99;
+            REQUIRE(rinne::state::trimToDecodable(edge, {}, edgeDropped));
+            CHECK(edgeDropped == (over ? 1u : 0u));
+            CHECK((edge.find(last) == nullptr) == over);
+            CHECK(widthOf(edge) <= rinne::state::kMaxParamBytes);
+        }
+    }
+
+    // 丢光了未知 id 还是超限：返回 false，但未知的已经被丢掉（这是「失败不碰出参」的例外），认识的一个不少。
+    {
+        rinne::state::Params partial;
+        std::vector<std::string> partialKnown;
+        for (std::uint32_t i = 0; i <= rinne::state::kMaxParamCount; ++i)
+        {
+            partialKnown.push_back("k" + std::to_string(i));
+            partial.set(partialKnown.back(), 0.0f);
+        }
+        for (int i = 0; i < 3; ++i)
+            partial.set("u" + std::to_string(i), 0.0f);
+        std::size_t partialDropped = 99;
+        CHECK_FALSE(rinne::state::trimToDecodable(partial, partialKnown, partialDropped));
+        CHECK(partialDropped == 3u);
+        CHECK(partial.entries.size() == partialKnown.size());
+        CHECK(partial.find("u0") == nullptr);
+        CHECK(partial.find("u2") == nullptr);
+        for (const auto& id : partialKnown)
+            CHECK(partial.find(id) != nullptr);
+    }
+
     // 认识的条目自己就超限：压不下去，返回 false，也不丢任何认识的。
     rinne::state::Params onlyKnown;
     std::vector<std::string> allKnown;

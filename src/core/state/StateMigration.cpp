@@ -19,7 +19,9 @@ StateLoadResult withStatus(StateLoadStatus status, std::uint32_t sourceAbi) noex
     return result;
 }
 
-// 容器上限：块数与单块长度。解码时查过一次；迁移函数可能改容器，迁移之后要再查一次。
+// 容器上限：块数与单块长度。解码时查过一次；迁移函数可能改容器，迁移之后要再查一次。块数这一半是防御性的：
+// 随后的 decodeDocument 要求「保留块数 + 已知块数 ≤ 上限」，更严，块数超限的容器在那里也过不了。单块长度才是只有
+// 这里拦得住的（未知块的长度 decodeDocument 不查）。
 bool containerWithinLimits(const Container& container) noexcept
 {
     if (container.chunks.size() > kMaxChunkCount)
