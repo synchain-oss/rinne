@@ -40,6 +40,10 @@ const SECTION_OK = /GPL|OFL|Apache|section|IEC|ISO|IEEE|ITU|AES|EBU|RFC/i;
 const sectionAllowed = (m, line, ctx) =>
     SECTION_OK.test(line.slice(Math.max(0, m.index - 12), m.index)) ||
     !!ctx.headings?.has(m[0].replace(/\D*(\d+).*/, "$1"));
+// 编译器的告警等级开关（等级 0–4，前面紧挨着斜杠或连字符）不是编号；开关必须单独成词：再往前是行首、空白、
+// 引号、括号或等号。路径里的一段（x/ 加 W 加数字）、裸写与括号里的写法照判
+const warnLevelAllowed = (m, line) =>
+    /^W[0-4]$/.test(m[0]) && /(?:^|[\s"'(=])[/-]$/.test(line.slice(Math.max(0, m.index - 2), m.index));
 
 // 规则的旗标：verbatimOk 逐字第三方目录里豁免；commentsOnly C/C++ 里只看注释与字符串；
 // binary 二进制文件也扫（只放与格式无关、误报极低的规则）；group "ai" 在 fork 档只告警。
@@ -61,7 +65,7 @@ export const RULES = [
     // 任务号与里程碑号；后面紧跟数字时不算（SVG 路径数据里满是 M12 2 这种形态）
     rule("upstream-tm", j(L, "[TM]", "\\d{2}", R, "(?![\\s,.]*-?\\d)"), "", VC),
     rule("upstream-adr", j(L, "AD", "R-?\\d{3}", R), "", V),
-    rule("upstream-w", j(L, "W", "\\d{1,2}", R), "", V),
+    rule("upstream-w", j(L, "W", "\\d{1,2}", R), "", { ...V, allow: warnLevelAllowed }),
     rule("erratum", j(L, "E", "-\\d{2}", R), "", V),
     // 括号里的私有编号；字母只取计划包实际用到的几个。仓内公开的编号都放行：场景号 S01、冻结条件 F1、
     // 音名 A4，以及本机 gates 的档名 G1–G9（会写成「Quick（G1–G5）」「[G1] 预检通过」）
@@ -399,6 +403,13 @@ export const CASES = [
     [null, '<path d="M12 2L4 6v6c0 5 8 10 8 10M10,10">', "web/shared/icons.js"],
     [null, j("float M", "11 = 0;\nT", "10 = 0.5f;"), "src/core/dsp/Matrix.cpp"],
     [null, "决策记录见 ADR-0007；1E-12 的误差；IEEE-754；W3C 规范"],
+    // 告警等级开关放行；裸写、括号里、路径里的一段、等级超出 0–4 照判
+    [null, j('target_compile_options(x PRIVATE "/W', '4" /utf-8) 与 cl -W', "3 a.cpp、cl /W", "0")],
+    ["upstream-w", j("沿用 W", "4 的约定")],
+    ["upstream-w", j("等级（W", "4）")],
+    ["upstream-w", j("见 plan/W", "4")],
+    ["upstream-w", j("cl /W", "5 a.cpp")],
+    ["upstream-w", j("cl /W", "15 a.cpp")],
     ["decision", j("决", "策 K1")],
     ["decision", j("用户决", "策 D", "4 已定")],
     // 括号编号：私有的判红，仓内公开的编号与常见记法放行
