@@ -666,8 +666,9 @@ bool isValidParamId(const std::string& id) noexcept
     return isParamIdBytes(bytesOf(id), id.size());
 }
 
-bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds) noexcept
+bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, std::size_t& dropped) noexcept
 {
+    dropped = 0;
     std::size_t bytes = 4u; // u32 count
     for (const auto& entry : params.entries)
         bytes += 1u + entry.id.size() + 4u;
@@ -688,6 +689,7 @@ bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds) n
             continue;
         bytes -= 1u + params.entries[i].id.size() + 4u;
         params.entries.erase(params.entries.begin() + static_cast<std::ptrdiff_t>(i));
+        ++dropped;
     }
     return params.entries.size() <= kMaxDecodedParamCount && bytes <= kMaxDecodedParamBytes;
 }

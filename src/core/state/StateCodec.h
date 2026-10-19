@@ -142,7 +142,9 @@ struct Params
 // 写出之前把列表压到下一次读得回来：不在 knownIds 里的条目从末尾起丢，直到条数 ≤ kMaxDecodedParamCount 且载荷 ≤
 // kMaxDecodedParamBytes；knownIds 里的条目一个不丢。写出的上限比读入的上限宽，参数层补完参数、编码之前要调用它，
 // 否则下一次加载会因超过读入上限而整份失败。返回 false 表示认识的条目自己就超过读入上限（列表已尽量压缩）。
-bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds) noexcept;
+// dropped 带回丢掉的条数（没丢就是 0）：丢弃不能悄悄发生，参数层要把它记进诊断计数。只有 PRMS 会丢；CFGS 的未知键读入时
+// 已经按写回预算整份校验过，读得进来就写得回去也读得回来，不需要这一步。
+bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, std::size_t& dropped) noexcept;
 bool isValidParamId(const std::string& id) noexcept;
 
 // 失败：条数超上限、某个 id 不合规、id 重复。上限是 kMaxParamCount（写回时的上限）。

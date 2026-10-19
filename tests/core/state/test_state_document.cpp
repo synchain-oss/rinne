@@ -271,7 +271,9 @@ TEST_CASE("document: 写出的 PRMS 压到下次读得回来", "[state][document
     CHECK(rinne::state::loadState(untrimmed.data(), untrimmed.size(), Role::Input, reread).status ==
           rinne::state::StateLoadStatus::Corrupt);
 
-    REQUIRE(rinne::state::trimToDecodable(document.params, known));
+    std::size_t dropped = 99;
+    REQUIRE(rinne::state::trimToDecodable(document.params, known, dropped));
+    CHECK(dropped == 11u);
     CHECK(document.params.entries.size() == rinne::state::kMaxDecodedParamCount);
     for (const auto& id : known)
         CHECK(document.params.find(id) != nullptr);
@@ -284,7 +286,15 @@ TEST_CASE("document: 写出的 PRMS 压到下次读得回来", "[state][document
     CHECK(rinne::state::loadState(trimmed.data(), trimmed.size(), Role::Input, back).status ==
           rinne::state::StateLoadStatus::Ok);
 
-    // 载荷字节同理：220 个 255 字节 id 读得进来，补 11 个最长的参数后超过读入的字节上限。
+    // 临界：213 个未知 id 加 11 个认识的正好 224 条，一条不丢；多 1 条未知，丢的恰是最末那条未知 id，认识的一个不少\n
+    // for (const std::size_t unknownCount : {std::size_t{213}, std::size_t{214}})\n    {\n        rinne::state::Params
+    // edge;\n        for (std::size_t i = 0; i < unknownCount; ++i)\n            edge.set("u" + std::to_string(i),
+    // 0.0f);\n        for (const auto& id : known)\n            edge.set(id, 1.0f);\n        std::size_t edgeDropped =
+    // 99;\n        REQUIRE(rinne::state::trimToDecodable(edge, known, edgeDropped));\n        CHECK(edgeDropped ==
+    // (unknownCount == 213u ? 0u : 1u));\n        CHECK(edge.entries.size() == rinne::state::kMaxDecodedParamCount);\n
+    // CHECK((edge.find("u213") != nullptr) == (unknownCount == 213u));\n        CHECK(edge.find("u212") != nullptr);\n
+    // for (const auto& id : known)\n            CHECK(edge.find(id) != nullptr);\n    }\n\n    // 载荷字节同理：220 个
+    // 255 字节 id 读得进来，补 11 个最长的参数后超过读入的字节上限。
     rinne::state::Params wide;
     for (std::size_t i = 0; i < 220u; ++i)
         wide.set(rinne::test::longestParamId(i), 0.0f);
@@ -294,7 +304,8 @@ TEST_CASE("document: 写出的 PRMS 压到下次读得回来", "[state][document
         wideKnown.push_back(rinne::test::longestParamId(1000u + i));
         wide.set(wideKnown.back(), 1.0f);
     }
-    REQUIRE(rinne::state::trimToDecodable(wide, wideKnown));
+    REQUIRE(rinne::state::trimToDecodable(wide, wideKnown, dropped));
+    CHECK(dropped > 0u);
     Bytes payload;
     REQUIRE(rinne::state::encodeParams(wide, payload));
     CHECK(payload.size() <= rinne::state::kMaxDecodedParamBytes);
@@ -309,7 +320,8 @@ TEST_CASE("document: 写出的 PRMS 压到下次读得回来", "[state][document
         allKnown.push_back("k" + std::to_string(i));
         onlyKnown.set(allKnown.back(), 0.0f);
     }
-    CHECK_FALSE(rinne::state::trimToDecodable(onlyKnown, allKnown));
+    CHECK_FALSE(rinne::state::trimToDecodable(onlyKnown, allKnown, dropped));
+    CHECK(dropped == 0u);
 }
 
 TEST_CASE("document: 编码拒绝会写出两份已知块或不认识的 role", "[state][document]")
