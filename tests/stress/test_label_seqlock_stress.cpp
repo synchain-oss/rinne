@@ -10,6 +10,8 @@
 // 两种摆放各跑一轮：标签在 256 字节对齐缓冲的偏移 0 与偏移 64。Apple M 系列一条缓存行 128 字节，偏移 0 时整个
 // 128 字节的标签落在一条线上，偏移 64 时跨两条线——撕开的读在跨线时更容易被看到。
 // x86 是 TSO，读方 fence 在那里只是编译器屏障，no_read_fence 变异在 x86 上仍然是绿的，只有原生 arm64 会变红。
+// no_read_fence 的变异构建里两种摆放一遍遍地跑，直到三条判据的命中合计攒够 20 次（封顶 25 s），不够就不算抓住
+// （见 StressMutation.h）；no_intent 不碰标签，这里照常跑一遍、照常该绿。两个变异构建里每一轮的非空转下限都必须达标。
 // 工作线程只用计数，断言在主线程 join 之后做；每一轮按时间封顶，不会挂死。
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,6 +23,7 @@
 #include <new>
 #include <thread>
 
+#include "StressMutation.h"
 #include "ipc/LabelSeqlock.h"
 #include "ipc/SegmentLayout.h"
 
@@ -28,6 +31,7 @@ namespace
 {
 
 using namespace rinne::ipc;
+using namespace rinne::stress;
 using Clock = std::chrono::steady_clock;
 
 constexpr u32 kRoundMs = 100;
@@ -175,25 +179,42 @@ Result runRound(std::size_t offset)
 TEST_CASE("a torn label read is always rejected or self-consistent", "[stress][seqlock]")
 {
     const std::size_t offsets[] = {0, 64};
-    for (const std::size_t offset : offsets)
+    // no_read_fence 的变异构建：三条判据合计命中了多少次
+    u64 hits = 0;
+    const auto start = Clock::now();
+    for (u32 pass = 1;; ++pass)
     {
-        INFO("label at offset " << offset);
-        const Result r = runRound(offset);
+        for (const std::size_t offset : offsets)
+        {
+            INFO("label at offset " << offset << " pass " << pass);
+            const Result r = runRound(offset);
 
-        // 三条判据各自独立：变异构建必须让至少一条变红
-        CHECK(r.badSelf == 0);
-        CHECK(r.badBracket == 0);
-        CHECK(r.badMonotonic == 0);
-        // 非空转下限：读方真的读到了足够多完整的版本，写方也真的发布了足够多
-        CHECK(r.accepted >= kMinAccepted);
-        CHECK(r.published >= kMinPublished);
+            // 三条判据各自独立：变异构建必须让至少一条变红
+            CHECK(r.badSelf == 0);
+            CHECK(r.badBracket == 0);
+            CHECK(r.badMonotonic == 0);
+            // 非空转下限：读方真的读到了足够多完整的版本，写方也真的发布了足够多
+            CHECK(r.accepted >= kMinAccepted);
+            CHECK(r.published >= kMinPublished);
 
-        std::printf("[stress][seqlock] offset=%llu published=%llu accepted=%llu rejected=%llu badSelf=%llu "
-                    "badBracket=%llu badMonotonic=%llu ms=%llu\n",
-                    static_cast<unsigned long long>(offset), static_cast<unsigned long long>(r.published),
-                    static_cast<unsigned long long>(r.accepted), static_cast<unsigned long long>(r.rejected),
-                    static_cast<unsigned long long>(r.badSelf), static_cast<unsigned long long>(r.badBracket),
-                    static_cast<unsigned long long>(r.badMonotonic), static_cast<unsigned long long>(r.millis));
-        std::fflush(stdout);
+            std::printf("[stress][seqlock] offset=%llu published=%llu accepted=%llu rejected=%llu badSelf=%llu "
+                        "badBracket=%llu badMonotonic=%llu ms=%llu\n",
+                        static_cast<unsigned long long>(offset), static_cast<unsigned long long>(r.published),
+                        static_cast<unsigned long long>(r.accepted), static_cast<unsigned long long>(r.rejected),
+                        static_cast<unsigned long long>(r.badSelf), static_cast<unsigned long long>(r.badBracket),
+                        static_cast<unsigned long long>(r.badMonotonic), static_cast<unsigned long long>(r.millis));
+            std::fflush(stdout);
+
+            requireNonVacuous(r.accepted >= kMinAccepted && r.published >= kMinPublished,
+                              "标签的一轮没有跑满非空转下限");
+            hits += r.badSelf + r.badBracket + r.badMonotonic;
+        }
+        const auto elapsed =
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count());
+        if (!anotherPass(kNoReadFence, hits, elapsed))
+        {
+            break;
+        }
     }
+    requireHits(kNoReadFence, hits, "标签读到了不自洽或越界的一版（badSelf + badBracket + badMonotonic）");
 }

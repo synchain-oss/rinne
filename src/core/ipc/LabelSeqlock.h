@@ -21,6 +21,8 @@
 //
 // 读失败时 out 不动：调用方可以把上一次成功读到的标签继续用于显示。本文件的读取只做无分配的无锁拷贝；
 // labelDisplayName 会分配（构造 std::string），只许非实时线程调用。
+// 标签是跨进程的不可信数据：上面那一份混写的、别的版本或有缺陷的对端写的，都可能带着被切断或拼接的 UTF-8。
+// 显示之前必须校验或清洗 UTF-8；拿 name_hash 核对名字时，以连续两次读到一致为准。
 #pragma once
 
 #include <atomic>
@@ -109,7 +111,8 @@ inline LabelPayload makeLabelPayload(std::string_view utf8Name, u32 colourArgb) 
     return p;
 }
 
-// 把 words 还原成显示用的前缀：遇到第一个 0 字节或满 112 字节为止。会分配，只许非实时线程调用
+// 把 words 还原成显示用的前缀：遇到第一个 0 字节或满 112 字节为止。字节原样交出、不校验 UTF-8（见文件头）。
+// 会分配，只许非实时线程调用
 inline std::string labelDisplayName(const LabelPayload& p)
 {
     std::string out;

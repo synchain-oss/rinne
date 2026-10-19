@@ -249,16 +249,19 @@ TEST_CASE("a second writer stays out while a chunk is in flight", "[ipc][ring]")
     std::unique_ptr<float[]> left(new float[600]);
     std::unique_ptr<float[]> right(new float[600]);
 
-    // 外层 500 帧公告之后、第一次填样本时，嵌套一个第二写方：它看见 intent 领先 W，什么都不写
+    // 外层 500 帧公告之后、第一次填样本时，嵌套一个第二写方：它看见 intent 领先 W，什么都不写。它的帧与外层重叠、
+    // 随后会被外层盖掉，所以「一个样本都没写」要直接核：它的 source 一次都不许被调用
     for (const u32 nestedFrames : {50u, 500u})
     {
         INFO("nested " << nestedFrames);
         const u64 start = LoopRing::writeHead(*seg);
         RingWriteResult nested = RingWriteResult::kOk;
+        u32 nestedCalls = 0;
         const RingWriteResult outer = LoopRing::write(*seg, 500, [&](u32 i, u64 p, float& l, float& r) {
             if (i == 0)
             {
-                nested = LoopRing::write(*seg, nestedFrames, [](u32, u64, float& nl, float& nr) {
+                nested = LoopRing::write(*seg, nestedFrames, [&nestedCalls](u32, u64, float& nl, float& nr) {
+                    ++nestedCalls;
                     nl = 1.0f;
                     nr = 1.0f;
                 });
@@ -267,6 +270,7 @@ TEST_CASE("a second writer stays out while a chunk is in flight", "[ipc][ring]")
             r = encodeR(p);
         });
         CHECK(nested == RingWriteResult::kInFlight);
+        CHECK(nestedCalls == 0u);
         CHECK(outer == RingWriteResult::kOk);
         CHECK(seg->header.w_cas_fail.load() == 0u);
         CHECK(LoopRing::writeHead(*seg) == start + 500);
