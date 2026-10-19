@@ -102,12 +102,13 @@ export function summaryFacts(body) {
 
 /**
  * bot 总结里逐条意见：`## 【红旗】`、`## 【重要】`、`## 【建议】` 节内顶格的列表项，口径与 review-bot 的
- * sectionCounts 相同（跳过代码块、「无」不算、三级以下标题不打断）。没开 thread 的意见靠它列出来。
+ * sectionCounts 相同（跳过代码块、「无」不算、三级以下标题不打断，只有【建议】下的小标题结束计数）。没开 thread 的意见靠它列出来。
  */
 export function summaryItems(body) {
     const items = [];
     let level = null;
     let fence = false;
+    let counting = true;
     for (const l of body.replace(/\r\n/g, "\n").split("\n")) {
         if (/^\s*(?:```|~~~)/.test(l)) {
             fence = !fence;
@@ -115,12 +116,14 @@ export function summaryItems(body) {
         }
         if (fence) continue;
         const h = /^(#{1,6})\s/.exec(l);
+        if (h && h[1].length > 2 && level === "建议") counting = false;
         if (h && h[1].length <= 2) {
             level = /^##\s+【(红旗|重要|建议)】/.exec(l)?.[1] || null;
+            counting = true;
             continue;
         }
         const item = /^(?:[-*+]|\d+[.)])\s+(\S.*)$/.exec(l);
-        if (level && item && !/^无[。.]?\s*$/.test(item[1])) items.push({ level, text: item[1] });
+        if (level && counting && item && !/^无[。.]?\s*$/.test(item[1])) items.push({ level, text: item[1] });
     }
     return items;
 }
@@ -188,6 +191,13 @@ export function selfTest() {
     t("reviewState：标记不在首行不算总结", false, summaries(`## 引用\n${mark}\n`).summaries.length !== 0);
     t("reviewState：CRLF 仍算总结", false, summaries(body.replace(/\n/g, "\r\n")).summaries.length !== 1);
     t("reviewState：BOM 仍算总结", false, summaries(`\uFEFF${body}`).summaries.length !== 1);
+    const gap = (imp) => `## 【红旗】\n无\n## 【重要】\n${imp}\n## 【建议】\n- k1\n### 增量核对\n- c1\n- c2\n`;
+    const levels = (text) =>
+        summaryItems(text)
+            .map((i) => i.level)
+            .join(",");
+    t("summaryItems：【建议】下小标题里的 bullet 不列为意见", false, levels(gap("无")) !== "建议");
+    t("summaryItems：【重要】下小标题里的 bullet 仍列为意见", false, levels(gap("### x\n- hidden")) !== "重要,建议");
     t(
         "reviewState：带出 updated_at 与正文 sha256",
         false,
