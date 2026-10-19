@@ -21,6 +21,18 @@
 #include "state/StateDocument.h"
 #include "state/StateMigration.h"
 
+// TSan 的运行库（libclang_rt.tsan_cxx）自己定义了全局 operator new/delete，再替换会重复定义、链接失败；这组用例在 TSan
+// 构建下跳过（ASan 构建允许用户替换，照常运行）。
+#if defined(__SANITIZE_THREAD__)
+#define RINNE_STATE_ALLOC_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define RINNE_STATE_ALLOC_TSAN 1
+#endif
+#endif
+
+#ifndef RINNE_STATE_ALLOC_TSAN
+
 namespace
 {
 
@@ -367,3 +379,12 @@ TEST_CASE("allocation: 复制高 abi 原字节失败时只返回 Corrupt", "[sta
     }
     CHECK(failures == allocations);
 }
+
+#else
+
+TEST_CASE("allocation: 分配失败注入在 TSan 构建下跳过", "[state][allocation]")
+{
+    SKIP("TSan 运行库已定义全局 operator new/delete，替换会重复定义；分配失败注入由其他构建覆盖");
+}
+
+#endif
