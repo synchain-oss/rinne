@@ -95,7 +95,8 @@ struct LoadRow
 };
 
 const std::array<LoadRow, 8> kLoadRows{{
-    {"zero bytes", "empty", "", "| 零字节 | `Empty` | 保持当前（尚未定型时即默认），不提示 | 否 |"},
+    {"zero bytes", "empty", "",
+     "| 零字节 | `Empty` | 保持当前：实例此刻的 state（还没读入过成功的 state 时就是默认值），不提示 | 否 |"},
     {"short header or wrong magic", "corrupt", "",
      "| 不足 16 字节，或 magic 不符 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |"},
     {"abi above this build, role of this end", "rejectedNewer",
@@ -150,9 +151,24 @@ std::vector<Invariant> schemaInvariants()
         {"apply-after-settle", "定型之后收到的 state（宿主预设、A/B、撤销）只改参数",
          "after it settles, later states only change parameters"},
         {"settle-definition",
-         "定型指第一次界面上的用户动作，只算这几类：`beginGesture` 起的参数改动、界面上的设置改动、手选组、确认接管",
-         "settling happens at the first user action in the UI: a gesture-begun parameter edit, a setting edit in the "
+         "定型指第一次界面上的用户动作，只算这几类：经桥由界面发起的参数改动（`beginParamGesture` 起的拖动，以及 "
+         "`setLimiter` 这类单击）、界面上的设置改动、手选组、确认接管",
+         "settling happens at the first user action in the UI: a parameter edit sent from the UI through the bridge (a "
+         "beginParamGesture drag or a setLimiter click), a setting edit in the "
          "UI, a manually picked group, confirming a takeover; host-sent values and automation do not count"},
+        {"sequence-default-then-project", "默认预设或旧 state 在前、工程在后：工程的 CFGS 生效",
+         "wiring sequence: a default preset or old state first, the project second, the project's CFGS takes effect"},
+        {"sequence-claim-then-project", "智能默认先认领、工程 state 后到：工程的组生效",
+         "wiring sequence: smart default claims first, project state arrives later, the project's group takes effect"},
+        {"sequence-newer-then-ok",
+         "更高 abi 在前、旧版 `Ok` 在后：旧版 `Ok` 全量应用，保留的原字节被清掉，保存时写旧版",
+         "wiring sequence: higher abi first, older Ok second, the Ok applies in full, kept bytes are cleared, save "
+         "writes the older state"},
+        {"sequence-ok-then-newer", "旧版 `Ok` 在前、更高 abi 在后：进入原样回写，保存时交回新版原字节",
+         "wiring sequence: older Ok first, higher abi second, write-back starts, save hands back the newer original "
+         "bytes"},
+        {"sequence-edit-then-preset", "用户在界面上改过之后再来宿主预设或 A/B：只改参数，组不动",
+         "wiring sequence: after a UI edit, a host preset or A/B changes parameters only, the group stays"},
         {"claims-not-settle", "任何认领（包括智能默认的 provisional 认领和工程恢复的认领）也不算定型",
          "no claim settles the instance, because a provisional claim is meant to be preempted by a later project "
          "state"},
@@ -578,7 +594,12 @@ TEST_CASE("golden: 契约文档区分应用方式与写回保护", "[state][gold
     checkInvariant(doc, schema, "claims-not-settle");
     checkInvariant(doc, schema, "settle-residue");
     checkInvariant(doc, schema, "not-a-load");
-    CHECK(doc.find("接线时要验四条 setState 序列") != std::string::npos);
+    checkInvariant(doc, schema, "sequence-default-then-project");
+    checkInvariant(doc, schema, "sequence-claim-then-project");
+    checkInvariant(doc, schema, "sequence-newer-then-ok");
+    checkInvariant(doc, schema, "sequence-ok-then-newer");
+    checkInvariant(doc, schema, "sequence-edit-then-preset");
+    CHECK(doc.find("接线时要验五条 setState 序列") != std::string::npos);
     CHECK(doc.find("正在保留原字节时仍交回保留的那份") != std::string::npos);
     checkInvariant(doc, schema, "rejected-newer-any-setstate");
     checkInvariant(doc, schema, "write-back-replaced");
