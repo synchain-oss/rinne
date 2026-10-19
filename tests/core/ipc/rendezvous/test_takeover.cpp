@@ -3,6 +3,8 @@
 // 接管：死进程（pid 真的死了，观察 5 s）、活着的外进程（永远不接）、幽灵认领（claiming 卡住 1 s）、
 // 休眠槽（死进程 5 s；同进程的活实例只有用户确认才拿，拿完之后原属主的 prepare 输掉 CAS）、
 // 同进程孤儿（30 s 不动才接）。观察时长与心跳/block_seq 的静止一起算，所以每个边界都要在「差 1 ms」上验一次。
+// 冲突期间的自动重试每 1 s 一次，落不到「差 1 ms」那一刻上：用例在边界前 1 ms 与边界上各用同组 setGroup 给一次显式
+// 意图，让实例当场再试，这样两次尝试都真的发生了，判定的是阈值本身而不是重试节拍。
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -43,13 +45,17 @@ TEST_CASE("a dead foreign process is taken over after five seconds, not before",
     CHECK(r.state() == RendezvousState::kConflict);
     CHECK(slot.ctl.load() == old);
 
-    // 观察 4 s 时还不够；之后要等到下一个 1 s 的重试点，正好是 5 s
+    // 自动重试：观察 4 s 时还不够
     r.tick(kT0 + RendezvousTiming::kDeadMs - 1000);
     CHECK(r.state() == RendezvousState::kConflict);
     CHECK(slot.ctl.load() == old);
+    // 差 1 ms：当场再试一次，仍然不接
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kDeadMs - 1);
     r.tick(kT0 + RendezvousTiming::kDeadMs - 1);
     CHECK(r.state() == RendezvousState::kConflict);
     CHECK(slot.ctl.load() == old);
+    // 正好 5 s：接管
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kDeadMs);
     r.tick(kT0 + RendezvousTiming::kDeadMs);
     CHECK(r.state() == RendezvousState::kActive);
     CHECK(ctlPhase(slot.ctl.load()) == kCtlPhaseActive);
@@ -110,9 +116,11 @@ TEST_CASE("a ghost claim is taken over after one second of watching the same wor
     r.prepare({48000, 512, 2}, kT0);
     r.tick(kT0);
     CHECK(r.state() == RendezvousState::kConflict);
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kGhostMs - 1);
     r.tick(kT0 + RendezvousTiming::kGhostMs - 1);
     CHECK(r.state() == RendezvousState::kConflict);
     CHECK(slot.ctl.load() == old);
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kGhostMs);
     r.tick(kT0 + RendezvousTiming::kGhostMs);
     CHECK(r.state() == RendezvousState::kActive);
     CHECK(ctlGen(slot.ctl.load()) == 5u); // 3 -> 4 claiming -> 5 active
@@ -142,8 +150,11 @@ TEST_CASE("a dormant dead process is taken over as a dead process, not as dorman
     r.tick(kT0 + RendezvousTiming::kDeadMs - 1000);
     CHECK(r.state() == RendezvousState::kConflict);
     CHECK(slot.ctl.load() == old);
+    // kManual 同样不拿休眠槽：当场再试只可能走死进程那一档
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kDeadMs - 1);
     r.tick(kT0 + RendezvousTiming::kDeadMs - 1);
     CHECK(r.state() == RendezvousState::kConflict);
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kDeadMs);
     r.tick(kT0 + RendezvousTiming::kDeadMs);
     CHECK(r.state() == RendezvousState::kActive);
     CHECK(ctlGen(slot.ctl.load()) == 6u); // 4 -> 5 claiming -> 6 active
@@ -173,10 +184,16 @@ TEST_CASE("a dormant slot of our own process needs a confirmed takeover", "[ipc]
     second.prepare(format, t1);
     second.tick(t1); // 观察到休眠槽，kManual 不拿
     CHECK(second.state() == RendezvousState::kConflict);
-    second.tick(t1 + RendezvousTiming::kDormantMs); // 满了 2 s，但意图还是 kManual：仍不拿
-    CHECK(second.state() == RendezvousState::kConflict);
 
-    // 用户确认接管：同组再给一次意图，立刻再试
+    // 用户确认接管：同组再给一次意图，当场再试。休眠不满 2 s 时确认了也不拿
+    second.setGroup(8, ClaimIntent::kManualConfirmed, t1 + RendezvousTiming::kDormantMs - 1);
+    second.tick(t1 + RendezvousTiming::kDormantMs - 1);
+    CHECK(second.state() == RendezvousState::kConflict);
+    // 满了 2 s，但意图是 kManual：仍不拿
+    second.setGroup(8, ClaimIntent::kManual, t1 + RendezvousTiming::kDormantMs);
+    second.tick(t1 + RendezvousTiming::kDormantMs);
+    CHECK(second.state() == RendezvousState::kConflict);
+    // 同一时刻确认：拿
     second.setGroup(8, ClaimIntent::kManualConfirmed, t1 + RendezvousTiming::kDormantMs);
     second.tick(t1 + RendezvousTiming::kDormantMs);
     CHECK(second.state() == RendezvousState::kActive);
@@ -209,13 +226,15 @@ TEST_CASE("a same-process orphan is taken over at thirty seconds, not at 29999 m
     r.tick(kT0);
     CHECK(r.state() == RendezvousState::kConflict);
 
-    // 观察 29 s 还不够；之后的重试点落在 30 s
+    // 自动重试：观察 29 s 还不够
     r.tick(kT0 + RendezvousTiming::kOrphanMs - 1000);
     CHECK(r.state() == RendezvousState::kConflict);
     CHECK(slot.ctl.load() == old);
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kOrphanMs - 1);
     r.tick(kT0 + RendezvousTiming::kOrphanMs - 1);
     CHECK(r.state() == RendezvousState::kConflict);
     CHECK(slot.ctl.load() == old);
+    r.setGroup(4, ClaimIntent::kManual, kT0 + RendezvousTiming::kOrphanMs);
     r.tick(kT0 + RendezvousTiming::kOrphanMs);
     CHECK(r.state() == RendezvousState::kActive);
     CHECK(ctlGen(slot.ctl.load()) == 7u);

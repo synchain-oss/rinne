@@ -10,7 +10,8 @@ status: draft
 - **Lifetime**: backends and handles may be destroyed in either order; handle control blocks are kept until process exit, so handles are created on load and regroup only, never per tick.
 - **Truth**: `src/core/ipc/SegmentLayout.h` mirrors this document; `tests/golden/ipc-layout.json` is checked against it twice (compiled in `rinne_core_tests`, uncompiled by `contract-static-ipc`). Any layout change bumps `kIpcAbi`.
 - **Memory order**: the data plane is specified here: the ring (the write intent is advanced from at most the write head, so a second writer stays out while a chunk is announced but not yet published, and a chunk abandoned by a dead writer is zero-filled and published after one second of blocked audio, which is why writers must go through `RingWriter`; release fence, samples, release CAS on the write head; readers discard every frame older than one lap before the intent they load after an acquire fence), the label seqlock and the binding snapshot the audio thread reads. Two mutation builds (no read fence, no write intent) must turn the native arm64 stress red, and each stress case must first prove its own mechanism was hit at least 20 times, otherwise the run ends without a test summary and does not count as caught. The one residual window (a writer suspended mid-chunk while its chunk is reclaimed and lapped) is the only exception to never reading aliased data. Labels are untrusted cross-process data.
-- **Status**: draft until the probe week; the slot ownership transition table and its time thresholds are completed together with the rendezvous code.
+- **Ownership**: every endpoint-slot transition is a whole-word CAS on `ctl` that bumps `gen`. A slot is taken over only on evidence the observer has watched for long enough: a stuck claim after 1 s, a slot of another process after 5 s of stillness with a dead pid, a slot of our own process after 30 s, a dormant slot after 2 s but only for a project restore or a confirmed user choice; a provisional (smart-default) claim yields to a project restore. Apart from those two intent-driven cases, a slot held by a live process is never taken over. Owners heartbeat every 250 ms, rewrite their identity fields and re-read their label each heartbeat. A peer is lost when its heartbeat is older than 2 s and its block counter has been still for 2 s, never during an offline export. The last instance to be destroyed reaps the remaining mappings immediately.
+- **Status**: draft until the probe week.
 
 ## 范围
 
@@ -97,7 +98,7 @@ status: draft
 
 标签只有属主在 `ctl` 仍是自己最后写下的整字时才写（安全不变量：环头与标签头只由该槽的属主写）。
 
-**ctl**：低 32 位 `state` 的低 2 位是阶段（0 空闲、1 认领中、2 活跃、3 休眠），第 2 位是 provisional（智能默认的认领，可被工程 state 的恢复抢占），其余位为 0；高 32 位 `gen`。认领、幽灵或死进程接管、provisional 抢占、休眠、恢复、释放，每一次转移都对整字 CAS，并且 `gen + 1`。属主记住自己最后写下的整字，每拍比对一次；整字变了就说明被接管过。这样双接管恰好一个胜者、释放的检查与动作之间不会被插队，也没有 ABA（同一个整字再出现要 2³² 次转移）。转移表与时间阈值随会合实现一起补入本文。
+**ctl**：低 32 位 `state` 的低 2 位是阶段（0 空闲、1 认领中、2 活跃、3 休眠），第 2 位是 provisional（智能默认的认领，可被工程 state 的恢复抢占），其余位为 0；高 32 位 `gen`。认领、幽灵或死进程接管、provisional 抢占、休眠、恢复、释放，每一次转移都对整字 CAS，并且 `gen + 1`。属主记住自己最后写下的整字，每拍比对一次；整字变了就说明被接管过。这样双接管恰好一个胜者、释放的检查与动作之间不会被插队，也没有 ABA（同一个整字再出现要 2³² 次转移）。转移表与时间阈值见「端点槽的归属」。
 
 ## 数据段 `g{G}`（abi 1，540 672 字节）
 
@@ -176,24 +177,85 @@ status: draft
 
 **验证宿主**（pluginval、auval 等）下 IPC 整体关闭、只出干声，状态 `validator`：验证与维护者开着的 DAW、并行的测试互不干扰。
 
+## 端点槽的归属
+
+会合层（[`src/core/ipc/Rendezvous.h`](../../src/core/ipc/Rendezvous.h)、[`src/core/ipc/SlotObserver.h`](../../src/core/ipc/SlotObserver.h)）全部跑在消息线程上：壳的 25 Hz 定时器调用 `tick`，时间一律由调用方传入（跨进程单调毫秒），不睡、不阻塞、不抛出。
+
+**时间阈值**（`RendezvousTiming`，毫秒）
+
+| 常数 | 值 | 用途 |
+|---|---|---|
+| `kHeartbeatMs` | 250 | 属主写 `heartbeat_ms`、重写身份字段、核对标签；观察者也按它扫描 |
+| `kGhostMs` | 1000 | 认领中卡住（幽灵认领） |
+| `kDeadMs` | 5000 | 外进程的槽：静止够久且 pid 已死才接管 |
+| `kOrphanMs` | 30000 | 本进程的槽：同一个消息线程 30 s 没动过，那个实例已经不在了 |
+| `kDormantMs` | 2000 | 休眠槽可以被工程恢复或用户确认拿走 |
+| `kConflictRetryMs` | 1000 | 冲突与 abi 不兼容时的重试间隔 |
+| `kLostHeartbeatMs`、`kLostStillMs` | 2000、2000 | 对端失联：心跳陈旧且 `block_seq` 静止 |
+
+**每一拍的顺序**
+
+1. 先回收：`SegmentHandle::reapRetired(now)` 与本实例退役句柄的计时，没分组、没 prepare 也照做。
+2. 退避没到点就到此为止（时钟倒退得比整个退避窗口还多时立刻重试）。
+3. 会合段没开就开：`kBusy` 立刻解映射、按 `RetryBackoff` 定下次的时刻，拿到别的结果就从头计；`kAbiMismatch` 在视图不小于 `kRvMinBytes` 时读对端槽 `version` 的绝对位置，解映射，停在「版本不兼容」，每 1 s 重看一次；`kFailedDenied`、`kFailedBadName` 永久 `ipcUnavailable`，换组也不再试；其余失败下一拍重试。
+4. 观察者到点（每 250 ms，时钟倒退时立刻）扫一遍全部 16 个槽。
+5. 持有槽就走属主一拍；没持有而已 prepare 就走认领一拍；没 prepare 不认领（`releaseResources` 关上认领的门，`prepare` 打开）。
+6. 持有活跃槽而数据段还没开就开它（失败处理同第 3 步）；开好后 Output 发布写权，然后发布绑定。只有数据段开好、绑定已发布才是 `active`。
+
+**观察**：每个槽 acquire 读 `ctl` → 各字段 relaxed 读 → 再 acquire 读 `ctl`，两次相同才算稳定，不稳定的样本不做任何接管判定。每个槽记两个起点：同一个 `ctl`、同一个 `block_seq` 从哪一次扫描起没变过；值变了或时钟倒退就从这次扫描重新计。下表的「静止」一律按这两个起点算，不按槽里写的时间戳算：槽里的 `claim_ms` 可能还是上一任留下的。时间戳为 0 按最陈旧，晚于现在按刚刚，未来的时间戳不能把对端说成活的。认领一拍只在观察者手里的样本与当前整字相同时才用它判定。
+
+**转移表**：每一次转移都是对整字的 CAS，并且 `gen + 1`。认领方的 expected 是它刚读到、并与稳定样本对上的整字，属主的 expected 是自己最后写下的整字；CAS 失败什么都不写。
+
+| 从 | 到 | 谁 | 条件 |
+|---|---|---|---|
+| 空闲 | 认领中 | 已 prepare 的认领方 | 无；智能默认（`kSmart`）的认领带 provisional 位 |
+| 认领中（自己的） | 活跃 | 认领方 | 先写 `heartbeat_ms` 与身份字段（`pid`、`host_ppid`、`claim_ms`、`dormant_ms`、`format`、`version`、`cfg_flags`、格式字段），再 CAS（release 让这些字段对读方可见）；provisional 位保留 |
+| 认领中（别人的） | 认领中 | 认领方 | 幽灵：同一个 `ctl` 静止 ≥ 1 s，`claim_ms` 也老于 1 s |
+| 活跃 + provisional | 认领中 | 意图为工程恢复（`kRestore`）的认领方 | 不看 pid 与年龄 |
+| 活跃或休眠，外进程 | 认领中 | 认领方 | `heartbeat_ms` 的年龄、`block_seq` 与 `ctl` 的静止都 ≥ 5 s，且 pid 已死（探活放在最后，拿不准一律按活） |
+| 活跃或休眠，本进程 | 认领中 | 认领方 | 同上三项都 ≥ 30 s |
+| 休眠 | 认领中 | 意图为 `kRestore` 或用户确认（`kManualConfirmed`）的认领方 | `dormant_ms` 的年龄与 `ctl` 的静止都 ≥ 2 s |
+| 活跃 | 休眠 | 属主（`releaseResources`） | 写 `dormant_ms`，重新发布绑定 |
+| 休眠 | 活跃 | 属主（`prepare`） | `claim_ms` 不变，重写格式字段，Output 重新发布写权，重新发布绑定 |
+| 活跃 + provisional | 活跃 | 属主（`confirmClaim`） | 重新发布绑定 |
+| 自己的任何阶段 | 空闲 | 属主（换组、析构） | 先撤下绑定；Output 先把 `writer_token` 从自己的 token CAS 到 0 |
+
+- 活着的外进程持有（活跃或休眠）的槽只在两种情形下被拿走：provisional 被工程恢复抢占，休眠槽被工程恢复或用户确认拿走；无论看起来多陈旧，都不会被自动接管。
+- 判定之外的情形一律进冲突（`kConflict`）：每 1 s 用 `kConflictRetry` 重试一次，它永远不拿休眠槽。同一组再调 `setGroup`、给出 `kConflictRetry` 以外的意图（例如工程恢复、用户确认）时不等这 1 s，下一拍就按新意图试。
+- 输了认领 CAS，或自己的认领中被别人判成幽灵（换活跃的 CAS 失败）：什么都不写，进冲突。
+
+**属主的每一拍**
+
+- 自检：acquire 读 `ctl`，不等于自己最后写下的整字就是被接管了：撤下绑定、数据段句柄退役、写权 token 清零，进冲突，不再写槽里任何字段。`prepare`、`releaseResources`、`confirmClaim` 动槽之前同样先核整字。
+- 心跳（距上次 ≥ 250 ms，或时钟倒退）：写 `heartbeat_ms`，再从本地副本重写一遍身份字段：上一任丢槽瞬间晚到的字段写，最迟一个心跳就被改回来。
+- 标签：标脏就写；心跳那一拍不脏也读回来与本地副本比，不一致就重写，这兑现了「标签 seqlock」一节说的「下一个心跳内修好」，也补上了核整字与写标签之间的检查与动作间隙。`label_seq` 在心跳上连续停在同一个奇数满两个心跳（≥ 500 ms）才用 `rewriteStuckLabel` 接手；中间奇数换了就从头计，序号回到偶数就照常写。
+
+**对端失联**：对端的槽被占着、`heartbeat_ms` 陈旧超过 2 s，**并且** `block_seq` 静止 ≥ 2 s。本地在离线导出（`setNonrealtime`）或对端 `rt_flags` 的离线位置位时一律不判：导出时宿主可能饿死消息线程，心跳陈旧而音频还在跑。失联只是界面状态，不触发接管，接管只走上面的转移表。
+
+**放开与回收**
+
+- 放开（换组、析构）不去「修」：`ctl` 的 CAS 失败说明槽已经是别人的，什么都不做。数据段句柄先退役 250 ms 才释放（撤下之前取到绑定的音频线程可能还在用），之后映射表还有自己的 500 ms 宽限。
+- 最后一个实例析构时，之后再没有 25 Hz 定时器替它回收，模块可能马上被卸载。它在析构里读真实时钟（会合层只在这里读），连调两次回收，第二次的时间在宽限期之后：租约计数为 0 的映射立刻解映射、关平台句柄；租约在途的跳过，留到进程退出（控制块本来就到进程退出才释放）。
+- 验证宿主：`ipcEnabled` 为 false 时 `tick` 只把状态置为 `validator`，什么段都不打开。
+
 ## 内存序
 
-本节规定数据面的内存序：环、标签 seqlock 与绑定的发布。会合段端点槽的转移表与时间阈值随会合实现补入。
+本节规定数据面的内存序：环、标签 seqlock 与绑定的发布。端点槽的转移见「端点槽的归属」。
 
 **环**（[`src/core/ipc/LoopRing.h`](../../src/core/ipc/LoopRing.h)）。写方只有槽属主 Output 的音频线程，每段不超过 8192 帧，更长的块由调用方切段。**写方必须经 `RingWriter` 写环**：每块先查 `isWriter`，换写方、换段或采样率改变时 `reset`；它负责下面说的回收。直接调用 `LoopRing::write` 的写方碰上写到一半死掉的上一任，会永远拿到 `kInFlight`，这一组从此静音。
 
 - 写：读 W（acquire）→ 读 `write_intent`：它已经领先 W，说明别人公告的一段还没发布（另一个写方正在写，或者写到一半死了），这一段一个样本都不写，返回 `kInFlight`；否则把它从这个不大于 W 的值 CAS 到 W + k（relaxed）→ release fence → 样本 relaxed 写 → W 从旧值 CAS 到 W + k（release）。
 - 读：先 acquire 读 W，只读 p < to ≤ W 的帧，也不读比 to − 65536 更早的帧（W − 65536 之前的帧随后一定被判废）→ 样本 relaxed 读 → acquire fence → 读 `write_intent`（relaxed）。凡 p < `write_intent` − 65536（有符号运算）的帧都视为可能已被覆盖，按 0 处理。
 - 为什么对：W 的 acquire 与写方 W 的 release CAS 配对，读到的每一帧至少是它自己那一圈的值，否则就是更晚一圈的。拷贝中若读到更晚的某段 C 写下的样本，那个样本写在 C 的 release fence 之后，读侧的 acquire fence 与 C 的 fence 同步，随后读到的 `write_intent` 不小于 C 的目标位置；C 覆盖掉的每一帧都小于 C 的目标 − 65536，于是落进判废范围。正确性只靠这对 fence，不靠「余量大于块长」之类的假设。
-- `write_intent` 同时是写方之间的互斥，而且只进不退：只有一个写方时它恒等于 W，检查从不触发；接管瞬间新旧两个写方都活着时，它们按段轮流写，谁也不会把对方已经发布的帧换成别的位置的数据（压测有两个写方同时写的一组）。写到一半死掉的写方会让 `write_intent` 一直领先 W：现任写方连续被挡满 1 s 的音频（`RingWriter` 按本写方的帧数计，不读时钟）就把 [W, `write_intent`) 的最后一圈填零，再把 W CAS 到 `write_intent`，环不会被永远卡住；填零之前的 release fence 让读方照常排除被覆盖的旧帧。W 的 CAS 失败（`w_cas_fail + 1`）只会出现在这次回收与那个卡住的写方之间。
-- 剩下的唯一窗口：旧写方在公告之后、写完样本之前被挂起，挂起期间它那一段被回收、新写方又写满一圈，它醒来接着写，晚到的样本落进新一圈已经发布的槽。读方排除不了这些帧，会把别的位置的数据当成有效数据，这是安全不变量「永不读旧数据或别名数据」的唯一例外。量级：实时速率下旧写方要被挂起 ≥ 1 s 加一圈（48 kHz 约 2.4 s）；回收阈值按帧计，比实时快的渲染（离线导出）会把它压到几十毫秒的墙钟。两个写方同时活着只出现在接管之后：外进程死了（≥ 5 s 的静止证据且 pid 已死，不会再醒）、本进程内的实例 30 s 没有任何动静、provisional 的认领被工程恢复抢占、休眠槽被工程恢复或用户确认拿走（旧写方已停用，不在写）；第二、三种情形里旧写方还活着，下一块自检写权就停下，窗口只在它恰好挂在一段中间时才打开。
+- `write_intent` 同时是写方之间的互斥，而且只进不退：只有一个写方时它恒等于 W，检查从不触发；接管瞬间新旧两个写方都活着时，它们按段轮流写，谁也不会把对方已经发布的帧换成别的位置的数据（压测有两个写方同时写的一组）。写到一半死掉的写方会让 `write_intent` 一直领先 W：现任写方连续被挡满 1 s 的音频（`RingWriter` 按本写方的帧数计，不读时钟）就把 [W, `write_intent`) 的最后一圈填零，再把 W CAS 到 `write_intent`，环不会被永远卡住；填零途中每 1024 帧看一眼 W，卡住的写方在这期间自己发布了就立刻停手（它的帧是真的，被盖成静音的最多是开头一小段）；填零之前的 release fence 让读方照常排除被覆盖的旧帧。W 的 CAS 失败（`w_cas_fail + 1`）只会出现在这次回收与那个卡住的写方之间。
+- 剩下的唯一窗口：旧写方在公告之后、写完样本之前被挂起，挂起期间它那一段被回收、新写方又写满一圈，它醒来接着写，晚到的样本落进新一圈已经发布的槽。读方排除不了这些帧，会把别的位置的数据当成有效数据，这是安全不变量「永不读旧数据或别名数据」的唯一例外。回收途中每 1024 帧复查 W，管的是卡住的写方在回收期间自己醒来发布的情形（回收立刻停手）；它在回收完成之后才醒来，复查就管不到了，这正是本条的窗口。量级：实时速率下旧写方要被挂起 ≥ 1 s 加一圈（48 kHz 约 2.4 s）；回收阈值按帧计，比实时快的渲染（离线导出）会把它压到几十毫秒的墙钟。两个写方同时活着只出现在接管之后：外进程死了（≥ 5 s 的静止证据且 pid 已死，不会再醒）、本进程内的实例 30 s 没有任何动静、provisional 的认领被工程恢复抢占、休眠槽被工程恢复或用户确认拿走（旧写方已停用，不在写）；第二、三种情形里旧写方还活着，下一块自检写权就停下，窗口只在它恰好挂在一段中间时才打开。
 - `epoch`、`writer_token` 与 `sample_rate`：写方先写 `sample_rate` 与 `src_channels`（relaxed），再以 release 写 `epoch`（只在采样率改变或首次发布时 + 1）与 `writer_token`；读方先 acquire 读 `epoch` 与 `writer_token`，再读 `sample_rate`。发布写权从不动 W 与 `write_intent`（W 不清零）。交出写权是 `writer_token` 从自己的 token 到 0 的 CAS，别人的 token 不动。
 
 **标签 seqlock**（[`src/core/ipc/LabelSeqlock.h`](../../src/core/ipc/LabelSeqlock.h)，端点槽 128–255 字节）
 
 - 写：只有属主、只在 `ctl` 仍是自己最后写下的整字时写。`label_seq` 是偶数 s 时 CAS 到 s + 1（relaxed）→ release fence → 各字段 relaxed 写 → `label_seq` 以 release 从 s + 1 CAS 到 s + 2。读到奇数或 CAS 输了就放弃这一次：接管瞬间旧属主与新属主撞上时后到的一方退让，序号不会被两个写方搅乱。
 - 读：`label_seq` acquire 读到 s1，奇数就放弃 → 各字段 relaxed 读 → acquire fence → 再读 `label_seq`（relaxed），等于 s1 才算读到完整的一份。读到的字段若被下一次写改过，那次写的 release fence 与读侧的 acquire fence 同步，第二次读到的序号必然已经变了。
-- 接手：上一任写到一半就死了、`label_seq` 停在奇数 s 上时，普通的写一直退让。新属主等同一个奇数停够之后（由会合层按心跳判断），把它从 s CAS 到 s + 2（仍是奇数，表示正在写），写完整的一份再以 release 从 s + 2 CAS 到 s + 3。上一任确实死了时，读方只会看到奇数（放弃）或 s + 3 配完整的新版。上一任若只是慢、并没有死，它醒来后的收尾 CAS 会失败，序号不会退回偶数，但它晚到的字段写可能落在新属主的字段之后，s + 3 之后读到的就是混写的一份。标签只用于显示，属主每个心跳重读自己的标签，不一致就重写，混写的一份在下一个心跳内修好。
+- 接手：上一任写到一半就死了、`label_seq` 停在奇数 s 上时，普通的写一直退让。新属主看到同一个奇数连续停满两个心跳（≥ 500 ms，由会合层判断）之后，把它从 s CAS 到 s + 2（仍是奇数，表示正在写），写完整的一份再以 release 从 s + 2 CAS 到 s + 3。上一任确实死了时，读方只会看到奇数（放弃）或 s + 3 配完整的新版。上一任若只是慢、并没有死，它醒来后的收尾 CAS 会失败，序号不会退回偶数，但它晚到的字段写可能落在新属主的字段之后，s + 3 之后读到的就是混写的一份。标签只用于显示，属主每个心跳重读自己的标签，不一致就重写，混写的一份在下一个心跳内修好。
 - 标签是跨进程的不可信数据：混写的一份、别的版本或有缺陷的对端都可能留下被切断或拼接的 UTF-8。显示之前必须校验或清洗 UTF-8，用 `name_hash` 核对名字时以连续两次读到一致为准。
 
 **绑定的发布**（[`src/core/ipc/LoopBinding.h`](../../src/core/ipc/LoopBinding.h)）
