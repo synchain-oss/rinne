@@ -323,7 +323,7 @@ TEST_CASE("a smart claim won by a conflict retry stays provisional and restore s
     CHECK(smart.state() == RendezvousState::kConflict);
 }
 
-TEST_CASE("a restore that missed its first try still preempts a provisional claim on retry, never a dormant slot",
+TEST_CASE("a restore past its intent hold still preempts a provisional claim on retry, never a dormant slot",
           "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();
@@ -333,62 +333,169 @@ TEST_CASE("a restore that missed its first try still preempts a provisional clai
     RvSegment& rv = rvOf(rvView);
     const StreamFormat format{48000, 512, 2};
 
-    Rendezvous smart(configFor(Role::kInput, backend, naming.scope(), 41));
-    smart.setGroup(3, ClaimIntent::kSmart, kT0);
-    smart.prepare(format, kT0);
-    smart.tick(kT0);
-    REQUIRE(smart.state() == RendezvousState::kActive);
-
-    // 工程恢复的实例先扫到 smart 的整字（还没 prepare，不认领）；之后 smart 走一次休眠来回，整字换了，
-    // 观察者还没到下一次扫描：首拍的样本与活字对不上，这一拍跳过，进冲突
+    // 工程恢复来的时候槽被一个正式认领占着：有效期内每一拍按原意图试也拿不到，过了有效期退化成冲突重试。
+    // 之后正式认领走了，一个智能默认的认领补上来（provisional）：退化之后的重试仍然抢得动它
+    Rendezvous holder(configFor(Role::kInput, backend, naming.scope(), 41));
+    holder.setGroup(3, ClaimIntent::kManual, kT0);
+    holder.prepare(format, kT0);
+    holder.tick(kT0);
+    REQUIRE(holder.state() == RendezvousState::kActive);
     Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 42));
     restore.setGroup(3, ClaimIntent::kRestore, kT0);
-    restore.tick(kT0);
-    smart.releaseResources(kT0 + 10);
-    smart.prepare(format, kT0 + 20);
-    REQUIRE((ctlState(smart.myCtl()) & kCtlProvisional) != 0);
-    restore.prepare(format, kT0 + 30);
-    restore.tick(kT0 + 30);
+    restore.prepare(format, kT0);
+    for (u64 t = kT0; t <= kT0 + RendezvousTiming::kIntentHoldMs; t += RendezvousTiming::kHeartbeatMs)
+    {
+        restore.tick(t);
+    }
     REQUIRE(restore.state() == RendezvousState::kConflict);
-    REQUIRE(roleSlot(rv, 3, Role::kInput).ctl.load() == smart.myCtl());
+    const u64 swapAt = kT0 + 2500;
+    holder.setGroup(0, ClaimIntent::kManual, swapAt);
+    Rendezvous smart(configFor(Role::kInput, backend, naming.scope(), 46));
+    smart.setGroup(3, ClaimIntent::kSmart, swapAt);
+    smart.prepare(format, swapAt);
+    smart.tick(swapAt);
+    REQUIRE(smart.state() == RendezvousState::kActive);
+    REQUIRE((ctlState(smart.myCtl()) & kCtlProvisional) != 0);
 
-    // 自动重试仍然抢得动 provisional
-    restore.tick(kT0 + 30 + RendezvousTiming::kConflictRetryMs);
+    restore.tick(kT0 + 3000);
     CHECK(restore.state() == RendezvousState::kActive);
     CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == restore.myCtl());
     CHECK((ctlState(restore.myCtl()) & kCtlProvisional) == 0);
-    smart.tick(kT0 + 1040);
+    smart.tick(kT0 + 3010);
     CHECK(smart.state() == RendezvousState::kConflict);
 
     // 工程恢复认领到的槽不带 provisional：另一个工程恢复首拍与重试都只进冲突，不会来回抢
     Rendezvous rival(configFor(Role::kInput, backend, naming.scope(), 45));
-    rival.setGroup(3, ClaimIntent::kRestore, kT0 + 1050);
-    rival.prepare(format, kT0 + 1050);
-    rival.tick(kT0 + 1050);
+    rival.setGroup(3, ClaimIntent::kRestore, kT0 + 3050);
+    rival.prepare(format, kT0 + 3050);
+    rival.tick(kT0 + 3050);
     CHECK(rival.state() == RendezvousState::kConflict);
-    rival.tick(kT0 + 1050 + RendezvousTiming::kConflictRetryMs);
+    for (u64 t = kT0 + 3090; t <= kT0 + 3050 + RendezvousTiming::kIntentHoldMs + 1000; t += 40)
+    {
+        rival.tick(t);
+    }
     CHECK(rival.state() == RendezvousState::kConflict);
     CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == restore.myCtl());
 
-    // 工程恢复的重试只保留这一档：休眠满 2 s 的槽照旧不拿
+    // 有效期过了，工程恢复的重试只保留这一档：之后才休眠、又休眠满 2 s 的槽照旧不拿
     Rendezvous sleeper(configFor(Role::kInput, backend, naming.scope(), 43));
     sleeper.setGroup(6, ClaimIntent::kManual, kT0);
     sleeper.prepare(format, kT0);
     sleeper.tick(kT0);
     REQUIRE(sleeper.state() == RendezvousState::kActive);
-    sleeper.releaseResources(kT0 + 10);
-    REQUIRE(ctlPhase(roleSlot(rv, 6, Role::kInput).ctl.load()) == kCtlPhaseDormant);
+    const u64 lateAt = kT0 + 100;
     Rendezvous late(configFor(Role::kInput, backend, naming.scope(), 44));
-    late.setGroup(6, ClaimIntent::kRestore, kT0 + 100);
-    late.prepare(format, kT0 + 100);
-    late.tick(kT0 + 100); // 休眠还不满 2 s：进冲突
+    late.setGroup(6, ClaimIntent::kRestore, lateAt);
+    late.prepare(format, lateAt);
+    late.tick(lateAt); // 槽还是活跃的、不带 provisional：进冲突
     REQUIRE(late.state() == RendezvousState::kConflict);
-    for (u64 t = kT0 + 1100; t <= kT0 + 5100; t += RendezvousTiming::kConflictRetryMs)
+    const u64 sleepAt = lateAt + RendezvousTiming::kIntentHoldMs + 150;
+    for (u64 t = lateAt + 40; t <= lateAt + 8000; t += 40) // 25 Hz
     {
+        if (t == sleepAt)
+        {
+            sleeper.releaseResources(t);
+            REQUIRE(ctlPhase(roleSlot(rv, 6, Role::kInput).ctl.load()) == kCtlPhaseDormant);
+        }
         late.tick(t);
     }
     CHECK(late.state() == RendezvousState::kConflict);
     CHECK(roleSlot(rv, 6, Role::kInput).ctl.load() == sleeper.myCtl());
+}
+
+TEST_CASE("restore and confirm keep their intent until the dormant evidence has had time to build up",
+          "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+    constexpr u64 kTick = 40; // 壳的 25 Hz 定时器
+
+    // (i) 工程加载：构造、setGroup(kRestore)、prepare、首拍连着来，会合段刚打开、观察者刚重置，ctl 的静止是 0。
+    // 之后不再调 setGroup，只按 25 Hz 往下 tick：证据攒满 2 s 的那一拍就拿到早已休眠的槽
+    Rendezvous sleeper(configFor(Role::kInput, backend, naming.scope(), 61));
+    sleeper.setGroup(2, ClaimIntent::kManual, kT0);
+    sleeper.prepare(format, kT0);
+    sleeper.tick(kT0);
+    REQUIRE(sleeper.state() == RendezvousState::kActive);
+    sleeper.releaseResources(kT0 + 10);
+    const u64 loadAt = kT0 + 10000; // 已经休眠了 10 s
+    Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 62));
+    restore.setGroup(2, ClaimIntent::kRestore, loadAt);
+    restore.prepare(format, loadAt);
+    restore.tick(loadAt);
+    REQUIRE(restore.state() == RendezvousState::kConflict);
+    for (u64 t = loadAt + kTick; t < loadAt + RendezvousTiming::kDormantMs; t += kTick)
+    {
+        restore.tick(t);
+    }
+    CHECK(restore.state() == RendezvousState::kConflict); // 证据还不满 2 s
+    restore.tick(loadAt + RendezvousTiming::kDormantMs);
+    CHECK(restore.state() == RendezvousState::kActive);
+    CHECK(roleSlot(rv, 2, Role::kInput).ctl.load() == restore.myCtl());
+    sleeper.tick(loadAt + RendezvousTiming::kDormantMs + kTick);
+    CHECK(sleeper.state() == RendezvousState::kConflict);
+
+    // (ii) 用户确认：对端刚休眠 1 s 就点了确认，这一拍拿不到；不再补调，确认在有效期内一直有效，
+    // 休眠与 ctl 的静止都满 2 s 的那一拍拿到
+    Rendezvous holder(configFor(Role::kInput, backend, naming.scope(), 63));
+    holder.setGroup(4, ClaimIntent::kManual, kT0);
+    holder.prepare(format, kT0);
+    holder.tick(kT0);
+    REQUIRE(holder.state() == RendezvousState::kActive);
+    Rendezvous user(configFor(Role::kInput, backend, naming.scope(), 64));
+    user.setGroup(4, ClaimIntent::kManual, kT0);
+    user.prepare(format, kT0);
+    const u64 sleepAt = kT0 + 1000;
+    const u64 confirmAt = sleepAt + 1000;
+    u64 t = kT0;
+    for (; t < confirmAt; t += kTick)
+    {
+        if (t == sleepAt)
+        {
+            holder.releaseResources(t);
+        }
+        user.tick(t);
+    }
+    REQUIRE(user.state() == RendezvousState::kConflict);
+    user.setGroup(4, ClaimIntent::kManualConfirmed, confirmAt);
+    u64 wonAt = 0;
+    for (; t < confirmAt + RendezvousTiming::kIntentHoldMs && wonAt == 0; t += kTick)
+    {
+        user.tick(t);
+        wonAt = user.state() == RendezvousState::kActive ? t : 0;
+    }
+    CHECK(wonAt >= sleepAt + RendezvousTiming::kDormantMs);
+    CHECK(user.state() == RendezvousState::kActive);
+    CHECK(roleSlot(rv, 4, Role::kInput).ctl.load() == user.myCtl());
+
+    // (iv) 两个工程恢复争同一个休眠槽：恰好一个拿到，另一个停在冲突，之后也不来回抢
+    Rendezvous idle(configFor(Role::kInput, backend, naming.scope(), 65));
+    idle.setGroup(7, ClaimIntent::kManual, kT0);
+    idle.prepare(format, kT0);
+    idle.tick(kT0);
+    REQUIRE(idle.state() == RendezvousState::kActive);
+    idle.releaseResources(kT0 + 10);
+    Rendezvous first(configFor(Role::kInput, backend, naming.scope(), 66));
+    Rendezvous second(configFor(Role::kInput, backend, naming.scope(), 67));
+    for (Rendezvous* r : {&first, &second})
+    {
+        r->setGroup(7, ClaimIntent::kRestore, loadAt);
+        r->prepare(format, loadAt);
+    }
+    for (u64 u = loadAt; u <= loadAt + 6000; u += kTick)
+    {
+        first.tick(u);
+        second.tick(u);
+    }
+    const bool firstWon = first.state() == RendezvousState::kActive;
+    const bool secondWon = second.state() == RendezvousState::kActive;
+    CHECK(firstWon != secondWon);
+    CHECK((firstWon ? second : first).state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 7, Role::kInput).ctl.load() == (firstWon ? first : second).myCtl());
 }
 
 TEST_CASE("a conflict retry does not wait out a clock that went backwards", "[ipc][rendezvous]")

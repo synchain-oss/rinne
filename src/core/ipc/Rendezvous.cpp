@@ -124,6 +124,7 @@ void Rendezvous::setGroup(u32 group, ClaimIntent intent, u64 nowMs)
     {
         return;
     }
+    intentFromMs_ = nowMs; // 新给的意图从这一拍起算有效期（只对工程恢复与用户确认有意义）
     if (group == group_)
     {
         intent_ = intent;
@@ -392,6 +393,7 @@ bool Rendezvous::openRendezvous(u64 nowMs)
         backoff_.reset();
         failures_ = 0;
         observer_.reset();
+        intentFromMs_ = nowMs; // 观察者从零攒证据：工程恢复与用户确认的有效期也从这一拍算
         return true;
     case InitResult::kBusy:
         // 契约：kBusy 之后立刻解映射，绝不在原映射上重试
@@ -502,13 +504,15 @@ bool Rendezvous::openRing(u64 nowMs)
 
 void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
 {
+    // 工程恢复与用户确认在有效期内：每一拍都按原意图再试，证据一攒够就拿到
+    const bool held = intentHeld(nowMs);
     // 冲突重试没到点就不碰；时钟倒退得比一个重试间隔还多时不多等，立刻重试（与 tick 的退避同一个口径）
-    if (state_ == RendezvousState::kConflict && nowMs < nextConflictRetryMs_ &&
+    if (state_ == RendezvousState::kConflict && !held && nowMs < nextConflictRetryMs_ &&
         nextConflictRetryMs_ - nowMs <= RendezvousTiming::kConflictRetryMs)
     {
         return;
     }
-    const ClaimIntent effective = state_ == RendezvousState::kConflict ? ClaimIntent::kConflictRetry : intent_;
+    const ClaimIntent effective = state_ == RendezvousState::kConflict && !held ? ClaimIntent::kConflictRetry : intent_;
     RoleSlot& slot = roleSlot(rv, group_, role());
     const u64 observed = slot.ctl.load(std::memory_order_acquire);
     TakeoverTier tier = TakeoverTier::kNone;
@@ -573,6 +577,24 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     labelDirty_ = true; // 新属主把自己的标签写上去
     labelOddSinceMs_ = 0;
     // 状态留给 openRing：成功时由 publishBinding 置 kActive，失败时置 kOpening
+}
+
+// 工程恢复与用户确认的原意图有效期。拿休眠槽要观察者看满 2 s 的证据，可这两种意图恰恰常在观察者刚开始看的时候
+// 给出：工程加载时会合段刚打开、观察者刚重置；用户也可能在对端刚休眠不久就点了确认。只给第一拍一次机会的话，
+// 这一档在主路径上永远走不到。所以从意图给出（setGroup）或观察者重置的那一拍起，kIntentHoldMs（2 s 再加一个
+// 扫描间隔）之内，冲突重试仍按原意图判；过了才退化成 kConflictRetry（工程恢复仍保留抢占 provisional）。
+// 时钟倒退时从这一拍重新计：观察者的静止起点同样从倒退之后的那次扫描重新计
+bool Rendezvous::intentHeld(u64 nowMs) noexcept
+{
+    if (intent_ != ClaimIntent::kRestore && intent_ != ClaimIntent::kManualConfirmed)
+    {
+        return false;
+    }
+    if (nowMs < intentFromMs_)
+    {
+        intentFromMs_ = nowMs;
+    }
+    return nowMs - intentFromMs_ < RendezvousTiming::kIntentHoldMs;
 }
 
 void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs)

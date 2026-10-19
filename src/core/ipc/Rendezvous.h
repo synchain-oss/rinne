@@ -34,7 +34,8 @@ namespace rinne::ipc
 {
 
 // 认领的意图。kSmart 的认领带 provisional 位（智能默认的认领，可被工程 state 的恢复抢占）；
-// kRestore 与 kManualConfirmed 可以拿休眠槽；kConflictRetry 是冲突期间的自动重试，永远不拿休眠槽
+// kRestore 与 kManualConfirmed 可以拿休眠槽，给出之后 kIntentHoldMs 之内的冲突重试仍按它们判；kConflictRetry 是
+// 冲突期间的自动重试，永远不拿休眠槽
 enum class ClaimIntent : std::uint8_t
 {
     kSmart,
@@ -53,6 +54,8 @@ struct RendezvousTiming
     static constexpr u64 kOrphanMs = 30000;
     static constexpr u64 kDormantMs = 2000;
     static constexpr u64 kConflictRetryMs = 1000;
+    // 工程恢复与用户确认的原意图有效期：拿休眠槽的证据攒够 2 s，再给一个扫描间隔
+    static constexpr u64 kIntentHoldMs = kDormantMs + kHeartbeatMs;
     static constexpr u64 kLostHeartbeatMs = 2000;
     static constexpr u64 kLostStillMs = 2000;
 };
@@ -168,6 +171,7 @@ private:
     void writeIdentity(RoleSlot& slot) noexcept;
     void upkeepLabel(RoleSlot& slot, u64 nowMs, bool heartbeatDue) noexcept;
     void upkeepWriter() noexcept;
+    bool intentHeld(u64 nowMs) noexcept;
     void lostOwnership(u64 nowMs);
     void letGo(u64 nowMs);
     void writeFormat(RoleSlot& slot) noexcept;
@@ -194,6 +198,7 @@ private:
     RetryBackoff backoff_;
     u64 retryAtMs_ = 0;
     u64 nextConflictRetryMs_ = 0;
+    u64 intentFromMs_ = 0; // 当前意图的有效期起点：setGroup 或观察者重置的那一拍，取较晚的
     RendezvousState state_ = RendezvousState::kUnassigned;
     LabelPayload label_;
     bool labelDirty_ = false;
