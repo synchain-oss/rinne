@@ -11,7 +11,8 @@
 # 处置汇总）、没有行内评论，结论作为一条 PR 评论发出。
 # workflow_dispatch 不是 PR 事件，claude-code-action 不会把 CLAUDE.md / .claude/ / .mcp.json 还原成 base 的版本
 # （它只在 PR 事件里还原）。共享 workflow 自 v1.3.0 起在「Prepare PR context for the reviewer」步骤里自己做：
-# 先删掉 PR head 里的这些路径，再从 base 分支检出，清单与 action 的 SENSITIVE_PATHS 相同。升 SHA 时照着复核这一步。
+# 先删掉 PR head 里的这些路径，再从 base 分支检出，清单与 action 的 SENSITIVE_PATHS 相同；所以工作区里的 CLAUDE.md
+# 与 .claude/ 是 base 的版本，extra_prompt 要照这个说，升 SHA 时照着复核这一步。
 # focus 必须与 claude-review.yml 的「重点（按优先级）」一节逐字相同（docs-truth 的 review-bot 检查核对）。
 # 共享 workflow 把 extra_prompt 放在 prompt 最后，extra_prompt 又以不可信数据声明收尾，所以声明就是整段 prompt 的
 # 结尾，合 CLAUDE.md 安全铁律里「prompt 末尾必须带不可信数据声明」那一条（review-bot 检查核对 extra_prompt 的最后一节）。
@@ -86,12 +87,13 @@ jobs:
         信号写进命名共享内存环，只有分组 / 配对）。两者之间的插入链构成自回授环路，环路延迟为 D。
 
         ## 审查前先读（冻结契约，不是建议）
-        - `CLAUDE.md`：协作规范与公开仓规则。
+        - `CLAUDE.md`：协作规范与公开仓规则。它在工作区里是 base 分支的版本（共享 workflow 删掉 PR head 的
+          `CLAUDE.md` 与 `.claude/` 再从 base 检出），不是 PR 改动之后的样子；本 PR 对它的改动看 `.ot-review/pr.diff`。
         - `docs/ARCHITECTURE.md`：九条安全不变量、分层、线程模型。
         - `docs/contracts/IPC_CONTRACT.md`、`docs/contracts/PARAMETERS.md`、`docs/contracts/STATE_SCHEMA.md`：冻结契约。
         - `docs/UI_BRIDGE.md`：桥契约（不冻结，但 web 与 C++ 两侧必须同改）。
         - `docs/adr/`：尤其 0002 环路时序、0003 安全模型、0004 配对。
-        工作区是 PR head 的代码，这些文件也是 PR 改动之后的样子：本 PR 改了它们时，比对以改动前的版本为准，改动本身按
+        其余文件是 PR head 的代码，也就是 PR 改动之后的样子：本 PR 改了它们时，比对以改动前的版本为准，改动本身按
         `.ot-review/pr.diff` 审。某份文档还不存在：写「该文档尚未建立，本项未比对」，不算缺陷。文档本该存在却读不到，
         或被本 PR 删除、改坏：报「契约文档缺失，本次未做契约比对」，不要假装比对过。
 

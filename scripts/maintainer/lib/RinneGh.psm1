@@ -566,8 +566,41 @@ function Get-RinneReviewState {
 }
 
 <#
-  把四个来源摊成一张表。Kind：agent（有写权限且首行带 agent 标记）、bot-summary、bot、user（有写权限、没有标记：
-  维护者本人的意见）、external（既不是 bot 也没有写权限；账号已删除、login 为空的也算）。
+  pr-agent 的审查输出：作者是 github-actions[bot]，前 5 行带 pr-agent:review / pr-agent:improve 的标记
+  （HTML 注释 `<!-- pr-agent:review:full -->` 或链接引用 `[pr-agent:review:full]: https://…`），或者就是它的
+  两段标题（「PR Reviewer Guide」「PR Code Suggestions」）。标记只在正文中间出现（引用别人的输出）不算；
+  两种通知（persistent review 更新、生成失败）仍当免回应的普通 bot 评论。
+#>
+function Test-RinnePrAgentComment {
+    param([AllowEmptyString()][AllowNull()][string]$Body)
+    $lines = @((($Body ?? '') -split "`r?`n") | Select-Object -First 5)
+    if (@($lines | Where-Object { $_ -match '\[Persistent review\]' -or $_ -match '^\s*Failed to generate\b' }).Count) { return $false }
+    if (@($lines | Where-Object {
+                $_ -match '^\s*<!--\s*pr-agent:(?:review|improve)\b' -or
+                $_ -match '^\s*\[pr-agent:(?:review|improve)[^\]]*\]:\s*\S+' -or
+                $_ -match 'PR Reviewer Guide|PR Code Suggestions'
+            }).Count) { return $true }
+    return $false
+}
+
+<# pr-agent-claude 的 check 名（workflow / job）：只在 head 上已经出现时才等它、要求它。 #>
+function Get-RinnePrAgentCheck { 'pr-agent-claude / pr-agent' }
+
+<# 一次运行的日志（gh run view --log；给了 JobId 时只取那个 job）。取不到（还没跑完、日志过期、权限不足）返回 $null。 #>
+function Get-RinneRunLog {
+    param([Parameter(Mandatory)][string]$RunId, [string]$JobId)
+    if ($RunId -notmatch '^\d+$') { return $null }
+    $argv = @('run', 'view', $RunId, '--repo', $script:Repo, '--log')
+    if ($JobId -match '^\d+$') { $argv += @('--job', $JobId) }
+    $r = Invoke-RinneGh $argv -AllowFail
+    if ($r.Code -ne 0) { return $null }
+    $r.Out
+}
+
+<#
+  把四个来源摊成一张表。Kind：agent（有写权限且首行带 agent 标记）、bot-summary、bot、pr-agent（github-actions[bot]
+  发的 pr-agent 审查输出，判据见 Test-RinnePrAgentComment）、user（有写权限、没有标记：维护者本人的意见）、
+  external（既不是 bot 也没有写权限；账号已删除、login 为空的也算）。
   review comment 带上所在线程、是否已 resolve 与所属 review。review 只收 COMMENTED 与 CHANGES_REQUESTED（正文为空的也收：
   inline 评论都挂在一个空正文的 COMMENTED review 下，「Request changes」也可以不写正文）；空正文、只装着我方回复的 review
   算 agent 的。CHANGES_REQUESTED 记下同一作者之后有没有 APPROVED。
@@ -589,7 +622,9 @@ function Get-RinneCommentItems {
         $marker = Get-AgentMarker $body
         $kind = if (-not $login) { 'external' }
         elseif ($login -match '\[bot\]$') {
-            if ($source -eq 'issue' -and $summaryIds -contains $id) { 'bot-summary' } else { 'bot' }
+            if ($source -eq 'issue' -and $summaryIds -contains $id) { 'bot-summary' }
+            elseif ($source -eq 'issue' -and $login -eq 'github-actions[bot]' -and (Test-RinnePrAgentComment $body)) { 'pr-agent' }
+            else { 'bot' }
         } elseif (Test-RepoWriter $login) {
             if ($marker) { 'agent' } else { 'user' }
         } else { 'external' }
@@ -631,6 +666,7 @@ function Get-RinneCommentItems {
   一条评论有没有得到我方回应。「之后」一律对比原评论的 updated_at：原评论在我方回复之后又改过，就算没回应。
   - agent 自己的、非总结的 bot 通知（/review 的回执之类）：不需要；
   - bot 审查总结：之后有处置汇总引用它的运行编号；
+  - pr-agent 的审查输出：与维护者的意见相同，要有后来的 agent 评论在 in-reply-to 里点名它；
   - review comment：线程里有我方回复的，要有一条晚于它的最后一次修改；维护者本人的 inline 评论必须有这样一条回复，
     只 resolve 不算；bot 的 inline 评论在处置汇总里逐条处置过，线程里没有我方回复的，线程已 resolve 也算；
   - 其余（issue comment、review 正文、CHANGES_REQUESTED）：我方评论的 agent 标记里用 in-reply-to 点名了它
@@ -648,6 +684,8 @@ function Test-RinneResponded {
             $s = @($State.summaries) | Where-Object { [string]$_.id -eq $Item.Id } | Select-Object -First 1
             return [bool]($s -and $s.runId -and (@($State.dispositionRuns) -contains [string]$s.runId))
         }
+        # pr-agent 的审查输出不分级：只看有没有后来的 agent 评论点名它，与维护者的意见同一条规则
+        'pr-agent' { return $explicit }
     }
     if ($Item.Source -eq 'review-comment') {
         $replies = @($Items | Where-Object { $_.Kind -eq 'agent' -and $_.ThreadId -and $_.ThreadId -eq $Item.ThreadId -and $_.Id -ne $Item.Id })

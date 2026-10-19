@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 基础设施清单（lib/infra-paths.mjs）的锚点：清单必须覆盖它自己和合并判据的每一类实现，又不能大到把普通
-// 文档与源码也算进去；CLAUDE.md 必须指向这份清单，而不是另抄一份。
+// 文档与源码也算进去；CLAUDE.md 必须指向这份清单，而不是另抄一份。评审 bot 能读取并重新配置自己的文件
+// （.pr_agent.toml、AGENTS.md）一律不许入库，除非在 ALLOWED_BOT_CONFIG 里逐条登记豁免。
 
 import fs from "node:fs";
 import path from "node:path";
-import { caseResult } from "../lib/check-kit.mjs";
-import { INFRA_PATHS, infraMatcher } from "../lib/infra-paths.mjs";
+import { caseResult, trackedFiles } from "../lib/check-kit.mjs";
+import {
+    ALLOWED_BOT_CONFIG,
+    BOT_CONFIG_PATHS,
+    INFRA_PATHS,
+    botConfigErrors,
+    infraMatcher,
+} from "../lib/infra-paths.mjs";
 
 const SELF = "scripts/lib/infra-paths.mjs";
 /** clang-format 这个 required check 直接读取的格式配置。 */
@@ -50,6 +57,11 @@ export const ANCHORS = [
     ".gitleaks-version",
     "REUSE.toml",
     "CLAUDE.md",
+    // 评审 bot 能从默认分支读取、据此重新配置自己的文件
+    ".pr_agent.toml",
+    "sub/.pr_agent.toml",
+    "AGENTS.md",
+    "sub/AGENTS.md",
     // 只差大小写的写法：在不区分大小写的文件系统上检出后就是上面的文件
     "Scripts/hooks/pre-push.mjs",
     ".GITHUB/workflows/x.yml",
@@ -67,11 +79,12 @@ export const NOT_INFRA = [
 ];
 
 /** isInfra 是判定函数，claude 是 CLAUDE.md 全文。返回错误列表。 */
-export function checkInfra({ isInfra, claude }) {
+export function checkInfra({ isInfra, claude, botFiles = [], allowedBotConfig = ALLOWED_BOT_CONFIG }) {
     const errors = [];
     for (const p of ANCHORS) if (!isInfra(p)) errors.push(`基础设施清单没有覆盖 ${p}`);
     for (const p of NOT_INFRA) if (isInfra(p)) errors.push(`基础设施清单把 ${p} 也算了进去，写得太宽`);
     if (!claude.includes(SELF)) errors.push(`CLAUDE.md 没有指向 ${SELF}`);
+    errors.push(...botConfigErrors(botFiles, allowedBotConfig));
     return errors;
 }
 
@@ -80,8 +93,9 @@ export function selfTest() {
     const drop = (g) => infraMatcher(INFRA_PATHS.filter((x) => x !== g));
     const dropAll = (gs) => infraMatcher(INFRA_PATHS.filter((x) => !gs.includes(x)));
     const swap = (from, to) => infraMatcher(INFRA_PATHS.map((x) => (x === from ? to : x)));
+    const base = { isInfra: infraMatcher(INFRA_PATHS), claude };
     const cases = [
-        ["当前清单", false, { isInfra: infraMatcher(INFRA_PATHS), claude }],
+        ["当前清单", false, base],
         ["清单不含 scripts/lib/**（连它自己也不在）", true, { isInfra: drop("scripts/lib/**"), claude }],
         ["清单不含检查脚本目录", true, { isInfra: drop("scripts/checks.d/**"), claude }],
         ["清单不含评审 bot", true, { isInfra: drop("scripts/review-bot.mjs"), claude }],
@@ -109,6 +123,21 @@ export function selfTest() {
         ],
         ["清单写成一条 **", true, { isInfra: infraMatcher(["**"]), claude }],
         ["CLAUDE.md 不指向清单", true, { isInfra: infraMatcher(INFRA_PATHS), claude: "不自合的路径见下表。" }],
+        ["仓里没有评审 bot 的配置文件", false, { ...base, botFiles: ["src/core/engine/InputEngine.cpp"] }],
+        [".pr_agent.toml 入库且没有豁免", true, { ...base, botFiles: [".pr_agent.toml"] }],
+        ["子目录里的 .pr_agent.toml 同样不许入库", true, { ...base, botFiles: ["sub/.pr_agent.toml"] }],
+        ["AGENTS.md 入库且没有豁免", true, { ...base, botFiles: ["AGENTS.md"] }],
+        ["子目录里的 AGENTS.md 同样不许入库", true, { ...base, botFiles: ["sub/AGENTS.md"] }],
+        [
+            ".pr_agent.toml 已登记豁免",
+            false,
+            { ...base, botFiles: [".pr_agent.toml"], allowedBotConfig: [".pr_agent.toml"] },
+        ],
+        [
+            "豁免只对登记的那一份有效",
+            true,
+            { ...base, botFiles: ["sub/.pr_agent.toml"], allowedBotConfig: [".pr_agent.toml"] },
+        ],
     ].map(([label, bad, args]) => {
         const errors = checkInfra(args);
         return { label, bad, passed: bad ? errors.length > 0 : errors.length === 0 };
@@ -123,7 +152,11 @@ export default {
     run(ctx) {
         const abs = path.join(ctx.root, "CLAUDE.md");
         if (!fs.existsSync(abs)) return { ok: false, lines: ["缺 CLAUDE.md"] };
-        const errors = checkInfra({ isInfra: infraMatcher(INFRA_PATHS), claude: fs.readFileSync(abs, "utf8") });
+        const errors = checkInfra({
+            isInfra: infraMatcher(INFRA_PATHS),
+            claude: fs.readFileSync(abs, "utf8"),
+            botFiles: trackedFiles(ctx.root),
+        });
         return { ok: errors.length === 0, lines: errors };
     },
     selfTest,

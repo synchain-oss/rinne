@@ -7,10 +7,13 @@
 //     不按 paths 过滤；job 级 if 恰好是「非 draft、同仓、非 dependabot」三项；
 //   - deepseek-review.yml（调用 Synchain-oss/ci-workflows 的共享手动审查）：只许 workflow_dispatch 触发，永不自己跑；
 //     job 级 if 恰好是 vars.ENABLE_DEEPSEEK == 'true'（没建变量时 skipped）；focus 与 claude-review.yml prompt 的
-//     「## 重点」一节逐字相同（只去掉公共缩进与首尾空行），重点只有一个真源；extra_prompt 的最后一节是不可信数据
-//     声明（共享 workflow 把 extra_prompt 放在 prompt 最后）；
+//     「## 重点」一节逐字相同（只去掉公共缩进与首尾空行），重点只有一个真源；focus 必须是 | 块（> 折叠块在本地逐行
+//     比较能过，GitHub 运行时会把换行折成空格）；extra_prompt 必须是 | 块、有二级标题，最后一节是不可信数据声明
+//     （共享 workflow 把 extra_prompt 放在 prompt 最后）；
 //   - review-dispatch.yml：job 级 if 恰好是「PR 上的评论、以 /review 开头、OWNER / MEMBER / COLLABORATOR」三项；
-//     每个 checkout 只签出目标分支。
+//     每个 checkout 只签出目标分支；
+//   - pr-agent.yml 与 pr-agent-claude.yml：两个 pr-agent 调用方都关掉 describe、review 标签与持久评论，ignore_globs
+//     逐字相同。被调用方默认全开，丢了 describe: false 会往 PR 正文追加内容，破坏「签名是末行」的检查。
 // job 级 if 按 && 拆成子句逐项比对，不做子串匹配：出现 ||、多一项或少一项都判红（多一个 || true 就等于没有门）。
 // YAML 解析沿用 workflows.mjs 的块式读法。
 
@@ -18,7 +21,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { caseResult } from "../lib/check-kit.mjs";
 import { argValue, checkConfig, stepConfig, FIXTURE, selfTest as scriptSelfTest } from "../review-bot.mjs";
-import { parseWorkflow } from "./workflows.mjs";
+import { selfTest as maintSelfTest } from "../maintainer/lib/maint.mjs";
+import { jobMap, parseWorkflow } from "./workflows.mjs";
 
 export const MODEL = "claude-opus-5-5";
 const SAME_REPO = [
@@ -141,6 +145,60 @@ function blockInput(wf, name) {
     return dedent(body.join("\n"));
 }
 
+/** 两个 pr-agent 调用方必须一致的开关：被调用方的默认值都是 true。 */
+export const PR_AGENT_SWITCHES = ["describe", "review_labels", "persistent_comments"];
+const PR_AGENT_FILES = [".github/workflows/pr-agent.yml", ".github/workflows/pr-agent-claude.yml"];
+
+/** 一个 pr-agent 调用方的 `with:` 映射（六格缩进的键行）。文件缺失或没有 job 返回 null。 */
+function prAgentWith(text) {
+    const wf = parseWorkflow(text);
+    const job = wf.jobs.find((j) => j.get("uses"));
+    return job ? jobMap(job, "with") : null;
+}
+
+/**
+ * 两个 pr-agent 调用方：describe / review_labels / persistent_comments 都是 false，ignore_globs 逐字相同。
+ * read(rel) 返回文本或 null。
+ */
+export function prAgentErrors(read) {
+    const errors = [];
+    const got = {};
+    for (const file of PR_AGENT_FILES) {
+        const text = read(file);
+        if (text === null) {
+            errors.push(`缺 ${file}`);
+            continue;
+        }
+        const map = prAgentWith(text);
+        if (!map) {
+            errors.push(`${file}：没有找到调用共享 workflow 的 job`);
+            continue;
+        }
+        const at = (key) => map.entries.find((l) => l.key === key);
+        for (const key of PR_AGENT_SWITCHES) {
+            const line = at(key);
+            if (!line) errors.push(`${file}：with 里缺 ${key}: false（被调用方默认是 true）`);
+            else if (line.value.replace(/^(["'])(.*)\1$/, "$2") !== "false") {
+                errors.push(`${file}：with.${key} 必须是 false`);
+            }
+        }
+        const globs = at("ignore_globs");
+        if (!globs) errors.push(`${file}：with 里缺 ignore_globs`);
+        else {
+            got[file] = globs.value;
+            // 这些夹具是合并闸门的判据样例，评审应该看到，不许 ignore
+            if (/scripts\/maintainer\/fixtures/.test(globs.value)) {
+                errors.push(`${file}：ignore_globs 不许忽略 scripts/maintainer/fixtures/**`);
+            }
+        }
+    }
+    const values = Object.values(got);
+    if (values.length === 2 && values[0] !== values[1]) {
+        errors.push(`${PR_AGENT_FILES.join(" 与 ")} 的 ignore_globs 必须逐字相同`);
+    }
+    return errors;
+}
+
 /** read(rel) 返回文本或 null。 */
 export function inspectReviewWorkflows(read) {
     const errors = [];
@@ -180,11 +238,20 @@ export function inspectReviewWorkflows(read) {
             errors.push("deepseek-review.yml 的 focus 与 claude-review.yml 的「## 重点」一节不一致");
         }
         // 共享 workflow 把 extra_prompt 放在 prompt 最后：它的最后一节就是整段 prompt 的结尾
-        const heads = (blockInput(dwf, "extra_prompt") || "").split("\n").filter((l) => l.startsWith("## "));
-        if (!heads.length || !heads.at(-1).startsWith("## 不可信数据声明")) {
-            errors.push("deepseek-review.yml 的 extra_prompt 最后一节必须是不可信数据声明");
+        const extra = blockInput(dwf, "extra_prompt");
+        if (extra === null) errors.push("deepseek-review.yml 缺 extra_prompt: | 块");
+        else {
+            const heads = extra.split("\n").filter((l) => l.startsWith("## "));
+            const last = heads.at(-1) ?? "";
+            if (!last) errors.push("deepseek-review.yml 的 extra_prompt 没有二级标题");
+            if (last && !last.startsWith("## 不可信数据声明")) {
+                errors.push("deepseek-review.yml 的 extra_prompt 最后一节必须是不可信数据声明");
+            }
         }
     }
+
+    const pa = prAgentErrors(read);
+    errors.push(...pa);
 
     const rd = read(".github/workflows/review-dispatch.yml");
     if (rd === null) errors.push("缺 .github/workflows/review-dispatch.yml");
@@ -252,6 +319,17 @@ const REVIEW_DISPATCH = [
     "      - name: Next",
     "        run: echo",
 ].join("\n");
+const GLOBS = '["scripts/probe/fixtures/**", "web/fonts/**"]';
+const PR_AGENT = [
+    "jobs:",
+    "  pr-agent:",
+    `    uses: Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@${"a".repeat(40)} # v1.3.1`,
+    "    with:",
+    "      describe: false",
+    "      review_labels: false",
+    "      persistent_comments: false",
+    `      ignore_globs: '${GLOBS}'`,
+].join("\n");
 
 export default {
     name: "review-bot",
@@ -264,16 +342,24 @@ export default {
         };
         const errors = inspectReviewWorkflows(read);
         if (errors.length) return { ok: false, lines: errors };
-        return { ok: true, lines: ["claude-review、deepseek-review、review-dispatch 的结构前提都在"] };
+        return { ok: true, lines: ["claude-review、deepseek-review、review-dispatch 与两个 pr-agent 的结构前提都在"] };
     },
     selfTest() {
-        const files = { claude: `${ON}${CLAUDE}`, deepseek: DEEPSEEK, dispatch: REVIEW_DISPATCH };
+        const files = {
+            claude: `${ON}${CLAUDE}`,
+            deepseek: DEEPSEEK,
+            dispatch: REVIEW_DISPATCH,
+            agent: PR_AGENT,
+            agentClaude: PR_AGENT,
+        };
         const check = (over = {}) => {
             const f = { ...files, ...over };
             const map = {
                 ".github/workflows/claude-review.yml": f.claude,
                 ".github/workflows/deepseek-review.yml": f.deepseek,
                 ".github/workflows/review-dispatch.yml": f.dispatch,
+                ".github/workflows/pr-agent.yml": f.agent,
+                ".github/workflows/pr-agent-claude.yml": f.agentClaude,
             };
             return inspectReviewWorkflows((rel) => map[rel] ?? null);
         };
@@ -317,7 +403,17 @@ export default {
             ],
             ["deepseek 的 focus 只差公共缩进与行尾空白", false, check({ deepseek: reindented })],
             ["deepseek 的 focus 不是 | 块", true, swap("deepseek", "      focus: |", "      focus: x")],
+            [
+                "deepseek 的 focus 写成 >- 折叠块（逐行比较能过，运行时折叠）",
+                true,
+                swap("deepseek", "      focus: |", "      focus: >-"),
+            ],
             ["deepseek 的 extra_prompt 缺不可信数据声明", true, swap("deepseek", "## 不可信数据声明", "## 声明")],
+            [
+                "deepseek 的 extra_prompt 没有二级标题",
+                true,
+                swap("deepseek", "        ## 本仓说明\n        ## 不可信数据声明", "        本仓说明"),
+            ],
             [
                 "deepseek 的不可信数据声明后面又接了一节",
                 true,
@@ -363,15 +459,56 @@ export default {
                 swap("dispatch", "          ref: ${{ steps.pr.outputs.base }}\n", ""),
             ],
             ["缺 deepseek-review.yml", true, check({ deepseek: null })],
+            [
+                "deepseek 没有 extra_prompt",
+                true,
+                check({ deepseek: DEEPSEEK.replace(/ {6}extra_prompt: \|\n(?: {8}.*\n?)+/, "") }),
+            ],
+            // 两个 pr-agent 调用方：被调用方的默认值全是 true
+            ["两个 pr-agent 的开关与 ignore 列表齐全", false, check()],
+            ["pr-agent 缺 describe: false", true, check({ agent: PR_AGENT.replace("      describe: false\n", "") })],
+            [
+                "pr-agent 的 describe 是 true",
+                true,
+                check({ agent: PR_AGENT.replace("      describe: false", "      describe: true") }),
+            ],
+            [
+                "pr-agent-claude 缺 review_labels: false",
+                true,
+                check({ agentClaude: PR_AGENT.replace("      review_labels: false\n", "") }),
+            ],
+            [
+                "pr-agent-claude 的 persistent_comments 不是 false",
+                true,
+                check({
+                    agentClaude: PR_AGENT.replace(
+                        "      persistent_comments: false",
+                        "      persistent_comments: true",
+                    ),
+                }),
+            ],
+            [
+                "两个 pr-agent 的 ignore_globs 不一致",
+                true,
+                check({ agentClaude: PR_AGENT.replace(GLOBS, '["web/fonts/**"]') }),
+            ],
+            [
+                "pr-agent 把合并闸门的夹具 ignore 掉",
+                true,
+                check({ agent: PR_AGENT.replace(GLOBS, `["scripts/maintainer/fixtures/**", "web/fonts/**"]`) }),
+            ],
+            ["缺 pr-agent-claude.yml", true, check({ agentClaude: null })],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
-        // review-bot.mjs 自己的判据（取总结、尾注归一、上一轮与处置汇总、config）一并在这里跑
+        // review-bot.mjs 自己的判据（取总结、尾注归一、上一轮与处置汇总、config、发帖记录行）与 maint.mjs 的
+        // 首行 head 标记判据一并在这里跑
         const own = caseResult(cases);
         const bot = scriptSelfTest();
+        const maint = maintSelfTest();
         return {
-            ok: own.ok && bot.ok,
-            bad: own.bad + bot.bad,
-            good: own.good + bot.good,
-            lines: [...own.lines, ...bot.lines],
+            ok: own.ok && bot.ok && maint.ok,
+            bad: own.bad + bot.bad + maint.bad,
+            good: own.good + bot.good + maint.good,
+            lines: [...own.lines, ...bot.lines, ...maint.lines],
         };
     },
 };
