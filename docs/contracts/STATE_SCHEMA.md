@@ -10,8 +10,8 @@ status: draft
   chunk count ≤ 64), then chunks of `fourcc | size ≤ 64 KiB | payload | zero padding to 4 bytes`. Nothing may follow
   the last chunk. The first 16 bytes never move or change meaning; the container framing (header length, chunk header,
   padding, the meaning of the chunk count) is fixed across abi, and migrations only change payloads.
-- **Payloads**: `PRMS` (Input only) is a list of `{parameter ID, f32 plain value}`, at most 256 entries when written
-  and 224 when read (32 slots are left for the parameter layer); `CFGS` (both roles) is a key/value table with 11
+- **Payloads**: `PRMS` (Input only) is a list of `{parameter ID, f32 plain value}`, at most 256 entries and 64 KiB, the same
+  limit when written and when read; `CFGS` (both roles) is a key/value table with 11
   numbered keys, of which Output knows 1, 2, 4, 8 and 9.
 - **Compatibility rules**: unknown chunks, parameter IDs and keys are kept and written back unchanged. A higher abi
   is refused and its original bytes are written back untouched, as long as the header names this end's role (role is
@@ -71,9 +71,8 @@ status: draft
 - 写出的顺序固定：Input 先 `PRMS` 后 `CFGS`，Output 只有 `CFGS`，然后是保留下来的块。已知块总是写出来，
   哪怕读入时缺了它。
 - 同一个已知块出现两次，整份失败。
-- 读入时为写回留足余量：保留的块数加上这一端的已知块数不超过 64，否则整份失败。CFGS 给已知键留的预算见下；PRMS
-  另有条数与载荷的预留（见下）。由 `decodeDocument` 解出来、没再加东西的文档一定编得出来；参数层补自己的参数不
-  超过预留槽数时也一定编得回去。
+- 读入时为写回留足余量：保留的块数加上这一端的已知块数不超过 64，否则整份失败。CFGS 给已知键留的预算见下。
+  由 `decodeDocument` 解出来、没再加东西的文档一定编得出来；参数层补了自己的参数之后，要先按 PRMS 一节的规则裁剪再编码。
 
 ## 加载
 
@@ -108,7 +107,7 @@ status: draft
 ## PRMS：参数值（只有 Input）
 
 ```text
-u32 count（写回 ≤ 256；读入 ≤ 224）
+u32 count（≤ 256，读写相同）
 count × { u8 idLen | id（idLen 字节）| f32 值 }
 最后一条之后不能再有字节。
 ```
@@ -117,15 +116,8 @@ count × { u8 idLen | id（idLen 字节）| f32 值 }
 - id 是 1..255 字节的可打印 ASCII（0x21..0x7E），不含空格；id 重复时「按 id 匹配」有歧义，整份失败。
 - 本层只搬运：按 id 匹配、夹到合法范围、缺失的补默认、非有限值的处理都归参数层。不认识的 id 原样留在列表里、
   顺序不变，保存时写回。
-- 读入时给参数层留出写回余量：条数不超过 224、载荷不超过 57216 字节（64 KiB − 32 × 260），否则整份失败。32 是
-  Input 参数个数的上界（参数表当前 11 个，留到 32 覆盖翻倍还有余）。参数层在解出来的列表上补自己的参数，最多再补
-  32 个槽；一个槽按 1 字节 idLen + 255 字节 id + 4 字节值共 260 字节计，补满预留槽之后仍不超过 256 条与 64 KiB。
-  多补的参数由参数层自己受参数表约束，不靠本层兜底。
-- 写出的 PRMS 也必须读得回来：写出的上限（256 条、64 KiB）比读入的上限宽，参数层补完参数之后、编码之前，要调用
-  `trimToDecodable`，把不在参数表里的条目从末尾起丢到条数 ≤ 224、载荷 ≤ 57216 字节；认识的参数一个不丢。否则下一次加载
-  会因超过读入上限而整份失败。这是「不认识的 id 原样写回」唯一的例外：只在未知 id 加上认识的参数超过 224 条（或 57216
-  字节）时才丢，只丢 PRMS 的未知 id，按列表顺序从最末一条往前丢；丢了几条由 `trimToDecodable` 的 `dropped` 带回，参数层要记进
-  诊断计数。CFGS 的未知键不会被丢：读入时已按写回预算整份校验。正常的 Rinne 只写 11 个参数，这条只会在手工构造或损坏的字节上触发。
+- 读入与写出用同一组上限：条数不超过 256、载荷不超过 65536 字节，超过则整份失败。写得出的就读得回来；将来的版本写出 225 到 256 条，本版本也能整份读进来。
+- 参数层在解出来的列表上补自己的参数，「未知 id + 认识的参数」可能超过上限。编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢，直到不超过上限；丢了几条由它的 `dropped` 带回，参数层要记进诊断计数。这是「不认识的 id 原样写回」唯一的例外，只在未知 id 加上认识的参数超过 256 条（或 65536 字节）时才触发；CFGS 的未知键不会被丢，读入时已按写回预算整份校验。正常的 Rinne 只写 11 个参数，这条只会在手工构造或损坏的字节上触发。
 
 ## CFGS：非参数设置
 

@@ -107,8 +107,9 @@ std::vector<std::pair<std::string, std::string>> schemaInvariants()
         {"role-whole-value", "role 按整字（u32）比较：Input 恒写 1，Output 恒写 2"},
         {"framing-fixed", "容器框架跨 abi 不变"},
         {"migrations-payload-only", "迁移只改载荷"},
-        {"prms-headroom", "条数不超过 " + std::to_string(rinne::state::kMaxDecodedParamCount) + "、载荷不超过 " +
-                              std::to_string(rinne::state::kMaxDecodedParamBytes) + " 字节"},
+        {"prms-limits", "读入与写出用同一组上限：条数不超过 " + std::to_string(rinne::state::kMaxParamCount) +
+                            "、载荷不超过 " + std::to_string(rinne::state::kMaxParamBytes) + " 字节"},
+        {"prms-trim", "编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢"},
         {"write-back-scope", "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来"},
         {"first-setstate", "实例一生的第一次 setState 全量应用"},
         {"later-setstate", "之后的 setState（宿主预设、A/B、撤销）只改参数"},
@@ -194,11 +195,9 @@ std::string schemaText()
     text += "  \"load\": [" + n + loadJsonLines() + "  ]," + n;
     text += "  \"prms\": { \"layout\": [\"u32 count\", \"count x { u8 idLen, id, f32 value }\"], \"maxCount\": " +
             std::to_string(rinne::state::kMaxParamCount) +
-            ", \"decodeMaxCount\": " + std::to_string(rinne::state::kMaxDecodedParamCount) +
-            ", \"decodeMaxBytes\": " + std::to_string(rinne::state::kMaxDecodedParamBytes) +
-            ", \"reservedSlots\": " + std::to_string(rinne::state::kReservedParamSlots) +
-            ", \"reservedSlotBytes\": " + std::to_string(rinne::state::kReservedParamSlotBytes) +
-            ", \"idBytes\": [1, " + std::to_string(rinne::state::kMaxParamIdBytes) +
+            ", \"maxBytes\": " + std::to_string(rinne::state::kMaxParamBytes) +
+            ", \"trimDropsOnly\": \"unknown PRMS ids, from the end\"" + ", \"idBytes\": [1, " +
+            std::to_string(rinne::state::kMaxParamIdBytes) +
             "], \"idChars\": \"0x21-0x7e\", \"duplicateIds\": \"rejected\", \"value\": \"plain saved value\" }," + n;
     text += "  \"cfgs\": {" + n;
     text += "    \"layout\": [\"repeat to end of payload: u16 key, u16 len, bytes[len]\"]," + n;
@@ -475,17 +474,15 @@ TEST_CASE("golden: STATE_SCHEMA.md 的加载表与 schema 的 load 数组一致"
     }
 }
 
-TEST_CASE("golden: 契约文档写清参数层的写回余量", "[state][golden]")
+TEST_CASE("golden: 契约文档写清 PRMS 读写共用的上限与裁剪规则", "[state][golden]")
 {
     const std::string doc = contractDoc();
     const std::string schema = schemaText();
-    checkInvariant(doc, schema, "prms-headroom");
+    checkInvariant(doc, schema, "prms-limits");
+    checkInvariant(doc, schema, "prms-trim");
     checkInvariant(doc, schema, "write-back-scope");
-    CHECK(schema.find("\"decodeMaxCount\": " + std::to_string(rinne::state::kMaxDecodedParamCount)) !=
-          std::string::npos);
-    CHECK(schema.find("\"decodeMaxBytes\": " + std::to_string(rinne::state::kMaxDecodedParamBytes)) !=
-          std::string::npos);
-    CHECK(schema.find("\"reservedSlots\": " + std::to_string(rinne::state::kReservedParamSlots)) != std::string::npos);
+    CHECK(schema.find("\"maxCount\": " + std::to_string(rinne::state::kMaxParamCount)) != std::string::npos);
+    CHECK(schema.find("\"maxBytes\": " + std::to_string(rinne::state::kMaxParamBytes)) != std::string::npos);
 }
 
 TEST_CASE("golden: 契约文档写死容器框架跨 abi 不变", "[state][golden]")

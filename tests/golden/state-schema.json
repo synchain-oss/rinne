@@ -27,7 +27,7 @@
     { "case": "abi equal to this build", "result": "ok", "doc": "| abi 等于本构建 | 解码，`Ok` | 读入的 state（第一次）；之后的 setState 只取参数 | 否 |" },
     { "case": "any other failure", "result": "corrupt", "doc": "| 以上任何一步之后失败 | `Corrupt` | 保持当前，提示 state 未能恢复 | 否 |" }
   ],
-  "prms": { "layout": ["u32 count", "count x { u8 idLen, id, f32 value }"], "maxCount": 256, "decodeMaxCount": 224, "decodeMaxBytes": 57216, "reservedSlots": 32, "reservedSlotBytes": 260, "idBytes": [1, 255], "idChars": "0x21-0x7e", "duplicateIds": "rejected", "value": "plain saved value" },
+  "prms": { "layout": ["u32 count", "count x { u8 idLen, id, f32 value }"], "maxCount": 256, "maxBytes": 65536, "trimDropsOnly": "unknown PRMS ids, from the end", "idBytes": [1, 255], "idChars": "0x21-0x7e", "duplicateIds": "rejected", "value": "plain saved value" },
   "cfgs": {
     "layout": ["repeat to end of payload: u16 key, u16 len, bytes[len]"],
     "keyTableMax": 32,
@@ -65,7 +65,8 @@
     { "id": "role-whole-value", "doc": "role 按整字（u32）比较：Input 恒写 1，Output 恒写 2" },
     { "id": "framing-fixed", "doc": "容器框架跨 abi 不变" },
     { "id": "migrations-payload-only", "doc": "迁移只改载荷" },
-    { "id": "prms-headroom", "doc": "条数不超过 224、载荷不超过 57216 字节" },
+    { "id": "prms-limits", "doc": "读入与写出用同一组上限：条数不超过 256、载荷不超过 65536 字节" },
+    { "id": "prms-trim", "doc": "编码之前调用 `trimToDecodable`，只丢 PRMS 的未知 id，从末尾往前丢，认识的参数一个不丢" },
     { "id": "write-back-scope", "doc": "由 `decodeDocument` 解出来、没再加东西的文档一定编得出来" },
     { "id": "first-setstate", "doc": "实例一生的第一次 setState 全量应用" },
     { "id": "later-setstate", "doc": "之后的 setState（宿主预设、A/B、撤销）只改参数" },

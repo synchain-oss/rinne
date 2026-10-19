@@ -353,41 +353,33 @@ TEST_CASE("load: 整份 state 至少 16 字节，role 按整字比较", "[state]
     requireUntouched(withRole(current, 2u), Role::Input, StateLoadStatus::Corrupt);
 }
 
-TEST_CASE("load: 满额 PRMS 判坏字节，参数层补完仍可写回", "[state][migration]")
+TEST_CASE("load: 满额 PRMS 读得进来，超限判坏字节", "[state][migration]")
 {
-    // 256 个未知 id：原来的证据是 loadState 返回 Ok，补一个参数后 257 条写不回去；现在读入就拒收。
+    const auto containerOf = [](const std::vector<rinne::test::RawParam>& params) {
+        return rinne::test::rawContainer(1, 1,
+                                         {{rinne::state::kFourCcPrms, rinne::test::rawParams(params)},
+                                          {rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))}});
+    };
+
+    // 256 个未知 id：读得进来。
     std::vector<rinne::test::RawParam> full;
     for (std::uint32_t i = 0; i < rinne::state::kMaxParamCount; ++i)
         full.push_back({"p" + std::to_string(i), 0u});
-    const Bytes fullBytes = rinne::test::rawContainer(1, 1,
-                                                      {{rinne::state::kFourCcPrms, rinne::test::rawParams(full)},
-                                                       {rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))}});
-    requireUntouched(fullBytes, Role::Input, StateLoadStatus::Corrupt);
-
-    // 252 个 255 字节 id 的 PRMS 共 65524 字节：同样拒收，参数层没有余量。
-    std::vector<rinne::test::RawParam> wide;
-    for (std::size_t i = 0; i < 252; ++i)
-        wide.push_back({rinne::test::longestParamId(i), 0u});
-    const Bytes wideBytes = rinne::test::rawContainer(1, 1,
-                                                      {{rinne::state::kFourCcPrms, rinne::test::rawParams(wide)},
-                                                       {rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))}});
-    requireUntouched(wideBytes, Role::Input, StateLoadStatus::Corrupt);
-
-    // 预算之内：220 个最长 id 解得开，参数层补 32 个槽之后整份仍编得出来。
-    std::vector<rinne::test::RawParam> budget;
-    for (std::size_t i = 0; i < 220; ++i)
-        budget.push_back({rinne::test::longestParamId(i), 0u});
-    const Bytes budgetBytes =
-        rinne::test::rawContainer(1, 1,
-                                  {{rinne::state::kFourCcPrms, rinne::test::rawParams(budget)},
-                                   {rinne::state::kFourCcCfgs, rinne::test::kv(1, byteList({3}))}});
+    const Bytes fullBytes = containerOf(full);
     StateDocument out = sentinelDocument(Role::Input);
-    REQUIRE(rinne::state::loadState(budgetBytes.data(), budgetBytes.size(), Role::Input, out).status ==
+    REQUIRE(rinne::state::loadState(fullBytes.data(), fullBytes.size(), Role::Input, out).status ==
             StateLoadStatus::Ok);
-    for (std::uint32_t i = 0; i < rinne::state::kReservedParamSlots; ++i)
-        out.params.set(rinne::test::longestParamId(1000u + i), 1.0f);
-    Bytes encoded;
-    CHECK(rinne::state::encodeDocument(out, encoded));
+    CHECK(out.params.entries.size() == rinne::state::kMaxParamCount);
+
+    // 257 个：判坏字节。
+    full.push_back({"p256", 0u});
+    requireUntouched(containerOf(full), Role::Input, StateLoadStatus::Corrupt);
+
+    // 253 个 255 字节 id 的 PRMS 超过 64 KiB：同样判坏字节。
+    std::vector<rinne::test::RawParam> wide;
+    for (std::size_t i = 0; i < 253; ++i)
+        wide.push_back({rinne::test::longestParamId(i), 0u});
+    requireUntouched(containerOf(wide), Role::Input, StateLoadStatus::Corrupt);
 }
 
 TEST_CASE("state: testing 入口只经 StateMigrationTesting.h 暴露", "[state][source]")

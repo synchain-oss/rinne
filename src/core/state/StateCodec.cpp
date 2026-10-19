@@ -497,6 +497,8 @@ bool encodeParamsImpl(const Params& params, std::vector<std::uint8_t>& out)
         writer.bytes(entry.id);
         writer.f32(entry.value);
     }
+    if (writer.size() > kMaxParamBytes)
+        return false;
     out = writer.take();
     return true;
 }
@@ -505,12 +507,11 @@ bool decodeParamsImpl(const std::uint8_t* data, std::size_t size, Params& out)
 {
     if (data == nullptr && size != 0u)
         return false;
-    // 参数层要在这份列表上补自己的参数：条数与载荷都得给写回留出余量，否则解得开却写不回去。
-    if (size > kMaxDecodedParamBytes)
+    if (size > kMaxParamBytes)
         return false;
     ByteReader reader(data, size);
     const std::uint32_t count = reader.u32();
-    if (!reader.ok() || count > kMaxDecodedParamCount)
+    if (!reader.ok() || count > kMaxParamCount)
         return false;
 
     Params result;
@@ -682,7 +683,7 @@ bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, s
     };
     for (std::size_t i = params.entries.size(); i > 0u;)
     {
-        if (params.entries.size() <= kMaxDecodedParamCount && bytes <= kMaxDecodedParamBytes)
+        if (params.entries.size() <= kMaxParamCount && bytes <= kMaxParamBytes)
             break;
         --i;
         if (isKnown(params.entries[i].id))
@@ -691,7 +692,7 @@ bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, s
         params.entries.erase(params.entries.begin() + static_cast<std::ptrdiff_t>(i));
         ++dropped;
     }
-    return params.entries.size() <= kMaxDecodedParamCount && bytes <= kMaxDecodedParamBytes;
+    return params.entries.size() <= kMaxParamCount && bytes <= kMaxParamBytes;
 }
 
 const ConfigField* findConfigField(Role role, std::uint16_t key) noexcept

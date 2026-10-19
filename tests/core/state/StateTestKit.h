@@ -125,7 +125,7 @@ inline std::uint32_t floatBits(float value)
     return bits;
 }
 
-// 255 字节的参数 id：写回余量的用例用它把一条参数顶到最长。序号放在结尾，保证两两不同。
+// 255 字节的参数 id：上限用例用它把一条参数顶到最长。序号放在结尾，保证两两不同。
 inline std::string longestParamId(std::size_t index)
 {
     std::string id(rinne::state::kMaxParamIdBytes, 'a');

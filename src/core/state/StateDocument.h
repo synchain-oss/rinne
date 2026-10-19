@@ -38,8 +38,8 @@ StateDocument makeDefaultDocument(Role role);
 bool decodeDocument(const Container& container, Role role, StateDocument& out) noexcept;
 
 // 编码。失败：role 不认识；unknownChunks 里混进这一端的已知块（会写出两份）；任何一层超出格式上限。
-// 由 decodeDocument 解出来、没再加东西的文档一定编得出来；参数层在解出来的参数列表上补自己的参数时，解码时留的
-// 写回余量（见 StateCodec.h 的 kReservedParamSlots）保证补完仍写得回去。
+// 由 decodeDocument 解出来、没再加东西的文档一定编得出来；参数层在解出来的参数列表上补自己的参数后，要先调用
+// trimToDecodable（见 StateCodec.h）把「未知 id + 认识的参数」压进读写共用的上限，才保证编得出来。
 bool encodeDocument(const StateDocument& document, std::vector<std::uint8_t>& out) noexcept;
 
 } // namespace rinne::state

@@ -17,7 +17,7 @@
 // 把两层拼成一个角色的整份 state 在 StateDocument.h；abi 判读与迁移在 StateMigration.h。
 //
 // 字节来自用户的工程文件，是不可信输入：长度与计数都先校验再用于分配或索引。分配量有常数上限：容器层最多按
-// 64 个块预留，载荷层读入最多按 224 条参数预留（写出最多 256 条）；载荷的复制不超过输入本身的长度。
+// 64 个块预留，载荷层最多按 256 条参数预留；载荷的复制不超过输入本身的长度。
 // 编解码函数都不抛异常（内存不足也只是返回失败），失败时不碰出参（trimToDecodable 是例外，见其注释）：调用方
 // 拿到的要么是完整的结果，要么还是调用前的样子，不会有填了一半的状态。只有 Container::set / remove 与
 // Params::set 这几个改内容的小工具会在内存不足时抛 std::bad_alloc。这里的函数都会分配内存，不能进音频回调；
@@ -111,16 +111,9 @@ bool encodeContainer(const Container& container, std::vector<std::uint8_t>& out)
 inline constexpr std::uint32_t kMaxParamCount = 256u;
 inline constexpr std::size_t kMaxParamIdBytes = 255u; // idLen 是 u8
 
-// 读入时为参数层留的写回余量：解出来的列表加上参数层自己的参数，仍要写得回去。
-// 预留槽数取参数表里 Input 参数个数的上界：参数层在解出来的列表上 set 时，认识的一律是已有 id（不增条），真正会
-// 增条的只有参数层补进来的那几个参数，以及参数表将来可能再加的参数。留 32 个槽够覆盖这张表翻倍还有余；每个槽按
-// 「1 字节 idLen + 255 字节 id + 4 字节值」共 260 字节计载荷，与 CFGS 给已知键留预算同理。
-inline constexpr std::uint32_t kReservedParamSlots = 32u;
-inline constexpr std::size_t kReservedParamSlotBytes = 1u + kMaxParamIdBytes + 4u; // 260
-
-// 解码时允许的最大条数与最大载荷：留下的余量就是上面那 32 个槽。
-inline constexpr std::uint32_t kMaxDecodedParamCount = kMaxParamCount - kReservedParamSlots;
-inline constexpr std::size_t kMaxDecodedParamBytes = kMaxChunkBytes - kReservedParamSlots * kReservedParamSlotBytes;
+// 读入与写出用同一组上限：条数 ≤ 256、载荷 ≤ 64 KiB（单块上限）。写得出的就读得回；将来的版本写出 225..256 条，
+// 本版本也能整份读进来。
+inline constexpr std::size_t kMaxParamBytes = kMaxChunkBytes;
 
 struct ParamValue
 {
@@ -141,17 +134,16 @@ struct Params
 // 参数 ID：1..255 字节的可打印 ASCII，不含空格。
 bool isValidParamId(const std::string& id) noexcept;
 
-// 写出之前把列表压到下一次读得回来：不在 knownIds 里的条目从末尾起丢，直到条数 ≤ kMaxDecodedParamCount 且载荷 ≤
-// kMaxDecodedParamBytes；knownIds 里的条目一个不丢。写出的上限比读入的上限宽，参数层补完参数、编码之前要调用它，
-// 否则下一次加载会因超过读入上限而整份失败。返回 false 表示认识的条目自己就超过读入上限（列表已尽量压缩）。
-// dropped 带回丢掉的条数（没丢就是 0）：丢弃不能悄悄发生，参数层要把它记进诊断计数。只有 PRMS 会丢；CFGS 的未知键读入时
-// 已经按写回预算整份校验过，读得进来就写得回去也读得回来，不需要这一步。
+// 写出之前把列表压到不超过上限：不在 knownIds 里的条目从末尾起丢，直到条数 ≤ kMaxParamCount 且载荷 ≤ kMaxParamBytes；
+// knownIds 里的条目一个不丢。参数层在解出来的列表上补完自己的参数、编码之前要调用它，否则「未知 id +
+// 认识的参数」超过上限时 保存会失败。返回 false 表示认识的条目自己就超过上限（列表已尽量压缩）。 dropped
+// 带回丢掉的条数（没丢就是 0）：丢弃不能悄悄发生，参数层要把它记进诊断计数。只有 PRMS 会丢；CFGS 的未知键读入时
+// 已经按写回预算整份校验过，读得进来就写得回去，不需要这一步。
 bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, std::size_t& dropped) noexcept;
 
-// 失败：条数超上限、某个 id 不合规、id 重复。上限是 kMaxParamCount（写回时的上限）。
+// 失败：条数超过 kMaxParamCount、载荷超过 kMaxParamBytes、某个 id 不合规、id 重复。
 bool encodeParams(const Params& params, std::vector<std::uint8_t>& out) noexcept;
 // 失败：同上，另有载荷截断、最后一条之后还有字节。重复的 id 让「按 id 匹配」有歧义，所以整份拒收。
-// 解码比编码严：条数不超过 kMaxDecodedParamCount、载荷不超过 kMaxDecodedParamBytes，给参数层留下写回余量。
 bool decodeParams(const std::uint8_t* data, std::size_t size, Params& out) noexcept;
 
 // ---- CFGS：非参数设置 ----
