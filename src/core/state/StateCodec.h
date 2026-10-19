@@ -18,9 +18,10 @@
 //
 // 字节来自用户的工程文件，是不可信输入：长度与计数都先校验再用于分配或索引。分配量有常数上限：容器层最多按
 // 64 个块预留，载荷层读入最多按 224 条参数预留（写出最多 256 条）；载荷的复制不超过输入本身的长度。
-// 编解码函数都不抛异常（内存不足也只是返回失败），失败时不碰出参：调用方拿到的要么是完整的结果，要么还是调用前
-// 的样子，不会有填了一半的状态。只有 Container::set / remove 与 Params::set 这几个改内容的小工具会在内存不足时
-// 抛 std::bad_alloc。这里的函数都会分配内存，不能进音频回调；可在任意非实时线程上调用。
+// 编解码函数都不抛异常（内存不足也只是返回失败），失败时不碰出参（trimToDecodable
+// 是例外，见其注释）：调用方拿到的要么是完整的结果，要么还是调用前 的样子，不会有填了一半的状态。只有 Container::set /
+// remove 与 Params::set 这几个改内容的小工具会在内存不足时 抛
+// std::bad_alloc。这里的函数都会分配内存，不能进音频回调；可在任意非实时线程上调用。
 #pragma once
 
 #include <array>
@@ -138,6 +139,7 @@ struct Params
 };
 
 // 参数 ID：1..255 字节的可打印 ASCII，不含空格。
+bool isValidParamId(const std::string& id) noexcept;
 
 // 写出之前把列表压到下一次读得回来：不在 knownIds 里的条目从末尾起丢，直到条数 ≤ kMaxDecodedParamCount 且载荷 ≤
 // kMaxDecodedParamBytes；knownIds 里的条目一个不丢。写出的上限比读入的上限宽，参数层补完参数、编码之前要调用它，
@@ -145,7 +147,6 @@ struct Params
 // dropped 带回丢掉的条数（没丢就是 0）：丢弃不能悄悄发生，参数层要把它记进诊断计数。只有 PRMS 会丢；CFGS 的未知键读入时
 // 已经按写回预算整份校验过，读得进来就写得回去也读得回来，不需要这一步。
 bool trimToDecodable(Params& params, const std::vector<std::string>& knownIds, std::size_t& dropped) noexcept;
-bool isValidParamId(const std::string& id) noexcept;
 
 // 失败：条数超上限、某个 id 不合规、id 重复。上限是 kMaxParamCount（写回时的上限）。
 bool encodeParams(const Params& params, std::vector<std::uint8_t>& out) noexcept;
