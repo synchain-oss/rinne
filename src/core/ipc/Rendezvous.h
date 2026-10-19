@@ -171,6 +171,7 @@ private:
     void writeIdentity(RoleSlot& slot) noexcept;
     void upkeepLabel(RoleSlot& slot, u64 nowMs, bool heartbeatDue) noexcept;
     void upkeepWriter() noexcept;
+    void enterConflict(u64 nowMs, bool retryDue) noexcept;
     void armIntentHold(u64 nowMs) noexcept;
     bool intentHeld(u64 nowMs) noexcept;
     void lostOwnership(u64 nowMs);

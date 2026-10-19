@@ -558,11 +558,7 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     }
     if (tier == TakeoverTier::kNone)
     {
-        state_ = RendezvousState::kConflict;
-        if (retryDue)
-        {
-            nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs; // 有效期内多看的拍子不推迟它
-        }
+        enterConflict(nowMs, retryDue);
         return;
     }
     // provisional 位与 kCfgSmartOrigin 跟着认领的来源走（intent_），不跟这一拍的档位走（effective）：智能默认的
@@ -572,8 +568,7 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     const CtlCas claimed = casCtl(slot.ctl, observed, claimState);
     if (!claimed.ok)
     {
-        state_ = RendezvousState::kConflict;
-        nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
+        enterConflict(nowMs, retryDue);
         return;
     }
     myCtl_ = claimed.word;
@@ -588,8 +583,7 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     {
         // 别人把我们的 claiming 判成幽灵或接管了：什么都不写，进冲突重试
         myCtl_ = 0;
-        state_ = RendezvousState::kConflict;
-        nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
+        enterConflict(nowMs, retryDue);
         return;
     }
     myCtl_ = activated.word;
@@ -598,6 +592,17 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     labelDirty_ = true; // 新属主把自己的标签写上去
     labelOddSinceMs_ = 0;
     // 状态留给 openRing：成功时由 publishBinding 置 kActive，失败时置 kOpening
+}
+
+// 进冲突。只有按常规重试的那一拍才把下一次重试排到 1 s 之后；有效期内只多看了一眼休眠档的拍子，不论是没判出档位
+// 还是 CAS 输了，都不推迟它，其余各档照旧每 1 s 试一次
+void Rendezvous::enterConflict(u64 nowMs, bool retryDue) noexcept
+{
+    state_ = RendezvousState::kConflict;
+    if (retryDue)
+    {
+        nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
+    }
 }
 
 // 工程恢复与用户确认的原意图有效期。拿休眠槽要观察者看满 2 s 的证据，可这两种意图恰恰常在证据还没攒够的时候

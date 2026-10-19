@@ -602,6 +602,43 @@ TEST_CASE("a clock that goes backwards never stretches the intent hold", "[ipc][
     CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == holder.myCtl());
 }
 
+TEST_CASE("the extra dormant look inside the intent hold never delays the normal retry", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+    constexpr u64 kTick = 40;
+
+    // 工程恢复首拍时组被一个正式认领占着，进冲突，常规重试排在 1 s 之后。有效期内每一拍都多看一眼休眠档（看不到），
+    // 这些拍子不推迟常规重试：属主在 320 ms 时放开了槽，工程恢复在 1 s 的那次常规重试上就拿到空槽
+    Rendezvous holder(configFor(Role::kInput, backend, naming.scope(), 91));
+    holder.setGroup(8, ClaimIntent::kManual, kT0);
+    holder.prepare(format, kT0);
+    holder.tick(kT0);
+    REQUIRE(holder.state() == RendezvousState::kActive);
+    const u64 loadAt = kT0 + 10000;
+    Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 92));
+    restore.setGroup(8, ClaimIntent::kRestore, loadAt);
+    restore.prepare(format, loadAt);
+    restore.tick(loadAt);
+    REQUIRE(restore.state() == RendezvousState::kConflict);
+    u64 wonAt = 0;
+    for (u64 t = loadAt + kTick; t <= loadAt + RendezvousTiming::kIntentHoldMs && wonAt == 0; t += kTick)
+    {
+        if (t == loadAt + 320)
+        {
+            holder.setGroup(0, ClaimIntent::kManual, t);
+        }
+        restore.tick(t);
+        wonAt = restore.state() == RendezvousState::kActive ? t : 0;
+    }
+    CHECK(wonAt == loadAt + RendezvousTiming::kConflictRetryMs);
+    CHECK(roleSlot(rv, 8, Role::kInput).ctl.load() == restore.myCtl());
+}
+
 TEST_CASE("a conflict retry does not wait out a clock that went backwards", "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();
