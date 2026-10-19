@@ -10,15 +10,18 @@
 //        squash 提交消息：subject 格式、DCO（恰好一行维护者签名）、只许 Signed-off-by 一种尾注、隐私
 //   node scripts/maintainer/lib/maint.mjs review-state --file <issue comments JSON> --writers <login,…> [--bot claude]
 //        最近一条 bot 审查总结（head、运行链接、尾注与条数核对）与它之后的处置汇总（作者须在 writers 里）；
-//        另列出全部 bot 总结（尾注、运行编号、逐条意见）与全部处置汇总引用的运行编号，供「每条 bot 总结都有回应」核对
+//        另列出全部 bot 总结（尾注、运行编号、逐条意见、created_at / updated_at 与正文 sha256）与全部处置汇总
+//        引用的运行编号，供「每条 bot 总结都有回应」「总结贴出之后没被改过」核对
 //   node scripts/maintainer/lib/maint.mjs infra --file <路径 JSON 数组> [--list <glob JSON 数组>]
 //        其中碰到基础设施路径的那些。清单与匹配规则都取自 scripts/lib/infra-paths.mjs（唯一真源）；
 //        --list 只给自测换一份 glob，匹配规则不变
 //   node scripts/maintainer/lib/maint.mjs signoff        维护者的签名行（squash 消息的最后一行）
+//   node scripts/maintainer/lib/maint.mjs --self-test    本文件的判据：首行 head 标记（CRLF、BOM、正文引用）、发帖记录行与正文哈希
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import { SIGNOFF, checkMessage } from "../../check-commits.mjs";
-import { isMain, j } from "../../lib/check-kit.mjs";
+import { caseResult, isMain, j } from "../../lib/check-kit.mjs";
 import { loadPersonalNeedles, needlesMode, plainText, redact, scan } from "../../lib/privacy-needles.mjs";
 import { FOOTER, findPrevious, headMark, validateSummary } from "../../review-bot.mjs";
 
@@ -53,6 +56,28 @@ export function agentMarker(body) {
             .map((kv) => kv.split("=")),
     );
     return { role: m[1], kind: m[2], round: +m[3], head: m[4], extra };
+}
+
+/**
+ * review-bot 发评论后写的那一行（GITHUB_STEP_SUMMARY 与运行日志里各一份）：
+ * `rinne-review-posted id=<评论编号> sha256=<正文的 sha256>`。拿不到返回 null。
+ */
+export const POSTED_LINE = /^rinne-review-posted id=(\d+) sha256=([0-9a-f]{64})$/;
+
+/** 一段文本里记下的发帖行 { id, sha256 }；没有返回 null。 */
+export function postedLine(text) {
+    for (const l of (text || "").split(/\r?\n/)) {
+        const m = POSTED_LINE.exec(l.trim());
+        if (m) return { id: m[1], sha256: m[2] };
+    }
+    return null;
+}
+
+/** 评论正文按 review-bot 的口径取 sha256：先把 CRLF 归一成 LF，再对 UTF-8 字节算。 */
+export function bodySha256(body) {
+    return createHash("sha256")
+        .update(Buffer.from((body || "").replace(/\r\n/g, "\n"), "utf8"))
+        .digest("hex");
 }
 
 /**
@@ -109,6 +134,10 @@ export function reviewState(comments, writers, bot = "claude") {
     const summaries = comments.filter(isSummary).map((c) => ({
         id: c.id,
         createdAt: c.created_at,
+        // review-bot 只建不改：两者不同说明总结在贴出之后被改过，判据在 pr-merge
+        updatedAt: c.updated_at ?? c.created_at,
+        // 正文的 sha256（CRLF 归一成 LF）：review-bot 发帖时也记下同一个值，pr-merge 用它核对评论没被改过
+        sha256: bodySha256(c.body || ""),
         ...summaryFacts(c.body || ""),
         items: summaryItems(c.body || ""),
     }));
@@ -126,10 +155,89 @@ export function reviewState(comments, writers, bot = "claude") {
     };
 }
 
+/**
+ * 自测：首行 head 标记的三种往返形态（CRLF、BOM、正文里引用标记行不算）与发帖记录行。返回 { ok; bad; good; lines }。
+ * 「标记不在首行就不是总结」这条不能放宽：改回多行正则时「正文里引用了标记行」会变红。
+ */
+export function selfTest() {
+    const cases = [];
+    const t = (label, bad, flagged) => cases.push({ label, bad, passed: bad ? flagged : !flagged });
+    const sha = "a".repeat(40);
+    const mark = `<!-- rinne-review-head sha=${sha} bot=claude -->`;
+    const body = `${mark}\n_审查对象：\`aaaaaaa\`_\n\n## 结论\n无\n`;
+    const found = (text) => headMark(text)?.sha === sha;
+    const summaries = (text) =>
+        reviewState(
+            [
+                {
+                    id: 1,
+                    user: { login: "github-actions[bot]" },
+                    created_at: "2026-10-12T04:00:00Z",
+                    updated_at: "2026-10-12T04:00:00Z",
+                    body: text,
+                },
+            ],
+            [],
+        );
+    t("首行是 head 标记时认得出", false, !found(body));
+    t("CRLF：首行以 \\r\\n 结尾仍认得出", false, !found(body.replace(/\n/g, "\r\n")));
+    t("BOM：首行前有 U+FEFF 仍认得出", false, !found(`\uFEFF${body}`));
+    t("标记不在首行（正文里引用了标记行）不算总结", false, found(`## 引用\n${mark}\n`));
+    t("只出现在第二行的标记不算", false, found(`\n${mark}\n`));
+    t("reviewState：首行 head 标记算总结", false, summaries(body).summaries.length !== 1);
+    t("reviewState：标记不在首行不算总结", false, summaries(`## 引用\n${mark}\n`).summaries.length !== 0);
+    t("reviewState：CRLF 仍算总结", false, summaries(body.replace(/\n/g, "\r\n")).summaries.length !== 1);
+    t("reviewState：BOM 仍算总结", false, summaries(`\uFEFF${body}`).summaries.length !== 1);
+    t(
+        "reviewState：带出 updated_at 与正文 sha256",
+        false,
+        (() => {
+            const s = reviewState(
+                [
+                    {
+                        id: 1,
+                        user: { login: "github-actions[bot]" },
+                        created_at: "2026-10-12T04:00:00Z",
+                        updated_at: "2026-10-12T05:00:00Z",
+                        body,
+                    },
+                ],
+                [],
+            ).summary;
+            return !(s && s.updatedAt === "2026-10-12T05:00:00Z" && s.sha256 === bodySha256(body));
+        })(),
+    );
+    t("summaryFacts.head：CRLF 首行仍取到", false, summaryFacts(body.replace(/\n/g, "\r\n")).head !== sha);
+    t("summaryFacts.head：BOM 首行仍取到", false, summaryFacts(`\uFEFF${body}`).head !== sha);
+    t("summaryFacts.head：标记不在首行为空", false, summaryFacts(`引用\n${mark}\n`).head !== null);
+    // 发帖记录行与正文哈希
+    const line = `rinne-review-posted id=123456 sha256=${"0".repeat(64)}`;
+    const got = postedLine(`日志行\n${line}\n`);
+    t("发帖记录行：取到编号与 sha256", false, !(got && got.id === "123456" && got.sha256 === "0".repeat(64)));
+    t("发帖记录行：没有这一行时取不到", true, postedLine("别的日志\n") === null);
+    t("发帖记录行：编号不是数字时不认", true, postedLine(line.replace("id=123456", "id=x")) === null);
+    t("发帖记录行：sha256 不是 64 位十六进制时不认", true, postedLine(line.replace("0".repeat(64), "zz")) === null);
+    const lf = "<!-- rinne-review-head sha=" + sha + " -->\n## 结论\n无\n";
+    t("正文哈希：CRLF 与 LF 归一后相同", false, bodySha256(lf) !== bodySha256(lf.replace(/\n/g, "\r\n")));
+    t("正文哈希：正文变了哈希就变", true, bodySha256(lf) !== bodySha256(`${lf}补一句\n`));
+    t(
+        "正文哈希：与 review-bot 记录的口径一致（对 UTF-8 字节算）",
+        false,
+        bodySha256(lf) !== createHash("sha256").update(Buffer.from(lf, "utf8")).digest("hex"),
+    );
+    return caseResult(cases);
+}
+
 async function main(argv) {
     const [cmd, ...rest] = argv;
     const opt = (k) => (rest.includes(k) ? rest[rest.indexOf(k) + 1] : undefined);
     const print = (v) => process.stdout.write(`${JSON.stringify(v)}\n`);
+    if (cmd === "--self-test") {
+        const r = selfTest();
+        for (const l of r.lines) console.error(l);
+        console.log(`maint --self-test：${r.ok ? "通过" : "失败"}（坏样例 ${r.bad}、正例 ${r.good}）`);
+        return r.ok ? 0 : 1;
+    }
     if (cmd === "signoff") {
         print({ signoff: SIGNOFF });
         return 0;

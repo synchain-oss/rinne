@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { caseResult } from "../lib/check-kit.mjs";
 import { argValue, checkConfig, stepConfig, FIXTURE, selfTest as scriptSelfTest } from "../review-bot.mjs";
+import { selfTest as maintSelfTest } from "../maintainer/lib/maint.mjs";
 import { parseWorkflow } from "./workflows.mjs";
 
 export const MODEL = "claude-opus-5-5";
@@ -364,14 +365,16 @@ export default {
             ],
             ["缺 deepseek-review.yml", true, check({ deepseek: null })],
         ].map(([label, bad, errors]) => ({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 }));
-        // review-bot.mjs 自己的判据（取总结、尾注归一、上一轮与处置汇总、config）一并在这里跑
+        // review-bot.mjs 自己的判据（取总结、尾注归一、上一轮与处置汇总、config、发帖记录行）与 maint.mjs 的
+        // 首行 head 标记判据一并在这里跑
         const own = caseResult(cases);
         const bot = scriptSelfTest();
+        const maint = maintSelfTest();
         return {
-            ok: own.ok && bot.ok,
-            bad: own.bad + bot.bad,
-            good: own.good + bot.good,
-            lines: [...own.lines, ...bot.lines],
+            ok: own.ok && bot.ok && maint.ok,
+            bad: own.bad + bot.bad + maint.bad,
+            good: own.good + bot.good + maint.good,
+            lines: [...own.lines, ...bot.lines, ...maint.lines],
         };
     },
 };

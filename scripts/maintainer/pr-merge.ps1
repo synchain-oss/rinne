@@ -27,6 +27,8 @@
 # 信任模型：记录给的是「绑定到一个 head」与「留下书面痕迹」，不是认证。by 只是标签：能写这个文件的进程都能写出
 # "by": "user"，所以批准、豁免与外部处置记录只在维护者明确指示后写入；-Check 与 -Merge 把依据的每一条记录原文打印出来
 # （ReliedOn），用户能看到这次合并靠的是哪几条。
+# bot 总结只建不改：updated_at 与 created_at 不同就判红；运行日志里有 review-bot 的发帖记录行时，再核对总结的评论编号与
+# 正文 sha256。老运行的日志里没有这一行时退化为只核对 updated_at，并在 -Check 的 Warnings 里注明未核对哈希。
 #
 # 主 clone 的判据本身：-Check 断言 core.hooksPath 指向主 clone 的 scripts/hooks、rinne.waivers 指向一份存在的记录文件，
 # 而且它不在主 clone 与 <根>/wt/ 之下。位置按系统给出的最终路径判（junction、符号链接、短名都展开），并拒绝设备路径与 UNC
@@ -149,6 +151,20 @@ function Get-MergeFacts {
     $runId = if ($state.summary) { [string]$state.summary.runId } else { '' }
     $run = if ($runId) { Get-RinneApi "repos/$repo/actions/runs/$runId" -AllowFail } else { $null }
     $jobs = if ($run) { @(Get-RinneApi "repos/$repo/actions/runs/$runId/jobs?per_page=100" -Paginate | ForEach-Object { $_.jobs } | ForEach-Object { $_ }) } else { @() }
+    # 发帖记录：review-bot 发完总结打的那一行 id + 正文 sha256，在运行日志里。取不到（老运行、日志过期）时为 $null，
+    # 由判据退化为只核对 updated_at 并在 -Check 里注明未核对哈希
+    $posted = $null
+    if ($state.summary -and $run) {
+        $jobName = if ($run.path -eq $ReviewWorkflows[1]) { 'dispatch' } else { 'claude-pr-review' }
+        $job = @($jobs | Where-Object { $_.name -eq $jobName }) | Select-Object -First 1
+        if ($job) {
+            $logText = Get-RinneRunLog -RunId $runId -JobId ([string]$job.id)
+            if ($logText) {
+                $recs = [regex]::Matches($logText, 'rinne-review-posted id=(\d+) sha256=([0-9a-f]{64})')
+                if ($recs.Count) { $posted = [pscustomobject]@{ Id = $recs[$recs.Count - 1].Groups[1].Value; Sha256 = $recs[$recs.Count - 1].Groups[2].Value } }
+            }
+        }
+    }
     $files = Get-RinneApi "repos/$repo/pulls/$Pr/files?per_page=100" -Paginate
     $gatesPath = Join-Path (Get-RinneRoot) "_logs/$CardId/gates-$head.json"
     $gates = if (Test-Path -LiteralPath $gatesPath) { Get-Content -Raw -LiteralPath $gatesPath | ConvertFrom-Json } else { $null }
@@ -168,7 +184,7 @@ function Get-MergeFacts {
     [pscustomobject]@{
         Pr = $Pr; Card = $card; Pull = $pull; Head = $head; Files = @($files); Activity = $activity
         State = $state; Items = @(Get-RinneCommentItems -Activity $activity -State $state); Threads = @($activity.Threads)
-        Run = $run; Jobs = $jobs; Checks = Get-RinneCheckRuns $head; Required = Get-RinneRequiredChecks
+        Run = $run; Jobs = $jobs; Posted = $posted; Checks = Get-RinneCheckRuns $head; Required = Get-RinneRequiredChecks
         Gates = $gates; Records = Read-Records $Pr
         MainClone = [pscustomobject]@{
             Head = [string]$clone.Sha
@@ -188,20 +204,77 @@ function Get-MergeFacts {
 
 # ---- 判据（纯函数，自测逐条给反例） ---------------------------------------------------------
 
-<# 处置汇总表里判为「不改」或「挂账」的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。 #>
-function Get-DeferredSevere {
-    param([object[]]$Items)
-    $rows = [System.Collections.Generic.List[string]]::new()
-    foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' -and (Get-RinneProp (Get-AgentMarker $_.Body) 'Kind') -eq 'disposition' })) {
-        foreach ($line in $i.Body -split "`r?`n") {
-            if ($line -notmatch '^\s*\|') { continue }
-            $cells = @(($line -replace '\\\|', '') -split '\|' | ForEach-Object { $_.Trim() })
-            $severe = @($cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0
-            $kept = @($cells | Where-Object { $_ -match '^(不改|挂账)' }).Count -gt 0
-            if ($severe -and $kept) { $rows.Add($line.Trim()) }
+<# 单元格去掉 markdown 的强调与代码标记（*、_、反引号），再比决定词。 #>
+function Clear-MdCell {
+    param([AllowEmptyString()][string]$Cell)
+    (($Cell ?? '') -replace '[*_`]', '').Trim()
+}
+
+<#
+  处置汇总表的数据行：表格的第一行当表头，按列名认出 级别 / 位置 / 摘要 / 处置 四列；认不出表头时这一行按逐格扫描
+  处理（Cols 为 $null）。表格之间的文字把表头状态清掉，下一张表重新认。
+#>
+function Get-DispositionRows {
+    param([AllowEmptyString()][string]$Body)
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $cols = $null
+    foreach ($line in (($Body ?? '') -split "`r?`n")) {
+        if ($line -notmatch '^\s*\|') { $cols = $null; continue }
+        $cells = @((($line -replace '\\\|', '') -split '\|') | ForEach-Object { Clear-MdCell $_ })
+        if (-not @($cells | Where-Object { $_ }).Count) { continue }
+        if (@($cells | Where-Object { $_ -and $_ -notmatch '^:?-{2,}:?$' }).Count -eq 0) { continue }
+        if ($null -eq $cols) {
+            $map = @{}
+            for ($i = 0; $i -lt $cells.Count; $i++) {
+                foreach ($name in '级别', '位置', '摘要', '处置') {
+                    if ($cells[$i] -match $name -and -not $map.ContainsKey($name)) { $map[$name] = $i }
+                }
+            }
+            if ($map.Count) { $cols = $map; continue }
         }
+        $rows.Add([pscustomobject]@{ Line = $line.Trim(); Cells = @($cells); Cols = $cols })
     }
     $rows.ToArray()
+}
+
+<#
+  处置汇总表里判为「不改」「不采纳」「挂账」「暂不」「维持」的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。
+  同一条意见按「位置」认（去掉 markdown 标记；没有位置列时按摘要），以最后一次处置为准：后来写了「已修」并附提交的，
+  不再要用户豁免；后来才判为不改 / 挂账的，照样列出。单元格先去掉 * _ 与反引号再认决定词（「**不改**」也认得出来），
+  决定词出现在处置列任意位置都算；「采纳」「已采纳」不是拒绝。
+#>
+function Get-DeferredSevere {
+    param([object[]]$Items)
+    $rounds = [System.Collections.Generic.List[object]]::new()
+    $order = 0
+    foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' })) {
+        $m = Get-AgentMarker $i.Body
+        if (-not $m -or $m.Kind -ne 'disposition') { continue }
+        $rounds.Add([pscustomobject]@{ Round = [int]$m.Round; Order = $order; Rows = @(Get-DispositionRows $i.Body) })
+        $order++
+    }
+    # 同一个位置以轮次靠后的那一行为准；同一轮里以行序靠后的为准
+    $latest = @{}
+    foreach ($r in @($rounds | Sort-Object Round, Order)) {
+        foreach ($row in @($r.Rows)) {
+            $cell = { param($name) if ($row.Cols -and $row.Cols.ContainsKey($name) -and $row.Cols[$name] -lt $row.Cells.Count) { $row.Cells[$row.Cols[$name]] } else { $null } }
+            $level = & $cell '级别'
+            $severe = if ($level) { $level -match '红旗|重要' } else { @($row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0 }
+            if (-not $severe) { continue }
+            $loc, $sum = (& $cell '位置'), (& $cell '摘要')
+            $key = if ($loc) { $loc } elseif ($sum) { $sum } else { $row.Line }
+            $decision = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) {
+                $row.Cells[$row.Cols['处置']]
+            } else { $row.Cells -join ' ' }
+            if ($decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)') {
+                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $true }
+            } elseif (($decision -match '已修|修复|已改|采纳') -and @($row.Cells | Where-Object { $_ -match '(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count) {
+                # 后来写明已修 / 采纳并附提交：这条不再要用户豁免
+                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $false }
+            }
+        }
+    }
+    @($latest.Values | Where-Object Deferred | ForEach-Object Line)
 }
 
 function Get-MergeVerdict {
@@ -243,6 +316,10 @@ function Get-MergeVerdict {
     if (-not $s) { $fail.Add('没有 bot 审查总结') }
     else {
         if ($s.head -ne $head) { $fail.Add("最近一条 bot 总结审的是 $(([string]$s.head).Substring(0, [Math]::Min(7, ([string]$s.head).Length)))，不是当前 head") }
+        # review-bot 只建不改：updated_at 与 created_at 不同说明总结在贴出之后被改过（例如把 red / important 改成 0）
+        if ($s.updatedAt -and (ConvertTo-RinneUtc $s.updatedAt) -ne (ConvertTo-RinneUtc $s.createdAt)) {
+            $fail.Add("bot 总结 $($s.id) 在贴出之后被改过（created_at=$($s.createdAt)，updated_at=$($s.updatedAt)）")
+        }
         if (-not $s.ok) { $fail.Add("bot 结论不可用：$($s.reason)") }
         else {
             $sameHead = @($F.State.summaries | Where-Object { $_.head -eq $head -and $_.ok } | ForEach-Object { "$($_.red)/$($_.important)/$($_.suggest)" } | Select-Object -Unique)
@@ -285,6 +362,15 @@ function Get-MergeVerdict {
             if ($created -lt (ConvertTo-RinneUtc $r.run_started_at) -or $created -gt (ConvertTo-RinneUtc $r.updated_at).AddMinutes(1)) {
                 $fail.Add('bot 总结不是在那次运行期间发的')
             }
+            # 运行日志里 review-bot 记下了这次发帖的评论编号与正文 sha256：对得上才说明评论没被改过。
+            # 老运行没有这一行、日志过期或取不到时退化为只核对 updated_at，并明确注明未核对哈希
+            if ($F.Posted) {
+                if ([string]$F.Posted.Id -ne [string]$s.id -or [string]$F.Posted.Sha256 -ne [string]$s.sha256) {
+                    $fail.Add('bot 总结的评论编号或正文哈希与运行日志里的发帖记录不一致（贴出之后被改过）')
+                }
+            } elseif ($s.ok) {
+                $warn.Add("未核对哈希：运行 $($s.runId) 的日志里没有 review-bot 的发帖记录（老运行或取不到日志），只核对了 updated_at")
+            }
         }
     }
 
@@ -316,13 +402,18 @@ function Get-MergeVerdict {
     $deferred = @(Get-DeferredSevere $F.Items)
     if ($deferred.Count -gt 0) {
         if ($waiver -and [bool](Get-RinneProp $waiver 'deferred')) { & $rely 'waiver' $waiver }
-        else { & $need 'user' 'deferred' "有 $($deferred.Count) 条【红旗】【重要】判为不改或挂账，只能由用户豁免" }
+        else { & $need 'user' 'deferred' "有 $($deferred.Count) 条【红旗】【重要】在最新一轮处置里仍判为不改或挂账，只能由用户豁免" }
     }
 
-    # 6. 静态 check：feature 线 required checks 在当前 head 上都是 success
+    # 6. 静态 check：feature 线 required checks 在当前 head 上都是 success；pr-agent-claude 不是 required check，
+    #    但 head 上已经有这个名字的 check 时，它要在当前 head 上跑完（结论不限，它只发评论）
     foreach ($ctx in @($F.Required)) {
         $c = if ($F.Checks.ContainsKey($ctx)) { $F.Checks[$ctx] } else { $null }
         if (-not $c -or $c.conclusion -ne 'success') { $fail.Add("check $ctx 在当前 head 上不是 success") }
+    }
+    $prAgentCheck = Get-RinnePrAgentCheck
+    if ($F.Checks.ContainsKey($prAgentCheck) -and $F.Checks[$prAgentCheck].status -ne 'completed') {
+        $fail.Add("check $prAgentCheck 在当前 head 上还没跑完（结论不限，completed 即可）")
     }
 
     # 7. 本地 gates：json 存在、sha = head、档位够、基线对、真跑过（pass ≥ 1）、exit=0、fail=0、dirty=false。
@@ -892,6 +983,10 @@ function Invoke-SelfTest {
         $writeCard = { ConvertTo-Json -InputObject @($card) -Depth 10 | Set-Content -LiteralPath $cardsFile }
         & $writeCard
         $head = $pull.head.sha
+        # 运行日志里的发帖记录行：用 fixture 里最后一条 bot 总结的编号与正文哈希造一份；用例可以改它来测「未核对哈希」
+        $summaryFixture = (Read-RinneFixture 'pr3-issue-comments.json') | Where-Object { [string]$_.id -eq '6117738666' } | Select-Object -First 1
+        $summarySha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(([string]$summaryFixture.body -replace "`r`n", "`n")))).ToLowerInvariant()
+        $runLog = @{ Text = "claude-pr-review`tPost the review summary`t2026-10-12T04:26:27.0000000Z rinne-review-posted id=$($summaryFixture.id) sha256=$summarySha" }
         # 自测里 feature 线的 tip 是 c…c，PR head 与它的共同祖先也是 c…c；gates 的基线就是这个共同祖先
         $tipSha = 'c' * 40
         $gates = @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false; base = 'origin/feature/v1'; baseSha = $tipSha; autoTier = 'Quick' }
@@ -930,6 +1025,7 @@ function Invoke-SelfTest {
             }
             'actions/runs/\d+/jobs'            = { Read-RinneFixture 'pr3-run-jobs.json' }
             'actions/runs/\d+$'                = { Read-RinneFixture 'pr3-run.json' }
+            '^gh run view \d+ --repo \S+ --log( --job \d+)?$' = { $runLog.Text }
             'actions/workflows/build\.yml/runs' = { @{ workflow_runs = @() } }
             'check-runs'                       = { if ($plant.Facts) { $plant.Facts = $false; & $putMarker }; Read-RinneFixture 'pr3-check-runs.json' }
             '^git .* fetch '                   = { '' }
@@ -1188,6 +1284,7 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '契约守卫对当前 origin/feature/v1 重跑' $false (-not ($log | Where-Object { $_ -match 'contract-guard --base origin/feature/v1 --head refs/remotes/origin/pr/3' }))
         Add-RinneCase $cases '合并前 fetch 了 feature/v1、dev 与 PR head' $false (-not ($log | Where-Object { $_ -match 'fetch --no-tags origin .*feature/v1.*dev.*refs/pull/3/head' }))
         Add-RinneCase $cases '没有用到用户记录时 ReliedOn 为空' $false (@($v.ReliedOn).Count -gt 0)
+        Add-RinneCase $cases '运行日志里的发帖记录对得上：不注明未核对哈希' $false (@($v.Warnings | Where-Object { $_ -match '未核对哈希' }).Count -gt 0)
         # 用的是真的模块：定档取自仓里的 scripts/lib/Tiers.psm1；锁是 Locks.psm1 的真锁（自测专用的一组名字）
         $repoLib = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../lib'))
         $tiersMod = @(Get-Module Tiers | Where-Object { [IO.Path]::GetDirectoryName($_.Path) -eq $repoLib })
@@ -1226,6 +1323,11 @@ function Invoke-SelfTest {
             if ($env:RINNE_SELFTEST_VERBOSE) { [Console]::Error.WriteLine("$label => $($r.Code) | $(@($r.Failures) + @($r.Needs | ForEach-Object Reason) -join ' ; ')") }
             Add-RinneCase $cases $label ($expect -ne 'ready') ($(if ($expect -eq 'ready') { $r.Code -ne 'ready' } else { $r.Code -eq $expect -and (& $also $r) }))
         }
+        $vu = & $copy
+        $vu.Posted = $null
+        $vu = Get-MergeVerdict $vu
+        Add-RinneCase $cases '老运行没有发帖记录：只核对 updated_at，-Check 注明未核对哈希' $false (
+            -not ($vu.Code -eq 'ready' -and @($vu.Warnings | Where-Object { $_ -match '未核对哈希' }).Count -eq 1))
         # 评论表重新从（改过的）原始来源生成，连分类一起测
         $reitem = { param($f, [scriptblock]$edit) $a = Copy-RinneObject $f.Activity; & $edit $a; $f.Activity = $a; $f.Items = @(Get-RinneCommentItems -Activity $a -State $f.State) }
         $user = { param($id, $login, $body, $created, $updated) [pscustomobject]@{ id = [long]$id; user = $(if ($login) { [pscustomobject]@{ login = $login; type = 'User' } } else { $null }); author_association = 'NONE'; created_at = $created; updated_at = $updated; body = $body; html_url = "https://github.com/x/y/pull/3#issuecomment-$id" } }
@@ -1254,6 +1356,14 @@ function Invoke-SelfTest {
         & $bad 'claude-pr-review check 指向另一次运行' { param($f) $f.Checks['claude-pr-review'].details_url = 'https://github.com/x/y/actions/runs/1/job/2' }
         & $bad 'claude-pr-review job 没有成功' { param($f) $f.Jobs = @() }
         & $bad '总结发在运行之外' { param($f) $f.State.summary.createdAt = '2026-10-12T06:00:00Z' }
+        # SEC：bot 总结只建不改，updated_at 与 created_at 不同说明贴出之后被改过；发帖记录里的编号与正文哈希也要对得上
+        & $bad 'bot 总结在贴出之后被改过（updated_at 变了）' { param($f) $f.State.summary.updatedAt = '2026-10-12T06:00:00Z' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '被改过' }).Count -eq 1 }
+        & $bad '发帖记录里的正文哈希与总结对不上' { param($f) $f.State.summary.sha256 = '0' * 64 } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '发帖记录' }).Count -eq 1 }
+        & $bad '发帖记录里的评论编号与总结对不上' { param($f) $f.Posted.Id = '1' } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '发帖记录' }).Count -eq 1 }
+        # pr-agent 的 check：head 上有时要求它 completed（任何结论都接受）；head 上没有时不要求
+        & $bad 'pr-agent 的 check 还没跑完' { param($f) $f.Checks['pr-agent-claude / pr-agent'] = [pscustomobject]@{ name = 'pr-agent-claude / pr-agent'; status = 'in_progress'; conclusion = $null } } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'pr-agent-claude / pr-agent' -and $_ -match '没跑完' }).Count -eq 1 }
+        & $bad 'pr-agent 的 check 跑完了（failure 也接受）' { param($f) $f.Checks['pr-agent-claude / pr-agent'] = [pscustomobject]@{ name = 'pr-agent-claude / pr-agent'; status = 'completed'; conclusion = 'failure' } } 'ready'
+        & $bad 'head 上没有 pr-agent 的 check：不要求' { param($f) $null } 'ready'
         # 总结来自 /review：dispatch job 成功，当前 head 上的 claude-pr-review check 也要 success
         $viaReview = { param($f) $f.Run.path = '.github/workflows/review-dispatch.yml'; $f.Run.event = 'issue_comment'; $f.Run.head_sha = 'd' * 40; $f.Jobs = @([pscustomobject]@{ name = 'dispatch'; conclusion = 'success' }) }
         & $bad '总结来自 /review：dispatch job 与 head 上的 claude-pr-review 都成功放行' { param($f) & $viaReview $f } 'ready'
@@ -1297,6 +1407,14 @@ function Invoke-SelfTest {
         & $bad '维护者的 inline 评论只 resolve、没有回复' { param($f) & $reitem $f { param($a) & $userInline $a $false } }
         & $bad '维护者的 inline 评论线程里有我方回复放行' { param($f) & $reitem $f { param($a) & $userInline $a $true } } 'ready'
         & $bad '账号已删除的评论当外部评论' { param($f) & $reitem $f { param($a) $a.Issue += & $user 996 $null '……' '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'needs-user' { param($r) $r.Level -eq 'user' }
+        # pr-agent 的审查输出单独一类：未回应的按「没有回应的评论」判 not-ready，不是外部评论（不进 Needs）；
+        # 回应只认 in-reply-to 且晚于 updated_at；两种通知仍属免回应的 bot 类；标记在前 5 行之外不算
+        $prAgentComment = { param($a, $id, $updated = '2026-10-12T05:00:00Z') $a.Issue += & $user $id 'github-actions[bot]' "<!-- pr-agent:review:full -->`n## PR Reviewer Guide`n`n**Recommended focus areas**`n`n- Possible Issue: x" '2026-10-12T05:00:00Z' $updated }
+        & $bad '未回应的 pr-agent 评论：判 not-ready（不是外部评论）' { param($f) & $reitem $f { param($a) & $prAgentComment $a 1201 } } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'pr-agent' }).Count -eq 1 -and @($r.Needs).Count -eq 0 }
+        & $bad '回应 pr-agent 评论（晚于 updated_at）放行' { param($f) & $reitem $f { param($a) & $prAgentComment $a 1201; $a.Issue += & $reply 1202 '1201' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad '回应 pr-agent 评论但早于 updated_at：仍算未回应' { param($f) & $reitem $f { param($a) & $prAgentComment $a 1201 '2026-10-12T05:20:00Z'; $a.Issue += & $reply 1202 '1201' '2026-10-12T05:10:00Z' } }
+        & $bad 'pr-agent 的两种通知免回应' { param($f) & $reitem $f { param($a) $a.Issue += & $user 1203 'github-actions[bot]' "<!-- pr-agent:review:full -->`n**[Persistent review]（旧）** updated to latest commit abc1234" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z'; $a.Issue += & $user 1204 'github-actions[bot]' "Failed to generate PR review: timeout`n<!-- pr-agent:improve:summary -->" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'ready'
+        & $bad 'pr-agent 标记在前 5 行之外（正文引用）不算，按 bot 免回应' { param($f) & $reitem $f { param($a) $a.Issue += & $user 1205 'github-actions[bot]' "第一行`n第二行`n第三行`n第四行`n第五行`n<!-- pr-agent:review:full -->`n## PR Reviewer Guide" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'ready'
         # 外部评论：交用户；external-handled 绑定 head、by = user，以及处理时那条评论的 updated_at
         $external = { param($a, $updated = '2026-10-12T05:00:00Z') $a.Issue += & $user 998 'someone' 'lgtm' '2026-10-12T05:00:00Z' $updated }
         $handledRec = { param($h = $head, $by = 'user', $comments = @([pscustomobject]@{ id = '998'; updated_at = '2026-10-12T05:00:00Z' })) @([pscustomobject]@{ head = $h; by = $by; comments = $comments; note = '已回复' }) }
@@ -1312,9 +1430,36 @@ function Invoke-SelfTest {
         $vx = Get-MergeVerdict $x
         Add-RinneCase $cases '-Check 输出依据的已处理记录原文' $false (-not ($vx.Code -eq 'ready' -and @($vx.ReliedOn | Where-Object { $_.Kind -eq 'external-handled' -and $_.Record.comments[0].updated_at -eq '2026-10-12T05:00:00Z' -and $_.File -eq $recordsFile }).Count -eq 1))
         $deferRow = { param($f) $i = $f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' } | Select-Object -First 1; $i.Body += "`n| 9 | bot | 【重要】 | a.mjs:1 | x | 不改 | 理由 |" }
+        # 往指定轮次的处置汇总表格里插一行（插在最后一条表格行之后，仍在表内）
+        $addRow = {
+            param($f, [int]$round, [string]$row)
+            $items = @($f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' })
+            $a = @($items | Where-Object { (Get-AgentMarker $_.Body).Round -eq $round })[0]
+            $lines = [System.Collections.Generic.List[string]]::new()
+            $lines.AddRange([string[]]($a.Body -split "`n"))
+            $at = -1
+            for ($j = 0; $j -lt $lines.Count; $j++) { if ($lines[$j] -match '^\s*\|') { $at = $j } }
+            if ($at -lt 0) { $lines.Add($row) } else { $lines.Insert($at + 1, $row) }
+            $a.Body = $lines -join "`n"
+        }
+        $deferCell = { param($level, $action, $commit = '理由') "| 9 | bot | $level | a.mjs:1 | x | $action | $commit |" }
         & $bad '【重要】判为不改' { param($f) & $deferRow $f } 'needs-user'
         & $bad '挂账的【重要】只有 by=orchestrator 的豁免' { param($f) & $deferRow $f; $f.Records.Waivers = @([pscustomobject]@{ head = $head; by = 'orchestrator'; red = 0; important = 0; deferred = $true; note = '' }) } 'needs-user'
         & $bad '挂账的【重要】有用户对这个 head 的豁免放行' { param($f) & $deferRow $f; $f.Records.Waivers = @([pscustomobject]@{ head = $head; by = 'user'; red = 0; important = 0; deferred = $true; note = '用户同意挂账' }) } 'ready'
+        # 处置列的决定词：去掉 markdown 标记后认任意位置，采纳 / 已采纳不是拒绝
+        & $bad '【重要】写成 **不改**' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '**不改**') } 'needs-user'
+        & $bad '【重要】写成 __挂账__' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '__挂账__') } 'needs-user'
+        & $bad '【重要】处置用反引号包着（不采纳）' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '`不采纳`') } 'needs-user'
+        & $bad '【重要】处置写不采纳' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '不采纳') } 'needs-user'
+        & $bad '【重要】处置写暂不改' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '暂不改') } 'needs-user'
+        & $bad '【重要】处置写维持' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '维持') } 'needs-user'
+        & $bad '【重要】处置写已采纳（不是拒绝）' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已采纳' 'd62c5dc') } 'ready'
+        & $bad '【重要】处置写采纳（不是拒绝）' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '采纳' 'd62c5dc') } 'ready'
+        & $bad '级别列写重要（不带【】）' { param($f) & $addRow $f 1 (& $deferCell '重要' '不改') } 'needs-user'
+        # 同一条意见按最后一次处置判：后来已修并附提交的不再要豁免；后来才挂账的仍要
+        & $bad '先挂账、后已修（附提交）：不再要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修' 'd62c5dc') } 'ready'
+        & $bad '先已修、后挂账：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'd62c5dc'); & $addRow $f 3 (& $deferCell '【重要】' '挂账') } 'needs-user'
+        & $bad '先挂账、后写已修但没附提交：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修') } 'needs-user'
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
         & $bad '缺 gates json' { param($f) $f.Gates = $null }
         & $bad 'gates 的 sha 不是 head' { param($f) $f.Gates.sha40 = 'e' * 40 }
@@ -1413,29 +1558,48 @@ function Invoke-SelfTest {
         }
         # 带超时的外部命令（合并后构建就这样起构建脚本）：起进程那一刻本进程的输出管道不可继承，构建留下的进程拖不住
         # pr-merge 的调用方。真起一个中间层 pwsh（输出接管道），它导入本模块、用 Invoke-RinneTimed 起一个桩；桩只取
-        # scripts/build.ps1 的函数，留下一个最多活 12 秒的孙进程就退出。量的是读到中间层输出 EOF 的时间；量完写停止文件，
-        # 孙进程退出、放开 eof.log，临时目录最后才删得掉
-        $stub, $middle, $eofStop = (Join-Path $tmp 'eof-stub.ps1'), (Join-Path $tmp 'eof-middle.ps1'), (Join-Path $tmp 'eof-stop')
+        # scripts/build.ps1 的函数，留下一个最多活 12 秒的孙进程就退出。判据看的是「泄漏用例」比「同样启动、但不留孙进程」
+        # 的基线多出多少秒：机器整体慢下来时两边一起慢，差值不受负载影响。再拿一份不调 Protect-StdHandles 的桩做反例，
+        # 它必须被判成泄漏——不用绝对秒数也抓得到原来的问题。量完写停止文件，孙进程退出、放开 eof.log，临时目录最后才删得掉。
+        $stub, $stubBase, $stubBare, $middle, $eofStop = (Join-Path $tmp 'eof-stub.ps1'), (Join-Path $tmp 'eof-stub-base.ps1'),
+        (Join-Path $tmp 'eof-stub-bare.ps1'), (Join-Path $tmp 'eof-middle.ps1'), (Join-Path $tmp 'eof-stop')
         $pw = [Environment]::ProcessPath
-        Set-Content -LiteralPath $stub -Value (". '$(Join-Path (Get-RinneRepoRoot) 'scripts/build.ps1')'; Protect-StdHandles; " +
-            "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pw', '-NoProfile', '-EncodedCommand', '$(Get-RinneLingerCommand -Seconds 12 -StopFile $eofStop)') '$tmp\eof.log' 60)")
-        Set-Content -LiteralPath $middle -Value ("Import-Module '$(Join-Path $PSScriptRoot 'lib/RinneGh.psm1')'; " +
-            "`$null = Invoke-RinneTimed -Exe '$pw' -Arguments @('-NoProfile', '-NonInteractive', '-File', '$stub') -TimeoutSeconds 60; 'middle-done'")
-        $psi = [Diagnostics.ProcessStartInfo]::new($pw)
-        foreach ($x in '-NoProfile', '-NonInteractive', '-File', $middle) { $psi.ArgumentList.Add($x) }
-        $psi.UseShellExecute, $psi.RedirectStandardOutput, $psi.RedirectStandardError = $false, $true, $true
-        $sw4 = [Diagnostics.Stopwatch]::StartNew()
-        $mp = [Diagnostics.Process]::Start($psi)
-        $mOut, $mErr = $mp.StandardOutput.ReadToEndAsync(), $mp.StandardError.ReadToEndAsync()
-        # 40 秒还读不到 EOF 就结束中间层（连同子孙）、判没跑完；没读完的 Result 不去碰，免得一直阻塞
-        $mEof = $mOut.Wait(40000) -and $mErr.Wait(40000)
-        $sw4.Stop()
-        if (-not $mEof) { try { $mp.Kill($true) } catch [InvalidOperationException] { $null = $_ } }
-        $mDone = $mEof -and $mOut.Result -match 'middle-done'
-        $mp.Dispose()
-        Set-Content -LiteralPath $eofStop -Value 'x'
-        Add-RinneCase $cases ('带超时的外部命令：构建留下的进程不拖住 pr-merge 的调用方（{0:N1} 秒读到 EOF）' -f $sw4.Elapsed.TotalSeconds) $false (
-            -not ($mDone -and $sw4.Elapsed.TotalSeconds -lt 8))
+        $build = Join-Path (Get-RinneRepoRoot) 'scripts/build.ps1'
+        $linger = Get-RinneLingerCommand -Seconds 12 -StopFile $eofStop
+        $runStub = "exit (Invoke-Logged 'cmd.exe' @('/c', 'start', '/b', '', '$pw', '-NoProfile', '-EncodedCommand', '$linger') '$tmp\eof.log' 60)"
+        Set-Content -LiteralPath $stubBase -Value (". '$build'; Protect-StdHandles; exit (Invoke-Logged 'cmd.exe' @('/c', 'exit', '0') '$tmp\eof-base.log' 60)")
+        Set-Content -LiteralPath $stub -Value (". '$build'; Protect-StdHandles; $runStub")
+        Set-Content -LiteralPath $stubBare -Value (". '$build'; $runStub")
+        Set-Content -LiteralPath $middle -Value ("param([string]`$Stub); Import-Module '$(Join-Path $PSScriptRoot 'lib/RinneGh.psm1')'; " +
+            "`$null = Invoke-RinneTimed -Exe '$pw' -Arguments @('-NoProfile', '-NonInteractive', '-File', `$Stub) -TimeoutSeconds 60; 'middle-done'")
+        $measureEof = {
+            param([string]$StubPath)
+            Remove-Item -LiteralPath $eofStop -ErrorAction SilentlyContinue
+            $psi = [Diagnostics.ProcessStartInfo]::new($pw)
+            foreach ($x in '-NoProfile', '-NonInteractive', '-File', $middle, '-Stub', $StubPath) { $psi.ArgumentList.Add($x) }
+            $psi.UseShellExecute, $psi.RedirectStandardOutput, $psi.RedirectStandardError = $false, $true, $true
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $mp = [Diagnostics.Process]::Start($psi)
+            $o, $e = $mp.StandardOutput.ReadToEndAsync(), $mp.StandardError.ReadToEndAsync()
+            # 40 秒还读不到 EOF 就结束中间层（连同子孙）、判没跑完；没读完的 Result 不去碰，免得一直阻塞
+            $ok = $o.Wait(40000) -and $e.Wait(40000)
+            $sw.Stop()
+            if (-not $ok) { try { $mp.Kill($true) } catch [InvalidOperationException] { $null = $_ } }
+            $done = $ok -and $o.Result -match 'middle-done'
+            $mp.Dispose()
+            Set-Content -LiteralPath $eofStop -Value 'x'
+            [pscustomobject]@{ Done = [bool]$done; Seconds = $sw.Elapsed.TotalSeconds }
+        }
+        $baseRun = & $measureEof $stubBase
+        $leakRun = & $measureEof $stub
+        # 反例：不调 Protect-StdHandles，孙进程继承桩的输出管道，中间层要等 Invoke-RinneTimed 的 drain 上限才回来
+        $bareRun = & $measureEof $stubBare
+        $leakDelta = $leakRun.Seconds - $baseRun.Seconds
+        $bareDelta = $bareRun.Seconds - $baseRun.Seconds
+        Add-RinneCase $cases ('带超时的外部命令：构建留下的进程不拖住 pr-merge 的调用方（基线 {0:N1} 秒、泄漏用例 {1:N1} 秒，差 {2:N1} 秒）' -f $baseRun.Seconds, $leakRun.Seconds, $leakDelta) $false (
+            -not ($baseRun.Done -and $leakRun.Done -and $leakDelta -lt 5))
+        Add-RinneCase $cases ('带超时的外部命令：不改继承（反例）时差值超过阈值，判据仍能抓到泄漏（基线 {0:N1} 秒、反例 {1:N1} 秒，差 {2:N1} 秒）' -f $baseRun.Seconds, $bareRun.Seconds, $bareDelta) $true (
+            $baseRun.Done -and $bareRun.Done -and $bareDelta -ge 5)
         Add-RinneCase $cases '刷屏的用例之后，读取器的上限还原成原来的值' $false ((& (Get-Module RinneGh) { $script:PumpMaxChars }) -ne $savedPump)
         Set-RinneFake (New-RinneFake -Routes $routes -Log $log)
         Add-RinneCase $cases '外部命令超时：到点结束进程、判超时' $true ($slow.TimedOut -and $slow.Code -ne 0 -and $sw.Elapsed.TotalSeconds -lt 30)

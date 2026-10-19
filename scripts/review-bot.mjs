@@ -10,7 +10,8 @@
 //   config   从 claude-review.yml 取出 prompt 与 claude_args（唯一真源），核对结构、代入本次的值，写进 GITHUB_OUTPUT。
 //   post     取模型的最终回复，发成一条 PR 评论：首行是隐藏的 head 标记，机读尾注恒在最后一行、恰好一行，
 //            且三个数与正文【红旗】【重要】【建议】三节的条数一致。不一致、缺尾注或尾注互相矛盾时，
-//            去掉所有尾注行照发（注明结论不可用）并判红；形似凭据的内容一律不发。
+//            去掉所有尾注行照发（注明结论不可用）并判红；形似凭据的内容一律不发。贴出之后打印一行
+//            `rinne-review-posted id=<n> sha256=<hex>`（同时追加到 GITHUB_STEP_SUMMARY），下一轮核对这条总结没被改过。
 //   node scripts/review-bot.mjs prepare --pr <n> --repo <owner/name> --base <sha40> --head <sha40>
 //                               [--bot claude] [--out .rinne-review]
 //   node scripts/review-bot.mjs config --pr <n> --repo <owner/name> --output <文件> [--model <id>] [--dispatch-base <分支>]
@@ -22,7 +23,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { assertNodeVersion, caseResult, git, isMain } from "./lib/check-kit.mjs";
 import { workflowLines } from "./checks.d/workflows.mjs";
@@ -35,10 +36,12 @@ const HEAD_MARK = /^<!-- rinne-review-head sha=([0-9a-f]{40}) bot=([a-z]+) -->$/
 /**
  * 评论首行的 head 标记 { sha, bot }，没有返回 null。只认首行：post 贴出的总结首行就是它；pr-agent 与手动的
  * DeepSeek 审查也以 github-actions[bot] 发评论，正文里是模型写的文字，模型在正文中间写出同样一行不能算审查总结
- * （否则能伪造上一轮的 head，让下一轮只审一小段增量）。
+ * （否则能伪造上一轮的 head，让下一轮只审一小段增量）。首行前的 BOM 不算正文（评论往返可能带回来），
+ * 行尾的 \r 是 CRLF 的一半。
  */
 export function headMark(body) {
-    const m = HEAD_MARK.exec((body || "").split(/\r?\n/, 1)[0]);
+    const first = (body || "").replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0];
+    const m = HEAD_MARK.exec(first);
     return m ? { sha: m[1], bot: m[2] } : null;
 }
 // 处置汇总的隐藏标记：role 随发帖的一方而定（review、orchestrator），只认 kind=disposition
@@ -134,16 +137,21 @@ const REMOVED = "（已移除机读尾注）";
 
 /** `<` 与 `!` 之间插一个零宽连接符（U+200D）：不再构成 HTML 注释，在代码块与行内代码里看起来仍是原样。 */
 const BROKEN_COMMENT = "<\u200d!--";
+/** 链接引用形式的 pr-agent 标记：`[pr-agent:review:full]: https://…`。 */
+const PR_AGENT_REF = /^\s*\[pr-agent:[^\]]+\]:/;
 
 /**
  * 模型写的文字在贴出去之前：含 rinne-review v1 的行整行换成占位，评论里能被当成尾注的只剩末行我们自己加的那一行；
- * `<!--` 一律拆开，模型既不能藏内容，也不能冒充 head 标记、尾注或处置汇总的标记。不用 `&lt;` 转义：
- * 代码块与行内代码里不解析实体，会原样显示成 `&lt;!--`。
+ * `<!--` 一律拆开，模型既不能藏内容，也不能冒充 head 标记、尾注或处置汇总的标记。pr-agent 的链接引用行同样拆开
+ * （`[` 后插一个零宽连接符，整行不再等于标记，看起来仍是原样）：否则模型写的一行能让下一轮把这条评论当成 pr-agent 的
+ * 审查输出。不用 `&lt;` 转义：代码块与行内代码里不解析实体，会原样显示成 `&lt;!--`。
  */
 export const defang = (text) =>
     text
         .split("\n")
-        .map((l) => (l.includes("rinne-review v1") ? REMOVED : l))
+        .map((l) =>
+            l.includes("rinne-review v1") ? REMOVED : PR_AGENT_REF.test(l) ? l.replace(/^(\s*)\[/, "$1[\u200d") : l,
+        )
         .join("\n")
         .replaceAll("<!--", BROKEN_COMMENT);
 
@@ -341,11 +349,35 @@ export function outputBlock(values) {
 
 // ---- 联网的三步 ----
 
-function gh(args, { allowFail = false } = {}) {
+function gh(args, { allowFail = false, parse = false } = {}) {
     const r = spawnSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
-    if (r.status === 0) return r.stdout;
+    if (r.status === 0) return parse ? JSON.parse(r.stdout) : r.stdout;
     if (allowFail) return null;
     throw new Error(`gh ${args.slice(0, 2).join(" ")} 失败：${(r.stderr || "").trim().split("\n")[0]}`);
+}
+
+/**
+ * 发完评论记下编号与正文 sha256：一行机读记录，写进日志与 GITHUB_STEP_SUMMARY（设置了的话）。下一轮从这次运行的
+ * 日志或摘要里取回它，核对总结引用的评论没有被改过。写不进摘要不判红：日志里还有一份。
+ */
+export function postedRecord(id, body) {
+    const sha256 = createHash("sha256")
+        .update(Buffer.from(body || "", "utf8"))
+        .digest("hex");
+    return { id: String(id), sha256, line: `rinne-review-posted id=${id} sha256=${sha256}` };
+}
+
+export function recordPosted(rec, { log = console.log, summaryFile = process.env.GITHUB_STEP_SUMMARY } = {}) {
+    const line = typeof rec === "string" ? rec : rec.line;
+    log(line);
+    if (summaryFile) {
+        try {
+            fs.appendFileSync(summaryFile, `${line}\n`);
+        } catch (e) {
+            console.error(`写不进 GITHUB_STEP_SUMMARY：${e.message}`);
+        }
+    }
+    return line;
 }
 
 const compareJson = (repo, from, to) => {
@@ -455,9 +487,16 @@ function post({ pr, repo, head, exec, bot, runUrl }) {
         return 1;
     }
     const c = buildComment({ summary, head, bot, runUrl });
-    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rinne-review-")), "summary.md");
-    fs.writeFileSync(file, c.body);
-    gh(["pr", "comment", pr, "--repo", repo, "--body-file", file]);
+    // 走 REST：响应里带评论编号，下一轮靠 id 与正文的 sha256 核对这条总结有没有被改过。正文统一用 LF 发出去，
+    // 哈希算的就是这份字节（pr-merge 对 API 返回的 body 也先做 CRLF 归一）
+    const body = c.body.replace(/\r\n/g, "\n");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-review-"));
+    const file = path.join(dir, "comment.json");
+    fs.writeFileSync(file, JSON.stringify({ body }));
+    const posted = gh(["api", "-X", "POST", `repos/${repo}/issues/${pr}/comments`, "--input", file], { parse: true });
+    const id = String(posted?.id ?? "");
+    if (!/^\d+$/.test(id)) throw new Error("发评论的响应里没有评论编号，下一轮核对不了这条总结");
+    recordPosted(postedRecord(id, body));
     if (!c.ok) {
         console.error(`审查总结${c.reason}：已去掉尾注照发，并注明结论不可用`);
         return 1;
@@ -604,6 +643,29 @@ export function selfTest() {
     t("正文里行内的尾注被换成占位", false, !(inline.ok && footerLines(inline.body).length === 1));
     t("形似凭据的串", true, credentialShaped(`token ghp_${"A".repeat(36)}`));
     t("普通文字不像凭据", false, credentialShaped("task-sk-like 与 eyJ 一词"));
+    // 首行标记的两种往返形态：CRLF 与 BOM 仍认得出，标记不在首行仍然不算
+    t("CRLF：首行以 \\r\\n 结尾仍认得出 head 标记", false, headMark(built.body.replace(/\n/g, "\r\n"))?.sha !== head);
+    t("BOM：首行前有 U+FEFF 仍认得出 head 标记", false, headMark(`\uFEFF${built.body}`)?.sha !== head);
+    t("标记不在首行（正文里引用了标记行）不算", false, headMark(`## 引用\n${built.body}`) !== null);
+    // defang：链接引用形式的 pr-agent 标记也打断，整行不再匹配；正文其他行照旧
+    const ref = "[pr-agent:review:full]: https://github.com/The-PR-Agent/pr-agent";
+    const defanged = defang(`${S([], [], [])}\n${ref}\n${F(0, 0, 0)}`);
+    const refLine = defanged.split("\n").find((l) => l.includes("pr-agent:review:full"));
+    t(
+        "defang：链接引用形式的 pr-agent 标记整行不再匹配",
+        false,
+        !(
+            refLine !== undefined &&
+            !/^\s*\[pr-agent:[^\]]+\]:/.test(refLine) &&
+            refLine.includes("https://github.com/The-PR-Agent/pr-agent")
+        ),
+    );
+    t(
+        "defang：正文里的 pr-agent 字样（非标记行）不动",
+        false,
+        !defang("见 [pr-agent:review] 一节").includes("[pr-agent:review]"),
+    );
+    t("defang：行首空白的链接引用同样打断", false, /^\s*\[pr-agent:[^\]]+\]:/.test(defang(`  ${ref}`)));
 
     // 上一轮与处置汇总
     const mark = (sha, bot) => `<!-- rinne-review-head sha=${sha} bot=${bot} -->\n总结`;
@@ -734,6 +796,34 @@ export function selfTest() {
     t("手动 /review 的前提在最前", false, !r.prompt.startsWith("## 本次运行的前提"));
     const block = outputBlock({ prompt: "a\nb\n" });
     t("GITHUB_OUTPUT 多行值", false, !/^prompt<<(EOF_[0-9a-f]{32})\na\nb\n\1\n$/.test(block));
+    // 发帖记录行：格式固定、sha256 是正文的；写进日志与摘要（设置了 GITHUB_STEP_SUMMARY 时），取值来自参数
+    const lines = [];
+    const sumFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rinne-review-selftest-")), "summary.md");
+    const known = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"; // sha256("abc")
+    const rec = postedRecord("123456", "abc");
+    t(
+        "发帖记录行：格式固定，编号与 sha256 取自参数（正文的 UTF-8 字节）",
+        false,
+        !(rec.line === `rinne-review-posted id=123456 sha256=${known}` && rec.id === "123456" && rec.sha256 === known),
+    );
+    const line = recordPosted(rec, { log: (l) => lines.push(l), summaryFile: sumFile });
+    t(
+        "发帖记录行：写进日志与 GITHUB_STEP_SUMMARY",
+        false,
+        !(
+            line === rec.line &&
+            lines.length === 1 &&
+            lines[0] === rec.line &&
+            fs.readFileSync(sumFile, "utf8") === `${rec.line}\n`
+        ),
+    );
+    t(
+        "发帖记录行：没有设置 GITHUB_STEP_SUMMARY 时只写日志",
+        false,
+        !recordPosted(postedRecord("7", "abc"), { log: () => {}, summaryFile: "" }).includes("id=7 "),
+    );
+    fs.rmSync(sumFile, { force: true });
+    fs.rmdirSync(path.dirname(sumFile));
     return caseResult(cases);
 }
 
