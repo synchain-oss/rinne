@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 评审 bot 的脚本部分，claude-review、deepseek-review、review-dispatch 三个 workflow 共用：
+// 评审 bot 的脚本部分，claude-review、review-dispatch 两个 workflow 共用（deepseek-review 改为调用
+// Synchain-oss/ci-workflows 的共享手动审查，不再经本脚本；--bot、--model 留着，换审查方时用）：
 //   prepare  模型开跑前把材料写进 .rinne-review/（模型没有 shell，只能 Read / Glob / Grep）。diff 一律钉在
 //            --base...--head 上取（compare 接口），与模型读的工作区、评论里的 head 标记是同一个提交：
 //            pr.diff（取不到整份时退回逐文件 patch，并留 DIFF_PARTIAL）、pr.json、round.json；
@@ -29,7 +30,17 @@ import { workflowLines } from "./checks.d/workflows.mjs";
 /** 合并判据只解析这一行。 */
 export const FOOTER = /^<!-- rinne-review v1 red=(\d+) important=(\d+) suggest=(\d+) -->$/;
 export const FOOTER_TEMPLATE = "<!-- rinne-review v1 red=N important=N suggest=N -->";
-const HEAD_MARK = /^<!-- rinne-review-head sha=([0-9a-f]{40}) bot=([a-z]+) -->$/m;
+const HEAD_MARK = /^<!-- rinne-review-head sha=([0-9a-f]{40}) bot=([a-z]+) -->$/;
+
+/**
+ * 评论首行的 head 标记 { sha, bot }，没有返回 null。只认首行：post 贴出的总结首行就是它；pr-agent 与手动的
+ * DeepSeek 审查也以 github-actions[bot] 发评论，正文里是模型写的文字，模型在正文中间写出同样一行不能算审查总结
+ * （否则能伪造上一轮的 head，让下一轮只审一小段增量）。
+ */
+export function headMark(body) {
+    const m = HEAD_MARK.exec((body || "").split(/\r?\n/, 1)[0]);
+    return m ? { sha: m[1], bot: m[2] } : null;
+}
 // 处置汇总的隐藏标记：role 随发帖的一方而定（review、orchestrator），只认 kind=disposition
 const DISPOSITION = /^<!-- rinne-agent v1 role=[a-z-]+ kind=disposition /m;
 const MAX = 65536;
@@ -161,7 +172,7 @@ export const memberAssociation = (c) => ["OWNER", "MEMBER", "COLLABORATOR"].incl
  * trusted 只对带标记的候选评论调用。
  */
 export function findPrevious(comments, bot, trusted = memberAssociation) {
-    const isReview = (c) => c.user?.login === "github-actions[bot]" && HEAD_MARK.exec(c.body || "")?.[2] === bot;
+    const isReview = (c) => c.user?.login === "github-actions[bot]" && headMark(c.body)?.bot === bot;
     const at = comments.findLastIndex(isReview);
     const last = at >= 0 ? comments[at] : null;
     const disposition = last
@@ -172,7 +183,7 @@ export function findPrevious(comments, bot, trusted = memberAssociation) {
         : null;
     return {
         rounds: comments.filter(isReview).length,
-        previousHead: last ? HEAD_MARK.exec(last.body)[1] : null,
+        previousHead: last ? headMark(last.body).sha : null,
         previousReview: last ? last.body : null,
         disposition: disposition ? disposition.body : null,
     };
@@ -560,7 +571,7 @@ export function selfTest() {
     const comment = (summary) => buildComment({ summary, head, bot: "claude", runUrl: "https://x/runs/1" });
     const built = comment(`${S([], [], ["x", "y"])}\n${F(0, 0, 2)}\n后记`);
     t("评论最后一行就是尾注", false, !(built.ok && FOOTER.test(built.body.split("\n").at(-1))));
-    t("评论带 head 标记", false, HEAD_MARK.exec(built.body)?.[1] !== head);
+    t("评论带 head 标记", false, headMark(built.body)?.sha !== head);
     const long = comment(`${"字".repeat(70000)}\n${S([], [], [])}\n${F(0, 0, 0)}`);
     t("超长总结截断后尾注仍在最后一行", false, !(long.body.length <= MAX && FOOTER.test(long.body.split("\n").at(-1))));
     const footerLines = (body) => body.split("\n").filter((l) => l.includes("rinne-review v1"));
@@ -620,6 +631,10 @@ export function selfTest() {
     const quoted = findPrevious([comments[1], { ...member, body: `引用：${disposition("review")}` }], "claude");
     t("标记不在行首（引用、行内）不算", true, quoted.disposition === null);
     t("第 1 轮没有上一轮", false, findPrevious([], "claude").previousHead !== null);
+    // pr-agent、手动 DeepSeek 审查同样以 github-actions[bot] 发评论：模型写在正文中间的标记不算一轮
+    const midMark = { user: actions, body: `## PR Reviewer Guide\n${mark("e".repeat(40), "claude")}` };
+    const notRound = findPrevious([comments[1], midMark], "claude");
+    t("正文中间的 head 标记不算上一轮", true, notRound.previousHead === "b".repeat(40) && notRound.rounds === 1);
     // 第 2 轮实际漏掉的那条：维护者的组织成员身份不公开，GITHUB_TOKEN 读到的 author_association 是 NONE；
     // 标记里的 head 是推送后的新 head，与上一轮审过的 head 不同
     const real = {

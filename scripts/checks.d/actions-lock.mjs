@@ -30,13 +30,9 @@ export function checkLock(uses, lock, allowlist) {
         const ref = queue.shift();
         for (const n of entries[ref]?.nested || []) {
             const at = n.lastIndexOf("@");
-            const repo = n
-                .slice(0, at < 0 ? n.length : at)
-                .split("/")
-                .slice(0, 2)
-                .join("/");
+            const target = n.slice(0, at < 0 ? n.length : at);
             if (at < 0 || !/^[0-9a-f]{40}$/.test(n.slice(at + 1))) errors.push(`${ref} 嵌套的 ${n} 没有钉 40 位 SHA`);
-            if (!allowed(repo, allowlist)) errors.push(`${ref} 嵌套的 ${repo} 不在 actions-allowlist.json 里`);
+            if (!allowed(target, allowlist)) errors.push(`${ref} 嵌套的 ${target} 不在 actions-allowlist.json 里`);
             if (!entries[n]) {
                 errors.push(`${ref} 嵌套的 ${n} 在锁里没有自己的条目`);
             } else if (!seen.has(n)) {

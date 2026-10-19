@@ -8,8 +8,11 @@
 # 给了 prompt、不开 track_progress，action 走 agent 模式：不建进度评论、不切分支，工作区就是 checkout 签出的
 # 合并提交（PR 合入 base 之后的样子），符号链接检查查的正是模型要读的这一份。CLAUDE.md、.claude/ 等配置路径
 # 由 action 从 base 分支还原。审查总结由最后一步从 execution_file 取出代发，尾注恒在评论最后一行、恰好一行。
-# prompt 与 claude_args 是唯一真源：deepseek-review.yml 与 review-dispatch.yml 都经 review-bot.mjs config 从这里取，
-# 所以 job 名、「只有一个 claude-code-action 步骤」、prompt 与 claude_args 写成 | 块这三点不能改。
+# prompt 与 claude_args 是唯一真源：review-dispatch.yml 经 review-bot.mjs config 从这里取，所以 job 名、
+# 「只有一个 claude-code-action 步骤」、prompt 与 claude_args 写成 | 块这三点不能改。
+# 本 workflow 不改为调用 Synchain-oss/ci-workflows 的共享 claude-review：那边是 tag 模式加追踪评论，做不了这里的
+# 轮次与增量审查、总结代发与尾注核对，check 名也会变成「调用方 / 被调用方」，合并判据（pr-merge.ps1）对不上。
+# deepseek-review.yml 已改为调用共享的手动审查，它的 focus 抄自下面的「重点」一节，改这里时同步改它（docs-truth 核对）。
 name: Claude PR Review
 
 on:
@@ -39,6 +42,10 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+    # Claude Code 单个 API 请求默认 10 分钟就放弃重来；放宽到 15 分钟（与 Synchain-oss/ci-workflows 一致），
+    # 长回复不会被中途丢掉重算。写在 job 级，action 的步骤从这里继承。
+    env:
+      API_TIMEOUT_MS: "900000"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

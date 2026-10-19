@@ -42,6 +42,10 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+    # Claude Code 单个 API 请求默认 10 分钟就放弃重来；放宽到 15 分钟（与 Synchain-oss/ci-workflows 一致），
+    # 长回复不会被中途丢掉重算。写在 job 级，action 的步骤从这里继承。
+    env:
+      API_TIMEOUT_MS: "900000"
     steps:
       - name: Ack
         env:
