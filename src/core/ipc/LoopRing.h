@@ -214,9 +214,12 @@ public:
             stalledFrames_ += frames;
             if (stalledFrames_ >= stallLimitFrames_)
             {
-                LoopRing::reclaimStalled(seg);
+                // 卡住的写方恰好在这时自己发布了，回收就不算数；两种情况下计数都重新开始
+                if (LoopRing::reclaimStalled(seg))
+                {
+                    ++reclaims_;
+                }
                 stalledFrames_ = 0;
-                ++reclaims_;
             }
         }
         else if (result == RingWriteResult::kOk)
@@ -227,7 +230,7 @@ public:
     }
 
     u64 stalledFrames() const noexcept { return stalledFrames_; }
-    // 诊断用：回收过几次
+    // 诊断用：真正推过写头的回收次数
     u32 reclaims() const noexcept { return reclaims_; }
 
 private:

@@ -346,6 +346,62 @@ TEST_CASE("a chunk abandoned after its announcement blocks writers until it is r
     CHECK(wrong == 0u);
 }
 
+TEST_CASE("a writer that wakes after its chunk was reclaimed loses the head", "[ipc][ring]")
+{
+    auto seg = makeRing();
+    const u64 w0 = 9000;
+    seg->header.write_head.store(w0);
+    seg->header.write_intent.store(w0);
+    std::unique_ptr<float[]> left(new float[300]);
+    std::unique_ptr<float[]> right(new float[300]);
+
+    // 外层公告 300 帧、写了一半就被当成卡死：别的写方在这时回收，填零并把写头推到 intent
+    bool reclaimed = false;
+    const RingWriteResult outer = LoopRing::write(*seg, 300, [&](u32 i, u64 p, float& l, float& r) {
+        if (i == 150)
+        {
+            reclaimed = LoopRing::reclaimStalled(*seg);
+        }
+        l = encodeL(p);
+        r = encodeR(p);
+    });
+    REQUIRE(reclaimed);
+    CHECK(outer == RingWriteResult::kCasLost);
+    CHECK(seg->header.w_cas_fail.load() == 1u);
+    CHECK(LoopRing::writeHead(*seg) == w0 + 300);
+    CHECK(LoopRing::writeIntent(*seg) == w0 + 300);
+
+    // 读回 [w0, intent)：每一帧要么是回收填的 0，要么是外层写在本位置的值，没有别的
+    const RingRead r = LoopRing::read(*seg, static_cast<i64>(w0), 300, left.get(), right.get());
+    CHECK(r.validFrom == static_cast<i64>(w0));
+    CHECK(r.validTo == static_cast<i64>(w0 + 300));
+    u32 zeros = 0;
+    u32 own = 0;
+    u32 other = 0;
+    for (u32 i = 0; i < 300; ++i)
+    {
+        if (left[i] == 0.0f && right[i] == 0.0f)
+        {
+            ++zeros;
+        }
+        else if (decode(w0 + i, left[i], right[i]))
+        {
+            ++own;
+        }
+        else
+        {
+            ++other;
+        }
+    }
+    CHECK(zeros == 150u);
+    CHECK(own == 150u);
+    CHECK(other == 0u);
+
+    // 写头与 intent 又对齐了，下一块照常写
+    writeAt(*seg, w0 + 300, 100);
+    CHECK(seg->header.w_cas_fail.load() == 1u);
+}
+
 TEST_CASE("reclaiming a stall more than a lap ahead only zeroes the last lap", "[ipc][ring]")
 {
     auto seg = makeRing();

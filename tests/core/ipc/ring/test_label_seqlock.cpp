@@ -167,3 +167,28 @@ TEST_CASE("a new owner rewrites a label left odd by a dead writer", "[ipc][label
     REQUIRE(writeLabel(slot, makeLabelPayload("Bass", 2u)));
     CHECK(slot.label_seq.load() == 10u);
 }
+
+TEST_CASE("a slow writer that wakes after a takeover cannot publish its half", "[ipc][label]")
+{
+    auto rv = makeRendezvous();
+    RoleSlot& slot = rv->groups[0].input;
+    REQUIRE(writeLabel(slot, makeLabelPayload("Old", 1u)));
+    // 旧属主进了奇数（序号 3）就被挂起，新属主当它死了，接手到 5 并写完，序号 6
+    slot.label_seq.store(3u);
+    const LabelPayload mine = makeLabelPayload("Lead Vox", 0xff336699u);
+    REQUIRE(rewriteStuckLabel(slot, 3u, mine));
+    REQUIRE(slot.label_seq.load() == 6u);
+
+    // 旧属主醒来写完字段：收尾 CAS 3 → 4 失败，序号不退回，也不会变成别的偶数
+    const LabelPayload late = makeLabelPayload("Stale", 2u);
+    CHECK_FALSE(detail::finishLabelWrite(slot, 3u, late));
+    CHECK(slot.label_seq.load() == 6u);
+    // 它晚到的字段留在了稳定的序号后面：这一份由属主按心跳重读、重写来修
+    LabelPayload out;
+    REQUIRE(readLabel(slot, out));
+    CHECK(out == late);
+    REQUIRE(writeLabel(slot, mine));
+    REQUIRE(readLabel(slot, out));
+    CHECK(out == mine);
+    CHECK(slot.label_seq.load() == 8u);
+}

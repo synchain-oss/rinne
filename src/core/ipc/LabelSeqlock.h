@@ -4,7 +4,7 @@
 // 它最后写下的那个整字时写（那道检查由调用方做）；读方可以是任何一方，永远不加锁。
 //
 //   写：label_seq 从偶数 s CAS 到 s + 1（奇数 = 正在写）→ release fence → relaxed 写四个字段与 28 个字 →
-//       label_seq 以 release 存成 s + 2（偶数 = 稳定，且比上一版大 2）。
+//       label_seq 以 release 从 s + 1 CAS 到 s + 2（偶数 = 稳定，且比上一版大 2）。
 //   读：acquire 读 label_seq，奇数就放弃；relaxed 读全部字段；acquire fence；relaxed 再读 label_seq，
 //       与第一次不等就放弃（这一次的结果不可信）。
 //
@@ -13,7 +13,9 @@
 // 「先读字段、后再读序号」不被重排。后两道缺一不可：读到的字段只要有一个来自下一次写，那次写的 release fence 就与
 // 读方的 acquire fence 同步，第二次读到的序号必然已经是奇数或更大，这一份被丢弃；而 acquire load 只挡它后面的访问，
 // 挡不住字段的读被挪到第二次读序号之后。奇数那一步用 CAS 而不是 store：接管瞬间旧属主与新属主可能同时写，第二个
-// 写方 CAS 失败就退回，不会把序号再 + 1 而把正在写的那一版说成稳定。
+// 写方 CAS 失败就退回，不会把序号再 + 1 而把正在写的那一版说成稳定。收尾也用 CAS：写方慢到被新属主当成死掉、
+// 序号已被 rewriteStuckLabel 接走时，它的收尾失败，不会把序号退回偶数、把新属主正在写的一版说成稳定。它晚到的字段
+// 写仍可能落在新属主的字段之后，那一份由属主每个心跳重读自己的标签来修。
 // RINNE_STRESS_MUTATE_NO_READ_FENCE 同时去掉这里读方的 acquire fence（同一道屏障），压测据此证明它在 arm64 上
 // 不可省；x86 是 TSO，那里它只是编译器屏障，变异构建在 x86 上仍然是绿的。
 //
@@ -132,8 +134,9 @@ inline std::string labelDisplayName(const LabelPayload& p)
 // 写了一半就死掉的属主留下的奇数由接手这个槽的新属主用 rewriteStuckLabel 处理，不在这里猜
 namespace detail
 {
-// 序号已经由调用方 CAS 成奇数 odd 之后：写字段，再以 release 存成 odd + 1（偶数）
-inline void finishLabelWrite(RoleSlot& slot, u32 odd, const LabelPayload& p) noexcept
+// 序号已经由调用方 CAS 成奇数 odd 之后：写字段，再以 release 从 odd CAS 到 odd + 1（偶数）。
+// 返回 false = 写的途中序号被别人接走了（见文件头），这一版没有发布
+inline bool finishLabelWrite(RoleSlot& slot, u32 odd, const LabelPayload& p) noexcept
 {
     // 序号先变成奇数，字段才能开始动；否则读方可能读到新旧混在一起的一版
     std::atomic_thread_fence(std::memory_order_release);
@@ -145,7 +148,9 @@ inline void finishLabelWrite(RoleSlot& slot, u32 odd, const LabelPayload& p) noe
         slot.name_words[i].store(p.words[i], std::memory_order_relaxed);
     }
     // 偶数收尾以 release 发布：看到这个序号的读方，它之前的字段写都已经可见
-    slot.label_seq.store(odd + 1, std::memory_order_release);
+    u32 expected = odd;
+    return slot.label_seq.compare_exchange_strong(expected, odd + 1, std::memory_order_release,
+                                                  std::memory_order_relaxed);
 }
 } // namespace detail
 
@@ -161,8 +166,7 @@ inline bool writeLabel(RoleSlot& slot, const LabelPayload& p) noexcept
     {
         return false;
     }
-    detail::finishLabelWrite(slot, s + 1, p);
-    return true;
+    return detail::finishLabelWrite(slot, s + 1, p);
 }
 
 // 新属主接手一个停在奇数上的标签（上一任写到一半就死了）：把序号从 stuckOdd CAS 到 stuckOdd + 2（仍是奇数，表示
@@ -180,8 +184,7 @@ inline bool rewriteStuckLabel(RoleSlot& slot, u32 stuckOdd, const LabelPayload& 
     {
         return false;
     }
-    detail::finishLabelWrite(slot, stuckOdd + 2, p);
-    return true;
+    return detail::finishLabelWrite(slot, stuckOdd + 2, p);
 }
 
 // 读标签。返回 false 时 out 原样不动（调用方可以继续显示上一次成功读到的版本）

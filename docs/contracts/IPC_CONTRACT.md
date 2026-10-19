@@ -190,9 +190,9 @@ status: draft
 
 **标签 seqlock**（[`src/core/ipc/LabelSeqlock.h`](../../src/core/ipc/LabelSeqlock.h)，端点槽 128–255 字节）
 
-- 写：只有属主、只在 `ctl` 仍是自己最后写下的整字时写。`label_seq` 是偶数 s 时 CAS 到 s + 1（relaxed）→ release fence → 各字段 relaxed 写 → `label_seq` 以 release 写 s + 2。读到奇数或 CAS 输了就放弃这一次：接管瞬间旧属主与新属主撞上时后到的一方退让，序号不会被两个写方搅乱。
+- 写：只有属主、只在 `ctl` 仍是自己最后写下的整字时写。`label_seq` 是偶数 s 时 CAS 到 s + 1（relaxed）→ release fence → 各字段 relaxed 写 → `label_seq` 以 release 从 s + 1 CAS 到 s + 2。读到奇数或 CAS 输了就放弃这一次：接管瞬间旧属主与新属主撞上时后到的一方退让，序号不会被两个写方搅乱。
 - 读：`label_seq` acquire 读到 s1，奇数就放弃 → 各字段 relaxed 读 → acquire fence → 再读 `label_seq`（relaxed），等于 s1 才算读到完整的一份。读到的字段若被下一次写改过，那次写的 release fence 与读侧的 acquire fence 同步，第二次读到的序号必然已经变了。
-- 接手：上一任写到一半就死了、`label_seq` 停在奇数 s 上时，普通的写一直退让。新属主等同一个奇数停够之后（由会合层按心跳判断），把它从 s CAS 到 s + 2（仍是奇数，表示正在写），写完整的一份再以 release 存成 s + 3；整个过程序号都不会是偶数配着半份字段。
+- 接手：上一任写到一半就死了、`label_seq` 停在奇数 s 上时，普通的写一直退让。新属主等同一个奇数停够之后（由会合层按心跳判断），把它从 s CAS 到 s + 2（仍是奇数，表示正在写），写完整的一份再以 release 从 s + 2 CAS 到 s + 3；整个过程序号都不会是偶数配着半份字段。上一任若只是慢、并没有死，它醒来后的收尾 CAS 会失败，序号不会退回偶数；它晚到的字段写可能留在新属主的字段之后，属主每个心跳重读自己的标签，不一致就重写。
 
 **绑定的发布**（[`src/core/ipc/LoopBinding.h`](../../src/core/ipc/LoopBinding.h)）
 
