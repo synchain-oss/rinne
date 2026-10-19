@@ -37,6 +37,9 @@ CtlCas casCtl(std::atomic<u64>& ctl, u64 expected, u32 newState) noexcept
     u64 current = expected;
     if (ctl.compare_exchange_strong(current, desired, std::memory_order_acq_rel, std::memory_order_acquire))
     {
+        // 转移之后写的字段（认领中的身份、休眠的 dormant_ms）挡在这道 release fence 之后：观察者的样本里
+        // 只要出现了这些字段，它第二次读 ctl 就一定看到这次转移，样本判成不稳定（与观察者的 acquire fence 配对）
+        std::atomic_thread_fence(std::memory_order_release);
         return {true, desired};
     }
     return {false, current};
@@ -683,6 +686,11 @@ void Rendezvous::writeIdentity(RoleSlot& slot) noexcept
 void Rendezvous::lostOwnership(u64 nowMs)
 {
     bindings_.clear();
+    if (role() == Role::kOutput && ring_ != nullptr && token_ != 0)
+    {
+        // 写权也交出去：只在环头仍是我们的 token 时 CAS 到 0，新属主已经发布的 token 不动
+        LoopRing::retireWriter(*static_cast<RingSegment*>(ring_->base()), token_);
+    }
     if (ring_ != nullptr)
     {
         keeper_.retire(ring_, nowMs); // 句柄留到 kRetireDelayMs 之后，旧绑定可能还有音频线程在跑

@@ -77,8 +77,8 @@ bool LoopRing::reclaimStalled(RingSegment& seg) noexcept
     const u64 mask = static_cast<u64>(kRingFrames - 1);
     for (u64 p = first; p != intent; ++p)
     {
-        // 每填 1024 帧看一眼写头：卡住的写方要是在这期间自己发布了，它的帧是真的，立刻停手，
-        // 盖成静音的最多是这一小段
+        // 每填 1024 帧看一眼写头：卡住的写方要是在这期间自己发布了，它的帧是真的，立刻停手。被盖成静音的是它发布
+        // 之前已经填掉的那一段，再加最多 1024 帧；它醒得越晚，这一段越长（只是静音，不是旧数据）
         if ((p & (kReclaimCheckFrames - 1)) == 0 && seg.header.write_head.load(std::memory_order_relaxed) != w0)
         {
             return false;

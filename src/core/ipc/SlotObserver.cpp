@@ -5,6 +5,8 @@
 // 接管判定看到 stable=false 一律返回「不接管」。
 #include "ipc/SlotObserver.h"
 
+#include <atomic>
+
 #include "ipc/Rendezvous.h"
 
 namespace rinne::ipc
@@ -48,7 +50,11 @@ void SlotObserver::scan(const RvSegment& rv, u64 nowMs) noexcept
             next.channels = slot.channels.load(std::memory_order_relaxed);
             next.format = slot.format.load(std::memory_order_relaxed);
             next.cfgFlags = slot.cfg_flags.load(std::memory_order_relaxed);
-            const u64 after = slot.ctl.load(std::memory_order_acquire);
+            // acquire fence 把上面的字段读挡在第二次读 ctl 之前（单靠第二次读的 acquire 挡不住在它之前的读），
+            // 与 casCtl 成功之后的 release fence 配对，读法与标签 seqlock 相同；否则 arm64 上撕开的样本也可能
+            // 被判成稳定
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const u64 after = slot.ctl.load(std::memory_order_relaxed);
             next.stable = before == after;
             next.ctl = after;
             const auto gi = static_cast<std::size_t>(group - 1);

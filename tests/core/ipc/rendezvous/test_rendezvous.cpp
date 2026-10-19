@@ -184,6 +184,47 @@ TEST_CASE("a takeover is noticed by the per-tick self-check and the old owner st
     CHECK(slot.heartbeat_ms.load() == heartbeat);
 }
 
+TEST_CASE("a displaced output hands back its write token but never a successor's", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+
+    // 新属主还没打开环：环头仍是我们的 token，自检发现被接管时把它 CAS 到 0
+    Rendezvous first(configFor(Role::kOutput, backend, naming.scope(), 51));
+    first.setGroup(3, ClaimIntent::kManual, kT0);
+    first.prepare(format, kT0);
+    first.tick(kT0);
+    REQUIRE(first.state() == RendezvousState::kActive);
+    REQUIRE(first.writerToken() != 0u);
+    SegmentView ring3 = createView(backend, naming, SegmentId::groupData(3), kRingBytes);
+    REQUIRE(ringOf(ring3).header.writer_token.load() == first.writerToken());
+    RoleSlot& slot3 = roleSlot(rv, 3, Role::kOutput);
+    slot3.ctl.store(makeCtl(ctlGen(first.myCtl()) + 5u, kCtlPhaseActive));
+    first.tick(kT0 + 250);
+    CHECK(first.state() == RendezvousState::kConflict);
+    CHECK(first.writerToken() == 0u);
+    CHECK(ringOf(ring3).header.writer_token.load() == 0u);
+
+    // 新属主已经发布了自己的 token：旧属主的 CAS 落空，新 token 不动
+    Rendezvous second(configFor(Role::kOutput, backend, naming.scope(), 52));
+    second.setGroup(4, ClaimIntent::kManual, kT0);
+    second.prepare(format, kT0);
+    second.tick(kT0);
+    REQUIRE(second.state() == RendezvousState::kActive);
+    SegmentView ring4 = createView(backend, naming, SegmentId::groupData(4), kRingBytes);
+    RoleSlot& slot4 = roleSlot(rv, 4, Role::kOutput);
+    slot4.ctl.store(makeCtl(ctlGen(second.myCtl()) + 5u, kCtlPhaseActive));
+    constexpr u64 kSuccessorToken = 0x5eed5eed5eed5eedull;
+    ringOf(ring4).header.writer_token.store(kSuccessorToken);
+    second.tick(kT0 + 250);
+    CHECK(second.state() == RendezvousState::kConflict);
+    CHECK(ringOf(ring4).header.writer_token.load() == kSuccessorToken);
+}
+
 TEST_CASE("the heartbeat is written at most every 250 ms of synthetic time", "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();
@@ -599,6 +640,8 @@ TEST_CASE("a data segment that can never open gives the claimed slot back", "[ip
     CHECK(r.lastResult() == InitResult::kFailedDenied);
     // 认领到了，但数据段被拒：槽立刻放回空闲，别人能认领；我们不再持有、也不再发布绑定
     CHECK(ctlPhase(roleSlot(rv, 5, Role::kOutput).ctl.load()) == kCtlPhaseFree);
+    // 真的认领过再放开：free → claiming → active → free 三次 CAS；从没认领过的槽 gen 是 0
+    CHECK(ctlGen(roleSlot(rv, 5, Role::kOutput).ctl.load()) == 3u);
     CHECK(r.myCtl() == 0u);
     CHECK(r.bindings().current() == nullptr);
     const std::size_t calls = backend.createOrOpenCalls;
