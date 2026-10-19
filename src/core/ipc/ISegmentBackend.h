@@ -182,7 +182,8 @@ struct SegmentView
     void* base = nullptr;
     std::size_t size = 0; // 真实段大小：同名段已存在时请求大小被忽略，后端一律回读操作系统给的值
     void* mapping = nullptr; // 平台句柄（Win32 的 HANDLE、POSIX 后端的私有记录），不透明
-    bool created = false; // 本次调用是否新建了这个段
+    // 本次调用是否让内核新建了这个段。只表示「内核新建」，不表示「由本方初始化」（见 initHeader）
+    bool created = false;
     std::string name; // 平台段名，只供诊断
 
     SegmentView() = default;
@@ -278,8 +279,8 @@ public:
     // 初始化者写触碰之后锁页，尽力而为：失败只报诊断、不失败。附着方不锁。
     virtual void tryLock(const SegmentView& view) { (void)view; }
 
-    // initHeader 里的两个交错点（见 onInitStageForTesting）：看到 magic 为 0、马上认领之前；看到死掉的初始化者、
-    // 马上接管之前
+    // initHeader 里的两个交错点（见 onInitStageForTesting）：读到 magic 之后、任何判定与认领之前（不论读到什么）；
+    // 看到死掉的初始化者、马上接管之前
     enum class InitStage : std::uint8_t
     {
         kBeforeClaim,
@@ -309,7 +310,9 @@ public:
     //                    是唯一的初始化者，立刻写下自己的 pid（init_pid），然后初始化：建段者（内核刚清零的新段）逐页
     //                    写触碰并锁页，附着方从 clearFrom 清零到段尾；再写 abi、generation + 1、initData()，最后以
     //                    release 发布 magic。认领先于任何写，magic 为 0 的段从没被谁用过，所以附着方抢在慢的建段者
-    //                    前面认领也无害；输了 CAS 的一方从不清零。
+    //                    前面认领也无害；输了 CAS 的一方从不清零。也因为附着方可以抢先认领，view.created 只表示
+    //                    「内核新建了这个段」，不表示「由本方初始化」：建段者输给抢先认领的附着方时，对方还没发布
+    //                    就拿到 kBusy，已发布就直接附着。谁是初始化者只由 CAS 的输赢决定，调用方不得拿 created 判断。
     //   初始化标记        别人认领了。init_pid 非 0、不是本进程、并且已经死了：allowOverwrite 的一方用 CAS 把 init_pid
     //                    从死者换成自己来接管，赢了就按附着方的办法重初始化（generation 再 + 1）、发布；输了、
     //                    初始化者还活着、pid 还没写下、探活拿不准（一律按活）：kBusy（allowOverwrite 时诊断 kBusy）。
@@ -372,13 +375,15 @@ public:
         };
 
         u32 m = h.magic->load(std::memory_order_acquire);
+        // 钩子紧跟在读 magic 之后、任何判定之前：读到 0 与认领 CAS 之间不论哪里多出一处写，都落在钩子之后，
+        // 交错用例看得见
+        onInitStageForTesting(InitStage::kBeforeClaim, view);
         if (m == 0 && (view.created || allowOverwrite))
         {
             if (tooSmallToInitialise())
             {
                 return InitResult::kFailed;
             }
-            onInitStageForTesting(InitStage::kBeforeClaim, view);
             if (h.magic->compare_exchange_strong(m, kInitMarker, std::memory_order_acq_rel, std::memory_order_acquire))
             {
                 if (h.initPid != nullptr)
@@ -858,6 +863,9 @@ private:
         {
             return Lease{};
         }
+        // 先加计数、再查请求：这个次序就是握手本身，不能换。换成先查请求的话，「读到未置」与「加计数」之间
+        // release() 可以置请求、读到计数为 0、开始计宽限期，音频随后拿着租约去读一个就要解映射的段。
+        // 接缝用例把释放插在读裸指针与这一步之间，够不着这个窗口，次序只靠这里守住
         p->leaseCount.fetch_add(1, std::memory_order_seq_cst);
         if (p->releaseRequested.load(std::memory_order_seq_cst))
         {

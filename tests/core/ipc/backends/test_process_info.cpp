@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 进程标识、存活探测、跨进程时钟与四字符码。存活探测的代价不对称（把活进程判死会造成双属主），
-// 所以既要验「死了就判死」，也要验越界的 pid 不会被当成「所有进程」。
+// 所以既要验「死了就判死」、活着的外进程判活，也要验越界的 pid 不会被当成「所有进程」。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -9,6 +9,7 @@
 #include <cstring>
 #include <thread>
 
+#include "ChildProcess.h"
 #include "ipc/ProcessInfo.h"
 #include "util/Fourcc.h"
 #include "util/MonoClock.h"
@@ -38,6 +39,17 @@ TEST_CASE("this process is alive and pid 0 or an out-of-range pid is not", "[ipc
     CHECK_FALSE(ipc::isProcessAlive(0xffffffffu));
     CHECK(ipc::parentProcessId() != 0u);
     CHECK(ipc::parentProcessId() != self);
+}
+
+TEST_CASE("another process that is still running is reported alive", "[ipc][process]")
+{
+    // 把活着的外进程判死，接管就会让两个进程同时初始化同一个段：这一边必须判活
+    test::ChildProcess other;
+    REQUIRE(other.started());
+    CHECK(other.pid() != ipc::currentProcessId());
+    CHECK(ipc::isProcessAlive(other.pid()));
+    other.stop();
+    CHECK_FALSE(ipc::isProcessAlive(other.pid()));
 }
 
 TEST_CASE("a process that has exited is reported dead", "[ipc][process]")

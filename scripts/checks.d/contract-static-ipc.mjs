@@ -6,8 +6,9 @@
 //   - 字段：结构、字段名、偏移、字节数、类型、是否永久冻结，顺序也要一致；同一结构的字段首尾相接、不重叠不留缝，
 //     最后一项收在结构末尾；u64 字段的偏移是 8 的倍数，u32 是 4 的倍数；
 //   - 结构的大小与对齐；常量（头文件里每个 inline constexpr 都要进 golden，值只能写字面量或 util::fourcc("ABCD")）；
-//   - 永久冻结面（本文件写死，不随 golden 改）：会合段头在段首、它的前 16 字节与 init_pid，端点槽 version 的绝对位置
-//     与它依赖的组块偏移、步长，会合段的 magic 与初始化标记，会合段大小的下限；
+//   - 永久冻结面（本文件写死，不随 golden 改，头文件与 golden 各核一遍）：会合段头在段首、它的前 16 字节与 init_pid，
+//     端点槽 version 的绝对位置与它依赖的组块偏移、组块与端点槽的结构大小、步长，会合段的 magic 与初始化标记，
+//     会合段大小（kRvBytes 与 RvSegment 结构）的下限，RvSegment 结构的大小等于 kRvBytes；
 //   - 段名：三族前缀 × 9 段 × 2 平台 × {正式, 测试} 由本文件按规则重新拼一遍，与 golden 逐条相等，每条不超过 31 字符；
 //     abi 涨到 golden 的 nameAbiHeadroom（至少 99）时每条也不超过 31；前缀族与根 CMakeLists.txt 允许的三个值一一对应；
 //     会合段名不带 abi；
@@ -15,7 +16,8 @@
 //   - 发布代码不读环境变量（src/** 里出现 getenv 一族判红，注释与字符串里的不算）；测试钩子（名字以 ForTesting 结尾）
 //     只出现在声明它们的文件里，插件与其他 core 代码不许调用。
 // 每条判据有一个名字（RULES），报错行以 [名字] 开头。--self-test 的每个坏样例写明它必须触发哪几条判据，并核对每条
-// 判据都至少被一个坏样例点名：删掉任何一条判据，点名它的坏样例就变红。
+// 判据都至少被一个坏样例点名：删掉任何一条判据，点名它的坏样例就变红。冻结面清单与读环境写法表的每一项也各有一个
+// 只动这一项的坏样例，删掉任何一项同样变红。
 // 有意改布局是兼容性事件：kIpcAbi + 1，按 CLAUDE.md 的「冻结契约」一节走变更文档，并同一个 PR 更新 golden。
 //   node scripts/run-checks.mjs --only contract-static-ipc [--self-test | --mutation-check]
 
@@ -52,6 +54,11 @@ const ANCHORS = [
     { struct: "GroupBlock", field: "input", offset: 0 },
     { struct: "GroupBlock", field: "output", offset: 256 },
 ];
+/** 永久冻结的结构大小：组块的大小就是步长，端点槽的大小决定 Output 槽的位置。 */
+const PERMANENT_STRUCTS = [
+    { struct: "GroupBlock", size: 1024 },
+    { struct: "RoleSlot", size: 256 },
+];
 const PERMANENT_CONSTANTS = {
     kRvMagic: fourcc("RNRV"),
     kInitMarker: fourcc("RNIN"),
@@ -87,7 +94,9 @@ export const RULES = {
     "permanent-extra": "只有永久冻结面标为永久",
     "permanent-anchor": "永久冻结字段的绝对位置依赖的偏移不动",
     "permanent-constant": "永久冻结的常量不变",
-    "rv-floor": "会合段不小于永久冻结的下限",
+    "permanent-struct": "组块与端点槽的结构大小不变",
+    "rv-floor": "会合段（kRvBytes 与 RvSegment 结构）不小于永久冻结的下限",
+    "rv-struct": "RvSegment 结构的大小等于 kRvBytes",
     "families-missing": "Naming.h 里有 kPrefixFamilies",
     "cmake-missing": "根 CMakeLists.txt 里有三个段名前缀",
     "families-cmake": "前缀族与 CMake 允许的值一一对应",
@@ -259,8 +268,24 @@ export function renderGolden(g) {
     return `{\n${parts.join(",\n")}\n}\n`;
 }
 
-const ENV_READ =
-    /\b(?:std::)?(?:getenv|_wgetenv|getenv_s|_wgetenv_s|_dupenv_s|_wdupenv_s|secure_getenv|GetEnvironmentVariable[AW]?|GetEnvironmentStrings[AW]?|ExpandEnvironmentStrings[AW]?|getEnvironmentVariable|_NSGetEnviron|__environ|_?w?environ)\b|processInfo\s*\]\s*environment/;
+/** 发布代码里不许出现的读环境写法（整词）。自测里每一种写法各有一个坏样例，删掉任何一项都有样例变红。 */
+const ENV_READ_NAMES = [
+    "getenv",
+    "_wgetenv",
+    "getenv_s",
+    "_wgetenv_s",
+    "_dupenv_s",
+    "_wdupenv_s",
+    "secure_getenv",
+    "GetEnvironmentVariable[AW]?",
+    "GetEnvironmentStrings[AW]?",
+    "ExpandEnvironmentStrings[AW]?",
+    "getEnvironmentVariable",
+    "_NSGetEnviron",
+    "__environ",
+    "_?w?environ",
+];
+const ENV_READ = new RegExp(String.raw`\b(?:std::)?(?:${ENV_READ_NAMES.join("|")})\b|processInfo\s*\]\s*environment`);
 const SOURCE_EXT = /\.(?:c|cc|cpp|cxx|h|hh|hpp|m|mm)$/;
 /** 测试钩子：名字以 ForTesting 结尾的函数、类型与结构；只许出现在声明它们的文件里。 */
 const TEST_HOOKS = /\b\w*[Ff]orTesting\b/;
@@ -333,7 +358,7 @@ function sameList(f, rule, label, a, b, keys) {
 }
 
 /** 永久冻结面：头文件与 golden 各核一遍，取值写死在本文件里。 */
-function checkPermanent(f, where, fields, constants) {
+function checkPermanent(f, where, fields, structs, constants) {
     for (const p of PERMANENT) {
         const x = fields.find((y) => y.struct === p.struct && y.field === p.field);
         if (!x || x.offset !== p.offset || x.size !== p.size || x.type !== p.type || !x.permanent)
@@ -358,11 +383,18 @@ function checkPermanent(f, where, fields, constants) {
     }
     for (const [n, v] of Object.entries(PERMANENT_CONSTANTS))
         if (constants[n] !== v) f.add("permanent-constant", `${where}：${n} 永久是 ${v}`);
-    if (!(constants.kRvBytes >= PERMANENT_CONSTANTS.kRvMinBytes))
-        f.add(
-            "rv-floor",
-            `${where}：kRvBytes ${constants.kRvBytes} 小于永久冻结的下限 ${PERMANENT_CONSTANTS.kRvMinBytes}`,
-        );
+    for (const p of PERMANENT_STRUCTS) {
+        const s = structs.find((y) => y.struct === p.struct);
+        if (!s || s.size !== p.size)
+            f.add("permanent-struct", `${where}：${p.struct} 的大小永久是 ${p.size}（version 的绝对位置依赖它）`);
+    }
+    const floor = PERMANENT_CONSTANTS.kRvMinBytes;
+    const rv = structs.find((y) => y.struct === "RvSegment");
+    if (!(constants.kRvBytes >= floor))
+        f.add("rv-floor", `${where}：kRvBytes ${constants.kRvBytes} 小于永久冻结的下限 ${floor}`);
+    if (!(rv?.size >= floor)) f.add("rv-floor", `${where}：RvSegment 的大小 ${rv?.size} 小于永久冻结的下限 ${floor}`);
+    if (rv?.size !== constants.kRvBytes)
+        f.add("rv-struct", `${where}：RvSegment 的大小 ${rv?.size} 与 kRvBytes ${constants.kRvBytes} 不符`);
 }
 
 /**
@@ -424,11 +456,12 @@ export function checkIpc({ layoutText, namingText, cmakeText, goldenText, source
             `golden 的 nameAbiHeadroom 必须是不小于 ${MIN_ABI_HEADROOM} 的整数（段名要给 abi 留两位数的增长空间）`,
         );
 
-    checkPermanent(f, LAYOUT, layout.fields, layout.constants);
+    checkPermanent(f, LAYOUT, layout.fields, layout.structs, layout.constants);
     checkPermanent(
         f,
         GOLDEN,
         golden.fields ?? [],
+        golden.structs ?? [],
         Object.fromEntries((golden.constants ?? []).map((c) => [c.constant, c.value])),
     );
 
@@ -507,6 +540,7 @@ function edit(text, from, to) {
     if (!text.includes(from)) throw new Error(`夹具里没有「${from}」`);
     return text.replace(from, to);
 }
+const edits = (text, pairs) => pairs.reduce((t, [from, to]) => edit(t, from, to), text);
 
 /**
  * 在 golden 里把一个字段连同同一结构里它后面的字段一起后挪 delta 字节：前面插一段名为 <字段>_pad 的保留区，
@@ -540,6 +574,7 @@ export function selfTest(root) {
     };
     const field = (g, s, n) => g.fields.find((x) => x.struct === s && x.field === n);
     const constant = (g, n) => g.constants.find((x) => x.constant === n);
+    const struct = (g, n) => g.structs.find((x) => x.struct === n);
     const withSource = (p, text) => ({ sources: [...base.sources, { path: p, text }] });
     const L = base.layoutText;
     const G = base.goldenText;
@@ -759,6 +794,178 @@ export function selfTest(root) {
                 goldenText: goldenWith((g) => (constant(g, "kRvBytes").value = 8192)),
             }),
         ],
+        // 下面每个坏样例只动冻结面的一项，删掉 ANCHORS、PERMANENT_STRUCTS、PERMANENT_CONSTANTS 的任何一项或
+        // checkPermanent 的任何一个比较，都有一个样例变红
+        [
+            "头文件与 golden 一起把 RvHeader.magic 的类型改成 f32（偏移与大小不变）",
+            ["permanent-field"],
+            run({
+                layoutText: edit(
+                    L,
+                    'X(RvHeader, magic,             0,      4,      "u32",',
+                    'X(RvHeader, magic,             0,      4,      "f32",',
+                ),
+                goldenText: goldenWith((g) => (field(g, "RvHeader", "magic").type = "f32")),
+            }),
+        ],
+        [
+            "头文件与 golden 一起把 init_pid 加宽到 8 字节（类型仍写 u32）",
+            ["field-type-size", "permanent-field"],
+            run({
+                layoutText: edits(L, [
+                    ["X(RvHeader, init_pid,          32,     4,", "X(RvHeader, init_pid,          32,     8,"],
+                    ["X(RvHeader, reserved,          36,     28,", "X(RvHeader, reserved,          40,     24,"],
+                ]),
+                goldenText: goldenWith((g) => {
+                    field(g, "RvHeader", "init_pid").size = 8;
+                    Object.assign(field(g, "RvHeader", "reserved"), { offset: 40, size: 24 });
+                }),
+            }),
+        ],
+        // 冻结面在头文件与 golden 两侧各核一遍：只改一侧时，除了逐行比对，那一侧的冻结判据也要报
+        [
+            "只在头文件里把 RvHeader.magic 的类型改成 f32",
+            ["fields-match", "permanent-field"],
+            run({
+                layoutText: edit(
+                    L,
+                    'X(RvHeader, magic,             0,      4,      "u32",',
+                    'X(RvHeader, magic,             0,      4,      "f32",',
+                ),
+            }),
+        ],
+        [
+            "只在 golden 里把 RvHeader.magic 的类型改成 f32",
+            ["fields-match", "permanent-field"],
+            run({ goldenText: goldenWith((g) => (field(g, "RvHeader", "magic").type = "f32")) }),
+        ],
+        [
+            "头文件与 golden 一起把组块挪到会合段的 1088",
+            ["permanent-anchor"],
+            run({
+                layoutText: edits(L, [
+                    ["X(RvSegment, reserved0,        64,     960,", "X(RvSegment, reserved0,        64,     1024,"],
+                    ["X(RvSegment, groups,           1024,   8192,", "X(RvSegment, groups,           1088,   8192,"],
+                    ["X(RvSegment, reserved1,        9216,   7168,", "X(RvSegment, reserved1,        9280,   7104,"],
+                ]),
+                goldenText: goldenWith((g) => {
+                    field(g, "RvSegment", "reserved0").size = 1024;
+                    field(g, "RvSegment", "groups").offset = 1088;
+                    Object.assign(field(g, "RvSegment", "reserved1"), { offset: 9280, size: 7104 });
+                }),
+            }),
+        ],
+        [
+            "头文件与 golden 一起把 Input 槽挪到 Output 槽后面（Output 槽不动）",
+            ["permanent-anchor"],
+            run({
+                layoutText: edits(L, [
+                    [
+                        'X(GroupBlock, input,           0,      256,    "RoleSlot",   false) \\',
+                        'X(GroupBlock, input_pad,       0,      256,    "reserved",   false) \\',
+                    ],
+                    [
+                        'X(GroupBlock, panic_seq,       512,    4,      "u32",        false) \\\n' +
+                            '    X(GroupBlock, reserved,        516,    508,    "reserved",   false) \\',
+                        'X(GroupBlock, input,           512,    256,    "RoleSlot",   false) \\\n' +
+                            '    X(GroupBlock, panic_seq,       768,    4,      "u32",        false) \\\n' +
+                            '    X(GroupBlock, reserved,        772,    252,    "reserved",   false) \\',
+                    ],
+                ]),
+                goldenText: goldenWith((g) => {
+                    const input = field(g, "GroupBlock", "input");
+                    const at = g.fields.indexOf(input);
+                    g.fields.splice(at, 1, { ...input, field: "input_pad", type: "reserved" });
+                    g.fields.splice(at + 2, 0, { ...input, offset: 512 });
+                    field(g, "GroupBlock", "panic_seq").offset = 768;
+                    Object.assign(field(g, "GroupBlock", "reserved"), { offset: 772, size: 252 });
+                }),
+            }),
+        ],
+        [
+            "头文件与 golden 一起把组块长到 1088（kGroupStride 不动）",
+            ["permanent-struct"],
+            run({
+                layoutText: edits(L, [
+                    ["X(GroupBlock, reserved,        516,    508,", "X(GroupBlock, reserved,        516,    572,"],
+                    ["X(RvSegment, groups,           1024,   8192,", "X(RvSegment, groups,           1024,   8704,"],
+                    ["X(RvSegment, reserved1,        9216,   7168,", "X(RvSegment, reserved1,        9728,   6656,"],
+                    ["X(GroupBlock,  1024,   64)", "X(GroupBlock,  1088,   64)"],
+                ]),
+                goldenText: goldenWith((g) => {
+                    field(g, "GroupBlock", "reserved").size = 572;
+                    field(g, "RvSegment", "groups").size = 8704;
+                    Object.assign(field(g, "RvSegment", "reserved1"), { offset: 9728, size: 6656 });
+                    struct(g, "GroupBlock").size = 1088;
+                }),
+            }),
+        ],
+        [
+            "头文件与 golden 一起把端点槽长到 320（kRoleSlotBytes 不动）",
+            ["permanent-struct"],
+            run({
+                layoutText: edits(L, [
+                    [
+                        'X(RoleSlot, name_words,        144,    112,    "u32[28]",    false) \\',
+                        'X(RoleSlot, name_words,        144,    112,    "u32[28]",    false) \\\n' +
+                            '    X(RoleSlot, reserved1,         256,    64,     "reserved",   false) \\',
+                    ],
+                    ["X(RoleSlot,    256,    64)", "X(RoleSlot,    320,    64)"],
+                ]),
+                goldenText: goldenWith((g) => {
+                    const last = field(g, "RoleSlot", "name_words");
+                    g.fields.splice(g.fields.indexOf(last) + 1, 0, {
+                        struct: "RoleSlot",
+                        field: "reserved1",
+                        offset: 256,
+                        size: 64,
+                        type: "reserved",
+                        permanent: false,
+                    });
+                    struct(g, "RoleSlot").size = 320;
+                }),
+            }),
+        ],
+        [
+            "头文件与 golden 一起把 RvSegment 结构缩到 12288（kRvBytes 不动）",
+            ["rv-floor", "rv-struct"],
+            run({
+                layoutText: edits(L, [
+                    ["X(RvSegment, reserved1,        9216,   7168,", "X(RvSegment, reserved1,        9216,   3072,"],
+                    ["X(RvSegment,   16384,  64)", "X(RvSegment,   12288,  64)"],
+                ]),
+                goldenText: goldenWith((g) => {
+                    field(g, "RvSegment", "reserved1").size = 3072;
+                    struct(g, "RvSegment").size = 12288;
+                }),
+            }),
+        ],
+        [
+            "头文件与 golden 一起把 RvSegment 结构长到 20480（kRvBytes 不动）",
+            ["rv-struct"],
+            run({
+                layoutText: edits(L, [
+                    ["X(RvSegment, reserved1,        9216,   7168,", "X(RvSegment, reserved1,        9216,   11264,"],
+                    ["X(RvSegment,   16384,  64)", "X(RvSegment,   20480,  64)"],
+                ]),
+                goldenText: goldenWith((g) => {
+                    field(g, "RvSegment", "reserved1").size = 11264;
+                    struct(g, "RvSegment").size = 20480;
+                }),
+            }),
+        ],
+        ...[
+            ["kGroupStride", 1024, 1088],
+            ["kRoleSlotBytes", 256, 320],
+            ["kRvMinBytes", 16384, 12288],
+        ].map(([name, from, to]) => [
+            `头文件与 golden 一起把 ${name} 改成 ${to}`,
+            ["permanent-constant"],
+            run({
+                layoutText: edit(L, `${name} = ${from};`, `${name} = ${to};`),
+                goldenText: goldenWith((g) => (constant(g, name).value = to)),
+            }),
+        ]),
         [
             "Naming.h 里找不到前缀族",
             ["families-missing"],
@@ -827,33 +1034,34 @@ export function selfTest(root) {
             ["golden-name-length"],
             run({ goldenText: goldenWith((g) => (g.names[0].length += 1)) }),
         ],
-        [
-            "发布代码读环境变量",
-            ["env-read"],
-            run(withSource("src/core/ipc/Extra.cpp", 'auto d = std::getenv("RINNE_IPC_LOCK_DIR");\n')),
-        ],
-        [
-            "发布代码经 JUCE 读环境变量",
+        // 读环境的每一种写法各一个坏样例，每个只命中 ENV_READ 的一个分支
+        ...[
+            ["src/core/ipc/Extra.cpp", 'auto d = std::getenv("RINNE_IPC_LOCK_DIR");'],
+            ["src/core/util/Env.cpp", 'auto d = _wgetenv(L"X");'],
+            ["src/core/util/Env.cpp", 'getenv_s(&n, buf, sizeof(buf), "X");'],
+            ["src/core/util/Env.cpp", '_wgetenv_s(&n, buf, 8, L"X");'],
+            ["src/core/util/Env.cpp", '_dupenv_s(&p, &n, "X");'],
+            ["src/core/util/Env.cpp", '_wdupenv_s(&p, &n, L"X");'],
+            ["src/core/util/Env.cpp", 'auto d = secure_getenv("X");'],
+            ["src/plugin-common/Env.cpp", '::GetEnvironmentVariableW(L"X", buf, 8);'],
+            ["src/plugin-common/Env.cpp", "auto* block = ::GetEnvironmentStringsW();"],
+            ["src/plugin-common/Env.cpp", '::ExpandEnvironmentStringsW(L"%APPDATA%", buf, 8);'],
+            ["src/plugin-common/X.cpp", 'auto d = juce::SystemStats::getEnvironmentVariable("X", {});'],
+            ["src/plugin-common/Env.mm", "char** env = *_NSGetEnviron();"],
+            ["src/core/util/Env.cpp", "for (char** e = __environ; *e; ++e) {}"],
+            ["src/core/util/Env.cpp", "extern char** environ;"],
+            ["src/plugin-common/Env.mm", "NSDictionary* env = [[NSProcessInfo processInfo] environment];"],
+        ].map(([p, line]) => [
+            `发布代码读环境：${line}`,
             ["env-read"],
             run(
-                withSource("src/plugin-common/X.cpp", 'auto d = juce::SystemStats::getEnvironmentVariable("X", {});\n'),
+                withSource(
+                    p,
+                    `${line}
+`,
+                ),
             ),
-        ],
-        [
-            "发布代码取整块环境",
-            ["env-read"],
-            run(withSource("src/plugin-common/Env.cpp", "auto* block = ::GetEnvironmentStringsW();\n")),
-        ],
-        [
-            "发布代码经 _NSGetEnviron 读环境",
-            ["env-read"],
-            run(withSource("src/plugin-common/Env.mm", "char** env = *_NSGetEnviron();\n")),
-        ],
-        [
-            "发布代码经 __environ 读环境",
-            ["env-read"],
-            run(withSource("src/core/util/Env.cpp", "for (char** e = __environ; *e; ++e) {}\n")),
-        ],
+        ]),
         [
             "注释与字符串里提到 getenv 不算",
             [],

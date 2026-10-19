@@ -148,14 +148,14 @@ namespace
 {
 
 // 一个按契约重试的持有者的结果：建或开 → 段头初始化；kBusy 就立刻解映射、按 RetryBackoff 退避后再试。
-// 拿到 kOk 就一直映射着（它在用这个段），直到所有持有者都拿到结果
+// 拿到 kOk 就一直映射着（它在用这个段），直到所有持有者都拿到结果。inits 数 initData 一共被调了几次
 struct HolderOutcome
 {
     InitResult result = InitResult::kBusy;
     int attempts = 0;
     int attemptsWhileStuck = 0; // 卡住的映射放手之前开始的尝试
     bool succeededWhileStuck = false;
-    bool created = false; // 成功的那一次是不是它新建了段
+    bool created = false; // 成功的那一次是不是内核为它新建了段（不一定由它初始化）
     std::uint32_t generation = 0;
     std::chrono::steady_clock::duration doneAt{};
     std::chrono::steady_clock::duration longestAttempt{};
@@ -164,7 +164,7 @@ struct HolderOutcome
 std::vector<HolderOutcome> runRetryingHolders(const BackendFixture& fixture, const std::string& name, int holders,
                                               const std::atomic<bool>& stuckGone,
                                               const std::chrono::steady_clock::time_point start,
-                                              const std::function<void()>& whileRunning)
+                                              std::atomic<int>& inits, const std::function<void()>& whileRunning)
 {
     const SegmentHeaderSpec spec{kRvMagic, kIpcAbi, kRvBytes, kRvHeaderBytes};
     std::vector<HolderOutcome> outcomes(static_cast<std::size_t>(holders));
@@ -190,7 +190,8 @@ std::vector<HolderOutcome> runRetryingHolders(const BackendFixture& fixture, con
                 if (r == InitResult::kOk)
                 {
                     auto* rv = static_cast<RvSegment*>(view.base);
-                    r = backend->initHeader(view, headerFields(rv->header), spec, [rv] {
+                    r = backend->initHeader(view, headerFields(rv->header), spec, [rv, &inits] {
+                        inits.fetch_add(1);
                         rv->header.layout_bytes.store(kRvBytes, std::memory_order_relaxed);
                     });
                 }
@@ -246,7 +247,8 @@ TEST_CASE("retrying holders recover once a holder stuck in initialisation lets g
 {
     // 初始化者认领之后就死了，它记下的 pid 又接管不了（这里写成本进程：活着；被复用的 pid 也是这样）。
     // 三个持有者按契约重试：看到 kBusy 立刻解映射、带抖动退避。卡住的映射（死者的句柄）放手之后，各持有者放手的空档
-    // 总会重叠，段消失，下一次尝试由内核新建：恰好一个持有者新建并初始化，其余附着到同一个段
+    // 总会重叠，段消失，下一次尝试由内核新建：恰好一个持有者初始化（不一定是建段的那个：建段者走到认领之前，
+    // 后打开同一段的持有者可能先认领），其余附着到同一个段
     BackendFixture fixture;
     const std::string name = segName(SegmentId::rendezvous());
     auto stuckBackend = fixture.make();
@@ -259,8 +261,9 @@ TEST_CASE("retrying holders recover once a holder stuck in initialisation lets g
     constexpr int kHolders = 3;
     std::atomic<bool> stuckGone{false};
     std::chrono::steady_clock::duration goneAt{};
+    std::atomic<int> inits{0};
     const auto start = std::chrono::steady_clock::now();
-    const auto outcomes = runRetryingHolders(fixture, name, kHolders, stuckGone, start, [&] {
+    const auto outcomes = runRetryingHolders(fixture, name, kHolders, stuckGone, start, inits, [&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(400)); // 卡住期间各持有者都只拿到 kBusy
         goneAt = std::chrono::steady_clock::now() - start;
         stuckGone.store(true);
@@ -280,7 +283,8 @@ TEST_CASE("retrying holders recover once a holder stuck in initialisation lets g
         creators += o.created ? 1 : 0;
         lastDone = std::max(lastDone, o.doneAt);
     }
-    CHECK(creators == 1);
+    CHECK(inits.load() == 1); // 恰好一次初始化
+    CHECK(creators <= 1); // 建段者不一定是初始化者，见上
     const auto recoveryMs = std::chrono::duration_cast<std::chrono::milliseconds>(lastDone - goneAt).count();
     INFO("recovered " << recoveryMs << " ms after the stuck holder let go");
     CHECK(recoveryMs < 5000);
@@ -302,13 +306,16 @@ TEST_CASE("retrying holders take over a segment whose initialiser died, without 
     stuckRv->groups[0].input.pid.store(4242); // 死者写了一半的东西
 
     const std::atomic<bool> stuckGone{false};
-    const auto outcomes = runRetryingHolders(fixture, name, 3, stuckGone, std::chrono::steady_clock::now(), [] {});
+    std::atomic<int> inits{0};
+    const auto outcomes =
+        runRetryingHolders(fixture, name, 3, stuckGone, std::chrono::steady_clock::now(), inits, [] {});
     for (const auto& o : outcomes)
     {
         CHECK(o.result == InitResult::kOk);
         CHECK(o.generation == 1u); // 恰好一次接管：0 + 1
         CHECK(o.doneAt < std::chrono::seconds(5));
     }
+    CHECK(inits.load() == 1);
     CHECK(stuckRv->header.magic.load() == kRvMagic);
     CHECK(stuckRv->header.init_pid.load() == currentProcessId());
     CHECK(stuckRv->groups[0].input.pid.load() == 0u);

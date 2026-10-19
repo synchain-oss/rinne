@@ -12,11 +12,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "ChildProcess.h"
 #include "DiagCapture.h"
 #include "ipc/ISegmentBackend.h"
 #include "ipc/Naming.h"
@@ -494,8 +496,9 @@ TEST_CASE("two attachers racing to initialise elect exactly one initialiser", "[
 TEST_CASE("an initialiser that is alive or has not recorded its pid yet is never taken over",
           "[ipc][backend][header][busy]")
 {
-    // magic 停在初始化标记：初始化者 pid 还没写下（认领之后的那一瞬），或者它还活着（含被复用的 pid、本进程）。
-    // 附着方立刻返回 kBusy（诊断 kBusy），不睡、不清零、不改 pid；只读方从一开始就按「还没初始化完」处理、不报诊断
+    // magic 停在初始化标记：初始化者 pid 还没写下（认领之后的那一瞬），或者它还活着（本进程、活着的外进程，
+    // 被复用的 pid 也是这样）。附着方立刻返回 kBusy（诊断 kBusy），不睡、不清零、不改 pid；只读方从一开始就按
+    // 「还没初始化完」处理、不报诊断。外进程退出之后，同一个段由附着方接管
     SegmentBackendInProcess::resetAllForTesting();
     const Naming naming(NameScope::randomForTesting());
     const std::string name = segName(naming, SegmentId::rendezvous());
@@ -507,6 +510,7 @@ TEST_CASE("an initialiser that is alive or has not recorded its pid yet is never
     rv->header.magic.store(kInitMarker);
     rv->groups[0].input.pid.store(7);
     std::uint32_t owner = 0;
+    std::optional<rinne::test::ChildProcess> other;
     SECTION("pid not recorded yet")
     {
         owner = 0;
@@ -514,6 +518,14 @@ TEST_CASE("an initialiser that is alive or has not recorded its pid yet is never
     SECTION("initialiser alive")
     {
         owner = currentProcessId();
+    }
+    SECTION("initialiser alive in another process")
+    {
+        other.emplace();
+        REQUIRE(other->started());
+        owner = other->pid();
+        REQUIRE(owner != currentProcessId());
+        REQUIRE(isProcessAlive(owner));
     }
     rv->header.init_pid.store(owner);
 
@@ -530,6 +542,24 @@ TEST_CASE("an initialiser that is alive or has not recorded its pid yet is never
     CHECK(rv->header.magic.load() == kInitMarker);
     CHECK(rv->header.init_pid.load() == owner);
     CHECK(rv->groups[0].input.pid.load() == 7u);
+
+    if (other)
+    {
+        // 外进程退出之后（Windows 上它的进程句柄还开着，pid 不会被复用）：判死，附着方接管、重初始化，generation + 1
+        other->stop();
+        REQUIRE_FALSE(isProcessAlive(owner));
+        const std::uint32_t generation = rv->header.generation.load();
+        backend.unmap(attacher); // 契约：kBusy 之后先解映射，再重开重试
+        SegmentView retry;
+        REQUIRE(backend.createOrOpen(name, kRvBytes, retry) == InitResult::kOk);
+        InitProbe again;
+        CHECK(initRv(backend, retry, kRvSpec, true, &again) == InitResult::kOk);
+        CHECK(again.calls.load() == 1);
+        CHECK(rv->header.magic.load() == kRvMagic);
+        CHECK(rv->header.init_pid.load() == currentProcessId());
+        CHECK(rv->header.generation.load() == generation + 1u);
+        CHECK(rv->groups[0].input.pid.load() == 0u);
+    }
 }
 
 TEST_CASE("a read-only probe that meets the init marker gets kBusy without a diagnostic",

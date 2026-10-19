@@ -377,6 +377,10 @@ static_assert(offsetof(RvHeader, init_pid) == 32, "初始化者 pid 的位置永
 static_assert(offsetof(GroupBlock, input) == 0 && offsetof(GroupBlock, output) == kRoleSlotBytes,
               "端点槽 version 的绝对位置依赖组块里两个槽的位置");
 static_assert(offsetof(RoleSlot, version) == 56, "端点槽 version 的槽内位置永久冻结");
+static_assert(kRvMagic == util::fourcc("RNRV") && kInitMarker == util::fourcc("RNIN"),
+              "会合段的 magic 与初始化标记永久冻结");
+static_assert(kRvMinBytes == 16384 && kGroupStride == 1024 && kRoleSlotBytes == 256,
+              "会合段大小的下限、组块步长与端点槽大小永久冻结");
 
 // 组 G（1..8）的组块与端点槽在 rv 里的字节偏移，按结构体的真实偏移算；端点槽 version 的绝对位置由它决定，永久冻结
 constexpr u32 groupBlockOffset(u32 group) noexcept
