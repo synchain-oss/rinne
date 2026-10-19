@@ -7,7 +7,7 @@
 # describe: false：describe 会把生成的段落接在 PR 正文后面，而本仓 PR 正文的最后一行必须是签名行（branch-gate 与
 # pr-merge 都核对），所以哪个 base 都不跑。review_labels: false：不打 Review effort / Possible security concern
 # 标签（标签以 .github/labels.json 为唯一真源）。persistent_comments: false 的理由见下面 with 里的注释。
-name: PR Agent Code Review
+name: PR Agent (DeepSeek V4.1 Flash)
 
 on:
   pull_request:
