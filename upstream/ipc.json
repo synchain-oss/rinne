@@ -1,0 +1,144 @@
+{
+  "sources": {
+    "scvb-macos-au": {
+      "repo": "synchain-oss/scvb",
+      "ref": "feature/macos-au",
+      "sha": "730a1f9c546588c81a4da966439cf63467e582f4"
+    }
+  },
+  "files": [
+    {
+      "path": "src/core/ipc/ISegmentBackend.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/ISegmentBackend.h",
+      "fromBlob": "ae9da324a09e32152d5544ec52e37f0eed1cf21d",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/ipc/SegmentBackendWin32.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/SegmentBackendWin32.h",
+      "fromBlob": "d54538fa9668e2414c89c4790ee8e23352e07178",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/core/ipc/SegmentBackendWin32.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/SegmentBackendWin32.cpp",
+      "fromBlob": "4ac140954bfbf5f829039ac748c5297d7eff7169",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/core/ipc/SegmentBackendPosix.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/SegmentBackendPosix.h",
+      "fromBlob": "0980a83eaa9c43ebaf32b7161af220232f7d8ded",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/core/ipc/SegmentBackendPosix.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/SegmentBackendPosix.cpp",
+      "fromBlob": "4143a4cbe2500ea43f59b7b53a79bcc9a70e2387",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/core/ipc/SegmentBackendInProcess.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/SegmentBackendInProcess.h",
+      "fromBlob": "fda40b119ed2f4caa6ab6b89b5f275180160d935",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/core/ipc/SegmentBackendInProcess.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/SegmentBackendInProcess.cpp",
+      "fromBlob": "72fd1e642c954afae4d1897601ca97c6c2cd442d",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/core/ipc/PlatformSegmentBackend.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/PlatformSegmentBackend.h",
+      "fromBlob": "30b481d3d2eecd1a52aa9968ee4e2e6af88e80c6",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/core/ipc/IpcDiag.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/IpcDiag.h",
+      "fromBlob": "6b1ba412d526085ed3a459cc1ca76f3da9004882",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/ipc/IpcDiag.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/PlatformLog.h",
+      "fromBlob": "f0274e97bc184dd9b48ed436a7539b65130f4342",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/ipc/IpcDiag.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/IpcDiag.cpp",
+      "fromBlob": "6d5a69fe5a5f3ee629e4db1448a4427d85fd84d6",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/ipc/IpcDiag.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/PlatformLog.cpp",
+      "fromBlob": "0a87db2ec378bf2e4016cc4cdd908f8cda6ac712",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/ipc/ProcessInfo.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/Registry.h",
+      "fromBlob": "2e809da74da6770d01e6d9f21dcf2db099f90889",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/ipc/ProcessInfo.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/Registry.cpp",
+      "fromBlob": "c9f61dafdaf3af38c8160bf5d00949683f234cf8",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/util/MonoClock.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/Registry.cpp",
+      "fromBlob": "c9f61dafdaf3af38c8160bf5d00949683f234cf8",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/util/MonoClock.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/Registry.cpp",
+      "fromBlob": "c9f61dafdaf3af38c8160bf5d00949683f234cf8",
+      "mode": "forked"
+    },
+    {
+      "path": "src/core/util/Fourcc.h",
+      "source": "scvb-macos-au",
+      "from": "src/core/ipc/SegmentLayout.h",
+      "fromBlob": "f42fa6d750a3856c15f30ff0570d8d019d03b6af",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/PlatformLog.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/PlatformLog.h",
+      "fromBlob": "f0274e97bc184dd9b48ed436a7539b65130f4342",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/PlatformLog.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/PlatformLog.cpp",
+      "fromBlob": "0a87db2ec378bf2e4016cc4cdd908f8cda6ac712",
+      "mode": "forked"
+    }
+  ]
+}

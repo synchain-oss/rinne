@@ -20,14 +20,13 @@ import fs from "node:fs";
 import { SIGNOFF, checkMessage } from "../../check-commits.mjs";
 import { isMain, j } from "../../lib/check-kit.mjs";
 import { loadPersonalNeedles, needlesMode, plainText, redact, scan } from "../../lib/privacy-needles.mjs";
-import { FOOTER, findPrevious, validateSummary } from "../../review-bot.mjs";
+import { FOOTER, findPrevious, headMark, validateSummary } from "../../review-bot.mjs";
 
 /** 本仓 Actions 运行页的链接：bot 总结第二行的「运行记录」。 */
 const RUN_LINK = /\/actions\/runs\/(\d+)/;
 /** agent 隐藏标记：首行，格式见 RinneGh.psm1 的 New-AgentMarker。 */
 const AGENT_MARK =
     /^<!-- rinne-agent v1 role=([a-z]+) kind=([a-z-]+) round=(\d+) head=([0-9a-f]{7,40})((?: [a-z-]+=[^\s>]+)*) -->$/;
-const SUMMARY_HEAD = /^<!-- rinne-review-head sha=([0-9a-f]{40}) bot=([a-z]+) -->$/m;
 /**
  * 公开文本里不许出现任何署名尾注行（不论署的是谁）：提交消息由 check-commits 的同一条判据拦，
  * PR 正文与评论在这里拦。隐私规则表里的 ai-coauthor 只认 AI 的名字，不够。
@@ -64,7 +63,7 @@ export function summaryFacts(body) {
     const lines = body.replace(/\r\n/g, "\n").trimEnd().split("\n");
     const footers = lines.filter((l) => FOOTER.test(l.trim()));
     const base = {
-        head: SUMMARY_HEAD.exec(body)?.[1] || null,
+        head: headMark(body)?.sha || null,
         runId: RUN_LINK.exec(lines.slice(0, 3).join("\n"))?.[1] || null,
     };
     if (footers.length !== 1)
@@ -105,7 +104,8 @@ export function summaryItems(body) {
 export function reviewState(comments, writers, bot = "claude") {
     const trusted = (c) => writers.includes(c.user?.login);
     const prev = findPrevious(comments, bot, trusted);
-    const isSummary = (c) => c.user?.login === "github-actions[bot]" && SUMMARY_HEAD.exec(c.body || "")?.[2] === bot;
+    // 只认首行的 head 标记（review-bot 的 headMark）：pr-agent 与手动 DeepSeek 审查的评论也出自 github-actions[bot]
+    const isSummary = (c) => c.user?.login === "github-actions[bot]" && headMark(c.body)?.bot === bot;
     const summaries = comments.filter(isSummary).map((c) => ({
         id: c.id,
         createdAt: c.created_at,

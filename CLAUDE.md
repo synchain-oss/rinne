@@ -65,6 +65,7 @@
 ## §4 CI
 
 - 子 PR（base `feature/**`）的 required check 是 `branch-gate`、`clang-format`、`docs-truth`、`compliance`；评审 bot 的 `claude-pr-review` 不是 required check，但合并判据要求它在当前 head 上 success，纯文档 PR 也跑。进 `dev`、`prod` 的 PR 另跑完整构建（`build.yml`）。子 PR 的触发规则有意如此，不要改。
+- 另有两个 pr-agent 交叉审查，调用 `Synchain-oss/ci-workflows` 的共享 workflow：`pr-agent`（进 `dev` 的 PR，DeepSeek 经 OpenCode Go）与 `pr-agent-claude`（各个 base，Claude Haiku）。它们只发评论（照 §2 读、回应），不改 PR 正文、不打标签（describe 与 review 标签都关掉），不是 required check，也不进合并判据。`deepseek-review.yml` 是 Claude 额度用完时的应急审查，只能手动触发、默认停用，结论同样不进合并判据。
 - 改到 mac 代码、CMake、CI 或打包脚本的子支线，合入前对其 head 手动 dispatch 一次构建。
 - workflow 加固由 docs-truth 机检：最小 permissions、concurrency、每个 job 有 timeout；不可信文本只经 `env:` 传入；required job 不带 job 级 `if:`，所在 workflow 不设 paths 过滤。
 
@@ -73,7 +74,7 @@
 - 冻结面：`docs/contracts/**`、`tests/golden/**`，以及 `scripts/check-commits.mjs` 登记的源码（IPC 布局头、`src/core/state/**`、`src/input/ParamTable.h` 的 `RINNE_PARAM` 行、CMake 里的插件身份行）。
 - 每份契约文档有一行 `status: draft` 或 `status: frozen`。frozen 之后，碰到冻结面的 PR 二选一：同一个 PR 新增 `docs/contract-changes/<YYYYMMDD>-<slug>.md`（照 `TEMPLATE.md`），或在正文写一行 `contract-neutral: <理由>`。branch-gate 的 contract-guard 读 base 上的状态，同一个 PR 把 frozen 改回 draft 放行不了自己。
 - 首个公开 rc 起永久冻结：另加 `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。
-- 永不改：插件身份（PLUGIN_CODE、BUNDLE_ID、AU 三元组）与参数 ID；会合段名永不带 abi；会合段头部前 16 字节与端点槽的 version 字段永不移动；state 读到更高 abi 时拒载并原样回写字节。
+- 永不改：插件身份（PLUGIN_CODE、BUNDLE_ID、AU 三元组）与参数 ID；会合段名永不带 abi；会合段头在段首（偏移 0），它的前 16 字节与 `init_pid`（偏移 32）、端点槽的 version 字段（及其依赖的组块位置与步长）永不移动，`'RNRV'` 与初始化标记 `'RNIN'` 不变，会合段永不小于 `kRvMinBytes`（16384 字节）；state 读到更高 abi 时拒载并原样回写字节。
 - 合并冲突落在冻结契约文件上：停下上报，不自行解决。
 
 ## §6 环境与钉版

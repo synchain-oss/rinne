@@ -1,0 +1,57 @@
+{
+  "status": "draft",
+  "format": "RNST",
+  "abi": 1,
+  "probeAbi": 0,
+  "byteOrder": "little-endian",
+  "header": [
+    { "offset": 0, "field": "magic", "type": "u32", "value": "RNST" },
+    { "offset": 4, "field": "abi", "type": "u32" },
+    { "offset": 8, "field": "role", "type": "u32", "values": { "1": "input", "2": "output" } },
+    { "offset": 12, "field": "chunkCount", "type": "u32", "max": 64 }
+  ],
+  "headerFixedAcrossAbi": ["magic", "abi", "role"],
+  "chunk": { "layout": ["u32 fourcc", "u32 sizeBytes", "payload", "zero padding to 4 bytes"], "maxSizeBytes": 65536, "bytesAfterLastChunk": "rejected" },
+  "chunks": { "input": ["PRMS", "CFGS"], "output": ["CFGS"], "unknown": "kept, written back after the known chunks in their original order" },
+  "load": [
+    { "case": "zero bytes", "result": "empty" },
+    { "case": "short header or wrong magic", "result": "corrupt" },
+    { "case": "abi above this build, role of this end", "result": "rejectedNewer", "note": "original bytes written back unchanged" },
+    { "case": "abi above this build, other role", "result": "corrupt" },
+    { "case": "abi equal to probeAbi", "result": "ignoredProbe", "note": "only the header is read" },
+    { "case": "abi below this build", "result": "migrated", "note": "one step at a time" },
+    { "case": "any other failure", "result": "corrupt", "note": "nothing applied" }
+  ],
+  "prms": { "layout": ["u32 count", "count x { u8 idLen, id, f32 value }"], "maxCount": 256, "idBytes": [1, 255], "idChars": "0x21-0x7e", "duplicateIds": "rejected", "value": "plain saved value" },
+  "cfgs": {
+    "layout": ["repeat to end of payload: u16 key, u16 len, bytes[len]"],
+    "knownKeyWrongLength": "rejected",
+    "knownKeyRepeated": "rejected",
+    "missingKnownKey": "default",
+    "unknownKeys": "kept, written back after the known keys in their original order",
+    "keys": [
+      { "key": 1, "name": "group", "type": "u8", "bytes": 1, "min": 0, "max": 8, "default": 0, "outOfRange": "default", "input": true, "output": true },
+      { "key": 2, "name": "group_origin", "type": "u8", "bytes": 1, "min": 0, "max": 2, "default": 0, "outOfRange": "default", "input": true, "output": true },
+      { "key": 3, "name": "reset_on_play", "type": "u8", "bytes": 1, "min": 0, "max": 1, "default": 1, "outOfRange": "default", "input": true, "output": false },
+      { "key": 4, "name": "tail_mode", "type": "u8", "bytes": 1, "min": 0, "max": 2, "default": 0, "outOfRange": "default", "input": true, "output": true },
+      { "key": 5, "name": "delay_unit", "type": "u8", "bytes": 1, "min": 0, "max": 1, "default": 0, "outOfRange": "default", "input": true, "output": false },
+      { "key": 6, "name": "fb_unit", "type": "u8", "bytes": 1, "min": 0, "max": 1, "default": 0, "outOfRange": "default", "input": true, "output": false },
+      { "key": 7, "name": "guard_on", "type": "u8", "bytes": 1, "min": 0, "max": 1, "default": 1, "outOfRange": "default", "input": true, "output": false },
+      { "key": 8, "name": "ui_scale", "type": "u16", "bytes": 2, "min": 33, "max": 300, "default": 100, "outOfRange": "clamp", "input": true, "output": true },
+      { "key": 9, "name": "ui_lang", "type": "ascii", "maxBytes": 8, "default": "", "invalid": "default", "input": true, "output": true },
+      { "key": 10, "name": "preset_name", "type": "utf8", "maxBytes": 96, "default": "", "invalid": "default", "input": true, "output": false },
+      { "key": 11, "name": "preset_dirty", "type": "u8", "bytes": 1, "min": 0, "max": 1, "default": 0, "outOfRange": "default", "input": true, "output": false }
+    ],
+    "values": {
+      "group": { "0": "unset", "1-8": "groups A-H" },
+      "group_origin": { "0": "undecided", "1": "user", "2": "smart" },
+      "tail_mode": { "0": "auto", "1": "infinite", "2": "30 s" },
+      "delay_unit": { "0": "ms", "1": "samples" },
+      "fb_unit": { "0": "percent", "1": "dB" },
+      "ui_scale": "percent",
+      "ui_lang": "letters, digits and '-'",
+      "preset_name": "well-formed UTF-8 without control characters"
+    }
+  },
+  "notInProject": ["guide_seen", "rules_ack_version", "diag_log"]
+}

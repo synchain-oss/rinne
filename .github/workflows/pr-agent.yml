@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# pr-agent（review / improve），DeepSeek V4.1 Flash 经 OpenCode Go，按量计费。只在进 dev 的 PR 上跑，PR 每次推送都重跑；
+# 晋升 PR（dev → prod）、draft、fork 与 bot 的 PR 由被调用方跳过。只发评论：不是 required check，不进合并判据。
+# 模型、上限、超时、钉死的 pr-agent 镜像都在 Synchain-oss/ci-workflows 的 pr-agent.yml 里统一维护，这里只放本仓的
+# ignore 列表与开关。引用钉 40 位 SHA、行尾注明 tag；改 SHA 时重跑 node scripts/lock-actions.mjs。
+# describe: false：describe 会把生成的段落接在 PR 正文后面，而本仓 PR 正文的最后一行必须是签名行（branch-gate 与
+# pr-merge 都核对），所以哪个 base 都不跑。review_labels: false：不打 Review effort / Possible security concern
+# 标签（标签以 .github/labels.json 为唯一真源）。persistent_comments: false 的理由见下面 with 里的注释。
+name: PR Agent (DeepSeek V4.1 Flash)
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-agent:
+    # 被调用方的 job 要这三项，调用方给的不能比它少；写权限只有评论两项
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@8028e34628bc2276ca978d87ccfc364432742820 # v1.3.1
+    with:
+      provider: opencode-go
+      describe: false
+      review_labels: false
+      # dev 上 pr-agent-claude 也在跑，两者共用一个评论身份。持久模式会改「最新一条带 pr-agent 标记的评论」，
+      # 不管是哪个 pr-agent 写的，所以这里也每次推送发新评论，不去改写 Haiku 的评论。
+      persistent_comments: false
+      # 改这里时同步改 pr-agent-claude.yml
+      ignore_globs: '["scripts/probe/fixtures/**", "scripts/maintainer/fixtures/**", "web/fonts/**", "web/js/juce/**", "LICENSES/**", "third_party/notices/**"]'
+    secrets:
+      api_key: ${{ secrets.OPENCODE_GO_API_KEY_FOR_REVIEW }}
