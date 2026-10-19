@@ -124,10 +124,10 @@ void Rendezvous::setGroup(u32 group, ClaimIntent intent, u64 nowMs)
     {
         return;
     }
-    intentFromMs_ = nowMs; // 新给的意图从这一拍起算有效期（只对工程恢复与用户确认有意义）
     if (group == group_)
     {
         intent_ = intent;
+        armIntentHold(nowMs);
         if (state_ == RendezvousState::kConflict && intent != ClaimIntent::kConflictRetry)
         {
             // 用户显式给了新的意图（工程恢复、确认接管）：不再等自动冲突重试，下一拍就按新意图再试
@@ -139,6 +139,7 @@ void Rendezvous::setGroup(u32 group, ClaimIntent intent, u64 nowMs)
     letGo(nowMs); // 先放开旧组：CAS free 失败也不去「修」，那是新属主的槽了
     group_ = group;
     intent_ = intent;
+    armIntentHold(nowMs);
     retryAtMs_ = 0;
     nextConflictRetryMs_ = 0;
     labelDirty_ = true; // 换了槽：标签要重新写到新槽
@@ -312,7 +313,16 @@ void Rendezvous::tick(u64 nowMs)
     RvSegment& rv = *static_cast<RvSegment*>(rv_->base());
     if (observer_.due(nowMs))
     {
+        const bool firstScan = !observer_.scanned();
         observer_.scan(rv, nowMs);
+        if (firstScan)
+        {
+            firstSampleMs_ = nowMs;
+            if (intent_ == ClaimIntent::kRestore)
+            {
+                armIntentHold(nowMs); // 工程恢复的有效期等到这一刻才起算
+            }
+        }
     }
     if (myCtl_ != 0)
     {
@@ -393,7 +403,6 @@ bool Rendezvous::openRendezvous(u64 nowMs)
         backoff_.reset();
         failures_ = 0;
         observer_.reset();
-        intentFromMs_ = nowMs; // 观察者从零攒证据：工程恢复与用户确认的有效期也从这一拍算
         return true;
     case InitResult::kBusy:
         // 契约：kBusy 之后立刻解映射，绝不在原映射上重试
@@ -504,27 +513,29 @@ bool Rendezvous::openRing(u64 nowMs)
 
 void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
 {
-    // 工程恢复与用户确认在有效期内：每一拍都按原意图再试，证据一攒够就拿到
-    const bool held = intentHeld(nowMs);
-    // 冲突重试没到点就不碰；时钟倒退得比一个重试间隔还多时不多等，立刻重试（与 tick 的退避同一个口径）
-    if (state_ == RendezvousState::kConflict && !held && nowMs < nextConflictRetryMs_ &&
-        nextConflictRetryMs_ - nowMs <= RendezvousTiming::kConflictRetryMs)
+    const bool conflict = state_ == RendezvousState::kConflict;
+    // 冲突重试每 1 s 一次；时钟倒退得比一个重试间隔还多时不多等，立刻重试（与 tick 的退避同一个口径）
+    const bool retryDue =
+        !conflict || nowMs >= nextConflictRetryMs_ || nextConflictRetryMs_ - nowMs > RendezvousTiming::kConflictRetryMs;
+    // 工程恢复与用户确认在原意图有效期内：不到重试的拍子也每一拍看一次休眠档，证据一攒够就拿到
+    const bool held = conflict && intentHeld(nowMs);
+    if (!retryDue && !held)
     {
         return;
     }
-    const ClaimIntent effective = state_ == RendezvousState::kConflict && !held ? ClaimIntent::kConflictRetry : intent_;
+    const ClaimIntent effective = conflict ? ClaimIntent::kConflictRetry : intent_;
     RoleSlot& slot = roleSlot(rv, group_, role());
     const u64 observed = slot.ctl.load(std::memory_order_acquire);
     TakeoverTier tier = TakeoverTier::kNone;
     if (ctlPhase(observed) == kCtlPhaseFree)
     {
-        tier = TakeoverTier::kFree;
+        tier = retryDue ? TakeoverTier::kFree : TakeoverTier::kNone;
     }
     else
     {
         // 只有观察者手里的那一份和当前整字一致时才拿它判定；不一致说明槽刚动过，这一拍不碰
         const SlotSample& latest = observer_.sample(group_, role());
-        if (latest.ctl == observed)
+        if (latest.ctl == observed && retryDue)
         {
             tier = takeoverTier(latest, nowMs, currentProcessId(), effective, &isProcessAlive);
             // 工程恢复进了冲突重试，仍然抢得动 provisional（provisional 让位给工程恢复，不论第几次试），但只保留
@@ -538,11 +549,20 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
                 tier = TakeoverTier::kPreemptProvisional;
             }
         }
+        // 原意图有效期只放宽休眠这一档，其余各档照旧只在重试的拍子上按 kConflictRetry 判。不传探活：这里只认休眠
+        if (latest.ctl == observed && tier == TakeoverTier::kNone && held &&
+            takeoverTier(latest, nowMs, currentProcessId(), intent_, nullptr) == TakeoverTier::kDormant)
+        {
+            tier = TakeoverTier::kDormant;
+        }
     }
     if (tier == TakeoverTier::kNone)
     {
         state_ = RendezvousState::kConflict;
-        nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
+        if (retryDue)
+        {
+            nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs; // 有效期内多看的拍子不推迟它
+        }
         return;
     }
     // provisional 位与 kCfgSmartOrigin 跟着认领的来源走（intent_），不跟这一拍的档位走（effective）：智能默认的
@@ -573,28 +593,54 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
         return;
     }
     myCtl_ = activated.word;
+    intentUntilMs_ = 0; // 原意图有效期只服务于这一次认领
     lastHeartbeatMs_ = nowMs;
     labelDirty_ = true; // 新属主把自己的标签写上去
     labelOddSinceMs_ = 0;
     // 状态留给 openRing：成功时由 publishBinding 置 kActive，失败时置 kOpening
 }
 
-// 工程恢复与用户确认的原意图有效期。拿休眠槽要观察者看满 2 s 的证据，可这两种意图恰恰常在观察者刚开始看的时候
+// 工程恢复与用户确认的原意图有效期。拿休眠槽要观察者看满 2 s 的证据，可这两种意图恰恰常在证据还没攒够的时候
 // 给出：工程加载时会合段刚打开、观察者刚重置；用户也可能在对端刚休眠不久就点了确认。只给第一拍一次机会的话，
-// 这一档在主路径上永远走不到。所以从意图给出（setGroup）或观察者重置的那一拍起，kIntentHoldMs（2 s 再加一个
-// 扫描间隔）之内，冲突重试仍按原意图判；过了才退化成 kConflictRetry（工程恢复仍保留抢占 provisional）。
-// 时钟倒退时从这一拍重新计：观察者的静止起点同样从倒退之后的那次扫描重新计
+// 这一档在主路径上永远走不到。所以在有效期内，冲突重试每一拍多看一次休眠档（只这一档）；过了有效期才完全
+// 退化成 kConflictRetry（工程恢复仍保留抢占 provisional）。起点：
+// - 工程恢复从观察者对这个槽的第一个样本算起，不从 setGroup 算：加载时宿主可能先给 state、过几秒才让消息线程
+//   跑第一拍，那几秒里观察者一个样本都没有。观察者已经在看（会合段早就开着）时，有效期从它当初的第一个样本算，
+//   通常早就过了，只剩首拍那一次机会；
+// - 用户确认从确认的这一刻算起；
+// - 其余意图没有有效期。
+void Rendezvous::armIntentHold(u64 nowMs) noexcept
+{
+    intentUntilMs_ = 0;
+    intentSeenMs_ = nowMs;
+    if (intent_ == ClaimIntent::kManualConfirmed)
+    {
+        intentUntilMs_ = nowMs + RendezvousTiming::kIntentHoldMs;
+    }
+    else if (intent_ == ClaimIntent::kRestore && observer_.scanned())
+    {
+        intentUntilMs_ = firstSampleMs_ + RendezvousTiming::kIntentHoldMs;
+    }
+    // 工程恢复而观察者还没扫过：tick 在第一次扫描时再定
+}
+
+// 截止时刻定下之后不动：有效期内 ctl 变了、观察者的静止起点重新计，有效期也按原定时刻到期，不顺延，所以最长就是
+// kIntentHoldMs。时钟倒退也拉不长它：离截止还有不止 kIntentHoldMs 就当已经到期（与冲突闸门的上界同一个口径）；
+// 有效期内时钟比上一次看到的还早，也当已经到期，否则按原截止时刻算就多出了倒退的那一段。到期就清掉，之后时钟
+// 再怎么倒退也不会让它复活
 bool Rendezvous::intentHeld(u64 nowMs) noexcept
 {
-    if (intent_ != ClaimIntent::kRestore && intent_ != ClaimIntent::kManualConfirmed)
+    if (intentUntilMs_ == 0)
     {
         return false;
     }
-    if (nowMs < intentFromMs_)
+    if (nowMs >= intentSeenMs_ && nowMs < intentUntilMs_ && intentUntilMs_ - nowMs <= RendezvousTiming::kIntentHoldMs)
     {
-        intentFromMs_ = nowMs;
+        intentSeenMs_ = nowMs;
+        return true;
     }
-    return nowMs - intentFromMs_ < RendezvousTiming::kIntentHoldMs;
+    intentUntilMs_ = 0;
+    return false;
 }
 
 void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs)

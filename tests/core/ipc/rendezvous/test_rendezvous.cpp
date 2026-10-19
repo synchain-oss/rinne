@@ -413,9 +413,10 @@ TEST_CASE("restore and confirm keep their intent until the dormant evidence has 
     RvSegment& rv = rvOf(rvView);
     const StreamFormat format{48000, 512, 2};
     constexpr u64 kTick = 40; // 壳的 25 Hz 定时器
+    // 每一段里，带着这个意图的实例都只在首拍之前调一次 setGroup，之后只按 25 Hz 往下 tick
 
-    // (i) 工程加载：构造、setGroup(kRestore)、prepare、首拍连着来，会合段刚打开、观察者刚重置，ctl 的静止是 0。
-    // 之后不再调 setGroup，只按 25 Hz 往下 tick：证据攒满 2 s 的那一拍就拿到早已休眠的槽
+    // (i) 工程加载：宿主先给 state（setGroup(kRestore)）、prepare，消息线程忙着加载整个工程，3 s 之后才跑第一拍。
+    // 有效期从观察者的第一个样本算起，不从 setGroup 算：首拍时 ctl 的静止是 0，证据攒满 2 s 的那一拍拿到早已休眠的槽
     Rendezvous sleeper(configFor(Role::kInput, backend, naming.scope(), 61));
     sleeper.setGroup(2, ClaimIntent::kManual, kT0);
     sleeper.prepare(format, kT0);
@@ -423,54 +424,97 @@ TEST_CASE("restore and confirm keep their intent until the dormant evidence has 
     REQUIRE(sleeper.state() == RendezvousState::kActive);
     sleeper.releaseResources(kT0 + 10);
     const u64 loadAt = kT0 + 10000; // 已经休眠了 10 s
+    const u64 firstTickAt = loadAt + 3000;
     Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 62));
     restore.setGroup(2, ClaimIntent::kRestore, loadAt);
     restore.prepare(format, loadAt);
-    restore.tick(loadAt);
+    restore.tick(firstTickAt);
     REQUIRE(restore.state() == RendezvousState::kConflict);
-    for (u64 t = loadAt + kTick; t < loadAt + RendezvousTiming::kDormantMs; t += kTick)
+    for (u64 t = firstTickAt + kTick; t < firstTickAt + RendezvousTiming::kDormantMs; t += kTick)
     {
         restore.tick(t);
     }
     CHECK(restore.state() == RendezvousState::kConflict); // 证据还不满 2 s
-    restore.tick(loadAt + RendezvousTiming::kDormantMs);
+    restore.tick(firstTickAt + RendezvousTiming::kDormantMs);
     CHECK(restore.state() == RendezvousState::kActive);
     CHECK(roleSlot(rv, 2, Role::kInput).ctl.load() == restore.myCtl());
-    sleeper.tick(loadAt + RendezvousTiming::kDormantMs + kTick);
+    sleeper.tick(firstTickAt + RendezvousTiming::kDormantMs + kTick);
     CHECK(sleeper.state() == RendezvousState::kConflict);
 
-    // (ii) 用户确认：对端刚休眠 1 s 就点了确认，这一拍拿不到；不再补调，确认在有效期内一直有效，
-    // 休眠与 ctl 的静止都满 2 s 的那一拍拿到
+    // (ii) 用户确认：对端休眠了 1 s 时，用户在一个新实例上确认接管，这时观察者一个样本都没有。有效期从确认的那一刻
+    // 算起：休眠与 ctl 的静止都满 2 s 的那一拍拿到，仍在有效期内
     Rendezvous holder(configFor(Role::kInput, backend, naming.scope(), 63));
     holder.setGroup(4, ClaimIntent::kManual, kT0);
     holder.prepare(format, kT0);
     holder.tick(kT0);
     REQUIRE(holder.state() == RendezvousState::kActive);
+    holder.releaseResources(kT0 + 1000);
+    const u64 confirmAt = kT0 + 2000;
     Rendezvous user(configFor(Role::kInput, backend, naming.scope(), 64));
-    user.setGroup(4, ClaimIntent::kManual, kT0);
-    user.prepare(format, kT0);
-    const u64 sleepAt = kT0 + 1000;
-    const u64 confirmAt = sleepAt + 1000;
-    u64 t = kT0;
-    for (; t < confirmAt; t += kTick)
-    {
-        if (t == sleepAt)
-        {
-            holder.releaseResources(t);
-        }
-        user.tick(t);
-    }
-    REQUIRE(user.state() == RendezvousState::kConflict);
     user.setGroup(4, ClaimIntent::kManualConfirmed, confirmAt);
+    user.prepare(format, confirmAt);
     u64 wonAt = 0;
-    for (; t < confirmAt + RendezvousTiming::kIntentHoldMs && wonAt == 0; t += kTick)
+    for (u64 t = confirmAt; t < confirmAt + RendezvousTiming::kIntentHoldMs && wonAt == 0; t += kTick)
     {
         user.tick(t);
         wonAt = user.state() == RendezvousState::kActive ? t : 0;
     }
-    CHECK(wonAt >= sleepAt + RendezvousTiming::kDormantMs);
-    CHECK(user.state() == RendezvousState::kActive);
+    CHECK(wonAt == confirmAt + RendezvousTiming::kDormantMs);
     CHECK(roleSlot(rv, 4, Role::kInput).ctl.load() == user.myCtl());
+
+    // 同样的确认，发生在一个早就在看、因组被占而停在冲突的实例上：确认本身就是这一次 setGroup，之后不再调。
+    // 有效期从确认算起，不从观察者当初的第一个样本算（那样的话确认之前就已经过期了）
+    Rendezvous holder2(configFor(Role::kInput, backend, naming.scope(), 68));
+    holder2.setGroup(5, ClaimIntent::kManual, kT0);
+    holder2.prepare(format, kT0);
+    holder2.tick(kT0);
+    REQUIRE(holder2.state() == RendezvousState::kActive);
+    Rendezvous watcher(configFor(Role::kInput, backend, naming.scope(), 69));
+    watcher.setGroup(5, ClaimIntent::kManual, kT0);
+    watcher.prepare(format, kT0);
+    const u64 sleep2At = kT0 + 3000;
+    const u64 confirm2At = sleep2At + 1000;
+    u64 t = kT0;
+    for (; t < confirm2At; t += kTick)
+    {
+        if (t == sleep2At)
+        {
+            holder2.releaseResources(t);
+        }
+        watcher.tick(t);
+    }
+    REQUIRE(watcher.state() == RendezvousState::kConflict);
+    watcher.setGroup(5, ClaimIntent::kManualConfirmed, confirm2At);
+    u64 won2At = 0;
+    for (; t < confirm2At + RendezvousTiming::kIntentHoldMs && won2At == 0; t += kTick)
+    {
+        watcher.tick(t);
+        won2At = watcher.state() == RendezvousState::kActive ? t : 0;
+    }
+    CHECK(won2At >= sleep2At + RendezvousTiming::kDormantMs);
+    CHECK(roleSlot(rv, 5, Role::kInput).ctl.load() == watcher.myCtl());
+
+    // (iii) 有效期按原定时刻到期，不随 ctl 的变化顺延：工程恢复首拍时槽还是活跃的，有效期内对端才休眠，观察者的
+    // 静止从那次变化重新计，到原定截止时刻还不满 2 s。之后退化成冲突重试，休眠再久也不拿
+    Rendezvous busy(configFor(Role::kInput, backend, naming.scope(), 70));
+    busy.setGroup(6, ClaimIntent::kManual, kT0);
+    busy.prepare(format, kT0);
+    busy.tick(kT0);
+    REQUIRE(busy.state() == RendezvousState::kActive);
+    Rendezvous late(configFor(Role::kInput, backend, naming.scope(), 71));
+    late.setGroup(6, ClaimIntent::kRestore, loadAt);
+    late.prepare(format, loadAt);
+    const u64 busySleepsAt = loadAt + 600;
+    for (u64 u = loadAt; u <= loadAt + 8000; u += kTick)
+    {
+        if (u == busySleepsAt)
+        {
+            busy.releaseResources(u);
+        }
+        late.tick(u);
+    }
+    CHECK(late.state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 6, Role::kInput).ctl.load() == busy.myCtl());
 
     // (iv) 两个工程恢复争同一个休眠槽：恰好一个拿到，另一个停在冲突，之后也不来回抢
     Rendezvous idle(configFor(Role::kInput, backend, naming.scope(), 65));
@@ -496,6 +540,66 @@ TEST_CASE("restore and confirm keep their intent until the dormant evidence has 
     CHECK(firstWon != secondWon);
     CHECK((firstWon ? second : first).state() == RendezvousState::kConflict);
     CHECK(roleSlot(rv, 7, Role::kInput).ctl.load() == (firstWon ? first : second).myCtl());
+}
+
+TEST_CASE("a clock that goes backwards never stretches the intent hold", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+    constexpr u64 kTick = 40;
+
+    // 有效期内倒退 300 ms：观察者从倒退那一拍重新攒证据，按原截止时刻还剩 2150 ms，够它攒满 2 s，可那样有效期就
+    // 多出了倒退的那一段。倒退即到期：之后退化成冲突重试，早已休眠的槽也不拿
+    Rendezvous sleeper(configFor(Role::kInput, backend, naming.scope(), 81));
+    sleeper.setGroup(1, ClaimIntent::kManual, kT0);
+    sleeper.prepare(format, kT0);
+    sleeper.tick(kT0);
+    REQUIRE(sleeper.state() == RendezvousState::kActive);
+    sleeper.releaseResources(kT0 + 10);
+    const u64 loadAt = kT0 + 10000;
+    Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 82));
+    restore.setGroup(1, ClaimIntent::kRestore, loadAt);
+    restore.prepare(format, loadAt);
+    for (u64 t = loadAt; t <= loadAt + 400; t += kTick)
+    {
+        restore.tick(t);
+    }
+    REQUIRE(restore.state() == RendezvousState::kConflict);
+    for (u64 t = loadAt + 100; t <= loadAt + 8000; t += kTick)
+    {
+        restore.tick(t);
+    }
+    CHECK(restore.state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 1, Role::kInput).ctl.load() == sleeper.myCtl());
+
+    // 观察者早就在看，时钟倒退 3 s 之后才给出工程恢复：有效期从观察者当初的第一个样本算，截止时刻离现在超过
+    // kIntentHoldMs，就当已经到期（与冲突闸门的上界同一个口径），只剩首拍那一次机会
+    Rendezvous holder(configFor(Role::kInput, backend, naming.scope(), 83));
+    holder.setGroup(3, ClaimIntent::kManual, kT0);
+    holder.prepare(format, kT0);
+    holder.tick(kT0);
+    REQUIRE(holder.state() == RendezvousState::kActive);
+    const u64 seenAt = kT0 + 20000;
+    Rendezvous other(configFor(Role::kInput, backend, naming.scope(), 84));
+    other.setGroup(3, ClaimIntent::kManual, seenAt);
+    other.prepare(format, seenAt);
+    other.tick(seenAt);
+    REQUIRE(other.state() == RendezvousState::kConflict);
+    const u64 backAt = seenAt - 3000;
+    other.setGroup(3, ClaimIntent::kRestore, backAt);
+    other.tick(backAt); // 首拍：槽还是活跃的，进冲突
+    REQUIRE(other.state() == RendezvousState::kConflict);
+    holder.releaseResources(backAt + kTick);
+    for (u64 t = backAt + kTick; t <= backAt + 8000; t += kTick)
+    {
+        other.tick(t);
+    }
+    CHECK(other.state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == holder.myCtl());
 }
 
 TEST_CASE("a conflict retry does not wait out a clock that went backwards", "[ipc][rendezvous]")
