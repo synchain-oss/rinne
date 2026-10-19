@@ -841,6 +841,8 @@ function Invoke-SelfTest {
     # 临时目录只经 scripts/lib/TempDir.psm1 建与删：新建的、本进程的，删之前按真实路径核对
     Import-Module (Join-Path $PSScriptRoot '../lib/TempDir.psm1') -ErrorAction Stop
     $tmp = New-RinneTempDir -Prefix 'rinne-merge-selftest-'
+    # 假的 worktree remove 拒绝外面路径的用例：外面的目录也是这里新建的
+    $away = $null
     # 假卡号分开拼：源码里不出现完整的卡号形态（隐私规则表会拦）
     $cid = 'RN' + '-99a'
     $cardsFile = Join-Path $tmp 'card-list.json'
@@ -874,7 +876,7 @@ function Invoke-SelfTest {
         $latchFile = Join-Path $tmp 'premerge-latch.json'
         Set-RinneLatchOverride $latchFile
         # 假构建脚本要不要顺手改一样判据文件或主 clone 的状态（见下面构建的路由）
-        $tamper = @{ What = ''; Refused = $null; Late = $false }
+        $tamper = @{ What = ''; Refused = $null; Late = $false; Mid = $false }
         # 在途的调用撞上别的进程刚写下的标记：在 wt/tip-<n> 的哪一条 git（Tip）、拉 PR 信息（Facts）、构建前查主 clone 工作区
         # （Clone）或解析用户级配置（Config）的时候写下 Text；At 是写下时日志的条数
         $plant = @{ Text = ''; Tip = ''; Facts = $false; Clone = $false; Config = $false; At = -1 }
@@ -988,6 +990,8 @@ function Invoke-SelfTest {
                     'throw' { throw '构建中途出错' }
                     # 构建留下的进程等核对过了再删标记：下一次查主 clone 的工作区（核对之后、清除之前）时删
                     'latch-late' { $tamper.Late = $true }
+                    # 核对途中删标记：构建之后算指纹、解析用户级配置的那一条 git 时删（这一条之前的检查已经过了）
+                    'latch-mid' { $tamper.Mid = $true }
                 }
                 $buildResult
             }
@@ -996,6 +1000,7 @@ function Invoke-SelfTest {
             '^git config --file .*user\.gitconfig' = {
                 param($argv)
                 if ($plant.Config) { $plant.Config = $false; & $putMarker }
+                if ($tamper.Mid) { $tamper.Mid = $false; Remove-Item -LiteralPath $latchFile -ErrorAction SilentlyContinue }
                 $o = @(& git @argv 2>$null) -join "`n"
                 @{ Code = $LASTEXITCODE; Out = $o; Err = '' }
             }
@@ -1626,6 +1631,22 @@ function Invoke-SelfTest {
                     $vl.Code -eq 'not-ready' -and @($vl.Failures | Where-Object { $_ -match '判据文件：锁存标记（核对之后' }).Count -eq 1 -and $ln -and $ln.state -eq 'tampered' -and
                     @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -eq 0 -and $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
                 & $unlatch
+                # 核对途中抛错：算指纹时标记被删掉，下一条外部命令之前的检查抛错。照样写回成已篡改、写明核对没有走完；不 abort、
+                # 不再查工作区，下一次拒绝（不接住这个抛错时，标记就一直是删掉的，下一次放行）
+                $tipOps.Clear()
+                $tamper.What = 'latch-mid'
+                $s0 = $tree.Calls
+                try { $vm = Invoke-MergeCheck 3 $cid } finally { $tamper.What = ''; $tamper.Mid = $false }
+                $ms = $tree.Calls - $s0
+                $mn = & $readLatch
+                Reset-RinneLatchProcess
+                $n0 = $log.Count
+                $again = & $thrown { Invoke-MergeCheck 3 $cid }
+                Add-RinneCase $cases '合并后构建：核对途中抛错（算指纹时标记被删掉），写回成已篡改、写明核对没有走完，不 abort、不查工作区，下一次拒绝' $true (
+                    $vm.Code -eq 'not-ready' -and @($vm.Failures | Where-Object { $_ -match '判据文件：核对没有走完' }).Count -eq 1 -and $ms -eq $plain - 1 -and
+                    $mn -and $mn.state -eq 'tampered' -and @($mn.changed | Where-Object { $_ -match '^核对没有走完' }).Count -eq 1 -and
+                    @($tipOps | Where-Object { $_.Line -match 'merge --abort' }).Count -eq 0 -and $again -match '^已锁存' -and (& $gitSince $n0) -eq 0)
+                & $unlatch
             } finally { Set-RinneLatchHold $true }
             # 查工作区才发现不干净（指纹已经算过）：同样改写成已篡改；finally 里看到本进程已锁存，不 abort，Reason 写明
             $tipOps.Clear()
@@ -1862,8 +1883,13 @@ function Invoke-SelfTest {
             ' symbolic-ref --quiet --short HEAD' = { $wtBranch }
             'ls-remote --exit-code'          = { "$('a' * 40)`trefs/heads/feat/review-bot" }
             ' push origin --delete refs/heads/feat/review-bot' = { '' }
-            # 假的 worktree remove：挪进自测的临时目录（不递归删参数给的路径），最后随临时目录一起删
-            ' worktree remove '              = { param($argv) Move-Item -LiteralPath $argv[-1] -Destination (Join-Path $tmp "removed-$([guid]::NewGuid().ToString('N'))"); '' }
+            # 假的 worktree remove：挪进自测的临时目录（不递归删参数给的路径），最后随临时目录一起删。挪之前核对给的路径按真实路径
+            # 在这个临时目录里面，不在就抛错、不动它（Get-RinneRoot 的取值以后变了，也挪不到真的 wt/ 下的目录）
+            ' worktree remove '              = {
+                param($argv)
+                if (-not (Test-RinneInTempDir -Path $argv[-1] -Dir $tmp)) { throw "假的 worktree remove 只挪自测临时目录里面的路径：$($argv[-1])" }
+                Move-Item -LiteralPath $argv[-1] -Destination (Join-Path $tmp "removed-$([guid]::NewGuid().ToString('N'))"); ''
+            }
             'rev-parse --verify --quiet refs/heads/feat/review-bot' = { '' }
             ' branch -D feat/review-bot'     = { '' }
             '^git .* fetch '                 = { '' }
@@ -1889,6 +1915,18 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-After：subject 没有 (#3)' $true (Test-Throws { Invoke-After -Pr 3 -CardId $cid })
         $merged.merged = $false
         Add-RinneCase $cases '-After：还没合并' $true (Test-Throws { Invoke-After -Pr 3 -CardId $cid })
+        # 假的 worktree remove 给的路径在自测临时目录外面：直接给、经临时目录里的链接给，都抛错，原样不动。外面那个目录是本进程新建的
+        $away = New-RinneTempDir -Prefix 'rinne-merge-selftest-'
+        Set-Content -LiteralPath (Join-Path $away 'keep.txt') -Value 'x'
+        $toAway = Join-Path $tmp 'wt/to-away'
+        $null = New-Item -ItemType ($IsWindows ? 'Junction' : 'SymbolicLink') -Path $toAway -Target $away
+        $rm = $after[' worktree remove ']
+        $awayThrew = Test-Throws { & $rm @('git', 'worktree', 'remove', '--force', $away) }
+        $linkThrew = Test-Throws { & $rm @('git', 'worktree', 'remove', '--force', $toAway) }
+        Add-RinneCase $cases '假的 worktree remove：给的路径（按真实路径）在自测临时目录外面就抛错，原样不动' $true (
+            $awayThrew -and $linkThrew -and (Test-Path -LiteralPath (Join-Path $away 'keep.txt')) -and (Test-Path -LiteralPath $toAway))
+        # 只删链接本身（核对失效时它已经被挪走，不在原处）
+        if (Test-Path -LiteralPath $toAway) { Remove-Item -LiteralPath $toAway -Force }
 
         # 范围：owns 的通配与 takesOver、sections 里的 path
         $c2 = [pscustomobject]@{ owns = @('src/core/loop/**'); takesOver = @([pscustomobject]@{ path = 'src/core/engine/InputEngine.{h,cpp}' }); sections = @([pscustomobject]@{ path = 'THIRD-PARTY-NOTICES.md'; section = 'catch2' }) }
@@ -1917,8 +1955,9 @@ function Invoke-SelfTest {
         $env:RINNE_CARDS = $saved.Cards
         $env:RINNE_WAIVERS = $saved.Waivers
         # EOF 用例的孙进程量完就收到停止信号；万一它还握着 eof.log，最多再等 15 秒
+        $awayLeft = Remove-RinneTempDir -Path $away
         $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 15
-        Add-RinneCase $cases '自测的临时目录删掉了（EOF 用例的孙进程量完就退出）' $false ($left -or (Test-Path -LiteralPath $tmp))
+        Add-RinneCase $cases '自测的临时目录删掉了（EOF 用例的孙进程量完就退出）' $false ($left -or $awayLeft -or (Test-Path -LiteralPath $tmp) -or ($away -and (Test-Path -LiteralPath $away)))
     }
     Complete-RinneSelfTest $cases 'pr-merge'
 }

@@ -10,9 +10,12 @@
 #   还握着里面的文件）时按 -WaitSeconds 重试，等不到返回原因。
 # - 量子进程管道的自测会留下一个活十几秒、握着临时目录里日志的孙进程：Get-RinneLingerCommand 给出它的命令（pwsh
 #   -EncodedCommand 的参数），活到时限或者停止文件出现就退出。量完写停止文件，孙进程退出之后目录才删得掉。
-# - 本模块自己的 $ErrorActionPreference 是 Stop：调用方把偏好设成 SilentlyContinue 也吞不掉这里的抛错。
+# - 本模块自己的 $ErrorActionPreference 是 Stop：调用方把偏好设成 SilentlyContinue 时，核对途中的错误（例如解析链接时抛错）
+#   照样中止这一次调用，不会被吞掉之后接着走到删除。抛到调用方的错误按调用方的偏好处理（带参数属性的函数在调用方那一层按语句
+#   报错，SilentlyContinue 时返回空）。
 #   New-RinneTempDir -Prefix <rinne-…->                  返回目录的完整路径
 #   Remove-RinneTempDir -Path <目录> [-WaitSeconds <秒>]  删掉了（或本来就没有）返回 $null，不删或删不掉返回原因
+#   Test-RinneInTempDir -Path <路径> -Dir <目录>          路径（按真实路径）在本进程建的那个目录里面（不含它本身）
 #   Get-RinneLingerCommand -Seconds <秒> -StopFile <文件>
 #   Test-RinneTempDir                                     自测用例（gates 的自测调用）
 
@@ -62,6 +65,14 @@ function Get-RinneTempDirCheck {
     @{ Real = $real }
 }
 
+<# Path 的真实路径在 Dir 里面（不含 Dir 本身），而且 Dir 是本进程建的、照样过上面的核对。自测的假实现挪动路径之前用它。 #>
+function Test-RinneInTempDir {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Dir)
+    $c = Get-RinneTempDirCheck $Dir
+    if ($c -is [string]) { return $false }
+    (Resolve-RinneRealPath $Path).StartsWith($c.Real + [IO.Path]::DirectorySeparatorChar, $IsWindows ? [StringComparison]::OrdinalIgnoreCase : [StringComparison]::Ordinal)
+}
+
 <# 删掉本进程建的临时目录（连同里面的东西）。删掉了或本来就没有返回 $null；不删、删不掉返回原因。 #>
 function Remove-RinneTempDir {
     param([AllowNull()][AllowEmptyString()][string]$Path, [double]$WaitSeconds = 0)
@@ -95,8 +106,8 @@ function Get-RinneLingerCommand {
 
 <#
   自测：新建（系统临时目录下一层、带前缀、两次不重名）、删除（连同文件与子目录；里面指向别处的链接只删链接）、拒绝（不是
-  经 New-RinneTempDir 建的；建完被换成指向别处的链接；系统临时目录换了位置）、删不掉时重试到句柄放开、孙进程的命令。
-  返回 { Label; Bad; Passed }。
+  经 New-RinneTempDir 建的；建完被换成指向别处的链接；系统临时目录换了位置）、删不掉时重试到句柄放开、「在里面」的判断、
+  调用方的偏好吞不掉核对途中的错误、孙进程的命令。返回 { Label; Bad; Passed }。
 #>
 function Test-RinneTempDir {
     $check = { param($Label, $Bad, $Flagged) [pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = $(if ($Bad) { [bool]$Flagged } else { -not [bool]$Flagged }) } }
@@ -160,6 +171,42 @@ function Test-RinneTempDir {
             & $check '删除：按 WaitSeconds 重试，句柄放开之后删掉' $false (-not ($null -eq $later -and -not (Test-Path -LiteralPath $c)))
         }
 
+        # 在里面：本进程建的目录里面的路径算（还不存在也算）；目录本身、经里面的链接指到外面的、不是本进程建的目录里面的都不算
+        $toForeign = Join-Path $b 'to-foreign'
+        & $link $toForeign $foreign
+        try {
+            $inside = (Test-RinneInTempDir -Path (Join-Path $b 'wt/x') -Dir $b) -and -not (Test-RinneInTempDir -Path $b -Dir $b)
+            $outside = (Test-RinneInTempDir -Path (Join-Path $toForeign 'x') -Dir $b) -or (Test-RinneInTempDir -Path (Join-Path $foreign 'x') -Dir $foreign)
+        } finally { Remove-Item -LiteralPath $toForeign -Force }
+        & $check '在里面：本进程建的目录里面的路径算' $false (-not $inside)
+        & $check '在里面：经里面的链接指到外面的、不是本进程建的目录里面的都不算' $true (-not $outside)
+
+        # 调用方把 ErrorActionPreference 设成 SilentlyContinue：没设偏好的模块里，核对途中的错误被吞掉之后接着往下走，落到删除。子进程
+        # 里试，它的系统临时目录在 $b 里面：建一个目录、放一个文件，原目录挪开，原位换成成环的链接（解析真实路径时抛错），再删它。
+        # 子进程退出之后断言链接原样在、文件还在；它留下的东西都随 $b 删掉（链接只删链接本身）。输出里认的字样运行时才拼出来
+        $kind = $IsWindows ? 'Junction' : 'SymbolicLink'
+        $child = @"
+`$global:ErrorActionPreference = 'SilentlyContinue'
+`$env:TMP = `$env:TEMP = `$env:TMPDIR = '$($b -replace "'", "''")'
+Import-Module '$($PSCommandPath -replace "'", "''")'
+`$d = New-RinneTempDir -Prefix 'rinne-tempdir-selftest-'
+'pa' + 'th=' + `$d
+Set-Content -LiteralPath (Join-Path `$d 'keep.txt') -Value 'x'
+Move-Item -LiteralPath `$d -Destination "`$d.moved"
+`$null = New-Item -ItemType Directory -Path "`$d.cyc"
+`$null = New-Item -ItemType $kind -Path `$d -Target "`$d.cyc"
+[IO.Directory]::Delete("`$d.cyc")
+`$null = New-Item -ItemType $kind -Path "`$d.cyc" -Target `$d
+if ([IO.File]::GetAttributes(`$d) -band [IO.FileAttributes]::ReparsePoint) { 'cycle' + '-ready' }
+`$null = Remove-RinneTempDir -Path `$d
+"@
+        $o = & ([Environment]::ProcessPath) -NoProfile -NonInteractive -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))) 2>&1 | Out-String
+        $cd = [regex]::Match($o, '(?m)^path=(.+?)\r?$').Groups[1].Value
+        $cattr = $(if ($cd) { try { [IO.File]::GetAttributes($cd) } catch { $null } })
+        & $check '调用方把 ErrorActionPreference 设成 SilentlyContinue：解析真实路径时抛错照样中止，不删，链接原样在' $true (
+            $o -match 'cycle-ready' -and $cd.StartsWith($b) -and $null -ne $cattr -and ($cattr -band [IO.FileAttributes]::ReparsePoint) -and
+            (Test-Path -LiteralPath (Join-Path "$cd.moved" 'keep.txt')))
+
         $cmd = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String((Get-RinneLingerCommand -Seconds 7 -StopFile "x'y")))
         & $check '孙进程的命令：编码后不带 =，活到时限或停止文件出现（单引号转义）' $false (-not (
                 -not (Get-RinneLingerCommand -Seconds 7 -StopFile "x'y").Contains('=') -and $cmd -match 'AddSeconds\(7\)' -and $cmd.Contains("Exists('x''y')")))
@@ -176,4 +223,4 @@ function Test-RinneTempDir {
     }
 }
 
-Export-ModuleMember -Function New-RinneTempDir, Remove-RinneTempDir, Get-RinneLingerCommand, Test-RinneTempDir
+Export-ModuleMember -Function New-RinneTempDir, Remove-RinneTempDir, Test-RinneInTempDir, Get-RinneLingerCommand, Test-RinneTempDir
