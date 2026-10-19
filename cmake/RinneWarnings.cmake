@@ -9,12 +9,9 @@
 #       它们的告警由 scripts/build.ps1 按文件路径排除。增量构建不会重编没改过的文件，只看构建日志会漏掉上一次留下的告警；
 #       告警即错误的文件出了告警就没有目标文件，下次一定重编。
 
-# 等级号单独放一个变量：选项写成一个字面量时，隐私检查会把它当成参考仓的编号
-set(_rinne_msvc_warning_level 4)
-
 function(rinne_target_warnings target scope)
   if(MSVC)
-    target_compile_options(${target} ${scope} "/W${_rinne_msvc_warning_level}" /utf-8)
+    target_compile_options(${target} ${scope} "/W4" /utf-8)
   else()
     target_compile_options(${target} ${scope} -Wall -Wextra -Wpedantic)
   endif()
