@@ -225,6 +225,125 @@ TEST_CASE("a displaced output hands back its write token but never a successor's
     CHECK(ringOf(ring4).header.writer_token.load() == kSuccessorToken);
 }
 
+TEST_CASE("a preempted output's late writer publish is repaired on the new owner's next heartbeat", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+
+    // A 以智能默认认领（provisional），B 以工程恢复抢占
+    Rendezvous a(configFor(Role::kOutput, backend, naming.scope(), 53));
+    a.setGroup(6, ClaimIntent::kSmart, kT0);
+    a.prepare({44100, 512, 2}, kT0);
+    a.tick(kT0);
+    REQUIRE(a.state() == RendezvousState::kActive);
+    const u64 aToken = a.writerToken();
+    REQUIRE(aToken != 0u);
+
+    const u64 claimAt = kT0 + 40;
+    Rendezvous b(configFor(Role::kOutput, backend, naming.scope(), 54));
+    b.setGroup(6, ClaimIntent::kRestore, claimAt);
+    b.prepare({48000, 512, 2}, claimAt);
+    b.tick(claimAt);
+    REQUIRE(b.state() == RendezvousState::kActive);
+    REQUIRE(roleSlot(rv, 6, Role::kOutput).ctl.load() == b.myCtl());
+    SegmentView ringView = createView(backend, naming, SegmentId::groupData(6), kRingBytes);
+    RingSegment& ring = ringOf(ringView);
+    REQUIRE(LoopRing::isWriter(ring, b.writerToken()));
+
+    // A 核过整字之后晚到的那次发布：token 与格式字段都换成 A 的
+    LoopRing::publishWriter(ring, aToken, 44100, 1);
+    // A 下一拍自检发现被接管，只交出自己的 token：环头停在 0 上
+    a.tick(kT0 + 50);
+    REQUIRE(a.state() == RendezvousState::kConflict);
+    REQUIRE(ring.header.writer_token.load() == 0u);
+
+    // 非心跳拍不动；B 的下一个心跳读回来发现不是自己的，重新发布写权与格式字段
+    b.tick(claimAt + RendezvousTiming::kHeartbeatMs - 1);
+    CHECK(ring.header.writer_token.load() == 0u);
+    b.tick(claimAt + RendezvousTiming::kHeartbeatMs);
+    CHECK(b.state() == RendezvousState::kActive);
+    CHECK(LoopRing::isWriter(ring, b.writerToken()));
+    CHECK(ring.header.sample_rate.load() == 48000u);
+    CHECK(ring.header.src_channels.load() == 2u);
+
+    // token 还是自己的、只有采样率被换掉：同样在心跳上改回来，epoch 跟着 + 1
+    ring.header.sample_rate.store(44100);
+    const u64 epoch = ring.header.epoch.load();
+    b.tick(claimAt + 2 * RendezvousTiming::kHeartbeatMs);
+    CHECK(ring.header.sample_rate.load() == 48000u);
+    CHECK(ring.header.epoch.load() == epoch + 1u);
+    CHECK(LoopRing::isWriter(ring, b.writerToken()));
+}
+
+TEST_CASE("a smart claim won by a conflict retry stays provisional and restore still preempts it", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+
+    Rendezvous holder(configFor(Role::kInput, backend, naming.scope(), 37));
+    holder.setGroup(7, ClaimIntent::kManual, kT0);
+    holder.prepare(format, kT0);
+    holder.tick(kT0);
+    REQUIRE(holder.state() == RendezvousState::kActive);
+
+    // 智能默认选中的组正被别人占着：进冲突，之后的自动重试以 kConflictRetry 去认领
+    Rendezvous smart(configFor(Role::kInput, backend, naming.scope(), 38));
+    smart.setGroup(7, ClaimIntent::kSmart, kT0);
+    smart.prepare(format, kT0);
+    smart.tick(kT0);
+    REQUIRE(smart.state() == RendezvousState::kConflict);
+    holder.setGroup(0, ClaimIntent::kManual, kT0 + 10);
+    REQUIRE(ctlPhase(roleSlot(rv, 7, Role::kInput).ctl.load()) == kCtlPhaseFree);
+    smart.tick(kT0 + RendezvousTiming::kConflictRetryMs);
+    REQUIRE(smart.state() == RendezvousState::kActive);
+    CHECK((ctlState(smart.myCtl()) & kCtlProvisional) != 0);
+    CHECK((roleSlot(rv, 7, Role::kInput).cfg_flags.load() & kCfgSmartOrigin) != 0);
+
+    Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 39));
+    restore.setGroup(7, ClaimIntent::kRestore, kT0 + 1100);
+    restore.prepare(format, kT0 + 1100);
+    restore.tick(kT0 + 1100);
+    CHECK(restore.state() == RendezvousState::kActive);
+    smart.tick(kT0 + 1110);
+    CHECK(smart.state() == RendezvousState::kConflict);
+}
+
+TEST_CASE("a conflict retry does not wait out a clock that went backwards", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+
+    Rendezvous first(configFor(Role::kInput, backend, naming.scope(), 23));
+    first.setGroup(1, ClaimIntent::kManual, kT0);
+    first.prepare(format, kT0);
+    first.tick(kT0);
+    REQUIRE(first.state() == RendezvousState::kActive);
+
+    Rendezvous second(configFor(Role::kInput, backend, naming.scope(), 24));
+    second.setGroup(1, ClaimIntent::kManual, kT0 + 5000);
+    second.prepare(format, kT0 + 5000);
+    second.tick(kT0 + 5000);
+    REQUIRE(second.state() == RendezvousState::kConflict);
+    first.setGroup(0, ClaimIntent::kManual, kT0 + 5010);
+    REQUIRE(ctlPhase(roleSlot(rv, 1, Role::kInput).ctl.load()) == kCtlPhaseFree);
+
+    // 时钟倒退 3 s：下次重试的时刻离现在超过一个间隔，不等它，这一拍就重试
+    second.tick(kT0 + 2000);
+    CHECK(second.state() == RendezvousState::kActive);
+    CHECK(roleSlot(rv, 1, Role::kInput).ctl.load() == second.myCtl());
+}
+
 TEST_CASE("the heartbeat is written at most every 250 ms of synthetic time", "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();

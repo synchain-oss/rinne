@@ -2,7 +2,7 @@
 //
 // 端点槽的扫描节奏与对端丢失判定。观察者只读一段普通内存里的会合段，不碰任何后端：due() 的 250 ms 节拍与时钟
 // 倒退、ctl / block_seq 的「从何时起没变」跟踪、reset()、以及 peerLost 的真值表（空闲槽、心跳 2000/2001、
-// block_seq 还在动、导出中、对端自己声明非实时、心跳从没写过）。
+// block_seq 还在动、block_seq 静止 1999/2000、导出中、对端自己声明非实时、心跳从没写过）。
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -128,4 +128,22 @@ TEST_CASE("peerLost needs a stale heartbeat and a still block_seq, and never fir
     peer.block_seq.store(9);
     observer.scan(*rv, 1005000);
     CHECK(observer.peerLost(4, Role::kOutput, 1007000, false));
+}
+
+TEST_CASE("peerLost needs block_seq still for exactly 2000 ms", "[ipc][observer]")
+{
+    auto rv = std::make_unique<RvSegment>();
+    RoleSlot& peer = slotOf(*rv, 5, Role::kInput);
+    peer.ctl.store(makeCtl(2, kCtlPhaseActive));
+    peer.heartbeat_ms.store(1000000);
+    peer.block_seq.store(1);
+    SlotObserver observer;
+    observer.scan(*rv, 1000000);
+    peer.block_seq.store(2); // 这次扫描时 block_seq 还在动：静止从这里计
+    observer.scan(*rv, 1010000);
+    REQUIRE(observer.sample(5, Role::kInput).seqSinceMs == 1010000u);
+
+    // 心跳早已陈旧，只差 block_seq：静止 1999 ms 不算失联，2000 ms 才算
+    CHECK_FALSE(observer.peerLost(5, Role::kInput, 1011999, false));
+    CHECK(observer.peerLost(5, Role::kInput, 1012000, false));
 }

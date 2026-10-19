@@ -9,7 +9,8 @@
 // 字段）-> active；中间那一小段就是别人判定「幽灵认领」的窗口。
 //
 // 接管只认证据：观察者必须连续看到同一个 ctl 至少 N 毫秒（幽灵 1 s、死进程 5 s、同进程孤儿 30 s、休眠 2 s），
-// 并且对端心跳与 block_seq 也静止了同样久；跨进程还要 pid 真的死了（探活拿不准一律按活，宁可晚接管）。
+// 另加各档自己的字段：幽灵要 claim_ms 也老，休眠要 dormant_ms 也老，死进程与孤儿要心跳与 block_seq 也静止了同样久；
+// 跨进程还要 pid 真的死了（探活拿不准一律按活，宁可晚接管）。
 // 活着的外进程永远不自动接管，无论它看起来多陈旧。休眠槽只有工程恢复（kRestore）或用户确认（kManualConfirmed）
 // 才拿，自动的冲突重试（kConflictRetry）永远不拿。
 //
@@ -166,6 +167,7 @@ private:
     void refreshState() noexcept;
     void writeIdentity(RoleSlot& slot) noexcept;
     void upkeepLabel(RoleSlot& slot, u64 nowMs, bool heartbeatDue) noexcept;
+    void upkeepWriter() noexcept;
     void lostOwnership(u64 nowMs);
     void letGo(u64 nowMs);
     void writeFormat(RoleSlot& slot) noexcept;

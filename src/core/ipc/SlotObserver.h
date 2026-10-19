@@ -5,7 +5,8 @@
 // 每个槽按 ctl 与 block_seq 各跟踪一个「从何时起没变过」的时间戳。接管判据要的是「同一个 ctl 已经被观察了至少
 // N 毫秒」，而不是槽里写的 claim_ms 有多老：claim_ms 可能还留着上一任的时间（刚 CAS 过、字段还没来得及重写），
 // 也可能被一个写到一半就死掉的属主留在那里。block_seq 的静止用来把「对端还活着但消息线程没跑」与「对端真的
-// 没了」分开。字段一律 relaxed 读，前后两次 ctl 读守住一致性；acquire / release 的配对在写方。
+// 没了」分开。字段一律 relaxed 读，前后两次 ctl 读守住一致性：字段读完先过一道 acquire fence 再读第二次，
+// 与写方 casCtl 成功之后的 release fence 配对。
 #pragma once
 
 #include <cstddef>

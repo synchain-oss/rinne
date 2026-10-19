@@ -502,7 +502,9 @@ bool Rendezvous::openRing(u64 nowMs)
 
 void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
 {
-    if (state_ == RendezvousState::kConflict && nowMs < nextConflictRetryMs_)
+    // 冲突重试没到点就不碰；时钟倒退得比一个重试间隔还多时不多等，立刻重试（与 tick 的退避同一个口径）
+    if (state_ == RendezvousState::kConflict && nowMs < nextConflictRetryMs_ &&
+        nextConflictRetryMs_ - nowMs <= RendezvousTiming::kConflictRetryMs)
     {
         return;
     }
@@ -529,7 +531,10 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
         nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
         return;
     }
-    const u32 claimState = kCtlPhaseClaiming | (effective == ClaimIntent::kSmart ? kCtlProvisional : 0u);
+    // provisional 位与 kCfgSmartOrigin 跟着认领的来源走（intent_），不跟这一拍的档位走（effective）：智能默认的
+    // 认领经过冲突重试才拿到，也还是智能默认的，工程恢复照样能抢占它
+    const bool smartOrigin = intent_ == ClaimIntent::kSmart;
+    const u32 claimState = kCtlPhaseClaiming | (smartOrigin ? kCtlProvisional : 0u);
     const CtlCas claimed = casCtl(slot.ctl, observed, claimState);
     if (!claimed.ok)
     {
@@ -540,7 +545,7 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     myCtl_ = claimed.word;
     claimMs_ = nowMs;
     dormantMs_ = 0;
-    cfgFlags_ = (effective == ClaimIntent::kSmart ? kCfgSmartOrigin : 0u) | kCfgNeverPaired;
+    cfgFlags_ = (smartOrigin ? kCfgSmartOrigin : 0u) | kCfgNeverPaired;
     // 先写身份字段、再换 active：换 active 的 release 让这些字段对读方可见
     slot.heartbeat_ms.store(nowMs, std::memory_order_relaxed);
     writeIdentity(slot);
@@ -574,6 +579,7 @@ void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs)
         slot.heartbeat_ms.store(nowMs, std::memory_order_relaxed);
         // 每 250 ms 从本地副本重写一遍身份块：旧属主在丢槽的瞬间写到一半的字段，最迟一个心跳就被修回来
         writeIdentity(slot);
+        upkeepWriter();
         lastHeartbeatMs_ = nowMs;
     }
     if (labelDirty_ || heartbeatDue)
@@ -633,6 +639,26 @@ void Rendezvous::upkeepLabel(RoleSlot& slot, u64 nowMs, bool heartbeatDue) noexc
         // 接手失败说明序号刚动过：保持脏，下一拍照常再写
         labelDirty_ = !rewriteStuckLabel(slot, seq, label_);
         labelOddSinceMs_ = 0;
+    }
+}
+
+// 写权的维护，只在心跳那一拍、自检通过之后调用（这一拍我们仍是属主）。旧属主核过整字之后的那次 publishWriter
+// 是普通 store，可能晚于我们的发布才落地，把 writer_token 与格式字段换成它的；它随后丢槽时只 CAS 自己的 token，
+// token 就停在 0 上，我们的音频线程每块核 isWriter，从此一直静音。所以心跳上读回来核对：token、采样率、源声道数
+// 有一样不是我们的，就重新发布（采样率被换过时 epoch 跟着 + 1，读方重新同步）。旧属主丢槽之后不再写，最多再有
+// 一次晚到的 store，一个心跳之内就收敛
+void Rendezvous::upkeepWriter() noexcept
+{
+    if (role() != Role::kOutput || ring_ == nullptr || token_ == 0)
+    {
+        return;
+    }
+    RingSegment& seg = *static_cast<RingSegment*>(ring_->base());
+    if (!LoopRing::isWriter(seg, token_) ||
+        seg.header.sample_rate.load(std::memory_order_relaxed) != format_.sampleRate ||
+        seg.header.src_channels.load(std::memory_order_relaxed) != format_.channels)
+    {
+        LoopRing::publishWriter(seg, token_, format_.sampleRate, format_.channels);
     }
 }
 

@@ -9,8 +9,8 @@ status: draft
 - **Initialisation**: never blocks. Whoever wins a CAS on `magic` (0 → `'RNIN'`) initialises and records its pid; a stuck `'RNIN'` is taken over by CAS on `init_pid` only when that pid is dead. Everyone else gets `kBusy`, unmaps at once and retries after a jittered exponential backoff (25–250 ms), so the holders' gaps overlap and a segment that cannot be taken over still disappears.
 - **Lifetime**: backends and handles may be destroyed in either order; handle control blocks are kept until process exit, so handles are created on load and regroup only, never per tick.
 - **Truth**: `src/core/ipc/SegmentLayout.h` mirrors this document; `tests/golden/ipc-layout.json` is checked against it twice (compiled in `rinne_core_tests`, uncompiled by `contract-static-ipc`). Any layout change bumps `kIpcAbi`.
-- **Memory order**: the data plane is specified here: the ring (the write intent is advanced from at most the write head, so a second writer stays out while a chunk is announced but not yet published, and a chunk abandoned by a dead writer is zero-filled and published after one second of blocked audio, which is why writers must go through `RingWriter`; release fence, samples, release CAS on the write head; readers discard every frame older than one lap before the intent they load after an acquire fence), the label seqlock and the binding snapshot the audio thread reads. Two mutation builds (no read fence, no write intent) must turn the native arm64 stress red, and each stress case must first prove its own mechanism was hit at least 20 times, otherwise the run ends without a test summary and does not count as caught. The one residual window (a writer suspended mid-chunk while its chunk is reclaimed and lapped) is the only exception to never reading aliased data. Labels are untrusted cross-process data.
-- **Ownership**: every endpoint-slot transition is a whole-word CAS on `ctl` that bumps `gen`. A slot is taken over only on evidence the observer has watched for long enough: a stuck claim after 1 s, a slot of another process after 5 s of stillness with a dead pid, a slot of our own process after 30 s, a dormant slot after 2 s but only for a project restore or a confirmed user choice; a provisional (smart-default) claim yields to a project restore. Apart from those two intent-driven cases, a slot held by a live process is never taken over. Owners heartbeat every 250 ms, rewrite their identity fields and re-read their label each heartbeat. A peer is lost when its heartbeat is older than 2 s and its block counter has been still for 2 s, never during an offline export. The last instance to be destroyed reaps the remaining mappings immediately.
+- **Memory order**: the data plane is specified here: the ring (the write intent is advanced from at most the write head, so a second writer stays out while a chunk is announced but not yet published, and a chunk abandoned by a dead writer is zero-filled and published after one second of blocked audio, which is why writers must go through `RingWriter`; release fence, samples, release CAS on the write head; readers discard every frame older than one lap before the intent they load after an acquire fence), the label seqlock and the binding snapshot the audio thread reads. Two mutation builds (no read fence, no write intent) must turn the native arm64 stress red, and each stress case whose mechanism a mutation removes must first prove that mechanism was hit at least 20 times, otherwise the run ends without a test summary and does not count as caught. The one residual window (a writer suspended mid-chunk while its chunk is reclaimed and lapped) is the only exception to never reading aliased data. Labels are untrusted cross-process data.
+- **Ownership**: every endpoint-slot transition is a whole-word CAS on `ctl` that bumps `gen`. A slot is taken over only on evidence the observer has watched for long enough: a stuck claim after 1 s, a slot of another process after 5 s of stillness with a dead pid, a slot of our own process after 30 s, a dormant slot after 2 s but only for a project restore or a confirmed user choice; a provisional (smart-default) claim yields to a project restore, including one won by a conflict retry. Apart from those two intent-driven cases, a slot held by a live process is never taken over. Owners heartbeat every 250 ms, rewrite their identity fields and re-read their label each heartbeat; an Output owner also re-publishes its write token when a late write from the previous owner replaced it. A peer is lost when its heartbeat is older than 2 s and its block counter has been still for 2 s, never during an offline export. The last instance to be destroyed reaps the remaining mappings immediately.
 - **Status**: draft until the probe week.
 
 ## 范围
@@ -208,7 +208,7 @@ status: draft
 
 | 从 | 到 | 谁 | 条件 |
 |---|---|---|---|
-| 空闲 | 认领中 | 已 prepare 的认领方 | 无；智能默认（`kSmart`）的认领带 provisional 位 |
+| 空闲 | 认领中 | 已 prepare 的认领方 | 无；智能默认（`kSmart`）的认领带 provisional 位，包括它在冲突期间的自动重试：provisional 位与 `kCfgSmartOrigin` 按认领的来源取，不按这一拍的重试意图取 |
 | 认领中（自己的） | 活跃 | 认领方 | 先写 `heartbeat_ms` 与身份字段（`pid`、`host_ppid`、`claim_ms`、`dormant_ms`、`format`、`version`、`cfg_flags`、格式字段），再 CAS（release 让这些字段对读方可见）；provisional 位保留 |
 | 认领中（别人的） | 认领中 | 认领方 | 幽灵：同一个 `ctl` 静止 ≥ 1 s，`claim_ms` 也老于 1 s |
 | 活跃 + provisional | 认领中 | 意图为工程恢复（`kRestore`）的认领方 | 不看 pid 与年龄 |
@@ -220,14 +220,15 @@ status: draft
 | 活跃 + provisional | 活跃 | 属主（`confirmClaim`） | 重新发布绑定 |
 | 自己的任何阶段 | 空闲 | 属主（换组、析构） | 先撤下绑定；Output 先把 `writer_token` 从自己的 token CAS 到 0 |
 
-- 活着的外进程持有（活跃或休眠）的槽只在两种情形下被拿走：provisional 被工程恢复抢占，休眠槽被工程恢复或用户确认拿走；无论看起来多陈旧，都不会被自动接管。
-- 判定之外的情形一律进冲突（`kConflict`）：每 1 s 用 `kConflictRetry` 重试一次，它永远不拿休眠槽。同一组再调 `setGroup`、给出 `kConflictRetry` 以外的意图（例如工程恢复、用户确认）时不等这 1 s，下一拍就按新意图试。
+- 活着的外进程持有（活跃或休眠）的槽只在两种情形下被拿走：provisional 被工程恢复抢占，休眠槽被工程恢复或用户确认拿走；无论看起来多陈旧，都不会被自动接管。已知限制：死进程的 pid 被别的进程复用之后，探活一直返回活，那个槽同样不会被自动接管；用户确认只对休眠槽生效，目前没有拿走这种活跃槽的手动出口。
+- 判定之外的情形一律进冲突（`kConflict`）：每 1 s 用 `kConflictRetry` 重试一次（时钟倒退得比一个间隔还多时立刻重试），它永远不拿休眠槽。同一组再调 `setGroup`、给出 `kConflictRetry` 以外的意图（例如工程恢复、用户确认）时不等这 1 s，下一拍就按新意图试。
 - 输了认领 CAS，或自己的认领中被别人判成幽灵（换活跃的 CAS 失败）：什么都不写，进冲突。
 
 **属主的每一拍**
 
 - 自检：acquire 读 `ctl`，不等于自己最后写下的整字就是被接管了：撤下绑定；Output 把环头的 `writer_token` 从自己的 token CAS 到 0（新属主已经发布的 token 不动）；数据段句柄退役、本地 token 清零，进冲突，不再写槽里任何字段。`prepare`、`releaseResources`、`confirmClaim` 动槽之前同样先核整字。
 - 心跳（距上次 ≥ 250 ms，或时钟倒退）：写 `heartbeat_ms`，再从本地副本重写一遍身份字段：上一任丢槽瞬间晚到的字段写，最迟一个心跳就被改回来。
+- 写权（Output，数据段已开）：心跳那一拍读回环头，`writer_token`、`sample_rate`、`src_channels` 有一样不是自己的，就重新发布写权（采样率被换过时 `epoch` 跟着 + 1）。旧属主核过整字之后晚到的那次发布会把这些换成它的，它丢槽时又只交出自己的 token；没有这一条，新属主的写权就一直停在 0 上。旧属主丢槽之后不再写，一个心跳之内收敛。
 - 标签：标脏就写；心跳那一拍不脏也读回来与本地副本比，不一致就重写，这兑现了「标签 seqlock」一节说的「下一个心跳内修好」，也补上了核整字与写标签之间的检查与动作间隙。`label_seq` 在心跳上连续停在同一个奇数满两个心跳（≥ 500 ms）才用 `rewriteStuckLabel` 接手；中间奇数换了就从头计，序号回到偶数就照常写。
 
 **对端失联**：对端的槽被占着、`heartbeat_ms` 陈旧超过 2 s，**并且** `block_seq` 静止 ≥ 2 s。本地在离线导出（`setNonrealtime`）或对端 `rt_flags` 的离线位置位时一律不判：导出时宿主可能饿死消息线程，心跳陈旧而音频还在跑。失联只是界面状态，不触发接管，接管只走上面的转移表。

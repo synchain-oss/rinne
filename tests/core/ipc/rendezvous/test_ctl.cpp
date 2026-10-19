@@ -212,6 +212,8 @@ TEST_CASE("the takeover tier follows the evidence table and every boundary", "[i
         false, TakeoverTier::kNone);
     add("ghost with claim_ms never written", sampleFor(claiming, kForeign, 9000, 1000, 9000, kNever),
         ClaimIntent::kManual, false, TakeoverTier::kGhost);
+    add("ghost with claim_ms at exactly 1000 ms", sampleFor(claiming, kForeign, 9000, 9000, 9000, 1000),
+        ClaimIntent::kManual, false, TakeoverTier::kGhost);
 
     add("provisional slot with kRestore", sampleFor(provisional, kForeign, 0, 9000, 9000), ClaimIntent::kRestore, true,
         TakeoverTier::kPreemptProvisional);
@@ -245,6 +247,12 @@ TEST_CASE("the takeover tier follows the evidence table and every boundary", "[i
         TakeoverTier::kOrphan);
     add("orphan with a moving block_seq", sampleFor(active, kSelf, 30000, 30000, 29999), ClaimIntent::kManual, true,
         TakeoverTier::kNone);
+    add("orphan with a fresher heartbeat", sampleFor(active, kSelf, 29999, 30000, 30000), ClaimIntent::kManual, true,
+        TakeoverTier::kNone);
+    add("orphan with a changing ctl", sampleFor(active, kSelf, 30000, 29999, 30000), ClaimIntent::kManual, true,
+        TakeoverTier::kNone);
+    add("own pid is never a dead process", sampleFor(active, kSelf, 6000, 6000, 6000), ClaimIntent::kManual, false,
+        TakeoverTier::kNone);
     add("dormant orphan is an orphan", sampleFor(dormant, kSelf, 30000, 30000, 30000), ClaimIntent::kManual, true,
         TakeoverTier::kOrphan);
 
@@ -259,6 +267,8 @@ TEST_CASE("the takeover tier follows the evidence table and every boundary", "[i
     add("dormant at 2000 ms with kConflictRetry", sampleFor(dormant, kForeign, 0, 2000, 9000, kNever, 2000),
         ClaimIntent::kConflictRetry, true, TakeoverTier::kNone);
     add("dormant with a ctl seen for 1999 ms", sampleFor(dormant, kForeign, 0, 1999, 9000, kNever, 9000),
+        ClaimIntent::kRestore, true, TakeoverTier::kNone);
+    add("dormant with dormant_ms at 1999 ms", sampleFor(dormant, kForeign, 0, 9000, 9000, kNever, 1999),
         ClaimIntent::kRestore, true, TakeoverTier::kNone);
 
     REQUIRE(rows.size() >= 25);
