@@ -9,6 +9,9 @@
 # 审查骨架（diff 预取、符号链接拒审、只读工具边界、拒审 fork PR、发评论）在 Synchain-oss/ci-workflows 的
 # deepseek-review.yml，这里只放本仓的审查重点与说明。与 claude-review 的差别：没有轮次与增量审查（不读上一轮总结与
 # 处置汇总）、没有行内评论，结论作为一条 PR 评论发出。
+# workflow_dispatch 不是 PR 事件，claude-code-action 不会把 CLAUDE.md / .claude/ / .mcp.json 还原成 base 的版本
+# （它只在 PR 事件里还原）。共享 workflow 自 v1.3.0 起在「Prepare PR context for the reviewer」步骤里自己做：
+# 先删掉 PR head 里的这些路径，再从 base 分支检出，清单与 action 的 SENSITIVE_PATHS 相同。升 SHA 时照着复核这一步。
 # focus 必须与 claude-review.yml 的「重点（按优先级）」一节逐字相同（docs-truth 的 review-bot 检查核对）。
 # 共享 workflow 把 extra_prompt 放在 prompt 最后，extra_prompt 又以不可信数据声明收尾，所以声明就是整段 prompt 的
 # 结尾，合 CLAUDE.md 安全铁律里「prompt 末尾必须带不可信数据声明」那一条（review-bot 检查核对 extra_prompt 的最后一节）。
@@ -36,7 +39,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-    uses: Synchain-oss/ci-workflows/.github/workflows/deepseek-review.yml@3b2ba21a872a2ff05771e37be22614ba7a715312 # v1.2.0
+    uses: Synchain-oss/ci-workflows/.github/workflows/deepseek-review.yml@8028e34628bc2276ca978d87ccfc364432742820 # v1.3.1
     with:
       pr_number: ${{ inputs.pr_number }}
       provider: opencode-go
