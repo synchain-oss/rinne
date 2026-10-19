@@ -342,14 +342,13 @@ TEST_CASE("a hot crescendo from +12 to +15 dBFS through a 1 kHz all-pass chain d
         const double db = 12.0 + 3.0 * std::min(1.0, t / 1.0);
         return sine(1000.0, kRate, n, std::pow(10.0, db / 20.0));
     };
-    const auto process = allPassChain(1000.0);
     for (const std::int64_t delay : {24, 48, 480, 4800})
     {
         INFO("delay " << delay);
         LoopSetup s = loop(0.90f, 1.0f);
         s.seconds = 4.0;
         s.delay = delay;
-        s.process = process;
+        s.process = allPassChain(1000.0);
         CHECK_FALSE(runLoop(s, dry).tripped);
     }
 }
@@ -370,6 +369,28 @@ TEST_CASE("a +1 dB chain at 90 % feedback with hot dry trips as huge", "[safety]
             CHECK(r.tripped);
             CHECK(r.reason == TripReason::Huge);
         }
+}
+
+TEST_CASE("a +0.7 dB chain at 90 % feedback with hot dry still trips, +0.3 dB stays under the margin",
+          "[safety][loop][huge][threshold]")
+{
+    // 余量的两侧：+0.7 dB 的链（1.084）高于 0.5 dB 余量（1.059），回读每个峰都被计入，照样在 100 ms 级跳闸；
+    // +0.3 dB 的链（1.035）低于余量，不计入。余量若被悄悄放宽到 0.7 dB 以上，前一半会变红
+    for (const std::int64_t delay : {48, 480, 4800})
+    {
+        INFO("delay " << delay);
+        LoopSetup s = loop(0.90f, 1.0f, dbfs(0.7));
+        s.seconds = 4.0;
+        s.delay = delay;
+        const LoopResult r = runLoop(s, hotDry(12.5, 1000.0));
+        CHECK(r.tripped);
+        CHECK(r.reason == TripReason::Huge);
+
+        LoopSetup under = loop(0.90f, 1.0f, dbfs(0.3));
+        under.seconds = 4.0;
+        under.delay = delay;
+        CHECK_FALSE(runLoop(under, hotDry(12.5, 1000.0)).tripped);
+    }
 }
 
 TEST_CASE("the same frequency and delay grid through a unity chain does not trip", "[safety][loop][huge][fp]")
