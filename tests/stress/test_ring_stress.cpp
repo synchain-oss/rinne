@@ -18,13 +18,16 @@
 // 不写（它的 source 一次都不会被调用）。
 //
 // x86 能证明什么、不能证明什么：x86 是 TSO，两道 fence 在那里都只编译成编译器屏障，样本的读写在硬件上本来就
-// 不重排，所以 no_read_fence 在 x86 上仍然是绿的——它只能由原生 arm64 的 CI 变红。no_intent 在任何 CPU 上都会
+// 不重排，所以 no_read_fence 在 x86 上抓不到：跑满 25 s 后以「证据不成立」结束（退出码 70），只有原生 arm64 的
+// CI 能抓到。no_intent 在任何 CPU 上都会
 // 变红：读方根本不知道窗口被覆盖过，validFrom 停在 from，新圈的值被当成有效数据。CI 的压测步骤跑这两个变异
 // 构建，并要求它们以 Catch2 断言失败结束（不是崩溃、不是超时）。
 // 变异构建里另有正向取证（见 StressMutation.h）：所有配置一遍遍地跑，直到 badNewer + badTorn 攒够 20 次（封顶
 // 25 s），不够就不算抓住。no_intent 下两个写方本来就没有互斥，那一组 intent 相关的两条检查从构造上必然失败，
 // 所以跳过它们，它的帧也不计入命中。edge-tiny-chunks 一组（块长 1–16、窗口 32 帧）专门把读方压在覆盖的边缘上，
-// 给读侧 fence 的变异多一些命中。
+// 给读侧 fence 的变异多一些命中。读侧 fence 的变异证据来自 edge-small-chunks、edge-tiny-chunks、edge-loguniform
+// 与 edge-two-writers；randomlag-loguniform 与 edge-large-burst 从构造上对这种重排不敏感（读窗口离正被覆盖的边缘远，
+// 或块大、竞争窗口很少重合），它们在常规构建里的绿不构成读侧 fence 的证据，前四组不是冗余的。
 // 工作线程只用普通计数，断言一律在主线程 join 之后做；每一轮都按时间封顶，不会挂死。
 #include <catch2/catch_test_macros.hpp>
 

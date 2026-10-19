@@ -30,8 +30,9 @@
 // 变异构建：RINNE_STRESS_MUTATE_NO_READ_FENCE 去掉读方的 acquire fence，RINNE_STRESS_MUTATE_NO_INTENT 去掉写方的
 // intent 公告；两个宏只在压测的变异构建里定义（CMake 只允许它们与 RINNE_CORE_ONLY 同用），发布构建永不定义。
 // 变异构建的压测必须变红，用来证明压测判据抓得住这两类缺陷。x86 是 TSO：两道 fence 在那里都只是编译器屏障，
-// no_read_fence 在 x86 上仍然是绿的，只有原生 arm64 才能把它变红；no_intent 在任何 CPU 上都会红，因为读方根本
-// 没机会知道窗口被覆盖过。内联模板放在头文件里，调用方（尤其是压测）内联之后变异宏才在调用点生效。
+// no_read_fence 抓不到，跑满 25 s 后以「证据不成立」结束（退出码 70），只有原生 arm64 能抓到；no_intent 在任何
+// CPU 上都会红，因为读方根本没机会知道窗口被覆盖过。内联模板放在头文件里，调用方（尤其是压测）内联之后变异宏
+// 才在调用点生效。
 #pragma once
 
 #include <algorithm>
