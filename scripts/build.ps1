@@ -23,8 +23,17 @@
 # 输出：cmake、ninja、ctest、pluginval 的输出写进 <构建目录>/logs/ 下的文件，不经管道；本进程的标准句柄开跑前设为不可继承。
 # MSVC 的 mspdbsrv、编译缓存的服务进程会比构建活得久，它们继承了调用方的管道，调用方读 EOF 就要等它们退出，超时也就失效了。
 # 屏幕上只打印步骤、告警与失败步骤日志的末尾。
-# 环境：开跑前从本进程删掉凭据与个人针变量（判据见 $SecretEnv），CMake 配置期与编译器都看不到；VSLANG=1033 让 MSVC 输出英文，零 warning 才判得准；
+# 环境：开跑前从本进程删掉凭据与个人针变量（判据见 $SecretEnv），CMake 配置期与编译器都看不到；VSLANG=1033 在配置与构建两边都设
+# （进 MSVC 开发者 shell 之后再设一次），让 MSVC 的输出语言前后一致，零 warning 才判得准；
 # pluginval 会把同名环境变量（SKIP_GUI_TESTS 之类）当参数用，验之前一并删掉。
+# 头文件依赖：ninja 靠 cl /showIncludes 的输出行开头与 rules.ninja 的 msvc_deps_prefix 逐字节相同才记依赖，对不上就一条都不记，
+# 只改 .h 时含它的编译单元不会重编。配置后拿一个探针编译单元实测 cl 的输出，与 rules.ninja 的前缀逐字节核对；对不上说明构建目录里
+# 的编译器探测结果是在别的语言或编码下留下的，或者 CMake 解码 cl 输出用的代码页与 cl 编码用的不同（无控制台的后台进程里，cl 输出
+# UTF-8、CMake 按 ANSI 解，探测结果就成了二次编码的乱码）。先删掉 CMakeFiles/<版本>/ 下 C 与 CXX 的编译器信息文件（只删这两个文件）
+# 重配；仍对不上，且探针里 cl 的前缀是干净的 UTF-8 文本，就把它写进构建目录里的一个 cmake 文件、经 CMAKE_PROJECT_INCLUDE 在
+# project() 之后覆盖 CMAKE_CL_SHOWINCLUDES_PREFIX，再重配；两步之后仍对不上判红。修过的构建目录 clean 一次（旧目标文件没有依赖
+# 记录）。判红而不是悄悄放过的理由：前缀对不上时 ninja 不报错，只是不记依赖，只改 .h 时 gates 会跑在旧对象上。构建后再查
+# ninja -t deps 至少记下一条依赖，否则判红。
 # 退出码：0 通过；1 失败；2 -NoBuild 时构建目录里没有当前 HEAD 的构建；3 等构建槽超时。
 [CmdletBinding()]
 param(
@@ -153,6 +162,80 @@ function Get-CacheValue([string]$Text, [string]$Name) {
     $m.Success ? $m.Groups[1].Value : $null
 }
 
+# ninja 记头文件依赖的前提：cl /showIncludes 每行输出的开头与 rules.ninja 里 msvc_deps_prefix 的字节逐字节相同（ninja 按字节比，
+# 编码不同的同一句话也对不上）。字节一律按 Latin-1 转成字符串比较，字节与字符一一对应；报错时再按 UTF-8 显示。
+function ConvertFrom-Latin1([byte[]]$Bytes) { [Text.Encoding]::Latin1.GetString($Bytes) }
+function ConvertTo-Display([string]$Latin1) { [Text.Encoding]::UTF8.GetString([Text.Encoding]::Latin1.GetBytes($Latin1)) }
+
+# rules.ninja 里第一条 msvc_deps_prefix 的值（Latin-1 字符串）；没有这一条返回 $null。
+function Get-NinjaDepsPrefix([string]$RulesFile) {
+    if (-not (Test-Path -LiteralPath $RulesFile)) { return $null }
+    $m = [regex]::Match((ConvertFrom-Latin1 ([IO.File]::ReadAllBytes($RulesFile))), '(?m)^[ \t]*msvc_deps_prefix[ \t]*=[ \t]?(?<v>[^\r\n]*)')
+    $m.Success ? $m.Groups['v'].Value : $null
+}
+
+# 探针编译的 cl 输出（Latin-1 字符串）里那条 /showIncludes 行开头、路径之前的部分；找不到返回 $null。
+function Get-ClIncludePrefix([string]$ClOutput, [string]$Header) {
+    $m = [regex]::Match($ClOutput, '(?m)^(?<p>.*?)[A-Za-z]:\\[^\r\n]*' + [regex]::Escape($Header) + '[ \t]*\r?$')
+    $m.Success ? $m.Groups['p'].Value : $null
+}
+
+# rules.ninja 的前缀（$Rules）与 cl 实际输出的前缀（$Cl）对不上就返回错误文字，对上了返回空。ninja 先要求行以 $Rules 开头，
+# 再跳过后面的空白，所以 cl 的前缀可以比 $Rules 多出空白，但不能多出别的。
+function Test-ShowIncludesPrefix($Rules, $Cl) {
+    if ($null -eq $Rules -or -not "$Rules".Trim()) { return 'rules.ninja 里没有 msvc_deps_prefix，或者它是空的' }
+    if ($null -eq $Cl) { return 'cl 探针的输出里找不到 /showIncludes 行' }
+    if ($Cl.StartsWith($Rules, [StringComparison]::Ordinal) -and -not $Cl.Substring($Rules.Length).Trim()) { return '' }
+    "rules.ninja 的 msvc_deps_prefix 是「$(ConvertTo-Display $Rules)」，cl 实际输出的是「$(ConvertTo-Display $Cl)」，字节对不上，ninja 一条头文件依赖都不会记"
+}
+
+# ninja -t deps 的输出里至少有一个目标记下了依赖（形如 `x.obj: #deps 12, deps mtime …`）；返回错误文字，有就返回空。
+function Test-DepsRecorded([string[]]$Lines) {
+    $n = @($Lines | Where-Object { $_ -match ': #deps ([1-9]\d*),' }).Count
+    $n ? '' : 'ninja -t deps 里没有任何一个目标记下头文件依赖：只改 .h 时含它的编译单元不会重编'
+}
+
+# 用一个两行的探针编译单元（写在构建目录的 logs 下）按本进程的环境跑 cl，取它的 /showIncludes 前缀（Latin-1 字符串）；
+# 失败时 $script:ProbeError 记原因并返回 $null。
+function Get-ProbedClPrefix {
+    $script:ProbeError = ''
+    $dir = Join-Path $script:LogDir 'prefix-probe'
+    $null = New-Item -ItemType Directory -Force -Path $dir
+    Set-Content -LiteralPath (Join-Path $dir 'probe.h') -Value '#define RINNE_PROBE_H 1'
+    Set-Content -LiteralPath (Join-Path $dir 'probe.cpp') -Value '#include "probe.h"'
+    $log = Join-Path $dir 'cl.log'
+    $code = Invoke-Logged 'cl.exe' @('/nologo', '/showIncludes', '/c', (Join-Path $dir 'probe.cpp'), "/Fo$(Join-Path $dir 'probe.obj')") $log 120
+    if ($code -ne 0) { $script:ProbeError = "cl 探针编译退出码 $code（日志 $log）"; return $null }
+    Get-ClIncludePrefix (ConvertFrom-Latin1 ([IO.File]::ReadAllBytes($log))) 'probe.h'
+}
+
+# 构建目录的 rules.ninja 与 cl 探针核对，返回错误文字，对上了返回空。
+function Get-DepsPrefixProblem {
+    $cl = Get-ProbedClPrefix
+    if ($script:ProbeError) { return $script:ProbeError }
+    Test-ShowIncludesPrefix (Get-NinjaDepsPrefix (Join-Path $BuildDir 'CMakeFiles/rules.ninja')) $cl
+}
+
+# 覆盖用的 cmake 文件的内容：$ClPrefix（Latin-1 字符串）必须是干净的 UTF-8 文本，且不含 cmake 字符串里要转义的字符；
+# 否则返回 $null。文件按 UTF-8 写，cmake 原样写进 rules.ninja，字节就与 cl 输出的一致。
+function Get-PrefixOverride([string]$ClPrefix) {
+    if (-not $ClPrefix.Trim() -or $ClPrefix -match '["\\$;\[\]\x00-\x1f]') { return $null }
+    try { $text = [Text.UTF8Encoding]::new($false, $true).GetString([Text.Encoding]::Latin1.GetBytes($ClPrefix)) } catch { return $null }
+    "# 由 build.ps1 按本次 cl 实际输出生成：CMake 解码 cl 输出的代码页与 cl 编码用的不同时，探测到的 /showIncludes 前缀是乱码，这里改正。`n" +
+    "foreach(lang C CXX)`n    set(CMAKE_`${lang}_CL_SHOWINCLUDES_PREFIX `"$text`")`nendforeach()`nset(CMAKE_CL_SHOWINCLUDES_PREFIX `"$text`")`n"
+}
+
+# 清掉构建目录里缓存的编译器探测结果（CMakeFiles/<版本>/ 下 C 与 CXX 的编译器信息文件，只删这两个文件、不递归），下次配置会重新探测。
+function Clear-CompilerProbe {
+    $cmakeFiles = Join-Path $BuildDir 'CMakeFiles'
+    foreach ($d in @(Get-ChildItem -LiteralPath $cmakeFiles -Directory -ErrorAction SilentlyContinue)) {
+        foreach ($n in 'CMakeCCompiler.cmake', 'CMakeCXXCompiler.cmake') {
+            $f = Join-Path $d.FullName $n
+            if (Test-Path -LiteralPath $f -PathType Leaf) { Remove-Item -LiteralPath $f }
+        }
+    }
+}
+
 # CI 与发布构建的段名前缀必须是默认值：返回错误文字，对上了返回空。
 function Test-CachePrefix([string]$CacheText) {
     $have, $want = (Get-CacheValue $CacheText 'RINNE_SHM_PREFIX'), (Get-CacheValue $CacheText 'RINNE_SHM_PREFIX_DEFAULT')
@@ -237,6 +320,7 @@ function Invoke-Build([string]$Flavor) {
     Remove-Item -LiteralPath $script:StampFile -ErrorAction SilentlyContinue
     $env:VSLANG = '1033'
     Enter-MsvcShell
+    $env:VSLANG = '1033'
     $prefix = Get-ShmPrefix $Flavor
     $cfg = @('-S', $Root, '-B', $BuildDir, '-G', 'Ninja Multi-Config', "-DCMAKE_CONFIGURATION_TYPES=$Config", "-DCMAKE_MAKE_PROGRAM=$ninjaExe",
         '-DCMAKE_C_COMPILER=cl', '-DCMAKE_CXX_COMPILER=cl', "-DJUCE_PATH=$juce", "-DRINNE_PROBE_BUILD=$($Probe ? 'ON' : 'OFF')", "-DRINNE_BUILD_LABEL=$BuildLabel")
@@ -244,6 +328,25 @@ function Invoke-Build([string]$Flavor) {
     $cfg += ($Flavor -eq 'ci') ? '-URINNE_SHM_PREFIX' : "-DRINNE_SHM_PREFIX=$prefix"
     if ($Launcher) { $cfg += "-DCMAKE_C_COMPILER_LAUNCHER=$Launcher", "-DCMAKE_CXX_COMPILER_LAUNCHER=$Launcher" }
     $null = Invoke-Step 'configure' 'cmake' $cfg 1800
+    # 头文件依赖的前缀对不上：先清掉编译器探测结果重配，仍不行就用 cl 实测的前缀覆盖；旧目标文件没有依赖记录，clean 一次让它们全部重编
+    $depsProblem = Get-DepsPrefixProblem
+    if ($depsProblem) {
+        Write-Host "头文件依赖前缀对不上，清掉编译器探测结果重配：$depsProblem"
+        Clear-CompilerProbe
+        $null = Invoke-Step 'configure-retry' 'cmake' $cfg 1800
+        $depsProblem = Get-DepsPrefixProblem
+        if ($depsProblem) {
+            $override = Get-PrefixOverride (Get-ProbedClPrefix)
+            if ($null -eq $override) { throw [BuildStop]::new("重配后头文件依赖前缀仍对不上，cl 的前缀也不能写成 cmake 字符串：$depsProblem", 1) }
+            Write-Host "重配后仍对不上，改用 cl 实测的前缀覆盖：$depsProblem"
+            $file = Join-Path $BuildDir 'rinne-showincludes-prefix.cmake'
+            [IO.File]::WriteAllText($file, $override, [Text.UTF8Encoding]::new($false))
+            $null = Invoke-Step 'configure-override' 'cmake' ($cfg + "-DCMAKE_PROJECT_INCLUDE=$file") 1800
+            $depsProblem = Get-DepsPrefixProblem
+            if ($depsProblem) { throw [BuildStop]::new("覆盖之后头文件依赖前缀仍对不上：$depsProblem", 1) }
+        }
+        $null = Invoke-Step 'clean' 'cmake' @('--build', $BuildDir, '--config', $Config, '--target', 'clean') 1800
+    }
     $cache = Get-Content -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt') -Raw
     $got = Get-CacheValue $cache 'RINNE_SHM_PREFIX'
     if ($got -cne $prefix) { throw [BuildStop]::new("配置后的 RINNE_SHM_PREFIX 是 $got，本次应当是 $prefix", 1) }
@@ -251,6 +354,8 @@ function Invoke-Build([string]$Flavor) {
     $b = @('--build', $BuildDir, '--config', $Config)
     if ($script:Jobs -gt 0) { $b += '--parallel', "$($script:Jobs)" }
     $log = Invoke-Step 'build' 'cmake' $b 5400
+    $noDeps = Test-DepsRecorded (Get-LogLines (Invoke-Step 'ninja-deps' $ninjaExe @('-C', $BuildDir, '-t', 'deps') 600))
+    if ($noDeps) { throw [BuildStop]::new($noDeps, 1) }
     $warnings = @(Get-FirstPartyWarnings (Get-LogLines $log) $Root @($juce, $BuildDir))
     if ($warnings.Count) {
         $warnings | ForEach-Object { Write-Host "    $_" }
@@ -316,6 +421,30 @@ function Invoke-SelfTest {
     & $check '告警归属：仓内第一方与无源文件的链接器告警算，JUCE、构建目录、third_party/、仓外与 error 不算' $true ($w.Count -eq 3 -and
         $w[0] -match 'InputProcessor' -and $w[1] -match 'LNK4098' -and $w[2] -match 'OutputProcessor')
     & $check '告警归属：没有告警时为空' $false (-not @(Get-FirstPartyWarnings @($lines[1], $lines[2]) $r @($j, $bd)).Count)
+    # 头文件依赖的前缀：ninja 按字节比，同一句话换了编码也对不上
+    $zh = [Text.Encoding]::UTF8.GetBytes('注意: 包含文件:')
+    $rules, $okLine = (ConvertFrom-Latin1 $zh), (ConvertFrom-Latin1 ($zh + [byte[]]@(32, 32)))
+    $moji = ConvertFrom-Latin1 ([Text.Encoding]::UTF8.GetBytes([Text.Encoding]::GetEncoding(936).GetString($zh)))
+    & $check '依赖前缀：rules.ninja 与 cl 的输出一致（cl 多出的空白不碍事）' $false (-not (Test-ShowIncludesPrefix $rules $okLine))
+    & $check '依赖前缀：二次编码的乱码前缀（别的语言或编码下配置时留下的）对不上 cl 的输出' $true (Test-ShowIncludesPrefix $moji $okLine)
+    & $check '依赖前缀：英文前缀对不上中文的 cl 输出' $true (Test-ShowIncludesPrefix 'Note: including file:' $okLine)
+    & $check '依赖前缀：cl 的前缀比 rules.ninja 的多出别的字符' $true (Test-ShowIncludesPrefix $rules ($okLine + 'x'))
+    & $check '依赖前缀：rules.ninja 没有前缀或为空' $true ((Test-ShowIncludesPrefix $null $okLine) -and (Test-ShowIncludesPrefix '  ' $okLine))
+    & $check '依赖前缀：探针输出里找不到 /showIncludes 行' $true (Test-ShowIncludesPrefix $rules $null)
+    $rf = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-rules-$PID-$(Get-Random).ninja"
+    [IO.File]::WriteAllBytes($rf, [byte[]]([Text.Encoding]::ASCII.GetBytes("rule CXX`r`n  command = cl`r`n  msvc_deps_prefix = ") + $zh + [Text.Encoding]::ASCII.GetBytes("  `r`n  deps = msvc`r`n")))
+    try { $got = Get-NinjaDepsPrefix $rf } finally { Remove-Item -LiteralPath $rf }
+    & $check '依赖前缀：从 rules.ninja 按字节读出 msvc_deps_prefix（含行尾空白，不含换行）' $false ($got -ceq ($rules + '  '))
+    $out = "probe.cpp`r`n$(ConvertFrom-Latin1 ($zh + [byte[]]@(32, 32)))C:\x\logs\probe.h`r`n"
+    & $check '依赖前缀：从 cl 输出里取 /showIncludes 行的路径前缀' $false ((Get-ClIncludePrefix $out 'probe.h') -ceq ($rules + '  '))
+    & $check '依赖前缀：cl 输出里没有那条 include 行时取不到' $false ($null -eq (Get-ClIncludePrefix "probe.cpp`r`n" 'probe.h'))
+    $ov = Get-PrefixOverride $rules
+    & $check '依赖前缀覆盖：干净的 UTF-8 前缀生成 cmake 文件，C、CXX 与通用变量都设' $false ($ov -match 'foreach\(lang C CXX\)' -and $ov -match '\$\{lang\}_CL_SHOWINCLUDES_PREFIX' -and $ov.Contains((ConvertTo-Display $rules)))
+    & $check '依赖前缀覆盖：不是合法 UTF-8 的前缀（GBK 字节）不覆盖' $true ($null -eq (Get-PrefixOverride (ConvertFrom-Latin1 ([Text.Encoding]::GetEncoding(936).GetBytes('注意: 包含文件:  ')))))
+    & $check '依赖前缀覆盖：含引号、反斜杠、美元符或空的前缀不覆盖' $true (-not ((Get-PrefixOverride 'a"b: ') -or (Get-PrefixOverride 'a\b: ') -or (Get-PrefixOverride 'a$b: ') -or (Get-PrefixOverride '  ')))
+    & $check 'ninja -t deps：有目标记下依赖' $false (-not (Test-DepsRecorded @('a.obj: #deps 3, deps mtime 1 (VALID)', '    ../a.h')))
+    & $check 'ninja -t deps：全是 #deps 0（前缀对不上时的样子）' $true (Test-DepsRecorded @('a.obj: #deps 0, deps mtime 1 (VALID)', 'b.obj: #deps 0, deps mtime 2 (VALID)'))
+    & $check 'ninja -t deps：什么都没输出' $true (Test-DepsRecorded @())
     $formal, $probe = (Get-ExpectedBundles $false), (Get-ExpectedBundles $true)
     & $check '产物断言：正式版恰好两个' $false (-not (Test-BundleSet $formal $formal))
     & $check '产物断言：缺一个' $true (Test-BundleSet @($formal[0]) $formal)

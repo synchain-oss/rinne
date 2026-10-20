@@ -143,7 +143,8 @@ export const TOP_LEVEL = {
 
 const KiB = 1024;
 /**
- * 体量预算，超出只报 WARN（由 docs 组的 budget 检查执行）。字节按 UTF-8 计。
+ * 体量预算。ADR 超限判红（CLAUDE.md 把 ADR 4 KB 定为硬上限），其余条目超限只报 WARN，
+ * 由 docs-budget 检查执行。字节按 UTF-8 计。
  * 脚本行数只数本仓新写的部分：登记在 upstream/*.json 里的复制脚本不计。
  */
 export const BUDGETS = {
