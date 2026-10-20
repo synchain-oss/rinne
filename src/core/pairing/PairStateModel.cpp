@@ -139,7 +139,7 @@ PairModel buildPairModel(const PairInputs& in, const rinne::ipc::GroupViews& gro
     {
         state = PairState::kStale;
     }
-    else if (in.role == Role::kOutput && in.selfBypassed)
+    else if (in.selfBypassed)
     {
         state = PairState::kBypassed;
     }
@@ -195,12 +195,13 @@ PairModel buildPairModel(const PairInputs& in, const rinne::ipc::GroupViews& gro
         const bool selfIsInput = in.role == Role::kInput;
         const rinne::ipc::EndView& own = selfIsInput ? groups[i].input : groups[i].output;
         const rinne::ipc::EndView& peer = selfIsInput ? groups[i].output : groups[i].input;
-        // 自己那一组的本角色端就是自己，不该算作「被他人占着」；对端掩码则要在自己组里也显示出来
-        if (group != in.group && !own.isFree())
+        // 自己那一组的本角色端就是自己，不算「被他人占着」；冲突时恰恰相反，本组的本角色端是别人占着的
+        if ((group != in.group || state == PairState::kConflict) && !own.isFree())
         {
             model.occupiedMask |= bit;
         }
-        if (!peer.isFree() && peer.pid == in.selfPid)
+        // 对端掩码：同进程、活着、而本角色一端还空着，即「有未配对的对端在等」
+        if (peer.isLive() && peer.pid == in.selfPid && own.isFree())
         {
             model.peerMask |= bit;
         }

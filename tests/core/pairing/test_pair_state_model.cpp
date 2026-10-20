@@ -384,7 +384,8 @@ TEST_CASE("occupied and peer masks follow the role's own and opposite ends", "[p
     inputGroups[7].output = dormantSlot(kSelfPid); // bit7
     const PairModel inputModel = buildPairModel(input, inputGroups);
     CHECK(inputModel.occupiedMask == (bitAt(0) | bitAt(3)));
-    CHECK(inputModel.peerMask == (bitAt(1) | bitAt(2) | bitAt(7)));
+    // 只有活着的同进程对端、而本角色一端空着才算在等：休眠的对端和已经配好的组都不算
+    CHECK(inputModel.peerMask == bitAt(1));
 
     PairInputs output = baseInputs();
     output.role = Role::kOutput;
@@ -396,9 +397,21 @@ TEST_CASE("occupied and peer masks follow the role's own and opposite ends", "[p
     outputGroups[2].input = dormantSlot(kOtherPid); // 对端在别的进程
     outputGroups[3].input = dormantSlot(kSelfPid); // bit3
     outputGroups[4].output = dormantSlot(kOtherPid); // bit4
+    outputGroups[5].input = activeSlot(kSelfPid); // peerMask bit5：Input 在等，Output 一端空着
     const PairModel outputModel = buildPairModel(output, outputGroups);
     CHECK(outputModel.occupiedMask == (bitAt(0) | bitAt(4)));
-    CHECK(outputModel.peerMask == (bitAt(1) | bitAt(3)));
+    CHECK(outputModel.peerMask == bitAt(5));
+
+    // 冲突：本组的本角色端是别人占着的，位图上要看得出来
+    PairInputs conflict = baseInputs();
+    conflict.role = Role::kOutput;
+    conflict.group = 2;
+    conflict.conflict = true;
+    GroupViews conflictGroups{};
+    conflictGroups[1].output = activeSlot(kOtherPid);
+    const PairModel conflictModel = buildPairModel(conflict, conflictGroups);
+    REQUIRE(conflictModel.state == PairState::kConflict);
+    CHECK(conflictModel.occupiedMask == bitAt(1));
 }
 
 TEST_CASE("channel mismatch and peer fields only appear when the peer is present", "[pairing][model]")
@@ -468,4 +481,12 @@ TEST_CASE("loopSilent only turns connected into connectedStill", "[pairing][mode
     PairInputs unnamedPeer = linkedInputs();
     unnamedPeer.peer.nameHash = 0;
     CHECK(buildPairModel(unnamedPeer, kEmptyGroups).state == PairState::kConnectedUnverified);
+}
+
+TEST_CASE("an Input bypassed by the host shows bypassed too", "[pairing][model]")
+{
+    PairInputs in = baseInputs();
+    in.role = Role::kInput;
+    in.selfBypassed = true;
+    CHECK(buildPairModel(in, GroupViews{}).state == PairState::kBypassed);
 }

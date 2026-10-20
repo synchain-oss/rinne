@@ -3,9 +3,10 @@
 // 配对状态模型：把「会合状态、对端快照、宿主事实」折成界面要显示的一份只读模型。纯函数，不读段、不读时钟。
 // 15 个状态按颜色分组：红 5、琥珀 3、灰 4、绿 3（connectedStill 与 connected 同色同文案，只是绿点不脉冲）。
 // 判定顺序固定（先到先得），与设计稿的优先级表一致：
-//   validator, ipcUnavailable, abiMismatch, srMismatch, conflict, unassigned, stale, bypassed(仅 Output),
+//   validator, ipcUnavailable, abiMismatch, srMismatch, conflict, unassigned, stale, bypassed,
 //   crossProcess, crossTrack, waitingAudio, searching, connectedUnverified, connected / connectedStill。
-// 其中 stale 与 bypassed 之后的各项都以「有对端」为前提（searching 之前），bypassed 看的是本端被宿主旁路。
+// 其中 stale 与 bypassed 之后的各项都以「有对端」为前提（searching 之前），bypassed 看的是本端（Input 或
+// Output）被宿主旁路。
 #pragma once
 
 #include <cstdint>
@@ -106,7 +107,7 @@ struct PairModel
     PairColour colour = PairColour::kGrey;
     u32 group = 0;
     u32 occupiedMask = 0; // bit0 = 组 A：本角色一端已被他人占着（active 或 dormant）
-    u32 peerMask = 0; // bit0 = 组 A：相反角色一端有人（active 或 dormant），且与本实例同进程
+    u32 peerMask = 0; // bit0 = 组 A：同进程的对端活着，而本角色一端还空着（有未配对的对端在等）
     NameCheck nameCheck = NameCheck::kUnknown;
     std::string peerName;
     u32 peerColourArgb = 0;

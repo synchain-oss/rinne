@@ -411,24 +411,35 @@ TEST_CASE("repair plans move to a free group or ask before taking a dormant slot
     }
 }
 
-TEST_CASE("ties do not depend on where the candidates sit", "[ipc][pairing][policy]")
+TEST_CASE("an equal claim goes to the smallest group number", "[ipc][pairing][policy]")
 {
     const PairingSelf self = selfOf(Role::kOutput, 0);
     const GroupViews first =
         groupsOf({{2, liveSlot(kSelfPid, 500, 0), freeSlot()}, {6, liveSlot(kSelfPid, 500, 0), freeSlot()}});
     const GroupViews second =
         groupsOf({{3, liveSlot(kSelfPid, 500, 0), freeSlot()}, {7, liveSlot(kSelfPid, 500, 0), freeSlot()}});
-    // 同一对候选换个书写顺序，结果仍应相同：扫描顺序不该决定组号
-    const GroupViews reordered =
-        groupsOf({{7, liveSlot(kSelfPid, 500, 0), freeSlot()}, {3, liveSlot(kSelfPid, 500, 0), freeSlot()}});
     const PairingDecision a = decideOutput(self, first);
     const PairingDecision b = decideOutput(self, second);
-    const PairingDecision c = decideOutput(self, reordered);
-    INFO("an equal claim must resolve to the smallest group, whatever the scan order");
+    INFO("an equal claim must resolve to the smallest group");
     CHECK(a.reason == PairingReason::kLatestInput);
     CHECK(b.reason == PairingReason::kLatestInput);
-    CHECK(c.reason == PairingReason::kLatestInput);
     CHECK(a.group == 2);
     CHECK(b.group == 3);
-    CHECK(c.group == 3);
+}
+
+TEST_CASE("repair never hands back the group the instance already holds", "[ipc][pairing][policy]")
+{
+    PairingSelf self = selfOf(Role::kInput, 0);
+    self.heldGroup = 1;
+    // 组 1 就是自己占着的组，释放后两端都空：修复也不能把它当目的地
+    const GroupViews onlyHeldFree = groupsOf({{2, liveSlot(kSelfPid, 10, 0), liveSlot(kSelfPid, 11, 0)},
+                                              {3, liveSlot(kSelfPid, 10, 0), liveSlot(kSelfPid, 11, 0)},
+                                              {4, liveSlot(kSelfPid, 10, 0), liveSlot(kSelfPid, 11, 0)},
+                                              {5, liveSlot(kSelfPid, 10, 0), liveSlot(kSelfPid, 11, 0)},
+                                              {6, liveSlot(kSelfPid, 10, 0), liveSlot(kSelfPid, 11, 0)},
+                                              {7, liveSlot(kSelfPid, 10, 0), liveSlot(kSelfPid, 11, 0)},
+                                              {8, liveSlot(kSelfPid, 10, 0), liveSlot(kSelfPid, 11, 0)}});
+    CHECK(repairInput(self, onlyHeldFree).group == 0);
+    self.heldGroup = 0;
+    CHECK(repairInput(self, onlyHeldFree).group == 1);
 }

@@ -142,21 +142,23 @@ PairingDecision decideInput(const PairingSelf& self, const GroupViews& groups) n
 
 RepairPlan repairInput(const PairingSelf& self, const GroupViews& groups) noexcept
 {
-    // 第一优先：两端真空的组。heldGroup 那一端不再按空算，因为修复就是要离开它
+    // 第一优先：两端真空的组。本实例占着的组不算：修复就是要离开它
     for (std::size_t i = 0; i < groups.size(); ++i)
     {
-        if (groups[i].input.isFree() && groups[i].output.isFree())
+        const u32 group = static_cast<u32>(i) + 1;
+        if (group != self.heldGroup && groups[i].input.isFree() && groups[i].output.isFree())
         {
-            return {static_cast<u32>(i) + 1, false};
+            return {group, false};
         }
     }
     // 退而求其次：本进程的休眠 Input 槽，且对面不是活的（空或休眠）。接管休眠要用户确认
     for (std::size_t i = 0; i < groups.size(); ++i)
     {
+        const u32 group = static_cast<u32>(i) + 1;
         const GroupView& view = groups[i];
-        if (view.input.isDormant() && view.input.pid == self.pid && !view.output.isLive())
+        if (group != self.heldGroup && view.input.isDormant() && view.input.pid == self.pid && !view.output.isLive())
         {
-            return {static_cast<u32>(i) + 1, true};
+            return {group, true};
         }
     }
     return {0, false};

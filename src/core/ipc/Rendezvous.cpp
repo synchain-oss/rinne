@@ -639,7 +639,8 @@ void Rendezvous::armIntentHold(u64 nowMs) noexcept
 // 再怎么倒退也不会让它复活。
 // 一个例外：证据是按拍子比的，拍子稀的时候（宿主让消息线程饿了几拍）上一次评估可能还在证据攒满之前，下一拍
 // 已经过了截止时刻，休眠档就这样被错过。所以有效期内评估过的话，过期之后的第一拍按原意图补评一次（只这一次，
-// 之后照旧清掉）；补评只在时钟正常前进时给，倒退的一拍不算
+// 之后照旧清掉）；补评只在时钟正常前进、且迟到不超过一个扫描间隔时给（倒退的一拍、迟到更久的都不算），所以有效期最长也就是
+// kIntentHoldMs 加一个扫描间隔
 bool Rendezvous::intentHeld(u64 nowMs) noexcept
 {
     if (intentUntilMs_ == 0)
@@ -652,7 +653,8 @@ bool Rendezvous::intentHeld(u64 nowMs) noexcept
         intentEvaluated_ = true;
         return true;
     }
-    const bool catchUp = intentEvaluated_ && nowMs >= intentSeenMs_ && nowMs >= intentUntilMs_;
+    const bool catchUp = intentEvaluated_ && nowMs >= intentSeenMs_ && nowMs >= intentUntilMs_ &&
+                         nowMs - intentUntilMs_ <= SlotObserver::kScanIntervalMs;
     intentUntilMs_ = 0;
     intentEvaluated_ = false;
     return catchUp;

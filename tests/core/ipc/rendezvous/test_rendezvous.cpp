@@ -670,6 +670,23 @@ TEST_CASE("a sparse tick that lands past the intent hold still re-checks the dor
     CHECK(restore.state() == RendezvousState::kActive);
     CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == restore.myCtl());
 
+    // 迟到太久的一拍不补评：证据虽然早就满了，但拍子晚过一个扫描间隔，有效期已经结束
+    Rendezvous slow(configFor(Role::kInput, backend, naming.scope(), 85));
+    Rendezvous slowHolder(configFor(Role::kInput, backend, naming.scope(), 86));
+    slowHolder.setGroup(5, ClaimIntent::kManual, kT0);
+    slowHolder.prepare(format, kT0);
+    slowHolder.tick(kT0);
+    REQUIRE(slowHolder.state() == RendezvousState::kActive);
+    slowHolder.releaseResources(kT0 + 10);
+    slow.setGroup(5, ClaimIntent::kRestore, loadAt);
+    slow.prepare(format, loadAt);
+    slow.tick(firstTickAt);
+    REQUIRE(slow.state() == RendezvousState::kConflict);
+    slow.tick(firstTickAt + 1900);
+    slow.tick(firstTickAt + RendezvousTiming::kIntentHoldMs + SlotObserver::kScanIntervalMs + 1);
+    CHECK(slow.state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 5, Role::kInput).ctl.load() == slowHolder.myCtl());
+
     // 补评只有一次：补评时证据还不满的话，再往后拿不到。对端在首拍之后 1 s 才休眠，证据从那时重新计
     Rendezvous busy(configFor(Role::kInput, backend, naming.scope(), 83));
     busy.setGroup(4, ClaimIntent::kManual, kT0);
