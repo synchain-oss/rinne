@@ -1,15 +1,15 @@
 {
   "actions": {
-    "Synchain-oss/ci-workflows/.github/workflows/deepseek-review.yml@5c5defd08f79a320261700a5c1d8696af5a20ec0": {
-      "version": "v1.3.2",
+    "Synchain-oss/ci-workflows/.github/workflows/deepseek-review.yml@070537914c9af4c2742b8fc5c7f63e06daef82ae": {
+      "version": "v1.3.3",
       "using": "",
       "nested": [
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "anthropics/claude-code-action@5eb090f3c3afd701a0672cd32981197ca27688f6"
       ]
     },
-    "Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@5c5defd08f79a320261700a5c1d8696af5a20ec0": {
-      "version": "v1.3.2",
+    "Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@070537914c9af4c2742b8fc5c7f63e06daef82ae": {
+      "version": "v1.3.3",
       "using": "",
       "nested": []
     },
