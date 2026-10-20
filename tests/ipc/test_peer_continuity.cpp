@@ -191,12 +191,15 @@ TEST_CASE("an in-test output feeds an input peer across processes", "[ipc][xproc
     RingWriter writer;
     writer.reset(48000);
     u64 written = 0;
-    const u64 writeDeadline = rinne::util::monoNowMs() + 6000;
+    const u64 writeStart = rinne::util::monoNowMs();
+    const u64 writeDeadline = writeStart + 6000;
+    u64 blocksTried = 0;
     while (rinne::util::monoNowMs() < writeDeadline && written < 96000)
     {
         output.tick(rinne::util::monoNowMs());
-        // 与 peer 的音频线程同速：一拍最多写 4 x 480 帧
-        for (int blockIndex = 0; blockIndex < 4; ++blockIndex)
+        // 按墙钟配速：每 10 ms 一块 480 帧，与 peer 的音频线程同速，慢了就补（一拍最多补 8 块）
+        const u64 due = (rinne::util::monoNowMs() - writeStart) / 10 + 1;
+        for (int blockIndex = 0; blockIndex < 8 && blocksTried < due; ++blockIndex)
         {
             const LoopBinding* binding = output.bindings().current();
             if (binding == nullptr)
@@ -210,6 +213,7 @@ TEST_CASE("an in-test output feeds an input peer across processes", "[ipc][xproc
             }
             const RingWriteResult writtenBlock = writer.write(
                 block.ring(), kBlockFrames, [](u32, u64 position, float& l, float& r) { encodeRamp(position, l, r); });
+            ++blocksTried;
             if (writtenBlock == RingWriteResult::kOk)
             {
                 written += kBlockFrames;
