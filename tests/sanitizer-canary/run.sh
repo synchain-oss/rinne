@@ -11,6 +11,7 @@ config="${1:-}"
 cxx="${CXX:-clang++-18}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="$(mktemp -d)"
+# rinne-delete-ok: 本脚本 mktemp -d 新建的目录
 trap 'rm -rf "$out"' EXIT
 
 case "$config" in

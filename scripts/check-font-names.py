@@ -166,11 +166,15 @@ def self_test():
             for f in RESERVED:
                 shutil.copy(os.path.join(fonts_dir, f), tmp)
             font = TTFont(os.path.join(tmp, fname))
-            edit(font)
-            font.flavor = "woff2"
-            font.save(os.path.join(tmp, fname))
+            try:
+                edit(font)
+                font.flavor = "woff2"
+                font.save(os.path.join(tmp, fname))
+            finally:
+                font.close()  # Windows 上字体文件还开着时删不掉目录，ignore_errors 会把失败吞掉、留下残留
             return find_problems(tmp, reuse)
         finally:
+            # rinne-delete-ok: tmp 是本函数 mkdtemp 新建的目录，变量没有被改过
             shutil.rmtree(tmp, ignore_errors=True)
 
     def set_name(nid, value):

@@ -5,10 +5,10 @@
 // 自测在临时目录里放一份真源的副本和两个带标记的落地面，逐项改坏。
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { checkAll, writeAll } from "../gen-docs.mjs";
 import { ROOT, caseResult } from "../lib/check-kit.mjs";
+import { makeTempDir, removeTempDir } from "../lib/safe-rm.mjs";
 import { I18N_FILE, INSTALL_FILE, SOURCE_FILE, loadSource, zhHashes } from "../lib/docs-kit.mjs";
 
 const SURFACES = {
@@ -19,7 +19,7 @@ const marked = (blocks) => blocks.map((b) => `<!-- BEGIN gen:${b} -->\n<!-- END 
 
 /** 临时目录里搭一份已回写的夹具，让 mutate 改坏，再返回检查结果里的问题。 */
 async function scenario(root, mutate) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-gendocs-"));
+    const dir = makeTempDir("rinne-gendocs-");
     try {
         const put = (rel, text) => {
             fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
@@ -34,7 +34,7 @@ async function scenario(root, mutate) {
         mutate({ edit, put, dir });
         return await checkAll(dir);
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        removeTempDir(dir);
     }
 }
 

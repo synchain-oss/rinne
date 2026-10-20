@@ -11,6 +11,7 @@ set -euo pipefail
 
 list=$1
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
+# rinne-delete-ok: 本脚本 mktemp -d 新建的目录
 trap 'rm -rf "$tmp"' EXIT
 first=""
 fail=0

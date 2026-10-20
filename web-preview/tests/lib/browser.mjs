@@ -8,8 +8,8 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { makeTempDir, removeTempDir } from "../../../scripts/lib/safe-rm.mjs";
 
 const CANDIDATES = [
     process.env.RINNE_BROWSER,
@@ -142,7 +142,7 @@ class Page {
 export async function launchBrowser({ width = 1280, height = 900 } = {}) {
     const exe = findBrowser();
     if (!exe) throw new Error("找不到 Chromium 系浏览器（可用环境变量 RINNE_BROWSER 指定）");
-    const profile = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-pv-"));
+    const profile = makeTempDir("rinne-pv-");
     const proc = spawn(
         exe,
         [
@@ -176,12 +176,8 @@ export async function launchBrowser({ width = 1280, height = 900 } = {}) {
         }
         await sleep(300);
         for (let i = 0; i < 5; i++) {
-            try {
-                fs.rmSync(profile, { recursive: true, force: true });
-                return;
-            } catch {
-                await sleep(300);
-            }
+            if (removeTempDir(profile) === null) return;
+            await sleep(300); // 浏览器进程还握着文件：等一等再删
         }
     };
     if (!port) {

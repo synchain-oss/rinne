@@ -14,9 +14,9 @@
 // 用法：node web-preview/tests/smoke-first-frame-page.mjs [仓库根]
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createRun, repoRoot } from "./lib/harness.mjs";
+import { makeTempDir, removeFixedDir, removeTempDir } from "../../scripts/lib/safe-rm.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 
@@ -147,7 +147,7 @@ try {
 
     // 坏例：一个会发外部请求的页面，必须被同源断言抓到。页面放在 mkdtemp 出来的临时目录里，请求发往本机一个无人监听的端口，
     // 不会真的出网；同源断言要把它认作外部请求。
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-badpage-"));
+    const tmp = makeTempDir("rinne-badpage-");
     try {
         fs.mkdirSync(path.join(tmp, "web-preview"));
         fs.writeFileSync(
@@ -166,7 +166,7 @@ try {
             await badServer.close();
         }
     } finally {
-        fs.rmSync(tmp, { recursive: true }); // 只删上面 mkdtemp 出来的目录
+        removeTempDir(tmp);
     }
 } finally {
     await browser.close();

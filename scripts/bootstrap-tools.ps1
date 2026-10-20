@@ -37,6 +37,7 @@ $ErrorActionPreference = 'Stop'
 # 与 gates.ps1 一致：G1 以子进程调 -CheckHooks 并按 UTF-8 读它的输出
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ }
 $Root = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $PSScriptRoot 'lib/TempDir.psm1') -ErrorAction Stop
 
 $Manifest = [ordered]@{
     node       = @{ Pin = '.node-version'; Key = 'rinne.node'; Entry = 'node-v{0}-win-x64/node.exe'; Args = '--version'
@@ -173,8 +174,8 @@ function Install-Archive([string]$Name, $Spec, [string]$Node) {
         Write-Host "[已装] $Name $ver（档案与解开的文件逐个核对过）"
         return $entry
     }
-    $work = Join-Path $ToolsDir ".download-$Name-$ver-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $null = New-Item -ItemType Directory -Path $work
+    # 下载与解开的暂存目录：本进程在工具目录下新建的，删之前按真实路径核对（工具目录是盘根或用户目录时建不出来）
+    $work = New-RinneTempDir -Prefix 'rinne-download-' -Parent $ToolsDir
     try {
         $download = Join-Path $work $file
         Write-Host "[下载] $url"
@@ -193,7 +194,8 @@ function Install-Archive([string]$Name, $Spec, [string]$Node) {
         if (Test-Unpacked (Join-Path $stage ".rinne-archive/$file") $stage) { throw "$Name $ver 解开后与档案对不上" }
         Move-Item -LiteralPath $stage -Destination $dest
     } finally {
-        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        $left = Remove-RinneTempDir -Path $work
+        if ($left) { Write-Warning $left }
     }
     if (-not (Test-Installed $entry @($Spec.Args) $ver $via)) { throw "$Name $ver 装好后核对不过版本" }
     Write-Host "[装好] $Name $ver"
@@ -245,6 +247,8 @@ function Install-PyTools {
         if ($bad.Count) { throw "pytools-$tag 里的 $($bad -join '、')；请先手动移走该目录" }
         Write-Host "[已装] clang-format $($want['clang-format'])、reuse $($want.reuse)、$fonts（已装文件按 RECORD 核对过）"
     } else {
+        # 目录先由本进程新建（已经在就不会走到这里），失败时只删这一个
+        $dest = New-RinneOwnedDir -Path $dest
         try {
             & $Python -m venv $dest
             if ($LASTEXITCODE -ne 0) { throw "用 $Python 建 venv 失败" }
@@ -258,7 +262,8 @@ function Install-PyTools {
             if ($bad.Count) { throw "装好后 $($bad -join '、')" }
             Set-Content -LiteralPath $stamp -Value $tag
         } catch {
-            Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+            $left = Remove-RinneTempDir -Path $dest
+            if ($left) { Write-Warning $left }
             throw
         }
         Write-Host "[装好] clang-format $($want['clang-format'])、reuse $($want.reuse)、$fonts"

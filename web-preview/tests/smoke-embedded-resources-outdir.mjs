@@ -14,6 +14,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
+import { makeTempDir, removeFixedDir, removeTempDir } from "../../scripts/lib/safe-rm.mjs";
 
 /**
  * 只摘掉链接本身：先确认路径确实是符号链接或 junction，再 unlink。
@@ -91,7 +92,7 @@ run.check(
 rejected({ rootReal: realRoot2 }, "目录在字面仓库根下、真实仓库根却是别处");
 
 // ---- ② 端到端：只在 mkdtemp 出来的仓库副本里跑 ----
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-static-"));
+const tmp = makeTempDir("rinne-static-");
 try {
     fs.cpSync(path.join(ROOT, "web"), path.join(tmp, "web"), { recursive: true });
     fs.cpSync(path.join(ROOT, "web-preview"), path.join(tmp, "web-preview"), {
@@ -142,11 +143,11 @@ try {
     run.check(r.status === 0, "--check 只自检不写文件");
 
     // 固定目录本身是 junction：指向带标记的外部目录、以及悬空的，都必须拒绝，外部什么都不能被写或被删
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-outside-"));
+    const outside = makeTempDir("rinne-outside-");
     try {
         fs.writeFileSync(path.join(outside, MARKER), "m");
         fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
-        fs.rmSync(out, { recursive: true }); // 副本里的固定目录
+        removeFixedDir(out, { root: tmp, rel: OUT_REL }); // 副本里的固定目录
         fs.symlinkSync(outside, out, "junction");
         r = exec();
         run.check(r.status === 1, `固定目录是 junction 指向带标记的外部目录：应当拒绝，实得 ${r.status}`);
@@ -164,10 +165,10 @@ try {
         run.check(!fs.existsSync(gone), "悬空 junction：没有穿过链接创建任何东西");
         unlinkLink(out);
     } finally {
-        fs.rmSync(outside, { recursive: true }); // 只删上面 mkdtemp 出来的目录
+        removeTempDir(outside);
     }
 } finally {
-    fs.rmSync(tmp, { recursive: true }); // 只删上面 mkdtemp 出来的目录
+    removeTempDir(tmp);
 }
 
 run.finish();

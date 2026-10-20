@@ -29,6 +29,7 @@ count_lines() { # $1 类型 $2 子类型 $3 厂商 $4 输出文件
 self_test() {
   local dir bad=0
   dir=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
+  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
   trap 'rm -rf "$dir"' RETURN
   expect() { # $1 说明 $2 期望 $3 实际
     if [ "$2" != "$3" ]; then echo "FAIL  ${1}（期望 ${2}，实际 ${3}）"; bad=1; else echo "PASS  $1"; fi
@@ -63,6 +64,11 @@ install_au() {
       *.component)
         # 先删旧的：ditto 往已有目录里是合并，不会删掉多余的文件
         inst="$dest/$(basename "$b")"
+        case "$inst" in
+          "$HOME/Library/Audio/Plug-Ins/Components/"?*.component) ;;
+          *) echo "::error::拒绝删除 $inst：不是已装目录下一层的 .component"; exit 1 ;;
+        esac
+        # rinne-delete-ok: 上面核对过：只删 Components 目录下一层、名字以 .component 结尾的旧包
         rm -rf "$inst"
         ditto "$b" "$inst"
         printf '%s\n' "$inst" >> "$out" ;;

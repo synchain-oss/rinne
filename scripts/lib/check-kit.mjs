@@ -4,10 +4,10 @@
 // 零依赖；Node 版本钉在 .node-version。
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { makeTempDir, removeTempDir } from "./safe-rm.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -96,7 +96,7 @@ export function isolatedEnv(extra = {}) {
 
 /** 自测用临时仓，身份是维护者身份；用完调 cleanup()。 */
 export function tempRepo({ bare = false } = {}) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-selftest-"));
+    const dir = makeTempDir("rinne-selftest-");
     const env = isolatedEnv();
     const run = (args, opts = {}) => git(args, { cwd: dir, env, ...opts });
     run(bare ? ["init", "-q", "--bare"] : ["init", "-q", "-b", "main"]);
@@ -113,7 +113,7 @@ export function tempRepo({ bare = false } = {}) {
             fs.mkdirSync(path.dirname(abs), { recursive: true });
             fs.writeFileSync(abs, text);
         },
-        cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+        cleanup: () => removeTempDir(dir),
     };
 }
 

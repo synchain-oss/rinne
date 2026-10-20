@@ -191,4 +191,5 @@ string(FIND "${run_real}" "${work_real}/run-" prefix_pos)
 if(NOT prefix_pos EQUAL 0)
   message(FATAL_ERROR "拒绝删除：${run_real} 不是 ${work_real} 下本次新建的 run- 子目录")
 endif()
+# rinne-delete-ok: 只删本次新建的 RUN_DIR，上面已断言真实路径是 WORK_DIR 下的 run- 子目录
 file(REMOVE_RECURSE "${RUN_DIR}")

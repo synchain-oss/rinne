@@ -21,11 +21,11 @@
 // gh 用调用方环境里的 GH_TOKEN。评论、diff、PR 正文都是不可信数据：只写进文件或经参数数组交给 gh，不进 shell。
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { assertNodeVersion, caseResult, git, isMain } from "./lib/check-kit.mjs";
+import { makeTempDir, removeFixedDir, removeTempDir } from "./lib/safe-rm.mjs";
 import { workflowLines } from "./checks.d/workflows.mjs";
 
 /** 合并判据只解析这一行。 */
@@ -432,8 +432,13 @@ function prepare({ pr, repo, base, head, bot, out }) {
         );
         return 1;
     }
-    // 先删再建：签出的代码若自带同名目录，里面的链接会把写入引到工作区外
-    fs.rmSync(out, { recursive: true, force: true });
+    // 先删再建：签出的代码若自带同名目录，里面的链接会把写入引到工作区外。只清仓内写死的 .rinne-review，
+    // --out 指到别处而那里已经有东西时不清（返回原因），免得递归删到参数给的路径
+    const notCleared = removeFixedDir(out, { root: process.cwd(), rel: [".rinne-review"] });
+    if (notCleared) {
+        console.error(`不能清空输出目录：${notCleared}`);
+        return 1;
+    }
     fs.mkdirSync(out);
     const write = (name, text) => fs.writeFileSync(path.join(out, name), text);
     // 钉在 base...head 上取整份 diff；失败（最常见的是 diff 过大）就退回逐文件 patch，让 bot 写明 diff 不完整
@@ -509,10 +514,15 @@ function post({ pr, repo, head, exec, bot, runUrl }) {
     // 走 REST：响应里带评论编号，下一轮靠 id 与正文的 sha256 核对这条总结有没有被改过。正文统一用 LF 发出去，
     // 哈希算的就是这份字节（pr-merge 对 API 返回的 body 也先做 CRLF 归一）
     const body = c.body.replace(/\r\n/g, "\n");
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-review-"));
+    const dir = makeTempDir("rinne-review-");
     const file = path.join(dir, "comment.json");
-    fs.writeFileSync(file, JSON.stringify({ body }));
-    const posted = gh(["api", "-X", "POST", `repos/${repo}/issues/${pr}/comments`, "--input", file], { parse: true });
+    let posted;
+    try {
+        fs.writeFileSync(file, JSON.stringify({ body }));
+        posted = gh(["api", "-X", "POST", `repos/${repo}/issues/${pr}/comments`, "--input", file], { parse: true });
+    } finally {
+        removeTempDir(dir);
+    }
     const id = String(posted?.id ?? "");
     if (!/^\d+$/.test(id)) throw new Error("发评论的响应里没有评论编号，下一轮核对不了这条总结");
     recordPosted(postedRecord(id, body));
@@ -858,7 +868,8 @@ export function selfTest() {
     t("GITHUB_OUTPUT 多行值", false, !/^prompt<<(EOF_[0-9a-f]{32})\na\nb\n\1\n$/.test(block));
     // 发帖记录行：格式固定、sha256 是正文的；写进日志与摘要（设置了 GITHUB_STEP_SUMMARY 时），取值来自参数
     const lines = [];
-    const sumFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rinne-review-selftest-")), "summary.md");
+    const sumDir = makeTempDir("rinne-review-selftest-");
+    const sumFile = path.join(sumDir, "summary.md");
     const known = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"; // sha256("abc")
     const rec = postedRecord("123456", "abc");
     t(
@@ -882,8 +893,7 @@ export function selfTest() {
         false,
         !recordPosted(postedRecord("7", "abc"), { log: () => {}, summaryFile: "" }).includes("id=7 "),
     );
-    fs.rmSync(sumFile, { force: true });
-    fs.rmdirSync(path.dirname(sumFile));
+    removeTempDir(sumDir);
     return caseResult(cases);
 }
 

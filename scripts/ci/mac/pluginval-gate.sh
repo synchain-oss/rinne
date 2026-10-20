@@ -24,8 +24,8 @@ if [ -z "$tag" ] || [ "$tag" != "$pinned_tag" ]; then
   exit 1
 fi
 
-work="${RUNNER_TEMP:-$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")}/pluginval"
-rm -rf "$work"
+# 每次都在新建的目录里干活，不去清旧目录
+work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rinne.XXXXXX")/pluginval"
 mkdir -p "$work"
 curl -fsSL --retry 3 --retry-delay 5 -o "$work/pluginval_macOS.zip" \
   "https://github.com/Tracktion/pluginval/releases/download/$tag/pluginval_macOS.zip"

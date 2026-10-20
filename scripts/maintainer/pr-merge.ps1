@@ -59,6 +59,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'lib/RinneGh.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot '../lib/PremergeLatch.psm1')
+Import-Module (Join-Path $PSScriptRoot '../lib/TempDir.psm1') -ErrorAction Stop
 
 $PremergeTimeoutSeconds = 2700
 $SlotWaitSeconds = 2700
@@ -718,6 +719,18 @@ function Test-CloneIntegrity {
 }
 
 <#
+  git clean -ffdx 与 git worktree remove 会连同未跟踪的文件一起清掉目录，路径又是由工作区根推出来的：动手之前核对。路径（按真实路径）
+  必须是 <工作区根>/wt 的直接子项、名字合 NamePattern、不是盘根或用户目录，而且里面的 .git 是文件（worktree 的标记）。不合格抛错，
+  什么都不动。
+#>
+function Assert-RinneWtDir {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$NamePattern)
+    $why = Test-RinneChildOf -Path $Path -Parent (Join-Path (Get-RinneRoot) 'wt') -NamePattern $NamePattern
+    if ($why) { throw "拒绝清理 $($Path)：$why" }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path '.git') -PathType Leaf)) { throw "拒绝清理 $($Path)：里面的 .git 不是文件，不像 worktree" }
+}
+
+<#
   在 <根>/wt/tip-<n> 把 PR 合到当前 feature/v1 上做一次构建，构建脚本取自合并后的树，环境里没有凭据与个人针。
   建树、清理、合并、构建到 abort 整段持构建槽（见 Get-PremergeSlot）；用前 reset --hard 并 git clean -ffdx，上一次留下的未跟踪
   文件与构建产物都不带进这一次；构建超时就结束整棵进程树、判红。构建之前写「进行中」锁存标记（写不进去就不构建），之后的核对
@@ -738,6 +751,8 @@ function Invoke-Premerge {
                     # reset 也清掉上一次被杀时留下的合并状态
                     Invoke-RinneGit @('reset', '--hard', '--quiet') -Repo $tip | Out-Null
                     Invoke-RinneGit @('checkout', '--detach', '--force', 'origin/feature/v1') -Repo $tip | Out-Null
+                    Assert-RinneWtDir -Path $tip -NamePattern '^tip-\d+$'
+                    # rinne-delete-ok: 路径已由上一行 Assert-RinneWtDir 核对为 wt 下的 tip-<n>，且是 worktree
                     Invoke-RinneGit @('clean', '-ffdx', '--quiet') -Repo $tip | Out-Null
                 }
                 $m = Invoke-RinneGit @('merge', '--no-ff', '--no-commit', "refs/remotes/origin/pr/$Pr") -Repo $tip -AllowFail
@@ -915,9 +930,17 @@ function Invoke-AfterUnlocked {
     }
     $tip = Join-Path (Get-RinneRoot) "wt/tip-$Pr"
     Invoke-RinneGitLocked {
-        if (Test-Path -LiteralPath $wt) { Invoke-RinneGit @('worktree', 'remove', $wt) | Out-Null }
+        if (Test-Path -LiteralPath $wt) {
+            Assert-RinneWtDir -Path $wt -NamePattern ('^' + [regex]::Escape($CardId) + '$')
+            # rinne-delete-ok: 路径已由上一行 Assert-RinneWtDir 核对为 wt 下与卡号同名的 worktree
+            Invoke-RinneGit @('worktree', 'remove', $wt) | Out-Null
+        }
         # 合并后构建的目录只装着 feature/v1 与构建产物，强制移除
-        if (Test-Path -LiteralPath $tip) { Invoke-RinneGit @('worktree', 'remove', '--force', $tip) | Out-Null }
+        if (Test-Path -LiteralPath $tip) {
+            Assert-RinneWtDir -Path $tip -NamePattern '^tip-\d+$'
+            # rinne-delete-ok: 路径已由上一行 Assert-RinneWtDir 核对为 wt 下的 tip-<n>，且是 worktree
+            Invoke-RinneGit @('worktree', 'remove', '--force', $tip) | Out-Null
+        }
         if ((Invoke-RinneGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail).Code -eq 0) {
             Invoke-RinneGit @('branch', '-D', $branch) | Out-Null
         }
@@ -1050,6 +1073,7 @@ function Invoke-SelfTest {
                 param($argv)
                 $tipOps.Add([pscustomobject]@{ Line = $argv -join ' '; Held = @($held); At = [datetime]::UtcNow.Ticks })
                 New-Item -ItemType Directory -Force -Path (Join-Path $argv[-2] 'scripts') | Out-Null
+                Set-Content -LiteralPath (Join-Path $argv[-2] '.git') -Value 'gitdir: x'
                 Set-Content -LiteralPath (Join-Path $argv[-2] 'scripts/build.ps1') -Value 'exit 0'
                 ''
             }
@@ -2063,6 +2087,7 @@ function Invoke-SelfTest {
         $locks = [System.Collections.Generic.List[string]]::new()
         Set-RinneLockImpl { param($name, $sb) $locks.Add($name); & $sb }
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
+        Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
         $after = [ordered]@{
             'pulls/3$'                       = { $merged }
             'merge-base --is-ancestor'       = { '' }
@@ -2085,6 +2110,7 @@ function Invoke-SelfTest {
         $log.Clear()
         Set-RinneFake (New-RinneFake -Routes $after -Log $log)
         New-Item -ItemType Directory -Force -Path $tip | Out-Null
+        Set-Content -LiteralPath (Join-Path $tip '.git') -Value 'gitdir: x'
         $line = Invoke-After -Pr 3 -CardId $cid
         Add-RinneCase $cases '-After：持 merge 锁；回读通过后删远端子支线、持 git 锁移除 worktree 与本地分支' $false (-not (
                 $line -match '已合入 fffffff' -and @($log | Where-Object { $_ -match 'push origin --delete refs/heads/feat/review-bot' }).Count -eq 1 -and
@@ -2093,6 +2119,7 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '-After：一并强制移除这个 PR 的 wt/tip-3' $false (-not (
                 @($log | Where-Object { $_ -match "worktree remove --force $([regex]::Escape($tip))$" }).Count -eq 1 -and -not (Test-Path -LiteralPath $tip)))
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
+        Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
         $wtBranch = 'feat/other-card'
         Add-RinneCase $cases '-After：worktree 在别的分支上（卡号写错）不清理' $true ((Test-Throws { Invoke-After -Pr 3 -CardId $cid }) -and (Test-Path -LiteralPath (Join-Path $tmp "wt/$cid")))
         $wtBranch = 'feat/review-bot'
@@ -2109,12 +2136,28 @@ function Invoke-SelfTest {
         $toAway = Join-Path $tmp 'wt/to-away'
         $null = New-Item -ItemType ($IsWindows ? 'Junction' : 'SymbolicLink') -Path $toAway -Target $away
         $rm = $after[' worktree remove ']
+        # rinne-delete-ok: 自测里的假实现，只挪不删，且先核对路径在自测临时目录里面
         $awayThrew = Test-Throws { & $rm @('git', 'worktree', 'remove', '--force', $away) }
         $linkThrew = Test-Throws { & $rm @('git', 'worktree', 'remove', '--force', $toAway) }
         Add-RinneCase $cases '假的 worktree remove：给的路径（按真实路径）在自测临时目录外面就抛错，原样不动' $true (
             $awayThrew -and $linkThrew -and (Test-Path -LiteralPath (Join-Path $away 'keep.txt')) -and (Test-Path -LiteralPath $toAway))
         # 只删链接本身（核对失效时它已经被挪走，不在原处）
         if (Test-Path -LiteralPath $toAway) { Remove-Item -LiteralPath $toAway -Force }
+
+        # 清理前的路径核对（Assert-RinneWtDir，只看抛不抛错，不动手）：wt 下名字对且 .git 是文件的通过；没有 .git 文件、名字不对、
+        # 孙项、wt 之外的兄弟目录、经链接指到外面的都抛错
+        $okTip = Join-Path $tmp 'wt/tip-7'
+        $null = New-Item -ItemType Directory -Path $okTip
+        Add-RinneCase $cases '清理核对：里面没有 .git 文件（不像 worktree）' $true (Test-Throws { Assert-RinneWtDir -Path $okTip -NamePattern '^tip-\d+$' })
+        Set-Content -LiteralPath (Join-Path $okTip '.git') -Value 'gitdir: x'
+        Add-RinneCase $cases '清理核对：wt/tip-<n> 且 .git 是文件：通过' $false (Test-Throws { Assert-RinneWtDir -Path $okTip -NamePattern '^tip-\d+$' })
+        Add-RinneCase $cases '清理核对：名字不合' $true (Test-Throws { Assert-RinneWtDir -Path $okTip -NamePattern '^tip-9$' })
+        Add-RinneCase $cases '清理核对：wt 之外的目录' $true (Test-Throws { Assert-RinneWtDir -Path (Join-Path $tmp 'elsewhere') -NamePattern '.*' })
+        Add-RinneCase $cases '清理核对：工作区根本身' $true (Test-Throws { Assert-RinneWtDir -Path $tmp -NamePattern '.*' })
+        $null = New-Item -ItemType ($IsWindows ? 'Junction' : 'SymbolicLink') -Path $toAway -Target $away
+        $viaLink = Test-Throws { Assert-RinneWtDir -Path $toAway -NamePattern '.*' }
+        Remove-Item -LiteralPath $toAway -Force
+        Add-RinneCase $cases '清理核对：经 wt 里的链接指到外面' $true $viaLink
 
         # 范围：owns 的通配与 takesOver、sections 里的 path
         $c2 = [pscustomobject]@{ owns = @('src/core/loop/**'); takesOver = @([pscustomobject]@{ path = 'src/core/engine/InputEngine.{h,cpp}' }); sections = @([pscustomobject]@{ path = 'THIRD-PARTY-NOTICES.md'; section = 'catch2' }) }

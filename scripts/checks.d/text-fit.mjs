@@ -6,9 +6,9 @@
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { ROOT } from "../lib/check-kit.mjs";
+import { makeTempDir, removeTempDir } from "../lib/safe-rm.mjs";
 import { locatePython } from "./fonts.mjs";
 import { loadDict } from "../check-i18n.mjs";
 
@@ -37,13 +37,13 @@ export default {
         const { T } = await loadDict(ROOT);
         const dump = {};
         for (const k of Object.keys(T.zh)) dump[k] = { zh: T.zh[k], en: T.en[k], fr: T.fr[k] };
-        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-textfit-"));
+        const dir = makeTempDir("rinne-textfit-");
         try {
             const file = path.join(dir, "strings.json");
             fs.writeFileSync(file, JSON.stringify(dump));
             return runPython(python, ["--strings", file]);
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeTempDir(dir);
         }
     },
     selfTest(ctx) {

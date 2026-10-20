@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as kit from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
+import { makeTempDir, removeTempDir } from "./lib/safe-rm.mjs";
 
 const { ROOT, caseResult, git, tempRepo, trackedFiles } = kit;
 const { mask, redact, scan, scanBlob } = needles;
@@ -138,7 +139,7 @@ export function selfTest() {
     const cases = needles.runCases();
     const N = needles.FAKE_NEEDLE;
     const repo = tempRepo();
-    const aux = fs.mkdtempSync(`${repo.dir}-aux`);
+    const aux = makeTempDir("rinne-selftest-aux-");
     const file = (name, data) => {
         const p = path.join(aux, name);
         fs.writeFileSync(p, data);
@@ -236,7 +237,7 @@ export function selfTest() {
         t("补丁路径：八进制转义", '"b/\\346\\226\\207.md"', "文.md");
     } finally {
         repo.cleanup();
-        fs.rmSync(aux, { recursive: true, force: true });
+        removeTempDir(aux);
     }
     return caseResult(cases);
 }
