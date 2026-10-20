@@ -160,18 +160,41 @@ export function selfTestCases() {
     const root = path.parse(process.cwd()).root;
     const home = path.join(root, "users", "me");
     const tmp = path.join(root, "tmp");
-    const ok = { real: path.join(tmp, "rinne-x-1"), entry: { prefix: "rinne-x-", parent: tmp, temp: true }, tmpReal: tmp, home };
+    const ok = {
+        real: path.join(tmp, "rinne-x-1"),
+        entry: { prefix: "rinne-x-", parent: tmp, temp: true },
+        tmpReal: tmp,
+        home,
+    };
     t("临时目录判断：本进程建的、在临时目录下一层、前缀对：通过", false, tempVerdict(ok));
     t("临时目录判断：不是本进程建的：拒绝", true, tempVerdict({ ...ok, entry: undefined }));
     t("临时目录判断：临时目录换了位置：拒绝", true, tempVerdict({ ...ok, tmpReal: path.join(root, "elsewhere") }));
-    t("临时目录判断：真实路径变到别处（父目录对不上）：拒绝", true, tempVerdict({ ...ok, real: path.join(root, "other", "rinne-x-1") }));
+    t(
+        "临时目录判断：真实路径变到别处（父目录对不上）：拒绝",
+        true,
+        tempVerdict({ ...ok, real: path.join(root, "other", "rinne-x-1") }),
+    );
     t("临时目录判断：名字不以前缀开头：拒绝", true, tempVerdict({ ...ok, real: path.join(tmp, "other-1") }));
-    t("临时目录判断：盘根：拒绝", true, tempVerdict({ ...ok, real: root, entry: { prefix: "", parent: root, temp: true }, tmpReal: root }));
-    t("临时目录判断：用户目录：拒绝", true, tempVerdict({ ...ok, real: home, entry: { prefix: "me", parent: path.dirname(home), temp: false } }));
+    t(
+        "临时目录判断：盘根：拒绝",
+        true,
+        tempVerdict({ ...ok, real: root, entry: { prefix: "", parent: root, temp: true }, tmpReal: root }),
+    );
+    t(
+        "临时目录判断：用户目录：拒绝",
+        true,
+        tempVerdict({ ...ok, real: home, entry: { prefix: "me", parent: path.dirname(home), temp: false } }),
+    );
     t("危险路径：用户目录的上级", true, dangerousReason(path.dirname(home), home));
     t("危险路径：用户目录里面的子目录不算", false, dangerousReason(path.join(home, "work"), home));
     const repo = path.join(home, "repo");
-    const fx = { rootReal: repo, targetReal: path.join(repo, "build", "out"), targetIsLink: false, rel: ["build", "out"], home };
+    const fx = {
+        rootReal: repo,
+        targetReal: path.join(repo, "build", "out"),
+        targetIsLink: false,
+        rel: ["build", "out"],
+        home,
+    };
     t("写死目录判断：正好是 root/rel：通过", false, fixedVerdict(fx));
     t("写死目录判断：别的目录：拒绝", true, fixedVerdict({ ...fx, targetReal: path.join(repo, "src") }));
     t("写死目录判断：就是仓根：拒绝", true, fixedVerdict({ ...fx, targetReal: repo }));
@@ -179,7 +202,18 @@ export function selfTestCases() {
     t("写死目录判断：rel 带 ..：拒绝", true, fixedVerdict({ ...fx, rel: ["..", "x"] }));
     t("写死目录判断：rel 为空：拒绝", true, fixedVerdict({ ...fx, rel: [] }));
     t("写死目录判断：目标是盘根：拒绝", true, fixedVerdict({ ...fx, targetReal: root }));
-    t("前缀不合格时建不出目录", true, (() => { try { makeTempDir("x-"); return false; } catch { return true; } })());
+    t(
+        "前缀不合格时建不出目录",
+        true,
+        (() => {
+            try {
+                makeTempDir("x-");
+                return false;
+            } catch {
+                return true;
+            }
+        })(),
+    );
 
     // 真建真删，只在本进程新建的目录里
     const a = makeTempDir("rinne-safermtest-");
@@ -203,14 +237,35 @@ export function selfTestCases() {
     const parentLevel = makeTempDir("rinne-safermtest-", { parent: b });
     t("指定父目录：建在 parent 下一层", false, !same(path.dirname(realPathLoose(parentLevel)), realPathLoose(b)));
     t("指定父目录：建出来的能删", false, removeTempDir(parentLevel) !== null || fs.existsSync(parentLevel));
-    t("拒绝：父目录是盘根时建不出来", true, (() => { try { makeTempDir("rinne-safermtest-", { parent: root }); return false; } catch { return true; } })());
+    t(
+        "拒绝：父目录是盘根时建不出来",
+        true,
+        (() => {
+            try {
+                makeTempDir("rinne-safermtest-", { parent: root });
+                return false;
+            } catch {
+                return true;
+            }
+        })(),
+    );
     const r2 = removeTempDir(b);
     t("删除：自测建的目录都删掉了", false, r2 !== null || fs.existsSync(b));
     const f = makeTempDir("rinne-safermtest-");
     fs.mkdirSync(path.join(f, "build", "out"), { recursive: true });
     fs.writeFileSync(path.join(f, "build", "out", "x"), "x");
-    t("写死目录：不是 rel 指的目录就不删", true, removeFixedDir(path.join(f, "build"), { root: f, rel: ["build", "out"] }) && fs.existsSync(path.join(f, "build", "out", "x")));
-    t("写死目录：正好是 root/rel 的删掉", false, removeFixedDir(path.join(f, "build", "out"), { root: f, rel: ["build", "out"] }) !== null || fs.existsSync(path.join(f, "build", "out")));
+    t(
+        "写死目录：不是 rel 指的目录就不删",
+        true,
+        removeFixedDir(path.join(f, "build"), { root: f, rel: ["build", "out"] }) &&
+            fs.existsSync(path.join(f, "build", "out", "x")),
+    );
+    t(
+        "写死目录：正好是 root/rel 的删掉",
+        false,
+        removeFixedDir(path.join(f, "build", "out"), { root: f, rel: ["build", "out"] }) !== null ||
+            fs.existsSync(path.join(f, "build", "out")),
+    );
     removeTempDir(f);
     return out;
 }

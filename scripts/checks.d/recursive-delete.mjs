@@ -14,7 +14,11 @@ import { caseResult, readText, trackedFiles } from "../lib/check-kit.mjs";
 import { selfTestCases as safeRmCases } from "../lib/safe-rm.mjs";
 
 /** 模块自己与本检查：删除的实现就在这里，不再要求豁免。 */
-const ALLOWED = new Set(["scripts/lib/TempDir.psm1", "scripts/lib/safe-rm.mjs", "scripts/checks.d/recursive-delete.mjs"]);
+const ALLOWED = new Set([
+    "scripts/lib/TempDir.psm1",
+    "scripts/lib/safe-rm.mjs",
+    "scripts/checks.d/recursive-delete.mjs",
+]);
 
 /**
  * 待整改、暂时放行的文件：自测收尾删临时目录的那一处，整改要等并行改动该文件的变更合入之后再做（改成经 TempDir.psm1）。
@@ -41,7 +45,11 @@ export const RULES = [
             new RegExp(j("\\s-Rec\\w*\\b.*\\bRemove-", "Item\\b"), "i").test(l) ||
             /(^|[\s;|&({'"])(rm|ri|rd|rmdir|del|erase)\s.*\s-Rec\w*/i.test(l),
     },
-    { name: "dotnet-directory-delete-recursive", exts: PS, test: (l) => /Directory\]::Delete\([^)]*,\s*\$true\s*\)/i.test(l) },
+    {
+        name: "dotnet-directory-delete-recursive",
+        exts: PS,
+        test: (l) => /Directory\]::Delete\([^)]*,\s*\$true\s*\)/i.test(l),
+    },
     { name: "cmd-rd-s", exts: [...PS, "bat", "cmd"], test: (l) => /(^|[\s;&|"'])(rd|rmdir)\s+\/s\b/i.test(l) },
     {
         name: "node-rm-recursive",
@@ -61,13 +69,15 @@ export const RULES = [
         name: "git-clean-force",
         exts: [...PS, ...JS, ...SH],
         test: (l, _lines, _i, ext) =>
-            /['"]clean['"]\s*,\s*['"]-[a-zA-Z]*f/.test(l) || (SH.includes(ext) && /\bgit\b.*\sclean\s+-[a-zA-Z]*f/.test(l)),
+            /['"]clean['"]\s*,\s*['"]-[a-zA-Z]*f/.test(l) ||
+            (SH.includes(ext) && /\bgit\b.*\sclean\s+-[a-zA-Z]*f/.test(l)),
     },
     {
         name: "git-worktree-remove",
         exts: [...PS, ...JS, ...SH],
         test: (l, _lines, _i, ext) =>
-            /['"]worktree['"]\s*,\s*['"]remove/.test(l) || (SH.includes(ext) && /\bgit\b.*\sworktree\s+remove\b/.test(l)),
+            /['"]worktree['"]\s*,\s*['"]remove/.test(l) ||
+            (SH.includes(ext) && /\bgit\b.*\sworktree\s+remove\b/.test(l)),
     },
 ];
 
@@ -140,17 +150,31 @@ function cases(rules) {
     const out = [];
     for (const [rule, rel, text] of fx) {
         const hits = scanText(rel, text, rules);
-        out.push({ label: `坏样例判红：${rule}（${rel}：${text.split("\n")[0].slice(0, 40)}）`, bad: true, passed: hits.some((h) => h.rule === rule) });
+        out.push({
+            label: `坏样例判红：${rule}（${rel}：${text.split("\n")[0].slice(0, 40)}）`,
+            bad: true,
+            passed: hits.some((h) => h.rule === rule),
+        });
     }
     for (const [rel, text] of good) {
-        out.push({ label: `正例放行：${rel}：${text.split("\n")[0].slice(0, 40)}`, bad: false, passed: scanText(rel, text, rules).length === 0 });
+        out.push({
+            label: `正例放行：${rel}：${text.split("\n")[0].slice(0, 40)}`,
+            bad: false,
+            passed: scanText(rel, text, rules).length === 0,
+        });
     }
     // 豁免要写理由：空的或太短的不算；离得太远的不算
-    out.push({ label: "豁免没写理由：仍判红", bad: true, passed: scanText("a.mjs", "// rinne-delete-ok:\nfs.rmSync(d, { recursive: true });", rules).length > 0 });
+    out.push({
+        label: "豁免没写理由：仍判红",
+        bad: true,
+        passed: scanText("a.mjs", "// rinne-delete-ok:\nfs.rmSync(d, { recursive: true });", rules).length > 0,
+    });
     out.push({
         label: "豁免离得太远（隔了四行）：仍判红",
         bad: true,
-        passed: scanText("a.mjs", "// rinne-delete-ok: 理由写得很清楚\n\n\n\nfs.rmSync(d, { recursive: true });", rules).length > 0,
+        passed:
+            scanText("a.mjs", "// rinne-delete-ok: 理由写得很清楚\n\n\n\nfs.rmSync(d, { recursive: true });", rules)
+                .length > 0,
     });
     return out;
 }
@@ -166,13 +190,18 @@ export default {
             const text = readText(path.join(ctx.root, rel));
             if (text === null) continue;
             for (const h of scanText(rel, text)) {
-                lines.push(`${rel}:${h.line} 递归删除（${h.rule}）没经 TempDir.psm1 / safe-rm.mjs，也没有「rinne-delete-ok: 理由」`);
+                lines.push(
+                    `${rel}:${h.line} 递归删除（${h.rule}）没经 TempDir.psm1 / safe-rm.mjs，也没有「rinne-delete-ok: 理由」`,
+                );
             }
         }
         return { ok: lines.length === 0, lines };
     },
     selfTest: () => {
-        const r = caseResult([...cases(RULES), ...safeRmCases().map((c) => ({ label: `safe-rm：${c.label}`, bad: c.bad, passed: c.passed }))]);
+        const r = caseResult([
+            ...cases(RULES),
+            ...safeRmCases().map((c) => ({ label: `safe-rm：${c.label}`, bad: c.bad, passed: c.passed })),
+        ]);
         return r;
     },
     /** 逐条屏蔽规则，夹具的坏样例必须因此变红。 */
