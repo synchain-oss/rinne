@@ -282,12 +282,7 @@ export function selfTest() {
             one("docs/adr/12-demo.md", "x".repeat(adrLimit + 1)),
             (r) => r.red.length === 0 && r.warn.length === 0,
         ],
-        [
-            "预算文件缺失不在这里报",
-            false,
-            { paths: [], texts: {} },
-            (r) => r.red.length === 0 && r.warn.length === 0,
-        ],
+        ["预算文件缺失不在这里报", false, { paths: [], texts: {} }, (r) => r.red.length === 0 && r.warn.length === 0],
     ].map(([label, bad, input, expect]) => ({ label, bad, passed: expect(budgetProblems(input)) }));
     return caseResult(cases);
 }
