@@ -315,7 +315,9 @@ void printResult(const char* state, u64 blocks, u64 frames, u64 valid, u64 bad, 
     std::fflush(stdout);
 }
 
-// 写进环里的绝对位置编码：左声道低 24 位，右声道高 24 位；两个 float 都是精确的整数，读方按位拼回来
+// 写进环里的绝对位置编码：左声道低 24 位，右声道高 24 位；两个 float 都是精确的整数，读方按位拼回来。
+// 编码、解码与 readBlock 在 tests/ipc/IpcTestKit.h 和 test_peer_continuity.cpp 里各有一份：peer 是独立的可执行文件，
+// 不依赖测试头；改任何一边都必须同改另一边，否则两个方向的连续性用例会一起报 bad。
 void encodeRamp(u64 position, float& left, float& right) noexcept
 {
     left = static_cast<float>(position & 0xFFFFFFull);

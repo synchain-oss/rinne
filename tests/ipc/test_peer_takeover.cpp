@@ -37,6 +37,19 @@ RendezvousConfig configFor(Role role, PeerRig& rig)
     return config;
 }
 
+// 最后一条 "state <名字>" 行里的名字；一条都没有就是空串
+std::string lastState(const std::string& output)
+{
+    const std::size_t at = output.rfind("state ");
+    if (at == std::string::npos)
+    {
+        return {};
+    }
+    const std::size_t begin = at + 6;
+    const std::size_t end = output.find_first_of(" \r\n", begin);
+    return output.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+}
+
 } // namespace
 
 TEST_CASE("a killed output peer is taken over only after the dead-process window", "[ipc][xproc]")
@@ -119,28 +132,39 @@ TEST_CASE("two output peers elect exactly one owner", "[ipc][xproc]")
         SKIP(peerSkipReason());
     }
     PeerRig rig;
-    auto first = rig.spawn({"--role", "output", "--group", "6", "--seconds", "3"}, "race-first");
-    auto second = rig.spawn({"--role", "output", "--group", "6", "--seconds", "3"}, "race-second");
+    auto first = rig.spawn({"--role", "output", "--group", "6", "--seconds", "6"}, "race-first");
+    auto second = rig.spawn({"--role", "output", "--group", "6", "--seconds", "6"}, "race-second");
     REQUIRE(first != nullptr);
     REQUIRE(second != nullptr);
 
-    int firstCode = -1;
-    int secondCode = -1;
-    const bool firstExited = first->wait(8000, firstCode);
-    const bool secondExited = second->wait(8000, secondCode);
+    // 两个 peer 都还活着的时候判胜负：退出时的状态不可靠（先退的放槽，后退的可能赶上冲突重试而占到空槽）
+    const auto decided = [](const Spawned& peer) {
+        return peer.waitForLine("state active", 1) || peer.waitForLine("state conflict", 1);
+    };
+    const std::uint64_t deadline = rinne::util::monoNowMs() + 4000;
+    while (rinne::util::monoNowMs() < deadline && !(decided(*first) && decided(*second)))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    // 再等一个冲突重试周期，确认没有人在中途翻盘
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    const std::string firstState = lastState(first->output());
+    const std::string secondState = lastState(second->output());
     INFO(first->output());
     INFO(second->output());
+    const int actives = (firstState == "active" ? 1 : 0) + (secondState == "active" ? 1 : 0);
+    const int conflicts = (firstState == "conflict" ? 1 : 0) + (secondState == "conflict" ? 1 : 0);
+    CHECK(actives == 1);
+    CHECK(conflicts == 1);
+
+    int firstCode = -1;
+    int secondCode = -1;
+    const bool firstExited = first->wait(10000, firstCode);
+    const bool secondExited = second->wait(10000, secondCode);
     REQUIRE(firstExited);
     REQUIRE(secondExited);
     CHECK(firstCode == 0);
     CHECK(secondCode == 0);
-
-    const PeerResult firstResult = parsePeerResult(first->output());
-    const PeerResult secondResult = parsePeerResult(second->output());
-    REQUIRE(firstResult.ok);
-    REQUIRE(secondResult.ok);
-    const int actives = (firstResult.state == "active" ? 1 : 0) + (secondResult.state == "active" ? 1 : 0);
-    const int conflicts = (firstResult.state == "conflict" ? 1 : 0) + (secondResult.state == "conflict" ? 1 : 0);
-    CHECK(actives == 1);
-    CHECK(conflicts == 1);
+    CHECK(parsePeerResult(first->output()).ok);
+    CHECK(parsePeerResult(second->output()).ok);
 }

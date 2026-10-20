@@ -70,7 +70,8 @@ inline std::string peerSkipReason()
 
 constexpr u32 kBlockFrames = 480;
 
-// 位置编码：绝对位置的低 24 位放左声道、高 24 位放右声道；两边都按位拼回
+// 位置编码：绝对位置的低 24 位放左声道、高 24 位放右声道；两边都按位拼回。
+// tools/rinne_ipc_peer.cpp 里有一份同样的编码、解码与 readBlock（peer 不依赖测试头），改动须同改。
 inline void encodeRamp(u64 position, float& left, float& right) noexcept
 {
     left = static_cast<float>(position & 0xFFFFFFull);
@@ -227,7 +228,11 @@ inline PeerResult parsePeerResult(const std::string& output)
         return result;
     }
     const std::size_t end = output.find('\n', at);
-    const std::string line = output.substr(at, end == std::string::npos ? std::string::npos : end - at);
+    std::string line = output.substr(at, end == std::string::npos ? std::string::npos : end - at);
+    while (!line.empty() && line.back() == '\r')
+    {
+        line.pop_back(); // Windows 文本模式的标准输出以 CR LF 结尾
+    }
     result.state = fieldOf(line, "state");
     const bool numbers =
         parseDecimal(fieldOf(line, "blocks"), result.blocks) && parseDecimal(fieldOf(line, "frames"), result.frames) &&

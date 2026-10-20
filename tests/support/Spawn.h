@@ -164,6 +164,7 @@ public:
             ::TerminateProcess(process_, 1);
             ::WaitForSingleObject(process_, INFINITE);
         }
+        exitCode_ = 1; // 被强杀的对端不能被当成正常退出
         exited_ = true;
 #else
         if (child_ > 0)
@@ -174,6 +175,7 @@ public:
             {
             }
         }
+        exitCode_ = 128 + SIGKILL;
         exited_ = true;
 #endif
     }
