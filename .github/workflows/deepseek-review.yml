@@ -40,7 +40,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-    uses: Synchain-oss/ci-workflows/.github/workflows/deepseek-review.yml@5c5defd08f79a320261700a5c1d8696af5a20ec0 # v1.3.2
+    uses: Synchain-oss/ci-workflows/.github/workflows/deepseek-review.yml@070537914c9af4c2742b8fc5c7f63e06daef82ae # v1.3.3
     with:
       pr_number: ${{ inputs.pr_number }}
       provider: opencode-go
