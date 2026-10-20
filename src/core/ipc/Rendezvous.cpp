@@ -518,7 +518,9 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     const bool retryDue =
         !conflict || nowMs >= nextConflictRetryMs_ || nextConflictRetryMs_ - nowMs > RendezvousTiming::kConflictRetryMs;
     // 工程恢复与用户确认在原意图有效期内：不到重试的拍子也每一拍看一次休眠档，证据一攒够就拿到
-    const bool held = conflict && intentHeld(nowMs);
+    // intentHeld 每一拍都要问：它记着有效期内评估过没有，到期那一拍据此补评一次
+    const bool hold = intentHeld(nowMs);
+    const bool held = conflict && hold;
     if (!retryDue && !held)
     {
         return;
@@ -588,6 +590,7 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     }
     myCtl_ = activated.word;
     intentUntilMs_ = 0; // 原意图有效期只服务于这一次认领
+    intentEvaluated_ = false;
     lastHeartbeatMs_ = nowMs;
     labelDirty_ = true; // 新属主把自己的标签写上去
     labelOddSinceMs_ = 0;
@@ -617,6 +620,7 @@ void Rendezvous::enterConflict(u64 nowMs, bool retryDue) noexcept
 void Rendezvous::armIntentHold(u64 nowMs) noexcept
 {
     intentUntilMs_ = 0;
+    intentEvaluated_ = false;
     intentSeenMs_ = nowMs;
     if (intent_ == ClaimIntent::kManualConfirmed)
     {
@@ -632,7 +636,10 @@ void Rendezvous::armIntentHold(u64 nowMs) noexcept
 // 截止时刻定下之后不动：有效期内 ctl 变了、观察者的静止起点重新计，有效期也按原定时刻到期，不顺延，所以最长就是
 // kIntentHoldMs。时钟倒退也拉不长它：离截止还有不止 kIntentHoldMs 就当已经到期（与冲突闸门的上界同一个口径）；
 // 有效期内时钟比上一次看到的还早，也当已经到期，否则按原截止时刻算就多出了倒退的那一段。到期就清掉，之后时钟
-// 再怎么倒退也不会让它复活
+// 再怎么倒退也不会让它复活。
+// 一个例外：证据是按拍子比的，拍子稀的时候（宿主让消息线程饿了几拍）上一次评估可能还在证据攒满之前，下一拍
+// 已经过了截止时刻，休眠档就这样被错过。所以有效期内评估过的话，过期之后的第一拍按原意图补评一次（只这一次，
+// 之后照旧清掉）；补评只在时钟正常前进时给，倒退的一拍不算
 bool Rendezvous::intentHeld(u64 nowMs) noexcept
 {
     if (intentUntilMs_ == 0)
@@ -642,10 +649,13 @@ bool Rendezvous::intentHeld(u64 nowMs) noexcept
     if (nowMs >= intentSeenMs_ && nowMs < intentUntilMs_ && intentUntilMs_ - nowMs <= RendezvousTiming::kIntentHoldMs)
     {
         intentSeenMs_ = nowMs;
+        intentEvaluated_ = true;
         return true;
     }
+    const bool catchUp = intentEvaluated_ && nowMs >= intentSeenMs_ && nowMs >= intentUntilMs_;
     intentUntilMs_ = 0;
-    return false;
+    intentEvaluated_ = false;
+    return catchUp;
 }
 
 void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs)

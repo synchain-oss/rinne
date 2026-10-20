@@ -639,6 +639,61 @@ TEST_CASE("the extra dormant look inside the intent hold never delays the normal
     CHECK(roleSlot(rv, 8, Role::kInput).ctl.load() == restore.myCtl());
 }
 
+TEST_CASE("a sparse tick that lands past the intent hold still re-checks the dormant slot once", "[ipc][rendezvous]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    CountingBackend backend;
+    SegmentView rvView = openRv(backend, naming);
+    RvSegment& rv = rvOf(rvView);
+    const StreamFormat format{48000, 512, 2};
+
+    // 对端早就休眠。工程恢复的首拍在 T，有效期到 T + kIntentHoldMs。宿主让消息线程饿了几拍：下一拍在 T + 1900，
+    // 证据还不满 2 s；再下一拍在 T + 2300，已经过了截止时刻，而证据在 T + 2000 就满了。这一拍要按原意图补评一次
+    Rendezvous sleeper(configFor(Role::kInput, backend, naming.scope(), 81));
+    sleeper.setGroup(3, ClaimIntent::kManual, kT0);
+    sleeper.prepare(format, kT0);
+    sleeper.tick(kT0);
+    REQUIRE(sleeper.state() == RendezvousState::kActive);
+    sleeper.releaseResources(kT0 + 10);
+    const u64 loadAt = kT0 + 10000;
+    const u64 firstTickAt = loadAt + 3000;
+    Rendezvous restore(configFor(Role::kInput, backend, naming.scope(), 82));
+    restore.setGroup(3, ClaimIntent::kRestore, loadAt);
+    restore.prepare(format, loadAt);
+    restore.tick(firstTickAt);
+    REQUIRE(restore.state() == RendezvousState::kConflict);
+    restore.tick(firstTickAt + 1900);
+    CHECK(restore.state() == RendezvousState::kConflict);
+    REQUIRE(firstTickAt + 2300 >= firstTickAt + RendezvousTiming::kIntentHoldMs);
+    restore.tick(firstTickAt + 2300);
+    CHECK(restore.state() == RendezvousState::kActive);
+    CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == restore.myCtl());
+
+    // 补评只有一次：补评时证据还不满的话，再往后拿不到。对端在首拍之后 1 s 才休眠，证据从那时重新计
+    Rendezvous busy(configFor(Role::kInput, backend, naming.scope(), 83));
+    busy.setGroup(4, ClaimIntent::kManual, kT0);
+    busy.prepare(format, kT0);
+    busy.tick(kT0);
+    REQUIRE(busy.state() == RendezvousState::kActive);
+    Rendezvous late(configFor(Role::kInput, backend, naming.scope(), 84));
+    late.setGroup(4, ClaimIntent::kRestore, loadAt);
+    late.prepare(format, loadAt);
+    late.tick(loadAt);
+    REQUIRE(late.state() == RendezvousState::kConflict);
+    late.tick(loadAt + 1000);
+    busy.releaseResources(loadAt + 1000);
+    late.tick(loadAt + 1500);
+    late.tick(loadAt + 2300); // 补评：休眠才 1.3 s
+    CHECK(late.state() == RendezvousState::kConflict);
+    for (u64 t = loadAt + 2340; t <= loadAt + 8000; t += 40)
+    {
+        late.tick(t);
+    }
+    CHECK(late.state() == RendezvousState::kConflict);
+    CHECK(roleSlot(rv, 4, Role::kInput).ctl.load() == busy.myCtl());
+}
+
 TEST_CASE("a conflict retry does not wait out a clock that went backwards", "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();

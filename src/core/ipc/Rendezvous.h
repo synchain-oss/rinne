@@ -55,7 +55,7 @@ struct RendezvousTiming
     static constexpr u64 kDormantMs = 2000;
     static constexpr u64 kConflictRetryMs = 1000;
     // 工程恢复与用户确认的原意图有效期，也是它的上界：拿休眠槽的证据攒够 2 s，再给一个扫描间隔
-    static constexpr u64 kIntentHoldMs = kDormantMs + kHeartbeatMs;
+    static constexpr u64 kIntentHoldMs = kDormantMs + SlotObserver::kScanIntervalMs;
     static constexpr u64 kLostHeartbeatMs = 2000;
     static constexpr u64 kLostStillMs = 2000;
 };
@@ -203,6 +203,7 @@ private:
     u64 firstSampleMs_ = 0; // 观察者重置之后第一次扫描的时刻
     u64 intentUntilMs_ = 0; // 原意图有效期的截止时刻（不含），定下之后不动；0 = 没有有效期
     u64 intentSeenMs_ = 0; // 有效期内上一次看到的时钟：比它早就是时钟倒退了
+    bool intentEvaluated_ = false; // 有效期内至少评估过一次：到期那一拍据此补评
     RendezvousState state_ = RendezvousState::kUnassigned;
     LabelPayload label_;
     bool labelDirty_ = false;
