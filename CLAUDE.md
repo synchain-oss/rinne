@@ -9,7 +9,7 @@
 - 不得作为产品名：Rinne Send、Rinne Return、回环输入、回环输出、Loopback。
 - 对外回复用对方的语言；内部沟通用中文。
 - 我方提交身份只有 `DLsnows <noreply@synchain.ca>`；对外联络只有 `contact@synchain.ca`。
-- macOS 包不签名、不公证（ADR-0005）；将来引入时证书与凭据只走 secret，不落盘入库。
+- macOS 包不签名、不公证（ADR-0005）；将来引入时证书与凭据只走 secret，不落盘、不进仓库。
 
 ### 安全铁律
 
@@ -43,7 +43,7 @@
 - commit 与 PR 标题：`type(scope): 中文描述`，type 取 feat/fix/docs/test/refactor/perf/ci/build/chore/style/revert/harden/release/merge。
 - 已推送的分支不 rebase、不 force-push；不用 `--no-verify`，不跳过 hooks。坏 commit 的补救是新分支 cherry-pick 改正、关旧 PR 开新 PR。
 - GitHub 写操作（推送、开 PR、评论、合并、dispatch）只经 `scripts/maintainer/` 的包装脚本，不切换本机的 gh 登录账号。
-- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线；改到基础设施的不自合，交维护者批准。基础设施即合并判据本身（CI 与它调用的脚本、维护者脚本、hooks、gates、检查脚本、评审 bot 与共用库、合并时运行的构建与打包、格式与合规配置、工具钉版、本文件等），逐条路径以 `scripts/lib/infra-paths.mjs` 为唯一真源。
+- 子 PR review 干净后由 `scripts/maintainer/pr-merge.ps1` squash 合入主支线；改到基础设施的不自合，交维护者批准。基础设施即合并判据本身（CI 与它调用的脚本、维护者脚本、hooks、gates、检查脚本、评审 bot 与共用库、合并时运行的构建与打包、格式、规范化与合规配置、工具钉版、本文件等），逐条路径以 `scripts/lib/infra-paths.mjs` 为唯一真源。
 - 本机记录文件里的豁免、批准与外部评论处理只把决定绑定到确切的 head 并留痕，不是认证（agent 也以 DLsnows 操作）：`by: "user"` 只在维护者明确指示后写，`-Check` / `-Merge` 打印所依据的每条记录。
 - 外部贡献走 fork → `dev`，见 CONTRIBUTING。
 

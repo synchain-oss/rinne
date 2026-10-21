@@ -32,7 +32,7 @@
 # UTF-8、CMake 按 ANSI 解，探测结果就成了二次编码的乱码）。先删掉 CMakeFiles/<版本>/ 下 C 与 CXX 的编译器信息文件（只删这两个文件）
 # 重配；仍对不上，且探针里 cl 的前缀是干净的 UTF-8 文本，就把它写进构建目录里的一个 cmake 文件、经 CMAKE_PROJECT_INCLUDE 在
 # project() 之后覆盖 CMAKE_CL_SHOWINCLUDES_PREFIX，再重配；两步之后仍对不上判红。修过的构建目录 clean 一次（旧目标文件没有依赖
-# 记录）。判红而不是悄悄放过的理由：前缀对不上时 ninja 不报错，只是不记依赖，只改 .h 时 gates 会跑在旧对象上。构建后再查
+# 记录）；核对通过的前缀记在 <构建目录>/rinne-deps-prefix.txt，没有记录或记录不同的目录也 clean 一次。判红而不是悄悄放过的理由：前缀对不上时 ninja 不报错，只是不记依赖，只改 .h 时 gates 会跑在旧对象上。构建后再查
 # ninja -t deps 至少记下一条依赖，否则判红。
 # 退出码：0 通过；1 失败；2 -NoBuild 时构建目录里没有当前 HEAD 的构建；3 等构建槽超时。
 [CmdletBinding()]
@@ -176,7 +176,7 @@ function Get-NinjaDepsPrefix([string]$RulesFile) {
 
 # 探针编译的 cl 输出（Latin-1 字符串）里那条 /showIncludes 行开头、路径之前的部分；找不到返回 $null。
 function Get-ClIncludePrefix([string]$ClOutput, [string]$Header) {
-    $m = [regex]::Match($ClOutput, '(?m)^(?<p>.*?)[A-Za-z]:\\[^\r\n]*' + [regex]::Escape($Header) + '[ \t]*\r?$')
+    $m = [regex]::Match($ClOutput, '(?m)^(?<p>.*?)(?:[A-Za-z]:\\|\\\\)[^\r\n]*' + [regex]::Escape($Header) + '[ \t]*\r?$')
     $m.Success ? $m.Groups['p'].Value : $null
 }
 
@@ -194,6 +194,12 @@ function Test-DepsRecorded([string[]]$Lines) {
     $n = @($Lines | Where-Object { $_ -match ': #deps ([1-9]\d*),' }).Count
     $n ? '' : 'ninja -t deps 里没有任何一个目标记下头文件依赖：只改 .h 时含它的编译单元不会重编'
 }
+
+# 核对通过的前缀（Latin-1 字符串）的十六进制，记在构建目录的 rinne-deps-prefix.txt 里。
+function Get-DepsPrefixHex([string]$Prefix) { [BitConverter]::ToString([Text.Encoding]::Latin1.GetBytes("$Prefix")) }
+
+# 记录缺失或与这次核对通过的前缀不同，就要 clean：旧目标文件可能没有依赖记录。
+function Test-DepsNeedClean($Recorded, [string]$Verified) { $null -eq $Recorded -or $Recorded -cne $Verified }
 
 # 用一个两行的探针编译单元（写在构建目录的 logs 下）按本进程的环境跑 cl，取它的 /showIncludes 前缀（Latin-1 字符串）；
 # 失败时 $script:ProbeError 记原因并返回 $null。
@@ -329,8 +335,10 @@ function Invoke-Build([string]$Flavor) {
     if ($Launcher) { $cfg += "-DCMAKE_C_COMPILER_LAUNCHER=$Launcher", "-DCMAKE_CXX_COMPILER_LAUNCHER=$Launcher" }
     $null = Invoke-Step 'configure' 'cmake' $cfg 1800
     # 头文件依赖的前缀对不上：先清掉编译器探测结果重配，仍不行就用 cl 实测的前缀覆盖；旧目标文件没有依赖记录，clean 一次让它们全部重编
+    $needClean = $false
     $depsProblem = Get-DepsPrefixProblem
     if ($depsProblem) {
+        $needClean = $true
         Write-Host "头文件依赖前缀对不上，清掉编译器探测结果重配：$depsProblem"
         Clear-CompilerProbe
         $null = Invoke-Step 'configure-retry' 'cmake' $cfg 1800
@@ -345,8 +353,16 @@ function Invoke-Build([string]$Flavor) {
             $depsProblem = Get-DepsPrefixProblem
             if ($depsProblem) { throw [BuildStop]::new("覆盖之后头文件依赖前缀仍对不上：$depsProblem", 1) }
         }
+    }
+    # 核对通过的前缀记在构建目录里；没有记录或记录的前缀不同，说明这个目录里的目标文件可能是前缀对不上时编的（#deps 0，
+    # 改头文件不会重编，哪怕别的目标有依赖，断言也看不出来），clean 一次
+    $markerFile = Join-Path $BuildDir 'rinne-deps-prefix.txt'
+    $verified = Get-DepsPrefixHex (Get-NinjaDepsPrefix (Join-Path $BuildDir 'CMakeFiles/rules.ninja'))
+    $recorded = (Test-Path -LiteralPath $markerFile) ? (Get-Content -LiteralPath $markerFile -Raw).Trim() : $null
+    if ($needClean -or (Test-DepsNeedClean $recorded $verified)) {
         $null = Invoke-Step 'clean' 'cmake' @('--build', $BuildDir, '--config', $Config, '--target', 'clean') 1800
     }
+    Set-Content -LiteralPath $markerFile -Value $verified
     $cache = Get-Content -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt') -Raw
     $got = Get-CacheValue $cache 'RINNE_SHM_PREFIX'
     if ($got -cne $prefix) { throw [BuildStop]::new("配置后的 RINNE_SHM_PREFIX 是 $got，本次应当是 $prefix", 1) }
@@ -424,7 +440,8 @@ function Invoke-SelfTest {
     # 头文件依赖的前缀：ninja 按字节比，同一句话换了编码也对不上
     $zh = [Text.Encoding]::UTF8.GetBytes('注意: 包含文件:')
     $rules, $okLine = (ConvertFrom-Latin1 $zh), (ConvertFrom-Latin1 ($zh + [byte[]]@(32, 32)))
-    $moji = ConvertFrom-Latin1 ([Text.Encoding]::UTF8.GetBytes([Text.Encoding]::GetEncoding(936).GetString($zh)))
+    $gbk = [byte[]]@(0xD7, 0xA2, 0xD2, 0xE2, 0x3A, 0x20, 0xB0, 0xFC, 0xBA, 0xAC, 0xCE, 0xC4, 0xBC, 0xFE, 0x3A, 0x20, 0x20)   # 「注意: 包含文件:  」的 GBK 字节，不是合法 UTF-8
+    $moji = ConvertFrom-Latin1 ([Text.Encoding]::UTF8.GetBytes((ConvertFrom-Latin1 $zh)))
     & $check '依赖前缀：rules.ninja 与 cl 的输出一致（cl 多出的空白不碍事）' $false (-not (Test-ShowIncludesPrefix $rules $okLine))
     & $check '依赖前缀：二次编码的乱码前缀（别的语言或编码下配置时留下的）对不上 cl 的输出' $true (Test-ShowIncludesPrefix $moji $okLine)
     & $check '依赖前缀：英文前缀对不上中文的 cl 输出' $true (Test-ShowIncludesPrefix 'Note: including file:' $okLine)
@@ -437,11 +454,17 @@ function Invoke-SelfTest {
     & $check '依赖前缀：从 rules.ninja 按字节读出 msvc_deps_prefix（含行尾空白，不含换行）' $false ($got -ceq ($rules + '  '))
     $out = "probe.cpp`r`n$(ConvertFrom-Latin1 ($zh + [byte[]]@(32, 32)))C:\x\logs\probe.h`r`n"
     & $check '依赖前缀：从 cl 输出里取 /showIncludes 行的路径前缀' $false ((Get-ClIncludePrefix $out 'probe.h') -ceq ($rules + '  '))
+    $unc = { param($path) Get-ClIncludePrefix "x`r`n$(ConvertFrom-Latin1 $zh)  $path`r`n" 'probe.h' }
+    & $check '依赖前缀：UNC 路径与 \\?\ 长路径的 include 行也取得到' $false (((& $unc '\\srv\share\logs\probe.h') -ceq ($rules + '  ')) -and ((& $unc '\\?\C:\x\probe.h') -ceq ($rules + '  ')))
     & $check '依赖前缀：cl 输出里没有那条 include 行时取不到' $false ($null -eq (Get-ClIncludePrefix "probe.cpp`r`n" 'probe.h'))
     $ov = Get-PrefixOverride $rules
     & $check '依赖前缀覆盖：干净的 UTF-8 前缀生成 cmake 文件，C、CXX 与通用变量都设' $false ($ov -match 'foreach\(lang C CXX\)' -and $ov -match '\$\{lang\}_CL_SHOWINCLUDES_PREFIX' -and $ov.Contains((ConvertTo-Display $rules)))
-    & $check '依赖前缀覆盖：不是合法 UTF-8 的前缀（GBK 字节）不覆盖' $true ($null -eq (Get-PrefixOverride (ConvertFrom-Latin1 ([Text.Encoding]::GetEncoding(936).GetBytes('注意: 包含文件:  ')))))
+    & $check '依赖前缀覆盖：不是合法 UTF-8 的前缀（GBK 字节）不覆盖' $true ($null -eq (Get-PrefixOverride (ConvertFrom-Latin1 $gbk)))
     & $check '依赖前缀覆盖：含引号、反斜杠、美元符或空的前缀不覆盖' $true (-not ((Get-PrefixOverride 'a"b: ') -or (Get-PrefixOverride 'a\b: ') -or (Get-PrefixOverride 'a$b: ') -or (Get-PrefixOverride '  ')))
+    & $check '依赖记录：没有记录要 clean' $true (Test-DepsNeedClean $null 'AA-BB')
+    & $check '依赖记录：记录的前缀与这次的不同要 clean' $true (Test-DepsNeedClean 'AA-BB' 'AA-CC')
+    & $check '依赖记录：记录与这次相同不 clean' $false (-not (Test-DepsNeedClean 'AA-BB' 'AA-BB'))
+    & $check '依赖记录：前缀转十六进制按字节' $false ((Get-DepsPrefixHex 'a:') -ceq '61-3A')
     & $check 'ninja -t deps：有目标记下依赖' $false (-not (Test-DepsRecorded @('a.obj: #deps 3, deps mtime 1 (VALID)', '    ../a.h')))
     & $check 'ninja -t deps：全是 #deps 0（前缀对不上时的样子）' $true (Test-DepsRecorded @('a.obj: #deps 0, deps mtime 1 (VALID)', 'b.obj: #deps 0, deps mtime 2 (VALID)'))
     & $check 'ninja -t deps：什么都没输出' $true (Test-DepsRecorded @())
