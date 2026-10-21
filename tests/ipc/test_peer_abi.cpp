@@ -54,8 +54,9 @@ TEST_CASE("a foreign-abi peer publishes first and we only report the mismatch", 
                            std::to_string(kForeignVersion), "--seconds", "3"},
                           "abi-foreign-first");
     REQUIRE(peer != nullptr);
+    const bool reached = peer->waitForLine("state foreignPublished", 5000);
     INFO(peer->output());
-    REQUIRE(peer->waitForLine("state foreignPublished", 5000));
+    REQUIRE(reached);
 
     const std::string rvName = segmentName(rig.naming(), SegmentId::rendezvous());
     const std::vector<unsigned char> before = readHeaderBytes(rig.backend(), rvName, kRvHeaderBytes);
@@ -140,8 +141,9 @@ TEST_CASE("our kIpcAbi rendezvous makes a foreign-abi peer report the mismatch",
 
     auto peer = rig.spawn({"--role", "output", "--group", "4", "--abi", "2", "--seconds", "2"}, "abi-foreign-second");
     REQUIRE(peer != nullptr);
+    const bool reached = peer->waitForLine("state abiMismatch", 5000);
     INFO(peer->output());
-    REQUIRE(peer->waitForLine("state abiMismatch", 5000));
+    REQUIRE(reached);
 
     // 对方报不兼容，我们这边不受影响
     for (int i = 0; i < 10; ++i)

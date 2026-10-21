@@ -109,15 +109,17 @@ TEST_CASE("an output peer feeds an in-test input across processes", "[ipc][xproc
     PeerRig rig;
     auto peer = rig.spawn({"--role", "output", "--group", "3", "--seconds", "10"}, "continuity-forward");
     REQUIRE(peer != nullptr);
+    const bool reached = peer->waitForLine("state active", 5000);
     INFO(peer->output());
-    REQUIRE(peer->waitForLine("state active", 5000));
+    REQUIRE(reached);
 
     Rendezvous input(configFor(Role::kInput, rig));
     const u64 start = rinne::util::monoNowMs();
     input.setGroup(3, ClaimIntent::kManual, start);
     input.prepare({48000, kBlockFrames, 2}, start);
+    const bool ticked = tickUntil(input, RendezvousState::kActive, 3000);
     INFO(peer->output());
-    REQUIRE(tickUntil(input, RendezvousState::kActive, 3000));
+    REQUIRE(ticked);
     REQUIRE(input.bindings().current() != nullptr);
     REQUIRE(input.bindings().current()->ring != nullptr);
 
@@ -190,9 +192,20 @@ TEST_CASE("an in-test output feeds an input peer across processes", "[ipc][xproc
     const u64 start = rinne::util::monoNowMs();
     output.setGroup(4, ClaimIntent::kManual, start);
     output.prepare({48000, kBlockFrames, 2}, start);
+    const bool ticked = tickUntil(output, RendezvousState::kActive, 3000);
     INFO(peer->output());
-    REQUIRE(tickUntil(output, RendezvousState::kActive, 3000));
-    REQUIRE(peer->waitForLine("state active", 5000)); // 对端绑定之前写下的帧它读不到（读位置从写头开始）
+    REQUIRE(ticked);
+    // 对端绑定之前写下的帧它读不到（读位置从写头开始），所以先等它 active；等的时候本进程继续 tick，心跳不能停
+    const std::uint64_t peerDeadline = rinne::util::monoNowMs() + 5000;
+    while (rinne::util::monoNowMs() < peerDeadline && !peer->waitForLine("state active", 1))
+    {
+        output.tick(rinne::util::monoNowMs());
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!peer->waitForLine("state active", 1))
+    {
+        FAIL("input peer never reached active\npeer output:\n" << peer->output());
+    }
     REQUIRE(output.bindings().current() != nullptr);
 
     RingWriter writer;

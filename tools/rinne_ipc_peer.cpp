@@ -459,9 +459,10 @@ void readBlock(RingSegment& ring, i64& readPos, float* left, float* right, Count
                 {
                     if (binding->seq != boundSeq)
                     {
-                        // 换了绑定（换写方或换段）：写方的回收计数从头算
+                        // 换了绑定（换写方或换段）：写方的回收计数从头算，读方的位置也要重来（新环的写头可能落后于旧位置）
                         boundSeq = binding->seq;
                         writer.reset(48000);
+                        readPos = -1;
                     }
                     BoundBlock block(binding);
                     if (block.ok() && block.stillMine())

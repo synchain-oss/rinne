@@ -158,7 +158,9 @@ private:
 #endif
         const std::string name =
             "rinne-ipc-" + std::to_string(currentProcessId()) + "-" + std::to_string(fileCounter_++) + "-" + stem;
-        const std::string path = (directory / name).string();
+        // Spawn.h 按 UTF-8 解这个路径；path::string() 在 Windows 上走 ANSI 代码页，用户名带非 ASCII 字符时会对不上
+        const auto utf8 = (directory / name).u8string();
+        const std::string path(reinterpret_cast<const char*>(utf8.data()), utf8.size());
         files_.push_back(path);
         return path;
     }

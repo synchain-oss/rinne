@@ -61,8 +61,9 @@ TEST_CASE("a killed output peer is taken over only after the dead-process window
     PeerRig rig;
     auto peer = rig.spawn({"--role", "output", "--group", "5", "--seconds", "30"}, "takeover-dead");
     REQUIRE(peer != nullptr);
+    const bool reached = peer->waitForLine("state active", 5000);
     INFO(peer->output());
-    REQUIRE(peer->waitForLine("state active", 5000));
+    REQUIRE(reached);
 
     const std::string rvName = segmentName(rig.naming(), SegmentId::rendezvous());
     SegmentView rvView;
