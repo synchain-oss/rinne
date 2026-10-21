@@ -275,7 +275,7 @@ status: draft
 `tools/rinne_ipc_peer` 是只链 `rinne_core` 的对端进程（插件实例的骨架：25 Hz 消息线程跑 `Rendezvous::tick`，10 ms 的“音频”线程按绑定块读写环），`tests/ipc`（`rinne_ipc_tests`）用 `tests/support/Spawn.h` 起它。每个用例用随机的测试作用域，不碰正式段名。覆盖：
 
 - 数据连续：Output 写出的位置编码斜坡，另一个进程的 Input 读到的每一帧都能解码回自己的位置，两个方向各一条用例；对端的 pid 出现在本进程对其槽的观察样本里。
-- abi：别的 abi 先发布会合段时，本进程只报 `abiMismatch`、不写那份段（逐字节核对）；本进程先发布时，`--abi 2` 的对端同样判 `abiMismatch`。两个方向都要看见失配，不能两边都停在 `searching`。
+- abi：别的 abi 先发布会合段时，本进程只报 `abiMismatch`、不写那份段（逐字节核对）；本进程先发布时，`--abi 2` 的对端同样判 `abiMismatch`。两个方向都要看见失配，不能两边都停在等待配对（`waitingPrepare`、`opening`）。
 - 死进程接管：杀掉持有 Output 的 peer，死进程窗口（5 s）走完之前不接管，之后本进程的同组 Output 接管。
 - 竞争：两个 Output peer 抢同一个 (组, 角色)，恰好一个胜出。
 - 残段：`[shm-leftover]` 按正式作用域探测本构建前缀的全部段名，一个都不许存在；它与跨进程用例共用 `RESOURCE_LOCK rinne_formal_shm`，互斥执行。

@@ -106,7 +106,11 @@ TEST_CASE("a killed output peer is taken over only after the dead-process window
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
     UNSCOPED_INFO("local final state=" << static_cast<int>(local.state()));
-    REQUIRE(activeAt != 0); // 超时：贴出 local 的状态与 peer 的最后输出
+    if (activeAt == 0)
+    {
+        FAIL("no takeover before the deadline; local state=" << static_cast<int>(local.state()) << "\npeer output:\n"
+                                                             << peer->output());
+    }
     const u64 delay = activeAt - killAt;
     INFO("takeover delay ms=" << delay);
     CHECK(delay >= 4750);

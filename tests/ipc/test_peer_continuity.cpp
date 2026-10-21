@@ -192,6 +192,7 @@ TEST_CASE("an in-test output feeds an input peer across processes", "[ipc][xproc
     output.prepare({48000, kBlockFrames, 2}, start);
     INFO(peer->output());
     REQUIRE(tickUntil(output, RendezvousState::kActive, 3000));
+    REQUIRE(peer->waitForLine("state active", 5000)); // 对端绑定之前写下的帧它读不到（读位置从写头开始）
     REQUIRE(output.bindings().current() != nullptr);
 
     RingWriter writer;
