@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 跨进程连续性：一个真实的 peer 进程与本进程里的 Rendezvous 在同一个测试作用域里对通。
-//   正向：peer 是 Output，写位置编码；本进程 Input 读，逐帧解回绝对位置。读到 96000 帧或 6 s 超时为止，valid 至少 kMinFlowFrames，bad 必须为 0。
-//   反向：本进程 Output 按墙钟配速写；peer 是 Input，它的 result 行要报 valid >= kMinFlowFrames 且 bad = 0。
+//   正向：peer 是 Output，写位置编码；本进程 Input 读，逐帧解回绝对位置。读到 96000 帧或 6 s 超时为止，valid 至少
+//   kMinFlowFrames，bad 必须为 0。 反向：本进程 Output 按墙钟配速写；peer 是 Input，它的 result 行要报 valid >=
+//   kMinFlowFrames 且 bad = 0。
 // 计时全是真实时钟（跨进程只能如此）；每个等待都有超时，失败信息里贴 peer 的原话。
 #include <catch2/catch_test_macros.hpp>
 
