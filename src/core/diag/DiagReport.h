@@ -7,7 +7,9 @@
 // 隐私靠结构保证，再靠清洗兜底：
 //   - 输入里没有任何能装路径、用户名、主机名或原始轨道名的字段。轨道名只以 32 位散列的形式交进来，输出只有
 //     same / different / unknown 加自己那一端的 8 位十六进制散列；
-//   - 唯一的自由文本是产品、宿主、系统这几个短串，写出前过 sanitizeText：含路径分隔符、冒号、@、~、%
+//   -
+//   唯一的自由文本是产品、宿主、系统这几个短串（调用方只许交宿主与系统的名称和版本，不许交任何用户或机器自己起的名字：
+//     不带分隔符的裸名字清洗不出来，这一层只是兜底），写出前过 sanitizeText：含路径分隔符、冒号、@、~、%
 //   的片段连同它之后的内容一起丢掉（路径里的目录名可以带空格），
 //     只留 ASCII 字母数字与 . _ + - ( ) 和空格，长度封顶；
 //   - 事件是编码加两个数，名字来自固定表，不带自由文本。
@@ -64,6 +66,8 @@ enum class EventCode : std::uint8_t
 };
 // 事件码数量：固定名字表的长度
 inline constexpr std::size_t kEventCodeCount = 19;
+static_assert(static_cast<std::size_t>(EventCode::kNonrealtime) + 1 == kEventCodeCount,
+              "新增事件码要同步改常数与名字表");
 
 // 码的名字（固定表，ASCII）；越界返回 "unknown"
 const char* eventName(EventCode code) noexcept;

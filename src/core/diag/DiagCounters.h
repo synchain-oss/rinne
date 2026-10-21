@@ -24,7 +24,7 @@ struct DiagCountersSnapshot
     std::uint64_t zeroLen = 0; // 0 样本的调用
     std::uint64_t overMax = 0; // 块长超过 prepare 声明的值
     std::uint64_t bypassed = 0; // 宿主旁路的块
-    std::uint32_t maxNSeen = 0;
+    std::uint32_t maxNSeen = 0; // 与 nMax 同一个计数；诊断文本两处都列，是为了保持 v1 格式的字段齐全
     std::uint32_t nMin = 0; // 没见过任何非零块时为 0
     std::uint32_t nMax = 0;
     std::uint32_t hist[kNsamplesBuckets] = {};
