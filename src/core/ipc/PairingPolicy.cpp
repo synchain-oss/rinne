@@ -176,7 +176,8 @@ RepairPlan repairInput(const PairingSelf& self, const GroupViews& groups) noexce
     {
         const u32 group = static_cast<u32>(i) + 1;
         const GroupView& view = groups[i];
-        if (group != self.heldGroup && view.input.isDormant() && view.input.pid == self.pid && !view.output.isLive())
+        if (group != self.heldGroup && view.input.isDormant() && view.input.pid == self.pid &&
+            (view.output.isFree() || (view.output.pid == self.pid && !view.output.isLive())))
         {
             return {group, true};
         }
@@ -197,12 +198,13 @@ RepairPlan repairOutput(const PairingSelf& self, const GroupViews& groups) noexc
     // 没有可认领的组：本进程的休眠 Output 槽需要用户确认才能接管
     for (std::size_t i = 0; i < groups.size(); ++i)
     {
+        const u32 group = static_cast<u32>(i) + 1;
         const GroupView& view = groups[i];
-        // 对面的 Input 端要么空、要么也是本进程的：不能接管之后配到别的进程的 Input 上
-        if (view.output.isDormant() && view.output.pid == self.pid &&
+        // 修复要离开当前组；对面的 Input 端要么空、要么也是本进程的：不能接管之后配到别的进程的 Input 上
+        if (group != self.heldGroup && view.output.isDormant() && view.output.pid == self.pid &&
             (view.input.isFree() || view.input.pid == self.pid))
         {
-            return {static_cast<u32>(i) + 1, true};
+            return {group, true};
         }
     }
     return {0, false};
