@@ -16,7 +16,8 @@ namespace
 using namespace rinne::diag;
 
 // 桶计数与总块数同宽：高采样率小块长时 32 位的桶约 16 天就回绕，总数却不回绕
-static_assert(sizeof(DiagCountersSnapshot::hist[0]) == sizeof(DiagCountersSnapshot::blocksTotal), "直方图桶要和总块数同宽");
+static_assert(sizeof(DiagCountersSnapshot::hist[0]) == sizeof(DiagCountersSnapshot::blocksTotal),
+              "直方图桶要和总块数同宽");
 
 std::uint64_t histogramTotal(const DiagCountersSnapshot& snapshot)
 {
