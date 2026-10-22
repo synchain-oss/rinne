@@ -14,7 +14,11 @@
 // 只认字面写法。不覆盖的形态：命令名或选项放进变量或拼接出来（& $cmd -Recurse、"r" + "m"、$opts = '-Recurse'）、经别名或包装函数
 // 间接调用、别的语言的递归删除接口（C / C++ 的 remove_all、deleteRecursively、Java、Go 等，靠评审把关）、
 // 不在脚本类文件里的删除（.md 里的命令示例不算）。
-// 自测：每条规则至少一个只有它能命中的坏样例、几个正例；mutationCheck 逐条屏蔽规则，自测必须因此变红。
+// PowerShell 的块注释（<# … #>）整块不算代码：开始的判据是「行首空白再接 <#」，缩进的 <# 也是块注释的开始；
+// 结束标记 #> 之后的代码照常扫（同一行里 #> 后面还有代码时不跳过后半行）。
+// Node 的 rm / rmSync / rmdir / rmdirSync 只看这一次调用的括号里有没有 recursive：别的语句里的 recursive 不算。
+// 自测：每条规则至少一个只有它能命中的坏样例、几个正例；mutationCheck 逐条屏蔽规则，自测必须因此变红；
+// 另外把块注释的开始判据与 rm 的前瞻窗口改回旧写法，对应的正例也必须因此变红。
 
 import path from "node:path";
 import { caseResult, readText, trackedFiles } from "../lib/check-kit.mjs";
@@ -56,7 +60,46 @@ const FIXED_LITERALS = FIXED_DIRS.map(
         ),
 );
 
-/** 每条规则：name、适用的扩展名、判据 (l, lines, i, ext) => boolean；l 是拼好续行的那一条语句。 */
+/**
+ * 从第 i 行里某个 rm 调用的位置起，括号配平到第几行（跨行算）；配不平返回 null。
+ * 只看这一次调用的括号里：别处的 recursive 不算（fs.rmSync(file) 后面几行的 mkdirSync(…, { recursive: true }) 不该被判红）。
+ */
+function callEnd(lines, i, from) {
+    let depth = 0;
+    for (let k = i; k < lines.length && k <= i + 8; k++) {
+        const text = k === i ? lines[k].slice(from) : lines[k];
+        for (const ch of text) {
+            if (ch === "(") depth++;
+            else if (ch === ")") {
+                depth--;
+                if (depth <= 0) return k;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * 这一次 rm 调用里有没有 recursive。
+ * 现在的判据：括号配平时只看配平范围（别处的 recursive 不算）；配不平就退回往后八行（宁可多报不漏报）。
+ * wide 是旧写法：往后四行都算，只给 mutation-check 用。
+ */
+function rmCallHasRecursive(l, lines, i, names, wide) {
+    const m = l.match(new RegExp(`(^|[^\\w$])(${names})\\(`));
+    if (!m) return false;
+    const from = m.index + m[1].length;
+    if (wide) {
+        // 旧写法：这一行往后四行都算
+        return lines.slice(i, i + 4).some((x) => /\brecursive\b/.test(x));
+    }
+    const end = callEnd(lines, i, from);
+    const last = end === null ? i + 8 : end;
+    const win = [];
+    for (let k = i; k <= last && k < lines.length; k++) win.push(k === i ? lines[k].slice(from) : lines[k]);
+    return win.some((x) => /\brecursive\b/.test(x));
+}
+
+/** 每条规则：name、适用的扩展名、判据 (l, lines, i, ext, wide) => boolean；l 是拼好续行的那一条语句。 */
 export const RULES = [
     {
         name: "powershell-remove-then-recurse",
@@ -91,14 +134,14 @@ export const RULES = [
     {
         name: "node-rm-recursive",
         exts: JS,
-        test: (l, lines, i) =>
-            /(^|[^\w$])(rm|rmSync)\(/.test(l) && lines.slice(i, i + 4).some((x) => /\brecursive\b/.test(x)),
+        test: (l, lines, i, ext, wide) =>
+            /(^|[^\w$])(rm|rmSync)\(/.test(l) && rmCallHasRecursive(l, lines, i, "rm|rmSync", wide),
     },
     {
         name: "node-rmdir-recursive",
         exts: JS,
-        test: (l, lines, i) =>
-            /(^|[^\w$])(rmdir|rmdirSync)\(/.test(l) && lines.slice(i, i + 4).some((x) => /\brecursive\b/.test(x)),
+        test: (l, lines, i, ext, wide) =>
+            /(^|[^\w$])(rmdir|rmdirSync)\(/.test(l) && rmCallHasRecursive(l, lines, i, "rmdir|rmdirSync", wide),
     },
     {
         name: "fixed-dir-call-not-whitelisted",
@@ -156,6 +199,12 @@ export const RULES = [
     },
 ];
 
+/**
+ * PowerShell 块注释的开始判据：行首空白再接 <#。缩进的 <# 也是块注释的开始（函数里的帮助块很常见）。
+ * 自测与 mutation-check 都要能把它改坏，所以由参数传进去。
+ */
+export const BLOCK_OPEN = /^\s*<#/;
+
 const extOf = (rel) => (path.basename(rel) === "CMakeLists.txt" ? "cmake" : path.extname(rel).slice(1).toLowerCase());
 // 注释符按语言分：shell / yml 里 case 的兜底分支 `*) …` 以 * 开头，不能当注释
 const CLIKE = /^\s*(\/\/|\/\*|\*)/;
@@ -169,18 +218,22 @@ const COMMENT = {
 for (const e of JS) COMMENT[e] = CLIKE;
 const isComment = (l, ext) => (COMMENT[ext] ?? HASH).test(l);
 
-/** 续行拼成一条语句：PowerShell 行尾反引号，shell / yml 行尾反斜杠。 */
-function statement(lines, i, ext) {
+/** 续行拼成一条语句：PowerShell 行尾反引号，shell / yml 行尾反斜杠。first 是这一行里真正是代码的那一段。 */
+function statement(lines, i, ext, first = lines[i]) {
     const cont = PS.includes(ext) ? "`" : SH.includes(ext) ? "\\" : null;
-    let s = lines[i];
-    for (let k = i; cont && k < i + 5 && lines[k].trimEnd().endsWith(cont) && k + 1 < lines.length; k++) {
+    let s = first;
+    for (
+        let k = i;
+        cont && k < i + 5 && (k === i ? first : lines[k]).trimEnd().endsWith(cont) && k + 1 < lines.length;
+        k++
+    ) {
         s = s.trimEnd().slice(0, -1) + " " + lines[k + 1].trim();
     }
     return s;
 }
 
-/** 一份文本里的违规：[{ line, rule }]。rules 缺省是全部规则（mutationCheck 传去掉一条的）。 */
-export function scanText(rel, text, rules = RULES) {
+/** 一份文本里的违规：[{ line, rule }]。rules 缺省是全部规则（mutationCheck 传去掉一条的）；blockOpen 是块注释的开始判据；wide 是 rm 的旧前瞻窗口；keepAfterBlockEnd 是块注释结束标记之后还扫不扫。 */
+export function scanText(rel, text, rules = RULES, blockOpen = BLOCK_OPEN, wide = false, keepAfterBlockEnd = true) {
     if (ALLOWED.has(rel)) return [];
     const pending = PENDING.get(rel);
     const ext = extOf(rel);
@@ -191,20 +244,30 @@ export function scanText(rel, text, rules = RULES) {
     const out = [];
     let inBlock = false; // PowerShell 的 <# … #> 多行注释
     lines.forEach((l, i) => {
+        let code = l; // 这一行里真正是代码的那一段（块注释里 #> 之后的代码要照常扫）
         if (PS.includes(ext)) {
             if (inBlock) {
-                if (l.includes("#>")) inBlock = false;
-                return;
-            }
-            if (/^s*<#/.test(l) && !l.includes("#>")) {
-                inBlock = true;
-                return;
+                const end = l.indexOf("#>");
+                if (end < 0) return; // 整行都在块注释里
+                inBlock = false;
+                code = keepAfterBlockEnd ? l.slice(end + 2) : "";
+            } else {
+                const open = l.match(blockOpen);
+                if (open) {
+                    const end = l.indexOf("#>", open[0].length);
+                    if (end < 0) {
+                        inBlock = true;
+                        return;
+                    }
+                    code = keepAfterBlockEnd ? l.slice(end + 2) : "";
+                }
             }
         }
-        if (isComment(l, ext)) return;
-        if (pending && pending.test(l)) return; // 只放行清单里写明的那一行，文件里新增的递归删除照判
-        const stmt = statement(lines, i, ext);
-        const hits = use.filter((r) => r.test(stmt, lines, i, ext));
+        if (!code.trim()) return;
+        if (isComment(code, ext)) return;
+        if (pending && pending.test(code)) return; // 只放行清单里写明的那一行，文件里新增的递归删除照判
+        const stmt = statement(lines, i, ext, code);
+        const hits = use.filter((r) => r.test(stmt, lines, i, ext, wide));
         if (!hits.length) return;
         const marker = [i, i - 1].find((k) => k >= 0 && !usedMarkers.has(k) && EXEMPT.test(lines[k]));
         if (marker !== undefined) usedMarkers.add(marker);
@@ -280,6 +343,14 @@ const good = [
     ["a.mjs", " * rm -rf 写在块注释里不算"],
     ["a.mjs", "safeRmSync(dir, { recursive: true });"],
     ["a.py", "os.remove(path)"],
+    // 缩进的块注释：块里的说明文字不是代码，放行
+    [
+        "a.ps1",
+        "function Get-X {\n    <#\n    用法：先 git clean -f，再 Remove-Item -LiteralPath $d -Recurse\n    #>\n    Get-Y\n}",
+    ],
+    ["a.ps1", "    <#\n    Remove-Item -LiteralPath $d -Recurse -Force\n    #>\n"],
+    // rm 调用后面几行的 recursive 不算这一次调用的（别处的 mkdirSync 用了 recursive）
+    ["a.mjs", "fs.rmSync(file);\nfs.mkdirSync(dir, { recursive: true });"],
     ["a.sh", 'rm -f "$file"'],
     ["a.sh", 'rm -f -v "$file"'],
     ["a.sh", "git clean -n"],
@@ -298,11 +369,11 @@ const good = [
     ["scripts/lib/safe-rm.mjs", "fs.rmSync(dir, { recursive: true });"],
 ];
 
-/** 对一组夹具求自测用例；rules 是被试的规则集（正常是全部，mutationCheck 里少一条）。 */
-function cases(rules) {
+/** 对一组夹具求自测用例；rules 是被试的规则集（正常是全部，mutationCheck 里少一条）；blockOpen 与 wide 是被改坏的判据。 */
+function cases(rules, blockOpen = BLOCK_OPEN, wide = false, keepAfterBlockEnd = true) {
     const out = [];
     for (const [rule, rel, text] of fx) {
-        const hits = scanText(rel, text, rules);
+        const hits = scanText(rel, text, rules, blockOpen, wide, keepAfterBlockEnd);
         out.push({
             label: `坏样例判红：${rule}（${rel}：${text.split("\n")[0].slice(0, 40)}）`,
             bad: true,
@@ -313,12 +384,16 @@ function cases(rules) {
         out.push({
             label: `正例放行：${rel}：${text.split("\n")[0].slice(0, 40)}`,
             bad: false,
-            passed: scanText(rel, text, rules).length === 0,
+            passed: scanText(rel, text, rules, blockOpen, wide, keepAfterBlockEnd).length === 0,
         });
     }
     // 豁免要写理由、写在注释里、离得近、一条只盖一处
     const bad = (label, rel, text) =>
-        out.push({ label: `豁免无效仍判红：${label}`, bad: true, passed: scanText(rel, text, rules).length > 0 });
+        out.push({
+            label: `豁免无效仍判红：${label}`,
+            bad: true,
+            passed: scanText(rel, text, rules, blockOpen, wide, keepAfterBlockEnd).length > 0,
+        });
     bad("没写理由", "a.mjs", "// rinne-delete-ok:\nfs.rmSync(d, { recursive: true });");
     bad("理由太短", "a.mjs", "// rinne-delete-ok: 123456789\nfs.rmSync(d, { recursive: true });");
     bad(
@@ -341,6 +416,14 @@ function cases(rules) {
         "a.mjs",
         "fs.rmSync(a, { recursive: true }); // rinne-delete-ok: 本进程新建的目录，删前核对过真实路径\nfs.rmSync(b, { recursive: true });",
     );
+    // 块注释结束标记后面的代码不算注释，照常判
+    bad("块注释结束标记后面还有代码", "a.ps1", "<# 说明 #> Remove-Item -LiteralPath $d -Recurse -Force");
+    bad(
+        "块注释结束标记后面还有代码（缩进的开始）",
+        "a.ps1",
+        "    <# 说明 #> Remove-Item -LiteralPath $d -Recurse -Force",
+    );
+    bad("块注释里结束标记之后换行的代码", "a.ps1", "<#\n说明\n#>\nRemove-Item -LiteralPath $d -Recurse -Force");
     return out;
 }
 
@@ -369,13 +452,25 @@ export default {
         ]);
         return r;
     },
-    /** 逐条屏蔽规则，夹具的坏样例必须因此变红。 */
+    /**
+     * 逐条屏蔽规则，夹具的坏样例必须因此变红；另外把两条判据改回旧写法（块注释的开始判据、rm 的前瞻窗口），
+     * 对应的正例必须因此变红。
+     */
     mutationCheck: () => {
         const lines = [];
         for (const r of RULES) {
             const rest = RULES.filter((x) => x !== r);
             if (cases(rest).every((c) => c.passed)) lines.push(`屏蔽规则 ${r.name} 后自测仍是绿的`);
         }
+        // 块注释的开始判据改回旧的写法（漏了反斜杠）：缩进块注释里的正例要变红
+        const oldBlock = cases(RULES, /^s*<#/).filter((c) => !c.passed);
+        if (!oldBlock.length) lines.push("块注释的开始判据改回旧写法后自测仍是绿的");
+        // rm 的前瞻窗口改回旧的写法（看后面四行）：别处的 recursive 不该算这一次调用的
+        const oldWindow = cases(RULES, undefined, true).filter((c) => !c.passed);
+        if (!oldWindow.length) lines.push("rm 的前瞻窗口改回旧写法后自测仍是绿的");
+        // 块注释结束标记之后的代码不看（整行当注释）：那几个坏样例要变红
+        const skipAfterEnd = cases(RULES, undefined, false, false).filter((c) => !c.passed);
+        if (!skipAfterEnd.length) lines.push("块注释结束标记之后的代码不看时自测仍是绿的");
         return { ok: lines.length === 0, lines };
     },
 };
