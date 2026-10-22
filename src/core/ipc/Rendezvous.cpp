@@ -517,8 +517,14 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     // 冲突重试每 1 s 一次；时钟倒退得比一个重试间隔还多时不多等，立刻重试（与 tick 的退避同一个口径）
     const bool retryDue =
         !conflict || nowMs >= nextConflictRetryMs_ || nextConflictRetryMs_ - nowMs > RendezvousTiming::kConflictRetryMs;
-    // 工程恢复与用户确认在原意图有效期内：不到重试的拍子也每一拍看一次休眠档，证据一攒够就拿到
-    // intentHeld 每一拍都要问：它记着有效期内评估过没有，到期那一拍据此补评一次
+    // 工程恢复与用户确认在原意图有效期内：不到重试的拍子也每一拍看一次休眠档，证据一攒够就拿到。
+    // intentHeld 不论冲突与否每一拍都问，不能写成只在冲突时问的短路：
+    // - 不在冲突的一拍是按原意图的完整认领（effective 就是 intent_，各档都判），落在有效期内就算评估过。首拍之后
+    //   宿主就卡过了截止时刻（工程加载、用户刚点确认时都常见），过期后的那次补评全靠这个记号；只在冲突时问，首拍
+    //   不记，补评就丢了；
+    // - 到期补评被不在冲突的一拍用掉也无害：那一拍在不早于截止时刻的时间、按原意图对同一份样本完整判一遍，各档的
+    //   年龄只随判定时刻增长，补评拿得到的它都拿得到；之后照旧只剩冲突重试，有效期不因此延长；
+    // - 推进 intentSeenMs_ 也是有意的：有效期内哪一拍看到时钟倒退，都当已经到期。
     u64 holdEvalMs = nowMs;
     const bool hold = intentHeld(nowMs, holdEvalMs);
     const bool held = conflict && hold;
