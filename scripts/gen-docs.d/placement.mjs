@@ -31,6 +31,9 @@ export const RULES = {
     "ascii-only": "画里只有可打印 ASCII",
 };
 
+/** 换行统一成 LF：CRLF 检出的 \r 不是画的一部分，不能让 ascii-only 把每一行都判成不可打印，也不能漏进生成的围栏。 */
+const lf = (text) => text.replace(/\r\n?/g, "\n");
+
 /** 框体行：去掉行首空白后以 + 或 | 开头。 */
 const FRAME = /^[+|]/;
 /** 上下边框行：整行只有 + 与 -，且以 + 收尾（这种行的右端 + 位置唯一）。 */
@@ -79,7 +82,8 @@ function ownBoundary(f, right) {
  * 等宽判据。返回问题字符串数组（空数组 = 齐）。每条问题以 [判据名] 开头。
  * 口径：框体行左竖线在第 0 列；所有框体行的框右边界在同一列 C；顶行与底行长度 = C + 1；全是可打印 ASCII。
  */
-export function placementProblems(text) {
+export function placementProblems(raw) {
+    const text = lf(raw);
     const out = [];
     text.split("\n").forEach((line, i) => {
         const bad = [...line].find((ch) => ch < " " || ch > "~");
@@ -109,8 +113,8 @@ export function placementProblems(text) {
 }
 
 /** 渲染出的块正文：包一层不带 info string 的代码围栏。 */
-export function renderPlacement(text) {
-    const body = text.replace(/\n+$/, "");
+export function renderPlacement(raw) {
+    const body = lf(raw).replace(/\n+$/, "");
     return `\`\`\`\n${body}\n\`\`\``;
 }
 
@@ -173,11 +177,20 @@ export function selfTestCases() {
     add("没有框体行", "One mixer channel - inserts (Cubase shown)\n", ["frame-present"]);
     add("画里混进了宽字符", GOOD.replace("any plugin", "any plugin →"), ["ascii-only"]);
     add("画里混进了制表符", GOOD.replace("| ..  ...", "|\t..  ..."), ["ascii-only"]);
+    const crlf = GOOD.replace(/\n/g, "\r\n");
+    add("CRLF 换行的画与 LF 的画一样没有问题", crlf, []);
+    add("CRLF 换行的画里混进宽字符照样判红", crlf.replace("any plugin", "any plugin →"), ["ascii-only"]);
     const fenced = renderPlacement(GOOD);
     cases.push({
         label: "渲染出的块是不带 info string 的围栏，围栏里逐字是真源",
         bad: false,
         passed: fenced.startsWith("```\n") && fenced.endsWith("\n```") && fenced.includes(GOOD),
+        expect: [],
+    });
+    cases.push({
+        label: "CRLF 的画渲染出的块没有回车符，与 LF 的画逐字相同",
+        bad: false,
+        passed: renderPlacement(crlf) === fenced && !renderPlacement(crlf).includes("\r"),
         expect: [],
     });
     const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.passed && c.expect.includes(r)));

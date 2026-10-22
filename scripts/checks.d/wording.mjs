@@ -19,9 +19,15 @@
 //   fader-after       「推子后」，以及英文里 Rinne Output 与 after the fader / post-fader 同句
 //   whole-channel     「整条通道」「the whole channel」
 //   auto-pairing      「自动配对」「auto-pairing」「automatically pair」
-// 另有两条不属于禁用词家族的判据：
+// 另有三条不属于禁用词家族的判据：
 //   scope-closed      仓内跟踪的文本文件必须登记在扫描范围或排除清单里，新增的用户面文档不会悄悄漏扫
 //   scope-parse       扫描范围里的 JSON / JS 词条文件读不出来，就没法按字符串值扫描，直接判红
+//   scope-data        范围表 docs/wording-scope.json 自己的形状：没有未知字段、路径不重复、同一路径不既在扫描范围又在排除清单、
+//                     排除清单每组写明理由、核心用户面文件不得挪出扫描范围
+//
+// 扫描范围与排除清单是数据，放在 docs/wording-scope.json，不放在本文件里：本文件在基础设施路径之内，
+// 如果范围表写在这里，以后每新增一份面向用户的文档都要改本文件、都不能自合。数据文件不在基础设施清单里，
+// 新增文档只需要在它里面登记一行；排除清单的每一组都要写明理由，改动会出现在 PR 的 diff 里被评审看到。
 //
 // 扫描单位是「文本里真正会显示给用户的字符串」，按文件类型取：
 //   Markdown / 文本  整个文件
@@ -43,7 +49,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { caseResult, readText, trackedFiles } from "../lib/check-kit.mjs";
+import { ROOT, caseResult, readText, tempRepo, trackedFiles } from "../lib/check-kit.mjs";
 
 /** 判据名 → 说明。 */
 export const RULES = {
@@ -64,66 +70,124 @@ export const RULES = {
     "auto-pairing": "不写自动配对、auto-pairing、automatically pair",
     "scope-closed": "仓内跟踪的文本文件必须在扫描范围或排除清单里，扫描范围里至少有一个文件存在",
     "scope-parse": "扫描范围里的 JSON / JS 词条文件必须读得出来",
+    "scope-data":
+        "docs/wording-scope.json 的形状：字段齐全且没有未知字段，路径合法且不重复，同一路径不既在扫描范围又在排除清单，排除每组有理由，核心用户面文件留在扫描范围",
 };
 
-/** 扫描范围：用户面文本。web/i18n/ 下的词条文件在运行时扫全部 .js（见 scopedFiles）。 */
-export const SCOPE = [
-    "README.md",
-    "README.zh-CN.md",
-    "CHANGELOG.md",
-    "SECURITY.md",
-    "docs/USER_GUIDE.md",
-    "docs/USER_GUIDE.zh-CN.md",
-    "docs/INSTALL.md",
-    "docs/KNOWN_ISSUES.md",
-    "docs/RELEASE.md",
-    "docs/DAW_COMPATIBILITY.md",
-    "docs/hard-rules.i18n.json",
-    "docs/daw-tiers.json",
-    "docs/media/placement.txt",
-];
+/** 范围表：扫描范围与排除清单的数据文件（相对仓根）。 */
+export const SCOPE_FILE = "docs/wording-scope.json";
+
+/** 核心用户面文件：任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，这是它的底线）。 */
+export const REQUIRED_SCOPE = ["README.md", "README.zh-CN.md", "docs/hard-rules.i18n.json"];
+
+const TOP_KEYS = ["version", "scope", "excluded"];
+const GROUP_KEYS = ["reason", "paths"];
+
+/** 一个路径是否合法：仓内相对路径、正斜杠、不含通配与上级目录；目录以 / 结尾。返回问题说明或 null。 */
+function pathProblem(p, { dirOk }) {
+    if (typeof p !== "string" || !p.trim()) return "不是非空字符串";
+    if (p.includes("\\")) return "含反斜杠，路径一律写正斜杠";
+    if (/^(?:\/|[A-Za-z]:|\.\/)/.test(p)) return "不是相对仓根的路径";
+    if (p.split("/").includes("..") || p.includes("//")) return "含上级目录或空段";
+    if (/[*?[\]{}]/.test(p)) return "含通配符：范围表只认逐字路径，通配会悄悄什么都匹配不到";
+    if (p.endsWith("/") && !dirOk) return "扫描范围里只能写文件，不能写目录";
+    return null;
+}
 
 /**
- * 排除清单：这些文件里有合法的命中，或者根本不是写给用户看的文字。目录以 / 结尾，按前缀匹配。
- * 范围闭合判据（scope-closed）要求每个跟踪的文本文件不在 SCOPE 就在这里。
+ * 范围表的形状问题；返回问题字符串数组，每条以 [scope-data] 开头。
+ * 逐项核对：顶层与排除组里没有未知字段；路径合法；路径在全表里不重复；同一路径不既在扫描范围又在排除清单；
+ * 扫描范围里的文件不落在排除目录之下（会被悄悄跳过）；排除每组有理由；核心用户面文件留在扫描范围。
  */
-export const EXCLUDED = [
-    // 内部架构说明与桥契约，合法地引用禁用词本身（「整条通道」「界面文字里不出现「自动配对」」）
-    "docs/ARCHITECTURE.md",
-    "docs/UI_BRIDGE.md",
-    "docs/contracts/",
-    "docs/contract-changes/",
-    "docs/adr/",
-    "docs/validation/",
-    "docs/stable-links.txt",
-    // 给开发者与维护者看的构建与职责说明，不是面向用户的文字
-    "docs/BUILDING.md",
-    "docs/MAINTAINERS.md",
-    // 声明登记表：strong 短语栏里列的就是被管控的强断言本身
-    "docs/claims.json",
-    // 维护者规则：禁言清单本身就列着这些词
-    "CLAUDE.md",
-    "CONTRIBUTING.md",
-    ".github/",
-    // 脚本、测试、构建与第三方：不是用户面文字
-    "scripts/",
-    "src/",
-    "tests/",
-    "tools/",
-    "upstream/",
-    "third_party/",
-    "LICENSES/",
-    "web/fonts/",
-    "web/js/",
-    "web-preview/",
-    "THIRD-PARTY-NOTICES.md",
-    "requirements-tools.txt",
-    "CMakeLists.txt",
-];
+export function scopeTableProblems(data) {
+    const out = [];
+    const bad = (m) => out.push(`[scope-data] ${SCOPE_FILE} ${m}`);
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+        bad("的内容不是对象");
+        return out;
+    }
+    for (const k of Object.keys(data)) if (!TOP_KEYS.includes(k)) bad(`有未知字段「${k}」`);
+    if (data.version !== 1) bad(`的 version 应为 1（现为 ${JSON.stringify(data.version)}）`);
+    const scope = [];
+    if (!Array.isArray(data.scope) || !data.scope.length) bad("缺非空的 scope 数组");
+    else
+        data.scope.forEach((p, i) => {
+            const why = pathProblem(p, { dirOk: false });
+            if (why) bad(`的 scope 第 ${i + 1} 项「${p}」${why}`);
+            else scope.push(p);
+        });
+    const excluded = [];
+    if (!Array.isArray(data.excluded)) bad("缺 excluded 数组");
+    else
+        data.excluded.forEach((g, i) => {
+            const where = `的 excluded 第 ${i + 1} 组`;
+            if (!g || typeof g !== "object" || Array.isArray(g)) return bad(`${where}不是对象`);
+            for (const k of Object.keys(g)) if (!GROUP_KEYS.includes(k)) bad(`${where}有未知字段「${k}」`);
+            if (typeof g.reason !== "string" || !g.reason.trim()) bad(`${where}缺理由 reason`);
+            if (!Array.isArray(g.paths) || !g.paths.length) return bad(`${where}缺非空的 paths 数组`);
+            g.paths.forEach((p) => {
+                const why = pathProblem(p, { dirOk: true });
+                if (why) bad(`${where}的路径「${p}」${why}`);
+                else excluded.push(p);
+            });
+        });
+    const seen = new Set();
+    for (const p of scope) {
+        if (seen.has(p)) bad(`的 scope 里「${p}」重复`);
+        seen.add(p);
+    }
+    const seenEx = new Set();
+    for (const p of excluded) {
+        if (seenEx.has(p)) bad(`的 excluded 里「${p}」重复`);
+        seenEx.add(p);
+    }
+    for (const p of seen) if (seenEx.has(p)) bad(`里「${p}」既在 scope 又在 excluded，该扫还是不该扫要二选一`);
+    for (const p of seen) {
+        const dir = excluded.find((e) => e.endsWith("/") && p.startsWith(e));
+        if (dir) bad(`的 scope 里「${p}」落在排除目录「${dir}」之下，会被悄悄跳过`);
+    }
+    for (const p of REQUIRED_SCOPE) if (!seen.has(p)) bad(`的 scope 里缺核心用户面文件「${p}」，它们不许挪出扫描范围`);
+    return out;
+}
+
+/**
+ * 解析范围表文本。返回 { scope, excluded, problems }：形状有问题时 scope 与 excluded 仍尽量给出合法的部分，
+ * 调用方看到 problems 非空就该判红，不要在残缺的表上继续扫。
+ */
+export function parseScopeTable(text) {
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        return { scope: [], excluded: [], problems: [`[scope-data] ${SCOPE_FILE} 不是合法 JSON：${e.message}`] };
+    }
+    const problems = scopeTableProblems(data);
+    const scope = Array.isArray(data?.scope) ? data.scope.filter((p) => typeof p === "string") : [];
+    const excluded = Array.isArray(data?.excluded)
+        ? data.excluded.flatMap((g) => (Array.isArray(g?.paths) ? g.paths.filter((p) => typeof p === "string") : []))
+        : [];
+    return { scope, excluded, problems };
+}
+
+/** 读仓根下的范围表；文件不在时 problems 里写明。 */
+export function loadScopeTable(root = ROOT) {
+    const text = readText(path.join(root, SCOPE_FILE));
+    if (text === null) return { scope: [], excluded: [], problems: [`[scope-data] 缺 ${SCOPE_FILE}`] };
+    return parseScopeTable(text);
+}
+
+const TABLE = loadScopeTable(ROOT);
+/** 扫描范围：用户面文本。web/i18n/ 下的词条文件在运行时扫全部 .js（见 scopedFiles）。数据在 docs/wording-scope.json。 */
+export const SCOPE = TABLE.scope;
+/**
+ * 排除清单：这些文件里有合法的命中，或者根本不是写给用户看的文字。目录以 / 结尾，按前缀匹配。
+ * 范围闭合判据（scope-closed）要求每个跟踪的文本文件不在 SCOPE 就在这里。数据在 docs/wording-scope.json。
+ */
+export const EXCLUDED = TABLE.excluded;
 
 /** 文件在排除清单里（目录按前缀匹配）。 */
-export function isExcluded(file) {
-    return EXCLUDED.some((e) => (e.endsWith("/") ? file.startsWith(e) : file === e));
+export function isExcluded(file, excluded = EXCLUDED) {
+    return excluded.some((e) => (e.endsWith("/") ? file.startsWith(e) : file === e));
 }
 
 /** 词条文件：web/i18n/ 下的 .js。 */
@@ -458,12 +522,12 @@ export const PATTERN_KEYS = FAMILIES.flatMap((f) => [
 ]);
 
 /**
- * 判据的实现。files 是 { 路径: 文本 }。返回问题数组（每行以 [家族名] 开头）。
+ * 判据的实现。files 是 { 路径: 文本 }，excluded 是排除清单（默认取范围表）。返回问题数组（每行以 [家族名] 开头）。
  */
-export function wordingProblems({ files }) {
+export function wordingProblems({ files, excluded = EXCLUDED }) {
     const out = [];
     for (const [file, text] of Object.entries(files)) {
-        if (isExcluded(file)) continue;
+        if (isExcluded(file, excluded)) continue;
         let units;
         try {
             units = proseUnits(file, text ?? "");
@@ -486,15 +550,15 @@ const isCandidate = (file) =>
     /\.(?:md|txt)$/.test(file) || (file.startsWith("docs/") && file.endsWith(".json")) || isI18nFile(file);
 
 /**
- * 范围闭合：tracked 是仓内跟踪的文件，exists 是 SCOPE 里实际存在的文件数。
- * 每个候选文件不在 SCOPE 就得在 EXCLUDED；SCOPE 里一个文件都没读到也判红（等于什么都没扫）。
+ * 范围闭合：tracked 是仓内跟踪的文件，existing 是扫描范围里实际存在的文件数。
+ * 每个候选文件不在扫描范围就得在排除清单；扫描范围里一个文件都没读到也判红（等于什么都没扫）。
  */
-export function scopeProblems({ tracked, scope = SCOPE, existing }) {
+export function scopeProblems({ tracked, scope = SCOPE, excluded = EXCLUDED, existing }) {
     const out = [];
     for (const f of tracked)
-        if (isCandidate(f) && !scope.includes(f) && !isI18nFile(f) && !isExcluded(f))
+        if (isCandidate(f) && !scope.includes(f) && !isI18nFile(f) && !isExcluded(f, excluded))
             out.push(
-                `[scope-closed] ${f} 既不在扫描范围也不在排除清单：面向用户的文字登记进 SCOPE，否则登记进 EXCLUDED 并写明理由`,
+                `[scope-closed] ${f} 既不在扫描范围也不在排除清单：面向用户的文字登记进 ${SCOPE_FILE} 的 scope，否则登记进 excluded 并写明理由`,
             );
     if (existing === 0) out.push("[scope-closed] 扫描范围里一个文件都不存在，等于什么都没扫");
     return out;
@@ -503,7 +567,7 @@ export function scopeProblems({ tracked, scope = SCOPE, existing }) {
 /** 扫描范围内的用户面文本；web/i18n/ 下的词条文件全部扫。 */
 export function scopedFiles(root) {
     const files = {};
-    for (const rel of SCOPE) {
+    for (const rel of loadScopeTable(root).scope) {
         const t = readText(path.join(root, rel));
         if (t !== null) files[rel] = t;
     }
@@ -522,7 +586,10 @@ export function scopedFiles(root) {
 
 export async function selfTest() {
     const ruleOfLine = (l) => /^\[([^\]]+)\]/.exec(l)?.[1];
-    const lint = (text, file = "README.md") => wordingProblems({ files: { [file]: text } });
+    // 自测用固定的排除清单，不依赖真实范围表的内容：真实表以后增删条目不该让自测变红
+    const TEST_SCOPE = ["docs/media/placement.txt", ...REQUIRED_SCOPE];
+    const TEST_EXCLUDED = ["docs/ARCHITECTURE.md", "docs/only-in-test.md", "scripts/", "src/"];
+    const lint = (text, file = "README.md") => wordingProblems({ files: { [file]: text }, excluded: TEST_EXCLUDED });
     const fires = (text, rule, file) => lint(text, file).some((l) => ruleOfLine(l) === rule);
     /** 每个禁用家族、每个子模式一个坏样例；[文本, 家族, 文件?]。 */
     const samples = [
@@ -662,15 +729,18 @@ export async function selfTest() {
     cases.push({
         label: "新增的用户面文档没登记：范围闭合判红",
         bad: true,
-        passed: scopeProblems({ tracked: [...tracked, "docs/FAQ.md"], existing: 3 }).some(
-            (l) => ruleOfLine(l) === "scope-closed" && l.includes("docs/FAQ.md"),
-        ),
+        passed: scopeProblems({
+            tracked: [...tracked, "docs/FAQ.md"],
+            scope: TEST_SCOPE,
+            excluded: TEST_EXCLUDED,
+            existing: 3,
+        }).some((l) => ruleOfLine(l) === "scope-closed" && l.includes("docs/FAQ.md")),
         expect: ["scope-closed"],
     });
     cases.push({
         label: "扫描范围里一个文件都不存在：判红",
         bad: true,
-        passed: scopeProblems({ tracked, existing: 0 }).some(
+        passed: scopeProblems({ tracked, scope: TEST_SCOPE, excluded: TEST_EXCLUDED, existing: 0 }).some(
             (l) => ruleOfLine(l) === "scope-closed" && l.includes("什么都没扫"),
         ),
         expect: ["scope-closed"],
@@ -678,9 +748,282 @@ export async function selfTest() {
     cases.push({
         label: "登记过的与排除清单里的文件：范围闭合放行",
         bad: false,
-        passed: scopeProblems({ tracked, existing: 3 }).length === 0,
+        passed: scopeProblems({ tracked, scope: TEST_SCOPE, excluded: TEST_EXCLUDED, existing: 3 }).length === 0,
         expect: [],
     });
+
+    // 范围表自己的形状（scope-data）：每个子判据一个坏样例，外加正例
+    const goodTable = () => ({
+        version: 1,
+        scope: [...TEST_SCOPE],
+        excluded: [{ reason: "不是用户面文字", paths: ["docs/ARCHITECTURE.md", "scripts/"] }],
+    });
+    const edited = (edit) => {
+        const t = goodTable();
+        edit(t);
+        return t;
+    };
+    const badTable = (label, data, fragment) =>
+        cases.push({
+            label: `范围表：${label}`,
+            bad: true,
+            passed: scopeTableProblems(data).some((l) => ruleOfLine(l) === "scope-data" && l.includes(fragment)),
+            expect: ["scope-data"],
+        });
+    cases.push({
+        label: "范围表：形状齐全的表放行",
+        bad: false,
+        passed: scopeTableProblems(goodTable()).length === 0,
+        expect: [],
+    });
+    cases.push({
+        label: "范围表：解析出的扫描范围与排除清单逐项对得上",
+        bad: false,
+        passed: (() => {
+            const t = parseScopeTable(JSON.stringify(goodTable()));
+            return (
+                t.problems.length === 0 &&
+                t.scope.join() === TEST_SCOPE.join() &&
+                t.excluded.join() === "docs/ARCHITECTURE.md,scripts/"
+            );
+        })(),
+        expect: [],
+    });
+    badTable("内容不是对象", [], "内容不是对象");
+    badTable(
+        "顶层有未知字段",
+        edited((t) => (t.extra = 1)),
+        "未知字段「extra」",
+    );
+    badTable(
+        "排除组里有未知字段",
+        edited((t) => (t.excluded[0].note = "x")),
+        "未知字段「note」",
+    );
+    badTable(
+        "version 不是 1",
+        edited((t) => (t.version = 2)),
+        "version 应为 1",
+    );
+    badTable(
+        "scope 不是数组",
+        edited((t) => (t.scope = "README.md")),
+        "缺非空的 scope 数组",
+    );
+    badTable(
+        "excluded 不是数组",
+        edited((t) => (t.excluded = {})),
+        "缺 excluded 数组",
+    );
+    badTable(
+        "scope 里的路径重复",
+        edited((t) => t.scope.push("README.md")),
+        "scope 里「README.md」重复",
+    );
+    badTable(
+        "excluded 里的路径跨组重复",
+        edited((t) => t.excluded.push({ reason: "又一组", paths: ["scripts/"] })),
+        "excluded 里「scripts/」重复",
+    );
+    badTable(
+        "同一路径既在 scope 又在 excluded",
+        edited((t) => t.excluded[0].paths.push("docs/media/placement.txt")),
+        "既在 scope 又在 excluded",
+    );
+    badTable(
+        "scope 里的文件落在排除目录之下",
+        edited((t) => t.excluded[0].paths.push("docs/media/")),
+        "落在排除目录「docs/media/」之下",
+    );
+    badTable(
+        "排除组没有理由",
+        edited((t) => (t.excluded[0].reason = "  ")),
+        "缺理由",
+    );
+    badTable(
+        "排除清单里的一组不是对象",
+        edited((t) => t.excluded.push("docs/x.md")),
+        "第 2 组不是对象",
+    );
+    badTable(
+        "排除清单里的路径含上级目录",
+        edited((t) => t.excluded[0].paths.push("../x.md")),
+        "的路径「../x.md」",
+    );
+    badTable(
+        "排除组没有 paths",
+        edited((t) => (t.excluded[0].paths = [])),
+        "缺非空的 paths",
+    );
+    badTable(
+        "scope 里写了目录",
+        edited((t) => t.scope.push("docs/media/")),
+        "不能写目录",
+    );
+    badTable(
+        "路径含上级目录",
+        edited((t) => t.scope.push("../x.md")),
+        "上级目录",
+    );
+    badTable(
+        "路径含反斜杠",
+        edited((t) => t.scope.push("docs\\x.md")),
+        "反斜杠",
+    );
+    badTable(
+        "路径是绝对路径",
+        edited((t) => t.scope.push("/etc/x.md")),
+        "不是相对仓根",
+    );
+    badTable(
+        "路径含通配符",
+        edited((t) => t.scope.push("docs/*.md")),
+        "通配符",
+    );
+    badTable(
+        "核心用户面文件被挪出 scope",
+        edited((t) => (t.scope = t.scope.filter((p) => p !== "README.zh-CN.md"))),
+        "缺核心用户面文件「README.zh-CN.md」",
+    );
+    cases.push({
+        label: "范围表：不是合法 JSON",
+        bad: true,
+        passed: parseScopeTable("{bad").problems.some((l) => ruleOfLine(l) === "scope-data" && l.includes("合法 JSON")),
+        expect: ["scope-data"],
+    });
+    cases.push({
+        label: "范围表：文件不在",
+        bad: true,
+        passed: loadScopeTable(path.join(ROOT, "no-such-dir-for-selftest")).problems.some(
+            (l) => ruleOfLine(l) === "scope-data" && l.includes(`缺 ${SCOPE_FILE}`),
+        ),
+        expect: ["scope-data"],
+    });
+
+    // 排除清单与扫描范围取自参数，不取模块里的默认值：只在传入的清单里排除的文件不扫，
+    // 只在真实范围表里排除的文件照样扫、照样要求登记
+    cases.push({
+        label: "排除清单取自参数：只在传入清单里排除的文件放行",
+        bad: false,
+        passed: lint("干声随整条通道进环。", "docs/only-in-test.md").length === 0,
+        expect: [],
+    });
+    cases.push({
+        label: "排除清单取自参数：传入清单里没有的文件照样扫",
+        bad: true,
+        passed: fires("它处理整条通道。", "whole-channel", "docs/BUILDING.md"),
+        expect: ["whole-channel"],
+    });
+    cases.push({
+        label: "范围闭合取自参数：只在传入清单里排除的文件不要求登记",
+        bad: false,
+        passed:
+            scopeProblems({
+                tracked: ["docs/only-in-test.md"],
+                scope: TEST_SCOPE,
+                excluded: TEST_EXCLUDED,
+                existing: 3,
+            }).length === 0,
+        expect: [],
+    });
+    cases.push({
+        label: "范围闭合取自参数：传入清单里没有的文件要求登记",
+        bad: true,
+        passed: scopeProblems({
+            tracked: ["docs/BUILDING.md"],
+            scope: TEST_SCOPE,
+            excluded: TEST_EXCLUDED,
+            existing: 3,
+        }).some((l) => ruleOfLine(l) === "scope-closed" && l.includes("docs/BUILDING.md")),
+        expect: ["scope-closed"],
+    });
+
+    // 整条流程（读范围表 → 扫范围 → 范围闭合）在临时仓里走一遍
+    {
+        const goodText = JSON.stringify({
+            version: 1,
+            scope: ["README.md", "README.zh-CN.md", "docs/hard-rules.i18n.json"],
+            excluded: [{ reason: "不是用户面文字", paths: ["docs/wording-scope.json", "docs/BUILDING.md"] }],
+        });
+        const repo = (files) => {
+            const r = tempRepo();
+            for (const [rel, body] of Object.entries(files)) r.write(rel, body);
+            r.git(["add", "-A"]);
+            return r;
+        };
+        const base = {
+            "README.md": "Hello.\n",
+            "README.zh-CN.md": "你好。\n",
+            "docs/hard-rules.i18n.json": '{"en":"ok"}',
+            "docs/wording-scope.json": goodText,
+        };
+        const flows = [];
+        try {
+            const runOn = (files) => {
+                const r = repo(files);
+                flows.push(r);
+                return wordingRun(r.dir);
+            };
+            const ok = runOn({ ...base, "docs/BUILDING.md": "它处理整条通道。\n" });
+            cases.push({
+                label: "整条流程：范围表齐全、排除的文件里有禁用词、其余干净：通过",
+                bad: false,
+                passed: ok.ok && ok.lines.length === 0,
+                expect: [],
+            });
+            const dirty = runOn({ ...base, "README.md": "It is zero latency.\n" });
+            cases.push({
+                label: "整条流程：范围内的文件里有禁用词：判红",
+                bad: true,
+                passed: dirty.lines.some((l) => ruleOfLine(l) === "zero-latency"),
+                expect: ["zero-latency"],
+            });
+            // 范围取自范围表而不是模块里的默认清单：表里新登记的文件要被扫到
+            const extraTable = JSON.stringify({
+                ...JSON.parse(goodText),
+                scope: [...JSON.parse(goodText).scope, "docs/EXTRA.md"],
+            });
+            const extra = runOn({
+                ...base,
+                "docs/wording-scope.json": extraTable,
+                "docs/EXTRA.md": "It is zero latency.\n",
+            });
+            cases.push({
+                label: "整条流程：范围表里新登记的文件被扫到：里面的禁用词判红",
+                bad: true,
+                passed: extra.lines.some((l) => ruleOfLine(l) === "zero-latency" && l.includes("docs/EXTRA.md")),
+                expect: ["zero-latency"],
+            });
+            const unreg = runOn({ ...base, "docs/FAQ.md": "Hello.\n" });
+            cases.push({
+                label: "整条流程：新增的文档没登记进范围表：范围闭合判红",
+                bad: true,
+                passed: unreg.lines.some((l) => ruleOfLine(l) === "scope-closed" && l.includes("docs/FAQ.md")),
+                expect: ["scope-closed"],
+            });
+            const broken = runOn({
+                ...base,
+                "docs/wording-scope.json": JSON.stringify({ ...JSON.parse(goodText), extra: 1 }),
+            });
+            cases.push({
+                label: "整条流程：范围表本身不成形：只报范围表，不在残缺的表上继续扫",
+                bad: true,
+                passed:
+                    !broken.ok && broken.lines.length > 0 && broken.lines.every((l) => ruleOfLine(l) === "scope-data"),
+                expect: ["scope-data"],
+            });
+            const { "docs/wording-scope.json": _gone, ...noTable } = base;
+            const missing = runOn(noTable);
+            cases.push({
+                label: "整条流程：缺范围表：判红",
+                bad: true,
+                passed: !missing.ok && missing.lines.some((l) => ruleOfLine(l) === "scope-data" && l.includes("缺")),
+                expect: ["scope-data"],
+            });
+        } finally {
+            for (const r of flows) r.cleanup();
+        }
+    }
 
     // 每个家族的每个子模式都被某个坏样例命中
     const uncovered = PATTERN_KEYS.filter((k) => !fired.has(k));
@@ -705,26 +1048,36 @@ function unitsOf(text, file = "README.md") {
     return proseUnits(file, text).flatMap((u) => scanUnit(u));
 }
 
+/**
+ * 对仓根 root 跑一遍：先核对范围表，范围表不成形就只报它（不在残缺的表上继续扫，免得一串连带的 scope-closed 把真正的原因淹掉），
+ * 否则扫范围内的文本并核对范围闭合。自测用临时仓调它，所以不依赖全局状态。
+ */
+export function wordingRun(root) {
+    const table = loadScopeTable(root);
+    if (table.problems.length) return { ok: false, lines: table.problems };
+    const files = scopedFiles(root);
+    const problems = wordingProblems({ files, excluded: table.excluded });
+    let tracked = [];
+    try {
+        tracked = trackedFiles(root);
+    } catch {
+        // 不在 git 仓里时没法核对闭合，只扫已有的范围
+    }
+    problems.push(
+        ...scopeProblems({
+            tracked,
+            scope: table.scope,
+            excluded: table.excluded,
+            existing: Object.keys(files).filter((f) => table.scope.includes(f)).length,
+        }),
+    );
+    return { ok: problems.length === 0, lines: problems };
+}
+
 export default {
     name: "wording",
     group: "docs",
     inputs: [],
-    run(ctx) {
-        const files = scopedFiles(ctx.root);
-        const problems = wordingProblems({ files });
-        let tracked = [];
-        try {
-            tracked = trackedFiles(ctx.root);
-        } catch {
-            // 不在 git 仓里时没法核对闭合，只扫已有的范围
-        }
-        problems.push(
-            ...scopeProblems({
-                tracked,
-                existing: Object.keys(files).filter((f) => SCOPE.includes(f)).length,
-            }),
-        );
-        return { ok: problems.length === 0, lines: problems };
-    },
+    run: (ctx) => wordingRun(ctx.root),
     selfTest,
 };

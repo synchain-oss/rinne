@@ -1,21 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 强声明登记与证据（docs-truth 的一部分）。数据是 docs/claims.json：每条声明登记它的 strong 短语（肯定式的强断言）、
-// hedge 短语（免责或「按设计」这类限定语）、evidence（证据）与 pending（证据产物尚未到位）。
+// 强声明登记与证据（docs-truth 的一部分）。数据是 docs/claims.json：每条声明登记它的 strong 短语（肯定式的强断言，
+// 写成完整的断言，不写功能名这类宽词）、hedge 短语（免责或「按设计」这类限定语）、evidence（证据）、pending（证据产物
+// 尚未到位）与可选的 hedgeWhilePending（宿主兼容这类声明：证据没到位时，直述也要求同一句带 hedge）。
 //
 // 判据：
 //   claims-shape        claims.json 是合法 JSON；每条有 id / strong / hedge / evidence；id 唯一且为小写连字符；strong 非空；
-//                       strong / hedge 的每个短语都是能编译的、不会匹配任意句子的正则；scope 里的每一项都是扫描范围内的文件
+//                       strong / hedge 的每个短语都是能编译的、不会匹配任意句子的正则；hedge 与 strong 不自相匹配
+//                       （hedge 的典型命中本身含 strong，或 strong 的典型命中本身满足 hedge，免责就形同虚设）；
+//                       hedgeWhilePending 是布尔值，为真时 hedge 非空；scope 里的每一项都是扫描范围内的文件
+//   host-claim-evidence 宿主兼容类声明（hedgeWhilePending）的 evidence 只认真机的 validation 记录：构建 CI 通过证明不了宿主可用
 //   evidence-kind       每条 evidence / pending 的类型是 validation: / issue: / ci: / golden: 之一，形态可解析；
 //                       validation 的文件名通配（*）只允许写在 pending 里（记录的日期要等上机才知道）
 //   evidence-satisfied  evidence 里的每一条都成立：validation 文件存在；issue 是 https URL；ci 是仓内存在的 job 名；
 //                       golden 的谓词为真（目标文件不存在时按 pending 处理，不在这里判红）
 //   pending-listed      证据产物尚不存在时允许直述，并把待办列出来（INFO 行，不判红）
-//   strong-needs-hedge  一条声明既无成立的 evidence 也无 pending 时，它的 strong 短语只能出现在同一句里含 hedge 短语的句子上
-//   unregistered-absolute 用户面文本里出现绝对化强断言句式、又没有被任何已登记声明的 strong 覆盖时判红
+//   strong-needs-hedge  一条声明没有成立的 evidence，又没有 pending（或有 pending 但声明了 hedgeWhilePending）时，
+//                       它的 strong 短语只能出现在同一句里含 hedge 短语的句子上
+//   unregistered-absolute 用户面文本里出现绝对化强断言句式、又没有被任何已登记声明的 strong 覆盖时判红；
+//                       覆盖按命中片段算：声明的 strong 命中要与绝对化句式的命中片段重叠，同一句里别处另有 strong 不算覆盖
 //
 // 证据待到位的口径：pending 里的产物还没进仓时，直述允许、只列待办；产物已在仓内但谓词为假，说明声明被证据反驳，判红。
 // 这样今天不会因为证据产物还没造出来就判红，产物一落地又立刻被它自己的数据约束。
+// 例外是声明了 hedgeWhilePending 的宿主兼容类声明：真机记录还没到位就不能直述，同一句要带 hedge；
+// 记录到位后把它从 pending 移到 evidence，才解除这条要求。
 //
 // 判据名见 RULES，报错行以 [名字] 开头。自测的每个坏样例写明它必须触发哪几条判据，并核对每条判据都至少被一个坏样例
 // 点名：删掉任何一条判据，点名它的坏样例就变红。
@@ -32,7 +40,15 @@ import os from "node:os";
 import path from "node:path";
 import { ROOT, caseResult, readText } from "../lib/check-kit.mjs";
 import { selfTestCases as paramsTableCases } from "../gen-docs.d/params-table.mjs";
-import { SCOPE, negatedAt, proseUnits, quotedSpans, scopedFiles, sentences as plainSentences } from "./wording.mjs";
+import {
+    SCOPE,
+    loadScopeTable,
+    negatedAt,
+    proseUnits,
+    quotedSpans,
+    scopedFiles,
+    sentences as plainSentences,
+} from "./wording.mjs";
 import { parseWorkflow } from "./workflows.mjs";
 
 export { SCOPE, scopedFiles };
@@ -41,13 +57,16 @@ export const CLAIMS_FILE = "docs/claims.json";
 /** 判据名 → 说明。 */
 export const RULES = {
     "claims-shape":
-        "claims.json 的形状：id 唯一且为小写连字符，每条有 id / strong / hedge / evidence，strong 非空，短语是可用的正则，scope 在扫描范围内",
+        "claims.json 的形状：id 唯一且为小写连字符，每条有 id / strong / hedge / evidence，strong 非空，短语是可用的正则，hedge 与 strong 不自相匹配，hedgeWhilePending 是布尔值且为真时 hedge 非空，scope 在扫描范围内",
+    "host-claim-evidence":
+        "宿主兼容类声明（hedgeWhilePending）的 evidence 只认 validation 真机记录，ci 与 golden 证明不了宿主可用",
     "evidence-kind":
         "每条 evidence / pending 的类型与形态可解析（validation: / issue: / ci: / golden:），通配只允许 pending",
     "evidence-satisfied": "evidence 里的每一条都成立",
     "pending-listed": "证据产物尚未到位时列出待办（INFO，不判红）",
-    "strong-needs-hedge": "既无成立 evidence 也无 pending 的声明，strong 短语只能出现在含 hedge 的同一句里",
-    "unregistered-absolute": "绝对化强断言必须被某条已登记声明的 strong 覆盖",
+    "strong-needs-hedge":
+        "没有成立 evidence 的声明，若也没有 pending（或声明了 hedgeWhilePending），strong 短语只能出现在含 hedge 的同一句里",
+    "unregistered-absolute": "绝对化强断言必须被某条已登记声明的 strong 命中片段覆盖，同一句里别处的 strong 不算",
 };
 
 /**
@@ -98,8 +117,129 @@ export function phraseProblem(phrase) {
     return null;
 }
 
-/** scope 里的一项是否在扫描范围内（固定清单，或 web/i18n/ 下的词条文件）。 */
-const inScope = (f) => typeof f === "string" && (SCOPE.includes(f) || /^web\/i18n\/[^/]+\.js$/.test(f));
+/**
+ * 从短语（正则源码）生成几个能匹配它的样例串，用来测 hedge 与 strong 是否自相匹配。
+ * 只认本检查的短语会用到的子集：字面、转义、字符类、分组、分支、量词（取最少与多一次两种）；
+ * 生成的串必须真的匹配短语本身才保留，认不出的写法产不出样例，等于不参与自相匹配检查。
+ */
+export function phraseSamples(source, cap = 24) {
+    let i = 0;
+    const n = source.length;
+    const cross = (a, b) => a.flatMap((x) => b.map((y) => x + y)).slice(0, cap);
+    /** 字符类 [...]：取一个真的落在类里的字符。 */
+    const classSample = () => {
+        let j = i + 1;
+        while (j < n && source[j] !== "]") j += source[j] === "\\" ? 2 : 1;
+        const body = source.slice(i, j + 1);
+        i = j + 1;
+        let re;
+        try {
+            re = new RegExp(body);
+        } catch {
+            return [];
+        }
+        const literal = [...body.slice(1, -1).replace(/\\(.)/g, "$1")].filter((c) => c !== "^" && c !== "-");
+        const hit = [...literal, "a", "0", " ", "x", "-"].find((c) => re.test(c));
+        return hit === undefined ? [] : [hit];
+    };
+    const atom = () => {
+        const c = source[i];
+        if (c === "(") {
+            i++;
+            const look = /^\?(?:<[=!]|[=!])/.exec(source.slice(i, i + 4));
+            if (look) i += look[0].length;
+            else if (source.startsWith("?:", i)) i += 2;
+            else if (source[i] === "?") i = source.indexOf(">", i) + 1;
+            const inner = alt();
+            if (source[i] === ")") i++;
+            return look ? [""] : inner;
+        }
+        if (c === "[") return classSample();
+        if (c === "\\") {
+            const e = source[i + 1];
+            i += 2;
+            if (e === "b" || e === "B") return [""];
+            if (e === "d") return ["0"];
+            if (e === "w" || e === "S" || e === "D") return ["a"];
+            if (e === "s") return [" "];
+            if (e === "W") return ["-"];
+            if (e === "n") return ["\n"];
+            if (e === "t") return ["\t"];
+            return [e ?? ""];
+        }
+        i++;
+        if (c === "^" || c === "$") return [""];
+        if (c === ".") return ["a"];
+        return [c];
+    };
+    /** 量词：返回要试的重复次数（最少一次与多一次），没有量词返回 null。 */
+    const quant = () => {
+        const c = source[i];
+        let range = null;
+        if (c === "?" || c === "*") range = [0, 1];
+        else if (c === "+") range = [1, 2];
+        else if (c === "{") {
+            const m = /^\{(\d+)(?:(,)(\d*))?\}/.exec(source.slice(i));
+            if (!m) return null;
+            const lo = Number(m[1]);
+            const hi = m[2] ? (m[3] === "" ? lo + 1 : Number(m[3])) : lo;
+            i += m[0].length - 1;
+            range = [lo, Math.min(hi, lo + 1)];
+        }
+        if (!range) return null;
+        i++;
+        if (source[i] === "?") i++; // 惰性量词
+        return range;
+    };
+    const seq = () => {
+        let acc = [""];
+        while (i < n && source[i] !== "|" && source[i] !== ")") {
+            const a = atom();
+            const r = quant();
+            const reps = r ? [...new Set(r)] : [1];
+            acc = cross(
+                acc,
+                reps.flatMap((k) => a.map((x) => x.repeat(k))),
+            );
+        }
+        return acc;
+    };
+    function alt() {
+        const out = [...seq()];
+        while (source[i] === "|") {
+            i++;
+            out.push(...seq());
+        }
+        return out.slice(0, cap);
+    }
+    try {
+        const re = new RegExp(source, "i");
+        return alt().filter((t) => re.test(t));
+    } catch {
+        return [];
+    }
+}
+
+/** hedge 与 strong 是否自相匹配：一边的典型命中本身就满足另一边。返回说明；没有问题返回 null。 */
+export function selfMatchProblem(strong, hedge) {
+    const s = new RegExp(strong, "i");
+    const h = new RegExp(hedge, "i");
+    const fromHedge = phraseSamples(hedge).find((t) => s.test(t));
+    if (fromHedge !== undefined) return `hedge「${hedge}」的典型命中「${fromHedge}」本身就含有 strong「${strong}」`;
+    const fromStrong = phraseSamples(strong).find((t) => h.test(t));
+    if (fromStrong !== undefined) return `strong「${strong}」的典型命中「${fromStrong}」本身就满足 hedge「${hedge}」`;
+    return null;
+}
+
+/** 一个短语在文本里的全部命中区间 [起, 止)。 */
+export function phraseSpans(phrase, text) {
+    return [...text.matchAll(new RegExp(phrase, "gi"))]
+        .filter((m) => m[0].length > 0)
+        .map((m) => [m.index, m.index + m[0].length]);
+}
+
+/** scope 里的一项是否在扫描范围内（范围表里的文件，或 web/i18n/ 下的词条文件）。 */
+const inScope = (f, scope = SCOPE) => typeof f === "string" && (scope.includes(f) || /^web\/i18n\/[^/]+\.js$/.test(f));
 
 /**
  * 把一条 evidence / pending 拆成 { kind, body }；形态不对时返回 null。
@@ -179,16 +319,21 @@ export function evalGolden(root, body) {
             return false;
     }
 }
-/** 点路径取值：a.b[0].c 与 a.b.0.c 都支持。 */
+/**
+ * 点路径取值：a.b[0].c 与 a.b.0.c 都支持；a.b[name=x].c 在数组 a.b 里选 name 等于 x 的那一项
+ * （按字段值选，不依赖项在数组里的顺序，数组加一项、换个顺序都不会让谓词指到别的项）。
+ */
 function resolvePath(data, expr) {
-    const parts = expr
-        .replace(/\[(\d+)\]/g, ".$1")
-        .split(".")
-        .filter(Boolean);
+    const parts = [];
+    for (const m of expr.matchAll(/\[(\d+)\]|\[([^\]=\s]+)=([^\]\s]+)\]|([^.[\]]+)/g))
+        parts.push(m[4] !== undefined ? m[4] : m[1] !== undefined ? m[1] : { field: m[2], value: m[3] });
     let cur = data;
     for (const p of parts) {
         if (cur === null || cur === undefined || typeof cur !== "object") return undefined;
-        cur = cur[p];
+        if (typeof p === "string") cur = cur[p];
+        else if (Array.isArray(cur))
+            cur = cur.find((x) => x && typeof x === "object" && String(x[p.field]) === p.value);
+        else return undefined;
     }
     return cur;
 }
@@ -279,10 +424,11 @@ export function evidenceState(root, item, jobs, { glob = false } = {}) {
 }
 
 /**
- * 判据的实现。data 是 claims.json 解析后的对象；files 是 { 路径: 文本 }；root 是仓根（golden 与 ci 查表用）。
+ * 判据的实现。data 是 claims.json 解析后的对象；files 是 { 路径: 文本 }；root 是仓根（golden 与 ci 查表用）；
+ * scope 是扫描范围（范围表里的文件清单，默认取仓里的范围表）。
  * 返回 { errors, infos }；errors 判红，infos 只列出待办。
  */
-export function claimProblems({ data, files, root, jobs = ciJobs(root) }) {
+export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: scanScope = SCOPE }) {
     const errors = [];
     const infos = [];
     const add = (rule, message) => {
@@ -321,11 +467,36 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root) }) {
                     unusable.add(c);
                 }
             }
+        // hedge 与 strong 自相匹配：免责句式本身含有强断言（或强断言本身满足免责），hedge 就不起作用
+        for (const strong of Array.isArray(c?.strong) ? c.strong : [])
+            for (const hedge of Array.isArray(c?.hedge) ? c.hedge : []) {
+                if (phraseProblem(strong) || phraseProblem(hedge)) continue;
+                const why = selfMatchProblem(strong, hedge);
+                if (why) add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的${why}，hedge 形同虚设`);
+            }
+        if (c?.hedgeWhilePending !== undefined) {
+            if (typeof c.hedgeWhilePending !== "boolean")
+                add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的 hedgeWhilePending 不是布尔值`);
+            else if (c.hedgeWhilePending && !(Array.isArray(c.hedge) && c.hedge.length))
+                add(
+                    "claims-shape",
+                    `${CLAIMS_FILE} 的条目「${where}」声明了 hedgeWhilePending 却没有 hedge 短语，没有句子能满足它`,
+                );
+            // 宿主兼容类声明：构建通过证明不了宿主可用，evidence 只认真机记录
+            if (c.hedgeWhilePending === true)
+                for (const item of Array.isArray(c.evidence) ? c.evidence : [])
+                    if (typeof item !== "string" || !item.startsWith("validation:"))
+                        add(
+                            "host-claim-evidence",
+                            `${CLAIMS_FILE} 的条目「${where}」声明了 hedgeWhilePending，evidence「${item}」不是 validation 真机记录：` +
+                                "构建 CI 与 golden 证明不了宿主可用，真机记录到位前放在 pending 里",
+                        );
+        }
         if (c?.scope !== undefined) {
             if (!Array.isArray(c.scope)) add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的 scope 不是数组`);
             else
                 for (const f of c.scope)
-                    if (!inScope(f))
+                    if (!inScope(f, scanScope))
                         add(
                             "claims-shape",
                             `${CLAIMS_FILE} 的条目「${where}」的 scope「${f}」不在扫描范围内，写错了文件名？`,
@@ -369,7 +540,16 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root) }) {
             else note("pending-listed", `待办：${id} 的 pending「${item}」已经成立，请把它移到 evidence`);
         }
         if (unusable.has(c)) continue;
-        covered.push({ id, phrases: c.strong, hedges: c.hedge ?? [], hasProof: hasProof || pendings.length > 0, c });
+        // 要不要 hedge：有成立的 evidence 就不要；只有 pending 时直述允许，声明了 hedgeWhilePending 的除外
+        const pendingOnly = !hasProof && pendings.length > 0;
+        covered.push({
+            id,
+            phrases: c.strong,
+            hedges: c.hedge ?? [],
+            needsHedge: !hasProof && (!pendings.length || c.hedgeWhilePending === true),
+            pendingOnly,
+            c,
+        });
     }
 
     /** 一个文件里的全部句子（JSON / JS 词条先取出字符串值）。解析失败的文件由 wording 的 scope-parse 报，这里按原文扫。 */
@@ -383,9 +563,9 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root) }) {
         return units.flatMap((u) => sentences(u));
     };
 
-    // strong-needs-hedge：既无成立 evidence 也无 pending 的声明
-    for (const { id, phrases, hedges, hasProof, c } of covered) {
-        if (hasProof) continue;
+    // strong-needs-hedge：没有成立 evidence 又没有 pending 的声明，以及声明了 hedgeWhilePending、证据还在 pending 的声明
+    for (const { id, phrases, hedges, needsHedge, pendingOnly, c } of covered) {
+        if (!needsHedge) continue;
         const scope = c?.scope;
         for (const [file, text] of Object.entries(files)) {
             if (Array.isArray(scope) && scope.length && !scope.includes(file)) continue;
@@ -395,7 +575,10 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root) }) {
                     if (!hedges.some((h) => matchPhrase(h, s)))
                         add(
                             "strong-needs-hedge",
-                            `${file} 里的强声明「${phrase}」既没有成立的 evidence 也没有 pending，同一句里要有 hedge 短语`,
+                            pendingOnly
+                                ? `${file} 里的强声明「${phrase}」（${id}）的真机记录还没有到位（pending），同一句里要有 hedge 短语；` +
+                                      "记录到位后把它从 pending 移到 evidence"
+                                : `${file} 里的强声明「${phrase}」（${id}）既没有成立的 evidence 也没有 pending，同一句里要有 hedge 短语`,
                         );
                 }
             }
@@ -407,18 +590,22 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root) }) {
         for (const s of sentencesOf(file, text)) {
             const spans = quotedSpans(s);
             for (const re of ABSOLUTE_PATTERNS) {
-                const m = re.exec(s);
-                if (!m) continue;
-                // 引号里引用的句式、紧挨命中之前或之后的否定与免责：放行（口径与 wording 检查相同）
-                if (spans.some(([a, b]) => m.index >= a && m.index < b)) continue;
-                if (negatedAt(s, m.index, m[0].length)) continue;
-                // 声明的 scope 限定它管哪些文件；scope 外的文件不算这条声明覆盖到了
-                const covering = covered.filter((c) => {
-                    const sc = c.c?.scope;
-                    return !(Array.isArray(sc) && sc.length) || sc.includes(file);
-                });
-                if (!covering.some((c) => c.phrases.some((p) => matchPhrase(p, s))))
-                    add("unregistered-absolute", `${file} 里的绝对化强断言「${m[0]}」没有登记在 ${CLAIMS_FILE}`);
+                for (const m of s.matchAll(new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`))) {
+                    // 引号里引用的句式、紧挨命中之前或之后的否定与免责：放行（口径与 wording 检查相同）
+                    if (spans.some(([a, b]) => m.index >= a && m.index < b)) continue;
+                    if (negatedAt(s, m.index, m[0].length)) continue;
+                    // 声明的 scope 限定它管哪些文件；scope 外的文件不算这条声明覆盖到了
+                    const covering = covered.filter((c) => {
+                        const sc = c.c?.scope;
+                        return !(Array.isArray(sc) && sc.length) || sc.includes(file);
+                    });
+                    // 覆盖按命中片段算：声明的 strong 命中要与这处绝对化句式重叠。
+                    // 同一句里别处出现了某条声明的 strong，不能把这一处也当成已登记
+                    const [from, to] = [m.index, m.index + m[0].length];
+                    const covers = (c) => c.phrases.some((p) => phraseSpans(p, s).some(([a, b]) => a < to && b > from));
+                    if (!covering.some(covers))
+                        add("unregistered-absolute", `${file} 里的绝对化强断言「${m[0]}」没有登记在 ${CLAIMS_FILE}`);
+                }
             }
         }
     }
@@ -509,6 +696,7 @@ export async function selfTest(root = ROOT) {
             files: over.files ?? files,
             root: over.root ?? root,
             jobs: over.jobs ?? jobs,
+            scope: over.scope,
         });
     /** 规则名 → 触发它的行（errors 与 infos 合在一起看）。 */
     const fired = (result) => [...result.errors, ...result.infos];
@@ -526,6 +714,64 @@ export async function selfTest(root = ROOT) {
         const withRecord = mkTemp();
         fs.mkdirSync(path.join(withRecord, "docs", "validation"), { recursive: true });
         fs.writeFileSync(path.join(withRecord, "docs", "validation", "2026-11-02-cubase15-win.md"), "x\n");
+        // 带 LUNA 真机记录的仓：记录到位后宿主兼容类声明才算有了证据
+        const withLuna = mkTemp();
+        fs.mkdirSync(path.join(withLuna, "docs", "validation"), { recursive: true });
+        fs.writeFileSync(path.join(withLuna, "docs", "validation", "2026-11-03-luna-macos.md"), "x\n");
+        const lunaRecord = "validation:docs/validation/2026-11-03-luna-macos.md";
+        // state-schema 形状的 golden（cfgs.keys 是数组）：guard_on 的默认值可改，顺序可换，另有一份缺 guard_on 的
+        const withCfgs = (guardDefault, { swap = false, noGuard = false } = {}) => {
+            const dir = mkTemp();
+            fs.mkdirSync(path.join(dir, "tests", "golden"), { recursive: true });
+            const keys = [
+                // 默认值故意与 guard_on 的任何取值（0 或 1）都不同：数组换了顺序时，按位置取会取到它而判错
+                { key: 3, name: "reset_on_play", default: 2 },
+                ...(noGuard ? [] : [{ key: 7, name: "guard_on", default: guardDefault }]),
+            ];
+            fs.writeFileSync(
+                path.join(dir, "tests", "golden", "state-schema.json"),
+                JSON.stringify({ cfgs: { keys: swap ? keys.reverse() : keys } }),
+            );
+            return dir;
+        };
+        const cfgsOn = withCfgs(1);
+        const cfgsOff = withCfgs(0);
+        const cfgsSwapped = withCfgs(1, { swap: true });
+        const cfgsNoGuard = withCfgs(1, { noGuard: true });
+        const guardPred = "golden:tests/golden/state-schema.json#cfgs.keys[name=guard_on].default == 1";
+        // 宿主兼容类声明：真机记录没到位时直述也要同一句带 hedge
+        const hostClaim = {
+            id: "mac-hosts",
+            scope: ["README.md"],
+            strong: ["works in LUNA"],
+            hedge: ["host testing pending"],
+            hedgeWhilePending: true,
+            evidence: [],
+            pending: ["validation:docs/validation/*-luna-macos.md"],
+        };
+        const withHost = (over = {}) => ({ version: 1, claims: [{ ...hostClaim, ...over }] });
+        // 窄的完整断言：只有整句断言才算命中，同一句里别的绝对化说法不被它放过
+        const narrowClaims = {
+            version: 1,
+            claims: [
+                {
+                    id: "limiter-default-on",
+                    scope: ["README.md"],
+                    strong: ["limiter is on by default", "限制器默认开启"],
+                    hedge: ["designed so"],
+                    evidence: ["ci:core-sanitizers"],
+                    pending: [],
+                },
+                {
+                    id: "loop-delay-fixed",
+                    scope: ["README.md"],
+                    strong: ["delay does not change with"],
+                    hedge: ["designed so"],
+                    evidence: ["ci:core-sanitizers"],
+                    pending: [],
+                },
+            ],
+        };
         // 三种 workflow 写法：列 0 注释行夹在 jobs 下、job 键带行尾注释、下划线 job 名
         const wfRoot = mkTemp();
         fs.mkdirSync(path.join(wfRoot, ".github", "workflows"), { recursive: true });
@@ -716,6 +962,180 @@ export async function selfTest(root = ROOT) {
                 ["unregistered-absolute"],
                 run({ data: onlyAuto, files: { "README.md": "Rinne guarantees identical output, no exceptions.\n" } }),
             ],
+            // 覆盖按命中片段算：同一句里别处出现某条声明的 strong，不能把另一处绝对化说法也放过
+            [
+                "同句里限制器默认开启，另一处写了「完全一致」：后者没登记，判红",
+                ["unregistered-absolute"],
+                run({ data: narrowClaims, files: { "README.md": "限制器默认开启，输出与播放完全一致。\n" } }),
+            ],
+            [
+                "同句里 limiter is on by default，另一处写了 is identical to：后者没登记，判红",
+                ["unregistered-absolute"],
+                run({
+                    data: narrowClaims,
+                    files: { "README.md": "The limiter is on by default and the output is identical to playback.\n" },
+                }),
+            ],
+            [
+                "同一句里登记过一处 does not change with，另一处别的绝对化句式没登记：判红",
+                ["unregistered-absolute"],
+                run({
+                    data: narrowClaims,
+                    files: { "README.md": "The delay does not change with buffer size and the gain never changes.\n" },
+                }),
+            ],
+            [
+                "同一句里同一个句式出现两次，只有第一处登记过：第二处判红",
+                ["unregistered-absolute"],
+                run({
+                    data: narrowClaims,
+                    files: {
+                        "README.md": "The delay does not change with size, and the gain does not change with level.\n",
+                    },
+                }),
+            ],
+            [
+                "声明的 strong 命中紧挨着绝对化句式、没有重叠：不算覆盖",
+                ["unregistered-absolute"],
+                run({ data: narrowClaims, files: { "README.md": "限制器默认开启完全一致。\n" } }),
+            ],
+            // scope 取自参数（范围表），不取模块里的默认值
+            [
+                "声明的 scope 写了范围表里没有的文件：判红",
+                ["claims-shape"],
+                run({ data: withClaim({ scope: ["docs/INSTALL.md"] }), scope: ["README.md"] }),
+            ],
+            [
+                "声明的 scope 写了范围表里有的文件：放行",
+                [],
+                run({ data: withClaim({ scope: ["docs/only-in-test.md"] }), scope: ["docs/only-in-test.md"] }),
+            ],
+            [
+                "绝对化句式本身就是登记的 strong：覆盖成立",
+                [],
+                run({
+                    data: narrowClaims,
+                    files: { "README.md": "The loop delay does not change with buffer size.\n" },
+                }),
+            ],
+            [
+                "同一句里登记的绝对化句式与窄的完整断言各自覆盖：放行",
+                [],
+                run({
+                    data: narrowClaims,
+                    files: {
+                        "README.md": "The delay does not change with buffer size and the limiter is on by default.\n",
+                    },
+                }),
+            ],
+            // hedgeWhilePending：宿主兼容类声明，真机记录没到位时直述也要同一句带 hedge
+            [
+                "hedgeWhilePending：真机记录没到位，直述判红",
+                ["strong-needs-hedge"],
+                run({ root: goldenMissing, data: withHost(), files: { "README.md": "Rinne works in LUNA.\n" } }),
+            ],
+            [
+                "hedgeWhilePending：同句带 hedge 放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA, host testing pending.\n" },
+                }),
+            ],
+            [
+                "没声明 hedgeWhilePending 的 pending 声明可以直述",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedgeWhilePending: undefined }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "hedgeWhilePending 写成 false 等于没声明：可以直述",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedgeWhilePending: false }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "hedgeWhilePending：真机记录移到 evidence 并成立后，直述放行",
+                [],
+                run({
+                    root: withLuna,
+                    data: withHost({ evidence: [lunaRecord], pending: [] }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "hedgeWhilePending：记录已在仓内却还留在 pending，仍要求 hedge",
+                ["strong-needs-hedge", "pending-listed"],
+                run({ root: withLuna, data: withHost(), files: { "README.md": "Rinne works in LUNA.\n" } }),
+            ],
+            [
+                "宿主兼容类声明拿 ci 证据当证据：判红",
+                ["host-claim-evidence"],
+                run({ root: goldenMissing, data: withHost({ evidence: ["ci:core-sanitizers"] }) }),
+            ],
+            [
+                "宿主兼容类声明拿 golden 证据当证据：判红",
+                ["host-claim-evidence"],
+                run({ root: cfgsOn, data: withHost({ evidence: [guardPred] }) }),
+            ],
+            ["hedgeWhilePending 不是布尔值", ["claims-shape"], run({ data: withHost({ hedgeWhilePending: "yes" }) })],
+            ["声明了 hedgeWhilePending 却没有 hedge 短语", ["claims-shape"], run({ data: withHost({ hedge: [] }) })],
+            // hedge 与 strong 自相匹配
+            [
+                "hedge 的典型命中本身含 strong（tested on macOS [0-9]）",
+                ["claims-shape"],
+                run({
+                    data: withHost({
+                        id: "min-macos",
+                        strong: ["tested on macOS"],
+                        hedge: ["built for macOS 11\\+", "tested on macOS [0-9]"],
+                    }),
+                }),
+            ],
+            [
+                "strong 的典型命中本身满足 hedge",
+                ["claims-shape"],
+                run({ data: withHost({ strong: ["works in LUNA"], hedge: ["LUNA"] }) }),
+            ],
+            [
+                "hedge 是真正的免责或限定语：与 strong 不自相匹配",
+                [],
+                run({
+                    data: withHost({
+                        id: "min-macos",
+                        strong: ["tested on macOS", "在 macOS [^。\\n]{0,20}上可用"],
+                        hedge: ["built for macOS 11\\+", "not yet tested", "尚未[^，。\\n]{0,10}(?:测试|验证)"],
+                    }),
+                }),
+            ],
+            // golden 谓词按字段值选数组项
+            [
+                "按 name 选数组项：guard_on 默认值成立",
+                [],
+                run({ root: cfgsOn, data: withClaim({ pending: [], evidence: [guardPred] }) }),
+            ],
+            [
+                "按 name 选数组项：数组换了顺序仍指到 guard_on",
+                [],
+                run({ root: cfgsSwapped, data: withClaim({ pending: [], evidence: [guardPred] }) }),
+            ],
+            [
+                "按 name 选数组项：guard_on 默认值是 0 时判红",
+                ["evidence-satisfied"],
+                run({ root: cfgsOff, data: withClaim({ pending: [], evidence: [guardPred] }) }),
+            ],
+            [
+                "按 name 选数组项：数组里没有 guard_on 时判红",
+                ["evidence-satisfied"],
+                run({ root: cfgsNoGuard, data: withClaim({ pending: [], evidence: [guardPred] }) }),
+            ],
         ].map(([label, expect, result]) => {
             const lines = fired(result);
             const missed = expect.filter((r) => !lines.some((e) => e.startsWith(`[${r}] `)));
@@ -761,6 +1181,38 @@ export async function selfTest(root = ROOT) {
             passed: ["one", "two", "three_x"].every((j) => wfJobs.has(j)) && wfJobs.size === 3,
             expect: [],
         });
+        // 短语样例：字符类、量词、分支、转义、非捕获组都能出样例，且样例真的匹配短语本身；写坏的正则不抛错
+        const sampled = [
+            "tested on macOS [0-9]",
+            "在 macOS [^。\\n]{0,20}上可用",
+            "limiter (?:and x )?(?:is|are) on",
+            "11\\+",
+            "a|b",
+        ];
+        cases.push({
+            label: "phraseSamples：常见写法都出得了样例，样例匹配短语本身",
+            bad: false,
+            passed: sampled.every((p) => {
+                const ss = phraseSamples(p);
+                return ss.length > 0 && ss.every((t) => new RegExp(p, "i").test(t));
+            }),
+            expect: [],
+        });
+        cases.push({
+            label: "phraseSamples：量词取最少与多一次，分支各出一个",
+            bad: false,
+            passed:
+                phraseSamples("limiter (?:and x )?is").includes("limiter is") &&
+                phraseSamples("limiter (?:and x )?is").includes("limiter and x is") &&
+                ["a", "b"].every((x) => phraseSamples("a|b").includes(x)),
+            expect: [],
+        });
+        cases.push({
+            label: "phraseSamples：写坏的正则返回空，不抛错",
+            bad: true,
+            passed: phraseSamples("starts (with").length === 0,
+            expect: [],
+        });
         cases.push({
             label: "临时目录之外的路径拒绝删除",
             bad: true,
@@ -795,10 +1247,14 @@ export default {
         } catch (e) {
             return { ok: false, lines: [`[claims-shape] ${CLAIMS_FILE} 不是合法 JSON：${e.message}`] };
         }
+        // 范围表不成形时 wording 会报具体原因；这里不在残缺的范围上继续判
+        const table = loadScopeTable(ctx.root);
+        if (table.problems.length) return { ok: false, lines: table.problems };
         const { errors, infos } = claimProblems({
             data,
             files: scopedFiles(ctx.root),
             root: ctx.root,
+            scope: table.scope,
         });
         return { ok: errors.length === 0, lines: [...errors, ...infos] };
     },

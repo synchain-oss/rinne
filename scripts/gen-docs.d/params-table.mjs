@@ -110,9 +110,10 @@ export function rangeText(param) {
     const r = param.range;
     if (typeof r === "string" && r.trim()) return r;
     if (Array.isArray(r) && r.length) return r.join("…");
-    if (r && typeof r === "object" && !Array.isArray(r) && r.min !== undefined && r.max !== undefined)
-        return `${r.min}…${r.max}`;
-    if (param.min !== undefined && param.max !== undefined) return `${param.min}…${param.max}`;
+    // undefined 与 null 都算没写：null 不能被渲染成「null…null」
+    const written = (v) => v !== undefined && v !== null;
+    if (r && typeof r === "object" && !Array.isArray(r) && written(r.min) && written(r.max)) return `${r.min}…${r.max}`;
+    if (written(param.min) && written(param.max)) return `${param.min}…${param.max}`;
     return null;
 }
 
@@ -238,6 +239,25 @@ export function selfTestCases() {
     add("feedback 缺 default", { params: [param({ default: undefined })] }, dict, ["golden-default"]);
     add("feedback 缺 range", { params: [param({ range: undefined })] }, dict, ["golden-range"]);
     add("range 是空串", { params: [param({ range: "" })] }, dict, ["golden-range"]);
+    add("min 与 max 写成 null 等于没写 range", { params: [param({ range: undefined, min: null, max: null })] }, dict, [
+        "golden-range",
+    ]);
+    add(
+        "range 对象里的 min 与 max 写成 null 等于没写",
+        { params: [param({ range: { min: null, max: null } })] },
+        dict,
+        ["golden-range"],
+    );
+    add("range 对象里的 min 与 max 是数字就是写了 range", { params: [param({ range: { min: 0, max: 1 } })] }, dict, []);
+    add("min 与 max 是数字就是写了 range", { params: [param({ range: undefined, min: 0, max: 1 })] }, dict, []);
+    cases.push({
+        label: "min 与 max 渲染成「0…1」，不出现 null",
+        bad: false,
+        passed:
+            paramTableOf({ params: [param({ range: undefined, min: 0, max: 1 })] }, dict, "en").includes("0…1") &&
+            !paramTableOf({ params: [param({ range: undefined, min: 0, max: 1 })] }, dict, "en").includes("null"),
+        expect: [],
+    });
     add("feedback 缺 unit", { params: [param({ unit: undefined })] }, dict, ["golden-unit"]);
     add("unit 不是字符串", { params: [param({ unit: 5 })] }, dict, ["golden-unit"]);
     add("feedback 缺 automatable", { params: [param({ automatable: undefined })] }, dict, ["golden-automatable"]);

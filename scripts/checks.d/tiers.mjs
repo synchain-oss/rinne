@@ -13,8 +13,10 @@
 //   tier-values         tier 与 targetTier ∈ {null, 1, 2, 3, "out-of-scope"}
 //   status-values       status ∈ {awaiting-test, partial, verified, out-of-scope}
 //   awaiting-null       status == "awaiting-test" ⇒ tier 为 null 且 evidence 为空
-//   tier-evidence       有等级的行必须有证据，且每条都成立：Tier 1 / 2 至少一条 validation 记录且文件名带该宿主的名字；
-//                       Tier 3 至少一条 ci 证据
+//   tier-evidence       有等级的行必须有证据，且每条都成立：Tier 1 / 2 至少一条 validation 记录；Tier 3 至少一条 ci 证据；
+//                       validation 记录必须是这一行自己的：文件名 <YYYY-MM-DD>-<整个宿主名的 slug>[-版本]-<系统>.md，
+//                       宿主名整个对上（cubase-pro 不是 cubase，fl-studio 不是 studio），版本对得上（文件名里的版本，
+//                       或文件名没写时正文里有「宿主名 版本」），系统对得上；同族宿主、别的版本、别的系统的记录都不算
 //   tier1-checks        tier === 1 ⇒ checks 全部为 true
 //   verified-consistent status 与等级自洽，是「当且仅当」：verified ⇔ tier 是数字且 tier ≤ targetTier；
 //                       partial 只在 tier 是 1…3 的具体等级且 tier > targetTier（还没到目标）时才对；
@@ -48,7 +50,8 @@ export const RULES = {
     "tier-values": "tier 与 targetTier 的取值在登记的集合内",
     "status-values": "status 的取值在登记的集合内",
     "awaiting-null": "awaiting-test 的行 tier 为 null 且 evidence 为空",
-    "tier-evidence": "有等级的行必须有成立的证据：Tier 1 与 Tier 2 要有该宿主的 validation 记录，Tier 3 要有 ci 证据",
+    "tier-evidence":
+        "有等级的行必须有成立的证据：Tier 1 与 Tier 2 要有这一行自己的 validation 记录（整个宿主名、版本、系统都对得上），Tier 3 要有 ci 证据",
     "tier1-checks": "Tier 1 的 checks 全部为 true",
     "verified-consistent":
         "status 与等级自洽（当且仅当）：verified ⇔ tier ≤ targetTier；partial 要求 tier 是 1…3 且 tier > targetTier；awaiting-test 与 out-of-scope 要求 tier 为 null",
@@ -101,12 +104,53 @@ export function macDeploymentMajor(root) {
     return m ? Number(m[1]) : null;
 }
 
-/** 宿主名里能拿来认记录文件名的词（长度至少 4，避开 Pro、One 这种太泛的）。 */
-export function hostSlugs(host) {
+/** 宿主名的 slug：小写，非字母数字的片段换成连字符，多词宿主名整个连字符化（Cubase Pro → cubase-pro）。 */
+export function hostSlug(host) {
     return String(host ?? "")
         .toLowerCase()
-        .split(/[^a-z0-9]+/)
-        .filter((t) => t.length >= 4);
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** 记录文件名里系统部分的写法。 */
+const OS_TOKENS = { windows: ["win", "windows"], macos: ["mac", "macos"], linux: ["linux"] };
+
+/**
+ * 一条 validation 记录能不能给这一行作证；返回不能的原因，能则返回 null。
+ * 记录文件名的形态是 <YYYY-MM-DD>-<宿主 slug>[-版本]-<系统>.md（docs/validation/TEMPLATE.md）：
+ *   宿主：slug 要是整个宿主名（cubase-pro，不是 cubase；fl-studio，不是 studio），后面直接是版本或系统，不许多出别的词；
+ *   版本：这一行写了具体版本时，文件名里的版本要对得上（15 对 15 与 15.0.30，不对 14）；
+ *         文件名没写版本时，记录正文里要出现「宿主名 版本」；版本写 any 的行不核对；
+ *   系统：这一行的系统要对得上文件名里的系统（windows 对 win / windows，macos 对 mac / macos）；系统写 any 的行不核对。
+ * 记录的正文是人写的自由格式，这里只核对文件名与版本，不去解析 checks 各项的结论。
+ */
+export function recordProblem(row, item, root) {
+    const rel = String(item).slice("validation:".length);
+    const file = path.basename(rel).toLowerCase();
+    const slug = hostSlug(row?.host);
+    if (!slug) return null; // 没有宿主名由 tiers-shape 报
+    const osName = String(row?.os ?? "").toLowerCase();
+    const osTokens = osName === "any" ? ["[a-z0-9]+"] : (OS_TOKENS[osName] ?? [escapeRe(osName)]);
+    const m = new RegExp(
+        `^\\d{4}-\\d{2}-\\d{2}-${escapeRe(slug)}(?:-?(\\d+(?:\\.\\d+)*))?-(?:${osTokens.join("|")})\\.md$`,
+    ).exec(file);
+    const want = `<YYYY-MM-DD>-${slug}[-版本]-${osName === "any" ? "<系统>" : (OS_TOKENS[osName]?.[0] ?? osName)}.md`;
+    if (!m) return `文件名不是这一行（${row.host}，${osName || "未写系统"}）自己的记录，应写成 ${want}`;
+    const versions = String(row?.versions ?? "").trim();
+    if (!versions || versions.toLowerCase() === "any") return null;
+    const ver = versions.replace(/\.x$/i, "");
+    const inName = m[1];
+    if (inName !== undefined)
+        return inName === ver || inName.startsWith(`${ver}.`)
+            ? null
+            : `文件名里的版本 ${inName} 与这一行的 ${versions} 对不上`;
+    const text = readText(path.join(root, rel)) ?? "";
+    const words = String(row.host).trim().split(/\s+/).map(escapeRe).join("[\\s-]+");
+    return new RegExp(`${words}[^a-z0-9]{0,3}v?${escapeRe(ver)}(?![0-9])`, "i").test(text)
+        ? null
+        : `文件名没写版本，记录正文里也没有「${row.host} ${ver}」，对不上这一行的版本 ${versions}`;
 }
 
 /**
@@ -220,19 +264,15 @@ export function tierProblems({
                     );
             } else if (!evidence.some((e) => typeof e === "string" && e.startsWith("ci:")))
                 add("tier-evidence", `${TIERS_FILE} 的宿主「${name}」是 Tier 3，至少要有一条 ci 证据`);
-            const slugs = hostSlugs(name);
             for (const item of evidence) {
                 const state = evidenceState(root, item, jobs);
                 if (state === "malformed")
                     add("tier-evidence", `${TIERS_FILE} 的宿主「${name}」的证据「${item}」形态不认识`);
                 else if (state !== "ok") add("tier-evidence", `${TIERS_FILE} 的宿主「${name}」的证据「${item}」不成立`);
-                else if (slugs.length && item.startsWith("validation:")) {
-                    const file = path.basename(item).toLowerCase();
-                    if (!slugs.some((s) => file.includes(s)))
-                        add(
-                            "tier-evidence",
-                            `${TIERS_FILE} 的宿主「${name}」的证据「${item}」文件名里没有该宿主的名字（${slugs.join("、")}），别拿别的宿主的记录当证据`,
-                        );
+                else if (item.startsWith("validation:")) {
+                    // 记录要是这一行自己的：整个宿主名、版本、系统都对得上，别拿同族宿主或别的版本的记录当证据
+                    const why = recordProblem(h, item, root);
+                    if (why) add("tier-evidence", `${TIERS_FILE} 的宿主「${name}」的证据「${item}」${why}`);
                 }
             }
         }
@@ -315,7 +355,8 @@ export async function selfTest(root = ROOT) {
         notes: { en: "Not tested yet.", zh: "尚未测试。" },
         ...over,
     });
-    const cubaseRecord = "validation:docs/validation/2026-11-02-cubase15-win.md";
+    const rec = (f) => `validation:docs/validation/${f}`;
+    const cubaseRecord = rec("2026-11-02-cubase-pro-15-win.md");
     const lunaRecord = "validation:docs/validation/2026-11-03-luna-macos.md";
     const cubase = (over = {}) =>
         host({
@@ -332,6 +373,8 @@ export async function selfTest(root = ROOT) {
             ...over,
         });
     const luna = host();
+    /** 部分验证的 Windows 行（Tier 2，目标 Tier 1）：只有证据这一项是被测的变量。 */
+    const partial2 = (over = {}) => cubase({ tier: 2, status: "partial", checks: checks(false), ...over });
     const good = {
         version: 1,
         platforms: [
@@ -346,13 +389,27 @@ export async function selfTest(root = ROOT) {
         delete c[k];
         return c;
     };
-    // 临时目录里放两份 validation 记录，Tier 1 / 2 的证据要真的存在
+    // 临时目录里放一批 validation 记录，Tier 1 / 2 的证据要真的存在。
+    // 同族宿主（Cubase 三个版本、Studio One 与 FL Studio）与别的版本、别的系统都各放一份，用来证明它们互相不能作证；
+    // 文件名没写版本的记录（luna、reaper）靠正文里的「宿主名 版本」对版本。
+    const records = {
+        "2026-11-02-cubase-pro-15-win.md": "Cubase Pro 15.0.30 on Windows 11\n",
+        "2026-11-02-cubase-pro-14-win.md": "Cubase Pro 14.0.5 on Windows 11\n",
+        "2026-11-02-cubase-pro-15-mac.md": "Cubase Pro 15.0.30 on macOS 14\n",
+        "2026-11-02-cubase-elements-15-win.md": "Cubase Elements 15 on Windows 11\n",
+        "2026-11-04-studio-one-win.md": "Studio One 7 on Windows 11\n",
+        "2026-11-04-fl-studio-win.md": "FL Studio 2025 on Windows 11\n",
+        "2026-11-03-luna-macos.md": "LUNA 3.1 on macOS 14\n",
+        "2026-11-05-reaper-win.md": "REAPER 7.20 on Windows 11\n",
+        "2026-11-06-reaper-win.md": "REAPER 6.80 on Windows 11\n",
+        "cubase-pro-15-win.md": "Cubase Pro 15 on Windows 11\n",
+    };
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), TEMP_PREFIX));
     let cases;
     try {
         fs.mkdirSync(path.join(tmp, "docs", "validation"), { recursive: true });
-        for (const f of ["2026-11-02-cubase15-win.md", "2026-11-03-luna-macos.md"])
-            fs.writeFileSync(path.join(tmp, "docs", "validation", f), "x\n");
+        for (const [f, body] of Object.entries(records))
+            fs.writeFileSync(path.join(tmp, "docs", "validation", f), body);
         const run = (data, opts = {}) =>
             tierProblems({ data: data ?? good, root: tmp, jobs, formats: ["VST3", "AU"], macMajor: 11, ...opts });
         cases = [
@@ -450,12 +507,103 @@ export async function selfTest(root = ROOT) {
                     cubase({
                         tier: 2,
                         status: "partial",
-                        evidence: ["validation:docs/validation/2026-11-02-cubase15-nowhere.md"],
+                        evidence: [rec("2026-11-02-cubase-pro-15-nowhere-win.md")],
                         checks: checks(false),
                     }),
                 ),
             ],
             ["Tier 1 拿别的宿主的记录当证据", ["tier-evidence"], withHosts(cubase({ evidence: [lunaRecord] }), luna)],
+            // 记录必须是这一行自己的：整个宿主名、版本、系统、文件名形态都对得上
+            [
+                "Studio One 的记录不能给 FL Studio 作证",
+                ["tier-evidence"],
+                withHosts(
+                    partial2({ host: "FL Studio", versions: "any", evidence: [rec("2026-11-04-studio-one-win.md")] }),
+                ),
+            ],
+            [
+                "FL Studio 用自己的记录作证合规",
+                [],
+                withHosts(
+                    partial2({ host: "FL Studio", versions: "any", evidence: [rec("2026-11-04-fl-studio-win.md")] }),
+                ),
+            ],
+            [
+                "Cubase Pro 的记录不能给 Cubase Elements 作证",
+                ["tier-evidence"],
+                withHosts(partial2({ host: "Cubase Elements", evidence: [cubaseRecord] })),
+            ],
+            [
+                "Cubase Elements 用自己的记录作证合规",
+                [],
+                withHosts(
+                    partial2({ host: "Cubase Elements", evidence: [rec("2026-11-02-cubase-elements-15-win.md")] }),
+                ),
+            ],
+            [
+                "更泛的宿主名（Cubase）不能拿 Cubase Pro 的记录作证",
+                ["tier-evidence"],
+                withHosts(partial2({ host: "Cubase", evidence: [cubaseRecord] })),
+            ],
+            // 版本写 any 的行不核对版本，宿主名只能靠文件名的结构挡住：多出来的词（pro、elements）不许混过去
+            [
+                "版本写 any 的泛宿主名（Cubase）也不能拿 Cubase Pro 的记录作证",
+                ["tier-evidence"],
+                withHosts(partial2({ host: "Cubase", versions: "any", evidence: [cubaseRecord] })),
+            ],
+            [
+                "版本写 any 的 Cubase Elements 也不能拿 Cubase Pro 的记录作证",
+                ["tier-evidence"],
+                withHosts(partial2({ host: "Cubase Elements", versions: "any", evidence: [cubaseRecord] })),
+            ],
+            [
+                "文件名里的版本（14）与这一行的版本（15）对不上",
+                ["tier-evidence"],
+                withHosts(partial2({ evidence: [rec("2026-11-02-cubase-pro-14-win.md")] })),
+            ],
+            [
+                "文件名没写版本，正文里有这一行的版本（LUNA 3.x 对 LUNA 3.1）合规",
+                [],
+                withHosts(host({ tier: 2, status: "verified", evidence: [lunaRecord], checks: checks(false) })),
+            ],
+            [
+                "文件名没写版本，正文里的版本（6.80）对不上这一行的版本（7）",
+                ["tier-evidence"],
+                withHosts(partial2({ host: "REAPER", versions: "7", evidence: [rec("2026-11-06-reaper-win.md")] })),
+            ],
+            [
+                "文件名没写版本，正文里有这一行的版本（REAPER 7.20）合规",
+                [],
+                withHosts(partial2({ host: "REAPER", versions: "7", evidence: [rec("2026-11-05-reaper-win.md")] })),
+            ],
+            [
+                "版本写 any 的行不核对版本",
+                [],
+                withHosts(
+                    partial2({ host: "FL Studio", versions: "any", evidence: [rec("2026-11-04-fl-studio-win.md")] }),
+                ),
+            ],
+            [
+                "Windows 的记录不能给 macOS 的行作证",
+                ["tier-evidence"],
+                withHosts(partial2({ os: "macos", formats: ["VST3", "AU"], evidence: [cubaseRecord] })),
+            ],
+            [
+                "macOS 的行用 macOS 的记录作证合规",
+                [],
+                withHosts(
+                    partial2({
+                        os: "macos",
+                        formats: ["VST3", "AU"],
+                        evidence: [rec("2026-11-02-cubase-pro-15-mac.md")],
+                    }),
+                ),
+            ],
+            [
+                "记录文件名没有日期，不是模板规定的形态",
+                ["tier-evidence"],
+                withHosts(partial2({ evidence: [rec("cubase-pro-15-win.md")] })),
+            ],
             [
                 "awaiting-test 却给了 tier",
                 ["awaiting-null", "verified-consistent"],

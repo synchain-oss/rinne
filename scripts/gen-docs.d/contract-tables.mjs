@@ -55,6 +55,9 @@ export function loadJson(root, rel) {
 export const table = (header, rows) =>
     [header, header.map(() => "---"), ...rows].map((r) => `| ${r.map(cell).join(" | ")} |`).join("\n");
 
+/** 字段写了：undefined 与 null 都算没写。渲染与形状核对共用这一个判法，两边对「缺」的理解不会错开。 */
+const has = (v) => v !== undefined && v !== null;
+
 /** 取必填字段；缺了抛错，不给默认值。 */
 function need(obj, field, what) {
     if (obj?.[field] === undefined || obj[field] === null) throw new Error(`${what} 缺 ${field}`);
@@ -75,12 +78,13 @@ export function renderStateHeader(state) {
 export function renderCfgsTable(state) {
     const rows = (state?.cfgs?.keys ?? []).map((k) => {
         const what = `cfgs.keys 里的键 ${k?.key ?? "(没有 key)"}`;
-        const hasMin = k.min !== undefined;
-        const hasMax = k.max !== undefined;
+        // 缺失的判法与 contractProblems 一致：undefined 与 null 都算没写，否则 null 会被渲染成「null…null」或空单元格
+        const hasMin = has(k.min);
+        const hasMax = has(k.max);
         if (hasMin !== hasMax) throw new Error(`${what} 的 min 与 max 只写了一个`);
-        const bytes = k.bytes !== undefined ? k.bytes : `≤ ${need(k, "maxBytes", what)}`;
+        const bytes = has(k.bytes) ? k.bytes : `≤ ${need(k, "maxBytes", what)}`;
         const onBad = k.outOfRange ?? k.invalid;
-        if (onBad === undefined) throw new Error(`${what} 缺 outOfRange 或 invalid`);
+        if (!has(onBad)) throw new Error(`${what} 缺 outOfRange 或 invalid`);
         return [
             need(k, "key", what),
             need(k, "name", what),
@@ -118,7 +122,6 @@ export function renderNamesTable(ipc) {
 
 const isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStr = (v) => typeof v === "string" && v !== "";
-const has = (v) => v !== undefined && v !== null;
 
 /** 真源的形状问题；返回问题字符串数组，每条以 [判据名] 开头。逐项核对必填字段，缺哪个报哪个。 */
 export function contractProblems(state, ipc) {
@@ -337,6 +340,60 @@ export function selfTestCases() {
             cfgs.includes("| 1 | group | u8 | 1 | 0…8 | 0 | default | 是 | 是 |") &&
             cfgs.includes("| 9 | ui_lang | ascii | ≤ 8 | — | 空串 | default | 是 | 是 |"),
         expect: [],
+    });
+    // null 与缺字段同样对待：形状核对认 null 为没写，渲染也要一样，不能渲染出「null…null」或空单元格
+    const nullKey = key({
+        key: 5,
+        name: "x",
+        bytes: null,
+        maxBytes: 8,
+        min: null,
+        max: null,
+        outOfRange: null,
+        invalid: "default",
+    });
+    const nullTable = renderCfgsTable(withKey(nullKey));
+    cases.push({
+        label: "min、max、bytes、outOfRange 写 null 等于没写：渲染成「—」「≤ 8」「default」，不出现 null",
+        bad: false,
+        passed:
+            contractProblems(withKey(nullKey), ipc).length === 0 &&
+            nullTable.includes("| 5 | x | u8 | ≤ 8 | — | 0 | default | 是 | 是 |") &&
+            !nullTable.includes("null"),
+        expect: [],
+    });
+    cases.push({
+        label: "min 写 null、max 有值：形状核对判错，渲染也抛错",
+        bad: true,
+        passed:
+            contractProblems(withKey(key({ min: null })), ipc).some((p) => ruleOf(p) === "state-cfgs") &&
+            throws(() => renderCfgsTable(withKey(key({ min: null })))),
+        expect: ["state-cfgs"],
+    });
+    cases.push({
+        label: "bytes 与 maxBytes 都写 null：形状核对判错，渲染也抛错",
+        bad: true,
+        passed:
+            contractProblems(withKey(key({ bytes: null })), ipc).some((p) => ruleOf(p) === "state-cfgs") &&
+            throws(() => renderCfgsTable(withKey(key({ bytes: null })))),
+        expect: ["state-cfgs"],
+    });
+    cases.push({
+        label: "outOfRange 与 invalid 都写 null：形状核对判错，渲染也抛错",
+        bad: true,
+        passed:
+            contractProblems(withKey(key({ outOfRange: null })), ipc).some((p) => ruleOf(p) === "state-cfgs") &&
+            throws(() => renderCfgsTable(withKey(key({ outOfRange: null })))),
+        expect: ["state-cfgs"],
+    });
+    cases.push({
+        label: "只有 invalid 且写 null：形状核对判错，渲染也抛错，不渲染出 null",
+        bad: true,
+        passed:
+            contractProblems(withKey(key({ outOfRange: undefined, invalid: null })), ipc).some(
+                (p) => ruleOf(p) === "state-cfgs",
+            ) && throws(() => renderCfgsTable(withKey(key({ outOfRange: undefined, invalid: null })))),
+        expect: ["state-cfgs"],
     });
     const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.passed && c.expect.includes(r)));
     cases.push({

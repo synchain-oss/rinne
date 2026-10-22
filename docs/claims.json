@@ -4,59 +4,66 @@
     {
       "id": "loop-delay-fixed",
       "strong": ["does not change with", "not to depend on buffer size", "不受缓冲大小", "不随[^。\\n]{0,20}变化"],
-      "hedge": ["designed so", "按设计"],
+      "hedge": ["designed so", "designed not to", "按设计"],
+      "hedgeWhilePending": true,
       "evidence": [],
-      "pending": ["validation:docs/validation/*-cubase15-win.md"]
+      "pending": ["validation:docs/validation/*-cubase-pro-15-win.md"]
     },
     {
       "id": "render-matches-playback",
       "strong": ["matches playback", "与播放一致"],
       "hedge": ["designed so", "按设计"],
+      "hedgeWhilePending": true,
       "evidence": [],
-      "pending": ["validation:docs/validation/*-cubase15-win.md"]
+      "pending": ["validation:docs/validation/*-cubase-pro-15-win.md"]
     },
     {
       "id": "builtins-in-loop",
       "strong": ["including the host['’]s own insert effects", "包括宿主自带的插入效果器"],
       "hedge": ["between Rinne Input and Rinne Output", "Input 与 Output 之间插入槽里的插件"],
+      "hedgeWhilePending": false,
       "evidence": [],
-      "pending": ["validation:docs/validation/*-cubase15-win.md"]
+      "pending": ["validation:docs/validation/*-cubase-pro-15-win.md"]
     },
     {
       "id": "safe-defaults",
-      "strong": [
-        "starts with feedback at zero",
-        "starts at 0% feedback",
-        "默认反馈为 0",
-        "反馈量是 0",
-        "on by default",
-        "默认开启"
-      ],
+      "strong": ["starts with feedback at zero", "starts at 0% feedback", "默认反馈为 0", "反馈量是 0"],
       "hedge": ["designed so", "按设计"],
       "evidence": [],
-      "pending": [
-        "golden:tests/golden/params-input.json#feedback.default == 0",
-        "golden:tests/golden/params-input.json#limiter.default == 1"
-      ]
+      "pending": ["golden:tests/golden/params-input.json#feedback.default == 0"]
     },
     {
-      "id": "auto-protection",
-      "strong": ["auto-protection", "失控保护", "runaway protection"],
+      "id": "limiter-default-on",
+      "strong": ["limiter (?:and runaway protection )?(?:is|are) on by default", "限制器(?:和失控保护)?默认开启"],
       "hedge": ["designed so", "按设计"],
-      "evidence": ["ci:core-sanitizers"],
+      "evidence": [],
+      "pending": ["golden:tests/golden/params-input.json#limiter.default == 1"]
+    },
+    {
+      "id": "runaway-protection-default-on",
+      "strong": ["runaway protection (?:is|are) on by default", "失控保护默认开启"],
+      "hedge": ["designed so", "按设计"],
+      "evidence": ["golden:tests/golden/state-schema.json#cfgs.keys[name=guard_on].default == 1"],
       "pending": []
     },
     {
       "id": "mac-hosts",
       "strong": ["works in LUNA", "在 LUNA 可用"],
-      "hedge": ["passes auval and pluginval", "host testing pending"],
-      "evidence": ["ci:build-mac"],
+      "hedge": [
+        "passes auval and pluginval",
+        "host testing pending",
+        "通过 auval 与 pluginval",
+        "尚未[^，。\\n]{0,10}(?:测试|验证)"
+      ],
+      "hedgeWhilePending": true,
+      "evidence": [],
       "pending": ["validation:docs/validation/*-luna-macos.md"]
     },
     {
       "id": "min-macos",
       "strong": ["tested on macOS", "在 macOS [^。\\n]{0,20}上可用"],
-      "hedge": ["built for macOS 11\\+", "tested on macOS [0-9]"],
+      "hedge": ["built for macOS 11\\+", "not yet tested", "尚未[^，。\\n]{0,10}(?:测试|验证)"],
+      "hedgeWhilePending": true,
       "evidence": [],
       "pending": ["validation:docs/validation/*-luna-macos.md"]
     }
