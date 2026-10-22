@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 低切 / 高切这一级的行为：关态逐位直通；开关与改截止都平滑（30 ms 截止滑动、10 ms 交叉），没有咔嗒；
-// 10^5 次随机跳变不发散、不出非有限值；reset 与 prepare 落定；静音时不进 denormal。
+// 10^6 次随机跳变不发散、不出非有限值；reset 与 prepare 落定；静音时不进 denormal。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -32,6 +32,9 @@ namespace
 {
 
 constexpr double kRates[] = {44100.0, 48000.0, 96000.0, 192000.0};
+
+// 随机跳变的次数（规格：10^6 次随机截止跳变不发散）。参数跳变用例跳这么多次，裸 SVF 用例每个样本跳一次、跑这么多个样本
+constexpr int kJumpTrials = 1000000;
 
 bool sameCoefficients(const rinne::dsp::SvfCoefficients& a, const rinne::dsp::SvfCoefficients& b)
 {
@@ -444,10 +447,10 @@ TEST_CASE("the click criterion catches hard switches (the counterexample must fa
     }
 }
 
-TEST_CASE("10^5 random parameter jumps never make the cut diverge or go non-finite", "[tone][cut][stability]")
+TEST_CASE("10^6 random parameter jumps never make the cut diverge or go non-finite", "[tone][cut][stability]")
 {
     // 每 1–32 个样本跳一次参数（含关、越界、NaN、±Inf），每 10^4 次换一个采样率重新 prepare；输入是清洗后范围内的
-    // 随机噪声与 ±16 的方波。实测 |y| 最大约 20（高通对 ±16 方波的过冲），断言留到 48。
+    // 随机噪声与 ±16 的方波。实测 |y| 最大约 27（高通对 ±16 方波的过冲），断言留到 48。
     const float specials[] = {std::numeric_limits<float>::quiet_NaN(),
                               std::numeric_limits<float>::infinity(),
                               -std::numeric_limits<float>::infinity(),
@@ -462,7 +465,7 @@ TEST_CASE("10^5 random parameter jumps never make the cut diverge or go non-fini
         CutFilter f(kind);
         bool finite = true;
         double peak = 0.0;
-        for (int jump = 0; jump < 100000; ++jump)
+        for (int jump = 0; jump < kJumpTrials; ++jump)
         {
             if (jump % 10000 == 0)
                 f.prepare(kRates[(jump / 10000) % 4]);
@@ -498,7 +501,7 @@ TEST_CASE("10^5 random parameter jumps never make the cut diverge or go non-fini
 
 TEST_CASE("the raw SVF stays bounded even when its coefficients jump every sample", "[tone][svf][stability]")
 {
-    // 比参数跳变更狠：每个样本都换一组随机系数（1 Hz…0.45·sr），输入 ±16 方波与噪声。实测 |y| 最大约 110、
+    // 比参数跳变更狠：每个样本都换一组随机系数（1 Hz…0.45·sr），输入 ±16 方波与噪声。实测 |y| 最大约 93、
     // 状态约 3 倍输入，不随时间增长；断言 256，并要求后半段的峰值不比前半段高出一倍（没有缓慢发散）
     for (const SvfResponse resp : {SvfResponse::HighPass, SvfResponse::LowPass})
     {
@@ -509,7 +512,7 @@ TEST_CASE("the raw SVF stays bounded even when its coefficients jump every sampl
             bool finite = true;
             double firstHalf = 0.0;
             double secondHalf = 0.0;
-            constexpr int total = 100000;
+            constexpr int total = kJumpTrials;
             for (int n = 0; n < total; ++n)
             {
                 const auto c = svfCoefficients(std::exp(rng.range(0.0, std::log(0.45 * sr))), sr);

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 开关量的定长线性交叉过渡（限制器开关 10 ms、极性反转）：
+// 开关量的定长线性交叉过渡 SwitchRamp（低切 / 高切的开与关用它）：
 //   两路增益之和恒为 1（不是约等于，是逐位恰为 1.0f）、端点精确（那一路的样本原样返回，−0.0 的符号与 NaN 载荷不变）、
 //   过渡中再切换从当前位置折返（不跳回起点）、相邻样本无阶跃（无咔嗒）。
 // 必须变红：把 b 改成等功率的 sin/cos、把 b 换成不量化的 k/n、把端点改成乘加、过渡中改成「跳回起点重来」，
 // 下面都有反例格子会红。
+// 咔嗒判据用两对典型的信号来测（限制前后、正反相），测的是 SwitchRamp 本身的性质。插件里限制器开关的交叉不走
+// SwitchRamp，而是 SafetyChain 里的 LinearSmoother，那条路径的用例在 tests/core/safety/test_safety_chain.cpp。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -247,7 +249,7 @@ TEST_CASE("switching again mid-transition turns around in place", "[tone][switch
     }
 }
 
-TEST_CASE("the limiter toggle crossfades in 10 ms without a click", "[tone][switch][click]")
+TEST_CASE("a 10 ms crossfade between a limited and an unlimited path makes no click", "[tone][switch][click]")
 {
     // 判据：限制器一路与旁路一路的相邻样本差上界，加上交叉期间两路之差摊到 n 个样本上的那一项。
     // 事件落在正弦的峰上：那里两路差最大，硬切换的台阶最明显。
@@ -292,8 +294,9 @@ TEST_CASE("the limiter toggle crossfades in 10 ms without a click", "[tone][swit
     }
 }
 
-TEST_CASE("the polarity flip crossfades in 10 ms without a click", "[tone][switch][click]")
+TEST_CASE("a 10 ms crossfade between a signal and its negation makes no click", "[tone][switch][click]")
 {
+    // 两路完全反相：交叉中点上两路相消，是两路之差最大的一对
     constexpr double freq = 100.0;
     constexpr double amp = 0.9;
     for (const double sr : kRates)
@@ -325,7 +328,7 @@ TEST_CASE("the polarity flip crossfades in 10 ms without a click", "[tone][switc
         const double bound = clickBound(x, negated, n);
         CHECK(maxStep(cross) < bound);
 
-        // 必须变红：硬切极性（直接取反）在同一个事件上远远超过上界
+        // 必须变红：硬切（直接换成反相的那一路）在同一个事件上远远超过上界
         std::vector<float> hard(total);
         for (std::size_t i = 0; i < total; ++i)
             hard[i] = i < at ? x[i] : negated[i];

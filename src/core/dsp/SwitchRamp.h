@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 开关量的定长线性交叉过渡：限制器开关（10 ms）、极性反转、低切 / 高切的开与关都用它，不允许硬切。
+// 开关量的定长线性交叉过渡，不允许硬切。现在只有 CutFilter（dsp/SvfTpt.h）用它：低切 / 高切的开与关，
+// 在干声与滤波输出之间交叉 10 ms（kCutSwitchSeconds）。
+// 限制器开关的 10 ms 交叉过渡不在本头里：由 src/core/engine/SafetyMachine.cpp 里的 dsp::LinearSmoother 实现
+// （SafetyChain 的 limiterMix_，时长 safety::kLimiterCrossfadeSeconds）；
+// 那条路径的用例在 tests/core/safety/test_safety_chain.cpp。
 // 两路输入按 out = (1 − b)·off + b·on 混合，b 从一端走到另一端恰好 n 个样本，n = round(时长·sr)，至少 1。
 //   位置是整数 k ∈ [0, n]，step() 每个样本朝目标走一步，b 由 k 算出：全程按样本计数，与宿主怎么切块无关。
 //   过渡中再切换：从当前的 k 原路折返，增益连续、斜率不变，不会跳回起点重来；同一个目标重复设置什么都不做。
 //   b 取 k/n 舍入到 2^-24 的整数倍：这样 b 与 1 − b 在 float 里都恰好可表示，两路增益之和恒为 1，不只是约等于。
 //   落在端点（k = 0 或 n）时 mix() 直接返回那一路的样本、不做乘加：−0.0 的符号、NaN 载荷原样保留，
 //   另一路的非有限值也混不进来（0 乘 NaN 仍是 NaN）。
-// 线性而不是等功率：两路通常高度相关（限制前后、滤波前后、正反相），等功率交叉在相关信号上会过冲约 3 dB。
+// 线性而不是等功率：两路高度相关（同一个信号的滤波前后；端点上的滤波器在音频频带里几乎直通），等功率交叉在相关
+// 信号上会过冲约 3 dB。
 #pragma once
 
 #include <cmath>
