@@ -16,6 +16,7 @@
 
 using rinne::dsp::CutFilter;
 using rinne::dsp::CutKind;
+using rinne::dsp::isFiniteSample;
 using rinne::dsp::kCutoffSmoothSeconds;
 using rinne::dsp::kCutSwitchSeconds;
 using rinne::dsp::LinearSmoother;
@@ -451,6 +452,9 @@ TEST_CASE("10^6 random parameter jumps never make the cut diverge or go non-fini
 {
     // 每 1–32 个样本跳一次参数（含关、越界、NaN、±Inf），每 10^4 次换一个采样率重新 prepare；输入是清洗后范围内的
     // 随机噪声与 ±16 的方波。实测 |y| 最大约 27（高通对 ±16 方波的过冲），断言留到 48。
+    // 两条断言各管一件事：挡住发散的是峰值界，finite 断言挡的是非有限输出。std::fmax 遇到 NaN 取另一个数，峰值界
+    // 看不见 NaN；SVF 的输出不清非有限值（要留给 ⑥ 跳闸），这里算出的非有限值会原样出来，只有 finite 断言会红
+    // （变异验证：让 SVF 的输出每 10^5 个样本出一个 NaN，本用例与下一个用例只有 finite 断言变红）。
     const float specials[] = {std::numeric_limits<float>::quiet_NaN(),
                               std::numeric_limits<float>::infinity(),
                               -std::numeric_limits<float>::infinity(),
@@ -489,7 +493,7 @@ TEST_CASE("10^6 random parameter jumps never make the cut diverge or go non-fini
                 l = rinne::dsp::sanitizeSample(l);
                 rr = rinne::dsp::sanitizeSample(rr);
                 f.process(l, rr);
-                finite = finite && std::isfinite(l) && std::isfinite(rr);
+                finite = finite && isFiniteSample(l) && isFiniteSample(rr);
                 peak =
                     std::fmax(peak, std::fmax(std::fabs(static_cast<double>(l)), std::fabs(static_cast<double>(rr))));
             }
@@ -502,7 +506,8 @@ TEST_CASE("10^6 random parameter jumps never make the cut diverge or go non-fini
 TEST_CASE("the raw SVF stays bounded even when its coefficients jump every sample", "[tone][svf][stability]")
 {
     // 比参数跳变更狠：每个样本都换一组随机系数（1 Hz…0.45·sr），输入 ±16 方波与噪声。实测 |y| 最大约 93、
-    // 状态约 3 倍输入，不随时间增长；断言 256，并要求后半段的峰值不比前半段高出一倍（没有缓慢发散）
+    // 状态约 3 倍输入，不随时间增长；断言 256，并要求后半段的峰值不比前半段高出一倍（没有缓慢发散）。
+    // 与上一个用例一样：挡住发散的是峰值界，finite 断言挡的是非有限输出（峰值经 std::fmax 累计，看不见 NaN）
     for (const SvfResponse resp : {SvfResponse::HighPass, SvfResponse::LowPass})
     {
         for (const double sr : {44100.0, 192000.0})
@@ -519,7 +524,7 @@ TEST_CASE("the raw SVF stays bounded even when its coefficients jump every sampl
                 const auto x =
                     static_cast<float>(rng.uniform() < 0.5 ? (rng.below(2) ? 16.0 : -16.0) : rng.range(-16.0, 16.0));
                 const float y = t.process(x, c, resp);
-                finite = finite && std::isfinite(y);
+                finite = finite && isFiniteSample(y);
                 double& half = n < total / 2 ? firstHalf : secondHalf;
                 half = std::fmax(half, std::fabs(static_cast<double>(y)));
             }

@@ -6,7 +6,8 @@
 // 必须变红：把 b 改成等功率的 sin/cos、把 b 换成不量化的 k/n、把端点改成乘加、过渡中改成「跳回起点重来」，
 // 下面都有反例格子会红。
 // 咔嗒判据用两对典型的信号来测（限制前后、正反相），测的是 SwitchRamp 本身的性质。插件里限制器开关的交叉不走
-// SwitchRamp，而是 SafetyChain 里的 LinearSmoother，那条路径的用例在 tests/core/safety/test_safety_chain.cpp。
+// SwitchRamp，而是 SafetyChain 里的 LinearSmoother，那条路径的用例在 tests/core/safety/test_safety_chain.cpp 与
+// test_limiter_switch_click.cpp（逐样本的无咔嗒判据）。
 
 #include <catch2/catch_test_macros.hpp>
 

@@ -2,8 +2,10 @@
 //
 // 回送链第一级：清洗。环里来的样本先过这里，之后的每一级都可以假定输入有限、|x| ≤ 16。
 //   非有限（NaN、±Inf）→ 0；|x| > 16 → ±16；|x| < 1e-30 → 0（顺手冲掉 denormal，后面的递归滤波器不会被它拖慢）。
-// flushTiny 也把非有限值冲成 0：递归滤波器（SVF、DC 阻断）的状态经它写回，状态里万一算出 NaN 或 ±Inf
-// 会被清回 0，不会永久卡在 NaN 上。
+// ⑥ 之前清非有限值只在这一级做：之后 ②–⑤ 各级内部算出的非有限值（Input 内部产生的）不在半路清掉，要原样走到 ⑥
+// 的有限性检查跳闸，所以 flushTiny 只冲极小值、不碰非有限值。递归滤波器的状态要不要另防坏样本由各级自己定：SVF 的
+// 状态写回用 SvfTpt.h 的 flushState（非有限 → +0），状态不会被一个坏样本永久卡在 NaN 上，那一格的非有限输出照样
+// 交给 ⑥。
 // 有限性按位模式判断：指数位全 1 就是非有限。不用 std::isfinite，免得哪个编译选项把它当成恒真优化掉。
 #pragma once
 
@@ -33,20 +35,15 @@ inline bool isFiniteSample(double x) noexcept
     return (bits & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
 }
 
-// 把非有限值与 |x| < kTinyFlush 的值冲成 +0。递归滤波器的状态每个样本都过一遍：零输入时不会衰减进 denormal；
-// 万一状态里算出了 NaN 或 ±Inf，这一步就把它清回 0，不会一直带着它往下算。
-// 非有限要单独判：NaN 与任何数比较都为假，只靠下面两个比较，NaN 会原样通过。
+// 把 |x| < kTinyFlush 的值冲成 +0。递归滤波器的状态每个样本都过一遍，零输入时不会衰减进 denormal。
+// 它不清非有限值：非有限值要留给 ⑥ 跳闸。NaN 让两个比较都为假、原样返回，±Inf 也原样返回
 inline float flushTiny(float x) noexcept
 {
-    if (!isFiniteSample(x))
-        return 0.0f;
     return (x < kTinyFlush && x > -kTinyFlush) ? 0.0f : x;
 }
 
 inline double flushTiny(double x) noexcept
 {
-    if (!isFiniteSample(x))
-        return 0.0;
     return (x < 1.0e-30 && x > -1.0e-30) ? 0.0 : x;
 }
 

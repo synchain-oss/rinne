@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 非有限值进了 SVF 之后能出来：flushTiny 把 NaN、±Inf 冲成 +0（float 与 double 两个重载都是），SVF 的两个状态
-// 经它写回。一个非有限的输入样本只让这一个样本输出 +0、状态清回 0，之后与刚 reset 过的滤波器逐位相同。
-// 必须变红：flushTiny 只留「|x| < 1e-30」那两个比较时，NaN 让两个比较都为假、原样通过，状态从此一直是 NaN，
-// 之后每个样本都是 NaN。下面三个用例都会红。
+// 非有限值进了 SVF 之后的分工：状态清、输出不清。
+//   状态：SvfTpt 的两个状态经 flushState 写回（非有限 → +0，其余同 flushTiny），一个坏样本不会把状态永久卡在 NaN 上，
+//   下一个样本起与刚 reset 过的滤波器逐位相同；
+//   输出：只过 flushTiny，flushTiny 不清非有限值，坏的这一格输出非有限值，原样往下走，由 ⑥ 的有限性检查跳闸
+//   （Input 内部产生的非有限值立即跳闸，不能在音色级被清成 0）。
+// 必须变红：
+//   状态写回改用 flushTiny：NaN 留在状态里，之后每个样本都是 NaN，「之后与新建的逐位相同、全部有限」变红；
+//   输出改用 flushState：坏的这一格输出 +0，「这一格是非有限值」变红；
+//   flushTiny 改成清非有限值：「flushTiny 对非有限值原样返回」变红，坏的这一格同样输出 +0。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -18,6 +23,7 @@
 
 using rinne::dsp::CutFilter;
 using rinne::dsp::CutKind;
+using rinne::dsp::flushState;
 using rinne::dsp::flushTiny;
 using rinne::dsp::isFiniteSample;
 using rinne::dsp::svfCoefficients;
@@ -55,24 +61,50 @@ double doubleFromBits(std::uint64_t b)
     return d;
 }
 
+// 有限值上 flushState 与 flushTiny 都是：|x| < 1e-30 冲成 +0（含 −0.0 与 denormal），其余原样
+void checkFiniteFlush(double (*flush)(double))
+{
+    CHECK(doubleBits(flush(-0.0)) == 0u);
+    CHECK(doubleBits(flush(std::numeric_limits<double>::denorm_min())) == 0u);
+    CHECK(doubleBits(flush(-1.0e-31)) == 0u);
+    for (const double x :
+         {1.0e-29, -1.0e-29, 0.5, -16.0, std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()})
+    {
+        INFO("x = " << x);
+        CHECK(isFiniteSample(x));
+        CHECK(doubleBits(flush(x)) == doubleBits(x));
+    }
+}
+
+double flushTinyDouble(double x)
+{
+    return flushTiny(x);
+}
+
+double flushStateDouble(double x)
+{
+    return flushState(x);
+}
+
 } // namespace
 
-TEST_CASE("flushTiny turns NaN and infinities into +0 in both overloads", "[tone][svf][nonfinite]")
+TEST_CASE("flushTiny leaves NaN and infinities as they are, in both overloads", "[tone][svf][nonfinite]")
 {
+    // 非有限值原样返回（逐位，含 NaN 载荷与符号）：它们要留给 ⑥ 跳闸
     for (const std::uint32_t b : kBadFloatBits)
     {
         INFO("float bits = " << b);
         CHECK_FALSE(isFiniteSample(fromBits(b)));
-        CHECK(floatBits(flushTiny(fromBits(b))) == 0u);
+        CHECK(floatBits(flushTiny(fromBits(b))) == b);
     }
     for (const std::uint64_t b : kBadDoubleBits)
     {
         INFO("double bits = " << b);
         CHECK_FALSE(isFiniteSample(doubleFromBits(b)));
-        CHECK(doubleBits(flushTiny(doubleFromBits(b))) == 0u);
+        CHECK(doubleBits(flushTiny(doubleFromBits(b))) == b);
     }
 
-    // 有限值的行为不变：|x| < 1e-30 冲成 +0（含 −0.0 与 denormal），其余原样
+    // 有限值：|x| < 1e-30 冲成 +0（含 −0.0 与 denormal），其余原样
     CHECK(floatBits(flushTiny(fromBits(0x80000000u))) == 0u);
     CHECK(floatBits(flushTiny(fromBits(0x00000001u))) == 0u);
     CHECK(floatBits(flushTiny(-1.0e-31f)) == 0u);
@@ -83,23 +115,24 @@ TEST_CASE("flushTiny turns NaN and infinities into +0 in both overloads", "[tone
         CHECK(isFiniteSample(x));
         CHECK(floatBits(flushTiny(x)) == floatBits(x));
     }
-    CHECK(doubleBits(flushTiny(-0.0)) == 0u);
-    CHECK(doubleBits(flushTiny(std::numeric_limits<double>::denorm_min())) == 0u);
-    CHECK(doubleBits(flushTiny(-1.0e-31)) == 0u);
-    for (const double x :
-         {1.0e-29, -1.0e-29, 0.5, -16.0, std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()})
-    {
-        INFO("x = " << x);
-        CHECK(isFiniteSample(x));
-        CHECK(doubleBits(flushTiny(x)) == doubleBits(x));
-    }
+    checkFiniteFlush(flushTinyDouble);
 }
 
-TEST_CASE("a non-finite input costs the SVF one zero sample, then it runs like a freshly reset one",
+TEST_CASE("flushState turns NaN and infinities into +0 and otherwise acts like flushTiny", "[tone][svf][nonfinite]")
+{
+    for (const std::uint64_t b : kBadDoubleBits)
+    {
+        INFO("double bits = " << b);
+        CHECK(doubleBits(flushState(doubleFromBits(b))) == 0u);
+    }
+    checkFiniteFlush(flushStateDouble);
+}
+
+TEST_CASE("a non-finite input gives one non-finite SVF output, then it runs like a freshly reset one",
           "[tone][svf][nonfinite]")
 {
-    // 先用噪声把状态跑热，注入一个坏样本，再喂一段通带正弦：坏样本那一格输出 +0；之后与刚 reset 的滤波器逐位相同
-    // （两个状态清回了 0），输出有限，通带正弦的幅度也在（不是一直输出 0）
+    // 先用噪声把状态跑热，注入一个坏样本，再喂一段通带正弦：坏样本那一格输出非有限值（往下交给 ⑥ 跳闸）；之后与刚
+    // reset 的滤波器逐位相同（两个状态清回了 +0），输出全部有限，通带正弦的幅度也在（不是一直输出 0）
     for (const double sr : kRates)
     {
         for (const SvfResponse resp : {SvfResponse::HighPass, SvfResponse::LowPass})
@@ -114,7 +147,7 @@ TEST_CASE("a non-finite input costs the SVF one zero sample, then it runs like a
                 Rng rng(static_cast<std::uint64_t>(sr) + bad);
                 for (int i = 0; i < 2000; ++i)
                     t.process(static_cast<float>(rng.range(-1.0, 1.0)), c, resp);
-                CHECK(floatBits(t.process(fromBits(bad), c, resp)) == 0u);
+                CHECK_FALSE(isFiniteSample(t.process(fromBits(bad), c, resp)));
 
                 SvfTpt fresh;
                 bool same = true;
@@ -138,10 +171,11 @@ TEST_CASE("a non-finite input costs the SVF one zero sample, then it runs like a
     }
 }
 
-TEST_CASE("a NaN reaching a running cut filter costs one sample on its own channel only", "[tone][cut][nonfinite]")
+TEST_CASE("a NaN reaching a running cut filter gives one non-finite sample on its own channel only",
+          "[tone][cut][nonfinite]")
 {
-    // 开着、交叉已走完的低切 / 高切，左声道来一个 NaN：这一格左声道输出 +0；之后左声道与刚 prepare 的同参数实例
-    // 逐位相同（状态清回 0），右声道与没进过 NaN 的实例逐位相同（两声道的状态互不影响）
+    // 开着、交叉已走完的低切 / 高切，左声道来一个 NaN：这一格左声道输出非有限值；之后左声道与刚 prepare 的同参数实例
+    // 逐位相同（状态清回 +0）、全部有限，右声道（包括坏的那一格）与没进过 NaN 的实例逐位相同（两声道的状态互不影响）
     const float nan = std::numeric_limits<float>::quiet_NaN();
     for (const double sr : kRates)
     {
@@ -177,7 +211,7 @@ TEST_CASE("a NaN reaching a running cut filter costs one sample on its own chann
             float ur = 0.25f;
             f.process(l, r);
             untouched.process(ul, ur);
-            CHECK(floatBits(l) == 0u);
+            CHECK_FALSE(isFiniteSample(l));
             CHECK(floatBits(r) == floatBits(ur));
 
             bool leftLikeFresh = true;
@@ -199,6 +233,79 @@ TEST_CASE("a NaN reaching a running cut filter costs one sample on its own chann
                 finite = finite && isFiniteSample(xl) && isFiniteSample(xr);
             }
             CHECK(leftLikeFresh);
+            CHECK(rightUntouched);
+            CHECK(finite);
+        }
+    }
+}
+
+TEST_CASE("a NaN mid-crossfade or in bypass leaves the cut filter as a non-finite sample", "[tone][cut][nonfinite]")
+{
+    // 另两种情形同样往下交给 ⑥：开关交叉进行中（干声那一路的 NaN 混进输出），关态逐位直通（NaN 原样输出，载荷不变）。
+    // 交叉进行中的那一格之后，左声道恢复成有限值（状态清回了 +0），右声道与没进过 NaN 的实例逐位相同
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const double sr : kRates)
+    {
+        for (const CutKind kind : {CutKind::LowCut, CutKind::HighCut})
+        {
+            INFO("sr = " << sr << ", kind = " << static_cast<int>(kind));
+            const float off = kind == CutKind::LowCut ? 20.0f : 20000.0f;
+            const float on = kind == CutKind::LowCut ? 200.0f : 4000.0f;
+
+            // 关态：滤波器不跑，NaN 逐位原样
+            CutFilter bypassed(kind);
+            bypassed.setCutoff(off);
+            bypassed.prepare(sr);
+            REQUIRE(bypassed.isBypassed());
+            float bl = nan;
+            float br = 0.25f;
+            bypassed.process(bl, br);
+            CHECK(floatBits(bl) == floatBits(nan));
+            CHECK(floatBits(br) == floatBits(0.25f));
+
+            // 交叉进行中：从关切到开，走 2 ms（10 ms 交叉的五分之一）后来一个 NaN
+            CutFilter f(kind);
+            CutFilter untouched(kind);
+            for (CutFilter* p : {&f, &untouched})
+            {
+                p->setCutoff(off);
+                p->prepare(sr);
+                p->setCutoff(on);
+            }
+            Rng rng(static_cast<std::uint64_t>(sr) + 7u * static_cast<std::uint64_t>(kind));
+            const auto lead = static_cast<int>(0.002 * sr);
+            for (int i = 0; i < lead; ++i)
+            {
+                float l = static_cast<float>(rng.range(-1.0, 1.0));
+                float r = static_cast<float>(rng.range(-1.0, 1.0));
+                float ul = l;
+                float ur = r;
+                f.process(l, r);
+                untouched.process(ul, ur);
+            }
+            REQUIRE(f.isSmoothing());
+            float l = nan;
+            float r = 0.25f;
+            float ul = 0.25f;
+            float ur = 0.25f;
+            f.process(l, r);
+            untouched.process(ul, ur);
+            CHECK_FALSE(isFiniteSample(l));
+            CHECK(floatBits(r) == floatBits(ur));
+
+            bool rightUntouched = true;
+            bool finite = true;
+            for (int n = 0; n < 4800; ++n)
+            {
+                float xl = static_cast<float>(rng.range(-1.0, 1.0));
+                float xr = static_cast<float>(rng.range(-1.0, 1.0));
+                float tl = xl;
+                float tr = xr;
+                f.process(xl, xr);
+                untouched.process(tl, tr);
+                rightUntouched = rightUntouched && floatBits(xr) == floatBits(tr);
+                finite = finite && isFiniteSample(xl) && isFiniteSample(xr);
+            }
             CHECK(rightUntouched);
             CHECK(finite);
         }

@@ -4,7 +4,8 @@
 // 在干声与滤波输出之间交叉 10 ms（kCutSwitchSeconds）。
 // 限制器开关的 10 ms 交叉过渡不在本头里：由 src/core/engine/SafetyMachine.cpp 里的 dsp::LinearSmoother 实现
 // （SafetyChain 的 limiterMix_，时长 safety::kLimiterCrossfadeSeconds）；
-// 那条路径的用例在 tests/core/safety/test_safety_chain.cpp。
+// 那条路径的用例在 tests/core/safety/test_safety_chain.cpp（10 ms 内逐步放开）与
+// tests/core/tone/test_limiter_switch_click.cpp（相邻样本无咔嗒）。
 // 两路输入按 out = (1 − b)·off + b·on 混合，b 从一端走到另一端恰好 n 个样本，n = round(时长·sr)，至少 1。
 //   位置是整数 k ∈ [0, n]，step() 每个样本朝目标走一步，b 由 k 算出：全程按样本计数，与宿主怎么切块无关。
 //   过渡中再切换：从当前的 k 原路折返，增益连续、斜率不变，不会跳回起点重来；同一个目标重复设置什么都不做。

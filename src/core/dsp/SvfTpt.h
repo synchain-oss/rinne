@@ -8,8 +8,8 @@
 // tan 是频率预畸变，数字滤波器在 fc 处恰为 −3.01 dB。状态就是两个积分器的值，改系数时不用换算状态，截止随时间变化
 // 也不会失稳（用例：10^6 次随机跳变）。状态与系数用 double：低切 20 Hz、192 kHz 时 a3 约 1e-7，float 里 s2 + a3·v3
 // 的增量会被舍入吃掉。截止钳在 [1 Hz, 0.45·sr]：越靠近奈奎斯特 tan 越陡，0.45·sr 处 g ≈ 6.3，仍然稳定。
-// 状态每个样本冲一次极小值，输出也冲：静音时状态几何衰减，不冲就会落进 denormal。
-// 同一步也把非有限值冲成 0（见 Sanitize.h 的 flushTiny）。
+// 状态每个样本冲一次极小值，输出也冲：静音时状态几何衰减，不冲就会落进 denormal。两者分工不同：状态写回用
+// flushState（非有限 → +0，其余同 flushTiny），输出只过 flushTiny（不清非有限值），见下面的输入契约。
 //
 // CutFilter 是参数化的一级，左右声道共用一套系数：
 //   低切的参数 20–2000 Hz，≤ 20 为关；高切 1000–20000 Hz，≥ 20000 为关。关时逐位直通（滤波器不跑，样本一个位都不碰，
@@ -22,8 +22,14 @@
 //   高切被采样率截断（44.1 kHz 下 0.45·sr = 19845 Hz，参数在它之上而又不是关）时 cutoffLimited()
 //   为真，供界面给中性提示。 reset() 清状态，平滑与交叉都落定到目标：起播沿复位、离开快速路径时调用。prepare()
 //   换采样率后也落定。
-// 输入须已清洗（有限、|x| ≤ 16）。万一还是来了非有限值：这个样本输出 0，两个状态清回 0，之后与刚 reset 过的滤波器
-// 逐位相同；状态里算出的非有限值同样清回 0。不会永久卡在 NaN 上（用例在 test_svf_nonfinite.cpp）。
+// 输入契约：输入须已清洗（有限、|x| ≤ 16），这时状态与输出都算不出非有限值。万一出现（输入非有限，或这一步算出了
+// NaN、±Inf），状态清、输出不清：
+//   状态：两个状态经 flushState 写回、清成 +0，下一个样本起与刚 reset 过的滤波器逐位相同，不会被一个坏样本永久
+//   卡在 NaN 上；
+//   输出：这一格的非有限值原样输出（flushTiny 不清它），按设计交给 ⑥ 的有限性检查跳闸。Input 内部产生的非有限值
+//   要立即跳闸，不能在本级被清成 0、让 ⑥ 看不见。
+// CutFilter 的几种情形都一样往下交：滤波输出那一路是上面这条；交叉进行中干声那一路的非有限值混进输出，输出也是
+// 非有限值；关态逐位直通，非有限值原样输出。三种都由 ⑥ 跳闸（用例在 test_svf_nonfinite.cpp）。
 #pragma once
 
 #include <cmath>
@@ -90,6 +96,12 @@ enum class SvfResponse
     HighPass
 };
 
+// 只给状态写回用：非有限 → +0，其余同 flushTiny。输出不用它，输出的非有限值要留给 ⑥ 跳闸（见文件头）
+inline double flushState(double x) noexcept
+{
+    return isFiniteSample(x) ? flushTiny(x) : 0.0;
+}
+
 // 单声道的状态；系数由调用方给，左右声道可以共用一套
 class SvfTpt
 {
@@ -106,9 +118,10 @@ public:
         const double v3 = x - s2_;
         const double v1 = c.a1 * s1_ + c.a2 * v3;
         const double v2 = s2_ + c.a2 * s1_ + c.a3 * v3;
-        s1_ = flushTiny(2.0 * v1 - s1_);
-        s2_ = flushTiny(2.0 * v2 - s2_);
+        s1_ = flushState(2.0 * v1 - s1_);
+        s2_ = flushState(2.0 * v2 - s2_);
         const double y = response == SvfResponse::HighPass ? x - kSvfDamping * v1 - v2 : v2;
+        // 输出不清非有限值：交给 ⑥ 跳闸
         return flushTiny(static_cast<float>(y));
     }
 
