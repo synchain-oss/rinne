@@ -499,7 +499,8 @@ export default {
         const { paths, texts, sizes } = readInputs(root);
         const adrPattern = BUDGETS.patterns.find((p) => p.hard) ?? BUDGETS.patterns[0];
 
-        // 真实 ADR：取最大的那份，原样判不红；在它的内容上垫到超限，门禁必须判红；阈值放宽后同一份垫过的文件不再判红。
+        // 真实 ADR：取最大的那份，原样判不红；在它的内容上垫到刚好超限一字节，门禁必须判红；阈值放宽后同一份垫过的文件不再判红。
+        // 垫固定字节数不行：ADR 长到接近上限时，垫过的文件会超过翻倍后的阈值，放宽那一步就误红。
         const adrRe = globToRegExp(adrPattern.glob);
         const adrs = paths.filter((p) => adrRe.test(p) && typeof texts[p] === "string");
         if (!adrs.length) {
@@ -512,8 +513,14 @@ export default {
                 sizes: { [target]: sizes[target] },
             };
             if (judge(realInput, BUDGETS).red.length) lines.push(`基准：真实 ADR（${target}）本来就超限，变异没有意义`);
-            const padded = texts[target] + "\n" + "x".repeat(adrPattern.bytes);
-            const paddedInput = { paths: [target], texts: { [target]: padded }, sizes: { [target]: bytesOf(padded) } };
+            // 垫 limit + 1 - size 字节（至少 1 字节，开头是一个换行，其余是 x）：磁盘字节数恰好是 limit + 1。
+            const pad = Math.max(1, adrPattern.bytes + 1 - sizes[target]);
+            const padded = texts[target] + "\n" + "x".repeat(pad - 1);
+            const paddedInput = {
+                paths: [target],
+                texts: { [target]: padded },
+                sizes: { [target]: sizes[target] + pad },
+            };
             if (judge(paddedInput, BUDGETS).red.length !== 1) lines.push(`真实 ADR（${target}）垫到超限后门禁没有判红`);
             const wide = structuredClone(BUDGETS);
             for (const p of wide.patterns) p.bytes *= 2;

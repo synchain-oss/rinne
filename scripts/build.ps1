@@ -230,7 +230,9 @@ function Get-BuiltObjects([string[]]$Lines) {
 # 源路径里的 `__` 是 CMake 对仓外路径的转义（../..）。返回 $null 表示不是仓内的源文件（JUCE、第三方）。
 function Get-ObjectSource([string]$Obj) {
     if ($Obj -notmatch '^(?<dir>.+)/CMakeFiles/(?<tgt>[^/]+)\.dir/[^/]+/(?<src>.+)\.obj$') { return $null }
-    $rel = $Matches.src -replace '(^|/)__($|/)', '$1../$2'
+    # `__` 只在整段是 `__` 时才还原。用前后断言而不消耗分隔符：消耗掉的话相邻的两个 `__`（`__/__/x`）
+    # 共用中间那个 `/`，第二个匹配不上，被还原成 `../__/x`，这个第一方 TU 就被当成仓外文件跳过。
+    $rel = $Matches.src -replace '(?<=^|/)__(?=$|/)', '..'
     $segs = [System.Collections.Generic.List[string]]::new()
     foreach ($s in (($Matches.dir + '/' + $rel) -split '/')) {
         if ($s -eq '..') { if ($segs.Count) { $segs.RemoveAt($segs.Count - 1) } }
@@ -326,8 +328,8 @@ function Get-ProjectIncludeArg([string]$OverrideFile, [string]$CacheText) {
 # 用一个两行的探针编译单元（写在构建目录的 logs 下）按本进程的环境跑 cl，取它的 /showIncludes 前缀（Latin-1 字符串）；
 # 失败时 $script:ProbeError 记原因并返回 $null。
 # 探针跑的命令要与第一方目标一致：第一方目标带 /utf-8（cmake/RinneWarnings.cmake），CI 上还经 launcher（sccache）跑。
-# $Extra 是额外加的编译开关（/utf-8），$Launcher 是编译缓存（经它跑时命令变成 launcher cl …）。
-function Invoke-ClProbe([string[]]$Extra, [string]$Launcher) {
+# $Extra 是额外加的编译开关（/utf-8），$CacheLauncher 是编译缓存（经它跑时命令变成 launcher cl …；形参不叫 $Launcher，与脚本参数同名会遮住它）。
+function Invoke-ClProbe([string[]]$Extra, [string]$CacheLauncher) {
     $dir = Join-Path $script:LogDir 'prefix-probe'
     $null = New-Item -ItemType Directory -Force -Path $dir
     Set-Content -LiteralPath (Join-Path $dir 'probe.h') -Value '#define RINNE_PROBE_H 1'
@@ -335,7 +337,7 @@ function Invoke-ClProbe([string[]]$Extra, [string]$Launcher) {
     $log = Join-Path $dir 'cl.log'
     $exe = 'cl.exe'
     $clArgs = @('/nologo', '/showIncludes', '/c') + $Extra + @((Join-Path $dir 'probe.cpp'), "/Fo$(Join-Path $dir 'probe.obj')")
-    if ($Launcher) { $exe = $Launcher; $clArgs = @('cl.exe') + $clArgs }
+    if ($CacheLauncher) { $exe = $CacheLauncher; $clArgs = @('cl.exe') + $clArgs }
     $code = Invoke-Logged $exe $clArgs $log 120
     if ($code -ne 0) { return @{ Error = "cl 探针编译退出码 $code（日志 $log）" } }
     @{ Prefix = Get-ClIncludePrefix (ConvertFrom-Latin1 ([IO.File]::ReadAllBytes($log))) 'probe.h' }
@@ -377,15 +379,15 @@ function Get-DepsPrefixStatus {
 }
 
 # 前缀对不上时的修复流程（纯函数：只按探针与配置的结果决定下一步，跑 cmake 与写文件交给传入的脚本块）。
-# $Probe 返回 @{ Problem; ProbeError; ClPrefix }；
+# $ProbeStep 返回 @{ Problem; ProbeError; ClPrefix }（形参不叫 $Probe：与脚本开关 -Probe 同名，动态作用域里会遮住下游读到的 $Probe）；
 # $Configure 参数是覆盖文件路径（$null = 不带覆盖重配，要真的重新探测），返回同样的形状；
 # $Clear 清掉构建目录里缓存的编译器探测结果；$WriteOverride 参数是 cl 实测的前缀，返回写出的覆盖文件路径
 # （前缀不能写成 cmake 字符串时返回 $null）。
 # 返回 @{ Clean; Override }：Clean 是要不要 clean 一次（旧目标文件没有依赖记录）。
 # 探针自己失败与「前缀对不上」分开报错：探针失败不重配、不清探测。覆盖之后仍对不上就抛 BuildStop。
 function Resolve-DepsPrefix {
-    param([scriptblock]$Probe, [scriptblock]$Configure, [scriptblock]$Clear, [scriptblock]$WriteOverride)
-    $s = & $Probe
+    param([scriptblock]$ProbeStep, [scriptblock]$Configure, [scriptblock]$Clear, [scriptblock]$WriteOverride)
+    $s = & $ProbeStep
     if ($s.ProbeError) { throw [BuildStop]::new("cl 探针出错，与前缀对不对上无关，所以不清探测也不重配：$($s.ProbeError)", 1) }
     if (-not $s.Problem) { return @{ Clean = $false; Override = $null } }
     & $Clear
@@ -618,6 +620,32 @@ function Invoke-Stage([string[]]$Bundles) {
     Write-Host "已拷到 $Stage：$($Bundles.Count) 个插件、$($tools.Count) 个工具"
 }
 
+# 与脚本参数同名的变量（PowerShell 的变量名不分大小写），两种写法都会经动态作用域盖住下游读到的脚本参数：
+# 给它赋值（`$probe = {…}` 把 -Probe 开关盖成脚本块），或把它声明成形参（`param([scriptblock]$Probe)`）。
+# 返回每处的 @{ Line; Kind }（Kind 是「赋值」或「形参」）。脚本自己的 param 块不算；赋值只查函数体里的，形参查整个文件。
+function Get-ScriptParamShadows([Management.Automation.Language.ScriptBlockAst]$Ast) {
+    $names = @($Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+    $named = { param($v) $v -is [Management.Automation.Language.VariableExpressionAst] -and $names -contains $v.VariablePath.UserPath }
+    $assigned = {
+        param($a)
+        if ($a -isnot [Management.Automation.Language.AssignmentStatementAst]) { return $false }
+        $targets = $a.Left -is [Management.Automation.Language.ArrayLiteralAst] ? $a.Left.Elements : @($a.Left)
+        @($targets | Where-Object { & $named $_ }).Count -gt 0
+    }
+    $declared = {
+        param($p)
+        $p -is [Management.Automation.Language.ParameterAst] -and -not [object]::ReferenceEquals($p.Parent, $Ast.ParamBlock) -and
+        $names -contains $p.Name.VariablePath.UserPath
+    }
+    $found = [System.Collections.Generic.List[object]]::new()
+    foreach ($f in $Ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        foreach ($a in $f.Body.FindAll($assigned, $true)) { $found.Add(@{ Line = $a.Extent.StartLineNumber; Kind = '赋值' }) }
+    }
+    foreach ($p in $Ast.FindAll($declared, $true)) { $found.Add(@{ Line = $p.Extent.StartLineNumber; Kind = '形参' }) }
+    # 嵌套函数会被外层函数的 FindAll 再扫一遍，按行与种类去重
+    @($found | Sort-Object { $_.Line }, { $_.Kind } -Unique)
+}
+
 # 自测：纯判据逐条给正反例；另起子进程核对两件只有真跑才看得出的事：构建留下的长命子进程不拖住调用方的管道，
 # 调用方持槽的标记生效、残留的标记不生效。
 function Invoke-SelfTest {
@@ -821,7 +849,19 @@ function Invoke-SelfTest {
     & $check '第一方依赖：本次没新编第一方 TU 时第一方对象的依赖个数是 0，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts $fpZero) $fpRoot)
     & $check '第一方依赖：记录里的对象路径不是 CMake 对象的形状，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts @('weird.obj: #deps 5, deps mtime 1 (VALID)')) $fpRoot)
     & $check '第一方依赖：本次新编的对象路径不是 CMake 对象的形状时跳过，不抛错也不判红' $false (-not (Test-FirstPartyDeps @('weird.obj', $fpObj) (Get-DepsCounts $fpDeps) $fpRoot))
-    $cLog = @('[1/2] Building C object tools\CMakeFiles\x.dir\Release\a.c.obj', '[2/2] Linking CXX executable tools\Release\x.exe')
+    # 对象路径 → 源文件：`__` 是 CMake 对 `..` 的转义，只有整段是 `__` 才还原；相邻的 `__/__/` 每个都要还原
+    # （消耗分隔符的正则让两个 `__` 共用中间的 `/`，第二个漏掉，源文件被当成仓外文件跳过）
+    $objSrc = { param($Rel) Get-ObjectSource "p/q/r/s/CMakeFiles/t.dir/Release/$Rel.obj" }
+    & $check '对象路径还原：单个 __ 还原成上一级' $false ((& $objSrc '__/x.cpp') -ceq 'p/q/r/x.cpp')
+    & $check '对象路径还原：开头连续的 __/__/ 都还原' $true ((& $objSrc '__/__/x.cpp') -ceq 'p/q/x.cpp')
+    & $check '对象路径还原：中间夹在目录之间的连续 __/__/ 都还原' $true ((& $objSrc 'a/__/__/b.cpp') -ceq 'p/q/r/b.cpp')
+    & $check '对象路径还原：三个连续的 __ 都还原' $true ((& $objSrc '__/__/__/x.cpp') -ceq 'p/x.cpp')
+    & $check '对象路径还原：只是以 __ 开头或结尾的名字不还原' $true ((& $objSrc '__x/a__/__b/y.cpp') -ceq 'p/q/r/s/__x/a__/__b/y.cpp')
+    $fpFar = 'src/core/CMakeFiles/rinne_core.dir/Release/__/__/src/core/A.cpp.obj'
+    & $check '第一方依赖：对象路径里连续的 __/__/ 还原成仓内路径，没记依赖的第一方 TU 照样判红' $true (
+        (Test-FirstPartyDeps @($fpFar) @{} $fpRoot) -match '本次新编的第一方编译单元没有记下')
+    & $check '第一方依赖：对象路径里连续的 __/__/ 的第一方 TU 记下了依赖，不判红' $false (-not (Test-FirstPartyDeps @($fpFar) @{ $fpFar = 3 } $fpRoot))
+    $cLog = @('[1/2] Building C object tools\CMakeFiles\x.dir\Release\a.c.obj','[2/2] Linking CXX executable tools\Release\x.exe')
     $builtCxx, $builtC = @(Get-BuiltObjects $fpLog), @(Get-BuiltObjects $cLog)   # 单个结果会被函数返回值展开成字符串，用 @() 兜住
     & $check '构建日志：取出本次新编的对象（CXX 与 C，不含链接行）' $false ($builtCxx.Count -eq 2 -and $builtCxx[0] -eq $fpObj -and
         $builtC.Count -eq 1 -and $builtC[0] -eq 'tools/CMakeFiles/x.dir/Release/a.c.obj')
@@ -837,20 +877,24 @@ function Invoke-SelfTest {
     $pos = @($wired | ForEach-Object { [array]::IndexOf($called, $_) })
     & $check 'Invoke-Build 的接线：表态覆盖文件、核对前缀、记录与 clean、断言依赖，四步都在且先后不乱' $false (
         @($pos | Where-Object { $_ -lt 0 }).Count -eq 0 -and ($pos -join ',') -eq (($pos | Sort-Object) -join ','))
-    # 函数里给与脚本参数同名的变量赋值：PowerShell 的变量名不分大小写，`$probe = {…}` 会把 -Probe 开关盖成脚本块，
-    # 之后 Get-ExpectedBundles $Probe 才在真跑里抛错，上面那些纯函数的用例碰不到它。
+    # 函数里与脚本参数同名的变量（赋值或形参）：PowerShell 的变量名不分大小写，`$probe = {…}` 会把 -Probe 开关盖成脚本块，
+    # 形参 `$Probe` 经动态作用域也会遮住下游读到的 $Probe；之后 Get-ExpectedBundles $Probe 才在真跑里抛错，上面那些纯函数的用例碰不到它。
     $astTokens, $astErrors = $null, $null
     $selfAst = [Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$astTokens, [ref]$astErrors)
-    $paramNames = @($selfAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-    $assigned = {
-        param($a)
-        if ($a -isnot [Management.Automation.Language.AssignmentStatementAst]) { return $false }
-        $targets = $a.Left -is [Management.Automation.Language.ArrayLiteralAst] ? $a.Left.Elements : @($a.Left)
-        @($targets | Where-Object { $_ -is [Management.Automation.Language.VariableExpressionAst] -and $paramNames -contains $_.VariablePath.UserPath }).Count -gt 0
+    $shadow = @(Get-ScriptParamShadows $selfAst)
+    & $check "函数里不给与脚本参数同名的变量赋值、形参也不与脚本参数同名（变量名不分大小写）$(if ($shadow.Count) { '：' + (($shadow | ForEach-Object { "第 $($_.Line) 行$($_.Kind)" }) -join '、') })" $false ($shadow.Count -eq 0)
+    # 判据自己的正反例：赋值、函数体里的 param 块、函数名后括号里的形参都要抓到（大小写不论），改名后的与脚本自己的 param 块不能误报
+    $shadowKinds = {
+        param($Text)
+        $t, $e = $null, $null
+        (@(Get-ScriptParamShadows ([Management.Automation.Language.Parser]::ParseInput($Text, [ref]$t, [ref]$e)) | ForEach-Object { $_.Kind })) -join ','
     }
-    $shadow = @($selfAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true) |
-            ForEach-Object { $_.Body.FindAll($assigned, $true) })
-    & $check "函数里不给与脚本参数同名的变量赋值（变量名不分大小写）$(if ($shadow.Count) { '：第 ' + (($shadow | ForEach-Object { $_.Extent.StartLineNumber }) -join '、') + ' 行' })" $false ($shadow.Count -eq 0)
+    $scriptParam = 'param([switch]$Probe, [string]$BuildDir)'
+    & $check '同名检查：函数里给同名变量赋值，抓到' $true ((& $shadowKinds "$scriptParam`nfunction F { `$probe = 1 }") -ceq '赋值')
+    & $check '同名检查：函数体 param 块里的同名形参，抓到' $true ((& $shadowKinds "$scriptParam`nfunction F { param([scriptblock]`$Probe) }") -ceq '形参')
+    & $check '同名检查：函数名后括号里的同名形参（大小写不论），抓到' $true ((& $shadowKinds "$scriptParam`nfunction F([scriptblock]`$builddir) { }") -ceq '形参')
+    & $check '同名检查：脚本块 param 里的同名形参，抓到' $true ((& $shadowKinds "$scriptParam`n`$sb = { param(`$Probe) }") -ceq '形参')
+    & $check '同名检查：改了名的形参与变量、脚本自己的 param 块，不误报' $false ((& $shadowKinds "$scriptParam`nfunction F { param([scriptblock]`$ProbeStep); `$probeStep = 1 }") -ceq '')
     Remove-Item -LiteralPath (Join-Path $fpCore 'A.cpp'), (Join-Path $fpCore 'B.cpp') -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fpCore, (Join-Path $fpRoot 'src'), $fpRoot -ErrorAction SilentlyContinue
     $formal, $probeBundles = (Get-ExpectedBundles $false), (Get-ExpectedBundles $true)
