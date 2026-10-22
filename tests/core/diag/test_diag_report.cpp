@@ -68,7 +68,7 @@ DiagInputs makeSnapshotInputs(const DiagEventLog& events)
     in.blocks.zeroLen = 2;
     in.blocks.overMax = 1;
     in.blocks.bypassed = 3;
-    in.blocks.maxNSeen = 1024;
+    in.prepare.maxNSeen = 1024;
     in.blocks.nMin = 32;
     in.blocks.nMax = 1024;
     in.blocks.hist[0] = 10;
@@ -504,4 +504,76 @@ TEST_CASE("a field whose fragments are all dropped becomes none", "[diag]")
     in.host = winPathOf(kProfile);
     const std::string text = buildDiagReport(in);
     CHECK(text.find("host=none") != std::string::npos);
+}
+
+TEST_CASE("the output role gets the same privacy treatment", "[diag]")
+{
+    DiagInputs in = makePrivacyInputs();
+    in.role = DiagRole::kOutput;
+    const std::string text = buildDiagReport(in);
+    CHECK(text.find("alice_wonderland") == std::string::npos);
+    CHECK(text.find(kMachine) == std::string::npos);
+    CHECK(text.find("Users") == std::string::npos);
+    CHECK(text.find("Documents") == std::string::npos);
+    CHECK(text.find("song.cpr") == std::string::npos);
+    CHECK(text.find("Lead Vox") == std::string::npos);
+    CHECK(text.find("take7") == std::string::npos);
+    CHECK(text.find("Music") == std::string::npos);
+    CHECK(text.find("share") == std::string::npos);
+    CHECK(text.find('\\') == std::string::npos);
+    CHECK(text.find('@') == std::string::npos);
+    CHECK(text.find('~') == std::string::npos);
+    CHECK(text.find('%') == std::string::npos);
+    // 敌意字段被清成 none，不是空值
+    CHECK(text.find("host=none") != std::string::npos);
+    CHECK(text.find("os=none") != std::string::npos);
+    CHECK(text.find("pair=none") != std::string::npos);
+    CHECK(text.find("product=none") != std::string::npos);
+}
+
+TEST_CASE("a path fragment discards the whole free text, not just its own fragment", "[diag]")
+{
+    // 带路径特征的片段之前还有词时，整串都不要：目录名本身可以带空格，前面的词也可能是目录名的一部分
+    CHECK(sanitizeText("Jane Doe" + kBackslash + "Documents" + kBackslash + "song.cpr").empty());
+    CHECK(sanitizeText("Cubase 15.0.30 (x64) " + winPathOf(kProfile)).empty());
+    CHECK(sanitizeText("before one/two three").empty());
+}
+
+TEST_CASE("max_n_seen follows the current prepare while nsamples max stays lifetime", "[diag]")
+{
+    // 终身最大留在计数器里；「本次 prepare 以来的最大块长」由共享段的 max_n_seen 给出，两者是不同的量
+    DiagCounters counters;
+    counters.onBlock(1024, 1024, false);
+    counters.onBlock(256, 256, false);
+    const DiagCountersSnapshot blocks = counters.snapshot();
+    CHECK(blocks.nMax == 1024u);
+
+    DiagInputs in = makeOutputInputs();
+    in.blocks = blocks;
+    in.prepare.maxBlock = 256;
+    in.prepare.maxNSeen = 256;
+    const std::string text = buildDiagReport(in);
+    CHECK(text.find("max_n_seen=256") != std::string::npos);
+    CHECK(text.find("nsamples: min=256 max=1024") != std::string::npos);
+}
+
+TEST_CASE("events keep the order they were pushed in, not time order", "[diag]")
+{
+    DiagEventLog events;
+    events.push(61001, EventCode::kPrepare, 48000, 512);
+    events.push(7000, EventCode::kNonrealtime, 1);
+    DiagInputs in = makeOutputInputs();
+    in.events = &events;
+    const std::string text = buildDiagReport(in);
+    const std::size_t later = text.find("t+61.001 prepare");
+    const std::size_t earlier = text.find("t+7.000 nonrealtime");
+    REQUIRE(later != std::string::npos);
+    REQUIRE(earlier != std::string::npos);
+    CHECK(later < earlier); // 入环顺序，不是时间顺序
+}
+
+TEST_CASE("carriage returns and other control whitespace separate fragments", "[diag]")
+{
+    CHECK(sanitizeText("Cubase\r\n") == "Cubase");
+    CHECK(sanitizeText("Cubase\r15\v0\f1") == "Cubase 15 0 1");
 }

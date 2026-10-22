@@ -2,6 +2,8 @@
 //
 // 音频线程的诊断计数。只有音频线程写（单写者），消息线程随时读：全是 relaxed 的整字原子量，不加锁、不分配、
 // 不读时钟。读到的是各字段各自的近似值，彼此之间不保证同一时刻，诊断文本不需要更多。
+// 快照里的直方图合计与总块数的关系不保证：总块数先加，直方图桶后加，两次读之间可能只看到一半，所以
+// 「合计 + 0 样本 <= 总块数」不是恒等式，读到时以各字段自己的值为准。
 #pragma once
 
 #include <atomic>
@@ -24,9 +26,8 @@ struct DiagCountersSnapshot
     std::uint64_t zeroLen = 0; // 0 样本的调用
     std::uint64_t overMax = 0; // 块长超过 prepare 声明的值
     std::uint64_t bypassed = 0; // 宿主旁路的块
-    std::uint32_t maxNSeen = 0; // 与 nMax 同一个计数；诊断文本两处都列，是为了保持 v1 格式的字段齐全
-    std::uint32_t nMin = 0; // 没见过任何非零块时为 0
-    std::uint32_t nMax = 0;
+    std::uint32_t nMin = 0; // 最小块长；还没见过非零块，或读到时 nMax 仍是 0，报告 0
+    std::uint32_t nMax = 0; // 终身最大；「本次 prepare 以来」的最大块长不在这里，由调用方从共享段的 max_n_seen 填
     std::uint64_t hist[kNsamplesBuckets] = {};
 };
 
@@ -71,9 +72,9 @@ public:
         s.overMax = overMax_.load(std::memory_order_relaxed);
         s.bypassed = bypassed_.load(std::memory_order_relaxed);
         s.nMax = nMax_.load(std::memory_order_relaxed);
-        s.maxNSeen = s.nMax;
         const std::uint32_t lo = nMin_.load(std::memory_order_relaxed);
-        s.nMin = lo == kNoMin ? 0 : lo;
+        // 第一块的两次写落在两次读之间时，nMax 还是 0 而 nMin 已有值；两者一起报 0，不报出 min > max
+        s.nMin = (lo == kNoMin || s.nMax == 0) ? 0 : lo;
         for (std::size_t i = 0; i < kNsamplesBuckets; ++i)
         {
             s.hist[i] = hist_[i].load(std::memory_order_relaxed);

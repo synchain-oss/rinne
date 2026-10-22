@@ -5,8 +5,11 @@
 // 不同的桶，4096 与 4097 也是。
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
+#include <vector>
 
 #include "diag/DiagCounters.h"
 
@@ -41,7 +44,6 @@ TEST_CASE("block counters separate zero, over-max and bypassed calls", "[diag]")
     CHECK(empty.bypassed == 0u);
     CHECK(empty.nMin == 0u);
     CHECK(empty.nMax == 0u);
-    CHECK(empty.maxNSeen == 0u);
     CHECK(histogramTotal(empty) == 0u);
 
     counters.onBlock(0, 512, true);
@@ -58,7 +60,6 @@ TEST_CASE("block counters separate zero, over-max and bypassed calls", "[diag]")
     CHECK(snapshot.bypassed == 2u);
     CHECK(snapshot.nMin == 256u);
     CHECK(snapshot.nMax == 1024u);
-    CHECK(snapshot.maxNSeen == 1024u);
     CHECK(snapshot.hist[0] == 0u);
     CHECK(snapshot.hist[1] == 0u);
     CHECK(snapshot.hist[2] == 1u);
@@ -82,7 +83,6 @@ TEST_CASE("zero-length calls never create a minimum", "[diag]")
     CHECK(snapshot.bypassed == 1u);
     CHECK(snapshot.nMin == 0u);
     CHECK(snapshot.nMax == 0u);
-    CHECK(snapshot.maxNSeen == 0u);
     CHECK(histogramTotal(snapshot) == 0u);
 }
 
@@ -95,4 +95,36 @@ TEST_CASE("histogram buckets split at the upper bound of each power of two", "[d
     CHECK(DiagCounters::bucketOf(4096) == 6u);
     CHECK(DiagCounters::bucketOf(4097) == 7u);
     CHECK(DiagCounters::bucketOf(0xffffffffu) == 7u);
+}
+
+// 计数是单写者、多读者的：写线程在音频线程的位置上跑，读线程在消息线程的位置上跑。两个字段都要是原子的，
+// 否则这里会读到撕裂的值；把成员改成普通整型在 TSan 下会报 race。
+TEST_CASE("a reader can snapshot while the writer counts", "[diag]")
+{
+    DiagCounters counters;
+    constexpr std::uint32_t kBlocks = 20000u;
+    std::atomic<bool> writing{true};
+
+    std::thread writer([&] {
+        for (std::uint32_t i = 1u; i <= kBlocks; ++i)
+        {
+            counters.onBlock(i % 4097u, 4096u, (i % 8u) == 0u);
+        }
+        writing.store(false, std::memory_order_release);
+    });
+
+    std::uint64_t lastTotal = 0u;
+    while (writing.load(std::memory_order_acquire))
+    {
+        const DiagCountersSnapshot snapshot = counters.snapshot();
+        // 相邻两次快照之间，总块数只增不减
+        CHECK(snapshot.blocksTotal >= lastTotal);
+        lastTotal = snapshot.blocksTotal;
+    }
+    writer.join();
+
+    const DiagCountersSnapshot final = counters.snapshot();
+    CHECK(final.blocksTotal == kBlocks);
+    CHECK(final.bypassed == kBlocks / 8u);
+    CHECK(histogramTotal(final) + final.zeroLen == kBlocks);
 }

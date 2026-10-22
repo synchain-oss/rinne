@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 诊断文本的拼装。自由文本先按片段清洗再写出：带路径分隔符、冒号、@、~、% 的片段连同它之后的内容一起丢掉，其余字符只留
-// ASCII 白名单，因此路径、盘符、用户名和主机名不会随宿主字符串漏进剪贴板。数字一律走整数十进制，时间拆成
+// 诊断文本的拼装。自由文本先按片段清洗再写出：任何片段带路径分隔符、冒号、@、~、% 的，整串不要，其余字符只留
+// ASCII 白名单，所以宿主字符串里的路径、盘符和带账号特征的内容进不了剪贴板；不带分隔符的裸名字清洗不出来，
+// 靠调用方只交名称与版本。数字一律走整数十进制，时间拆成
 // 整数秒与三位毫秒，浮点只参与取整前的乘法，不用 printf 的浮点格式，所以输出与区域设置无关、逐字节可复现。
 #include "diag/DiagReport.h"
 
@@ -34,7 +35,7 @@ static_assert(sizeof(kEventInfo) / sizeof(kEventInfo[0]) == kEventCodeCount, "�
 
 bool isWhitespace(char c) noexcept
 {
-    return c == ' ' || c == '\t' || c == '\n';
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
 bool isAsciiAlnum(char c) noexcept
@@ -239,12 +240,22 @@ std::string sanitizeText(std::string_view raw, std::size_t maxLen)
             // 目录名的一部分，只丢这一段或这一段之后的内容，都会把 "Jane" 或 "Doe" 留在输出里
             return {};
         }
+        // 拼到 maxLen 就不再往里加字符，临时串因此有上界。但后面的片段仍要看有没有路径或账号特征：只看已经
+        // 拼好的部分就收工，会把后面那段路径漏过去，让带路径的串拼出前半个词
+        if (joined.size() >= maxLen)
+        {
+            continue;
+        }
         if (!joined.empty())
         {
             joined.push_back(' ');
         }
         for (const char c : fragment)
         {
+            if (joined.size() >= maxLen)
+            {
+                break;
+            }
             joined.push_back(isAllowedTextChar(c) ? c : '_');
         }
     }
@@ -359,7 +370,7 @@ DiagEvent DiagEventLog::at(std::size_t i) const noexcept
 std::string buildDiagReport(const DiagInputs& in)
 {
     std::string out;
-    out.reserve(2048);
+    out.reserve(4096);
     out += "rinne-diag v1\n";
 
     out += "product=";
@@ -458,7 +469,7 @@ std::string buildDiagReport(const DiagInputs& in)
     out += " bypassed=";
     out += std::to_string(in.blocks.bypassed);
     out += " max_n_seen=";
-    out += std::to_string(in.blocks.maxNSeen);
+    out += std::to_string(in.prepare.maxNSeen);
     out += '\n';
 
     out += "nsamples: min=";

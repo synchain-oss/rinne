@@ -8,13 +8,17 @@
 // 桥契约的检查脚本，另行处理，在那之前复制诊断接不到桥上。
 //
 // 隐私靠结构保证，再靠清洗兜底：
-//   - 输入里没有任何能装路径、用户名、主机名或原始轨道名的字段。轨道名只以 32 位散列的形式交进来，输出只有
-//     same / different / unknown 加自己那一端的 8 位十六进制散列；
-//   - 唯一的自由文本是产品、宿主、系统这几个短串。调用方只许交宿主与系统的名称和版本，不许交任何用户或机器
-//     自己起的名字：不带分隔符的裸名字清洗不出来，这一层只是兜底。写出前过 sanitizeText：含路径分隔符、冒号、
-//     @、~、% 的片段，整串不要（路径里的目录名可以带空格，前面的词也可能是目录名的一部分），
-//     只留 ASCII 字母数字与 . _ + - ( ) 和空格，长度封顶；
+//   - 没有字段收原始轨道名：轨道名只以 32 位散列的形式交进来，输出只有 same / different / unknown 加自己那一端
+//     的 8 位十六进制散列。这个散列是指纹，不是匿名化：调用方交的是不带盐的 32 位散列，四个可打印 ASCII 字符
+//     以内的短名能被字典秒级还原，常见名可撞库还原，独有名字可用来核对猜测。散列只用来比较两端「相同 / 不同」，
+//     但报告一旦贴进公开 issue 就收不回来，看的人可以拿它核对猜测；
+//   - 自由文本有 11 个 std::string 字段（产品、版本、构建标签、格式、宿主、系统、架构、后端、段名前缀、配对状态、
+//     安全状态），写出前一律过 sanitizeText：含路径分隔符、冒号、@、~、% 的片段，整串不要（路径里的目录名可以带
+//     空格，前面的词也可能是目录名的一部分），只留 ASCII 字母数字与 . _ + - ( ) 和空格，长度封顶；
+//   - 清洗只是兜底：调用方只许交宿主与系统的名称和版本，不许交任何用户或机器自己起的名字，不带分隔符的裸名字
+//     清洗不出来。配对状态与安全状态仍是自由文本，接线的一侧要交机读标识，不是用户起的名字；
 //   - 事件是编码加两个数，名字来自固定表，不带自由文本。
+// 末尾的 ui 段由界面补，不经过本文件的清洗：界面补的那几项必须遵守同一套规则（固定名字表，或过 sanitizeText）。
 // 数字一律用整数运算格式化成定点，不经 printf 的浮点，所以与区域设置无关，逐字节可复现。只在非实时线程使用。
 #pragma once
 
@@ -23,6 +27,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include "diag/DiagCounters.h"
 
@@ -32,10 +37,11 @@ namespace rinne::diag
 inline constexpr std::size_t kEventCapacity = 64;
 inline constexpr std::size_t kTextMaxLen = 48;
 
-// 清洗一个自由文本：见文件头。结果只含 [A-Za-z0-9 ._+()-]，首尾无空格，不超过 maxLen
+// 清洗一个自由文本：见文件头；有任何一段带路径或账号特征，整串返回空。结果只含 [A-Za-z0-9 ._+()-]，首尾无空格，不超过
+// maxLen
 std::string sanitizeText(std::string_view raw, std::size_t maxLen = kTextMaxLen);
 
-// 定点格式化：value 四舍五入到 decimals 位（0..6）。NaN 与无穷输出 "nan"。负零输出 "0.000"
+// 定点格式化：value 四舍五入到 decimals 位（0..6）。NaN、无穷和绝对值超过 1e15 的数都输出 "nan"。负零输出 "0.000"
 std::string formatFixed(double value, int decimals);
 
 // 8 位小写十六进制
@@ -82,6 +88,7 @@ struct DiagEvent
 };
 
 // 最近 kEventCapacity 条事件的环，外加累计条数。消息线程使用，不加锁。音频线程的事件经队列转到这里
+// 事件按入环顺序输出，不按时间排序：tMs 不保证单调，格式说明也不作此保证
 class DiagEventLog
 {
 public:
@@ -104,13 +111,21 @@ enum class DiagRole : std::uint8_t
     kInput,
     kOutput,
 };
+// 来源序号：调用方可能把它当作 group_set 事件的 b 传进事件环，事件行会原样写出这个十进制数，所以数值属于
+// rinne-diag v1 的格式，只许在末尾追加，不许改已有项的数值，也不在中间插项后重排。名字表（originName）与这里
+// 的数值一一对应。
 enum class DiagOrigin : std::uint8_t
 {
-    kNone,
-    kSmart,
-    kRestore,
-    kManual,
+    kNone = 0,
+    kSmart = 1,
+    kRestore = 2,
+    kManual = 3,
 };
+static_assert(static_cast<std::uint8_t>(DiagOrigin::kNone) == 0u &&
+                  static_cast<std::uint8_t>(DiagOrigin::kSmart) == 1u &&
+                  static_cast<std::uint8_t>(DiagOrigin::kRestore) == 2u &&
+                  static_cast<std::uint8_t>(DiagOrigin::kManual) == 3u,
+              "来源序号属于 rinne-diag v1，只许追加");
 enum class DiagTrackRelation : std::uint8_t
 {
     kUnknown,
@@ -158,6 +173,8 @@ struct DiagPrepare
     bool nonrealtimeSeen = false;
     bool setStateBeforePrepare = false;
     std::uint32_t resetCalls = 0;
+    std::uint32_t maxNSeen =
+        0; // 本次 prepare 以来的最大块长，调用方从共享段的 max_n_seen 填；不同于 blocks.nMax（终身）
 };
 
 // 以下四段只有 Input 输出
@@ -228,6 +245,9 @@ struct DiagInputs
     DiagSafety safety;
     const DiagEventLog* events = nullptr; // 可空
 };
+
+// 轨道名的隐私靠这个类型保证：原始名字是 std::string，DiagInputs 里装不下它，只装得下散列
+static_assert(std::is_same_v<decltype(DiagInputs::trackHash), std::uint32_t>, "轨道名只能以 32 位散列交进来");
 
 // 生成文本。每行以 '\n' 结尾；不含 ui 段
 std::string buildDiagReport(const DiagInputs& in);
