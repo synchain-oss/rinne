@@ -1,0 +1,462 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// StreamSync 的判据：断档、严格模式的对齐、容忍模式、重同步的淡变、两端停用清空、
+// 同采样率重 prepare、reset 只记诊断、起播沿的淡出与复位、宿主违约、读头槽。
+//
+// 这里直接驱动 StreamSync（判据那一半），不经过 LoopSession：判据是纯逻辑，
+// 与环、延迟线的搬运无关。判据全部按样本计，与宿主怎么切块无关。
+//
+// 用例编号：L2-01…L2-11。标 ⛔ 的是删除式验证点。
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <cstdint>
+#include <vector>
+
+#include "loop/LocalLine.h"
+#include "loop/StreamSync.h"
+#include "loop/Taps.h"
+
+namespace
+{
+
+using namespace rinne::loop;
+
+constexpr double kSr = 48000.0;
+
+// 一个把输入变成输出的驱动器：包住 StreamSync、LocalLine 与 TapSet，省掉每条用例的样板。
+//
+// 用法：driver.feed(writeHead, blockLength) 推进一块；driver.block() 给出这一块的 SyncOutcome。
+class Driver
+{
+public:
+    Driver()
+    {
+        line_.allocate(kSr);
+        sync_.prepare(kSr);
+    }
+
+    // 推进一块：writeHead 是这一块看到的写头 W，n 是块长。
+    SyncOutcome feed(i64 writeHead, int n, bool paired = true)
+    {
+        SyncInputs in;
+        in.paired = paired;
+        in.writeHead = writeHead;
+        in.processed = processed_;
+        in.declaredBlock = declaredBlock_;
+        in.peerMaxBlock = peerMaxBlock_;
+        in.blockLength = n;
+        SyncOutcome outcome = sync_.process(in, line_, taps_);
+        processed_ += n;
+        advanceTaps(taps_, n);
+        return outcome;
+    }
+
+    // 推进一块并带上一批事实（起播沿、换写方、停用…）
+    SyncOutcome feedWith(SyncInputs& in, i64 writeHead, int n)
+    {
+        in.writeHead = writeHead;
+        in.processed = processed_;
+        in.declaredBlock = declaredBlock_;
+        in.peerMaxBlock = peerMaxBlock_;
+        in.blockLength = n;
+        SyncOutcome outcome = sync_.process(in, line_, taps_);
+        processed_ += n;
+        advanceTaps(taps_, n);
+        return outcome;
+    }
+
+    LocalLine& line() { return line_; }
+    TapSet& taps() { return taps_; }
+    StreamSync& sync() { return sync_; }
+    i64 processed() const { return processed_; }
+
+    void setDeclaredBlock(std::int64_t n) { declaredBlock_ = n; }
+    void setPeerMaxBlock(std::int64_t n) { peerMaxBlock_ = n; }
+
+private:
+    LocalLine line_;
+    TapSet taps_;
+    StreamSync sync_;
+    i64 processed_ = 0;
+    std::int64_t declaredBlock_ = 512;
+    std::int64_t peerMaxBlock_ = 0;
+};
+
+// 事件出口的收集器：把事件码记下来，供用例断言。
+struct EventLog
+{
+    std::vector<std::uint16_t> codes;
+
+    static void sink(void* context, std::uint16_t code, std::uint8_t, std::uint8_t, std::int64_t) noexcept
+    {
+        static_cast<EventLog*>(context)->codes.push_back(code);
+    }
+
+    bool has(std::uint16_t code) const
+    {
+        for (const auto c : codes)
+        {
+            if (c == code)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+} // namespace
+
+TEST_CASE("loop sync L2-01 断档：R 前进 2·N_max − 1 不判断档，= 2·N_max 判断档")
+{
+    // ⛔ 删除式验证点：把判据改成按块计 → 本用例变红。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+    driver.setPeerMaxBlock(0);
+
+    const std::int64_t limit = stallThreshold(512, 0); // 1024
+
+    // 推进量恰好 2·N_max − 1：还不判断档。
+    driver.feed(0, static_cast<int>(limit - 1));
+    REQUIRE_FALSE(driver.sync().state() == SyncState::kStalled);
+
+    // 再推 1 个样本：累计正好 2·N_max，判断档。
+    const SyncOutcome outcome = driver.feed(0, 1);
+    REQUIRE(outcome.stalled);
+    REQUIRE(driver.sync().state() == SyncState::kStalled);
+}
+
+TEST_CASE("loop sync L2-01b 断档之后写头恢复推进，判据解除")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    driver.feed(0, 1024);
+    REQUIRE(driver.sync().state() == SyncState::kStalled);
+
+    // 写头恢复推进：解除断档并重建读头。
+    const SyncOutcome outcome = driver.feed(512, 512);
+    REQUIRE_FALSE(outcome.stalled);
+    REQUIRE(driver.sync().state() != SyncState::kStalled);
+}
+
+TEST_CASE("loop sync L2-02 严格模式：Δ 序列 0,0 不重同步；0,256 重同步")
+{
+    // ⛔ 删除式验证点：去掉严格模式的 Δ 判据 → 本用例变红。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    // 先配上：这一块只锚定偏移，不做判据。
+    driver.feed(0, 512);
+    REQUIRE(driver.sync().resyncCount() == 0);
+
+    // Δ = 0 的第二块：仍然不重同步。
+    driver.feed(0, 512);
+    REQUIRE(driver.sync().resyncCount() == 0);
+
+    // Δ = 256：与上一块的 Δ 不同 → 重同步。
+    const SyncOutcome outcome = driver.feed(256, 512);
+    REQUIRE(outcome.resynced);
+    REQUIRE(driver.sync().resyncCount() == 1);
+}
+
+TEST_CASE("loop sync L2-03 10 s 内第 3 次重同步 → 转容忍模式并置「时序不稳定」")
+{
+    // ⛔ 删除式验证点：去掉容忍模式 → 本用例变红。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    EventLog log;
+    driver.sync().setEventSink(LoopEventSink(&EventLog::sink, &log));
+
+    // 漂移跳变（写头猛冲）触发重同步。四次跳变：前三次落在 10 s 窗口内。
+    driver.feed(0, 512);
+    driver.feed(1, 512);
+    driver.feed(2, 10000);
+    driver.feed(3, 10000);
+    driver.feed(4, 10000);
+    driver.feed(5, 10000);
+
+    REQUIRE(driver.sync().resyncCount() >= 3);
+    REQUIRE(driver.sync().tolerant());
+    REQUIRE(driver.sync().unstable());
+    REQUIRE(log.has(static_cast<std::uint16_t>(LoopEventCode::kTolerantMode)));
+    REQUIRE(log.has(static_cast<std::uint16_t>(LoopEventCode::kUnstable)));
+}
+
+TEST_CASE("loop sync L2-03b 超出 10 s 的重同步不转容忍模式")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    // 同样的三次跳变，但每两次之间隔 > 10 s 的样本数，所以第 3 次不在窗口内。
+    driver.feed(0, 512);
+    driver.feed(1, 512);
+    driver.feed(2, 480001);
+    driver.feed(3, 480001);
+    driver.feed(4, 480001);
+    driver.feed(5, 480001);
+
+    REQUIRE(driver.sync().resyncCount() >= 3);
+    REQUIRE_FALSE(driver.sync().tolerant());
+}
+
+TEST_CASE("loop sync L2-04 重同步：旧读头 5 ms 淡出、新读头 20 ms onset")
+{
+    // ⛔ 删除式验证点：去掉淡出 → 本用例变红（出现阶跃）。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    // 读头（满增益）。
+    Tap& tap = driver.taps().at(0);
+    tap.active = true;
+    tap.offset = 0;
+    tap.delay = 100;
+    tap.validFrom = 0;
+    tap.validTo = 1000000;
+
+    // 触发一次重同步（漂移跳变）。块要小：5 ms 的淡出是 240 个样本，块太大淡出就在块末走完了。
+    driver.feed(0, 64);
+    driver.feed(0, 64);
+    const SyncOutcome outcome = driver.feed(256, 64);
+    REQUIRE(outcome.resynced);
+
+    // 旧读头开始淡出：包络在下降（不再是 1）。
+    REQUIRE(tap.env.fadingOut());
+    REQUIRE(TapSet::currentEnvelope(tap) < 1.0f);
+    REQUIRE(TapSet::currentEnvelope(tap) > 0.0f);
+
+    // 淡出是单调下降的：每推进一步包络都不增。
+    float previous = TapSet::currentEnvelope(tap);
+    for (int i = 0; i < 20; ++i)
+    {
+        advanceTaps(driver.taps(), 1);
+        const float now = TapSet::currentEnvelope(tap);
+        REQUIRE(now <= previous);
+        previous = now;
+    }
+}
+
+TEST_CASE("loop sync L2-05 两端停用 > 250 ms 清空本地延迟线；恰好 250 ms 不清")
+{
+    // ⛔ 删除式验证点：去掉停用 250 ms 清空 → 本用例变红（停用后复燃）。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    // 先拉一点数据进来。
+    driver.line().pull(0, 100, [&](std::int64_t, float& l, float& r) {
+        l = 1.0f;
+        r = 1.0f;
+    });
+    REQUIRE(driver.line().pulled() == 100);
+
+    SyncInputs in;
+    in.paired = false;
+    in.inactive = true;
+
+    // 恰好 250 ms（12000 个样本，48 kHz）：不清。
+    driver.feedWith(in, 0, 12000);
+    REQUIRE_FALSE(driver.sync().state() == SyncState::kStalled);
+    REQUIRE(driver.line().pulled() == 100);
+
+    // 超过 250 ms：清空（pulled 归零）。
+    driver.feedWith(in, 0, 1);
+    REQUIRE(driver.line().pulled() == 0);
+}
+
+TEST_CASE("loop sync L2-06 同采样率重新 prepare：W、R、读头、延迟线内容逐位不变")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    driver.line().pull(0, 100, [&](std::int64_t, float& l, float& r) {
+        l = 0.25f;
+        r = -0.25f;
+    });
+
+    Tap& tap = driver.taps().at(0);
+    tap.active = true;
+    tap.offset = 17;
+    tap.delay = 4800;
+    tap.validFrom = 3;
+    tap.validTo = 999;
+
+    driver.feed(100, 512);
+
+    const i64 pulledBefore = driver.line().pulled();
+    const i64 offsetBefore = driver.sync().offset();
+    const i64 writeHeadBefore = driver.sync().writeHead();
+    const std::int64_t resyncBefore = driver.sync().resyncCount();
+
+    // 同采样率重新 prepare：什么都不动。
+    driver.sync().prepare(kSr);
+
+    REQUIRE(driver.line().pulled() == pulledBefore);
+    REQUIRE(driver.sync().offset() == offsetBefore);
+    REQUIRE(driver.sync().writeHead() == writeHeadBefore);
+    REQUIRE(driver.sync().resyncCount() == resyncBefore);
+
+    // 读头逐位不变。
+    REQUIRE(driver.taps().at(0).offset == 17);
+    REQUIRE(driver.taps().at(0).delay == 4800);
+    REQUIRE(driver.taps().at(0).validFrom == 3);
+    REQUIRE(driver.taps().at(0).validTo == 999);
+
+    // 延迟线的内容逐位不变。
+    float l = 0.0f;
+    float r = 0.0f;
+    REQUIRE(driver.line().read(10, l, r));
+    REQUIRE(l == 0.25f);
+    REQUIRE(r == -0.25f);
+}
+
+TEST_CASE("loop sync L2-07 reset() 只记诊断：调用前后音频输出逐位相同")
+{
+    // ⛔ 删除式验证点：让 reset 清延迟线 → 本用例变红。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    driver.line().pull(0, 100, [&](std::int64_t, float& l, float& r) {
+        l = 0.5f;
+        r = 0.5f;
+    });
+
+    const std::uint32_t before = driver.sync().resetCount();
+    driver.sync().noteReset();
+    REQUIRE(driver.sync().resetCount() == before + 1);
+
+    // 延迟线的内容逐位不变：reset 没有清它。
+    float l = 0.0f;
+    float r = 0.0f;
+    REQUIRE(driver.line().read(10, l, r));
+    REQUIRE(l == 0.5f);
+    REQUIRE(r == 0.5f);
+    REQUIRE(driver.line().pulled() == 100);
+}
+
+TEST_CASE("loop sync L2-08 起播沿：s0 起 5 ms 淡出旧回送；reset_on_play 关时不起作用")
+{
+    // ⛔ 删除式验证点：去掉起播淡出 → 本用例变红（咔嗒）。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    Tap& tap = driver.taps().at(0);
+    tap.active = true;
+    tap.offset = 0;
+    tap.delay = 100;
+    tap.validFrom = 0;
+    tap.validTo = 1000000;
+
+    driver.feed(0, 64);
+
+    SyncInputs in;
+    in.playEdge = true;
+    in.resetOnPlay = true;
+
+    const SyncOutcome outcome = driver.feedWith(in, 0, 64);
+    REQUIRE(outcome.fadeStarted);
+    // 旧读头开始淡出。
+    REQUIRE(tap.env.fadingOut());
+
+    // reset_on_play 关时：不起作用（读头不淡出）。
+    Driver other;
+    Tap& otherTap = other.taps().at(0);
+    otherTap.active = true;
+    otherTap.offset = 0;
+    otherTap.delay = 100;
+    otherTap.validFrom = 0;
+    otherTap.validTo = 1000000;
+    other.feed(0, 64);
+
+    SyncInputs off;
+    off.playEdge = true;
+    off.resetOnPlay = false;
+    other.feedWith(off, 0, 64);
+    REQUIRE_FALSE(otherTap.env.fadingOut());
+}
+
+TEST_CASE("loop sync L2-09 宿主违约（n > N_prep）：补 0 且 D_min 立即抬升")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    SyncOutcome outcome = driver.feed(0, 1024);
+    REQUIRE(outcome.hostViolation);
+    REQUIRE(outcome.overrunSamples == 1024 - 512);
+
+    // D 的下限立刻抬到违约的块长。
+    REQUIRE(delayMinFrames(512, 1024) == 1024);
+}
+
+TEST_CASE("loop sync L2-10 容忍模式下断档判据仍然生效")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    EventLog log;
+    driver.sync().setEventSink(LoopEventSink(&EventLog::sink, &log));
+
+    // 先转容忍模式：10 s 内三次漂移跳变。
+    driver.feed(0, 512);
+    driver.feed(1, 512);
+    driver.feed(2, 10000);
+    driver.feed(3, 10000);
+    driver.feed(4, 10000);
+    driver.feed(5, 10000);
+    REQUIRE(driver.sync().tolerant());
+
+    // 容忍模式下断档判据仍然生效：写头不动，R 前进 2·N_max。
+    const SyncOutcome outcome = driver.feed(5, 1024);
+    REQUIRE(outcome.stalled);
+    REQUIRE(driver.sync().state() == SyncState::kStalled);
+}
+
+TEST_CASE("loop sync L2-11 读头槽：3 槽满时丢包络最小的旧读头，不硬丢")
+{
+    TapSet taps;
+    REQUIRE(taps.allocate() == 0);
+    REQUIRE(taps.allocate() == 1);
+    REQUIRE(taps.allocate() == 2);
+    // 满了：allocate 返回 -1（调用方按「丢一个包络最小的」处理）。
+    REQUIRE(taps.allocate() == -1);
+    REQUIRE(taps.count() == 3);
+
+    // 让槽 1 的包络最小（正在淡出、且快走完了）。
+    taps.at(0).env.fadeOutSteps = 240;
+    taps.at(0).env.fadeOutStep = 0;
+    taps.at(1).env.fadeOutSteps = 240;
+    taps.at(1).env.fadeOutStep = 230; // 包络最小
+    taps.at(2).env.fadeOutSteps = 240;
+    taps.at(2).env.fadeOutStep = 100;
+
+    const int dropped = taps.dropSmallestEnvelope();
+    REQUIRE(dropped == 1);
+    // 丢的是包络最小的那个，不是硬丢第一个。
+    REQUIRE(taps.count() == 2);
+    REQUIRE_FALSE(taps.at(1).active);
+    REQUIRE(taps.at(0).active);
+    REQUIRE(taps.at(2).active);
+}
+
+TEST_CASE("loop sync 0 样本的调用立刻返回，不推进任何计数")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    const SyncOutcome outcome = driver.feed(0, 0);
+    REQUIRE_FALSE(outcome.resynced);
+    REQUIRE_FALSE(outcome.stalled);
+    REQUIRE(driver.sync().resyncCount() == 0);
+    REQUIRE(driver.processed() == 0);
+}
+
+TEST_CASE("loop sync 没有对端：只判断为未配对，不做判据")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    const SyncOutcome outcome = driver.feed(0, 512, false);
+    REQUIRE_FALSE(outcome.resynced);
+    REQUIRE(driver.sync().state() == SyncState::kUnpaired);
+}
