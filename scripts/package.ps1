@@ -400,6 +400,30 @@ function Invoke-RinneInstallTxt([string]$Root, [hashtable]$Vars, [string]$Platfo
   return $r.Out
 }
 
+# 渲染逐文件来源表（gen-docs --emit provenance）：发行包里那份 NOTICES 的「从哪来」一节由它填。
+# 表里逐个文件写上游仓、上游提交、上游路径与改写方式；渲染不出来就抛错（不打包半张表）。
+function Invoke-RinneProvenance([string]$Root) {
+  $node = Get-RinneNode $Root
+  $r = Invoke-RinneCommand $node @('scripts/gen-docs.mjs', '--emit', 'provenance') $Root
+  if ($r.Code -ne 0) { Stop-RinnePackage "渲染逐文件来源表失败（退出码 $($r.Code)）：$($r.Err.Trim())" }
+  return $r.Out
+}
+
+# 把来源表插进 NOTICES 的 scvb-derived 小节（在仓里那份的正文末尾，标记之前）。
+# 纯函数：吃 NOTICES 全文与表文本，返回插好的全文。标记不在就不插（判据自己报）。
+function Add-RinneProvenanceTable([string]$NoticesText, [string]$Table) {
+  $open = '<!-- section:scvb-derived -->'
+  $close = '<!-- /section:scvb-derived -->'
+  $i = $NoticesText.IndexOf($open, [StringComparison]::Ordinal)
+  $j = $NoticesText.IndexOf($close, [StringComparison]::Ordinal)
+  if ($i -lt 0 -or $j -lt 0 -or $j -lt $i) { return $NoticesText }
+  $head = $NoticesText.Substring(0, $j).TrimEnd()
+  $tail = $NoticesText.Substring($j)
+  $body = $Table.TrimEnd()
+  # 末尾留一个空行，表与小节标记之间不粘连。
+  "$head`n`n$body`n`n$tail"
+}
+
 # INSTALL.txt 里必须有的对应源码指引那几行（GPLv3 第 6 条 (d)）。纯函数。
 function Get-RinneInstallProblems([string]$Text, [hashtable]$Vars) {
   $out = New-Object System.Collections.Generic.List[string]
@@ -545,6 +569,7 @@ function Invoke-RinnePackage {
   foreach ($f in $licenseFiles) { $packedPaths.Add(('LICENSES/' + $f.Name)) }
   foreach ($k in $noticeFiles.Keys) { $packedPaths.Add($k) }
 
+  # 许可闭合的判据跑在**仓里那份** NOTICES 上（逐字的那份是判据的真源）。
   $licenseProblems = @(Get-RinneLicenseProblems $noticesText @($licenseFiles | ForEach-Object { $_.Name }) @($noticeNames) @($packedPaths))
   if ($licenseProblems.Count) {
     $licenseProblems | ForEach-Object { Write-Host "package.ps1: $_" -ForegroundColor Red }
@@ -573,6 +598,11 @@ function Invoke-RinnePackage {
   }
 
   # ── -Preflight：只跑不依赖构建产物的检查 ──────────────────────────────────
+  # 逐文件来源表要能渲染出来（preflight 与正式打包都要，渲染不出来就红）。
+  # 先渲染一次：preflight 与正式打包共用这一份，两条路渲染出来的表一样。
+  try { $provenanceTable = Invoke-RinneProvenance $RepoRoot }
+  catch { Stop-RinnePackage $_.Exception.Message }
+  if (-not $provenanceTable.Trim()) { Stop-RinnePackage '逐文件来源表渲染出来是空的' }
   if ($Preflight) {
     if ($PreflightOut) {
       $outFull = Resolve-RinneFull $PreflightOut
@@ -654,6 +684,13 @@ function Invoke-RinnePackage {
     $installPath = Join-Path $stage 'INSTALL.txt'
     [IO.File]::WriteAllText($installPath, $installText, (New-Object System.Text.UTF8Encoding($false)))
 
+    # 包里那份 NOTICES：仓里那份加上渲染出来的逐文件来源表（渲染不出来就红，不打包半张表）。
+    # 来源表在上面已经渲染过（preflight 与正式打包共用同一份）。
+    $packagedNotices = Add-RinneProvenanceTable $noticesText $provenanceTable
+    if ($packagedNotices -ceq $noticesText) {
+      Stop-RinnePackage 'NOTICES 里没有 scvb-derived 小节，逐文件来源表插不进去'
+    }
+
     $entries = @{}
     foreach ($b in $bundles) {
       $root = $b.FullName.TrimEnd('\', '/')
@@ -663,7 +700,10 @@ function Invoke-RinnePackage {
       }
     }
     $entries['LICENSE'] = (Join-Path $RepoRoot 'LICENSE')
-    $entries['THIRD-PARTY-NOTICES.md'] = (Join-Path $RepoRoot 'THIRD-PARTY-NOTICES.md')
+    # 包里那份 NOTICES 带渲染出来的逐文件来源表：仓里那份是判据的真源，包里那份给用户看「从哪来」。
+    $noticesPath = Join-Path $stage 'THIRD-PARTY-NOTICES.md'
+    [IO.File]::WriteAllText($noticesPath, $packagedNotices, (New-Object System.Text.UTF8Encoding($false)))
+    $entries['THIRD-PARTY-NOTICES.md'] = $noticesPath
     foreach ($f in $licenseFiles) { $entries[('LICENSES/' + $f.Name)] = $f.FullName }
     foreach ($k in $noticeFiles.Keys) { $entries[$k] = $noticeFiles[$k] }
     $entries['INSTALL.txt'] = $installPath
@@ -893,6 +933,36 @@ function Invoke-RinneSelfTest {
   & $check '根条目：没有野条目' $false ($rootsReal.Stray.Count -eq 0)
   $rootsStray = Get-RinneRootEntries @($entriesReal + 'EXTRA/x.txt') $dirUnits
   & $check '根条目：清单外的目录条目被报出来' $true ($rootsStray.Stray.Count -eq 1)
+
+  # 4c. 逐文件来源表插进 NOTICES 的 scvb-derived 小节。
+  $noticesSample2 = @"
+# Third-Party Notices
+
+## 4. Code derived from other Synchain projects
+
+<!-- section:scvb-derived -->
+
+Some files are adapted from synchain-oss/scvb.
+
+<!-- /section:scvb-derived -->
+
+## 5. Trademarks
+
+VST is a registered trademark.
+"@
+  $tableSample = @"
+| 本仓文件 | 上游 | 上游路径 | 改写方式 |
+| --- | --- | --- | --- |
+| ``scripts/package.ps1`` | synchain-oss/scvb@0123456789ab (dev) | ``scripts/package.ps1`` | forked |
+"@
+  $merged = Add-RinneProvenanceTable $noticesSample2 $tableSample
+  & $check '来源表：表插在 scvb-derived 小节的正文末尾、标记之前' $false (
+    $merged.Contains('| `scripts/package.ps1` |') -and
+    $merged.IndexOf('| `scripts/package.ps1` |') -lt $merged.IndexOf('<!-- /section:scvb-derived -->') -and
+    $merged.Contains('## 5. Trademarks'))
+  & $check '来源表：仓里那份 NOTICES 没被改动（插的是副本）' $false (-not $noticesSample2.Contains('scripts/package.ps1'))
+  $noSection = Add-RinneProvenanceTable "# 没有小节`n" $tableSample
+  & $check '来源表：没有 scvb-derived 小节时原样返回（判据自己报红）' $false ($noSection -ceq "# 没有小节`n")
 
   # 5. .sha256 的格式。
   & $check '.sha256：<64 位小写 hex><两个空格><文件名> 加 LF，没有问题' $false (0 -eq @(Get-RinneSha256Problems ("$('a' * 64)  Rinne-v1.2.3-win64.zip`n") 'Rinne-v1.2.3-win64.zip').Count)
