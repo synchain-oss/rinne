@@ -197,6 +197,7 @@ function main() {
             console.error(`build-static：拒绝清空输出目录：${verdict.reason}`);
             process.exit(1);
         }
+        // rinne-delete-ok: 仓内写死的输出目录 OUT_REL，上面 cleanVerdict 已核对真实路径、标记文件与非链接
         if (exists) fs.rmSync(target, { recursive: true });
         // 先写标记再拷内容：中途失败也不会留下没有标记、之后再也清不掉的目录
         fs.mkdirSync(target, { recursive: true });

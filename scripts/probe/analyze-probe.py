@@ -1390,6 +1390,7 @@ def self_test():
     try:
         return _self_test(tmp)
     finally:
+        # rinne-delete-ok: tmp 是本函数 mkdtemp 新建的目录，变量没有被改过
         shutil.rmtree(tmp, ignore_errors=True)
 
 

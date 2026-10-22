@@ -135,7 +135,7 @@ function Test-CxxTree($Ctx, [string]$Root) {
 
 function Invoke-ClangFormat($Ctx) {
     # 自测与 CI 相同：有 src/ 但清单为空的夹具必须判红，免得清单写坏后静默放行
-    $fx = Join-Path ([IO.Path]::GetTempPath()) "rinne-gates-cxx-$PID-$(Get-Random)"
+    $fx = New-RinneTempDir -Prefix 'rinne-gates-cxx-'
     try {
         $null = New-Item -ItemType Directory -Path (Join-Path $fx 'src')
         Set-Content -LiteralPath (Join-Path $fx 'src/README.md') -Value 'x'
@@ -147,7 +147,7 @@ function Invoke-ClangFormat($Ctx) {
         git -C $fx add -A *>$null
         $one = Test-CxxTree $Ctx $fx
         if ($one.Status -ne 'PASS') { return @{ Status = 'FAIL'; Reason = "自测失败：恰好一个 C++ 文件的夹具没有通过（$($one.Status)：$($one.Reason)）" } }
-    } finally { Remove-Item -LiteralPath $fx -Recurse -Force -ErrorAction SilentlyContinue }
+    } finally { $left = Remove-RinneTempDir -Path $fx -WaitSeconds 5; if ($left) { Write-Warning "临时目录没清掉：$left" } }
     Test-CxxTree $Ctx $Ctx.Root
 }
 
@@ -172,12 +172,12 @@ function Export-Head([string]$Root, [string]$Dir) {
 }
 
 # 与 compliance.yml 里 run-checks 的 --only 一一对应，顺序也相同；Test-RinneGates 拿 workflow 原文核对。
-$script:ComplianceOnly = 'spdx', 'reuse', 'licenses-closure', 'modules-closure', 'offline', 'privacy'
+$script:ComplianceOnly = 'spdx', 'reuse', 'licenses-closure', 'modules-closure', 'offline', 'recursive-delete', 'privacy'
 
 function Invoke-Compliance($Ctx) {
     $node, $gl, $range = (Get-ToolCommand $Ctx node), (Get-ToolCommand $Ctx gitleaks), "$($Ctx.Base)..HEAD"
     $rc = 'scripts/run-checks.mjs'
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-gates-tree-$PID-$(Get-Random)"
+    $tmp = New-RinneTempDir -Prefix 'rinne-gates-tree-'
     try {
         $tree = Export-Head $Ctx.Root $tmp
         Invoke-Steps $Ctx @(
@@ -187,7 +187,7 @@ function Invoke-Compliance($Ctx) {
             (Step 'gitleaks 提交' $gl @('git', '.', '--no-banner', '--redact', "--log-opts=$range --no-ext-diff --no-textconv"))
             (Step '隐私 提交' $node @('scripts/check-privacy.mjs', '--commits', '--no-messages', $range))
         )
-    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    } finally { $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 5; if ($left) { Write-Warning "临时目录没清掉：$left" } }
 }
 
 # workflow 里 run-checks 的 compliance 组用到的 --only，按出现顺序。

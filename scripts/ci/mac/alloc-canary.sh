@@ -48,6 +48,7 @@ run_canaries() {
 
 if [ "${1:-}" = "--self-test" ]; then
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
+  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
   trap 'rm -rf "$tmp"' EXIT
   # 假的测试程序，都按 Catch2 的输出样子造：good 对致盲有反应（失败、点名 section、有汇总行），deaf 对致盲没反应，
   # wrong 失败但点的不是对应的 section，silent 致盲后什么都没跑，killed 先出 FAILED 再被杀死（没有汇总行），skipped 全被 SKIP

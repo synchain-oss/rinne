@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
+import { cleanupTempDir, makeTempDir, removeFixedDirInTemp } from "../../scripts/lib/safe-rm.mjs";
 
 /**
  * 只摘掉链接本身：先确认路径确实是符号链接或 junction，再 unlink。
@@ -91,8 +92,8 @@ for (const [label, patch] of [
 }
 
 // ---- ② 真实行为：只在 mkdtemp 出来的假仓库里 ----
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-safeout-"));
-const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-safeout-outside-"));
+const tmp = makeTempDir("rinne-safeout-");
+const outside = makeTempDir("rinne-safeout-outside-");
 try {
     const resolveIn = (name, rel = baseRel, exts = [".png"]) => resolveOutFile(tmp, rel, name, exts);
     const p = resolveIn("a.png");
@@ -131,7 +132,7 @@ try {
         run.eq(fs.readFileSync(path.join(outside, "victim.png"), "utf8"), "victim", "符号链接被拒之后外部文件没动");
     }
     // 输出目录是 junction
-    fs.rmSync(path.join(tmp, "build"), { recursive: true }); // 假仓库里的 build/
+    removeFixedDirInTemp(path.join(tmp, "build"), { tempRoot: tmp, rel: ["build"] }); // 假仓库里的 build/
     fs.mkdirSync(path.join(tmp, "build"));
     fs.symlinkSync(outside, path.join(tmp, ...baseRel), "junction");
     run.check(
@@ -150,8 +151,8 @@ try {
     run.check(!fs.existsSync(path.join(outside, "web-preview-shots")), "build/ 是 junction 被拒之后没有穿过去建目录");
     unlinkLink(path.join(tmp, "build"));
 } finally {
-    fs.rmSync(tmp, { recursive: true }); // 只删上面 mkdtemp 出来的目录
-    fs.rmSync(outside, { recursive: true });
+    cleanupTempDir(tmp);
+    cleanupTempDir(outside);
 }
 
 function throws(fn) {

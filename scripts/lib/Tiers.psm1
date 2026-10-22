@@ -12,6 +12,8 @@
 # （Standard）；rules 只往上抬。一律按不区分大小写的正则匹配仓内相对路径（正斜杠）：Windows 与 mac 的文件系统
 # 不区分大小写，Src/ 与 src/ 在那里是同一个目录。
 
+# 自测的临时目录经 TempDir 建与删（只删本进程新建的）
+Import-Module (Join-Path $PSScriptRoot 'TempDir.psm1') -ErrorAction Stop
 $script:Cache = @{}
 
 function Get-RinneTierRules {
@@ -66,6 +68,15 @@ function Get-RinneTreeState {
     [pscustomobject]@{ Sha = $sha; Dirty = (-not $ok) -or $status.Count -gt 0 -or $ignored.Count -gt 0; Ignored = $ignored }
 }
 
+# 自测的临时目录清不掉时要把原因报出来，不能无声丢掉（与 10-static.ps1、new-worktree.ps1、bootstrap-tools.ps1 同一口径）。
+# 返回清不掉的原因（空串表示清掉了）。
+function Remove-RinneTiersTempDir {
+    param([Parameter(Mandatory)][string]$Path, [double]$WaitSeconds = 5)
+    $left = Remove-RinneTempDir -Path $Path -WaitSeconds $WaitSeconds
+    if ($left) { Write-Warning "临时目录没清掉：$left" }
+    if ($left) { $left } else { '' }
+}
+
 # 自测：tier-rules.json 的 cases 逐条核对；quick 与 rules 的每条正则都至少要被一个用例命中；工作区状态在临时仓里核对。
 # 返回 { Label; Bad; Passed }。
 function Test-RinneTierRules {
@@ -81,9 +92,16 @@ function Test-RinneTierRules {
     }
     $loose = @($Rules.gates | Where-Object { $_.tier -cne 'Quick' -and -not ($_.by -and $_.requires) })
     [pscustomobject]@{ Label = '目录里非 Quick 的 gate 都写了 by 与 requires'; Bad = $false; Passed = -not $loose.Count }
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-tiers-selftest-$PID-$(Get-Random)"
+    # 清临时目录：清不掉要有提示（不能无声丢掉原因）。造一个不是本进程建的目录：核对不过，删不掉
+    $probe = New-RinneTempDir -Prefix 'rinne-tiers-warn-'
+    $foreign = Join-Path $probe 'foreign'
+    $null = New-Item -ItemType Directory -Path $foreign
+    $warned = $null
+    $left = Remove-RinneTiersTempDir -Path $foreign -WarningVariable warned -WarningAction SilentlyContinue
+    [pscustomobject]@{ Label = '清不掉临时目录时给出提示'; Bad = $true; Passed = @($warned).Count -gt 0 -and @($warned)[0] -match '临时目录没清掉' -and $left -match '不删' }
+    $null = Remove-RinneTempDir -Path $probe -WaitSeconds 5
+    $tmp = New-RinneTempDir -Prefix 'rinne-tiers-selftest-'
     try {
-        $null = New-Item -ItemType Directory -Path $tmp
         $ignoredFile = @($Rules.ignoredInputs)[0]
         Set-Content -LiteralPath (Join-Path $tmp '.gitignore') -Value $ignoredFile
         git -C $tmp init -q *>$null; git -C $tmp add -A *>$null
@@ -93,8 +111,8 @@ function Test-RinneTierRules {
         $state = Get-RinneTreeState $tmp $Rules
         [pscustomobject]@{ Label = '干净的仓不算脏'; Bad = $false; Passed = $clean -eq $false }
         [pscustomobject]@{ Label = "被忽略的 $ignoredFile 存在也算工作区不干净"; Bad = $true; Passed = $state.Dirty -and @($state.Ignored) -contains $ignoredFile }
-    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    } finally { $null = Remove-RinneTiersTempDir -Path $tmp -WaitSeconds 5 }
 }
 
 Export-ModuleMember -Function Get-RinneTierRules, Get-RinneTierRank, Get-RinneFileTier, Resolve-RinneTier, Get-RinneDiff,
-    Get-RinneTreeState, Test-RinneTierRules
+    Get-RinneTreeState, Test-RinneTierRules, Remove-RinneTiersTempDir

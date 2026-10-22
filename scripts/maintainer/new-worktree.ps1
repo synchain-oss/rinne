@@ -14,6 +14,7 @@ param([switch]$SelfTest, [string]$Card, [string]$Slug)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'lib/RinneGh.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot '../lib/TempDir.psm1') -ErrorAction Stop
 
 function New-CardWorktree {
     param([Parameter(Mandatory)][string]$Card, [Parameter(Mandatory)][string]$Slug)
@@ -44,8 +45,7 @@ function New-CardWorktree {
 
 function Invoke-SelfTest {
     $cases = New-RinneCases
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) "rinne-wt-selftest-$PID"
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $tmp = New-RinneTempDir -Prefix 'rinne-wt-selftest-'
     # 假卡号分开拼：源码里不出现完整的卡号形态（隐私规则表会拦）
     $cid = 'RN' + '-99'
     $oldRoot = $env:RINNE_ROOT
@@ -85,7 +85,8 @@ function Invoke-SelfTest {
         Exit-RinneSelfTestNeedles $needles
         Set-RinneLockImpl $null
         $env:RINNE_ROOT = $oldRoot
-        Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
+        $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 5
+        if ($left) { Write-Warning "临时目录没清掉：$left" }
     }
     Complete-RinneSelfTest $cases 'new-worktree'
 }

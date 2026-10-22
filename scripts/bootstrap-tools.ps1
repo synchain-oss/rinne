@@ -5,7 +5,8 @@
 #   pwsh scripts/bootstrap-tools.ps1 [-ToolsDir <目录>] [-Tools node,gitleaks,…] [-Python <python>]
 #   pwsh scripts/bootstrap-tools.ps1 -CheckHooks
 #   pwsh scripts/bootstrap-tools.ps1 -SelfTest      纯函数的正反例（gates 的自测会调用）
-# -ToolsDir 缺省取环境变量 RINNE_TOOLS_DIR，两者都没有就停下。版本取自仓内钉版文件：.node-version、.gitleaks-version、
+# -ToolsDir 缺省取环境变量 RINNE_TOOLS_DIR，两者都没有就停下。相对路径按当前目录解析成绝对路径
+# （TempDir.psm1 的建目录入口只收绝对路径，所以先归一一次，函数本身不放宽）。版本取自仓内钉版文件：.node-version、.gitleaks-version、
 # .actionlint-version、.prettier-version；clang-format 与 reuse 取 requirements-tools.txt。ninja 还没有钉版文件、
 # pluginval 的钉版文件构建骨架入库时才有，两者先用下面清单里的版本，只在 -Tools 点名或钉版文件出现后才装。
 # 档案工具：每个包先下载进自己新建的空目录，sha256 与清单逐字一致才解开，原始档案随解开的文件一起放进
@@ -37,6 +38,7 @@ $ErrorActionPreference = 'Stop'
 # 与 gates.ps1 一致：G1 以子进程调 -CheckHooks 并按 UTF-8 读它的输出
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ }
 $Root = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $PSScriptRoot 'lib/TempDir.psm1') -ErrorAction Stop
 
 $Manifest = [ordered]@{
     node       = @{ Pin = '.node-version'; Key = 'rinne.node'; Entry = 'node-v{0}-win-x64/node.exe'; Args = '--version'
@@ -173,8 +175,8 @@ function Install-Archive([string]$Name, $Spec, [string]$Node) {
         Write-Host "[已装] $Name $ver（档案与解开的文件逐个核对过）"
         return $entry
     }
-    $work = Join-Path $ToolsDir ".download-$Name-$ver-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-    $null = New-Item -ItemType Directory -Path $work
+    # 下载与解开的暂存目录：本进程在工具目录下新建的，删之前按真实路径核对（工具目录是盘根或用户目录时建不出来）
+    $work = New-RinneTempDir -Prefix 'rinne-download-' -Parent $ToolsDir
     try {
         $download = Join-Path $work $file
         Write-Host "[下载] $url"
@@ -193,7 +195,8 @@ function Install-Archive([string]$Name, $Spec, [string]$Node) {
         if (Test-Unpacked (Join-Path $stage ".rinne-archive/$file") $stage) { throw "$Name $ver 解开后与档案对不上" }
         Move-Item -LiteralPath $stage -Destination $dest
     } finally {
-        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        $left = Remove-RinneTempDir -Path $work
+        if ($left) { Write-Warning $left }
     }
     if (-not (Test-Installed $entry @($Spec.Args) $ver $via)) { throw "$Name $ver 装好后核对不过版本" }
     Write-Host "[装好] $Name $ver"
@@ -217,6 +220,21 @@ function Get-BackendRequirement([string]$Req) {
     $out = @($lines[$i])
     while ($lines[$i].TrimEnd().EndsWith('\') -and $i + 1 -lt $lines.Count) { $i++; $out += $lines[$i] }
     $out
+}
+
+<#
+  工具目录的路径归一：相对路径按当前目录解析成绝对路径。
+  TempDir.psm1 的建目录入口只收绝对路径，所以相对的 -ToolsDir 或 RINNE_TOOLS_DIR 先在这里转一次，
+  函数本身不必放宽（放宽就等于允许按配置推出的路径去建目录）。
+  基准取 PowerShell 的当前位置：New-Item 之类 cmdlet 用的就是它，转换前后指的是同一个地方。
+#>
+function Resolve-RinneToolsDir([Parameter(Mandatory)][string]$Path, [string]$Base = '') {
+    if (-not $Base) {
+        $Base = if ($PWD.ProviderPath -and [IO.Path]::IsPathFullyQualified($PWD.ProviderPath)) {
+            $PWD.ProviderPath
+        } else { [Environment]::CurrentDirectory }
+    }
+    [IO.Path]::GetFullPath($Path, $Base)
 }
 
 # clang-format 与 reuse：独立 venv，两步按哈希装（见文件头）。返回 @{ 键 = 路径 }。
@@ -245,6 +263,8 @@ function Install-PyTools {
         if ($bad.Count) { throw "pytools-$tag 里的 $($bad -join '、')；请先手动移走该目录" }
         Write-Host "[已装] clang-format $($want['clang-format'])、reuse $($want.reuse)、$fonts（已装文件按 RECORD 核对过）"
     } else {
+        # 目录先由本进程新建（已经在就不会走到这里），失败时只删这一个
+        $dest = New-RinneOwnedDir -Path $dest
         try {
             & $Python -m venv $dest
             if ($LASTEXITCODE -ne 0) { throw "用 $Python 建 venv 失败" }
@@ -258,7 +278,8 @@ function Install-PyTools {
             if ($bad.Count) { throw "装好后 $($bad -join '、')" }
             Set-Content -LiteralPath $stamp -Value $tag
         } catch {
-            Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+            $left = Remove-RinneTempDir -Path $dest
+            if ($left) { Write-Warning $left }
             throw
         }
         Write-Host "[装好] clang-format $($want['clang-format'])、reuse $($want.reuse)、$fonts"
@@ -269,13 +290,28 @@ function Install-PyTools {
 
 if ($SelfTest) {
     $req = "clang-format==18.1.8`nfonttools==4.65.0 \`n    --hash=sha256:aa`nbrotli==1.2.0 \`n    --hash=sha256:bb`n"
+    # 工具目录的路径归一：相对路径要变成绝对路径，绝对路径原样保留。
+    # -SelfTest 在 $IsWindows 检查之前就跑，gates.ps1 -SelfTest 也会调它，所以这组用例在 mac / Linux 的 pwsh 上也要成立：
+    # 基准目录和绝对路径都从 GetTempPath() 拼出来（Windows 上是带盘符的绝对路径，其他平台是 /tmp 或 $TMPDIR，
+    # 两边 IsPathFullyQualified 都为真，GetFullPath(相对, 基准) 不会抛 ArgumentException），不写死盘符；
+    # 期望值与相对路径里的分隔符一律用 [IO.Path]::Combine 拼：反斜杠在非 Windows 上不是分隔符，
+    # 写成 'a\..\b' 会被当成一个叫这个名字的文件而不是 a/../b。非 Windows 上期望值是 <tmp>/rinne-selftest-work/tools 一类。
+    # 这里只做字符串运算，不创建也不访问这些目录。
+    $tmp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $work = [IO.Path]::Combine($tmp, 'rinne-selftest-work')
+    $abs = [IO.Path]::Combine($tmp, 'rinne-selftest-abs', 'rinne') # 与 $work 并列，不在它下面
     $cases = @(
         @('版本都对上', $false, (Get-FontToolsMismatch $req 'fonttools 4.65.0 brotli 1.2.0')),
         @('fonttools 版本不对', $true, (Get-FontToolsMismatch $req 'fonttools 4.67.0 brotli 1.2.0')),
         @('brotli 版本不对', $true, (Get-FontToolsMismatch $req 'fonttools 4.65.0 brotli 1.1.0')),
         @('venv 里导入失败（什么都没报出来）', $true, (Get-FontToolsMismatch $req '')),
         @('requirements 里没钉 brotli', $true, (Get-FontToolsMismatch "fonttools==4.65.0`n" 'fonttools 4.65.0 ')),
-        @('包名大小写不同也认', $false, (Get-FontToolsMismatch ($req -replace 'fonttools==', 'FontTools==') 'fonttools 4.65.0 brotli 1.2.0'))
+        @('包名大小写不同也认', $false, (Get-FontToolsMismatch ($req -replace 'fonttools==', 'FontTools==') 'fonttools 4.65.0 brotli 1.2.0')),
+        @('工具目录：相对路径变成绝对路径', $false, (-not [IO.Path]::IsPathFullyQualified((Resolve-RinneToolsDir -Path 'tools' -Base $work)))),
+        @('工具目录：相对路径按基准目录解析', $false, ((Resolve-RinneToolsDir -Path 'tools' -Base $work) -cne [IO.Path]::Combine($work, 'tools'))),
+        @('工具目录：绝对路径原样保留', $false, ((Resolve-RinneToolsDir -Path $abs -Base $work) -cne $abs)),
+        @('工具目录：带 .. 的相对路径也归一', $false, ((Resolve-RinneToolsDir -Path ([IO.Path]::Combine('a', '..', 'b')) -Base $work) -cne [IO.Path]::Combine($work, 'b'))),
+        @('工具目录：基准目录没给时按当前位置解析', $false, (-not [IO.Path]::IsPathFullyQualified((Resolve-RinneToolsDir -Path 'tools'))))
     )
     $failed = @($cases | Where-Object { [bool]$_[2] -ne $_[1] })
     $failed | ForEach-Object { Write-Host "自测未通过：$($_[0])" }
@@ -290,6 +326,9 @@ if ($CheckHooks) {
 
 if (-not $ToolsDir) { throw '需要 -ToolsDir 或环境变量 RINNE_TOOLS_DIR' }
 if (-not $IsWindows) { throw '清单里目前只登记了 Windows x64 的包' }
+# 相对路径按当前目录解析成绝对路径：TempDir.psm1 的建目录入口只收绝对路径，相对的 -ToolsDir 或 RINNE_TOOLS_DIR
+# 先归一一次（两个入口都在这里合并之后、建目录之前转），函数本身不必放宽。
+$ToolsDir = Resolve-RinneToolsDir -Path $ToolsDir
 $all = @($Manifest.Keys) + 'pytools'
 # pwsh -File 把 a,b,c 当成一个字符串传进来
 $Tools = @($Tools | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
