@@ -290,8 +290,16 @@ function Install-PyTools {
 
 if ($SelfTest) {
     $req = "clang-format==18.1.8`nfonttools==4.65.0 \`n    --hash=sha256:aa`nbrotli==1.2.0 \`n    --hash=sha256:bb`n"
-    # 工具目录的路径归一：相对路径要变成绝对路径，绝对路径原样保留
-    $abs = 'C:\tools\rinne'
+    # 工具目录的路径归一：相对路径要变成绝对路径，绝对路径原样保留。
+    # -SelfTest 在 $IsWindows 检查之前就跑，gates.ps1 -SelfTest 也会调它，所以这组用例在 mac / Linux 的 pwsh 上也要成立：
+    # 基准目录和绝对路径都从 GetTempPath() 拼出来（Windows 上是带盘符的绝对路径，其他平台是 /tmp 或 $TMPDIR，
+    # 两边 IsPathFullyQualified 都为真，GetFullPath(相对, 基准) 不会抛 ArgumentException），不写死盘符；
+    # 期望值与相对路径里的分隔符一律用 [IO.Path]::Combine 拼：反斜杠在非 Windows 上不是分隔符，
+    # 写成 'a\..\b' 会被当成一个叫这个名字的文件而不是 a/../b。非 Windows 上期望值是 <tmp>/rinne-selftest-work/tools 一类。
+    # 这里只做字符串运算，不创建也不访问这些目录。
+    $tmp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $work = [IO.Path]::Combine($tmp, 'rinne-selftest-work')
+    $abs = [IO.Path]::Combine($tmp, 'rinne-selftest-abs', 'rinne') # 与 $work 并列，不在它下面
     $cases = @(
         @('版本都对上', $false, (Get-FontToolsMismatch $req 'fonttools 4.65.0 brotli 1.2.0')),
         @('fonttools 版本不对', $true, (Get-FontToolsMismatch $req 'fonttools 4.67.0 brotli 1.2.0')),
@@ -299,10 +307,10 @@ if ($SelfTest) {
         @('venv 里导入失败（什么都没报出来）', $true, (Get-FontToolsMismatch $req '')),
         @('requirements 里没钉 brotli', $true, (Get-FontToolsMismatch "fonttools==4.65.0`n" 'fonttools 4.65.0 ')),
         @('包名大小写不同也认', $false, (Get-FontToolsMismatch ($req -replace 'fonttools==', 'FontTools==') 'fonttools 4.65.0 brotli 1.2.0')),
-        @('工具目录：相对路径变成绝对路径', $false, (-not [IO.Path]::IsPathFullyQualified((Resolve-RinneToolsDir -Path 'tools' -Base 'C:\work')))),
-        @('工具目录：相对路径按基准目录解析', $false, ((Resolve-RinneToolsDir -Path 'tools' -Base 'C:\work') -cne 'C:\work\tools')),
-        @('工具目录：绝对路径原样保留', $false, ((Resolve-RinneToolsDir -Path $abs -Base 'C:\work') -cne $abs)),
-        @('工具目录：带 .. 的相对路径也归一', $false, ((Resolve-RinneToolsDir -Path 'a\..\b' -Base 'C:\work') -cne 'C:\work\b')),
+        @('工具目录：相对路径变成绝对路径', $false, (-not [IO.Path]::IsPathFullyQualified((Resolve-RinneToolsDir -Path 'tools' -Base $work)))),
+        @('工具目录：相对路径按基准目录解析', $false, ((Resolve-RinneToolsDir -Path 'tools' -Base $work) -cne [IO.Path]::Combine($work, 'tools'))),
+        @('工具目录：绝对路径原样保留', $false, ((Resolve-RinneToolsDir -Path $abs -Base $work) -cne $abs)),
+        @('工具目录：带 .. 的相对路径也归一', $false, ((Resolve-RinneToolsDir -Path ([IO.Path]::Combine('a', '..', 'b')) -Base $work) -cne [IO.Path]::Combine($work, 'b'))),
         @('工具目录：基准目录没给时按当前位置解析', $false, (-not [IO.Path]::IsPathFullyQualified((Resolve-RinneToolsDir -Path 'tools'))))
     )
     $failed = @($cases | Where-Object { [bool]$_[2] -ne $_[1] })
