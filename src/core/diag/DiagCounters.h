@@ -27,7 +27,7 @@ struct DiagCountersSnapshot
     std::uint32_t maxNSeen = 0; // 与 nMax 同一个计数；诊断文本两处都列，是为了保持 v1 格式的字段齐全
     std::uint32_t nMin = 0; // 没见过任何非零块时为 0
     std::uint32_t nMax = 0;
-    std::uint32_t hist[kNsamplesBuckets] = {};
+    std::uint64_t hist[kNsamplesBuckets] = {};
 };
 
 class DiagCounters
@@ -101,7 +101,7 @@ private:
     std::atomic<std::uint64_t> bypassed_{0};
     std::atomic<std::uint32_t> nMax_{0};
     std::atomic<std::uint32_t> nMin_{kNoMin};
-    std::atomic<std::uint32_t> hist_[kNsamplesBuckets] = {};
+    std::atomic<std::uint64_t> hist_[kNsamplesBuckets] = {};
 };
 
 } // namespace rinne::diag

@@ -65,11 +65,10 @@ enum class EventCode : std::uint8_t
     kBypassOn,
     kBypassOff,
     kNonrealtime, // a = 1 进入离线，0 退出
+    kCount, // 哨兵，不是事件码；新码一律加在它前面
 };
-// 事件码数量：固定名字表的长度
-inline constexpr std::size_t kEventCodeCount = 19;
-static_assert(static_cast<std::size_t>(EventCode::kNonrealtime) + 1 == kEventCodeCount,
-              "新增事件码要同步改常数与名字表");
+// 事件码数量：由哨兵导出，名字表长度在 .cpp 里与它断言相等，所以新增码漏改名字表会编译失败
+inline constexpr std::size_t kEventCodeCount = static_cast<std::size_t>(EventCode::kCount);
 
 // 码的名字（固定表，ASCII）；越界返回 "unknown"
 const char* eventName(EventCode code) noexcept;
