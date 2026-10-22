@@ -507,6 +507,7 @@ export function selfTest() {
 
     // 渲染正文的几格：正文的第一行必须是两个资产直链，第二行是「不要下载 Source code」。
     cases.push(...renderCases());
+    cases.push(...summaryCases());
 
     // 端到端一格：真的建一个临时仓、打一个 tag，在那棵提交上判。
     // 这一格盯住「判的是被打 tag 的提交，不是工作树」：工作树里有 docs/BUILDING.md、
@@ -539,7 +540,7 @@ function renderCases() {
         "| `{{WIN_FILE}}` | `{{WIN_SHA256}}` |",
         "| `{{MAC_FILE}}` | `{{MAC_SHA256}}` |",
         "",
-        "commit {{SOURCE_COMMIT}} juce {{JUCE_COMMIT}} webview2 {{WEBVIEW2_VERSION}}",
+        "commit {{SOURCE_COMMIT}} juce {{JUCE_VERSION}} {{JUCE_COMMIT}} webview2 {{WEBVIEW2_VERSION}}",
         "<!-- END release-notes -->",
         "",
         "## 附录 A",
@@ -556,6 +557,7 @@ function renderCases() {
         WIN_SHA256: "a".repeat(64),
         MAC_SHA256: "b".repeat(64),
         SOURCE_COMMIT: "c".repeat(40),
+        JUCE_VERSION: "8.0.8",
         JUCE_COMMIT: "d".repeat(40),
         WEBVIEW2_VERSION: "1.0.2957.106",
     };
@@ -634,6 +636,114 @@ function renderCases() {
 }
 
 /**
+ * 两份 package-summary 到模板变量的自测格：值备齐才渲染，缺一个或两份对不上都判红。
+ * 用临时目录里的假 summary 走一遍 renderReleaseNotes（读的是仓里真的 docs/RELEASE.md 模板块）。
+ */
+function summaryCases() {
+    const C40 = "c".repeat(40);
+    const JUCE40 = "d".repeat(40);
+    const summary = (o = {}) => {
+        const v = {
+            sha: "a".repeat(64),
+            commit: C40,
+            juceVersion: "8.0.8",
+            juceCommit: JUCE40,
+            webview2: "1.0.2957.106",
+            ...o,
+        };
+        return [
+            "# Rinne package summary",
+            "",
+            "| key | value |",
+            "| --- | --- |",
+            "| version | 0.9.0-rc.1 |",
+            `| sourceCommit | ${v.commit} |`,
+            ...(v.juceVersion === null ? [] : [`| juceVersion | ${v.juceVersion} |`]),
+            `| juceCommit | ${v.juceCommit} |`,
+            ...(v.webview2 === null ? [] : [`| webview2Version | ${v.webview2} |`]),
+            `| sha256 | ${v.sha} |`,
+            "",
+        ].join("\n");
+    };
+    const vars = (win, mac) => {
+        try {
+            return { ok: true, v: releaseVarsFromSummaries({ version: "0.9.0-rc.1", win, mac }) };
+        } catch (e) {
+            return { ok: false, message: e.message };
+        }
+    };
+    const out = [];
+    const good = vars(summary(), summary({ sha: "b".repeat(64) }));
+    out.push({
+        label: "summary 变量：两份齐备时取到 JUCE 版本、WebView2 版本、两个 SHA-256",
+        bad: false,
+        passed:
+            good.ok &&
+            good.v.JUCE_VERSION === "8.0.8" &&
+            good.v.WEBVIEW2_VERSION === "1.0.2957.106" &&
+            good.v.WIN_SHA256 === "a".repeat(64) &&
+            good.v.MAC_SHA256 === "b".repeat(64),
+    });
+    // mac 的 summary 没有 WebView2 行是常态：只要 Windows 那份有。
+    out.push({
+        label: "summary 变量：macOS 的 summary 没有 webview2Version 行不算缺",
+        bad: false,
+        passed: vars(summary(), summary({ webview2: null })).ok,
+    });
+    const reds = [
+        ["Windows 的 summary 缺 juceVersion", vars(summary({ juceVersion: null }), summary())],
+        ["macOS 的 summary 缺 juceVersion", vars(summary(), summary({ juceVersion: null }))],
+        ["Windows 的 summary 缺 webview2Version", vars(summary({ webview2: null }), summary())],
+        ["Windows 的 webview2Version 为空", vars(summary({ webview2: "" }), summary())],
+        ["两份 summary 的 juceVersion 不一致", vars(summary(), summary({ juceVersion: "8.0.9" }))],
+        ["两份 summary 的 juceCommit 不一致", vars(summary(), summary({ juceCommit: "e".repeat(40) }))],
+        ["两份 summary 的 sourceCommit 不一致", vars(summary(), summary({ commit: "f".repeat(40) }))],
+        ["sourceCommit 不是 40 位", vars(summary({ commit: "abc" }), summary({ commit: "abc" }))],
+        ["juceCommit 不是 40 位", vars(summary({ juceCommit: "abc" }), summary({ juceCommit: "abc" }))],
+        ["Windows 的 summary 缺 sha256", vars(summary().replace(/^\| sha256 .*$/m, ""), summary())],
+    ];
+    for (const [label, r] of reds) out.push({ label: `summary 变量：${label}判红`, bad: true, passed: !r.ok });
+
+    // 走一遍真正的渲染：假 summary 落在本进程建的临时目录里，模板用仓里真的 docs/RELEASE.md。
+    const dir = makeTempDir("rinne-release-ready-");
+    try {
+        fs.writeFileSync(path.join(dir, "package-summary-win64.md"), summary());
+        fs.writeFileSync(path.join(dir, "package-summary-macos-arm64.md"), summary({ sha: "b".repeat(64) }));
+        let text = "";
+        let rendered = true;
+        try {
+            text = renderReleaseNotes({ version: "0.9.0-rc.1", tag: "v0.9.0-rc.1", dist: dir });
+        } catch {
+            rendered = false;
+        }
+        out.push({
+            label: "渲染：假 summary 渲染出完整正文（含 JUCE 版本与链接、WebView2 版本、没有占位符）",
+            bad: false,
+            passed:
+                rendered &&
+                text.includes("| JUCE | `8.0.8`, [commit `") &&
+                text.includes("JUCE `8.0.8`（commit `") &&
+                text.includes(`https://github.com/juce-framework/JUCE/tree/${JUCE40}`) &&
+                text.includes("1.0.2957.106") &&
+                !/\{\{[A-Z0-9_]+\}\}/.test(text) &&
+                text.startsWith("[Windows x64]("),
+        });
+        // Windows 的 summary 缺 juceVersion：整条渲染必须红，不能渲染出残缺的对应源码块。
+        fs.writeFileSync(path.join(dir, "package-summary-win64.md"), summary({ juceVersion: null }));
+        let red = false;
+        try {
+            renderReleaseNotes({ version: "0.9.0-rc.1", tag: "v0.9.0-rc.1", dist: dir });
+        } catch {
+            red = true;
+        }
+        out.push({ label: "渲染：Windows 的 summary 缺 juceVersion 时整条渲染判红", bad: true, passed: red });
+    } finally {
+        cleanupTempDir(dir);
+    }
+    return out;
+}
+
+/**
  * 端到端：临时仓里打一个 tag，被 tag 的提交里没有 docs/BUILDING.md → 判红；
  * 补上再打一个 tag → 判绿（README 状态行与 CHANGELOG 都对）。
  */
@@ -702,7 +812,7 @@ function endToEndCase() {
  *   …
  *   <!-- END release-notes -->
  * 渲染只取标记之间的内容并替换占位符：{{HEADER}}、{{VERSION}}、{{TAG}}、{{WIN_SHA256}}、{{MAC_SHA256}}、
- * {{WIN_FILE}}、{{MAC_FILE}}、{{SOURCE_COMMIT}}、{{JUCE_COMMIT}}、{{WEBVIEW2_VERSION}}。
+ * {{WIN_FILE}}、{{MAC_FILE}}、{{SOURCE_COMMIT}}、{{JUCE_VERSION}}、{{JUCE_COMMIT}}、{{WEBVIEW2_VERSION}}。
  * 替换不了的占位符留在正文里就是断链，渲染时判红。
  * 模板块本身留在仓里（发版清单要引用它），**不进正文**：正文只放渲染出来的这一段。
  * 返回的这一段第一行是那两个资产直链，第二行是「不要下载 Source code」。
@@ -737,6 +847,58 @@ export function releaseNotesHeader({ version, tag, repo = "synchain-oss/rinne" }
     ].join("\n");
 }
 
+/** 从 summary 的表里取一行的值（`| key | value |`）；取不到返回空串。 */
+function summaryField(text, key) {
+    const m = new RegExp(`^\\|\\s*${key}\\s*\\|([^|]*)\\|`, "m").exec(text);
+    return m ? m[1].trim() : "";
+}
+
+/**
+ * 两份 package-summary 到模板变量的映射（纯函数）。
+ * 缺哪个值都判红，不写占位的“n/a”：用户在 Release 页看到的对应源码指引（GPLv3 第 6 条 (d)）
+ * 必须与随包 INSTALL.txt 一致，值备不齐就不该发。
+ *   - sha256 两份各取自己的；
+ *   - 源码 commit、JUCE 版本、JUCE commit：Windows 与 macOS 两份必须相等（同一次发版，同一份源码）；
+ *   - WebView2 SDK 版本只有 Windows 有，缺了判红。
+ */
+export function releaseVarsFromSummaries({ version, win, mac }) {
+    const need = (text, key, label) => {
+        const v = summaryField(text, key);
+        if (!v) throw new Error(`package-summary 里读不到 ${label}`);
+        return v;
+    };
+    const winSha = need(win, "sha256", "sha256（Windows）");
+    const macSha = need(mac, "sha256", "sha256（macOS）");
+    const same = (key, label) => {
+        const a = need(win, key, `${label}（Windows）`);
+        const b = need(mac, key, `${label}（macOS）`);
+        if (a !== b) throw new Error(`两份 package-summary 的 ${label} 不一致（Windows ${a}，macOS ${b}）`);
+        return a;
+    };
+    const commit = same("sourceCommit", "sourceCommit");
+    const juceVersion = same("juceVersion", "juceVersion");
+    const juceCommit = same("juceCommit", "juceCommit");
+    for (const [label, value] of [
+        ["sourceCommit", commit],
+        ["juceCommit", juceCommit],
+    ]) {
+        if (!/^[0-9a-f]{40}$/.test(value))
+            throw new Error(`package-summary 的 ${label} 不是 40 位小写十六进制：${value}`);
+    }
+    const webview2 = need(win, "webview2Version", "webview2Version（Windows）");
+    return {
+        VERSION: version,
+        WIN_SHA256: winSha,
+        MAC_SHA256: macSha,
+        WIN_FILE: `Rinne-v${version}-win64.zip`,
+        MAC_FILE: `Rinne-v${version}-macos-arm64.zip`,
+        SOURCE_COMMIT: commit,
+        JUCE_VERSION: juceVersion,
+        JUCE_COMMIT: juceCommit,
+        WEBVIEW2_VERSION: webview2,
+    };
+}
+
 /**
  * 从仓里的模板块与两份 package-summary 渲染完整正文。
  * dist 是两个打包 job 交上来的资产目录（里面有 package-summary-win64.md 与 package-summary-macos-arm64.md）。
@@ -752,35 +914,7 @@ export function renderReleaseNotes({ version, tag, dist, root = REPO }) {
     };
     const win = summary("package-summary-win64.md");
     const mac = summary("package-summary-macos-arm64.md");
-    /** 从 summary 的表里取一行的值（`| key | value |`）。 */
-    const field = (text, key) => {
-        const m = new RegExp(`^\\|\\s*${key}\\s*\\|([^|]*)\\|`, "m").exec(text);
-        return m ? m[1].trim() : "";
-    };
-    const winSha = field(win, "sha256");
-    const macSha = field(mac, "sha256");
-    const commit = field(win, "sourceCommit");
-    const juceCommit = field(win, "juceCommit");
-    const webview2 = field(win, "webview2Version");
-    for (const [name, value] of [
-        ["sha256（Windows）", winSha],
-        ["sha256（macOS）", macSha],
-        ["sourceCommit", commit],
-        ["juceCommit", juceCommit],
-    ]) {
-        if (!value) throw new Error(`package-summary 里读不到 ${name}`);
-    }
-    const vars = {
-        VERSION: version,
-        TAG: tag,
-        WIN_SHA256: winSha,
-        MAC_SHA256: macSha,
-        WIN_FILE: `Rinne-v${version}-win64.zip`,
-        MAC_FILE: `Rinne-v${version}-macos-arm64.zip`,
-        SOURCE_COMMIT: commit,
-        JUCE_COMMIT: juceCommit,
-        WEBVIEW2_VERSION: webview2 || "n/a",
-    };
+    const vars = { ...releaseVarsFromSummaries({ version, win, mac }), TAG: tag };
     const header = releaseNotesHeader({ version, tag });
     // 模板块的第一行占位符 {{HEADER}} 放那两个直链：直链按 tag 拼出来，不写死在文档里。
     const withHeader = template.replace("{{HEADER}}", () => header);
