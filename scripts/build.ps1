@@ -32,7 +32,7 @@
 # UTF-8、CMake 按 ANSI 解，探测结果就成了二次编码的乱码）。先删掉 CMakeFiles/<版本>/ 下 C 与 CXX 的编译器信息文件（只删这两个文件）
 # 重配；仍对不上，且探针里 cl 的前缀是干净的 UTF-8 文本，就把它写进构建目录里的一个 cmake 文件、经 CMAKE_PROJECT_INCLUDE 在
 # project() 之后覆盖 CMAKE_CL_SHOWINCLUDES_PREFIX，再重配；两步之后仍对不上判红。修过的构建目录 clean 一次（旧目标文件没有依赖
-# 记录）；核对通过的前缀记在 <构建目录>/rinne-deps-prefix.txt，没有记录或记录不同的目录也 clean 一次。判红而不是悄悄放过的理由：前缀对不上时 ninja 不报错，只是不记依赖，只改 .h 时 gates 会跑在旧对象上。构建后再查
+# 记录）；核对通过的前缀记在 <构建目录>/rinne-deps-prefix-<配置>.txt（clean 只清当前配置，所以按配置分开记），没有记录或记录不同的目录也 clean 一次。判红而不是悄悄放过的理由：前缀对不上时 ninja 不报错，只是不记依赖，只改 .h 时 gates 会跑在旧对象上。构建后再查
 # ninja -t deps 至少记下一条依赖，否则判红。
 # 退出码：0 通过；1 失败；2 -NoBuild 时构建目录里没有当前 HEAD 的构建；3 等构建槽超时。
 [CmdletBinding()]
@@ -195,7 +195,7 @@ function Test-DepsRecorded([string[]]$Lines) {
     $n ? '' : 'ninja -t deps 里没有任何一个目标记下头文件依赖：只改 .h 时含它的编译单元不会重编'
 }
 
-# 核对通过的前缀（Latin-1 字符串）的十六进制，记在构建目录的 rinne-deps-prefix.txt 里。
+# 核对通过的前缀（Latin-1 字符串）的十六进制，记在构建目录的 rinne-deps-prefix-<配置>.txt 里。
 function Get-DepsPrefixHex([string]$Prefix) { [BitConverter]::ToString([Text.Encoding]::Latin1.GetBytes("$Prefix")) }
 
 # 记录缺失或与这次核对通过的前缀不同，就要 clean：旧目标文件可能没有依赖记录。
@@ -356,7 +356,7 @@ function Invoke-Build([string]$Flavor) {
     }
     # 核对通过的前缀记在构建目录里；没有记录或记录的前缀不同，说明这个目录里的目标文件可能是前缀对不上时编的（#deps 0，
     # 改头文件不会重编，哪怕别的目标有依赖，断言也看不出来），clean 一次
-    $markerFile = Join-Path $BuildDir 'rinne-deps-prefix.txt'
+    $markerFile = Join-Path $BuildDir "rinne-deps-prefix-$Config.txt"
     $verified = Get-DepsPrefixHex (Get-NinjaDepsPrefix (Join-Path $BuildDir 'CMakeFiles/rules.ninja'))
     $recorded = (Test-Path -LiteralPath $markerFile) ? (Get-Content -LiteralPath $markerFile -Raw).Trim() : $null
     if ($needClean -or (Test-DepsNeedClean $recorded $verified)) {
