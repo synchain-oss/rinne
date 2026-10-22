@@ -151,6 +151,29 @@ export function removeFixedDir(dir, { root, rel }) {
 }
 
 /**
+ * 写死的输出目录位置上是一个链接时，只摘掉链接本身（不进去、不递归）。dir 的字面路径必须正好是 root/rel。
+ * 不是链接或不在返回 null；位置不对返回原因。
+ */
+export function unlinkFixedLink(dir, { root, rel }) {
+    let st;
+    try {
+        st = fs.lstatSync(dir);
+    } catch (e) {
+        if (e.code === "ENOENT") return null;
+        return `不处理 ${dir}：${e.message}`;
+    }
+    if (!st.isSymbolicLink()) return null;
+    if (!rel?.length || rel.some((x) => !x || x === ".." || x === "." || /[\\/]/.test(x))) return `不处理 ${dir}：rel 不合格`;
+    if (!same(path.resolve(dir), path.join(path.resolve(root), ...rel))) return `不处理 ${dir}：不是 root/rel 这个位置`;
+    try {
+        fs.unlinkSync(dir); // 摘链接本身；目录型链接（junction）在 Windows 上同样用 unlink
+        return null;
+    } catch (e) {
+        return `摘不掉 ${dir}：${e.message}`;
+    }
+}
+
+/**
  * 自测：返回 [{ label, bad, passed }]。纯函数用假数据；建与删只发生在本进程新建的目录里，
  * 「拒绝」类用例只喂纯函数，不在真实路径上触发删除。
  */
@@ -266,6 +289,30 @@ export function selfTestCases() {
         removeFixedDir(path.join(f, "build", "out"), { root: f, rel: ["build", "out"] }) !== null ||
             fs.existsSync(path.join(f, "build", "out")),
     );
+    const g = makeTempDir("rinne-safermtest-");
+    fs.writeFileSync(path.join(g, "keep.txt"), "x");
+    let gLinked = true;
+    try {
+        fs.symlinkSync(g, path.join(f, "lnk"), "junction");
+    } catch {
+        gLinked = false;
+    }
+    if (gLinked) {
+        t(
+            "写死目录位置上的链接：位置不对不摘",
+            true,
+            unlinkFixedLink(path.join(f, "lnk"), { root: f, rel: ["other"] }) && fs.existsSync(path.join(f, "lnk")),
+        );
+        t(
+            "写死目录位置上的链接：正好是 root/rel 就只摘链接，指向的东西不动",
+            false,
+            unlinkFixedLink(path.join(f, "lnk"), { root: f, rel: ["lnk"] }) !== null ||
+                fs.existsSync(path.join(f, "lnk")) ||
+                !fs.existsSync(path.join(g, "keep.txt")),
+        );
+    }
+    t("写死目录位置上的链接：不是链接就什么都不做", false, unlinkFixedLink(path.join(f, "build"), { root: f, rel: ["build"] }) !== null);
+    removeTempDir(g);
     removeTempDir(f);
     return out;
 }

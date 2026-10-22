@@ -748,11 +748,12 @@ function Invoke-Premerge {
             Invoke-RinneGitLocked {
                 if (-not (Test-Path -LiteralPath $tip)) { Invoke-RinneGit @('worktree', 'add', '--detach', $tip, 'origin/feature/v1') | Out-Null }
                 else {
+                    # 先核对路径再动手：reset / checkout --force 对不是 worktree 的路径同样会丢改动
+                    Assert-RinneWtDir -Path $tip -NamePattern '^tip-\d+$'
                     # reset 也清掉上一次被杀时留下的合并状态
                     Invoke-RinneGit @('reset', '--hard', '--quiet') -Repo $tip | Out-Null
                     Invoke-RinneGit @('checkout', '--detach', '--force', 'origin/feature/v1') -Repo $tip | Out-Null
-                    Assert-RinneWtDir -Path $tip -NamePattern '^tip-\d+$'
-                    # rinne-delete-ok: 路径已由上一行 Assert-RinneWtDir 核对为 wt 下的 tip-<n>，且是 worktree
+                    # rinne-delete-ok: 路径已在 reset 之前由 Assert-RinneWtDir 核对为 wt 下的 tip-<n>，且是 worktree
                     Invoke-RinneGit @('clean', '-ffdx', '--quiet') -Repo $tip | Out-Null
                 }
                 $m = Invoke-RinneGit @('merge', '--no-ff', '--no-commit', "refs/remotes/origin/pr/$Pr") -Repo $tip -AllowFail

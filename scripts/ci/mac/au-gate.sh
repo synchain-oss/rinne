@@ -68,6 +68,10 @@ install_au() {
           "$HOME/Library/Audio/Plug-Ins/Components/"?*.component) ;;
           *) echo "::error::拒绝删除 $inst：不是已装目录下一层的 .component"; exit 1 ;;
         esac
+        # case 里的 ?* 也匹配 /，所以再核对一次父目录正好是 Components
+        if [ "$(dirname -- "$inst")" != "$dest" ]; then
+          echo "::error::拒绝删除 $inst：不是已装目录下一层"; exit 1
+        fi
         # rinne-delete-ok: 上面核对过：只删 Components 目录下一层、名字以 .component 结尾的旧包
         rm -rf "$inst"
         ditto "$b" "$inst"

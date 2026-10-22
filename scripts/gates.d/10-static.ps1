@@ -172,7 +172,7 @@ function Export-Head([string]$Root, [string]$Dir) {
 }
 
 # 与 compliance.yml 里 run-checks 的 --only 一一对应，顺序也相同；Test-RinneGates 拿 workflow 原文核对。
-$script:ComplianceOnly = 'spdx', 'reuse', 'licenses-closure', 'modules-closure', 'offline', 'privacy'
+$script:ComplianceOnly = 'spdx', 'reuse', 'licenses-closure', 'modules-closure', 'offline', 'recursive-delete', 'privacy'
 
 function Invoke-Compliance($Ctx) {
     $node, $gl, $range = (Get-ToolCommand $Ctx node), (Get-ToolCommand $Ctx gitleaks), "$($Ctx.Base)..HEAD"

@@ -24,7 +24,7 @@ const ALLOWED = new Set([
  * 待整改、暂时放行的文件：自测收尾删临时目录的那一处，整改要等并行改动该文件的变更合入之后再做（改成经 TempDir.psm1）。
  * 整改完从这里删掉；清单里每多一项都要写明原因。
  */
-const PENDING = new Set(["scripts/build.ps1"]);
+const PENDING = new Map([["scripts/build.ps1", /Remove-Item -LiteralPath \$tmp -Recurse -Force/]]);
 
 const EXEMPT = /rinne-delete-ok:\s*\S.{3,}/;
 const EXEMPT_WINDOW = 3;
@@ -55,11 +55,11 @@ export const RULES = [
         name: "node-rm-recursive",
         exts: JS,
         test: (l, lines, i) =>
-            /\.(rm|rmSync|rmdir|rmdirSync)\(/.test(l) && lines.slice(i, i + 4).some((x) => /\brecursive\b/.test(x)),
+            /(^|[^\w$])(rm|rmSync|rmdir|rmdirSync)\(/.test(l) && lines.slice(i, i + 4).some((x) => /\brecursive\b/.test(x)),
     },
     { name: "node-rimraf", exts: JS, test: (l) => /\brimraf\b/.test(l) },
     { name: "python-rmtree", exts: ["py"], test: (l) => /\brmtree\s*\(/.test(l) },
-    { name: "shell-rm-r", exts: SH, test: (l) => /(^|[\s;&|('"])rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/.test(l) },
+    { name: "shell-rm-r", exts: SH, test: (l) => /(^|[\s;&|('"])rm(\s+-[a-zA-Z]+)*\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/.test(l) },
     {
         name: "cmake-remove-recurse",
         exts: ["cmake"],
@@ -82,18 +82,30 @@ export const RULES = [
 ];
 
 const extOf = (rel) => (path.basename(rel) === "CMakeLists.txt" ? "cmake" : path.extname(rel).slice(1).toLowerCase());
-const isComment = (l) => /^\s*(#|\/\/|\*|\/\*|<#|<!--)/.test(l);
+// 注释符按语言分：shell / yml 里 case 的兜底分支 `*) …` 以 * 开头，不能当注释
+const CLIKE = /^\s*(\/\/|\/\*|\*)/;
+const HASH = /^\s*#/;
+const COMMENT = {
+    ps1: /^\s*(#|<#)/,
+    psm1: /^\s*(#|<#)/,
+    bat: /^\s*(rem\b|::)/i,
+    cmd: /^\s*(rem\b|::)/i,
+};
+for (const e of JS) COMMENT[e] = CLIKE;
+const isComment = (l, ext) => (COMMENT[ext] ?? HASH).test(l);
 
 /** 一份文本里的违规：[{ line, rule }]。rules 缺省是全部规则（mutationCheck 传去掉一条的）。 */
 export function scanText(rel, text, rules = RULES) {
-    if (ALLOWED.has(rel) || PENDING.has(rel)) return [];
+    if (ALLOWED.has(rel)) return [];
+    const pending = PENDING.get(rel);
     const ext = extOf(rel);
     const use = rules.filter((r) => r.exts.includes(ext));
     if (!use.length) return [];
     const lines = text.split(/\r?\n/);
     const out = [];
     lines.forEach((l, i) => {
-        if (isComment(l)) return;
+        if (isComment(l, ext)) return;
+        if (pending && pending.test(l)) return; // 只放行清单里写明的那一行，文件里新增的递归删除照判
         for (const r of use) {
             if (!r.test(l, lines, i, ext)) continue;
             const exempt = lines.slice(Math.max(0, i - EXEMPT_WINDOW), i + 1).some((x) => EXEMPT.test(x));
@@ -119,6 +131,10 @@ const fx = [
     ["shell-rm-r", "a.sh", 'rm -rf "$dir"'],
     ["shell-rm-r", "a.sh", `trap 'rm -rf "$tmp"' EXIT`],
     ["shell-rm-r", "w.yml", '          rm -fr "$RUNNER_TEMP/x"'],
+    ["shell-rm-r", "a.sh", 'rm -f -r "$d"'],
+    ["shell-rm-r", "a.sh", '  *) rm -rf "$d" ;;'],
+    ["node-rm-recursive", "a.mjs", "rmSync(dir, { recursive: true });"],
+    ["powershell-remove-recurse", "scripts/build.ps1", `${rm} -LiteralPath $other -Recurse -Force`],
     ["cmake-remove-recurse", "CMakeLists.txt", 'file(REMOVE_RECURSE "${dir}")'],
     ["cmake-remove-recurse", "x.cmake", "execute_process(COMMAND cmake -E remove_directory ${d})"],
     ["git-clean-force", "a.ps1", "Invoke-RinneGit @('clean', '-ffdx', '--quiet')"],
@@ -134,6 +150,10 @@ const good = [
     ["a.mjs", "fs.rmSync(file, { force: true });"],
     ["a.mjs", "fs.rmdirSync(emptyDir);"],
     ["a.mjs", "removeTempDir(dir);"],
+    ["a.mjs", " * rm -rf 写在块注释里不算"],
+    ["a.mjs", "safeRmSync(dir, { recursive: true });"],
+    ["a.sh", 'rm -f -v "$file"'],
+    ["scripts/build.ps1", `${rm} -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue`],
     ["a.py", "os.remove(path)"],
     ["a.sh", 'rm -f "$file"'],
     ["a.sh", "git clean -n"],

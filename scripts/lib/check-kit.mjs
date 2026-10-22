@@ -113,7 +113,10 @@ export function tempRepo({ bare = false } = {}) {
             fs.mkdirSync(path.dirname(abs), { recursive: true });
             fs.writeFileSync(abs, text);
         },
-        cleanup: () => removeTempDir(dir),
+        cleanup: () => {
+            const why = removeTempDir(dir);
+            if (why) console.error(`临时仓没清掉：${why}`); // 在 finally 里调用，不抛，但不能悄悄留着
+        },
     };
 }
 
