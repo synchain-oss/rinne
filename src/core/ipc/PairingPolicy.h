@@ -5,7 +5,7 @@
 //
 // 规则：
 // - 触发：首次 prepare 之后，累计 >= 8 个实时块，距 prepare >= 300 ms；没有存档组号；本会话没有手选过组。
-// - 作用域：只看与本实例同 pid 的对端；别的进程里的端点一律当不存在。
+// - 作用域：只看与本实例同 pid 的对端；别的进程占着的端点算占着，不参与匹配，也不当空位。
 // - 新 Output：同名轨上唯一的未配对 Input（两端名字都已知、哈希相等、恰好一个）；否则最近认领的未配对 Input；
 //   否则编号最小的空组，并进入等待，壳每 kPairingReevalMs 重评一次。
 // - 新 Input：先加入有未配对 Output 在等待的组（最近认领的优先）；否则编号最小的空组。
@@ -100,10 +100,12 @@ struct RepairPlan
     bool needsConfirm = false;
 };
 
-// Input「移到空闲组」：编号最小的两端全空的组；没有时退到本角色一端是同进程休眠槽的最小组（需确认）
+// Input「移到空闲组」：编号最小的两端全空的组；没有时退到本角色一端是同进程休眠槽的最小组（需确认）。
+// 对面的 Output 端要么空、要么也是本进程的且不是活的：不能接管之后配到别的进程的 Output 上
 RepairPlan repairInput(const PairingSelf& self, const GroupViews& groups) noexcept;
 // Output「重新配对」：按 decideOutput 重选；选出空组以外的结果同 decideOutput。没有任何可去的组时，
-// 退到本角色一端是同进程休眠槽的最小组（需确认）
+// 退到本角色一端是同进程休眠槽的最小组（需确认）。对面的 Input 端要么空、要么也是本进程的：
+// 不能接管之后配到别的进程的 Input 上
 RepairPlan repairOutput(const PairingSelf& self, const GroupViews& groups) noexcept;
 
 } // namespace rinne::ipc

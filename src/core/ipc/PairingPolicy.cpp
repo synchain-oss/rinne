@@ -171,11 +171,12 @@ RepairPlan repairInput(const PairingSelf& self, const GroupViews& groups) noexce
             return {group, false};
         }
     }
-    // 退而求其次：本进程的休眠 Input 槽，且对面不是活的（空或休眠）。接管休眠要用户确认
+    // 退而求其次：本进程的休眠 Input 槽需要用户确认才能接管
     for (std::size_t i = 0; i < groups.size(); ++i)
     {
         const u32 group = static_cast<u32>(i) + 1;
         const GroupView& view = groups[i];
+        // 修复要离开当前组；对面的 Output 端要么空、要么也是本进程的且不是活的：不能接管之后配到别的进程的 Output 上
         if (group != self.heldGroup && view.input.isDormant() && view.input.pid == self.pid &&
             (view.output.isFree() || (view.output.pid == self.pid && !view.output.isLive())))
         {
