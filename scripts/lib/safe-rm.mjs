@@ -72,7 +72,8 @@ export function tempVerdict({ real, entry, tmpReal, home }) {
 /** rel 只收由非空、不含 . .. 分隔符与盘符的段组成的数组（纯）。返回 null 或原因。 */
 export function relVerdict(rel) {
     if (!Array.isArray(rel) || !rel.length) return "写死的相对路径不合格";
-    if (rel.some((s) => typeof s !== "string" || !s || s === "." || s === ".." || /[\\/:]/.test(s))) return "写死的相对路径不合格";
+    if (rel.some((s) => typeof s !== "string" || !s || s === "." || s === ".." || /[\\/:]/.test(s)))
+        return "写死的相对路径不合格";
     return null;
 }
 
@@ -89,7 +90,16 @@ export const FIXED_DIRS = [[".rinne-review"]];
  * 仓内写死的输出目录能不能删的判断（纯）。rel 是写死的相对路径（段数组）；allowed 给了就要求 rel 正好是其中一项。
  * 任何情况下都不删仓根、wt/ 或它的子目录、盘根、用户目录：rel 必须是 allowed 里的、或（临时副本里）合格的段，目标必须正好是 root/rel。
  */
-export function fixedVerdict({ rootReal, targetReal, targetIsLink, rel, home, repoReal = rootReal, madeReals = [], allowed }) {
+export function fixedVerdict({
+    rootReal,
+    targetReal,
+    targetIsLink,
+    rel,
+    home,
+    repoReal = rootReal,
+    madeReals = [],
+    allowed,
+}) {
     const bad = relVerdict(rel) ?? rootVerdict({ rootReal, repoReal, madeReals });
     if (bad) return bad;
     if (allowed && !allowed.some((a) => a.length === rel.length && a.every((x, i) => x === rel[i]))) {
@@ -299,19 +309,38 @@ export function selfTestCases() {
     const wl = [[".rinne-review"]];
     const wlFx = { ...fx, targetReal: path.join(repo, ".rinne-review"), rel: [".rinne-review"], allowed: wl };
     t("白名单：rel 在白名单里、目标正好是仓根/rel：通过", false, fixedVerdict(wlFx));
-    t("白名单：rel 不在白名单里：拒绝", true, fixedVerdict({ ...wlFx, rel: ["build"], targetReal: path.join(repo, "build") }));
+    t(
+        "白名单：rel 不在白名单里：拒绝",
+        true,
+        fixedVerdict({ ...wlFx, rel: ["build"], targetReal: path.join(repo, "build") }),
+    );
     t("白名单：rel 是 ..：拒绝", true, fixedVerdict({ ...wlFx, rel: [".."], targetReal: path.dirname(repo) }));
-    t("白名单：目标是 wt/：拒绝", true, fixedVerdict({ ...wlFx, rel: ["wt"], targetReal: path.join(repo, "wt"), allowed: [["wt"]] }));
+    t(
+        "白名单：目标是 wt/：拒绝",
+        true,
+        fixedVerdict({ ...wlFx, rel: ["wt"], targetReal: path.join(repo, "wt"), allowed: [["wt"]] }),
+    );
     t("白名单：目标是工作区根（仓根的上级）：拒绝", true, fixedVerdict({ ...wlFx, targetReal: path.dirname(repo) }));
     t("白名单：目标是仓根：拒绝", true, fixedVerdict({ ...wlFx, targetReal: repo }));
-    t("白名单：目标是 wt/ 下的子目录：拒绝", true, fixedVerdict({ ...wlFx, targetReal: path.join(repo, "wt", "x", ".rinne-review") }));
+    t(
+        "白名单：目标是 wt/ 下的子目录：拒绝",
+        true,
+        fixedVerdict({ ...wlFx, targetReal: path.join(repo, "wt", "x", ".rinne-review") }),
+    );
     t("写死目录判断：root 是仓根：通过", false, fixedVerdict({ ...fx, repoReal: repo }));
     t("写死目录判断：root 是登记过的临时目录：通过", false, fixedVerdict({ ...fx, repoReal: tmp, madeReals: [repo] }));
     const wtLike = path.join(root, "work", "wt");
     t(
         "写死目录判断：调用方从目标本身推出 root（目标是 wt）：拒绝",
         true,
-        fixedVerdict({ rootReal: path.dirname(wtLike), targetReal: wtLike, targetIsLink: false, rel: ["wt"], home, repoReal: repo }),
+        fixedVerdict({
+            rootReal: path.dirname(wtLike),
+            targetReal: wtLike,
+            targetIsLink: false,
+            rel: ["wt"],
+            home,
+            repoReal: repo,
+        }),
     );
     t("写死目录判断：rel 的段带分隔符：拒绝", true, fixedVerdict({ ...fx, rel: ["build/out"] }));
     t("写死目录判断：rel 的段带盘符：拒绝", true, fixedVerdict({ ...fx, rel: ["C:", "x"] }));
@@ -381,7 +410,8 @@ export function selfTestCases() {
         t(
             "写死目录位置上的链接：位置不对不摘",
             true,
-            unlinkFixedLinkInTemp(path.join(f, "lnk"), { tempRoot: f, rel: ["other"] }) && fs.existsSync(path.join(f, "lnk")),
+            unlinkFixedLinkInTemp(path.join(f, "lnk"), { tempRoot: f, rel: ["other"] }) &&
+                fs.existsSync(path.join(f, "lnk")),
         );
         t(
             "写死目录位置上的链接：正好是 root/rel 就只摘链接，指向的东西不动",
@@ -391,7 +421,11 @@ export function selfTestCases() {
                 !fs.existsSync(path.join(g, "keep.txt")),
         );
     }
-    t("写死目录位置上的链接：不是链接就什么都不做", false, unlinkFixedLinkInTemp(path.join(f, "build"), { tempRoot: f, rel: ["build"] }) !== null);
+    t(
+        "写死目录位置上的链接：不是链接就什么都不做",
+        false,
+        unlinkFixedLinkInTemp(path.join(f, "build"), { tempRoot: f, rel: ["build"] }) !== null,
+    );
     removeTempDir(g);
     removeTempDir(f);
     return out;

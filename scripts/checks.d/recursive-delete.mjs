@@ -123,7 +123,10 @@ export const RULES = [
     {
         name: "shell-rm-array",
         exts: [...JS, "py"],
-        test: (l) => new RegExp(j("['\"]rm['\"]\\s*,\\s*\\[?\\s*(['\"]-[a-zA-Z]+['\"]\\s*,\\s*)*['\"](", RM_OPT, "|--recursive)['\"]")).test(l),
+        test: (l) =>
+            new RegExp(
+                j("['\"]rm['\"]\\s*,\\s*\\[?\\s*(['\"]-[a-zA-Z]+['\"]\\s*,\\s*)*['\"](", RM_OPT, "|--recursive)['\"]"),
+            ).test(l),
     },
     { name: "find-delete", exts: [...SH, ...JS, "py"], test: (l) => /\bfind\b.*\s-delete\b/.test(l) },
     {

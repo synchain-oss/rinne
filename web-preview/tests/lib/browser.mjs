@@ -171,7 +171,8 @@ export async function launchBrowser({ width = 1280, height = 900 } = {}) {
     const cleanup = async () => {
         try {
             // Windows 上 Chromium 还有 GPU / 工具子进程握着 profile 里的文件：只杀主进程，子进程一直不放，目录就删不掉；连子进程一起结束
-            if (process.platform === "win32" && proc.pid) spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
+            if (process.platform === "win32" && proc.pid)
+                spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
             proc.kill();
         } catch {
             // 已经退出
