@@ -603,7 +603,8 @@ TEST_CASE("a clock that goes backwards never stretches the intent hold", "[ipc][
     CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == holder.myCtl());
 }
 
-TEST_CASE("an unsuccessful extra dormant look inside the intent hold never delays the normal retry", "[ipc][rendezvous]")
+TEST_CASE("an unsuccessful extra dormant look inside the intent hold never delays the normal retry",
+          "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();
     const Naming naming(NameScope::randomForTesting());
