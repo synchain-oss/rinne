@@ -18,13 +18,13 @@
 //   node scripts/check-release-ready.mjs --self-test
 // --version / --tag 省略时只做仓内 lint（不按版本判）：第 2 条与第 5 条跳过。
 
-import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { assertNodeVersion, caseResult, isMain } from "./lib/check-kit.mjs";
 import { I18N_FILE, SOURCE_FILE, parseSource, readRepoText, zhHashes } from "./lib/docs-kit.mjs";
+import { cleanupTempDir, makeTempDir } from "./lib/safe-rm.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -638,7 +638,7 @@ function renderCases() {
  * 补上再打一个 tag → 判绿（README 状态行与 CHANGELOG 都对）。
  */
 function endToEndCase() {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rinne-release-ready-"));
+    const dir = makeTempDir("rinne-release-ready-");
     try {
         const git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
         git(["init", "-q", "-b", "main"]);
@@ -691,7 +691,7 @@ function endToEndCase() {
     } catch (e) {
         return { label: "端到端：临时仓那一格跑不起来", bad: true, passed: false };
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        cleanupTempDir(dir);
     }
 }
 

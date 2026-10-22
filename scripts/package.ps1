@@ -1048,6 +1048,7 @@ Corresponding Source for this build (GPLv3 section 6 (d)):
       try { $null = Invoke-RinnePackage -Version '0.0.0-local' -Tag 'v0.0.0-local' -BuildDir $fakeBuild -OutDir (Join-Path $tmp 'out-probe') -SourceCommit $fakeCommit -Manifest 'packaging/manifest-win64.txt' }
       catch { $probeRed = $true }
       & $check '探针：BuildDir 里有 Rinne Probe Input.vst3 时打包必须红' $true $probeRed
+      # rinne-delete-ok: 自测在本进程 New-RinneTempDir 建的临时目录里造的假 bundle；路径由自测拼出，不是参数
       $null = Remove-Item -LiteralPath (Join-Path $fakeBuild 'Rinne Probe Input.vst3') -Recurse -Force
     } finally { $env:SOURCE_DATE_EPOCH = $savedEpoch }
 
@@ -1083,6 +1084,7 @@ Corresponding Source for this build (GPLv3 section 6 (d)):
     try { $null = Invoke-RinnePackage -Version '0.0.0-local' -Tag 'v0.0.0-local' -BuildDir $fakeBuild -OutDir (Join-Path $tmp 'out-probe2') -SourceCommit $fakeCommit -Manifest 'packaging/manifest-win64.txt' }
     catch { $probeInZip = $true }
     & $check '探针：BuildDir 里有 Rinne Probe.vst3 时打包必须红' $true $probeInZip
+    # rinne-delete-ok: 自测在本进程 New-RinneTempDir 建的临时目录里造的假 bundle；路径由自测拼出，不是参数
     $null = Remove-Item -LiteralPath $probeName -Recurse -Force
 
     # 本机路径进包：必须红。

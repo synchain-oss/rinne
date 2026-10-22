@@ -102,6 +102,7 @@ remove_bundle() { # $1 目标根目录 $2 bundle 名
     if ! bundle_removable "$name" "$root" "$root_real" "$is_link" "$real"; then
         return 1
     fi
+    # rinne-delete-ok: 名字锚定的四个 bundle 之一；bundle_removable 已核真实路径等于期望路径、不是符号链接、根不是 / 与 HOME 本身
     rm -rf -- "$real" || return 1
     return 0
 }
@@ -209,6 +210,7 @@ cleanup_temp() { # $1 本进程建的临时目录
     local dir="${1:-$TEMP_DIR}"
     [ -n "$dir" ] || return 0
     if temp_dir_is_ours "$dir"; then
+        # rinne-delete-ok: 本进程 mktemp -d 建的临时目录；temp_dir_is_ours 已核真实路径在临时根下一层且带本进程前缀
         rm -rf -- "$dir"
     fi
     if [ "$dir" = "$TEMP_DIR" ]; then TEMP_DIR=""; fi

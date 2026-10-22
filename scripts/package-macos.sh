@@ -403,6 +403,7 @@ cleanup_temp() {
     local dir="${1:-$TEMP_DIR}"
     [ -n "$dir" ] || return 0
     if temp_dir_is_ours "$dir"; then
+        # rinne-delete-ok: 本进程 mktemp -d 建的临时目录；temp_dir_is_ours 已核真实路径在临时根下一层且带本进程前缀
         rm -rf -- "$dir" || echo "$PROG: 临时目录没删掉：$dir" >&2
     else
         echo "$PROG: 临时目录不是本进程建的，不删：$dir" >&2
@@ -1944,6 +1945,7 @@ st_pipeline() {
     ST_EXPECT="bundle 集合不对"
     st_red_run "流水线：构建目录里混进探针 bundle → 红" "$work/ob$n" "$zip0" --version 0.9.0 --build-dir "$bx"
     nb
+    # rinne-delete-ok: 自测在自己 mktemp -d 建的临时目录里造的假构建目录；路径由自测拼出，不是参数
     rm -rf "$bx/Rinne Output.component"
     ST_EXPECT="bundle 集合不对"
     st_red_run "流水线：少一个 bundle → 红" "$work/ob$n" "$zip0" --version 0.9.0 --build-dir "$bx"
@@ -2045,6 +2047,7 @@ st_pipeline() {
     st_red_run "kit：--kit-name 没带 --kit → 红" "$work/okit3" "$kitn.zip" --version 0.9.0 --build-dir "$bk" --kit-name "$kitn"
     ST_EXPECT="--kit-name 里只许"
     st_red_run "kit：--kit-name 含路径分隔符 → 红" "$work/okit4" "x.zip" --version 0.9.0 --build-dir "$bk" --kit --kit-name "a/b"
+    # rinne-delete-ok: 自测在自己 mktemp -d 建的临时目录里造的假构建目录；路径由自测拼出，不是参数
     rm -rf "$bk/tools-bin"
     ST_EXPECT="没有 rinne_nulltest"
     st_red_run "kit：构建目录里没有 rinne_nulltest → 红" "$work/okit5" "$kitn.zip" --version 0.9.0 --build-dir "$bk" --kit --kit-name "$kitn"
