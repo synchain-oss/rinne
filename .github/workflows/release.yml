@@ -1,21 +1,29 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Derived from synchain-oss/scvb; see upstream/release.json
 #
-# 发版流水线：推一个 v* tag ⇒ verify-tag → build → package-win ∥ package-mac → publish（草稿 Release）。
+# 发版流水线：推一个 v* tag ⇒ verify-tag → build → package-win ∥ package-mac → notes → publish（草稿 Release）。
 #
-# 五个 job 的分工：
+# 六个 job 的分工：
 #   1. verify-tag   tag 的形态、版本、来源分支、CHANGELOG 与正式版的源码一致性；再判发版就绪与打包前置。
-#                   判据先自测再实判：自测红就停，不往下走。
-#   2. build        以 workflow_call 调用 build.yml 的 release 模式（构建、ctest、pluginval、auval）。
+#                   判据先自测再实判：自测红就停，不往下走（tag 门禁与发版就绪两个都有自测）。
+#   2. build        以 workflow_call 调用 build.yml 的 release 模式（构建、ctest、pluginval、auval，
+#                   以及 macOS 打包脚本与安装脚本的自测）。
 #                   tag 靠 github 上下文隐式传递：release.yml 由 push tag 触发，被调用方拿到的
 #                   github.ref 就是 refs/tags/<tag>，github.ref_name 就是 tag 名，github.sha 就是被 tag 的提交。
 #                   with: 留空是因为 tag 是不可信文本，而工作流检查禁止在 with: 里插值表达式。
 #   3. package-win  取回 Windows 的构建产物，打成发行 zip（外加 .sha256 与 package-summary）。
 #   4. package-mac  取回 macOS 的构建产物，同上。mac 包用 ditto 压缩，保留可执行位与符号链接。
-#   5. publish       唯一持 contents: write 的 job：收齐 6 件、核哈希、建**草稿** Release。
+#   5. notes        只读：收齐 6 件、核哈希与源码 commit、渲染 Release 正文，把 6 件加正文打成一个 artifact。
+#                   这个 job 要 checkout 被 tag 的提交、跑仓库里的脚本，所以不持写权限。
+#   6. publish      唯一持 contents: write 的 job：不 checkout、不跑任何仓库脚本，只取回 notes 交上来的东西，
+#                   再核一次文件名与哈希，建**草稿** Release，最后读回核对（草稿状态、恰好 6 个资产、字节数）。
 #
 # 两条与姊妹仓不同的口径（故意的）：
-#   - Win 或 mac 任一红都不建草稿（publish 的 needs 同时含 package-win 与 package-mac）；
+#   - Win 或 mac 任一红都不建草稿（notes 的 needs 同时含 package-win 与 package-mac）；
 #   - Release 恒为 6 个资产（2 个 zip + 2 个 .sha256 + 2 个 package-summary），kit 包只进 Actions artifact。
+#
+# 重跑：Re-run failed jobs 与 Re-run all jobs 都行。artifact 名在一个 run 内固定，所以每处 upload-artifact
+# 都带 overwrite: true（默认 false 时，重跑撞上同名 artifact 会失败）；build.yml 的 release 模式同理。
 #
 # 权限：顶层 contents: read；只有 publish 持 contents: write。
 # 不用第三方 release action：runner 上自带 gh CLI，少一个持写权限的第三方依赖。
@@ -82,7 +90,13 @@ jobs:
         run: pwsh -NoProfile -File scripts/check-release-tag.ps1 -Tag "$env:TAG_NAME"
 
       # 发版就绪：README 状态行、CHANGELOG 节、frReview、强声明的证据、INSTALL.txt 引用的仓内文件。
-      # 判的是被打 tag 的那棵提交，不是工作树。
+      # 判的是被打 tag 的那棵提交，不是工作树。先自测再实判，两步分开写（理由同上）。
+      - name: Release-ready self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/check-release-ready.mjs --self-test
+
       - name: Release is ready
         shell: bash
         env:
@@ -135,7 +149,7 @@ jobs:
 
       # artifact 名是 build.yml 的 release 模式写下的：Rinne-release-win64-<tag>。
       # tag 已经被 verify-tag 的形态判据放行过；这里只是 action 的输入，不进任何脚本正文。
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: Rinne-release-win64-${{ github.ref_name }}
           path: build-artifact
@@ -153,7 +167,7 @@ jobs:
         shell: pwsh
         run: Get-Content dist/package-summary-win64.md | Out-File $env:GITHUB_STEP_SUMMARY -Append
 
-      # 三件产物按名字传上去：publish 那一步按名字收齐，核「恰好 6 个资产」。
+      # 三件产物按名字传上去：notes 那一步按名字收齐，核「恰好 6 个资产」。
       - name: Upload Windows release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -163,6 +177,7 @@ jobs:
             dist/Rinne-v${{ needs.verify-tag.outputs.version }}-win64.zip.sha256
             dist/package-summary-win64.md
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
 
   package-mac:
@@ -193,7 +208,7 @@ jobs:
 
       # build.yml 的 mac 构建把每个 bundle 各打成一个 ditto zip 再上传（upload-artifact 会丢可执行位与符号链接）。
       # artifact 名里的 tag 已经被 verify-tag 的形态判据放行过。
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: Rinne-release-macos-arm64-${{ github.ref_name }}
           path: build-artifact
@@ -217,6 +232,7 @@ jobs:
           ls -1 bundles
 
       # zip 名与产物名由打包脚本按版本号定；tag 就是 v<version>，脚本从合规清单里取。
+      # 打包脚本与两个安装脚本的自测在 build 的 mac 作业里跑过（同一个被 tag 的提交，红了就到不了这里）。
       - name: Package
         shell: bash
         env:
@@ -239,17 +255,19 @@ jobs:
             dist/Rinne-v${{ needs.verify-tag.outputs.version }}-macos-arm64.zip.sha256
             dist/package-summary-macos-arm64.md
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
 
-  publish:
-    name: publish
-    # needs 同时含两个打包 job：任一红都不建草稿（与姊妹仓「mac 失败不挡 Windows」故意不同）。
+  notes:
+    name: notes
+    # needs 同时含两个打包 job：任一红都不往下走（与姊妹仓「mac 失败不挡 Windows」故意不同）。
     needs: [verify-tag, build, package-win, package-mac]
     # ubuntu 而不是 macos：核哈希用 sha256sum -c（与 INSTALL.txt 教用户的 shasum -a 256 -c 同一格式），不占 mac 队列。
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # 只读：这里 checkout 被 tag 的提交并执行仓库里的脚本，写权限留给不执行任何仓库代码的 publish。
     permissions:
-      contents: write # 建草稿 Release + 上传资产；整个流水线只有这一处有写权限
+      contents: read
     steps:
       # fetch-depth 0：要按 tag 解析出被 tag 的提交，核对 summary 里的 sourceCommit。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -271,12 +289,12 @@ jobs:
           fi
           echo "node $major"
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: Rinne-release-assets-win64
           path: assets/win
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: Rinne-release-assets-macos-arm64
           path: assets/mac
@@ -351,6 +369,48 @@ jobs:
           node scripts/check-release-ready.mjs --render-notes --version "$VERSION" --tag "$TAG_NAME" --dist dist --out dist/release-notes.md
           head -n 2 dist/release-notes.md
 
+      # 6 个资产加正文打成一个 artifact 交给 publish。名字固定，所以带 overwrite: true（重跑不撞 409）。
+      - name: Upload release bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Rinne-release-bundle
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: [verify-tag, notes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # 建草稿 Release + 上传资产；整个流水线只有这一处有写权限
+    steps:
+      # 不 checkout、不 setup-node、不跑任何仓库脚本：写权限的 job 里只有 download-artifact（GitHub 自家、钉了 SHA）、
+      # sha256sum、jq 与 gh。notes 交上来的东西在这里再核一遍名字与哈希。
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: Rinne-release-bundle
+          path: dist
+
+      - name: Bundle is exactly six assets plus the notes
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          win_zip="Rinne-v$VERSION-win64.zip"
+          mac_zip="Rinne-v$VERSION-macos-arm64.zip"
+          want="$(printf '%s\n' "$win_zip" "$win_zip.sha256" package-summary-win64.md "$mac_zip" "$mac_zip.sha256" package-summary-macos-arm64.md release-notes.md | LC_ALL=C sort)"
+          got="$(ls -1A dist | LC_ALL=C sort)"
+          if [ "$got" != "$want" ]; then
+            printf '%s\n' "$got" | sed 's/^/  file: /'
+            echo "::error::the bundle is not exactly the six assets plus release-notes.md"; exit 1
+          fi
+          (cd dist && sha256sum -c "$win_zip.sha256")
+          (cd dist && sha256sum -c "$mac_zip.sha256")
+
       - name: Create draft release
         shell: bash
         env:
@@ -363,32 +423,70 @@ jobs:
           set -euo pipefail
           win_zip="Rinne-v$VERSION-win64.zip"
           mac_zip="Rinne-v$VERSION-macos-arm64.zip"
-          assets=("dist/$win_zip" "dist/$win_zip.sha256" "dist/package-summary-win64.md" "dist/$mac_zip" "dist/$mac_zip.sha256" "dist/package-summary-macos-arm64.md")
+          names=("$win_zip" "$win_zip.sha256" package-summary-win64.md "$mac_zip" "$mac_zip.sha256" package-summary-macos-arm64.md)
+          assets=()
+          for n in "${names[@]}"; do assets+=("dist/$n"); done
+          want_names="$(printf '%s\n' "${names[@]}" | LC_ALL=C sort)"
           title="Synchain Rinne v$VERSION (Windows x64 · macOS Apple Silicon)"
+          if [ "$PRERELEASE" != "true" ] && [ "$PRERELEASE" != "false" ]; then
+            echo "::error::prerelease output is '$PRERELEASE', expected true or false"; exit 1
+          fi
 
           # 同一个 tag 重跑：已有**草稿**就覆盖资产并把正文重置为本次渲染的结果（否则正文里的 SHA-256
           # 会是上一次的）；已发布的 Release 一律不碰。三种状态各走各的分支，不靠真值语义兜底。
-          # 「没有 Release」是正常路径上的非零退出：显式关掉 native 命令的 ErrorActionPreference 联动。
+          # 「没有 Release」只认 gh 的 "release not found"：网络抖动、限流、权限错误都不是「没有」，
+          # 当成没有会再建出第二个草稿，所以其余失败一律判红。
           rc=0
-          is_draft="$(gh release view "$TAG_NAME" --json isDraft -q .isDraft 2>/dev/null)" || rc=$?
+          view_out="$(gh release view "$TAG_NAME" --json isDraft 2>"$RUNNER_TEMP/view.err")" || rc=$?
           if [ "$rc" != "0" ]; then
+            if ! grep -qi 'release not found' "$RUNNER_TEMP/view.err"; then
+              cat "$RUNNER_TEMP/view.err" >&2
+              echo "::error::gh release view failed for a reason other than 'release not found'; not creating anything"; exit 1
+            fi
             # 没有 Release：新建草稿。
             flags=(--draft --verify-tag --title "$title" --notes-file dist/release-notes.md)
             if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
             gh release create "$TAG_NAME" "${assets[@]}" "${flags[@]}"
-            exit $?
+          else
+            is_draft="$(printf '%s' "$view_out" | jq -r .isDraft)"
+            # 已发布 ⇒ 有意判红（不是 exit 0）：重跑一个已发布的 tag 需要人来看一眼，别当 bug 改成放行。
+            if [ "$is_draft" = "false" ]; then
+              echo "::error::the release of tag $TAG_NAME is already published; the pipeline does not touch it"; exit 1
+            fi
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::cannot make sense of isDraft='$is_draft' from gh release view; not touching it"; exit 1
+            fi
+            echo "there is already a draft release: overwriting the assets and resetting the notes"
+            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+            # 草稿上多出来的、不在这六个名字里的资产（手传的 kit 包、旧版本残留）清掉：Release 恒为 6 个资产。
+            while IFS= read -r extra; do
+              [ -n "$extra" ] || continue
+              if ! printf '%s\n' "$want_names" | grep -Fqx -- "$extra"; then
+                echo "::warning::removing the stray asset '$extra' from the draft"
+                gh release delete-asset "$TAG_NAME" "$extra" --yes
+              fi
+            done < <(gh release view "$TAG_NAME" --json assets -q '.assets[].name')
+            gh release edit "$TAG_NAME" --notes-file dist/release-notes.md --prerelease="$PRERELEASE"
           fi
-          # 已发布 ⇒ 有意判红（不是 exit 0）：重跑一个已发布的 tag 需要人来看一眼，别当 bug 改成放行。
-          if [ "$is_draft" = "false" ]; then
-            echo "::error::the release of tag $TAG_NAME is already published; the pipeline does not touch it"; exit 1
+
+          # 读回核对：建完或更新完，Release 必须是草稿、预发布标记对、恰好这六个名字、每个字节数与本地一致。
+          json="$(gh release view "$TAG_NAME" --json isDraft,isPrerelease,assets)"
+          if [ "$(printf '%s' "$json" | jq -r .isDraft)" != "true" ]; then
+            echo "::error::the release is not a draft after the update"; exit 1
           fi
-          if [ "$is_draft" != "true" ]; then
-            echo "::error::cannot make sense of isDraft='$is_draft' from gh release view; not touching it"; exit 1
+          if [ "$(printf '%s' "$json" | jq -r .isPrerelease)" != "$PRERELEASE" ]; then
+            echo "::error::the release's prerelease flag is not $PRERELEASE after the update"; exit 1
           fi
-          echo "there is already a draft release: overwriting the assets and resetting the notes"
-          gh release upload "$TAG_NAME" "${assets[@]}" --clobber
-          gh release edit "$TAG_NAME" --notes-file dist/release-notes.md
-          if [ "$PRERELEASE" = "true" ]; then
-            gh release edit "$TAG_NAME" --prerelease=true
+          got_names="$(printf '%s' "$json" | jq -r '.assets[].name' | LC_ALL=C sort)"
+          if [ "$got_names" != "$want_names" ]; then
+            printf '%s\n' "$got_names" | sed 's/^/  asset: /'
+            echo "::error::the draft release does not have exactly the six expected assets"; exit 1
           fi
-          echo "::notice::draft release $TAG_NAME updated; check the six assets and both .sha256 files before publishing."
+          for n in "${names[@]}"; do
+            want_size="$(wc -c < "dist/$n" | tr -d '[:space:]')"
+            got_size="$(printf '%s' "$json" | jq -r --arg n "$n" '.assets[] | select(.name == $n) | .size')"
+            if [ "$want_size" != "$got_size" ]; then
+              echo "::error::asset $n is $got_size bytes on the draft, expected $want_size"; exit 1
+            fi
+          done
+          echo "::notice::draft release $TAG_NAME is ready (six assets read back); check the assets and both .sha256 files before publishing."

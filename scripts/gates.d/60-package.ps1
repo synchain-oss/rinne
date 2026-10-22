@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# 打包，由 scripts/gates.ps1 加载：G9-pkg（Full 档）。一条 gate 跑四件事：
+# 打包，由 scripts/gates.ps1 加载：G9-pkg（Full 档）。一条 gate 依次跑下面几件事：
 #   1. scripts/package.ps1 -Preflight：只跑不依赖构建产物的判据（版本与 tag 形态、许可双向闭合、
 #      NOTICES 点名的声明文件、INSTALL.txt 可渲染、打包清单齐备）。这一步不碰构建目录。
 #   2. scripts/package.ps1 -SelfTest：打包脚本自己的判据自测（坏样例与正例）。
+#      紧接着是发版判据的两个自测：scripts/check-release-tag.ps1 -SelfTest（tag 门禁，含临时 git 仓里的取数层）与
+#      node scripts/check-release-ready.mjs --self-test（发版就绪，含临时仓的端到端）。发版没有演练 tag，
+#      这两道门第一次真跑就是真发版，所以每次 Full 档都在这里把它们的判据过一遍。
 #   3. 假版本打包：在本进程用 New-RinneTempDir 建的临时目录里造一个假 BuildDir（两个 .vst3，各含
 #      Contents/x86_64-win/<名字>），跑 package.ps1 打一个 0.0.0-local 的假包，再把 zip 的根条目与
 #      packaging/manifest-win64.txt 逐条比对。
@@ -68,6 +71,47 @@ function ConvertTo-RinnePkgStatus([int]$Code) {
     if ($Code -eq 0) { 'PASS' } else { 'FAIL' }
 }
 
+# 跑一条外部命令（发版判据的自测用），返回退出码与输出行。命令的路径与参数都是本文件写死的，cwd 是仓根。
+function Invoke-RinneRelSelfTest([string]$Root, [string]$Exe, [string[]]$Arguments) {
+    $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = 0
+    Push-Location -LiteralPath $Root
+    try {
+        $lines = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" })
+        @{ Code = $LASTEXITCODE; Lines = $lines }
+    } finally { Pop-Location }
+}
+
+# 发版判据的自测清单（纯函数：只拼命令，不执行）。Test-RinneGates 盯着它别被删。
+function Get-RinneRelSelfTestSteps([string]$Root, [string]$Pwsh, [string]$Node) {
+    @(
+        @{ Label = 'check-release-tag.ps1 -SelfTest'; Exe = $Pwsh
+            Arguments = @('-NoProfile', '-NonInteractive', '-File', (Join-Path $Root 'scripts/check-release-tag.ps1'), '-SelfTest') }
+        @{ Label = 'check-release-ready.mjs --self-test'; Exe = $Node
+            Arguments = @((Join-Path $Root 'scripts/check-release-ready.mjs'), '--self-test') }
+    )
+}
+
+# 逐个跑发版判据的自测，任何一个没过就返回 FAIL 结论（其余不再跑）；全过返回 $null。
+# Runner 是 (Root, Exe, Arguments) -> @{ Code; Lines }：gate 里用真的，自测里换成假的。Lines 是调用方的 List，这里往里追加。
+function Invoke-RinneRelSelfTests([string]$Root, [object[]]$Steps, [scriptblock]$Runner, $Lines) {
+    foreach ($step in $Steps) {
+        $rs = & $Runner $Root $step.Exe $step.Arguments
+        $Lines.Add("--- $($step.Label)：退出码 $($rs.Code)")
+        $Lines.AddRange([string[]]$rs.Lines)
+        if ((ConvertTo-RinnePkgStatus $rs.Code) -ne 'PASS') {
+            return New-RinnePkgResult (ConvertTo-RinnePkgStatus $rs.Code) "$($step.Label) 没过（退出码 $($rs.Code)）" $Lines.ToArray()
+        }
+    }
+    return $null
+}
+
+# Node 用钉版：先找环境变量 RINNE_NODE，再找 git config rinne.node，最后退回 PATH（与 50-web.ps1 同一套口径）。
+function Get-RinnePkgNode($Ctx) {
+    $p = & $Ctx.Setting 'RINNE_NODE' 'rinne.node'
+    $p ? $p : 'node'
+}
+
 # 跑 package.ps1，返回退出码与输出行。
 function Invoke-RinnePkgScript([string]$Root, [string[]]$Arguments) {
     $ErrorActionPreference = 'Continue'
@@ -100,6 +144,11 @@ function Invoke-RinnePackageGate($Ctx) {
     if ((ConvertTo-RinnePkgStatus $st.Code) -ne 'PASS') {
         return New-RinnePkgResult (ConvertTo-RinnePkgStatus $st.Code) "package.ps1 -SelfTest 没过（退出码 $($st.Code)）" $lines.ToArray()
     }
+
+    # 2b. 发版判据的自测：tag 门禁与发版就绪。任何一个红都直接红，不往下打假包。
+    $relSteps = Get-RinneRelSelfTestSteps $root (Get-Process -Id $PID).Path (Get-RinnePkgNode $Ctx)
+    $relFail = Invoke-RinneRelSelfTests $root $relSteps ${function:Invoke-RinneRelSelfTest} $lines
+    if ($relFail) { return $relFail }
 
     # 3. 假版本打包 + 清单比对。0.0.0-local 只是本地假版本号：不涉及任何 tag，也不写进任何仓内文件。
     $tmp = New-RinneTempDir -Prefix 'rinne-gate-pkg-'
@@ -176,6 +225,28 @@ function Test-RinneGates([string]$Root) {
     $map = { param($c) ConvertTo-RinnePkgStatus $c }
     [pscustomobject]@{ Label = 'package.ps1 退出 0 记 PASS'; Bad = $false; Passed = (& $map 0) -eq 'PASS' }
     [pscustomobject]@{ Label = 'package.ps1 退出非 0 记 FAIL'; Bad = $true; Passed = (& $map 1) -eq 'FAIL' }
+
+    # 发版判据的自测清单：tag 门禁与发版就绪的自测必须在里面（它们没有演练 tag 可以兜底）。
+    $relSteps = @(Get-RinneRelSelfTestSteps 'R' 'pwsh' 'node')
+    [pscustomobject]@{ Label = '发版判据自测清单含 check-release-tag.ps1 -SelfTest'; Bad = $true
+        Passed = (@($relSteps | Where-Object { $_.Arguments -contains '-SelfTest' -and ($_.Arguments -join ' ') -match 'check-release-tag\.ps1' }).Count -eq 1) }
+    [pscustomobject]@{ Label = '发版判据自测清单含 check-release-ready.mjs --self-test'; Bad = $true
+        Passed = (@($relSteps | Where-Object { $_.Arguments -contains '--self-test' -and ($_.Arguments -join ' ') -match 'check-release-ready\.mjs' }).Count -eq 1) }
+
+    # 逐个跑自测的编排：全过返回 $null 且每个都跑了；有一个红就返回 FAIL 并且停在那里。
+    $relCalls = New-Object System.Collections.Generic.List[string]
+    $relLines = New-Object System.Collections.Generic.List[string]
+    $okRunner = { param($r, $e, $a) $relCalls.Add($e); @{ Code = 0; Lines = @('ok') } }
+    $relOk = Invoke-RinneRelSelfTests 'R' $relSteps $okRunner $relLines
+    [pscustomobject]@{ Label = '发版判据自测编排：全部通过时返回空，且清单里每个自测都跑了'; Bad = $false
+        Passed = ($null -eq $relOk) -and ($relCalls.Count -eq $relSteps.Count) -and ($relLines.Count -ge 2 * $relSteps.Count) }
+    $relCalls.Clear(); $relLines.Clear()
+    $failSecond = { param($r, $e, $a) $relCalls.Add($e); @{ Code = ($relCalls.Count -ge 2 ? 1 : 0); Lines = @() } }
+    $relBad = Invoke-RinneRelSelfTests 'R' $relSteps $failSecond $relLines
+    [pscustomobject]@{ Label = '发版判据自测编排：第二个自测红时整道 gate 记 FAIL，原因点名它'; Bad = $true
+        Passed = ($relBad -and $relBad.Status -eq 'FAIL' -and $relBad.Reason -like "*$($relSteps[1].Label)*") }
+    [pscustomobject]@{ Label = '发版判据自测编排：红了就停，后面的自测不再跑'; Bad = $true
+        Passed = ($relCalls.Count -eq 2) }
 
     # 清单比对的纯函数：一致时没有差异，多一项与少一项都要被报出来。
     $ok = @('Rinne Input.vst3/', 'Rinne Output.vst3/', 'INSTALL.txt', 'LICENSE', 'LICENSES/', 'SHA256SUMS', 'THIRD-PARTY-NOTICES.md', 'third_party/notices/')
