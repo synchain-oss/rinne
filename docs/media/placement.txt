@@ -2,7 +2,7 @@ One mixer channel - inserts (Cubase shown)
 +----------------------------------------------+
 | 1   Rinne Input   <--- fed back after D --+  |   return end: mixes the loop back in
 | 2   any plugin                            |  |   inside the loop
-| 3   a Cubase built-in insert              |  |   inside the loop
+| 3   another plugin                        |  |   inside the loop
 | ..  ...                                   |  |
 | n   Rinne Output  ------------------------+  |   send end: last pre-fader slot
 |----------- pre/post-fader divider -----------|

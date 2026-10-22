@@ -134,7 +134,7 @@
     },
     {
       "host": "Nuendo",
-      "versions": "14",
+      "versions": "any",
       "os": "windows",
       "formats": ["VST3"],
       "tier": null,
@@ -202,6 +202,29 @@
       }
     },
     {
+      "host": "REAPER",
+      "versions": "7",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
       "host": "Ableton Live",
       "versions": "12",
       "os": "windows",
@@ -225,8 +248,31 @@
       }
     },
     {
+      "host": "Ableton Live",
+      "versions": "12",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
       "host": "Studio One",
-      "versions": "7",
+      "versions": "any",
       "os": "windows",
       "formats": ["VST3"],
       "tier": null,
@@ -248,8 +294,31 @@
       }
     },
     {
+      "host": "Studio One",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
       "host": "Bitwig",
-      "versions": "5",
+      "versions": "any",
       "os": "windows",
       "formats": ["VST3"],
       "tier": null,
@@ -271,8 +340,31 @@
       }
     },
     {
+      "host": "Bitwig",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet. Its plug-in hosting mode may load the two plug-ins into different processes.",
+        "zh": "尚未在真机上测试。它的插件托管模式可能把两个插件分进不同进程。"
+      }
+    },
+    {
       "host": "FL Studio",
-      "versions": "2024",
+      "versions": "any",
       "os": "windows",
       "formats": ["VST3"],
       "tier": null,
@@ -294,8 +386,31 @@
       }
     },
     {
+      "host": "FL Studio",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
       "host": "Logic Pro",
-      "versions": "11",
+      "versions": "any",
       "os": "macos",
       "formats": ["AU"],
       "tier": null,
@@ -342,7 +457,7 @@
     {
       "host": "Pro Tools",
       "versions": "any",
-      "os": "windows",
+      "os": "any",
       "formats": ["AAX"],
       "tier": null,
       "targetTier": "out-of-scope",
@@ -412,7 +527,7 @@
       "host": "Linux hosts",
       "versions": "any",
       "os": "linux",
-      "formats": ["VST3", "AU"],
+      "formats": ["VST3"],
       "tier": null,
       "targetTier": "out-of-scope",
       "status": "out-of-scope",

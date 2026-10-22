@@ -7,9 +7,10 @@
 //   - 框体行（以 + 或 | 开头）的左竖线在第 0 列；
 //   - 所有框体行的框右边界在同一列 C；
 //   - 顶行与底行长度 = C + 1；
+//   - 画里只有可打印 ASCII：宽字符混进来会让按字符数判的对齐在视觉上错位却仍通过；
 //   - 框体之外的自由行（标题行、脚注行）与右边界之外的标注列不参与等宽判定。
-// 计划的原图右侧有一列自由文本标注，整行长度 66…85 不等，所以「每行等宽」按整行算不成立；本模块按上面的口径判，
-// 也不写死 C：计划文字说 49 列，原图实测 48 列，写死会误判。
+// 原图右侧有一列自由文本标注，整行长度 66…85 不等，所以「每行等宽」按整行算不成立；本模块按上面的口径判，
+// 也不写死 C：说明文字里写过 49 列，原图实测 48 列，写死会误判。
 //
 // C 从上下边框行（整行只有 + 与 -）取：这种行的右端 + 位置唯一，不会和右侧标注里的字符混淆。
 // 没有边框行时退到「所有框体行都有的最右框字符列」。
@@ -27,6 +28,7 @@ export const RULES = {
     "frame-left": "框体行的左竖线在第 0 列",
     "frame-right": "所有框体行的框右边界在同一列",
     "frame-edge": "顶行与底行的长度等于框右边界列号加一",
+    "ascii-only": "画里只有可打印 ASCII",
 };
 
 /** 框体行：去掉行首空白后以 + 或 | 开头。 */
@@ -75,12 +77,19 @@ function ownBoundary(f, right) {
 
 /**
  * 等宽判据。返回问题字符串数组（空数组 = 齐）。每条问题以 [判据名] 开头。
- * 口径：框体行左竖线在第 0 列；所有框体行的框右边界在同一列 C；顶行与底行长度 = C + 1。
+ * 口径：框体行左竖线在第 0 列；所有框体行的框右边界在同一列 C；顶行与底行长度 = C + 1；全是可打印 ASCII。
  */
 export function placementProblems(text) {
     const out = [];
+    text.split("\n").forEach((line, i) => {
+        const bad = [...line].find((ch) => ch < " " || ch > "~");
+        if (bad !== undefined)
+            out.push(
+                `[ascii-only] 放置图第 ${i + 1} 行有不是可打印 ASCII 的字符（U+${bad.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}）`,
+            );
+    });
     const frames = frameBounds(text);
-    if (!frames.length) return ["[frame-present] 放置图里没有框体行（以 + 或 | 开头的行）"];
+    if (!frames.length) return [...out, "[frame-present] 放置图里没有框体行（以 + 或 | 开头的行）"];
     for (const f of frames)
         if (f.left !== 0) out.push(`[frame-left] 放置图第 ${f.line} 行的框左边界在第 ${f.left} 列，应在第 0 列`);
     const right = rightColumn(frames);
@@ -123,26 +132,32 @@ const GOOD = [
 ].join("\n");
 
 /**
- * 自测：每个判据都有坏样例点名，另有一个覆盖用例核对每条判据都被点名过——删掉任一判据，点名它的坏样例就变红。
+ * 自测用例：每个用例 { label, bad, passed, expect }。期望为空表示正例（一条问题都不许有），
+ * 否则是坏样例（期望的判据都要被点名）。末尾的覆盖用例核对每条判据都被某个通过的坏样例点名：
+ * 删掉任一判据，点名它的坏样例就变红。
  */
-export function selfTest() {
-    const seen = new Set();
+export function selfTestCases() {
     const cases = [];
-    const add = (label, text, expectRules) => {
+    const add = (label, text, expect) => {
         const rules = placementProblems(text).map(ruleOf).filter(Boolean);
-        for (const r of rules) seen.add(r);
-        cases.push({
-            label,
-            bad: rules.length > 0,
-            passed: expectRules.every((r) => rules.includes(r)),
-        });
+        const bad = expect.length > 0;
+        cases.push({ label, bad, passed: bad ? expect.every((r) => rules.includes(r)) : rules.length === 0, expect });
     };
     add("齐的画没有问题", GOOD, []);
+    add("标注列长短不一的自由行不算不齐", GOOD.replace("outside the loop\n+", "outside the loop, still fine\n+"), []);
     add(
         "右边框少一列",
         GOOD.replace(
             "| 2   any plugin                            |  |",
             "| 2   any plugin                            | |",
+        ),
+        ["frame-right"],
+    );
+    add(
+        "右边框多一列",
+        GOOD.replace(
+            "| ..  ...                                   |  |",
+            "| ..  ...                                   |   |",
         ),
         ["frame-right"],
     );
@@ -156,14 +171,26 @@ export function selfTest() {
         ["frame-edge"],
     );
     add("没有框体行", "One mixer channel - inserts (Cubase shown)\n", ["frame-present"]);
-    add("标注列长短不一的自由行不算不齐", GOOD, []);
+    add("画里混进了宽字符", GOOD.replace("any plugin", "any plugin →"), ["ascii-only"]);
+    add("画里混进了制表符", GOOD.replace("| ..  ...", "|\t..  ..."), ["ascii-only"]);
+    const fenced = renderPlacement(GOOD);
     cases.push({
-        label: "每条判据都至少被一个坏样例点名",
+        label: "渲染出的块是不带 info string 的围栏，围栏里逐字是真源",
         bad: false,
-        passed: Object.keys(RULES).every((r) => seen.has(r)),
+        passed: fenced.startsWith("```\n") && fenced.endsWith("\n```") && fenced.includes(GOOD),
+        expect: [],
     });
-    return caseResult(cases);
+    const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.passed && c.expect.includes(r)));
+    cases.push({
+        label: `每条判据都有坏样例点名${unnamed.length ? `（没有：${unnamed.join("、")}）` : ""}`,
+        bad: false,
+        passed: unnamed.length === 0,
+        expect: [],
+    });
+    return cases;
 }
+
+export const selfTest = () => caseResult(selfTestCases());
 
 export default {
     name: "placement",

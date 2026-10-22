@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 参数表：真源是 tests/golden/params-input.json（参数的范围、默认值、单位、是否可自动化）与
-// web/i18n/input.js（界面上的显示名）。两张真源今天都还不在仓里（分别由参数与界面两条线拥有），所以本模块走跳过路径。
+// web/i18n/input.js（界面上的显示名）。两张真源今天都还不在仓里，所以本模块走跳过路径。
+// 字段名（range / min / max / unit / automatable / i18nKey）是按这张表需要的信息写的；真正的 golden 落地时，
+// 以它的实际形状为准重新对一遍。
 //
-// 缺字段时的口径（卡验收的硬要求）：
+// 缺字段时的口径：
 //   - golden 文件不存在 → 跳过：validate 返回空数组，render 不被调用；
-//   - golden 存在但缺字段（缺参数集合 / 某参数缺 id / 缺 default / 缺 range） → 明确报错，指名字段与参数，
+//   - golden 存在但缺字段（缺参数集合 / 某参数缺 id / default / range / unit / automatable）→ 明确报错，指名字段与参数，
 //     例如「tests/golden/params-input.json 的 feedback 缺 default」；绝不生成占位值，也不拿参数 ID 顶替显示名；
-//   - 显示名缺某个参数 → 同样报错：「web/i18n/input.js 缺参数 feedback 的显示名」。
+//     unit 可以是空串（无单位）但必须写出来，automatable 必须是布尔值；
+//   - 显示名缺某个参数 → 同样报错：「web/i18n/input.js 缺参数 feedback 的显示名」；
+//   - 显示名词条文件不存在：只有在某个落地面已经接入（文件里放了标记）时才报，因为那时 render 会被调用、会抛错，
+//     validate 与 render 对「词条文件缺失」的反应要一致；没有落地面接入时不拦 golden 先落地。
 //
 // golden 的参数集合有两种形状，都认：
 //   数组形  {"params": [{ "id": "feedback", "default": 0, ... }, ...]}（键名 parameters 同义）
@@ -20,7 +25,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { readRepoText } from "../lib/docs-kit.mjs";
+import { findRegion, readRepoText } from "../lib/docs-kit.mjs";
 import { caseResult } from "../lib/check-kit.mjs";
 
 export const GOLDEN_FILE = "tests/golden/params-input.json";
@@ -31,6 +36,8 @@ const HEADERS = {
     en: ["ID", "Display name", "Range", "Default", "Unit", "Automatable"],
     zh: ["ID", "显示名", "范围", "默认值", "单位", "可自动化"],
 };
+/** 「可自动化」列的是 / 否，随语言走。 */
+const YES_NO = { en: ["Yes", "No"], zh: ["是", "否"] };
 /** id → 语言。契约文档正文用中文（CLAUDE.md 的「文档、上游与第三方」一节）。 */
 const ID_LANG = { en: "en", zh: "zh", params: "zh" };
 
@@ -39,8 +46,10 @@ export const RULES = {
     "golden-shape": "golden 里有非空的参数集合，每项都有 id",
     "golden-unique": "参数 id 不重名",
     "golden-default": "每个参数都有 default",
-    "golden-range": "每个参数都有范围",
-    "i18n-missing": "显示名词条文件在，但缺某个参数的显示名",
+    "golden-range": "每个参数都有非空的范围",
+    "golden-unit": "每个参数都写出 unit（字符串，可为空串）",
+    "golden-automatable": "每个参数的 automatable 是布尔值",
+    "i18n-missing": "显示名词条文件在，但缺某个参数的显示名；或有落地面接入而词条文件不在",
     "render-refuses": "真源不成形时 render 抛错，不生成占位表格",
 };
 
@@ -87,22 +96,22 @@ export function paramsOf(golden) {
     return entries.map(([id, v]) => ({ id, ...v }));
 }
 
-/** 表格单元里的竖线要转义，否则表格列数会算错。 */
-const cell = (v) => String(v ?? "").replace(/\|/g, "\\|");
+/** 表格单元：竖线转义（否则列数会算错），换行换成 <br>（否则表格会被撕开）。 */
+const cell = (v) =>
+    String(v ?? "")
+        .replace(/\|/g, "\\|")
+        .replace(/\r?\n/g, "<br>");
 
 /** 默认值的写法：字符串加引号（空串与缺值要分得开），其余按字面量。 */
 export const defaultText = (v) => (typeof v === "string" ? JSON.stringify(v) : String(v));
 
-/** 范围的写法：range 可以是字符串、数组或对象；否则用 min 与 max 拼。 */
+/** 范围的写法：range 可以是字符串、数组或对象；否则用 min 与 max 拼。空串、空数组都算没写，返回 null。 */
 export function rangeText(param) {
-    if (param.range !== undefined && param.range !== null) {
-        if (typeof param.range === "string") return param.range;
-        if (Array.isArray(param.range)) return param.range.join("…");
-        if (typeof param.range === "object") {
-            const { min, max } = param.range;
-            if (min !== undefined && max !== undefined) return `${min}…${max}`;
-        }
-    }
+    const r = param.range;
+    if (typeof r === "string" && r.trim()) return r;
+    if (Array.isArray(r) && r.length) return r.join("…");
+    if (r && typeof r === "object" && !Array.isArray(r) && r.min !== undefined && r.max !== undefined)
+        return `${r.min}…${r.max}`;
     if (param.min !== undefined && param.max !== undefined) return `${param.min}…${param.max}`;
     return null;
 }
@@ -137,6 +146,8 @@ export function paramsProblems(golden, dict) {
         else ids.add(id);
         if (p.default === undefined || p.default === null) out.push(`[golden-default] ${where} 缺 default`);
         if (rangeText(p) === null) out.push(`[golden-range] ${where} 缺 range`);
+        if (typeof p.unit !== "string") out.push(`[golden-unit] ${where} 缺 unit（无单位写空串）`);
+        if (typeof p.automatable !== "boolean") out.push(`[golden-automatable] ${where} 的 automatable 不是布尔值`);
         if (dict && id) {
             const key = nameKeyOf(p, dict);
             if (!key) out.push(`[i18n-missing] ${I18N_FILE} 缺参数 ${id} 的显示名`);
@@ -152,19 +163,21 @@ export function paramsProblems(golden, dict) {
     return out;
 }
 
-/** 渲染出的表格。params 是 golden 的参数数组；dict 是词条表；lang 是 "en" 或 "zh"。 */
+/** 渲染出的表格。params 是 golden 的参数数组（已通过 paramsProblems）；dict 是词条表；lang 是 "en" 或 "zh"。 */
 export function renderParamTable(params, dict, lang) {
-    const head = HEADERS[lang] ?? HEADERS.en;
+    const head = HEADERS[lang];
+    if (!head) throw new Error(`未知的语言 ${lang}`);
     const rows = params.map((p) => {
         const key = nameKeyOf(p, dict);
-        const name = key ? (dict?.[lang]?.[key] ?? "") : "";
+        const name = key ? dict?.[lang]?.[key] : undefined;
+        if (typeof name !== "string") throw new Error(`缺参数 ${p.id} 的 ${lang} 显示名`);
         return [
             cell(p.id),
             cell(name),
-            cell(rangeText(p) ?? ""),
+            cell(rangeText(p)),
             cell(defaultText(p.default)),
-            cell(p.unit ?? ""),
-            cell(p.automatable === undefined ? "" : p.automatable ? "是" : "否"),
+            cell(p.unit),
+            cell(YES_NO[lang][p.automatable ? 0 : 1]),
         ];
     });
     const sep = head.map(() => "---");
@@ -173,6 +186,7 @@ export function renderParamTable(params, dict, lang) {
 
 /** 参数表；真源不成形时抛错。golden 是 params-input.json 的内容，dict 是词条表，lang 是 "en" 或 "zh"。 */
 export function paramTableOf(golden, dict, lang) {
+    if (!dict) throw new Error(`缺 ${I18N_FILE}`);
     const problems = paramsProblems(golden, dict);
     if (problems.length) throw new Error(problems.join("；"));
     return renderParamTable(paramsOf(golden), dict, lang);
@@ -181,96 +195,138 @@ export function paramTableOf(golden, dict, lang) {
 /** 问题串里的判据名。 */
 export const ruleOf = (problem) => /^\[([^\]]+)\]/.exec(problem)?.[1] ?? "";
 
-/** 自测：每个判据都有坏样例点名，另有一个覆盖用例核对每条判据都被点名过。 */
-export function selfTest() {
-    const param = (over = {}) => ({ id: "feedback", range: "0…1", default: 0, ...over });
+/**
+ * 自测用例：每个用例 { label, bad, passed, expect }。期望为空表示正例（一条问题都不许有），
+ * 否则是坏样例（期望的判据都要被点名）。末尾的覆盖用例核对每条判据都被某个通过的坏样例点名。
+ */
+export function selfTestCases() {
+    const param = (over = {}) => ({
+        id: "feedback",
+        range: "0…1",
+        default: 0,
+        unit: "%",
+        automatable: true,
+        ...over,
+    });
     const dict = { zh: { feedback: "反馈" }, en: { feedback: "Feedback" }, fr: { feedback: "Retour" } };
     const cases = [];
-    const add = (label, golden, d, expectRules) => {
+    const add = (label, golden, d, expect) => {
         const rules = paramsProblems(golden, d).map(ruleOf).filter(Boolean);
-        cases.push({ label, bad: rules.length > 0, passed: expectRules.every((r) => rules.includes(r)) });
+        const bad = expect.length > 0;
+        cases.push({ label, bad, passed: bad ? expect.every((r) => rules.includes(r)) : rules.length === 0, expect });
     };
-    add("齐的参数表没问题（数组形）", { params: [param()] }, dict, []);
-    add("齐的参数表没问题（映射形）", { feedback: { range: "0…1", default: 0 } }, dict, []);
-    add("缺参数集合", {}, dict, ["golden-shape"]);
-    add("参数集合是空的", { params: [] }, dict, ["golden-shape"]);
-    add("某项缺 id", { params: [{ range: "0…1", default: 0 }] }, dict, ["golden-shape"]);
-    add("id 重名", { params: [param(), param()] }, dict, ["golden-unique"]);
-    add("feedback 缺 default", { params: [param({ default: undefined })] }, dict, ["golden-default"]);
-    add("feedback 缺 range", { params: [param({ range: undefined })] }, dict, ["golden-range"]);
-    add("词条表里没有 feedback 的显示名", { params: [param()] }, { zh: {}, en: {}, fr: {} }, ["i18n-missing"]);
-    // 判据 render-refuses：真源不成形时 render 抛错，不出占位表格
-    const threw = (g, d) => {
+    const threw = (g, d, lang = "en") => {
         try {
-            paramTableOf(g, d, "en");
+            paramTableOf(g, d, lang);
             return false;
         } catch {
             return true;
         }
     };
+    add("齐的参数表没问题（数组形）", { params: [param()] }, dict, []);
+    add(
+        "齐的参数表没问题（映射形）",
+        { feedback: { range: "0…1", default: 0, unit: "", automatable: false } },
+        dict,
+        [],
+    );
+    add("缺参数集合", {}, dict, ["golden-shape"]);
+    add("参数集合是空的", { params: [] }, dict, ["golden-shape"]);
+    add("某项缺 id", { params: [{ range: "0…1", default: 0, unit: "", automatable: true }] }, dict, ["golden-shape"]);
+    add("参数集合里有不是对象的项", { params: [param(), null] }, dict, ["golden-shape"]);
+    add("id 重名", { params: [param(), param()] }, dict, ["golden-unique"]);
+    add("feedback 缺 default", { params: [param({ default: undefined })] }, dict, ["golden-default"]);
+    add("feedback 缺 range", { params: [param({ range: undefined })] }, dict, ["golden-range"]);
+    add("range 是空串", { params: [param({ range: "" })] }, dict, ["golden-range"]);
+    add("feedback 缺 unit", { params: [param({ unit: undefined })] }, dict, ["golden-unit"]);
+    add("unit 不是字符串", { params: [param({ unit: 5 })] }, dict, ["golden-unit"]);
+    add("feedback 缺 automatable", { params: [param({ automatable: undefined })] }, dict, ["golden-automatable"]);
+    add("automatable 写成字符串", { params: [param({ automatable: "yes" })] }, dict, ["golden-automatable"]);
+    add("词条表里没有 feedback 的显示名", { params: [param()] }, { zh: {}, en: {}, fr: {} }, ["i18n-missing"]);
+    // 判据 render-refuses：真源不成形时 render 抛错，不出占位表格
     cases.push({
         label: "真源缺字段时 render 抛错",
         bad: true,
         passed: threw({ params: [param({ default: undefined })] }, dict),
+        expect: ["render-refuses"],
+    });
+    cases.push({
+        label: "没有词条表时 render 抛错",
+        bad: true,
+        passed: threw({ params: [param()] }, null),
+        expect: [],
     });
     cases.push({
         label: "真源齐备时 render 不抛错",
         bad: false,
         passed: !threw({ params: [param()] }, dict),
+        expect: [],
     });
-    // 正例：显示名取自词条表；映射形与数组形取到同一个 default
-    const table = renderParamTable(paramsOf({ params: [param()] }), dict, "en");
-    const mapped = renderParamTable(paramsOf({ feedback: { range: "0…1", default: 0 } }), dict, "en");
+    // 正例：显示名取自词条表；映射形与数组形取到同一个 default；是 / 否随语言走
+    const table = paramTableOf({ params: [param()] }, dict, "en");
+    const mapped = paramTableOf({ feedback: { range: "0…1", default: 0, unit: "%", automatable: true } }, dict, "en");
+    const zh = paramTableOf({ params: [param({ automatable: false })] }, dict, "zh");
     cases.push({
         label: "表格用词条表里的显示名",
         bad: false,
         passed: table.includes("Feedback") && !table.includes("undefined"),
+        expect: [],
     });
+    cases.push({ label: "两种 golden 形状渲染出的表格逐字相同", bad: false, passed: table === mapped, expect: [] });
     cases.push({
-        label: "两种 golden 形状渲染出的表格逐字相同",
+        label: "是 / 否随语言走：英文表写 Yes，中文表写 否",
         bad: false,
-        passed: table === mapped,
+        passed: table.includes("| Yes |") && !table.includes("是") && zh.includes("| 否 |") && !zh.includes("No"),
+        expect: [],
     });
-    const missing = paramsProblems({ params: [param({ default: undefined })] }, dict);
     cases.push({
         label: "缺 default 的报错点名参数",
         bad: false,
-        passed: missing.some((m) => m.includes("feedback") && m.includes("default")),
+        passed: paramsProblems({ params: [param({ default: undefined })] }, dict).some(
+            (m) => m.includes("feedback") && m.includes("default"),
+        ),
+        expect: [],
     });
-    const seen = new Set();
-    for (const [g, d] of [
-        [{ params: [param()] }, dict],
-        [{ feedback: { range: "0…1", default: 0 } }, dict],
-        [{}, dict],
-        [{ params: [] }, dict],
-        [{ params: [{ range: "0…1", default: 0 }] }, dict],
-        [{ params: [param(), param()] }, dict],
-        [{ params: [param({ default: undefined })] }, dict],
-        [{ params: [param({ range: undefined })] }, dict],
-        [{ params: [param()] }, { zh: {}, en: {}, fr: {} }],
-    ])
-        for (const p of paramsProblems(g, d)) seen.add(ruleOf(p));
-    seen.add("render-refuses");
+    const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.passed && c.expect.includes(r)));
     cases.push({
-        label: "每条判据都至少被一个坏样例点名",
+        label: `每条判据都有坏样例点名${unnamed.length ? `（没有：${unnamed.join("、")}）` : ""}`,
         bad: false,
-        passed: Object.keys(RULES).every((r) => seen.has(r)),
+        passed: unnamed.length === 0,
+        expect: [],
     });
-    return caseResult(cases);
+    return cases;
 }
+
+export const selfTest = () => caseResult(selfTestCases());
+
+/** 本模块的某个落地面是否已经接入（文件在、放了标记）。 */
+function anySurfaceAdopted(root, surfaces) {
+    return surfaces.some((s) => {
+        const text = readRepoText(root, s.file);
+        try {
+            return text !== null && findRegion(text, `gen:params-table:${s.id}`) !== null;
+        } catch {
+            return true; // 标记坏了也算接入，让引擎去报
+        }
+    });
+}
+
+const SURFACES = [
+    { file: "docs/contracts/PARAMETERS.md", id: "params", required: false },
+    { file: "docs/USER_GUIDE.md", id: "en", required: false },
+    { file: "docs/USER_GUIDE.zh-CN.md", id: "zh", required: false },
+];
 
 export default {
     name: "params-table",
     sources: [GOLDEN_FILE, I18N_FILE],
-    surfaces: [
-        { file: "docs/contracts/PARAMETERS.md", id: "params", required: false },
-        { file: "docs/USER_GUIDE.md", id: "en", required: false },
-        { file: "docs/USER_GUIDE.zh-CN.md", id: "zh", required: false },
-    ],
+    surfaces: SURFACES,
     validate(ctx) {
         const golden = loadGolden(ctx.root);
         if (golden === null) return []; // 真源缺失：跳过，不报问题
         const dict = loadI18n(ctx.root);
+        if (dict === null && anySurfaceAdopted(ctx.root, SURFACES))
+            return [`[i18n-missing] 参数表的落地面已接入，但缺 ${I18N_FILE}`, ...paramsProblems(golden, null)];
         return paramsProblems(golden, dict); // dict 为 null 时只查 golden 自己的字段
     },
     render(ctx, id) {
@@ -278,7 +334,9 @@ export default {
         if (golden === null) throw new Error(`缺 ${GOLDEN_FILE}`);
         const dict = loadI18n(ctx.root);
         if (dict === null) throw new Error(`缺 ${I18N_FILE}`);
-        return paramTableOf(golden, dict, ID_LANG[id] ?? "en");
+        const lang = ID_LANG[id];
+        if (!lang) throw new Error(`未知的落地面 id ${id}`);
+        return paramTableOf(golden, dict, lang);
     },
     selfTest,
 };

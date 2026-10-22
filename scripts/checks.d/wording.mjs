@@ -11,7 +11,7 @@
 //   safety-promise    「永不啸叫」「100% safe」「protects your hearing」一类
 //   first-only        「唯一」「首个」「the first open-source feedback plugin」一类
 //   signed-claims     「已签名」「已公证」「is signed」一类
-//   unverified-support「官方认证」「works with Logic」一类
+//   unverified-support「官方认证」「官方合作」「works with Logic」一类
 //   naming            产品名：Rinne Send / Rinne Return / 回环输入 / 回环输出 / Loopback
 //   doctrine          「业力」「转世」「涅槃」「karma」一类
 //   competitor        「better than」「比……更好」
@@ -19,15 +19,31 @@
 //   fader-after       「推子后」，以及英文里 Rinne Output 与 after the fader / post-fader 同句
 //   whole-channel     「整条通道」「the whole channel」
 //   auto-pairing      「自动配对」「auto-pairing」「automatically pair」
+// 另有两条不属于禁用词家族的判据：
+//   scope-closed      仓内跟踪的文本文件必须登记在扫描范围或排除清单里，新增的用户面文档不会悄悄漏扫
+//   scope-parse       扫描范围里的 JSON / JS 词条文件读不出来，就没法按字符串值扫描，直接判红
 //
-// 三条放行规则，任一命中即放过：短语在引号里；同一句里有否定或免责标记；文件在排除清单里。
+// 扫描单位是「文本里真正会显示给用户的字符串」，按文件类型取：
+//   Markdown / 文本  整个文件
+//   JSON             每个字符串值（键不算，键是标识符）
+//   JS 词条文件      每个字符串字面量的内部文本（注释不算）
+// 取出来再按散文扫描，所以引号放行只看字符串内部的引号：JSON 与双引号 JS 词条的整行值都被引号包着，
+// 如果在原文上判引号，这些文件里的每一处命中都会被放过。
 //
-// 判据名见 RULES。自测的每个坏样例写明它必须触发哪一条，并核对每一条都至少被一个坏样例点名：删掉任何一条判据，
-// 点名它的坏样例就变红。
+// 两条放行规则，任一命中即放过：
+//   1. 命中片段在引号里（「」 “” ‘’ ""）——引用禁用词本身的句子；
+//   2. 命中片段所在的分句里、紧挨它之前出现登记过的否定或免责短语（不能保证、no software can、do not……），
+//      或它的紧后面直接跟着「is not」「是不可能的」这类否定。分句以逗号、冒号、分号、顿号、破折号、括号为界。
+//      故意不认同一句里远处的单字「不」「无」「no」：「永不啸叫，不用担心」「works with Logic, no extra setup」
+//      这类肯定式强断言，随手一个「不用」「no」不能把它放过。
+// 排除清单里的文件不扫（它们合法地引用禁用词本身）。
+//
+// 判据名见 RULES。自测的每个坏样例写明它必须触发哪一条，并核对每一条、每个子模式都至少被一个坏样例命中：
+// 删掉任何一条判据或任何一个子模式，点名它的坏样例就变红。
 
 import fs from "node:fs";
 import path from "node:path";
-import { ROOT, caseResult, readText } from "../lib/check-kit.mjs";
+import { caseResult, readText, trackedFiles } from "../lib/check-kit.mjs";
 
 /** 判据名 → 说明。 */
 export const RULES = {
@@ -38,7 +54,7 @@ export const RULES = {
     "safety-promise": "不写永不啸叫、绝对安全、100% safe 这类承诺",
     "first-only": "不写唯一、首个、the first open-source feedback plugin 这类说法",
     "signed-claims": "不写已签名、已公证、is notarized 这类说法",
-    "unverified-support": "不写官方认证、works with Logic 这类未验证的支持声明",
+    "unverified-support": "不写官方认证、官方合作、works with Logic 这类未验证的支持声明",
     naming: "不用 Rinne Send、Rinne Return、回环输入、回环输出、Loopback 当产品名",
     doctrine: "不写业力、转世、涅槃、karma 这类说法",
     competitor: "不写比别家更好、replaces Connector 这类比较",
@@ -46,31 +62,63 @@ export const RULES = {
     "fader-after": "不把 Rinne Output 说成在推子后",
     "whole-channel": "不写整条通道、the whole channel",
     "auto-pairing": "不写自动配对、auto-pairing、automatically pair",
+    "scope-closed": "仓内跟踪的文本文件必须在扫描范围或排除清单里，扫描范围里至少有一个文件存在",
+    "scope-parse": "扫描范围里的 JSON / JS 词条文件必须读得出来",
 };
 
-/** 扫描范围：用户面文本。 */
+/** 扫描范围：用户面文本。web/i18n/ 下的词条文件在运行时扫全部 .js（见 scopedFiles）。 */
 export const SCOPE = [
     "README.md",
     "README.zh-CN.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
     "docs/USER_GUIDE.md",
     "docs/USER_GUIDE.zh-CN.md",
     "docs/INSTALL.md",
     "docs/KNOWN_ISSUES.md",
+    "docs/RELEASE.md",
     "docs/DAW_COMPATIBILITY.md",
     "docs/hard-rules.i18n.json",
+    "docs/daw-tiers.json",
     "docs/media/placement.txt",
 ];
 
-/** 排除清单：这些文件里有合法的命中，不扫。 */
+/**
+ * 排除清单：这些文件里有合法的命中，或者根本不是写给用户看的文字。目录以 / 结尾，按前缀匹配。
+ * 范围闭合判据（scope-closed）要求每个跟踪的文本文件不在 SCOPE 就在这里。
+ */
 export const EXCLUDED = [
+    // 内部架构说明与桥契约，合法地引用禁用词本身（「整条通道」「界面文字里不出现「自动配对」」）
     "docs/ARCHITECTURE.md",
     "docs/UI_BRIDGE.md",
     "docs/contracts/",
+    "docs/contract-changes/",
     "docs/adr/",
     "docs/validation/",
+    "docs/stable-links.txt",
+    // 给开发者与维护者看的构建与职责说明，不是面向用户的文字
+    "docs/BUILDING.md",
+    "docs/MAINTAINERS.md",
+    // 声明登记表：strong 短语栏里列的就是被管控的强断言本身
+    "docs/claims.json",
+    // 维护者规则：禁言清单本身就列着这些词
     "CLAUDE.md",
     "CONTRIBUTING.md",
+    ".github/",
+    // 脚本、测试、构建与第三方：不是用户面文字
     "scripts/",
+    "src/",
+    "tests/",
+    "tools/",
+    "upstream/",
+    "third_party/",
+    "LICENSES/",
+    "web/fonts/",
+    "web/js/",
+    "web-preview/",
+    "THIRD-PARTY-NOTICES.md",
+    "requirements-tools.txt",
+    "CMakeLists.txt",
 ];
 
 /** 文件在排除清单里（目录按前缀匹配）。 */
@@ -78,35 +126,100 @@ export function isExcluded(file) {
     return EXCLUDED.some((e) => (e.endsWith("/") ? file.startsWith(e) : file === e));
 }
 
-/** 否定与免责标记：同句里有它们的强断言不算命中。 */
-const NEGATION = [
-    /\bnot\b/i,
-    /\bno\b/i,
-    /\bnever\b/i,
-    /\bcannot\b/i,
-    /\bcan't\b/i,
-    /\bwithout\b/i,
-    /\bdo not\b/i,
-    /\bdon't\b/i,
-    /\bunsupported\b/i,
-    /\bunsigned\b/i,
-    /\bin the backlog\b/i,
-    /\bpending\b/i,
-    /不/,
-    /不得/,
-    /不要/,
-    /禁止/,
-    /勿/,
-    /不会/,
-    /没有/,
-    /无/,
-    /无法/,
-    /尚未/,
-    /未/,
-];
+/** 词条文件：web/i18n/ 下的 .js。 */
+const isI18nFile = (file) => /^web\/i18n\/[^/]+\.js$/.test(file);
+
+// ---------------------------------------------------------------------------------------------
+// 文本单位
+// ---------------------------------------------------------------------------------------------
+
+/** JS 字符串字面量里一个转义序列；返回 [解出的字符, 消耗的字符数]（含反斜杠）。 */
+function unescapeAt(text, i) {
+    const c = text[i + 1];
+    if (c === undefined) return ["", 1];
+    if (c === "n") return ["\n", 2];
+    if (c === "t") return ["\t", 2];
+    if (c === "r") return ["\r", 2];
+    if (c === "\n") return ["", 2]; // 行续接
+    if (c === "u") {
+        const brace = /^\{([0-9a-fA-F]+)\}/.exec(text.slice(i + 2, i + 12));
+        if (brace) return [String.fromCodePoint(parseInt(brace[1], 16)), 2 + brace[0].length];
+        const hex = /^[0-9a-fA-F]{4}/.exec(text.slice(i + 2, i + 6));
+        if (hex) return [String.fromCharCode(parseInt(hex[0], 16)), 6];
+    }
+    if (c === "x") {
+        const hex = /^[0-9a-fA-F]{2}/.exec(text.slice(i + 2, i + 4));
+        if (hex) return [String.fromCharCode(parseInt(hex[0], 16)), 4];
+    }
+    return [c, 2];
+}
+
+/**
+ * JS 源码里的字符串字面量内部文本（单引号、双引号、反引号），按出现顺序。注释（// 与 块注释）不算。
+ * 词条文件是纯数据，不会有正则字面量，所以不处理它们。
+ */
+export function jsStrings(text) {
+    const out = [];
+    const n = text.length;
+    let i = 0;
+    while (i < n) {
+        const c = text[i];
+        const d = text[i + 1];
+        if (c === "/" && d === "/") {
+            while (i < n && text[i] !== "\n") i++;
+            continue;
+        }
+        if (c === "/" && d === "*") {
+            const end = text.indexOf("*/", i + 2);
+            i = end < 0 ? n : end + 2;
+            continue;
+        }
+        if (c === '"' || c === "'" || c === "`") {
+            let buf = "";
+            let j = i + 1;
+            while (j < n && text[j] !== c) {
+                if (text[j] === "\\") {
+                    const [ch, used] = unescapeAt(text, j);
+                    buf += ch;
+                    j += used;
+                    continue;
+                }
+                if (text[j] === "\n" && c !== "`") break; // 没收口的字面量到行尾为止
+                buf += text[j++];
+            }
+            out.push(buf);
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    return out;
+}
+
+/** JSON 里的全部字符串值（不含键）。 */
+function jsonStrings(value, out = []) {
+    if (typeof value === "string") out.push(value);
+    else if (Array.isArray(value)) for (const v of value) jsonStrings(v, out);
+    else if (value && typeof value === "object") for (const v of Object.values(value)) jsonStrings(v, out);
+    return out;
+}
+
+/**
+ * 一个文件里要按散文扫描的文本单位。JSON 与 JS 取字符串值（引号放行只看值内部），其余整个文件一个单位。
+ * JSON 不合法时抛错，由调用方归到 scope-parse。
+ */
+export function proseUnits(file, text) {
+    if (file.endsWith(".json")) return jsonStrings(JSON.parse(text));
+    if (file.endsWith(".js")) return jsStrings(text);
+    return [text];
+}
+
+// ---------------------------------------------------------------------------------------------
+// 句子、引号、否定
+// ---------------------------------------------------------------------------------------------
 
 /** 引号：短语在引号里就放过。 */
-const QUOTE_RE = /「[^」]*」|“[^”]*”|‘[^’]*’|"[^"\n]*"|''[^'\n]*''/g;
+const QUOTE_RE = /「[^」]*」|“[^”]*”|‘[^’]*’|"[^"\n]*"/g;
 
 /** 句子切分：句号、问号、感叹号、分号、换行，以及英文的句点加空白。 */
 export function sentences(text) {
@@ -116,11 +229,6 @@ export function sentences(text) {
         .filter(Boolean);
 }
 
-/** 一句话里有没有否定或免责标记。 */
-export function hasNegation(sentence) {
-    return NEGATION.some((re) => re.test(sentence));
-}
-
 /** 一句话里引号圈起来的区间。 */
 export function quotedSpans(sentence) {
     const out = [];
@@ -128,9 +236,54 @@ export function quotedSpans(sentence) {
     return out;
 }
 
+/** 分句界：逗号、冒号、分号、顿号、破折号、括号与带空格的连字符。否定只认同一分句里命中片段之前的那一段。 */
+const CLAUSE_BREAK = /[,，;；:：、—–()（）[\]]|\s-\s/g;
+/** 命中片段之前最多看多少个字符。 */
+const WINDOW = 40;
+
 /**
- * 禁用词家族。patterns 每项是 { re, negation }：negation 为假时，同句的否定标记不放过它
+ * 登记过的否定与免责短语，只在命中片段之前（同一分句、最近 40 个字符）里找。
+ * 故意不收单字「不」「无」「未」与 \bno\b：它们在同一句的别处出现不说明这个命中被否定了。
+ */
+export const NEGATION_BEFORE = [
+    /\b(?:not|never|cannot|without)\b/i,
+    /n['’]t\b/i,
+    /\bno (?:software|plug-?in|tool|product|one|guarantee|promise)\b/i,
+    /(?:不能|无法|没法|不会|不可|不得|不要|不应|禁止|勿|并非|不是|没有|尚未|未能|不保证|不承诺|不声称|不宣称|绝不|并不|从不|从未)/,
+    /[不无未非没别]\s*$/, // 紧挨着命中片段的单字否定：「不支持所有 DAW」
+];
+
+/** 命中片段紧后面直接跟着的否定：「zero latency is not claimed」「零延迟是不可能的」。 */
+export const NEGATION_AFTER = [
+    /^\s*(?:is|are|was|were|will be|can be|should be|must be)\s+(?:not|never)\b/i,
+    /^\s*(?:isn['’]t|aren['’]t|cannot|can['’]t|won['’]t)\b/i,
+    /^[的是]?(?:不对|不成立|不可信|不可能|做不到|无法|不能|并非|不是)/,
+];
+
+/** 命中片段之前同一分句里、最近 WINDOW 个字符。 */
+function clauseBefore(sentence, index) {
+    const before = sentence.slice(0, index);
+    let cut = 0;
+    for (const m of before.matchAll(CLAUSE_BREAK)) cut = m.index + m[0].length;
+    return before.slice(cut).slice(-WINDOW);
+}
+
+/** 一个命中（在 sentence 里从 index 起、长 len）是否被登记过的否定或免责放过。 */
+export function negatedAt(sentence, index, len) {
+    const before = clauseBefore(sentence, index);
+    if (NEGATION_BEFORE.some((re) => re.test(before))) return true;
+    const after = sentence.slice(index + len);
+    return NEGATION_AFTER.some((re) => re.test(after));
+}
+
+// ---------------------------------------------------------------------------------------------
+// 禁用词家族
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * 禁用词家族。patterns 每项是 { re, negation }：negation 为假时，否定标记不放过它
  * （safety-promise 的英文 never howls 靠正则里的否定后顾，豁免写在自己的形态里）。
+ * 自测按 `家族#序号` 核对每个子模式都被某个坏样例命中；custom 记为 `家族#custom`。
  */
 export const FAMILIES = [
     {
@@ -168,9 +321,9 @@ export const FAMILIES = [
             },
             { re: /\b100\s?% safe\b/i },
             { re: /\bprotects your (?:hearing|ears|speakers)\b/i },
-            // 中文形态带否定或免责前缀时放过：「无法保证本插件不会爆音」
             { re: /绝对安全/ },
-            { re: /永不啸叫/ },
+            // 永不啸叫、永远不啸叫、永不会啸叫；带「无法保证」一类免责前缀的由否定窗口放过
+            { re: /永(?:远)?不(?:会)?啸叫/ },
             { re: /不会爆音/ },
         ],
     },
@@ -188,7 +341,8 @@ export const FAMILIES = [
         id: "signed-claims",
         note: "已签名、已公证、is notarized",
         patterns: [
-            { re: /\b(?:is|are|now|fully|officially)\s+(?:code[- ])?(?:signed|notarized)\b/i },
+            // 「is signed off」是提交的 sign-off，不是代码签名
+            { re: /\b(?:is|are|now|fully|officially)\s+(?:code[- ])?(?:signed(?!\s+off\b)|notarized)\b/i },
             { re: /\bsigned and notarized\b/i },
             { re: /已签名/ },
             { re: /已公证/ },
@@ -196,9 +350,10 @@ export const FAMILIES = [
     },
     {
         id: "unverified-support",
-        note: "官方认证、works with Logic、supports Intel",
+        note: "官方认证、官方合作、works with Logic、supports Intel",
         patterns: [
-            { re: /\bSteinberg[- ](?:approved|certified)\b/i },
+            { re: /\b(?:Steinberg|Apple|Universal Audio)[- ](?:approved|certified)\b/i },
+            { re: /\b(?:Steinberg|Apple|Universal Audio)\s*官方(?:合作|推荐)/i },
             { re: /官方认证/ },
             { re: /\b(?:works (?:with|in)|supports?|compatible with)\s+(?:Logic|Intel|GarageBand)\b/i },
             { re: /\bIntel Macs? (?:are |is )?supported\b/i },
@@ -235,13 +390,12 @@ export const FAMILIES = [
         id: "fader-after",
         note: "推子后；英文里 Rinne Output 与 after the fader / post-fader 同句",
         patterns: [{ re: /推子后/ }],
-        // 英文形态：同一句里既说 Rinne Output，又说 after the fader / post-fader
+        // 英文形态：同一句里既说 Rinne Output，又说 after the fader / post-fader。命中位置取放置短语本身，
+        // 这样「Rinne Output must not be placed post-fader」的否定落在命中之前，能被放过
         custom: (sentence) => {
             if (!/\bRinne Output\b/i.test(sentence)) return null;
             const m = /\b(?:after the fader|post-fader)\b/i.exec(sentence);
-            if (!m) return null;
-            const out = /\bRinne Output\b/i.exec(sentence);
-            return { index: out.index, text: out[0] };
+            return m ? { index: m.index, text: m[0] } : null;
         },
     },
     {
@@ -261,6 +415,48 @@ export const FAMILIES = [
     },
 ];
 
+/** matchAll 要求全局正则；表里的正则写成非全局的，这里补上 g。 */
+const global = (re) => (re.global ? re : new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`));
+
+/**
+ * 逐命中扫描一份文本单位。返回 [{ family, key, hit, passed }]，passed 为真表示被引号或否定放过。
+ * key 是 `家族#序号` 或 `家族#custom`，自测用它核对子模式覆盖。
+ */
+export function scanUnit(text) {
+    const out = [];
+    for (const family of FAMILIES) {
+        if (!Object.hasOwn(RULES, family.id)) throw new Error(`未登记的判据 ${family.id}`);
+        for (const sentence of sentences(text ?? "")) {
+            const spans = quotedSpans(sentence);
+            const inQuote = (i) => spans.some(([a, b]) => i >= a && i < b);
+            (family.patterns ?? []).forEach((p, k) => {
+                for (const m of sentence.matchAll(global(p.re))) {
+                    const passed =
+                        inQuote(m.index) || (p.negation !== false && negatedAt(sentence, m.index, m[0].length));
+                    out.push({ family: family.id, key: `${family.id}#${k}`, hit: m[0], passed });
+                }
+            });
+            if (family.custom) {
+                const hit = family.custom(sentence);
+                if (hit)
+                    out.push({
+                        family: family.id,
+                        key: `${family.id}#custom`,
+                        hit: hit.text,
+                        passed: inQuote(hit.index) || negatedAt(sentence, hit.index, hit.text.length),
+                    });
+            }
+        }
+    }
+    return out;
+}
+
+/** 每个家族的子模式键（含 custom）。 */
+export const PATTERN_KEYS = FAMILIES.flatMap((f) => [
+    ...(f.patterns ?? []).map((_, k) => `${f.id}#${k}`),
+    ...(f.custom ? [`${f.id}#custom`] : []),
+]);
+
 /**
  * 判据的实现。files 是 { 路径: 文本 }。返回问题数组（每行以 [家族名] 开头）。
  */
@@ -268,40 +464,41 @@ export function wordingProblems({ files }) {
     const out = [];
     for (const [file, text] of Object.entries(files)) {
         if (isExcluded(file)) continue;
-        for (const family of FAMILIES) {
-            if (!Object.hasOwn(RULES, family.id)) throw new Error(`未登记的判据 ${family.id}`);
-            const report = (index, hit) => out.push(`[${family.id}] ${file}：${family.note}（命中「${hit}」）`);
-            for (const sentence of sentences(text ?? "")) {
-                const spans = quotedSpans(sentence);
-                const inQuote = (i) => spans.some(([a, b]) => i >= a && i < b);
-                // 免责标记要在这句里、且不在命中片段自己身上（命中片段自带否定词的不算免责）
-                const negatedOutside = (index, len) => {
-                    const rest = sentence.slice(0, index) + " " + sentence.slice(index + len);
-                    return hasNegation(rest);
-                };
-                for (const p of family.patterns ?? []) {
-                    const negation = p.negation !== false;
-                    for (const m of sentence.matchAll(global(p.re))) {
-                        if (inQuote(m.index)) continue;
-                        if (negation && negatedOutside(m.index, m[0].length)) continue;
-                        report(m.index, m[0]);
-                    }
-                }
-                if (family.custom) {
-                    const hit = family.custom(sentence);
-                    if (!hit) continue;
-                    if (inQuote(hit.index)) continue;
-                    if (negatedOutside(hit.index, hit.text.length)) continue;
-                    report(hit.index, hit.text);
-                }
-            }
+        let units;
+        try {
+            units = proseUnits(file, text ?? "");
+        } catch (e) {
+            out.push(`[scope-parse] ${file}：读不出来，没法按字符串值扫描（${e.message}）`);
+            continue;
         }
+        for (const unit of units)
+            for (const h of scanUnit(unit)) {
+                if (h.passed) continue;
+                const family = FAMILIES.find((f) => f.id === h.family);
+                out.push(`[${h.family}] ${file}：${family.note}（命中「${h.hit}」）`);
+            }
     }
     return out;
 }
 
-/** matchAll 要求全局正则；表里的正则写成非全局的，这里补上 g。 */
-const global = (re) => (re.global ? re : new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`));
+/** 候选文件：需要登记进 SCOPE 或 EXCLUDED 的跟踪文件（文本文档、docs 下的 JSON、web/i18n 词条）。 */
+const isCandidate = (file) =>
+    /\.(?:md|txt)$/.test(file) || (file.startsWith("docs/") && file.endsWith(".json")) || isI18nFile(file);
+
+/**
+ * 范围闭合：tracked 是仓内跟踪的文件，exists 是 SCOPE 里实际存在的文件数。
+ * 每个候选文件不在 SCOPE 就得在 EXCLUDED；SCOPE 里一个文件都没读到也判红（等于什么都没扫）。
+ */
+export function scopeProblems({ tracked, scope = SCOPE, existing }) {
+    const out = [];
+    for (const f of tracked)
+        if (isCandidate(f) && !scope.includes(f) && !isI18nFile(f) && !isExcluded(f))
+            out.push(
+                `[scope-closed] ${f} 既不在扫描范围也不在排除清单：面向用户的文字登记进 SCOPE，否则登记进 EXCLUDED 并写明理由`,
+            );
+    if (existing === 0) out.push("[scope-closed] 扫描范围里一个文件都不存在，等于什么都没扫");
+    return out;
+}
 
 /** 扫描范围内的用户面文本；web/i18n/ 下的词条文件全部扫。 */
 export function scopedFiles(root) {
@@ -324,99 +521,188 @@ export function scopedFiles(root) {
 }
 
 export async function selfTest() {
-    const files = {
-        "README.md": "Rinne is two plugins.\n",
-    };
-    const one = (text) => wordingProblems({ files: { "README.md": text } });
-    const bad = (text, rule) => {
-        const lines = one(text);
-        return lines.some((l) => l.startsWith(`[${rule}] `));
-    };
-    /** 每个禁用家族一个坏样例，外加几条必须放行的正例。 */
+    const ruleOfLine = (l) => /^\[([^\]]+)\]/.exec(l)?.[1];
+    const lint = (text, file = "README.md") => wordingProblems({ files: { [file]: text } });
+    const fires = (text, rule, file) => lint(text, file).some((l) => ruleOfLine(l) === rule);
+    /** 每个禁用家族、每个子模式一个坏样例；[文本, 家族, 文件?]。 */
     const samples = [
-        ["支持所有 DAW", "all-daw-zh"],
         ["It supports all DAWs and hosts.", "absolute-support"],
+        ["支持所有 DAW", "all-daw-zh"],
+        ["本插件兼容所有宿主。", "all-daw-zh"],
         ["The loop is zero latency.", "zero-latency"],
         ["这条链是零延迟的。", "zero-latency-zh"],
         ["Rinne never howls.", "safety-promise"],
         ["Rinne is 100% safe.", "safety-promise"],
-        ["本插件不会爆音。", "safety-promise"],
-        ["本插件永不啸叫。", "safety-promise"],
+        ["Rinne protects your ears.", "safety-promise"],
         ["本插件绝对安全。", "safety-promise"],
+        ["本插件永不啸叫。", "safety-promise"],
+        ["本插件永远不啸叫。", "safety-promise"],
+        ["本插件不会爆音。", "safety-promise"],
         ["Rinne is the first open-source feedback plugin.", "first-only"],
         ["它是唯一一款开源插件。", "first-only"],
         ["The build is now notarized.", "signed-claims"],
+        ["Builds ship signed and notarized.", "signed-claims"],
+        ["这些构建已签名。", "signed-claims"],
         ["这些构建已公证。", "signed-claims"],
         ["Steinberg-certified plug-ins.", "unverified-support"],
+        ["Rinne is an Apple Universal Audio-approved plug-in.", "unverified-support"],
+        ["Steinberg官方合作伙伴。", "unverified-support"],
+        ["通过官方认证。", "unverified-support"],
         ["It works with Logic Pro.", "unverified-support"],
+        ["Intel Macs are supported.", "unverified-support"],
+        ["支持 Intel Mac。", "unverified-support"],
         ["Rinne Send is the sending end.", "naming"],
         ["这个插件叫回环输入。", "naming"],
+        ["发送端叫回环输出。", "naming"],
         ["The product used to be called Loopback.", "naming"],
         ["It follows the doctrine of karma.", "doctrine"],
+        ["这是业力。", "doctrine"],
         ["轮回即转世。", "doctrine"],
+        ["达到涅槃。", "doctrine"],
+        ["得到解脱。", "doctrine"],
         ["Rinne is better than the other one.", "competitor"],
-        ["Rinne is even better than nothing.", "competitor"],
+        ["Rinne replaces Connector.", "competitor"],
+        ["Rinne 比别家更好。", "competitor"],
         ["Rinne is coming soon.", "coming-soon"],
         ["功能即将推出。", "coming-soon"],
-        ["Put Rinne Output after the fader divider.", "fader-after"],
+        ["AU 即将支持。", "coming-soon"],
+        ["敬请期待。", "coming-soon"],
         ["Rinne Output 放在推子后。", "fader-after"],
-        ["It processes the whole channel.", "whole-channel"],
+        ["Put Rinne Output after the fader divider.", "fader-after"],
         ["它处理整条通道。", "whole-channel"],
-        ["The two plug-ins auto-pairing happens by itself.", "auto-pairing"],
+        ["It processes the whole channel.", "whole-channel"],
         ["两端自动配对。", "auto-pairing"],
+        ["The two plug-ins auto-pairing happens by itself.", "auto-pairing"],
+        ["Rinne automatically pairs the two ends.", "auto-pairing"],
+        ["The two ends pairs automatically.", "auto-pairing"],
+        // 同句里远处的单字否定不能放过肯定式强断言
+        ["本插件永不啸叫，不用担心。", "safety-promise"],
+        ["本插件绝对安全，不需要担心。", "safety-promise"],
+        ["It is the first open-source feedback plugin, not a toy.", "first-only"],
+        ["Works with Logic Pro, no extra setup.", "unverified-support"],
+        ["Rinne supports all DAWs, no exceptions.", "absolute-support"],
+        ["本插件支持所有 DAW，无论什么宿主。", "all-daw-zh"],
+        ["Rinne is zero latency, no kidding.", "zero-latency"],
+        ["Rinne is not a toy, it supports all DAWs.", "absolute-support"],
+        [
+            "Rinne does not do many things in this section of the manual and then it supports all DAWs.",
+            "absolute-support",
+        ],
+        // JSON 与 JS 词条的字符串值整个被引号包着，必须按值内部扫描
+        ['{"en":{"body":"Rinne is zero latency."}}', "zero-latency", "docs/hard-rules.i18n.json"],
+        ['export default { en: { "x.y": "Rinne is zero latency and 100% safe." } };', "zero-latency", "web/i18n/x.js"],
+        ["export default { en: { 'x.y': 'Rinne is zero latency.' } };", "zero-latency", "web/i18n/x.js"],
+        ["export default { zh: { 'x.y': '本插件绝对安全。' } };", "safety-promise", "web/i18n/x.js"],
+        ["export default { en: { x: `Rinne is 100% safe.` } };", "safety-promise", "web/i18n/x.js"],
+        ["{bad json", "scope-parse", "docs/hard-rules.i18n.json"],
     ];
-    // 必须放行的写法
+    /** 必须放行的写法。 */
     const allowed = [
-        "Rinne reports no plugin latency to the host.",
-        "向宿主报告 0 延迟。",
-        "Put Rinne Input in the first insert slot.",
-        "放在第一格。",
-        "The builds are not signed with an Apple Developer ID and not notarized.",
-        "No software can guarantee a loop will never howl.",
-        "无法保证环路永远不啸叫。",
-        "我们不能保证本插件不会爆音。",
-        "Put Rinne Output above the fader divider.",
-        "Intel Macs are not supported.",
-        "It is in the backlog, no date.",
-        "「支持所有 DAW」这种写法不写。",
-        "Rinne Input（返回端）与 Rinne Output（发送端）。",
-        "輪廻（循环）这个名字的意思是循环。",
+        ["Rinne reports no plugin latency to the host."],
+        ["向宿主报告 0 延迟。"],
+        ["Put Rinne Input in the first insert slot."],
+        ["放在第一格。"],
+        ["The builds are not signed with an Apple Developer ID and not notarized."],
+        ["The builds are unsigned."],
+        ["Every commit must be signed off."],
+        ["Every commit is signed off."],
+        ["Rinne was tested in two hosts."],
+        ["Logic Pro is not tested."],
+        ["使用微软官方安装程序。"],
+        ["No software can guarantee a loop will never howl."],
+        ["无法保证环路永远不啸叫。"],
+        ["我们不能保证本插件不会爆音。"],
+        ["Put Rinne Output above the fader divider."],
+        ["Rinne Output must not be placed post-fader."],
+        ["Intel Macs are not supported."],
+        ["It is in the backlog, no date."],
+        ["Rinne does not claim to support all DAWs."],
+        ["We cannot promise zero latency."],
+        ["We don't promise zero latency."],
+        ["We ship it without any zero latency promise."],
+        ["No plugin can promise 100% safe."],
+        ["Never describe Rinne as the first open-source feedback plugin."],
+        ["Zero latency is not claimed."],
+        ["Zero latency isn't something we promise."],
+        ["零延迟是不可能的。"],
+        ["Rinne 不支持所有 DAW。"],
+        ["「支持所有 DAW」这种写法不写。"],
+        ['The words "zero latency" are not used.'],
+        ["Rinne Input（返回端）与 Rinne Output（发送端）。"],
+        ["輪廻（循环）这个名字的意思是循环。"],
+        // JSON 与 JS：值内用「」圈起来的禁用词放行；注释与 JSON 键不是用户面文字
+        ['{"zh":{"body":"「零延迟」这种写法不写。"}}', "docs/hard-rules.i18n.json"],
+        ['export default { zh: { "x.y": "说明：「支持所有 DAW」不写。" } };', "web/i18n/x.js"],
+        ["export default { en: { 'x.y': 'Say \\u201czero latency\\u201d? No.' } };", "web/i18n/x.js"],
+        ["// zero latency 只出现在注释里\nexport default { en: { 'x.y': 'ok' } };", "web/i18n/x.js"],
+        ["/* 100% safe 只出现在块注释里 */\nexport default { en: { x: 'ok' } };", "web/i18n/x.js"],
+        ['{"zero latency":"ok"}', "docs/hard-rules.i18n.json"],
+        // 排除清单里的文件不判红
+        ["干声随整条通道进环。", "docs/ARCHITECTURE.md"],
+        ["探针描述推子后。", "scripts/probe/x.md"],
     ];
 
     const cases = [];
-    for (const [text, rule] of samples) {
-        cases.push({
-            label: `坏样例：${text}`,
-            bad: true,
-            passed: bad(text, rule),
-            expect: [rule],
-        });
+    const fired = new Set();
+    for (const [text, rule, file] of samples) {
+        if (rule !== "scope-parse") for (const h of unitsOf(text, file)) if (!h.passed) fired.add(h.key);
+        cases.push({ label: `坏样例：${text}`, bad: true, passed: fires(text, rule, file), expect: [rule] });
     }
-    for (const text of allowed) {
-        cases.push({
-            label: `放行：${text}`,
-            bad: false,
-            passed: one(text).length === 0,
-            expect: [],
-        });
-    }
-    // 排除清单里的文件不判红
+    for (const [text, file] of allowed)
+        cases.push({ label: `放行：${text}`, bad: false, passed: lint(text, file).length === 0, expect: [] });
+
+    // 范围闭合
+    const tracked = [
+        "README.md",
+        "docs/media/placement.txt",
+        "docs/ARCHITECTURE.md",
+        "src/core/CMakeLists.txt",
+        "a.png",
+    ];
     cases.push({
-        label: "排除清单里的文件不判红",
+        label: "新增的用户面文档没登记：范围闭合判红",
+        bad: true,
+        passed: scopeProblems({ tracked: [...tracked, "docs/FAQ.md"], existing: 3 }).some(
+            (l) => ruleOfLine(l) === "scope-closed" && l.includes("docs/FAQ.md"),
+        ),
+        expect: ["scope-closed"],
+    });
+    cases.push({
+        label: "扫描范围里一个文件都不存在：判红",
+        bad: true,
+        passed: scopeProblems({ tracked, existing: 0 }).some(
+            (l) => ruleOfLine(l) === "scope-closed" && l.includes("什么都没扫"),
+        ),
+        expect: ["scope-closed"],
+    });
+    cases.push({
+        label: "登记过的与排除清单里的文件：范围闭合放行",
         bad: false,
-        passed:
-            wordingProblems({
-                files: { "docs/ARCHITECTURE.md": "干声随整条通道进环。\n", "scripts/probe/x.md": "探针描述推子后。\n" },
-            }).length === 0,
+        passed: scopeProblems({ tracked, existing: 3 }).length === 0,
         expect: [],
     });
-    const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.expect.includes(r)));
+
+    // 每个家族的每个子模式都被某个坏样例命中
+    const uncovered = PATTERN_KEYS.filter((k) => !fired.has(k));
+    cases.push({
+        label: `每个子模式都被坏样例命中${uncovered.length ? `（没有：${uncovered.join("、")}）` : ""}`,
+        bad: false,
+        passed: uncovered.length === 0,
+        expect: [],
+    });
+    const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.passed && c.expect.includes(r)));
     cases.push({
         label: `每条判据都有坏样例点名${unnamed.length ? `（没有：${unnamed.join("、")}）` : ""}`,
         bad: false,
         passed: unnamed.length === 0,
+        expect: [],
     });
     return caseResult(cases);
+}
+
+/** 自测用：一份文本按文件类型取出单位，逐个扫描。 */
+function unitsOf(text, file = "README.md") {
+    return proseUnits(file, text).flatMap((u) => scanUnit(u));
 }
 
 export default {
@@ -424,7 +710,20 @@ export default {
     group: "docs",
     inputs: [],
     run(ctx) {
-        const problems = wordingProblems({ files: scopedFiles(ctx.root) });
+        const files = scopedFiles(ctx.root);
+        const problems = wordingProblems({ files });
+        let tracked = [];
+        try {
+            tracked = trackedFiles(ctx.root);
+        } catch {
+            // 不在 git 仓里时没法核对闭合，只扫已有的范围
+        }
+        problems.push(
+            ...scopeProblems({
+                tracked,
+                existing: Object.keys(files).filter((f) => SCOPE.includes(f)).length,
+            }),
+        );
         return { ok: problems.length === 0, lines: problems };
     },
     selfTest,
