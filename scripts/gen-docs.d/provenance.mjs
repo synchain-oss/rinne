@@ -10,11 +10,17 @@
 //   2. 登记与文件头必须一致：带 `Derived from` 头的文件必须在某个片段里登记，登记过的文件必须恰好带一行头。
 //      这一条与 scripts/check-upstream.mjs 的判据一致，两处不重复实现第三套口径。
 //   3. 表里按本仓路径排序（序数），同一份输入渲染出同一段文本：包里两个平台比哈希才有意义。
+//   4. 渲染进表里的每个字段都先校验：来源的 repo 形如 owner/name、ref 非空不含空白，path 与 from 是安全的相对路径；
+//      同一个 (path, from) 只登记一次，同一个 path 不能分属两个片段。否则表里会出现 undefined 或重复行，而打包
+//      并不依赖 check-upstream，没人拦。
+//   文件头与 NO_COMMENT 两个常量是 check-upstream.mjs 里那两个的副本（它没有导出）；自测会对照那份源码，
+//   两边一旦不同就红，漂移有机制拦。
 //
 // 它只被 `--emit provenance` 调用；发行包里的那份 NOTICES 由打包脚本渲染后放进 zip。
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { caseResult, isMain } from "../lib/check-kit.mjs";
 import { readRepoText } from "../lib/docs-kit.mjs";
 
@@ -26,6 +32,15 @@ const HEADER_LINES = 8;
 /** 写不了注释的格式：登记照常，但不要求文件头（与 check-upstream 的 NO_COMMENT 同一份口径）。 */
 const NO_COMMENT =
     /\.(?:json|woff2?|png|jpe?g|gif|ico|svg|lock)$|(?<!CMakeLists)\.txt$|(?:^|\/)\.[\w.-]*version$|(?:^|\/)\.[\w.-]*sha256$/;
+
+/** 路径要是仓内（参考仓内）的安全相对路径：不绝对、不含反斜杠、没有 . 与 .. 段、不带盘符（与 check-upstream 同一口径）。 */
+const safeRel = (p) =>
+    typeof p === "string" &&
+    p !== "" &&
+    !p.includes("\\") &&
+    !p.startsWith("/") &&
+    !/(?:^|\/)\.\.?(?:\/|$)/.test(p) &&
+    !/^[A-Za-z]:/.test(p);
 
 /** 改写方式的显示名：登记里的 mode 是机读值，表里写成人话。 */
 const MODE_LABEL = { adapted: "adapted", forked: "forked" };
@@ -60,6 +75,8 @@ export function loadFragments(root) {
 export function provenanceRows({ fragments, read, exists }) {
     const errors = [];
     const rows = [];
+    const pairs = new Set();
+    const registered = new Map();
     for (const [area, frag] of Object.entries(fragments)) {
         if (!frag || frag.error) {
             errors.push(`upstream/${area}.json：${frag?.error ?? "不是对象"}`);
@@ -74,12 +91,41 @@ export function provenanceRows({ fragments, read, exists }) {
             errors.push(`upstream/${area}.json：files 必须是非空数组`);
             continue;
         }
+        // 来源的 repo 与 ref 会原样拼进表里（`repo@sha12 (ref)`）：形态不对就是 undefined 或乱码。
+        let sourcesOk = true;
+        for (const [name, src] of Object.entries(sources)) {
+            if (typeof src?.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(src.repo)) {
+                errors.push(`upstream/${area}.json：来源 ${name} 的 repo 须形如 owner/name`);
+                sourcesOk = false;
+            }
+            if (typeof src?.ref !== "string" || !/^\S+$/.test(src.ref)) {
+                errors.push(`upstream/${area}.json：来源 ${name} 的 ref 不能为空或含空白`);
+                sourcesOk = false;
+            }
+        }
+        if (!sourcesOk) continue;
         for (const f of frag.files) {
             const where = `upstream/${area}.json 的 ${f?.path ?? "(没有 path)"}`;
             if (typeof f?.path !== "string" || typeof f?.from !== "string") {
                 errors.push(`${where}：缺 path 或 from`);
                 continue;
             }
+            if (!safeRel(f.path) || !safeRel(f.from)) {
+                errors.push(`${where}：path 与 from 必须是相对路径，用正斜杠，没有 .. 段`);
+                continue;
+            }
+            // 同一个 (path, from) 只登记一次；同一个 path 可以合并自几个上游文件，但必须都在同一个片段里。
+            const pair = `${f.path}\0${f.from}`;
+            if (pairs.has(pair)) {
+                errors.push(`${where}：来自 ${f.from} 的这一项重复登记`);
+                continue;
+            }
+            pairs.add(pair);
+            if (registered.has(f.path) && registered.get(f.path) !== area) {
+                errors.push(`${where}：已在 upstream/${registered.get(f.path)}.json 登记，同一个文件不能分属两个片段`);
+                continue;
+            }
+            registered.set(f.path, area);
             const src = sources[f.source];
             if (!src) {
                 errors.push(`${where}：source「${f.source}」不在 sources 里`);
@@ -251,12 +297,89 @@ export function selfTest() {
         ["文件头指向别的片段", true, run({ release: frag() }, { "scripts/a.ps1": header("build") })],
         ["文件头在第 8 行之后", true, run({ release: frag() }, { "scripts/a.ps1": `${"//\n".repeat(8)}${header()}` })],
         ["source 指向不存在的来源", true, run({ release: { sources: {}, files: frag().files } })],
+        [
+            "来源缺 repo（表里会出现 undefined）",
+            true,
+            run({ release: { sources: { "scvb-dev": { ref: "dev", sha: SHA } }, files: frag().files } }),
+        ],
+        [
+            "来源的 repo 不是 owner/name",
+            true,
+            run({ release: { sources: { "scvb-dev": { repo: "scvb", ref: "dev", sha: SHA } }, files: frag().files } }),
+        ],
+        [
+            "来源缺 ref",
+            true,
+            run({ release: { sources: { "scvb-dev": { repo: "synchain-oss/scvb", sha: SHA } }, files: frag().files } }),
+        ],
+        [
+            "来源的 ref 含空白",
+            true,
+            run({
+                release: {
+                    sources: { "scvb-dev": { repo: "synchain-oss/scvb", ref: "d ev", sha: SHA } },
+                    files: frag().files,
+                },
+            }),
+        ],
+        ["登记缺 from", true, run({ release: frag("release", { from: undefined }) })],
+        ["from 是绝对路径", true, run({ release: frag("release", { from: "/etc/passwd" }) })],
+        ["path 含 .. 段", true, run({ release: frag("release", { path: "scripts/../a.ps1" }) })],
+        [
+            "同一个 (path, from) 重复登记",
+            true,
+            run({ release: { sources: frag().sources, files: [...frag().files, ...frag().files] } }),
+        ],
+        [
+            "同一个文件分属两个片段",
+            true,
+            // 写不了注释的格式不查文件头，所以“分属两个片段”只能靠登记表自己的判据拦。
+            run(
+                {
+                    release: frag("release", { path: "config/a.json", from: "config/a.json" }),
+                    build: frag("build", { path: "config/a.json", from: "config/b.json" }),
+                },
+                { "config/a.json": "{}\n" },
+            ),
+        ],
         ["片段里一个文件都没登记", true, run({ release: { sources: frag().sources, files: [] } })],
     ].map(([label, bad, result]) => ({
         label,
         bad,
         passed: bad ? result.errors.length > 0 : result.errors.length === 0,
     }));
+    // 合并自两个上游文件的同一个 path（同一片段里两项、from 不同）：不算重复。
+    cases.push({
+        label: "同一个 path 合并自两个上游文件（同一片段）：不算重复登记",
+        bad: false,
+        passed:
+            run({
+                release: {
+                    sources: frag().sources,
+                    files: [...frag().files, { ...frag().files[0], from: "scripts/b.ps1", fromBlob: "c".repeat(40) }],
+                },
+            }).errors.length === 0,
+    });
+    // 本文件的两个常量是 check-upstream.mjs 里那两个的副本：对照源码，不同就红。
+    const upstreamSrc = fs.readFileSync(
+        path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "check-upstream.mjs"),
+        "utf8",
+    );
+    cases.push({
+        label: "文件头正则与 check-upstream.mjs 里的逐字相同（副本没有漂移）",
+        bad: true,
+        passed: upstreamSrc.includes(HEADER.toString()),
+    });
+    cases.push({
+        label: "NO_COMMENT 正则与 check-upstream.mjs 里的逐字相同（副本没有漂移）",
+        bad: true,
+        passed: upstreamSrc.includes(NO_COMMENT.toString()),
+    });
+    cases.push({
+        label: "文件头位置（前 8 行）与 check-upstream.mjs 里的相同",
+        bad: true,
+        passed: upstreamSrc.includes(`const HEADER_LINES = ${HEADER_LINES};`),
+    });
     // 渲染：表头、行数与排序都要对。
     const rows = run({ release: frag() }).rows;
     const table = renderTable(rows);
