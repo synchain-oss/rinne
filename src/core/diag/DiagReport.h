@@ -76,6 +76,11 @@ enum class EventCode : std::uint8_t
 // 事件码数量：由哨兵导出，名字表长度在 .cpp 里与它断言相等，所以新增码漏改名字表会编译失败
 inline constexpr std::size_t kEventCodeCount = static_cast<std::size_t>(EventCode::kCount);
 
+// 事件行的参数约定：组号在头行写字母（groupLetter），在事件行写十进制数；group_set 的来源参数写 DiagOrigin 的
+// 数值，名字表 originName 与之一一对应。smart_default 与 resync、trip 的原因序号和 pair_state 的配对状态序号由
+// 调用方给，仓里还没有这些序号的真源枚举，所以这里不钉名字表；接线的一侧定下真源后再补，届时这些数值属于
+// rinne-diag v1，只许在末尾追加。
+
 // 码的名字（固定表，ASCII）；越界返回 "unknown"
 const char* eventName(EventCode code) noexcept;
 

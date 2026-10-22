@@ -103,28 +103,81 @@ TEST_CASE("a reader can snapshot while the writer counts", "[diag]")
 {
     DiagCounters counters;
     constexpr std::uint32_t kBlocks = 20000u;
+    std::atomic<bool> readerReady{false};
     std::atomic<bool> writing{true};
 
+    // 写线程等读线程先取到第一份快照再开始计数，两边一定有交叠
     std::thread writer([&] {
+        while (!readerReady.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
         for (std::uint32_t i = 1u; i <= kBlocks; ++i)
         {
-            counters.onBlock(i % 4097u, 4096u, (i % 8u) == 0u);
+            // 块长在 1..4096 之间循环，每 4097 块里有一块是 0 样本；声明上限取一半，好让超限计数也动起来
+            counters.onBlock(i % 4097u, 2048u, (i % 8u) == 0u);
+            // 偶尔让出时间片，读线程才能在计数进行中取到快照
+            if ((i % 64u) == 0u)
+            {
+                std::this_thread::yield();
+            }
         }
         writing.store(false, std::memory_order_release);
     });
 
+    // 每个字段只朝一个方向动：计数与直方图桶只增不减，终身最大块长只增，最小块长只减
+    // （快照报 0 表示还没见到非零块，不参与比较）
     std::uint64_t lastTotal = 0u;
-    while (writing.load(std::memory_order_acquire))
+    std::uint64_t lastZeroLen = 0u;
+    std::uint64_t lastOverMax = 0u;
+    std::uint64_t lastBypassed = 0u;
+    std::uint32_t lastNMax = 0u;
+    std::uint32_t lastNMin = 0u;
+    std::uint64_t lastHist[kNsamplesBuckets] = {};
+
+    do
     {
         const DiagCountersSnapshot snapshot = counters.snapshot();
-        // 相邻两次快照之间，总块数只增不减
+        // 相邻两次快照之间，每个字段都不能倒退
         CHECK(snapshot.blocksTotal >= lastTotal);
+        CHECK(snapshot.zeroLen >= lastZeroLen);
+        CHECK(snapshot.overMax >= lastOverMax);
+        CHECK(snapshot.bypassed >= lastBypassed);
+        CHECK(snapshot.nMax >= lastNMax);
+        if (snapshot.nMin != 0u)
+        {
+            // 快照报 0 表示还没见到非零块；见到过之后，最小块长只会更小
+            if (lastNMin != 0u)
+            {
+                CHECK(snapshot.nMin <= lastNMin);
+            }
+            lastNMin = snapshot.nMin;
+        }
+        for (std::size_t i = 0; i < kNsamplesBuckets; ++i)
+        {
+            CHECK(snapshot.hist[i] >= lastHist[i]);
+        }
         lastTotal = snapshot.blocksTotal;
-    }
+        lastZeroLen = snapshot.zeroLen;
+        lastOverMax = snapshot.overMax;
+        lastBypassed = snapshot.bypassed;
+        lastNMax = snapshot.nMax;
+        for (std::size_t i = 0; i < kNsamplesBuckets; ++i)
+        {
+            lastHist[i] = snapshot.hist[i];
+        }
+        readerReady.store(true, std::memory_order_release);
+    } while (writing.load(std::memory_order_acquire));
+
     writer.join();
 
     const DiagCountersSnapshot final = counters.snapshot();
     CHECK(final.blocksTotal == kBlocks);
     CHECK(final.bypassed == kBlocks / 8u);
     CHECK(histogramTotal(final) + final.zeroLen == kBlocks);
+    // 块长在 1..4096 循环：最小 1，最大 4096；声明上限 2048，每轮 4097 块里有 2048 块超限
+    CHECK(final.nMin == 1u);
+    CHECK(final.nMax == 4096u);
+    CHECK(final.zeroLen == 4u);
+    CHECK(final.overMax == 9756u);
 }
