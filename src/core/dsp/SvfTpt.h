@@ -17,10 +17,17 @@
 //   截止在 log2 域线性平滑 30 ms（按样本计数）。平滑期间每个样本按当前值重算系数（只在这 30 ms 里有 exp2 与 tan），
 //   走完时用目标值本身算，与直接设在目标上的滤波器逐位相同；没有按块或按网格更新的系数，宿主怎么切块都一样。
 //   开：状态清零，截止从「关」的端点（低切 20 Hz，高切 min(20000 Hz, 0.45·sr)）滑向目标，同时用 10 ms 线性交叉从干声
-//   过渡到滤波输出。端点上的滤波器在音频频带里几乎直通，交叉的两头几乎一样，听不出切换。
+//   过渡到滤波输出。端点上的滤波器只在通带中段几乎直通，交叉的两头在频带两端并不一样（数字按预畸变 Butterworth 的
+//   幅频与相频算，与 test_svf_response.cpp 的理论值同一个公式）：
+//     低切端点 20 Hz：40 Hz 以上增益偏差不到 0.3 dB、相移不到 44°，100 Hz 以上不到 0.01 dB；20–40 Hz 之间是
+//     −3.01…−0.26 dB、90°…43°（25 Hz 约 −1.5 dB / 72°，30 Hz 约 −0.8 dB / 60°）。
+//     高切端点 min(20 kHz, 0.45·sr)：10 kHz 以下偏差不到 0.25 dB（44.1 kHz 下 0.002 dB，192 kHz 下 0.24 dB），
+//     15 kHz 处 −0.03…−1.1 dB（随采样率），端点本身 −3.01 dB、−90°。
+//   所以超低频与最高频上，交叉两头的增益与相位都不同；10 ms 线性交叉把这个差摊在 n 个样本上，输出连续、没有台阶
+//   （25–30 Hz 正弦上开关低切的无咔嗒用例在 test_cut_filter.cpp）。
 //   关：先滑回端点，再 10 ms 交叉回干声，之后逐位直通。过渡中再改参数：平滑从当前值重新起算，交叉从当前位置折返。
 //   高切被采样率截断（44.1 kHz 下 0.45·sr = 19845 Hz，参数在它之上而又不是关）时 cutoffLimited()
-//   为真，供界面给中性提示。 reset() 清状态，平滑与交叉都落定到目标：起播沿复位、离开快速路径时调用。prepare()
+//   为真，供界面给中性提示。reset() 清状态，平滑与交叉都落定到目标：起播沿复位、离开快速路径时调用。prepare()
 //   换采样率后也落定。
 // 输入契约：输入须已清洗（有限、|x| ≤ 16），这时状态与输出都算不出非有限值。万一出现（输入非有限，或这一步算出了
 // NaN、±Inf），状态清、输出不清：
@@ -51,7 +58,8 @@ inline constexpr float kLowCutMaxHz = 2000.0f;
 inline constexpr float kHighCutMinHz = 1000.0f;
 inline constexpr float kHighCutOffHz = 20000.0f;
 inline constexpr double kCutoffSmoothSeconds = 0.030;
-inline constexpr double kCutSwitchSeconds = 0.010;
+// 开关交叉的时长不另立数：用 SwitchRamp 的标准时长，10 ms 只在 dsp/SwitchRamp.h 里写一次
+inline constexpr double kCutSwitchSeconds = kSwitchRampSeconds;
 
 struct SvfCoefficients
 {

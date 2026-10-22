@@ -13,12 +13,14 @@
 #include "ToneTestKit.h"
 #include "dsp/LinearSmoother.h"
 #include "dsp/SvfTpt.h"
+#include "dsp/SwitchRamp.h"
 
 using rinne::dsp::CutFilter;
 using rinne::dsp::CutKind;
 using rinne::dsp::isFiniteSample;
 using rinne::dsp::kCutoffSmoothSeconds;
 using rinne::dsp::kCutSwitchSeconds;
+using rinne::dsp::kSwitchRampSeconds;
 using rinne::dsp::LinearSmoother;
 using rinne::dsp::svfCoefficients;
 using rinne::dsp::SvfResponse;
@@ -49,10 +51,11 @@ struct Event
     float hz;
 };
 
-// 低频正弦过一串参数事件，返回相邻输出样本差的最大值。起始参数 start 在 prepare 时就生效（不滑动）
+// 低频正弦过一串参数事件，返回相邻输出样本差的最大值。起始参数 start 在 prepare 时就生效（不滑动）。
+// from > 0 时只量第 from 个样本起的差，把滤波器从零状态起来的瞬态排除在外
 template<std::size_t N>
 double maxStep(CutKind kind, double sr, float start, const Event (&events)[N], std::int64_t total, double freq,
-               double amplitude, double phase)
+               double amplitude, double phase, std::int64_t from = 0)
 {
     CutFilter f(kind);
     f.setCutoff(start);
@@ -67,7 +70,7 @@ double maxStep(CutKind kind, double sr, float start, const Event (&events)[N], s
         const auto x = static_cast<float>(
             amplitude * std::sin(2.0 * rinne::test::kPi * freq * static_cast<double>(n) / sr + phase));
         const float y = f.process(x);
-        if (n > 0)
+        if (n > 0 && n >= from)
             worst = std::fmax(worst, std::fabs(static_cast<double>(y) - prev));
         prev = y;
     }
@@ -135,6 +138,8 @@ TEST_CASE("off passes every bit through, including -0.0 and NaN payloads", "[ton
 TEST_CASE("turning a cut off glides back to the off corner, crosses over in 10 ms, then passes bits through",
           "[tone][cut][bypass]")
 {
+    // 交叉时长只有一个真源：CutFilter 用的 kCutSwitchSeconds 就是 SwitchRamp 的标准时长，10 ms
+    CHECK(kCutSwitchSeconds == kSwitchRampSeconds);
     for (const double sr : kRates)
     {
         const auto glide = LinearSmoother::samplesFor(sr, kCutoffSmoothSeconds);
@@ -445,6 +450,96 @@ TEST_CASE("the click criterion catches hard switches (the counterexample must fa
         CHECK(hard(SvfResponse::HighPass, 2000.0, 2000.0, true) > 3.0 * bound);
         CHECK(hard(SvfResponse::LowPass, 1000.0, 19000.0, false) > 3.0 * bound);
         CHECK(hard(SvfResponse::LowPass, 1000.0, 1000.0, true) > 3.0 * bound);
+    }
+}
+
+TEST_CASE("the low cut makes no click on a 25-30 Hz sine, where its 20 Hz end is not transparent", "[tone][cut][click]")
+{
+    // 关的端点是 20 Hz 的二阶高通，它只在约 40 Hz 以上几乎直通：25 Hz 上 −1.5 dB / 72°，30 Hz 上 −0.8 dB / 60°
+    // （数字见 dsp/SvfTpt.h 头注释）。所以在 25–30 Hz 的正弦上，交叉的两头（干声与端点的滤波输出）增益和相位都不同，
+    // 差可以到一个振幅。10 ms 线性交叉把这个差摊开，输出连续，没有台阶。
+    // 事件：从端点开到 30 / 100 / 2000 Hz（开）；从 100 / 30 / 2000 Hz 关回 20 Hz（先滑回端点，再交叉回干声）；
+    // 过渡中来回切一串。每个事件对 8 个相位各跑一遍，只量事件前一个样本起的相邻输出样本差，取最坏的。
+    // 判据：不超过输入正弦自身上界 2a·sin(πf/sr) 的 kLimit 倍。实测最坏 1.52 倍（25 Hz、来回切，四个采样率一样），
+    // 开的方向 1.27–1.43 倍（起振的瞬态叠在交叉上），关的方向 1.00 倍；100 Hz 上的同类判据是 1.5 倍
+    // （"cutoff jumps, on/off switches and sweeps make no clicks"），这里留出 2 倍。
+    // 必须变红：硬切换，端点的滤波器一直在跑，输出在事件那一格直接从滤波输出跳到干声（关），或从干声跳到滤波输出（开）。
+    // 台阶是两路在该相位上的差，实测是上界的 218–1338 倍，用例只要求超过 6 倍，见本用例最后一段。
+    constexpr double amp = 0.5;
+    constexpr int kPhases = 8;
+    constexpr double kLimit = 2.0;
+    for (const double sr : kRates)
+    {
+        const auto s = static_cast<std::int64_t>(0.3 * sr);
+        const auto total = s + static_cast<std::int64_t>(0.15 * sr);
+        const auto ms = [sr](double t) { return static_cast<std::int64_t>(t * sr / 1000.0); };
+        for (const double freq : {25.0, 27.5, 30.0})
+        {
+            INFO("sr = " << sr << ", freq = " << freq);
+            const double ref = sineStepBound(amp, freq, sr);
+            const auto sample = [&](std::int64_t n, int k) {
+                return static_cast<float>(amp * std::sin(2.0 * rinne::test::kPi * freq * static_cast<double>(n) / sr +
+                                                         static_cast<double>(k) * rinne::test::kPi / 4.0));
+            };
+            // 相邻输出样本差的最坏值，是 ref 的几倍
+            const auto worstRatio = [&](float start, const auto& events) {
+                double worst = 0.0;
+                for (int k = 0; k < kPhases; ++k)
+                    worst = std::fmax(worst, maxStep(CutKind::LowCut, sr, start, events, total, freq, amp,
+                                                     static_cast<double>(k) * rinne::test::kPi / 4.0, s - 1));
+                return worst / ref;
+            };
+            {
+                INFO("on: 20 -> 30 Hz");
+                const Event e[] = {{s, 30.0f}};
+                CHECK(worstRatio(20.0f, e) < kLimit);
+            }
+            {
+                INFO("on: 20 -> 100 Hz");
+                const Event e[] = {{s, 100.0f}};
+                CHECK(worstRatio(20.0f, e) < kLimit);
+            }
+            {
+                INFO("on: 20 -> 2000 Hz");
+                const Event e[] = {{s, 2000.0f}};
+                CHECK(worstRatio(20.0f, e) < kLimit);
+            }
+            const Event off[] = {{s, 20.0f}};
+            for (const float from : {100.0f, 30.0f, 2000.0f})
+            {
+                INFO("off: " << from << " -> 20 Hz");
+                CHECK(worstRatio(from, off) < kLimit);
+            }
+            {
+                INFO("toggling mid-transition");
+                const Event e[] = {
+                    {s, 60.0f}, {s + ms(5), 20.0f}, {s + ms(25), 100.0f}, {s + ms(33), 20.0f}, {s + ms(70), 40.0f}};
+                CHECK(worstRatio(20.0f, e) < kLimit);
+            }
+
+            // 必须变红：硬切换。端点滤波器一直在跑（稳态），第 s 个样本直接换路
+            for (const bool toFiltered : {false, true})
+            {
+                INFO("hard switch, to filtered = " << toFiltered);
+                const auto c20 = svfCoefficients(20.0, sr);
+                double worst = 0.0;
+                for (int k = 0; k < kPhases; ++k)
+                {
+                    SvfTpt t;
+                    float prev = 0.0f;
+                    for (std::int64_t n = 0; n < s + 64; ++n)
+                    {
+                        const float x = sample(n, k);
+                        const float y = t.process(x, c20, SvfResponse::HighPass);
+                        const float out = ((n >= s) == toFiltered) ? y : x;
+                        if (n >= s - 1)
+                            worst = std::fmax(worst, std::fabs(static_cast<double>(out) - prev));
+                        prev = out;
+                    }
+                }
+                CHECK(worst / ref > 3.0 * kLimit);
+            }
+        }
     }
 }
 
