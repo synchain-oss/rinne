@@ -235,9 +235,9 @@ std::string sanitizeText(std::string_view raw, std::size_t maxLen)
         }
         if (rejected)
         {
-            // 含路径或账号特征：这一段和它之后的全部丢掉。路径里的目录名可以带空格（用户目录名常是「名 姓」），
-            // 只丢带分隔符的那一段会把 "Doe" 留在输出里
-            break;
+            // 含路径或账号特征：整串不要。路径里的目录名可以带空格（用户目录名常是「名 姓」），它前面的词也可能是
+            // 目录名的一部分，只丢这一段或这一段之后的内容，都会把 "Jane" 或 "Doe" 留在输出里
+            return {};
         }
         if (!joined.empty())
         {

@@ -232,10 +232,12 @@ TEST_CASE("sanitizeText drops path-like fragments and keeps whitelisted text", "
     CHECK(sanitizeText("%USERNAME%").empty());
     CHECK(sanitizeText("user:alice_wonderland").empty()); // 没有分隔符的冒号也算账号形态
     CHECK(sanitizeText(winPathOf("Jane Doe")).empty());
-    CHECK(sanitizeText("Cubase 15 " + winPathOf("Jane Doe")) == "Cubase 15");
+    CHECK(sanitizeText("Cubase 15 " + winPathOf("Jane Doe")).empty()); // 前面的词也不留
     CHECK(sanitizeText("one/two three").empty());
-    CHECK(sanitizeText("before one/two three") == "before");
-    CHECK(sanitizeText("Cubase 15.0.30 (x64) " + winPathOf(kProfile)) == "Cubase 15.0.30 (x64)");
+    CHECK(sanitizeText("before one/two three").empty());
+    CHECK(sanitizeText("Cubase 15.0.30 (x64) " + winPathOf(kProfile)).empty());
+    CHECK(sanitizeText("Jane " + winPathOf("Doe")).empty());
+    CHECK(sanitizeText("Jane Doe" + kBackslash + "Documents" + kBackslash + "song.cpr").empty());
     CHECK(sanitizeText(std::string("C") + ":" + kBackslash + "x " + macPathOf("alice") + " ~x a@b %USERNAME%").empty());
 
     const std::string nonAscii = "Caf\xc3\xa9 Mix";
@@ -243,7 +245,7 @@ TEST_CASE("sanitizeText drops path-like fragments and keeps whitelisted text", "
 
     CHECK(sanitizeText("  alpha\tbeta\ngamma  ") == "alpha beta gamma");
     CHECK(sanitizeText("a#b [x]") == "a_b _x_");
-    CHECK(sanitizeText("keep %USERNAME% also") == "keep");
+    CHECK(sanitizeText("keep %USERNAME% also").empty());
     CHECK(sanitizeText("A-z_0+(.)") == "A-z_0+(.)");
     CHECK(sanitizeText("Cubase 15.0.30 (x64)") == "Cubase 15.0.30 (x64)");
     CHECK(sanitizeText("").empty());
