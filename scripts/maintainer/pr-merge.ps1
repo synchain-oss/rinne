@@ -1982,7 +1982,23 @@ function Invoke-SelfTest {
             $tipOps.Clear()
             $vc = Invoke-MergeCheck 3 $cid
             $ops = @($tipOps | ForEach-Object { ($_.Line -replace '^-C \S+ ', '') -replace ' (--quiet|origin/feature/v1|--no-commit refs/remotes/origin/pr/3)', '' })
-            Add-RinneCase $cases '合并后构建：再用时先 reset --hard、回到 feature/v1、git clean -ffdx，再合并' $false (($ops -join ' | ') -ne 'reset --hard | checkout --detach --force | clean -ffdx | merge --no-ff | merge --abort')
+            Add-RinneCase $cases '合并后构建：再用时先 reset --hard、回到 feature/v1、git clean -ffdx，再合并' $false (($ops -join ' | ') -ne 'reset --hard | checkout --detach --force | clean -ffdx | merge --no-ff | merge --abort') # rinne-delete-ok: 只是用例标题与期望串里的文字，没有执行删除
+            # wt/tip-3 是指向别处的 junction：路径核对在 reset 之前，所以 reset、checkout、clean 一条都不跑
+            $tipSaved = Join-Path $tmp 'tip-saved'
+            $tipAway2 = Join-Path $tmp 'tip-away2'
+            $null = New-Item -ItemType Directory -Path $tipAway2
+            Set-Content -LiteralPath (Join-Path $tipAway2 '.git') -Value 'gitdir: x'
+            Move-Item -LiteralPath $tip -Destination $tipSaved
+            try {
+                $null = New-Item -ItemType ($IsWindows ? 'Junction' : 'SymbolicLink') -Path $tip -Target $tipAway2
+                $tipOps.Clear()
+                $vj = try { Invoke-MergeCheck 3 $cid } catch { $_.Exception.Message } # 核对不过是抛错：宁可中止，不往下跑
+                $jOps = @($tipOps | Where-Object { $_.Line -match '(reset --hard|checkout --detach|clean -ffdx)' }).Count
+            } finally {
+                if (Test-Path -LiteralPath $tip) { [IO.Directory]::Delete($tip) } # 只摘链接本身
+                Move-Item -LiteralPath $tipSaved -Destination $tip
+            }
+            Add-RinneCase $cases '合并后构建：wt/tip-3 是 junction 时 reset、checkout、clean 都不跑，判红' $true ($jOps -eq 0 -and $vj -is [string] -and $vj -match '拒绝清理')
             Add-RinneCase $cases '合并后构建：都用同一把构建槽 build-slot-1（同一时间只跑一个，并发的见上面）' $false ($slot -ne 'build-slot-1')
             $buildResult = @{ Code = -1; Out = ''; Err = '超时'; TimedOut = $true }
             $vc = Invoke-MergeCheck 3 $cid
@@ -2139,7 +2155,7 @@ function Invoke-SelfTest {
         $rm = $after[' worktree remove ']
         # rinne-delete-ok: 自测里的假实现，只挪不删，且先核对路径在自测临时目录里面
         $awayThrew = Test-Throws { & $rm @('git', 'worktree', 'remove', '--force', $away) }
-        $linkThrew = Test-Throws { & $rm @('git', 'worktree', 'remove', '--force', $toAway) }
+        $linkThrew = Test-Throws { & $rm @('git', 'worktree', 'remove', '--force', $toAway) } # rinne-delete-ok: 自测里的假实现，只记录不删，路径在自测临时目录里
         Add-RinneCase $cases '假的 worktree remove：给的路径（按真实路径）在自测临时目录外面就抛错，原样不动' $true (
             $awayThrew -and $linkThrew -and (Test-Path -LiteralPath (Join-Path $away 'keep.txt')) -and (Test-Path -LiteralPath $toAway))
         # 只删链接本身（核对失效时它已经被挪走，不在原处）

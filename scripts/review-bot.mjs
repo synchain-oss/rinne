@@ -25,7 +25,7 @@ import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { assertNodeVersion, caseResult, git, isMain } from "./lib/check-kit.mjs";
-import { makeTempDir, removeFixedDir, removeTempDir, unlinkFixedLink } from "./lib/safe-rm.mjs";
+import { cleanupTempDir, makeTempDir, removeFixedDir, unlinkFixedLink } from "./lib/safe-rm.mjs";
 import { workflowLines } from "./checks.d/workflows.mjs";
 
 /** 合并判据只解析这一行。 */
@@ -435,12 +435,12 @@ function prepare({ pr, repo, base, head, bot, out }) {
     // 先删再建：签出的代码若自带同名目录，里面的链接会把写入引到工作区外。只清仓内写死的 .rinne-review，
     // --out 指到别处而那里已经有东西时不清（返回原因），免得递归删到参数给的路径
     // 签出的代码若让 .rinne-review 自己是链接，只摘链接本身再建真目录（不进链接目标）
-    const notUnlinked = unlinkFixedLink(out, { root: process.cwd(), rel: [".rinne-review"] });
+    const notUnlinked = unlinkFixedLink(out, { rel: [".rinne-review"] });
     if (notUnlinked) {
         console.error(`不能清空输出目录：${notUnlinked}`);
         return 1;
     }
-    const notCleared = removeFixedDir(out, { root: process.cwd(), rel: [".rinne-review"] });
+    const notCleared = removeFixedDir(out, { rel: [".rinne-review"] });
     if (notCleared) {
         console.error(`不能清空输出目录：${notCleared}`);
         return 1;
@@ -527,7 +527,7 @@ function post({ pr, repo, head, exec, bot, runUrl }) {
         fs.writeFileSync(file, JSON.stringify({ body }));
         posted = gh(["api", "-X", "POST", `repos/${repo}/issues/${pr}/comments`, "--input", file], { parse: true });
     } finally {
-        removeTempDir(dir);
+        cleanupTempDir(dir);
     }
     const id = String(posted?.id ?? "");
     if (!/^\d+$/.test(id)) throw new Error("发评论的响应里没有评论编号，下一轮核对不了这条总结");
@@ -899,7 +899,7 @@ export function selfTest() {
         false,
         !recordPosted(postedRecord("7", "abc"), { log: () => {}, summaryFile: "" }).includes("id=7 "),
     );
-    removeTempDir(sumDir);
+    cleanupTempDir(sumDir);
     return caseResult(cases);
 }
 

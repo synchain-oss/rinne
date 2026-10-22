@@ -6,7 +6,7 @@
 // 无头浏览器的光栅路径和真机不同，颜色、字体和亚像素可能有极小差异；本库用来回归和「有没有画出来」，设计验收以真机为准。
 // 本机同时只能有一个浏览器冒烟：调用方在 gates 里持 gui 锁；手动跑 run-all 时自己别并行。
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { makeTempDir, removeTempDir } from "../../../scripts/lib/safe-rm.mjs";
@@ -170,16 +170,25 @@ export async function launchBrowser({ width = 1280, height = 900 } = {}) {
     }
     const cleanup = async () => {
         try {
+            // Windows 上 Chromium 还有 GPU / 工具子进程握着 profile 里的文件：只杀主进程，子进程一直不放，目录就删不掉；连子进程一起结束
+            if (process.platform === "win32" && proc.pid) spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { stdio: "ignore" });
             proc.kill();
         } catch {
             // 已经退出
         }
         await sleep(300);
-        for (let i = 0; i < 5; i++) {
-            if (removeTempDir(profile) === null) return;
+        let why;
+        for (let i = 0; i < 20; i++) {
+            why = removeTempDir(profile);
+            if (why === null) return;
             await sleep(300); // 浏览器进程还握着文件：等一等再删
         }
+        console.error(`浏览器的临时 profile 没清掉：${why}`);
     };
+    // 主进程被强杀（超时）时 finally 不会执行；正常退出和未捕获异常时 exit 事件还能尽力清一次
+    process.once("exit", () => {
+        removeTempDir(profile);
+    });
     if (!port) {
         await cleanup();
         throw new Error("浏览器没有在 10 秒内开出调试端口");

@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as kit from "./lib/check-kit.mjs";
 import * as needles from "./lib/privacy-needles.mjs";
-import { makeTempDir, removeTempDir } from "./lib/safe-rm.mjs";
+import { cleanupTempDir, makeTempDir } from "./lib/safe-rm.mjs";
 
 const { ROOT, caseResult, git, tempRepo, trackedFiles } = kit;
 const { mask, redact, scan, scanBlob } = needles;
@@ -237,7 +237,7 @@ export function selfTest() {
         t("补丁路径：八进制转义", '"b/\\346\\226\\207.md"', "文.md");
     } finally {
         repo.cleanup();
-        removeTempDir(aux);
+        cleanupTempDir(aux);
     }
     return caseResult(cases);
 }

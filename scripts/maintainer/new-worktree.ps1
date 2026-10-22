@@ -85,7 +85,8 @@ function Invoke-SelfTest {
         Exit-RinneSelfTestNeedles $needles
         Set-RinneLockImpl $null
         $env:RINNE_ROOT = $oldRoot
-        $null = Remove-RinneTempDir -Path $tmp -WaitSeconds 5
+        $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 5
+        if ($left) { Write-Warning "临时目录没清掉：$left" }
     }
     Complete-RinneSelfTest $cases 'new-worktree'
 }

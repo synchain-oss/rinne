@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # 自测用的临时目录：递归删除只删本进程经 New-RinneTempDir 建出来的目录，删之前按真实路径核对。
-# - New-RinneTempDir 在系统临时目录下一层建目录（名字是前缀 + 32 位随机十六进制，同名的已经在就换一个，建不出来抛错），
+# - New-RinneTempDir 在系统临时目录（或 -Parent 指定的已有绝对路径目录）下一层建目录（名字是前缀 + 32 位随机十六进制，同名的
+#   已经在就换一个，建不出来抛错），
 #   所以「是本进程建的」不取决于调用方的 ErrorActionPreference；建好就记下它的真实路径。不用 .NET 7 才有的
 #   [IO.Directory]::CreateTempSubdirectory：脚本的 #Requires 只到 7.0，这里自己拼路径、用 CreateDirectory 建。
 # - 真实路径逐级解析：路径上每一级是 junction 或符号链接的，换成它最终指向的位置再往下走（Windows 与别的平台同一套，macOS
 #   的 /var 指向 /private/var 这类系统自带的链接也照样解析）。
-# - Remove-RinneTempDir 每次动手之前重新解析：真实路径必须是建的时候记下的那一个，而且就在系统临时目录（同样按真实路径）
-#   下一层、名字以建时的前缀开头；有一项不符就不删，返回原因。里面的 junction 与符号链接只删链接本身，不进去。删不掉（子进程
+# - Remove-RinneTempDir 每次动手之前重新解析：真实路径必须是建的时候记下的那一个，而且就在建时的父目录（系统临时目录或 -Parent，
+#   同样按真实路径）下一层、名字以建时的前缀开头；有一项不符就不删，返回原因。New-RinneOwnedDir 建的是指定名字的目录，只收
+#   绝对路径、父目录已存在、目录本身不能已经在（包括指向目录的链接），建好同样登记。路径比较前先剥掉 \\?\ 与 \\.\ 前缀。里面的 junction 与符号链接只删链接本身，不进去。删不掉（子进程
 #   还握着里面的文件）时按 -WaitSeconds 重试，等不到返回原因。
 # - 量子进程管道的自测会留下一个活十几秒、握着临时目录里日志的孙进程：Get-RinneLingerCommand 给出它的命令（pwsh
 #   -EncodedCommand 的参数），活到时限或者停止文件出现就退出。量完写停止文件，孙进程退出之后目录才删得掉。
@@ -34,7 +36,7 @@ $script:Made = [Collections.Generic.Dictionary[string, object]]::new($script:Cmp
 function Resolve-RinneRealPath {
     param([Parameter(Mandatory)][string]$Path, [int]$Depth = 0)
     if ($Depth -gt 32) { throw "链接套得太深，解析不出真实路径：$Path" }
-    $full = [IO.Path]::GetFullPath($Path)
+    $full = [IO.Path]::GetFullPath(($Path -replace '^\\\\[?.]\\(?=[A-Za-z]:)', ''))
     $cur = [IO.Path]::GetPathRoot($full)
     foreach ($part in @($full.Substring($cur.Length) -split '[\\/]' | Where-Object { $_ })) {
         $next = [IO.Path]::Join($cur, $part)
@@ -59,6 +61,7 @@ function New-RinneTempDir {
     param([Parameter(Mandatory)][ValidatePattern('^rinne-[a-z0-9-]+-$')][string]$Prefix, [string]$Parent)
     $root = $Parent ? $Parent : [IO.Path]::GetTempPath()
     if ($Parent) {
+        if (-not [IO.Path]::IsPathFullyQualified($Parent)) { throw "父目录要写绝对路径：$Parent" }
         if (-not (Test-Path -LiteralPath $Parent -PathType Container)) { throw "父目录不存在：$Parent" }
         $why = Test-RinneDangerousPath $Parent
         if ($why) { throw "不在这里建可删的目录：$why" }
@@ -90,6 +93,7 @@ function New-RinneTempDir {
 #>
 function New-RinneOwnedDir {
     param([Parameter(Mandatory)][string]$Path)
+    if (-not [IO.Path]::IsPathFullyQualified($Path)) { throw "目录路径要写绝对路径：$Path" }
     $full = [IO.Path]::GetFullPath($Path)
     $parent = [IO.Path]::GetDirectoryName($full)
     $name = [IO.Path]::GetFileName($full)
@@ -301,11 +305,29 @@ function Test-RinneTempDir {
         $o1 = New-RinneOwnedDir -Path (Join-Path $b 'owned-one')
         Set-Content -LiteralPath (Join-Path $o1 'f.txt') -Value 'x'
         $dup = & $throws { New-RinneOwnedDir -Path (Join-Path $b 'keep.txt') }
-        $rootParent = & $throws { New-RinneTempDir -Prefix 'rinne-tempdir-selftest-' -Parent $driveRoot }
+        # 父目录是盘根：只用纯函数判断，不在真的盘根上调建目录的入口
+        $rootParent = $null -ne (Test-RinneDangerousPath -Path $driveRoot -HomeDir $fakeHome)
+        # 已经存在的目录、指向目录的链接都不接手；相对路径一律拒绝（不碰磁盘）
+        $existDir = Join-Path $b 'exists-dir'
+        $null = New-Item -ItemType Directory -Path $existDir
+        $existLink = Join-Path $b 'exists-link'
+        & $link $existLink $existDir
+        try { $dupDir = & $throws { New-RinneOwnedDir -Path $existDir }; $dupLink = & $throws { New-RinneOwnedDir -Path $existLink } }
+        finally { Remove-Item -LiteralPath $existLink -Force }
+        $relOwned = & $throws { New-RinneOwnedDir -Path 'rinne-rel-owned-dir' }
+        $relParent = & $throws { New-RinneTempDir -Prefix 'rinne-tempdir-selftest-' -Parent 'rel-parent' }
         $r1, $r2 = (Remove-RinneTempDir -Path $p1), (Remove-RinneTempDir -Path $o1)
         & $check '指定父目录：建出来的目录（随机名、指定名）都能删，删后不在' $false (-not ($null -eq $r1 -and $null -eq $r2 -and -not (Test-Path -LiteralPath $p1) -and -not (Test-Path -LiteralPath $o1)))
         & $check '指定父目录：指定名的目录已经在就报错，不接手' $true ($dup -and (Test-Path -LiteralPath (Join-Path $b 'keep.txt')))
-        & $check '指定父目录：父目录是盘根就报错，不建' $true $rootParent
+        & $check '指定父目录：父目录是盘根判为危险（纯函数）' $true $rootParent
+        & $check '指定名目录：目录已经在就报错，不接手' $true ($dupDir -and (Test-Path -LiteralPath $existDir))
+        & $check '指定名目录：位置上已经有指向目录的链接就报错，不接手' $true ($dupLink -and (Test-Path -LiteralPath $existDir))
+        & $check '指定名目录：相对路径拒绝，也没有建出来' $true ($relOwned -and -not (Test-Path -LiteralPath 'rinne-rel-owned-dir'))
+        & $check '指定父目录：相对路径拒绝' $true $relParent
+        if ($IsWindows) {
+            & $check '危险路径：带 \\?\ 前缀的用户目录也判得出' $true ($null -ne (Test-RinneDangerousPath -Path ('\\?\' + $fakeHome) -HomeDir $fakeHome))
+            & $check '危险路径：带 \\.\ 前缀的盘根也判得出' $true ($null -ne (Test-RinneDangerousPath -Path ('\\.\' + $driveRoot) -HomeDir $fakeHome))
+        }
 
         # 调用方把 ErrorActionPreference 设成 SilentlyContinue：没设偏好的模块里，核对途中的错误被吞掉之后接着往下走，落到删除。子进程
         # 里试，它的系统临时目录在 $b 里面：建一个目录、放一个文件，原目录挪开，原位换成成环的链接（解析真实路径时抛错），再删它。

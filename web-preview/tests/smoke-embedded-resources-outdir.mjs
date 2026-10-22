@@ -14,7 +14,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
-import { makeTempDir, removeFixedDir, removeTempDir } from "../../scripts/lib/safe-rm.mjs";
+import { cleanupTempDir, makeTempDir, removeFixedDirInTemp } from "../../scripts/lib/safe-rm.mjs";
 
 /**
  * 只摘掉链接本身：先确认路径确实是符号链接或 junction，再 unlink。
@@ -147,7 +147,7 @@ try {
     try {
         fs.writeFileSync(path.join(outside, MARKER), "m");
         fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
-        removeFixedDir(out, { root: tmp, rel: OUT_REL }); // 副本里的固定目录
+        removeFixedDirInTemp(out, { tempRoot: tmp, rel: OUT_REL }); // 副本里的固定目录
         fs.symlinkSync(outside, out, "junction");
         r = exec();
         run.check(r.status === 1, `固定目录是 junction 指向带标记的外部目录：应当拒绝，实得 ${r.status}`);
@@ -165,10 +165,10 @@ try {
         run.check(!fs.existsSync(gone), "悬空 junction：没有穿过链接创建任何东西");
         unlinkLink(out);
     } finally {
-        removeTempDir(outside);
+        cleanupTempDir(outside);
     }
 } finally {
-    removeTempDir(tmp);
+    cleanupTempDir(tmp);
 }
 
 run.finish();

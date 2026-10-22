@@ -147,7 +147,7 @@ function Invoke-ClangFormat($Ctx) {
         git -C $fx add -A *>$null
         $one = Test-CxxTree $Ctx $fx
         if ($one.Status -ne 'PASS') { return @{ Status = 'FAIL'; Reason = "自测失败：恰好一个 C++ 文件的夹具没有通过（$($one.Status)：$($one.Reason)）" } }
-    } finally { $null = Remove-RinneTempDir -Path $fx -WaitSeconds 5 }
+    } finally { $left = Remove-RinneTempDir -Path $fx -WaitSeconds 5; if ($left) { Write-Warning "临时目录没清掉：$left" } }
     Test-CxxTree $Ctx $Ctx.Root
 }
 
@@ -187,7 +187,7 @@ function Invoke-Compliance($Ctx) {
             (Step 'gitleaks 提交' $gl @('git', '.', '--no-banner', '--redact', "--log-opts=$range --no-ext-diff --no-textconv"))
             (Step '隐私 提交' $node @('scripts/check-privacy.mjs', '--commits', '--no-messages', $range))
         )
-    } finally { $null = Remove-RinneTempDir -Path $tmp -WaitSeconds 5 }
+    } finally { $left = Remove-RinneTempDir -Path $tmp -WaitSeconds 5; if ($left) { Write-Warning "临时目录没清掉：$left" } }
 }
 
 # workflow 里 run-checks 的 compliance 组用到的 --only，按出现顺序。

@@ -4,7 +4,8 @@
 // （checks.d/recursive-delete.mjs 把关）。
 //   makeTempDir(prefix, { parent })      在系统临时目录（或指定的已有目录）下一层建随机名目录，记下真实路径，返回路径
 //   removeTempDir(dir, { maxRetries })   只删本进程经 makeTempDir 建出来的目录；删之前重新按真实路径核对。返回 null 或不删/删不掉的原因
-//   removeFixedDir(dir, { root, rel })   只删「仓内写死的输出目录」：dir 的真实路径必须正好是 root/rel（rel 是写死的相对路径），
+//   removeFixedDir(dir, { rel })         只删「仓内写死的输出目录」：仓根由本模块的位置推出，rel 必须是 FIXED_DIRS 白名单里的一项，
+//                                         dir 的真实路径必须正好是 仓根/rel，
 //                                         且它本身不是链接、不是仓根或盘根或用户目录。返回 null 或原因
 // 核对用的判断都是纯函数（dangerousReason、tempVerdict、fixedVerdict），自测只喂它们假数据，不在真实路径上触发删除。
 // 链接的处理：路径逐级解析成真实路径再比；fs.rmSync 递归删除遇到目录里的链接只删链接本身，不进去。
@@ -13,6 +14,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** 仓根：按本模块自己的位置（scripts/lib/）推出，不由调用方给。 */
+export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const WIN = process.platform === "win32";
 const norm = (p) => (WIN ? p.toLowerCase() : p);
@@ -64,10 +69,34 @@ export function tempVerdict({ real, entry, tmpReal, home }) {
     return null;
 }
 
-/** 仓内写死的输出目录能不能删的判断（纯）。rel 是写死的相对路径（数组或 / 分隔的串）。 */
-export function fixedVerdict({ rootReal, targetReal, targetIsLink, rel, home }) {
-    const parts = Array.isArray(rel) ? rel : String(rel).split("/");
-    if (!parts.length || parts.some((s) => !s || s === "." || s === "..")) return "写死的相对路径不合格";
+/** rel 只收由非空、不含 . .. 分隔符与盘符的段组成的数组（纯）。返回 null 或原因。 */
+export function relVerdict(rel) {
+    if (!Array.isArray(rel) || !rel.length) return "写死的相对路径不合格";
+    if (rel.some((s) => typeof s !== "string" || !s || s === "." || s === ".." || /[\\/:]/.test(s))) return "写死的相对路径不合格";
+    return null;
+}
+
+/** root 只能是仓根，或本进程用 makeTempDir 建出来的目录（纯）。repoReal、madeReals 由调用方给真实路径。 */
+export function rootVerdict({ rootReal, repoReal, madeReals = [] }) {
+    if (same(rootReal, repoReal) || madeReals.some((m) => same(m, rootReal))) return null;
+    return `root ${rootReal} 既不是仓根也不是 makeTempDir 登记过的目录`;
+}
+
+/** 仓内允许递归删除的写死相对路径（相对仓根）。要加一项就改这里，评审看得见；门禁要求 removeFixedDir 的参数是这里的字面量。 */
+export const FIXED_DIRS = [[".rinne-review"]];
+
+/**
+ * 仓内写死的输出目录能不能删的判断（纯）。rel 是写死的相对路径（段数组）；allowed 给了就要求 rel 正好是其中一项。
+ * 任何情况下都不删仓根、wt/ 或它的子目录、盘根、用户目录：rel 必须是 allowed 里的、或（临时副本里）合格的段，目标必须正好是 root/rel。
+ */
+export function fixedVerdict({ rootReal, targetReal, targetIsLink, rel, home, repoReal = rootReal, madeReals = [], allowed }) {
+    const bad = relVerdict(rel) ?? rootVerdict({ rootReal, repoReal, madeReals });
+    if (bad) return bad;
+    if (allowed && !allowed.some((a) => a.length === rel.length && a.every((x, i) => x === rel[i]))) {
+        return `${rel.join("/")} 不在 safe-rm.mjs 的写死白名单里`;
+    }
+    if (rel[0] === "wt") return "不删 wt/ 或它的子目录";
+    const parts = rel;
     if (targetIsLink) return `${targetReal} 本身是链接，不递归删`;
     const danger = dangerousReason(targetReal, home);
     if (danger) return danger;
@@ -126,8 +155,27 @@ export function removeTempDir(dir, { maxRetries = 0 } = {}) {
     }
 }
 
-/** 删掉仓内写死的输出目录（root 下 rel）。不在返回 null；不删、删不掉返回原因。 */
-export function removeFixedDir(dir, { root, rel }) {
+/** 收尾用：删不掉就把原因打到 stderr（不抛，免得盖住 finally 之前的错误），泄漏不再无声。 */
+export function cleanupTempDir(dir, opts) {
+    const why = removeTempDir(dir, opts);
+    if (why) console.error(`临时目录没清掉：${why}`);
+    return why;
+}
+
+/**
+ * 删掉仓内写死的输出目录（仓根下 rel）。仓根由本模块的位置推出，调用方不能指定；rel 必须是 FIXED_DIRS 里的一项。
+ * 不在返回 null；不删、删不掉返回原因。
+ */
+export function removeFixedDir(dir, { rel }) {
+    return removeFixedUnder(dir, REPO_ROOT, rel, FIXED_DIRS);
+}
+
+/** 临时副本里的写死目录（冒烟测试在 makeTempDir 建的副本里清它的输出目录）：tempRoot 只能是 makeTempDir 登记过的目录。 */
+export function removeFixedDirInTemp(dir, { tempRoot, rel }) {
+    return removeFixedUnder(dir, tempRoot, rel, null);
+}
+
+function removeFixedUnder(dir, root, rel, allowed) {
     let st;
     try {
         st = fs.lstatSync(dir);
@@ -140,10 +188,16 @@ export function removeFixedDir(dir, { root, rel }) {
         targetReal: realPathLoose(dir),
         targetIsLink: st.isSymbolicLink(),
         rel,
+        repoReal: allowed ? realPathLoose(REPO_ROOT) : "(无仓根)",
+        madeReals: [...made.values()].map((e) => e.real),
+        allowed,
     });
     if (why) return `不删 ${dir}：${why}`;
+    // 删核对过的真实路径；核对到删除之间它若被换成了链接就不删
+    const target = realPathLoose(dir);
     try {
-        fs.rmSync(dir, { recursive: true, force: true }); // rinne-delete-ok: 核对过的仓内写死输出目录
+        if (fs.lstatSync(target).isSymbolicLink()) return `不删 ${dir}：核对之后变成了链接`;
+        fs.rmSync(target, { recursive: true, force: true }); // rinne-delete-ok: 上面 fixedVerdict 核对过的仓内写死输出目录，删的是核对过的真实路径
         return null;
     } catch (e) {
         return `删不掉 ${dir}：${e.message}`;
@@ -154,7 +208,16 @@ export function removeFixedDir(dir, { root, rel }) {
  * 写死的输出目录位置上是一个链接时，只摘掉链接本身（不进去、不递归）。dir 的字面路径必须正好是 root/rel。
  * 不是链接或不在返回 null；位置不对返回原因。
  */
-export function unlinkFixedLink(dir, { root, rel }) {
+export function unlinkFixedLink(dir, { rel }) {
+    return unlinkFixedUnder(dir, REPO_ROOT, rel, FIXED_DIRS);
+}
+
+/** 同上，在 makeTempDir 登记过的临时副本里。 */
+export function unlinkFixedLinkInTemp(dir, { tempRoot, rel }) {
+    return unlinkFixedUnder(dir, tempRoot, rel, null);
+}
+
+function unlinkFixedUnder(dir, root, rel, allowed) {
     let st;
     try {
         st = fs.lstatSync(dir);
@@ -163,7 +226,15 @@ export function unlinkFixedLink(dir, { root, rel }) {
         return `不处理 ${dir}：${e.message}`;
     }
     if (!st.isSymbolicLink()) return null;
-    if (!rel?.length || rel.some((x) => !x || x === ".." || x === "." || /[\\/]/.test(x))) return `不处理 ${dir}：rel 不合格`;
+    const bad =
+        relVerdict(rel) ??
+        rootVerdict({
+            rootReal: realPathLoose(root),
+            repoReal: allowed ? realPathLoose(REPO_ROOT) : "(无仓根)",
+            madeReals: [...made.values()].map((e) => e.real),
+        });
+    if (!bad && allowed && !allowed.some((a) => a.join("/") === rel.join("/"))) return `不处理 ${dir}：不在白名单里`;
+    if (bad) return `不处理 ${dir}：${bad}`;
     if (!same(path.resolve(dir), path.join(path.resolve(root), ...rel))) return `不处理 ${dir}：不是 root/rel 这个位置`;
     try {
         fs.unlinkSync(dir); // 摘链接本身；目录型链接（junction）在 Windows 上同样用 unlink
@@ -225,6 +296,26 @@ export function selfTestCases() {
     t("写死目录判断：rel 带 ..：拒绝", true, fixedVerdict({ ...fx, rel: ["..", "x"] }));
     t("写死目录判断：rel 为空：拒绝", true, fixedVerdict({ ...fx, rel: [] }));
     t("写死目录判断：目标是盘根：拒绝", true, fixedVerdict({ ...fx, targetReal: root }));
+    const wl = [[".rinne-review"]];
+    const wlFx = { ...fx, targetReal: path.join(repo, ".rinne-review"), rel: [".rinne-review"], allowed: wl };
+    t("白名单：rel 在白名单里、目标正好是仓根/rel：通过", false, fixedVerdict(wlFx));
+    t("白名单：rel 不在白名单里：拒绝", true, fixedVerdict({ ...wlFx, rel: ["build"], targetReal: path.join(repo, "build") }));
+    t("白名单：rel 是 ..：拒绝", true, fixedVerdict({ ...wlFx, rel: [".."], targetReal: path.dirname(repo) }));
+    t("白名单：目标是 wt/：拒绝", true, fixedVerdict({ ...wlFx, rel: ["wt"], targetReal: path.join(repo, "wt"), allowed: [["wt"]] }));
+    t("白名单：目标是工作区根（仓根的上级）：拒绝", true, fixedVerdict({ ...wlFx, targetReal: path.dirname(repo) }));
+    t("白名单：目标是仓根：拒绝", true, fixedVerdict({ ...wlFx, targetReal: repo }));
+    t("白名单：目标是 wt/ 下的子目录：拒绝", true, fixedVerdict({ ...wlFx, targetReal: path.join(repo, "wt", "x", ".rinne-review") }));
+    t("写死目录判断：root 是仓根：通过", false, fixedVerdict({ ...fx, repoReal: repo }));
+    t("写死目录判断：root 是登记过的临时目录：通过", false, fixedVerdict({ ...fx, repoReal: tmp, madeReals: [repo] }));
+    const wtLike = path.join(root, "work", "wt");
+    t(
+        "写死目录判断：调用方从目标本身推出 root（目标是 wt）：拒绝",
+        true,
+        fixedVerdict({ rootReal: path.dirname(wtLike), targetReal: wtLike, targetIsLink: false, rel: ["wt"], home, repoReal: repo }),
+    );
+    t("写死目录判断：rel 的段带分隔符：拒绝", true, fixedVerdict({ ...fx, rel: ["build/out"] }));
+    t("写死目录判断：rel 的段带盘符：拒绝", true, fixedVerdict({ ...fx, rel: ["C:", "x"] }));
+    t("写死目录判断：rel 是串不是数组：拒绝", true, fixedVerdict({ ...fx, rel: "build/out" }));
     t(
         "前缀不合格时建不出目录",
         true,
@@ -260,18 +351,7 @@ export function selfTestCases() {
     const parentLevel = makeTempDir("rinne-safermtest-", { parent: b });
     t("指定父目录：建在 parent 下一层", false, !same(path.dirname(realPathLoose(parentLevel)), realPathLoose(b)));
     t("指定父目录：建出来的能删", false, removeTempDir(parentLevel) !== null || fs.existsSync(parentLevel));
-    t(
-        "拒绝：父目录是盘根时建不出来",
-        true,
-        (() => {
-            try {
-                makeTempDir("rinne-safermtest-", { parent: root });
-                return false;
-            } catch {
-                return true;
-            }
-        })(),
-    );
+    t("拒绝：父目录是盘根（纯函数判断）", true, dangerousReason(root, home));
     const r2 = removeTempDir(b);
     t("删除：自测建的目录都删掉了", false, r2 !== null || fs.existsSync(b));
     const f = makeTempDir("rinne-safermtest-");
@@ -280,13 +360,13 @@ export function selfTestCases() {
     t(
         "写死目录：不是 rel 指的目录就不删",
         true,
-        removeFixedDir(path.join(f, "build"), { root: f, rel: ["build", "out"] }) &&
+        removeFixedDirInTemp(path.join(f, "build"), { tempRoot: f, rel: ["build", "out"] }) &&
             fs.existsSync(path.join(f, "build", "out", "x")),
     );
     t(
         "写死目录：正好是 root/rel 的删掉",
         false,
-        removeFixedDir(path.join(f, "build", "out"), { root: f, rel: ["build", "out"] }) !== null ||
+        removeFixedDirInTemp(path.join(f, "build", "out"), { tempRoot: f, rel: ["build", "out"] }) !== null ||
             fs.existsSync(path.join(f, "build", "out")),
     );
     const g = makeTempDir("rinne-safermtest-");
@@ -301,17 +381,17 @@ export function selfTestCases() {
         t(
             "写死目录位置上的链接：位置不对不摘",
             true,
-            unlinkFixedLink(path.join(f, "lnk"), { root: f, rel: ["other"] }) && fs.existsSync(path.join(f, "lnk")),
+            unlinkFixedLinkInTemp(path.join(f, "lnk"), { tempRoot: f, rel: ["other"] }) && fs.existsSync(path.join(f, "lnk")),
         );
         t(
             "写死目录位置上的链接：正好是 root/rel 就只摘链接，指向的东西不动",
             false,
-            unlinkFixedLink(path.join(f, "lnk"), { root: f, rel: ["lnk"] }) !== null ||
+            unlinkFixedLinkInTemp(path.join(f, "lnk"), { tempRoot: f, rel: ["lnk"] }) !== null ||
                 fs.existsSync(path.join(f, "lnk")) ||
                 !fs.existsSync(path.join(g, "keep.txt")),
         );
     }
-    t("写死目录位置上的链接：不是链接就什么都不做", false, unlinkFixedLink(path.join(f, "build"), { root: f, rel: ["build"] }) !== null);
+    t("写死目录位置上的链接：不是链接就什么都不做", false, unlinkFixedLinkInTemp(path.join(f, "build"), { tempRoot: f, rel: ["build"] }) !== null);
     removeTempDir(g);
     removeTempDir(f);
     return out;

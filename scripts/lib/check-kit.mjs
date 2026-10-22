@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { makeTempDir, removeTempDir } from "./safe-rm.mjs";
+import { makeTempDir, cleanupTempDir } from "./safe-rm.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -114,8 +114,7 @@ export function tempRepo({ bare = false } = {}) {
             fs.writeFileSync(abs, text);
         },
         cleanup: () => {
-            const why = removeTempDir(dir);
-            if (why) console.error(`临时仓没清掉：${why}`); // 在 finally 里调用，不抛，但不能悄悄留着
+            cleanupTempDir(dir); // 在 finally 里调用，不抛，但清不掉要报出来
         },
     };
 }

@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { checkAll, writeAll } from "../gen-docs.mjs";
 import { ROOT, caseResult } from "../lib/check-kit.mjs";
-import { makeTempDir, removeTempDir } from "../lib/safe-rm.mjs";
+import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
 import { I18N_FILE, INSTALL_FILE, SOURCE_FILE, loadSource, zhHashes } from "../lib/docs-kit.mjs";
 
 const SURFACES = {
@@ -34,7 +34,7 @@ async function scenario(root, mutate) {
         mutate({ edit, put, dir });
         return await checkAll(dir);
     } finally {
-        removeTempDir(dir);
+        cleanupTempDir(dir);
     }
 }
 

@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { ROOT } from "../lib/check-kit.mjs";
-import { makeTempDir, removeTempDir } from "../lib/safe-rm.mjs";
+import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
 import { locatePython } from "./fonts.mjs";
 import { loadDict } from "../check-i18n.mjs";
 
@@ -43,7 +43,7 @@ export default {
             fs.writeFileSync(file, JSON.stringify(dump));
             return runPython(python, ["--strings", file]);
         } finally {
-            removeTempDir(dir);
+            cleanupTempDir(dir);
         }
     },
     selfTest(ctx) {

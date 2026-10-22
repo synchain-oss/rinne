@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
-import { makeTempDir, removeFixedDir, removeTempDir } from "../../scripts/lib/safe-rm.mjs";
+import { cleanupTempDir, makeTempDir, removeFixedDirInTemp } from "../../scripts/lib/safe-rm.mjs";
 
 /**
  * 只摘掉链接本身：先确认路径确实是符号链接或 junction，再 unlink。
@@ -132,7 +132,7 @@ try {
         run.eq(fs.readFileSync(path.join(outside, "victim.png"), "utf8"), "victim", "符号链接被拒之后外部文件没动");
     }
     // 输出目录是 junction
-    removeFixedDir(path.join(tmp, "build"), { root: tmp, rel: ["build"] }); // 假仓库里的 build/
+    removeFixedDirInTemp(path.join(tmp, "build"), { tempRoot: tmp, rel: ["build"] }); // 假仓库里的 build/
     fs.mkdirSync(path.join(tmp, "build"));
     fs.symlinkSync(outside, path.join(tmp, ...baseRel), "junction");
     run.check(
@@ -151,8 +151,8 @@ try {
     run.check(!fs.existsSync(path.join(outside, "web-preview-shots")), "build/ 是 junction 被拒之后没有穿过去建目录");
     unlinkLink(path.join(tmp, "build"));
 } finally {
-    removeTempDir(tmp);
-    removeTempDir(outside);
+    cleanupTempDir(tmp);
+    cleanupTempDir(outside);
 }
 
 function throws(fn) {

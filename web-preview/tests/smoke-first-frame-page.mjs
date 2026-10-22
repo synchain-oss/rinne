@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRun, repoRoot } from "./lib/harness.mjs";
-import { makeTempDir, removeFixedDir, removeTempDir } from "../../scripts/lib/safe-rm.mjs";
+import { cleanupTempDir, makeTempDir } from "../../scripts/lib/safe-rm.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 
@@ -166,7 +166,7 @@ try {
             await badServer.close();
         }
     } finally {
-        removeTempDir(tmp);
+        cleanupTempDir(tmp);
     }
 } finally {
     await browser.close();
