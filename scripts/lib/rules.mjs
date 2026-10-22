@@ -143,8 +143,8 @@ export const TOP_LEVEL = {
 
 const KiB = 1024;
 /**
- * 体量预算。ADR 超限判红（CLAUDE.md 把 ADR 4 KB 定为硬上限），其余条目超限只报 WARN，
- * 由 docs-budget 检查执行。字节按 UTF-8 计。
+ * 体量预算。patterns 里带 hard 的条目超限判红（CLAUDE.md 把 ADR 4 KB 定为硬上限），
+ * 其余条目超限只报 WARN，由 docs-budget 检查执行。字节按文件在磁盘上的原始字节计。
  * 脚本行数只数本仓新写的部分：登记在 upstream/*.json 里的复制脚本不计。
  */
 export const BUDGETS = {
@@ -156,7 +156,7 @@ export const BUDGETS = {
         { path: "docs/USER_GUIDE.zh-CN.md", bytes: 30 * KiB },
         { path: "docs/RELEASE.md", bytes: 12 * KiB },
     ],
-    patterns: [{ glob: "docs/adr/[0-9][0-9][0-9][0-9]-*.md", bytes: 4 * KiB }],
+    patterns: [{ glob: "docs/adr/[0-9][0-9][0-9][0-9]-*.md", bytes: 4 * KiB, hard: true }],
     changelogSectionBytes: 4 * KiB,
     publicMarkdownBytes: 200 * KiB,
     scriptLines: { total: 2500, perFile: 400, growthPerMinor: 0.15 },

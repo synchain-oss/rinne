@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 文档与脚本体量预算（docs-truth 的一部分），数据取 scripts/lib/rules.mjs 的 BUDGETS：
-//   files：逐个文件的 UTF-8 字节数；
+//   files：逐个文件在磁盘上的字节数；
 //   patterns：glob 命中的文件，目前只有 ADR（docs/adr/[0-9][0-9][0-9][0-9]-*.md），每份 4 KiB；
 //   changelogSectionBytes：CHANGELOG.md 每个二级标题节的字节数；
 //   publicMarkdownBytes：全部跟踪 Markdown 的合计，third_party/ 与 LICENSES/ 除外；
 //   scriptLines：scripts/ 下本仓新写脚本的总行数与单文件行数，upstream/*.json 里登记的复制脚本不计。
-// ADR 超限判红（CLAUDE.md 把 ADR 4 KB 定为硬上限），其余条目超限只报 WARN。
+// patterns 里带 hard 的条目超限判红（CLAUDE.md 把 ADR 4 KB 定为硬上限），其余条目超限只报 WARN。
 // growthPerMinor 不实现：仓里没有可比的上一小版本基线，增长比例无从计算。
-// 判据在 budgetProblems，只吃路径与文本；glob 用本文件里的最小匹配，不引依赖。
-
+// 判据在 budgetProblems，只吃路径、文本与字节数，不碰文件系统；glob 用本文件里的最小匹配，不引依赖。
+// 字节按文件在磁盘上的原始字节算（输入里的 sizes，来自 readEntry 读到的整个缓冲区）：解码会剥掉 UTF-8 BOM，
+// 按解码后的文本算会少 3 字节，恰好跨过预算线时判错。解码后的文本只用来算行数与 CHANGELOG 分节。
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { BUDGETS } from "../lib/rules.mjs";
-import { caseResult, readText, trackedFiles } from "../lib/check-kit.mjs";
+import { caseResult, decodeText, trackedFiles } from "../lib/check-kit.mjs";
 
 const CHANGELOG = "CHANGELOG.md";
 const PUBLIC_MARKDOWN = /\.md$/i;
@@ -22,10 +25,10 @@ const UPSTREAM_JSON = /^upstream\/[^/]+\.json$/;
 
 const bytesOf = (text) => Buffer.byteLength(text, "utf8");
 
-/** 行数：按 LF / CRLF 分行，末尾换行不多算一行；空文件是 0 行。 */
-function lineCount(text) {
+/** 行数：按 LF / CRLF 分行，末尾换行不多算一行；空文件是 0 行。dropTrailing 只供变异检查用。 */
+function lineCount(text, { dropTrailing = true } = {}) {
     const lines = text.split(/\r?\n/);
-    if (lines.at(-1) === "") lines.pop();
+    if (dropTrailing && lines.at(-1) === "") lines.pop();
     return lines.length;
 }
 
@@ -51,15 +54,18 @@ function globToRegExp(glob) {
     return new RegExp(`^${out}$`);
 }
 
-/** CHANGELOG 的二级标题节：从 `## ` 行到下一个二级标题之前；围栏代码里的 `## ` 不算。 */
-function h2Sections(text) {
+/**
+ * CHANGELOG 的二级标题节：从 `## ` 行到下一个二级标题之前；围栏代码里的 `## ` 不算。
+ * isFence 与 onlyFirst 只供变异检查换成坏版本（围栏判定失效 / 只让第一个 ## 开节）。
+ */
+function h2Sections(text, { isFence = (line) => /^\s*(```|~~~)/.test(line), onlyFirst = false } = {}) {
     const out = [];
     let cur = null;
     let fence = false;
     for (const raw of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
         const line = raw.replace(/\r?\n$/, "");
-        if (/^\s*(```|~~~)/.test(line)) fence = !fence;
-        else if (!fence && /^## /.test(line)) {
+        if (isFence(line)) fence = !fence;
+        else if (!fence && /^## /.test(line) && !(onlyFirst && cur)) {
             if (cur) out.push(cur);
             cur = { title: line.slice(3).trim(), text: raw };
             continue;
@@ -89,39 +95,57 @@ function upstreamCopies(paths, texts) {
 
 /**
  * paths：全部跟踪路径；texts：{ 路径: 文本 }，含预算条目、CHANGELOG.md、公开 Markdown、
- * scripts/ 下的脚本与 upstream/*.json。返回 { red, warn }，只做计算，不碰文件系统。
+ * scripts/ 下的脚本与 upstream/*.json；sizes：{ 路径: 磁盘上的字节数 }，没有时按文本长度算。
+ * 返回 { red, warn }，只做计算，不碰文件系统。
+ * overrides 只供变异检查换掉一条判据（sections / count / sizeOf / isHard / patternLabel / budgets），运行时留空。
  */
-export function budgetProblems({ paths, texts }) {
-    return judge({ paths, texts }, BUDGETS);
+export function budgetProblems({ paths, texts, sizes }, overrides = {}) {
+    return judge({ paths, texts, sizes }, overrides.budgets ?? BUDGETS, overrides);
 }
 
-/** 判据本体。budgets 只供变异检查放宽阈值，运行时一律是 BUDGETS。 */
-function judge({ paths, texts }, budgets) {
+/**
+ * 判据本体。budgets 只供变异检查换阈值与口径，运行时一律是 BUDGETS；overrides 同上。
+ * 字节一律取 sizes 里记的磁盘字节数（原始字节），没有才退回解码后文本的字节数。
+ */
+function judge({ paths, texts, sizes }, budgets, overrides = {}) {
+    const sections = overrides.sections ?? ((text) => h2Sections(text));
+    const count = overrides.count ?? ((text) => lineCount(text));
+    const label = overrides.patternLabel ?? ((pattern) => pattern.glob);
+    const isHard = overrides.isHard ?? ((pattern) => pattern.hard === true);
+    const sizeOf = (p) =>
+        overrides.sizeOf
+            ? overrides.sizeOf(p, texts, sizes)
+            : sizes && typeof sizes[p] === "number"
+              ? sizes[p]
+              : bytesOf(texts[p]);
     const red = [];
     const warn = [];
     const present = (p) => typeof texts[p] === "string";
     const sorted = [...paths].sort();
-
     // 预算文件缺失时不在这里报：存在性由别的检查负责。
     for (const { path: file, bytes: limit } of budgets.files) {
         if (!present(file)) continue;
-        const bytes = bytesOf(texts[file]);
+        const bytes = sizeOf(file);
         if (bytes > limit) warn.push(`${file} 有 ${bytes} 字节，超过 ${limit} 字节的预算`);
     }
 
+    // patterns 里带 hard 的才判红（ADR 是硬上限），其余只报 WARN；提示文字按这一项自己的 glob 生成，不写死成 ADR。
     for (const pattern of budgets.patterns) {
         const re = globToRegExp(pattern.glob);
         for (const p of sorted) {
             if (!re.test(p) || !present(p)) continue;
-            const bytes = bytesOf(texts[p]);
+            const bytes = sizeOf(p);
             if (bytes > pattern.bytes) {
-                red.push(`${p} 有 ${bytes} 字节，超过 ADR 每份 ${pattern.bytes} 字节的硬上限`);
+                const hard = isHard(pattern);
+                const msg = `${p} 有 ${bytes} 字节，超过 ${label(pattern)} 每份 ${pattern.bytes} 字节的${hard ? "硬上限" : "预算"}`;
+                if (hard) red.push(msg);
+                else warn.push(msg);
             }
         }
     }
 
     if (present(CHANGELOG)) {
-        for (const section of h2Sections(texts[CHANGELOG])) {
+        for (const section of sections(texts[CHANGELOG])) {
             const bytes = bytesOf(section.text);
             if (bytes > budgets.changelogSectionBytes) {
                 warn.push(
@@ -134,7 +158,7 @@ function judge({ paths, texts }, budgets) {
 
     const publicBytes = sorted
         .filter((p) => PUBLIC_MARKDOWN.test(p) && !NOT_PUBLIC.test(p) && present(p))
-        .reduce((sum, p) => sum + bytesOf(texts[p]), 0);
+        .reduce((sum, p) => sum + sizeOf(p), 0);
     if (publicBytes > budgets.publicMarkdownBytes) {
         warn.push(`公开 Markdown 合计 ${publicBytes} 字节，超过 ${budgets.publicMarkdownBytes} 字节的预算`);
     }
@@ -143,7 +167,7 @@ function judge({ paths, texts }, budgets) {
     const scripts = sorted.filter((p) => SCRIPT.test(p) && !copies.has(p) && present(p));
     let totalLines = 0;
     for (const p of scripts) {
-        const lines = lineCount(texts[p]);
+        const lines = count(texts[p]);
         totalLines += lines;
         if (lines > budgets.scriptLines.perFile) {
             warn.push(`${p} 有 ${lines} 行，超过单文件 ${budgets.scriptLines.perFile} 行的预算`);
@@ -156,8 +180,13 @@ function judge({ paths, texts }, budgets) {
     return { red: red.sort(), warn: warn.sort() };
 }
 
-export function selfTest() {
-    const adrLimit = BUDGETS.patterns[0].bytes;
+/**
+ * 跑一遍自测用例。overrides 只供变异检查换掉一条判据（走判据本体的同一个入口），运行时留空。
+ * 每个用例配一个只有它能命中的坏样例：删掉任一判据，用例必须变红。
+ */
+function runCases(overrides = {}) {
+    const adrPattern = BUDGETS.patterns.find((p) => p.hard) ?? BUDGETS.patterns[0];
+    const adrLimit = adrPattern.bytes;
     const fileLimit = BUDGETS.files.find((f) => f.path === "CLAUDE.md").bytes;
     const sectionLimit = BUDGETS.changelogSectionBytes;
     const mdLimit = BUDGETS.publicMarkdownBytes;
@@ -178,6 +207,29 @@ export function selfTest() {
         return { paths, texts };
     };
     const changelog = `## [1.0.0]\n${"x".repeat(sectionLimit + 1)}\n## [0.9.0]\nok`;
+    // 三个新样例：两节只一节超限、围栏里的 ## 不是节头、末尾换行不多算一行。用例名写明各自的期望。
+    const twoSections = `## [9.9.9]\nsmall\n## [8.8.8]\n${"x".repeat(sectionLimit + 1)}\n`;
+    const fenced = ["## [1.0.0]", "```text", "## 假节头", "```", "x".repeat(sectionLimit + 1), ""].join("\n");
+    const withNewline = one("scripts/demo.mjs", `${lines(perFile + 5)}\n`);
+    const withoutNewline = one("scripts/demo.mjs", lines(perFile + 5));
+    // 从 WARN 文本里取判据算出的行数；只有一个 WARN 且字节数对得上；某一节自己的字节数。
+    const rowsOf = (r) => Number(/有 (\d+) 行/.exec(r.warn.join("\n"))?.[1] ?? -1);
+    const oneWarn = (r, bytes) => r.red.length === 0 && r.warn.length === 1 && r.warn[0].includes(`${bytes} 字节`);
+    const bytesFrom = (text, marker) => Buffer.byteLength(text.slice(text.indexOf(marker)), "utf8");
+    // 带 BOM 的文件：磁盘上的字节比解码后的文本多 3 字节。字节数必须按磁盘上的原始字节算。
+    const bomBytes = (n) => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("x".repeat(n))]);
+    const bomOver = bomBytes(adrLimit - 2); // 3 + 4094 = 4097 字节
+    const bomExact = bomBytes(adrLimit - 3); // 3 + 4093 = 4096 字节
+    const bomFileOver = bomBytes(fileLimit - 2); // CLAUDE.md：磁盘上 fileLimit + 1 字节，解码后少 3 字节
+    const bomMdOver = bomBytes(mdLimit - 2); // 公开 Markdown 合计：同理
+    const fromDisk = (p, bytes) => {
+        const e = readBackFromDisk(bytes);
+        return { paths: [p], texts: { [p]: e.text }, sizes: { [p]: e.size } };
+    };
+    // patterns 里不带 hard 的条目只报 WARN：提示文字按这一项自己的 glob 生成。
+    const softBudgets = structuredClone(BUDGETS);
+    softBudgets.patterns = [{ glob: "docs/notes/[0-9][0-9]-*.md", bytes: 1024 }];
+    const soft = "docs/notes/01-demo.md";
     const cases = [
         [
             "ADR 恰好 4096 字节不判红",
@@ -198,6 +250,44 @@ export function selfTest() {
             (r) => r.red.length === 1 && r.warn.length === 0,
         ],
         [
+            "ADR 带 BOM 时按磁盘字节算：4097 字节判红",
+            true,
+            { paths: [adr], texts: { [adr]: decodeText(bomOver) }, sizes: { [adr]: bomOver.length } },
+            (r) => r.red.length === 1 && r.warn.length === 0 && r.red[0].includes(`${bomOver.length} 字节`),
+        ],
+        [
+            "ADR 带 BOM 时按磁盘字节算：4096 字节不判红",
+            false,
+            { paths: [adr], texts: { [adr]: decodeText(bomExact) }, sizes: { [adr]: bomExact.length } },
+            (r) => r.red.length === 0 && r.warn.length === 0,
+        ],
+        [
+            "ADR 真从磁盘读回来：带 BOM 的 4097 字节判红，不能少算 BOM",
+            true,
+            fromDisk(adr, bomOver),
+            (r) => r.red.length === 1 && r.warn.length === 0 && r.red[0].includes(`${bomOver.length} 字节`),
+        ],
+        [
+            "CLAUDE.md 带 BOM 时按磁盘字节算：超一字节报 WARN",
+            true,
+            {
+                paths: ["CLAUDE.md"],
+                texts: { "CLAUDE.md": decodeText(bomFileOver) },
+                sizes: { "CLAUDE.md": bomFileOver.length },
+            },
+            (r) => oneWarn(r, bomFileOver.length) && r.warn[0].includes("CLAUDE.md"),
+        ],
+        [
+            "公开 Markdown 合计按磁盘字节算：带 BOM 超一字节报 WARN",
+            true,
+            {
+                paths: ["docs/big.md"],
+                texts: { "docs/big.md": decodeText(bomMdOver) },
+                sizes: { "docs/big.md": bomMdOver.length },
+            },
+            (r) => oneWarn(r, bomMdOver.length) && r.warn[0].includes("公开 Markdown"),
+        ],
+        [
             "CLAUDE.md 超限只 WARN 不判红",
             true,
             one("CLAUDE.md", "x".repeat(fileLimit + 1)),
@@ -214,6 +304,35 @@ export function selfTest() {
             true,
             one(CHANGELOG, changelog),
             (r) => r.red.length === 0 && r.warn.length === 1 && r.warn[0].includes(CHANGELOG),
+        ],
+        [
+            "changelog 两节只报超限的那一节，不合并两节",
+            true,
+            one(CHANGELOG, twoSections),
+            (r) =>
+                oneWarn(r, bytesFrom(twoSections, "## [8.8.8]")) &&
+                r.warn[0].includes("8.8.8") &&
+                !r.warn[0].includes("9.9.9"),
+        ],
+        [
+            "changelog 围栏里的 ## 不算节头",
+            true,
+            one(CHANGELOG, fenced),
+            (r) => oneWarn(r, Buffer.byteLength(fenced, "utf8")) && !r.warn[0].includes("假节头"),
+        ],
+        [
+            "脚本行数不因末尾换行多算一行，带与不带末尾换行算出的行数相同",
+            true,
+            withNewline,
+            (r, ov) => {
+                const a = rowsOf(r);
+                return (
+                    r.red.length === 0 &&
+                    r.warn.length === 1 &&
+                    a === rowsOf(budgetProblems(withoutNewline, ov)) &&
+                    a === perFile + 5
+                );
+            },
         ],
         [
             "公开 Markdown 合计超限 WARN",
@@ -282,9 +401,82 @@ export function selfTest() {
             one("docs/adr/12-demo.md", "x".repeat(adrLimit + 1)),
             (r) => r.red.length === 0 && r.warn.length === 0,
         ],
+        [
+            "patterns 里不带 hard 的条目超限只 WARN，提示按该项的 glob 生成",
+            true,
+            one(soft, "x".repeat(1025)),
+            (r) =>
+                r.red.length === 0 &&
+                r.warn.length === 1 &&
+                r.warn[0].includes("docs/notes/[0-9][0-9]-*.md") &&
+                !r.warn[0].includes("ADR"),
+            { budgets: softBudgets },
+        ],
         ["预算文件缺失不在这里报", false, { paths: [], texts: {} }, (r) => r.red.length === 0 && r.warn.length === 0],
-    ].map(([label, bad, input, expect]) => ({ label, bad, passed: expect(budgetProblems(input)) }));
+    ].map(([label, bad, input, expect, caseOverrides]) => {
+        const ov = { ...overrides, ...(caseOverrides ?? {}) };
+        return { label, bad, passed: expect(budgetProblems(input, ov), ov) };
+    });
     return caseResult(cases);
+}
+
+/** 自测：坏样例与正例都要有，删掉任一判据都要有用例变红。 */
+export function selfTest() {
+    return runCases();
+}
+
+/** 要读的路径：预算条目、CHANGELOG、公开 Markdown、脚本与 upstream 登记。 */
+function wantedPath(p) {
+    return (
+        BUDGETS.files.some((f) => f.path === p) ||
+        p === CHANGELOG ||
+        UPSTREAM_JSON.test(p) ||
+        (PUBLIC_MARKDOWN.test(p) && !NOT_PUBLIC.test(p)) ||
+        SCRIPT.test(p)
+    );
+}
+
+/**
+ * 读一个文件：解码后的文本（算行数与分节）与磁盘上的字节数（算字节预算，就是整个缓冲区的长度，BOM 也在内）。
+ * 读不到或是二进制时返回 null。
+ */
+function readEntry(abs) {
+    let buf;
+    try {
+        buf = fs.readFileSync(abs);
+    } catch {
+        return null;
+    }
+    const text = decodeText(buf);
+    return text === null ? null : { text, size: buf.length };
+}
+
+/** 读一遍要判的文件。 */
+function readInputs(root) {
+    const paths = trackedFiles(root);
+    const texts = {};
+    const sizes = {};
+    for (const p of paths) {
+        if (!wantedPath(p)) continue;
+        const entry = readEntry(path.join(root, p));
+        if (entry === null) continue;
+        texts[p] = entry.text;
+        sizes[p] = entry.size;
+    }
+    return { paths, texts, sizes };
+}
+
+/** 把字节写进临时目录里的一个文件，用 readEntry 读回来，再删掉（不递归：目录里只有这一个文件）。 */
+function readBackFromDisk(bytes) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "docs-budget-"));
+    const file = path.join(dir, "probe.md");
+    try {
+        fs.writeFileSync(file, bytes);
+        return readEntry(file);
+    } finally {
+        fs.rmSync(file, { force: true });
+        fs.rmdirSync(dir);
+    }
 }
 
 export default {
@@ -292,44 +484,69 @@ export default {
     group: "docs",
     inputs: [],
     run(ctx) {
-        const paths = trackedFiles(ctx.root);
-        const budgeted = new Set(BUDGETS.files.map((f) => f.path));
-        const wanted = (p) =>
-            budgeted.has(p) ||
-            p === CHANGELOG ||
-            UPSTREAM_JSON.test(p) ||
-            (PUBLIC_MARKDOWN.test(p) && !NOT_PUBLIC.test(p)) ||
-            SCRIPT.test(p);
-        const texts = {};
-        for (const p of paths) {
-            if (!wanted(p)) continue;
-            const text = readText(path.join(ctx.root, p));
-            if (text !== null) texts[p] = text;
-        }
-        const { red, warn } = budgetProblems({ paths, texts });
+        const { paths, texts, sizes } = readInputs(ctx.root);
+        const { red, warn } = budgetProblems({ paths, texts, sizes });
         return { ok: red.length === 0, lines: [...red, ...warn.map((w) => `WARN ${w}`)] };
     },
     selfTest,
-    /** 放宽阈值后，原本判红的 ADR 超限样例必须不再红；脚本单文件超限的 WARN 同理消失。 */
-    mutationCheck() {
+    /**
+     * 逐条换掉一条判据，自测必须因此变红；在真实文件上做变异，门禁必须因此判红。
+     * 变异走判据本体的同一个入口（overrides / budgets），不是把判据从源码里删掉。
+     */
+    mutationCheck(ctx) {
         const lines = [];
-        const adr = "docs/adr/9999-demo.md";
-        const adrInput = { paths: [adr], texts: { [adr]: "x".repeat(BUDGETS.patterns[0].bytes + 1) } };
-        if (judge(adrInput, BUDGETS).red.length !== 1) lines.push("基准：ADR 超限没有判红");
-        const wideAdr = structuredClone(BUDGETS);
-        for (const p of wideAdr.patterns) p.bytes *= 2;
-        if (judge(adrInput, wideAdr).red.length !== 0) lines.push("ADR 阈值翻倍后，超限样例仍然判红");
+        const root = ctx?.root ?? process.cwd();
+        const { paths, texts, sizes } = readInputs(root);
+        const adrPattern = BUDGETS.patterns.find((p) => p.hard) ?? BUDGETS.patterns[0];
 
-        const script = "scripts/demo.mjs";
-        const body = Array.from({ length: BUDGETS.scriptLines.perFile + 1 }, (_, i) => `line ${i}`).join("\n");
-        const scriptInput = { paths: [script], texts: { [script]: body } };
-        if (!judge(scriptInput, BUDGETS).warn.some((w) => w.includes("单文件"))) {
-            lines.push("基准：脚本单文件超限没有报 WARN");
+        // 真实 ADR：取最大的那份，原样判不红；在它的内容上垫到超限，门禁必须判红；阈值放宽后同一份垫过的文件不再判红。
+        const adrRe = globToRegExp(adrPattern.glob);
+        const adrs = paths.filter((p) => adrRe.test(p) && typeof texts[p] === "string");
+        if (!adrs.length) {
+            lines.push("真实文件里没有 ADR，无法在真实文件上做变异");
+        } else {
+            const target = adrs.reduce((a, b) => ((sizes[b] ?? 0) > (sizes[a] ?? 0) ? b : a));
+            const realInput = {
+                paths: [target],
+                texts: { [target]: texts[target] },
+                sizes: { [target]: sizes[target] },
+            };
+            if (judge(realInput, BUDGETS).red.length) lines.push(`基准：真实 ADR（${target}）本来就超限，变异没有意义`);
+            const padded = texts[target] + "\n" + "x".repeat(adrPattern.bytes);
+            const paddedInput = { paths: [target], texts: { [target]: padded }, sizes: { [target]: bytesOf(padded) } };
+            if (judge(paddedInput, BUDGETS).red.length !== 1) lines.push(`真实 ADR（${target}）垫到超限后门禁没有判红`);
+            const wide = structuredClone(BUDGETS);
+            for (const p of wide.patterns) p.bytes *= 2;
+            if (judge(paddedInput, wide).red.length) lines.push("ADR 阈值翻倍后，真实 ADR 垫到超限仍然判红");
         }
-        const wideScript = structuredClone(BUDGETS);
-        wideScript.scriptLines.perFile *= 2;
-        if (judge(scriptInput, wideScript).warn.some((w) => w.includes("单文件"))) {
-            lines.push("单文件行数上限翻倍后，超限样例仍然报 WARN");
+
+        // 真实脚本：取最短的那份，原样不报单文件超限；在它的内容后接上 perFile + 1 个空行，门禁必须报 WARN。
+        const copies = upstreamCopies(paths, texts);
+        const scripts = paths.filter((p) => SCRIPT.test(p) && !copies.has(p) && typeof texts[p] === "string");
+        if (!scripts.length) {
+            lines.push("真实文件里没有本仓新写的脚本，无法在真实文件上做变异");
+        } else {
+            const target = scripts.reduce((a, b) => (texts[b].length < texts[a].length ? b : a));
+            const overLimit = (text) =>
+                judge({ paths: [target], texts: { [target]: text } }, BUDGETS).warn.some((w) => w.includes("单文件"));
+            if (overLimit(texts[target])) lines.push(`基准：真实脚本（${target}）本来就超过单文件行数，变异没有意义`);
+            if (!overLimit(texts[target] + "\n".repeat(BUDGETS.scriptLines.perFile + 1))) {
+                lines.push(`真实脚本（${target}）垫到超过单文件行数后门禁没有报 WARN`);
+            }
+        }
+
+        // 各条判据各变异一次：分节、围栏、末尾换行、字节取磁盘原始字节、patterns 的判红口径与提示文字。每条变异后自测都必须变红。
+        const mutants = [
+            ["只让第一个 ## 开节", { sections: (text) => h2Sections(text, { onlyFirst: true }) }],
+            ["围栏判定失效", { sections: (text) => h2Sections(text, { isFence: () => false }) }],
+            ["末尾换行多算一行", { count: (text) => lineCount(text, { dropTrailing: false }) }],
+            ["字节按解码后的文本算（BOM 少算）", { sizeOf: (p, texts) => bytesOf(texts[p]) }],
+            ["patterns 里每一项都判红", { isHard: () => true }],
+            ["patterns 里没有一项判红", { isHard: () => false }],
+            ["patterns 提示文字写死成 ADR", { patternLabel: () => "ADR" }],
+        ];
+        for (const [label, ov] of mutants) {
+            if (runCases(ov).ok) lines.push(`变异「${label}」后自测仍然是绿的`);
         }
         return { ok: lines.length === 0, lines };
     },

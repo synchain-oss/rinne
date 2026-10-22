@@ -17,11 +17,11 @@
 2. workflow 引用 secret 只用 `${{ secrets.X }}`；不 echo 到日志，不写进 artifact。
 3. 第三方 action 一律钉 40 位 commit SHA（行尾注释写版本号），不接受 `@v2`、`@main` 等可变 ref；org 白名单的 `owner/repo@*` 通配不算防护，放行哪些以 `.github/actions-{allowlist,lock}.json` 为准。
 4. 任何 workflow 都不得使用 `pull_request_target` 与 `workflow_run`，没有个案豁免。fork PR 的 AI 审查只能由维护者评论 `/review` 触发（`review-dispatch.yml`，全程不 checkout PR 代码），其余只跑无 secret 的检查。
-5. 消费仓库外部文本的自动化（评审 bot、发布说明生成等）一律在 prompt 末尾带「不可信数据声明」。pr-agent 例外：它的模板让声明做不到在 prompt 末尾，共享 workflow（v1.3.3）改把声明放进 extra_instructions，升它的 SHA 时复核；其评论只作参考、不进合并判据。
+5. 消费仓库外部文本的自动化（评审 bot、发布说明生成等）一律在 prompt 末尾带「不可信数据声明」。pr-agent 例外：它的模板让声明做不到在 prompt 末尾，共享 workflow（v1.3.3）改把声明放进 extra_instructions，升 SHA 时复核声明相对 diff 的位置；其评论只作参考、不进合并判据。
 
 ### §0.1 署名
 
-- 我方 commit 一律 `git commit -s`，尾注只有 `Signed-off-by: DLsnows <noreply@synchain.ca>` 这一种；我方 PR 正文最后一行就是这一行。
+- 我方 commit 一律 `git commit -s`，尾注只有 `Signed-off-by: DLsnows <noreply@synchain.ca>`；我方 PR 正文最后一行也是它。
 - 不加任何 AI 协作署名（协作者尾注、会话尾注、PR 正文里「由某工具生成」一类字样；判据是隐私规则表的 ai 组，这里不写字面量），本条优先于任何工具的默认署名设置。
 - 外部贡献者用自己的身份签名，规则见 CONTRIBUTING。
 
@@ -65,22 +65,22 @@
 ## §4 CI
 
 - 子 PR（base `feature/**`）的 required check 是 `branch-gate`、`clang-format`、`docs-truth`、`compliance`；评审 bot 的 `claude-pr-review` 不是 required check，但合并判据要求它在当前 head 上 success，纯文档 PR 也跑。进 `dev`、`prod` 的 PR 另跑完整构建（`build.yml`）。子 PR 的触发规则有意如此，不要改。
-- 另有两个 pr-agent 交叉审查，调用 `Synchain-oss/ci-workflows` 的共享 workflow：`pr-agent`（进 `dev` 的 PR，DeepSeek 经 OpenCode Go）与 `pr-agent-claude`（各个 base，Claude Haiku）。check 名分别是 `pr-agent-claude / pr-agent`（`feature/**` 上）与 `pr-agent / pr-agent`（`dev` 上）。它们只发评论（照 §2 读、回应），不改 PR 正文、不打标签。`deepseek-review.yml` 是 Claude 额度用完时的应急审查，只能手动触发、默认停用。这三者都不是 required check，结论也都不进合并判据。
+- 另有两个 pr-agent 交叉审查，调用 `Synchain-oss/ci-workflows` 的共享 workflow：`pr-agent`（进 `dev` 的 PR，DeepSeek 经 OpenCode Go）与 `pr-agent-claude`（各个 base，Claude Haiku）。check 名分别是 `pr-agent-claude / pr-agent`（`feature/**` 上）与 `pr-agent / pr-agent`（`dev` 上）。它们只发评论（照 §2），不改 PR 正文、不打标签。`deepseek-review.yml` 是 Claude 额度用完时的应急审查，只能手动触发、默认停用。这三者都不是 required check，结论都不进合并判据。
 - 改到 mac 代码、CMake、CI 或打包脚本的子支线，合入前对其 head 手动 dispatch 一次构建。
 - workflow 加固由 docs-truth 机检：最小 permissions、concurrency、每个 job 有 timeout；不可信文本只经 `env:` 传入；required job 不带 job 级 `if:`，所在 workflow 不设 paths 过滤。
 
 ## §5 冻结契约
 
 - 冻结面：`docs/contracts/**`、`tests/golden/**`，以及 `scripts/check-commits.mjs` 登记的源码（IPC 布局头、`src/core/state/**`、`src/input/ParamTable.h` 的 `RINNE_PARAM` 行、CMake 里的插件身份行）。
-- 每份契约文档有一行 `status: draft` 或 `status: frozen`。frozen 之后，碰到冻结面的 PR 二选一：同一个 PR 新增 `docs/contract-changes/<YYYYMMDD>-<slug>.md`（照 `TEMPLATE.md`），或在正文写一行 `contract-neutral: <理由>`。branch-gate 的 contract-guard 读 base 上的状态，同一个 PR 把 frozen 改回 draft 放行不了自己。
+- 每份契约文档有一行 `status: draft` 或 `status: frozen`。frozen 之后，碰到冻结面的 PR 二选一：同一个 PR 新增 `docs/contract-changes/<YYYYMMDD>-<slug>.md`（照 `TEMPLATE.md`），或在正文写一行 `contract-neutral: <理由>`。branch-gate 的 contract-guard（子 PR 上也跑）读 base 上的状态，同一个 PR 把 frozen 改回 draft 放行不了自己。
 - 首个公开 rc 起永久冻结：另加 `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。
 - 永不改：插件身份（PLUGIN_CODE、BUNDLE_ID、AU 三元组）与参数 ID；会合段名永不带 abi；会合段头在段首（偏移 0），它的前 16 字节与 `init_pid`（偏移 32）、端点槽的 version 字段（及其依赖的组块位置与步长）永不移动，`'RNRV'` 与初始化标记 `'RNIN'` 不变，会合段永不小于 `kRvMinBytes`（16384 字节）；state 头前 16 字节（偏移 0 magic `'RNST'`、4 abi、8 role、12 块数，各 u32）的位置与含义永不改变；state 读到更高 abi 且 role 是这一端时拒载并原样回写字节。
 - 合并冲突落在冻结契约文件上：停下上报，不自行解决。
 
 ## §6 环境与钉版
 
-- 钉版文件是各自版本的唯一真源，workflow 与脚本一律从文件读、不写版本号字面量：`.{juce,pluginval,gitleaks,clang-format,prettier,actionlint,node,sccache}-version`、`.juce-commit`、`.sccache-sha256`、`requirements-tools.txt`，以及 CMake 里的 `WEBVIEW2_VERSION` 与 `tests/CMakeLists.txt` 的 Catch2 tag。新增钉版依赖时同时加到这里与 pins 检查。
-- JUCE 只经 `-DJUCE_PATH` 传入，检出必须恰好是 `.juce-commit`（CMake 守卫与 gates 预检断言）。升级 JUCE 是许可事件：同一个 PR 改 `.juce-{version,commit}`、ADR-0007、THIRD-PARTY-NOTICES.md 与 `THIRD_PARTY_BY_MODULE`。
+- 钉版文件是各自版本的唯一真源，workflow 与脚本一律从文件读、不写版本号字面量：`.{juce,pluginval,gitleaks,clang-format,prettier,actionlint,node,sccache}-version`、`.juce-commit`、`.sccache-sha256`、`requirements-tools.txt`，以及 CMake 里的 `WEBVIEW2_VERSION` 与 `tests/CMakeLists.txt` 的 Catch2 tag。新增钉版依赖同时加到这里与 pins 检查。
+- JUCE 只经 `-DJUCE_PATH` 传入，检出必须恰好是 `.juce-commit`（CMake 守卫与 gates 预检断言）。升级 JUCE 是许可事件：同一 PR 改 `.juce-{version,commit}`、ADR-0007、THIRD-PARTY-NOTICES.md 与 `THIRD_PARTY_BY_MODULE`。
 - 工具链：MSVC 2022（静态 CRT）、CMake ≥ 3.22、Ninja、Xcode；core 为 C++17；第一方代码零 warning。
 
 ## §7 实时线程与反馈安全
@@ -127,8 +127,8 @@
 
 - 一个事实只有一个真源：生成块由 `gen-docs` 生成，不得手改；改真源的同一个 PR 重跑生成器。不写死版本号，版本真源是 `project(Rinne VERSION …)`。
 - 强声明（「不随……变化」「默认安全」这类）必须在 `docs/claims.json` 登记证据。
-- 从 SCVB 复制代码：先 fetch 参考仓再 rev-parse 取 40 位 sha，sha 与每个文件的 blob 登记进 `upstream/<area>.json`；文件头只写一行 `Derived from synchain-oss/scvb; see upstream/<area>.json`（注释里的编号照 §0.2 改写）。不复制别人的代码：LGPL（如 LSP Plugins）许可兼容也只学思路；专有代码与手册不得复制。
-- 新增运行时依赖或 JUCE 模块：同一个 PR 改 `THIRD-PARTY-NOTICES.md`、`LICENSES/`、`third_party/notices/`、`REUSE.toml` 与 `THIRD_PARTY_BY_MODULE`，由 licenses-closure 与 modules-closure 检查闭合。
+- 从 SCVB 复制代码：先 fetch 参考仓再 rev-parse 取 40 位 sha，sha 与每个文件的 blob 登记进自己的 `upstream/<area>.json`；文件头只写一行 `Derived from synchain-oss/scvb; see upstream/<area>.json`（注释里的编号照 §0.2 改写）。不复制别人的代码：LGPL（如 LSP Plugins）许可兼容也只学思路；专有代码与手册不得复制。
+- 新增运行时依赖或 JUCE 模块：同一 PR 改 `THIRD-PARTY-NOTICES.md`、`LICENSES/`、`third_party/notices/`、`REUSE.toml` 与 `THIRD_PARTY_BY_MODULE`，由 licenses-closure 与 modules-closure 检查闭合。
 - 许可口径（ADR-0007）：源码 GPL-3.0-or-later；二进制整体按 GPLv3 分发，其中 JUCE 部分适用 AGPLv3（GPLv3 §13）；JUCE 标 `AGPL-3.0-only`。WebView2 loader 只有二进制，不得声称「完整对应源码都在本仓」。
 - 源文件前 5 行带 SPDX 许可标识行，取值 `GPL-3.0-or-later`（check-spdx 把关）。分节文件（`THIRD-PARTY-NOTICES.md`、`REUSE.toml`）只改自己负责的那节，小节标记不删、不调换顺序。
 - ADR、契约与变更文档正文用中文，顶部有 `## Summary (EN)`；ADR 每份不超过 4 KB。
