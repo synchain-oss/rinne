@@ -24,18 +24,27 @@ const EndView& peerSlot(const GroupView& group, Role role) noexcept
     return role == Role::kInput ? group.output : group.input;
 }
 
-// 自己正占着的组里，本角色那一端按空算：重评时若还把它当占着，就永远看不出它其实已经在等对端
-bool ownEndEmpty(const EndView& end, u32 group, u32 heldGroup) noexcept
-{
-    return group == heldGroup || end.isFree();
-}
-
-// 空组：自己一端（heldGroup 那一端按空算）与另一端都空。heldGroup 满足条件时优先给它，
-// 免得重评在两个都空的组之间来回搬；其余情况取编号最小的，保证与扫描顺序无关
-u32 pickEmptyGroup(const PairingSelf& self, const GroupViews& groups, Role role) noexcept
+// 自己正占着的组里，本角色那一端按空算：重评时若还把它当占着，就永远看不出它其实已经在等对端。
+// 前提是那一端确实是自己的：本角色一端空（认领还没被观察到），或者 pid 是本进程的。别的进程占着的端点就是
+// 占着，调用方说「自己占着」也不能把它当空位或当已经配上（冲突里 Rendezvous 不持有槽，却仍记着请求的组）。
+// 核对不过的 heldGroup 按没填处理，下面的判断一律用核对后的组号。
+// 快照里只有 pid 可核对：同进程里别的实例（复制轨道）与自己分不开，所以调用方只在持有槽时才填 heldGroup
+u32 verifiedHeldGroup(const PairingSelf& self, const GroupViews& groups) noexcept
 {
     const u32 held = self.heldGroup;
-    if (held >= 1u && held <= kGroupCount && peerSlot(groups[static_cast<std::size_t>(held - 1)], role).isFree())
+    if (held < 1u || held > kGroupCount)
+    {
+        return 0;
+    }
+    const EndView& own = ownSlot(groups[static_cast<std::size_t>(held - 1)], self.role);
+    return own.isFree() || own.pid == self.pid ? held : 0;
+}
+
+// 空组：自己一端（held 那一端按空算）与另一端都空。held 满足条件时优先给它，
+// 免得重评在两个都空的组之间来回搬；其余情况取编号最小的，保证与扫描顺序无关
+u32 pickEmptyGroup(u32 held, const GroupViews& groups, Role role) noexcept
+{
+    if (held != 0 && peerSlot(groups[static_cast<std::size_t>(held - 1)], role).isFree())
     {
         return held;
     }
@@ -65,15 +74,18 @@ bool pairingTriggered(const PairingTrigger& t) noexcept
 
 PairingDecision decideOutput(const PairingSelf& self, const GroupViews& groups) noexcept
 {
+    const u32 held = verifiedHeldGroup(self, groups);
     // 已经配上了：所在组里有同进程的活 Input，就留在原地。重评是给还在等对端的 Output 做的，不能把一个已经工作的
-    // 环路拆开，否则结果取决于重评落在别的 Input 认领之前还是之后
-    if (self.heldGroup >= 1u && self.heldGroup <= kGroupCount)
+    // 环路拆开，否则结果取决于重评落在别的 Input 认领之前还是之后。
+    // 循环里要求 Input 是同进程的活端、本角色一端空着；held 组若满足前一条，已经在这里返回了，所以循环里不会有
+    // 「held 组的本角色端按空算」的情形，循环只认 isFree()
+    if (held != 0)
     {
-        const EndView& held = groups[static_cast<std::size_t>(self.heldGroup - 1)].input;
-        if (held.isLive() && held.pid == self.pid)
+        const EndView& heldInput = groups[static_cast<std::size_t>(held - 1)].input;
+        if (heldInput.isLive() && heldInput.pid == self.pid)
         {
-            const bool sameName = self.nameHash != 0 && held.nameHash == self.nameHash;
-            return {self.heldGroup, sameName ? PairingReason::kSameNameInput : PairingReason::kLatestInput, false};
+            const bool sameName = self.nameHash != 0 && heldInput.nameHash == self.nameHash;
+            return {held, sameName ? PairingReason::kSameNameInput : PairingReason::kLatestInput, false};
         }
     }
     u32 sameNameGroup = 0;
@@ -84,7 +96,7 @@ PairingDecision decideOutput(const PairingSelf& self, const GroupViews& groups) 
     {
         const u32 group = static_cast<u32>(i) + 1;
         const GroupView& view = groups[i];
-        if (!view.input.isLive() || view.input.pid != self.pid || !ownEndEmpty(view.output, group, self.heldGroup))
+        if (!view.input.isLive() || view.input.pid != self.pid || !view.output.isFree())
         {
             continue;
         }
@@ -110,7 +122,7 @@ PairingDecision decideOutput(const PairingSelf& self, const GroupViews& groups) 
     {
         return {latestGroup, PairingReason::kLatestInput, false};
     }
-    const u32 empty = pickEmptyGroup(self, groups, Role::kOutput);
+    const u32 empty = pickEmptyGroup(held, groups, Role::kOutput);
     if (empty != 0)
     {
         return {empty, PairingReason::kEmptyGroup, true};
@@ -120,13 +132,14 @@ PairingDecision decideOutput(const PairingSelf& self, const GroupViews& groups) 
 
 PairingDecision decideInput(const PairingSelf& self, const GroupViews& groups) noexcept
 {
+    const u32 held = verifiedHeldGroup(self, groups);
     // 对称地：所在组里已有同进程的活 Output，就留在原地（Input 本身不重评，这里只是不让调用方得到迁走的结果）
-    if (self.heldGroup >= 1u && self.heldGroup <= kGroupCount)
+    if (held != 0)
     {
-        const EndView& held = groups[static_cast<std::size_t>(self.heldGroup - 1)].output;
-        if (held.isLive() && held.pid == self.pid)
+        const EndView& heldOutput = groups[static_cast<std::size_t>(held - 1)].output;
+        if (heldOutput.isLive() && heldOutput.pid == self.pid)
         {
-            return {self.heldGroup, PairingReason::kWaitingOutput, false};
+            return {held, PairingReason::kWaitingOutput, false};
         }
     }
     u32 latestGroup = 0;
@@ -136,8 +149,7 @@ PairingDecision decideInput(const PairingSelf& self, const GroupViews& groups) n
         const u32 group = static_cast<u32>(i) + 1;
         const GroupView& view = groups[i];
         // 未配对过（neverPaired）才是在等 Input 的 Output；已经配过的组不抢，避免把别人的环路拆开
-        if (!view.output.isLive() || view.output.pid != self.pid || !view.output.neverPaired ||
-            !ownEndEmpty(view.input, group, self.heldGroup))
+        if (!view.output.isLive() || view.output.pid != self.pid || !view.output.neverPaired || !view.input.isFree())
         {
             continue;
         }
@@ -152,7 +164,7 @@ PairingDecision decideInput(const PairingSelf& self, const GroupViews& groups) n
         return {latestGroup, PairingReason::kWaitingOutput, false};
     }
     // Input 进空组不需要重评：空组里没有对端可等，等轮到 Output 认领时再匹配
-    const u32 empty = pickEmptyGroup(self, groups, Role::kInput);
+    const u32 empty = pickEmptyGroup(held, groups, Role::kInput);
     if (empty != 0)
     {
         return {empty, PairingReason::kEmptyGroup, false};

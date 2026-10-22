@@ -63,7 +63,11 @@ struct GroupView
 
 using GroupViews = std::array<GroupView, kGroupCount>; // 下标 0 = 组 1
 
-// 本实例自己的信息。heldGroup 是自己已经占着的组号（1..8，0 = 没有）：重评时它那一端按空算
+// 本实例自己的信息。heldGroup 是自己已经占着的组号（1..8，0 = 没有）：重评时它那一端按空算。
+// decideOutput / decideInput 只在 Rendezvous 持有槽时才填它；冲突里本实例并不占着请求的那一组（槽是别人的），
+// 填 0。快照里只有 pid 可核对：heldGroup 那一组里本角色一端若是别的进程占着的，按没填处理；同进程里别的实例
+// （复制轨道）与自己分不开，靠调用方守这条前提。repairInput / repairOutput 只拿它当「要离开的组」排除，
+// 冲突里照填请求的组
 struct PairingSelf
 {
     Role role = Role::kInput;

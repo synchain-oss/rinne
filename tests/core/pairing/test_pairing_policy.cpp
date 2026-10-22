@@ -389,6 +389,117 @@ TEST_CASE("a new Input joins a waiting output, then the smallest empty group", "
     }
 }
 
+// heldGroup 的本角色一端被别的进程占着（冲突里 Rendezvous 不持有槽，却仍记着请求的组）时，那一组不是空位，
+// 也不是「已经配上」：别的进程占着的端点就是占着。本角色一端空（认领还没被观察到）或属于本进程时才按自己算
+TEST_CASE("a held group whose own end belongs to another process is not an empty or paired group",
+          "[ipc][pairing][policy]")
+{
+    const std::vector<DecisionCase> outputs = {
+        {"output: own end taken by another pid, the held group is not a waiting target",
+         selfOf(Role::kOutput, 0, 3),
+         {{3, freeSlot(), liveSlot(kOtherPid, 100, 0)}},
+         1,
+         PairingReason::kEmptyGroup,
+         true},
+        {"output: own end dormant under another pid, the held group is not a waiting target",
+         selfOf(Role::kOutput, 0, 3),
+         {{3, freeSlot(), dormantSlot(kOtherPid)}},
+         1,
+         PairingReason::kEmptyGroup,
+         true},
+        {"output: the smallest group is held but its own end is another pid's, so the next empty group wins",
+         selfOf(Role::kOutput, 0, 1),
+         {{1, freeSlot(), liveSlot(kOtherPid, 100, 0)}},
+         2,
+         PairingReason::kEmptyGroup,
+         true},
+        {"output: a live input of this process beside a foreign output is not already paired",
+         selfOf(Role::kOutput, 0, 3),
+         {{3, liveSlot(kSelfPid, 100, 0, true), liveSlot(kOtherPid, 50, 0)}},
+         1,
+         PairingReason::kEmptyGroup,
+         true},
+        {"output: a foreign own end in the held group yields to a live input elsewhere",
+         selfOf(Role::kOutput, 0, 3),
+         {{3, liveSlot(kSelfPid, 100, 0, true), liveSlot(kOtherPid, 50, 0)},
+          {5, liveSlot(kSelfPid, 200, 0, true), freeSlot()}},
+         5,
+         PairingReason::kLatestInput,
+         false},
+        {"output: own end not yet visible (claim in flight) still counts as ours",
+         selfOf(Role::kOutput, 0, 3),
+         {{3, freeSlot(), freeSlot()}},
+         3,
+         PairingReason::kEmptyGroup,
+         true},
+        {"output: own end dormant under this pid still counts as ours",
+         selfOf(Role::kOutput, 0, 3),
+         {{3, freeSlot(), dormantSlot(kSelfPid)}},
+         3,
+         PairingReason::kEmptyGroup,
+         true},
+        {"output: own end stale under this pid still counts as ours",
+         selfOf(Role::kOutput, 0, 3),
+         {{3, freeSlot(), staleSlot(kSelfPid, 100, 0)}},
+         3,
+         PairingReason::kEmptyGroup,
+         true},
+        {"output: a caller in conflict that passes no held group gets the same answer as the foreign-end case",
+         selfOf(Role::kOutput, 0, 0),
+         {{3, freeSlot(), liveSlot(kOtherPid, 100, 0)}},
+         1,
+         PairingReason::kEmptyGroup,
+         true},
+    };
+    for (const DecisionCase& c : outputs)
+    {
+        checkDecision(c, decideOutput(c.self, groupsOf(c.groups)));
+    }
+    const std::vector<DecisionCase> inputs = {
+        {"input: own end taken by another pid, the held group is not an empty group",
+         selfOf(Role::kInput, 0, 3),
+         {{3, liveSlot(kOtherPid, 100, 0), freeSlot()}},
+         1,
+         PairingReason::kEmptyGroup,
+         false},
+        {"input: own end dormant under another pid, the held group is not an empty group",
+         selfOf(Role::kInput, 0, 3),
+         {{3, dormantSlot(kOtherPid), freeSlot()}},
+         1,
+         PairingReason::kEmptyGroup,
+         false},
+        {"input: a waiting output of this process beside a foreign input is not already paired",
+         selfOf(Role::kInput, 0, 3),
+         {{3, liveSlot(kOtherPid, 100, 0), liveSlot(kSelfPid, 50, 0, true)}},
+         1,
+         PairingReason::kEmptyGroup,
+         false},
+        {"input: a foreign own end in the held group yields to a waiting output elsewhere",
+         selfOf(Role::kInput, 0, 3),
+         {{3, liveSlot(kOtherPid, 100, 0), liveSlot(kSelfPid, 50, 0, true)},
+          {5, freeSlot(), liveSlot(kSelfPid, 300, 0, true)}},
+         5,
+         PairingReason::kWaitingOutput,
+         false},
+        {"input: own end not yet visible (claim in flight) still counts as ours",
+         selfOf(Role::kInput, 0, 3),
+         {{3, freeSlot(), freeSlot()}},
+         3,
+         PairingReason::kEmptyGroup,
+         false},
+        {"input: own end dormant under this pid still counts as ours",
+         selfOf(Role::kInput, 0, 3),
+         {{3, dormantSlot(kSelfPid), freeSlot()}},
+         3,
+         PairingReason::kEmptyGroup,
+         false},
+    };
+    for (const DecisionCase& c : inputs)
+    {
+        checkDecision(c, decideInput(c.self, groupsOf(c.groups)));
+    }
+}
+
 TEST_CASE("repair plans move to a free group or ask before taking a dormant slot", "[ipc][pairing][policy]")
 {
     const std::vector<RepairCase> cases = {
