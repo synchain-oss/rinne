@@ -8,8 +8,11 @@
 //   claims-shape        claims.json 是合法 JSON；每条有 id / strong / hedge / evidence；id 唯一且为小写连字符；strong 非空；
 //                       strong / hedge 的每个短语都是能编译的、不会匹配任意句子的正则；hedge 与 strong 不自相匹配
 //                       （hedge 的典型命中本身含 strong，或 strong 的典型命中本身满足 hedge，免责就形同虚设）；
+//                       hedge 不是另一个正面断言（典型命中里每一个都要含 DISCLAIMER_TERMS 里的免责词）；
 //                       hedgeWhilePending 是布尔值，为真时 hedge 非空；scope 里的每一项都是扫描范围内的文件
-//   host-claim-evidence 宿主兼容类声明（hedgeWhilePending）的 evidence 只认真机的 validation 记录：构建 CI 通过证明不了宿主可用
+//   host-claim-evidence 宿主兼容类声明的 evidence 只认真机的 validation 记录：构建 CI 通过证明不了宿主可用。
+//                       宿主兼容类 = 声明了 hedgeWhilePending，或 pending / evidence 里有 validation 记录，二者任一，
+//                       关掉 hedgeWhilePending 躲不开这条
 //   evidence-kind       每条 evidence / pending 的类型是 validation: / issue: / ci: / golden: 之一，形态可解析；
 //                       validation 的文件名通配（*）只允许写在 pending 里（记录的日期要等上机才知道）
 //   evidence-satisfied  evidence 里的每一条都成立：validation 文件存在；issue 是 https URL；ci 是仓内存在的 job 名；
@@ -36,9 +39,9 @@
 // 参数表块模块（gen-docs.d/params-table.mjs）的自测也在这里跑：它认的参数形状就是上面谓词路径认的形状。
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { ROOT, caseResult, readText } from "../lib/check-kit.mjs";
+import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
 import { selfTestCases as paramsTableCases } from "../gen-docs.d/params-table.mjs";
 import {
     SCOPE,
@@ -57,9 +60,9 @@ export const CLAIMS_FILE = "docs/claims.json";
 /** 判据名 → 说明。 */
 export const RULES = {
     "claims-shape":
-        "claims.json 的形状：id 唯一且为小写连字符，每条有 id / strong / hedge / evidence，strong 非空，短语是可用的正则，hedge 与 strong 不自相匹配，hedgeWhilePending 是布尔值且为真时 hedge 非空，scope 在扫描范围内",
+        "claims.json 的形状：id 唯一且为小写连字符，每条有 id / strong / hedge / evidence，strong 非空，短语是可用的正则，hedge 与 strong 不自相匹配，hedge 不是不含免责词的正面断言，hedgeWhilePending 是布尔值且为真时 hedge 非空，scope 在扫描范围内",
     "host-claim-evidence":
-        "宿主兼容类声明（hedgeWhilePending）的 evidence 只认 validation 真机记录，ci 与 golden 证明不了宿主可用",
+        "宿主兼容类声明（声明了 hedgeWhilePending，或 pending / evidence 里有 validation 记录）的 evidence 只认 validation 真机记录，ci 与 golden 证明不了宿主可用",
     "evidence-kind":
         "每条 evidence / pending 的类型与形态可解析（validation: / issue: / ci: / golden:），通配只允许 pending",
     "evidence-satisfied": "evidence 里的每一条都成立",
@@ -229,6 +232,64 @@ export function selfMatchProblem(strong, hedge) {
     const fromStrong = phraseSamples(strong).find((t) => h.test(t));
     if (fromStrong !== undefined) return `strong「${strong}」的典型命中「${fromStrong}」本身就满足 hedge「${hedge}」`;
     return null;
+}
+
+/**
+ * 免责词表：hedge 短语的每个典型命中至少含其中一个，否则它不是限定或免责，只是另一个正面断言
+ * （「passes auval and pluginval」放在 works in LUNA 的 hedge 里，同一句「works in LUNA and passes auval and pluginval」
+ * 就被放行了）。词表按用途分三类，英文词带词界，中文不带：
+ *   没验证过   not yet / untested / pending / awaiting / 尚未 / 未验证 / 待
+ *   按设计     designed / by design / intended / 按设计 / 设计上 / 旨在
+ *   限定范围   built for / between / only / except / unless / until / if / 面向 / 之间 / 仅 / 除非
+ * 要加词就改这里，评审看得见；词不能宽到匹配任意句子（自测拿探针句核对）。
+ */
+export const DISCLAIMER_TERMS = [
+    "\\bnot yet\\b",
+    "\\byet to\\b",
+    "\\bnot (?:been )?(?:tested|verified|confirmed|validated)\\b",
+    "\\bun(?:tested|verified|confirmed|validated)\\b",
+    "\\bpending\\b",
+    "\\bawait(?:s|ing|ed)?\\b",
+    "\\bto be (?:tested|verified|confirmed|validated)\\b",
+    "尚未",
+    "未(?:经|能)?(?:测试|验证|确认)",
+    "没有(?:测试|验证|确认)",
+    "待",
+    "\\bdesigned\\b",
+    "\\bby design\\b",
+    "\\bintended\\b",
+    "按设计",
+    "设计上",
+    "旨在",
+    "\\bbuilt for\\b",
+    "\\bbetween\\b",
+    "\\bonly\\b",
+    "\\bexcept\\b",
+    "\\bunless\\b",
+    "\\buntil\\b",
+    "\\bif\\b",
+    "面向",
+    "之间",
+    "仅",
+    "除非",
+];
+const DISCLAIMER_RE = new RegExp(DISCLAIMER_TERMS.join("|"), "i");
+
+/** 免责词表是否宽到匹配任意句子（自测用）。 */
+export const disclaimerTooBroad = () => PROBES.some((t) => DISCLAIMER_RE.test(t));
+
+/**
+ * hedge 短语是不是另一个正面断言：它的典型命中里有不含任何免责词的，就是。返回说明；没有问题返回 null。
+ * 典型命中用 phraseSamples 生成（含「可选的免责」那一份不出现的写法）；认不出的写法产不出样例，
+ * 退回看短语的字面文字。
+ */
+export function disclaimerProblem(hedge) {
+    const samples = phraseSamples(hedge);
+    const pool = samples.length ? samples : [hedge.replace(/\\(.)/g, "$1")];
+    const bare = pool.find((t) => !DISCLAIMER_RE.test(t));
+    return bare === undefined
+        ? null
+        : `hedge「${hedge}」的典型命中「${bare}」不含任何免责词（尚未 / pending / 按设计 / built for 等），它是另一个正面断言`;
 }
 
 /** 一个短语在文本里的全部命中区间 [起, 止)。 */
@@ -474,6 +535,12 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
                 const why = selfMatchProblem(strong, hedge);
                 if (why) add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的${why}，hedge 形同虚设`);
             }
+        // hedge 要是免责或限定语：不含任何免责词的正面断言放进 hedge，同一句里再写别的强断言就被放行了
+        for (const hedge of Array.isArray(c?.hedge) ? c.hedge : []) {
+            if (phraseProblem(hedge)) continue; // 写坏的短语上面已经报过
+            const why = disclaimerProblem(hedge);
+            if (why) add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的${why}`);
+        }
         if (c?.hedgeWhilePending !== undefined) {
             if (typeof c.hedgeWhilePending !== "boolean")
                 add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的 hedgeWhilePending 不是布尔值`);
@@ -482,16 +549,20 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
                     "claims-shape",
                     `${CLAIMS_FILE} 的条目「${where}」声明了 hedgeWhilePending 却没有 hedge 短语，没有句子能满足它`,
                 );
-            // 宿主兼容类声明：构建通过证明不了宿主可用，evidence 只认真机记录
-            if (c.hedgeWhilePending === true)
-                for (const item of Array.isArray(c.evidence) ? c.evidence : [])
-                    if (typeof item !== "string" || !item.startsWith("validation:"))
-                        add(
-                            "host-claim-evidence",
-                            `${CLAIMS_FILE} 的条目「${where}」声明了 hedgeWhilePending，evidence「${item}」不是 validation 真机记录：` +
-                                "构建 CI 与 golden 证明不了宿主可用，真机记录到位前放在 pending 里",
-                        );
         }
+        // 宿主兼容类声明：声明了 hedgeWhilePending，或 pending / evidence 里有 validation 真机记录（不看开关）。
+        // 构建通过证明不了宿主可用，evidence 只认真机记录；真机记录到位前放在 pending 里
+        const isRecord = (x) => typeof x === "string" && x.startsWith("validation:");
+        const evidenceList = Array.isArray(c?.evidence) ? c.evidence : [];
+        const pendingList = Array.isArray(c?.pending) ? c.pending : [];
+        if (c?.hedgeWhilePending === true || [...evidenceList, ...pendingList].some(isRecord))
+            for (const item of evidenceList)
+                if (!isRecord(item))
+                    add(
+                        "host-claim-evidence",
+                        `${CLAIMS_FILE} 的条目「${where}」是宿主兼容类声明（hedgeWhilePending，或 pending / evidence 里有 validation 记录），` +
+                            `evidence「${item}」不是 validation 真机记录：构建 CI 与 golden 证明不了宿主可用，真机记录到位前放在 pending 里`,
+                    );
         if (c?.scope !== undefined) {
             if (!Array.isArray(c.scope)) add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的 scope 不是数组`);
             else
@@ -612,30 +683,11 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
     return { errors, infos };
 }
 
-/** 自测临时目录的前缀；删除前核对它。tiers 的自测也用它建目录、用 removeTemp 删。 */
-export const TEMP_PREFIX = "rinne-claims-";
-
-/**
- * 删除自测建的临时目录。递归删除前先断言：真实路径在系统临时目录之下、目录名带本自测的前缀，
- * 且不是盘根、用户目录或仓根。
- */
-export function removeTemp(dir) {
-    const real = fs.realpathSync.native(dir);
-    const tmp = fs.realpathSync.native(os.tmpdir());
-    const bad =
-        !real.startsWith(tmp + path.sep) ||
-        !path.basename(real).startsWith(TEMP_PREFIX) ||
-        path.parse(real).root === real ||
-        real === fs.realpathSync.native(os.homedir()) ||
-        real === fs.realpathSync.native(ROOT);
-    if (bad) throw new Error(`拒绝删除 ${real}：它不是本次自测新建的临时目录`);
-    fs.rmSync(real, { recursive: true, force: true });
-}
-
 export async function selfTest(root = ROOT) {
+    // 临时目录的建与删都走 scripts/lib/safe-rm.mjs：只删本进程建出来的目录，删之前按真实路径重新核对
     const temps = [];
     const mkTemp = () => {
-        const d = fs.mkdtempSync(path.join(os.tmpdir(), TEMP_PREFIX));
+        const d = makeTempDir("rinne-claims-");
         temps.push(d);
         return d;
     };
@@ -1085,11 +1137,142 @@ export async function selfTest(root = ROOT) {
                 ["host-claim-evidence"],
                 run({ root: cfgsOn, data: withHost({ evidence: [guardPred] }) }),
             ],
+            // 宿主兼容类的认定不看 hedgeWhilePending 开关：pending / evidence 里有 validation 记录就是
+            [
+                "关掉 hedgeWhilePending（false）、evidence 加回 ci 证据：仍判红",
+                ["host-claim-evidence"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedgeWhilePending: false, evidence: ["ci:core-sanitizers"] }),
+                }),
+            ],
+            [
+                "去掉 hedgeWhilePending 字段、evidence 加回 ci 证据：仍判红",
+                ["host-claim-evidence"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedgeWhilePending: undefined, evidence: ["ci:core-sanitizers"] }),
+                }),
+            ],
+            [
+                "关掉 hedgeWhilePending、evidence 加回 golden 证据：仍判红",
+                ["host-claim-evidence"],
+                run({ root: cfgsOn, data: withHost({ hedgeWhilePending: false, evidence: [guardPred] }) }),
+            ],
+            [
+                "关掉 hedgeWhilePending、真机记录已在 evidence 却混着 ci 证据（pending 已清空）：仍判红",
+                ["host-claim-evidence"],
+                run({
+                    root: withLuna,
+                    data: withHost({
+                        hedgeWhilePending: false,
+                        evidence: [lunaRecord, "ci:core-sanitizers"],
+                        pending: [],
+                    }),
+                }),
+            ],
+            [
+                "关掉 hedgeWhilePending、evidence 全是 validation 真机记录：放行",
+                [],
+                run({
+                    root: withLuna,
+                    data: withHost({ hedgeWhilePending: false, evidence: [lunaRecord], pending: [] }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "pending 与 evidence 里都没有 validation 记录的声明不算宿主兼容类：ci 证据照常放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({
+                        hedgeWhilePending: undefined,
+                        evidence: ["ci:core-sanitizers"],
+                        pending: ["golden:tests/golden/params-input.json#feedback.default == 0"],
+                    }),
+                }),
+            ],
             ["hedgeWhilePending 不是布尔值", ["claims-shape"], run({ data: withHost({ hedgeWhilePending: "yes" }) })],
             ["声明了 hedgeWhilePending 却没有 hedge 短语", ["claims-shape"], run({ data: withHost({ hedge: [] }) })],
-            // hedge 与 strong 自相匹配
+            // hedge 不能是不含任何免责词的正面断言
             [
-                "hedge 的典型命中本身含 strong（tested on macOS [0-9]）",
+                "hedge 是另一个正面断言（passes auval and pluginval）",
+                ["claims-shape"],
+                run({ data: withHost({ hedge: ["host testing pending", "passes auval and pluginval"] }) }),
+            ],
+            [
+                "hedge 是另一个正面断言（中文：通过 auval 与 pluginval）",
+                ["claims-shape"],
+                run({ data: withHost({ hedge: ["尚未[^，。\\n]{0,10}(?:测试|验证)", "通过 auval 与 pluginval"] }) }),
+            ],
+            [
+                "hedge 的免责是可选的（不写免责词时就是正面断言）",
+                ["claims-shape"],
+                run({ data: withHost({ hedge: ["(?:not yet )?passes auval"] }) }),
+            ],
+            [
+                "hedge 的一个分支是正面断言",
+                ["claims-shape"],
+                run({ data: withHost({ hedge: ["not yet tested|also works in Cubase"] }) }),
+            ],
+            [
+                "同一句「works in LUNA and passes auval and pluginval」不因 hedge 里没有正面断言而放行",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA and passes auval and pluginval.\n" },
+                }),
+            ],
+            [
+                "同一句中文「在 LUNA 可用，通过 auval 与 pluginval」同样不放行",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({
+                        strong: ["works in LUNA", "在 LUNA 可用"],
+                        hedge: ["host testing pending", "尚未[^，。\\n]{0,10}(?:测试|验证)"],
+                    }),
+                    files: { "README.md": "Rinne 在 LUNA 可用，通过 auval 与 pluginval。\n" },
+                }),
+            ],
+            [
+                "hedge 都是真正的免责或限定语（尚未验证、pending、awaiting、按设计、built for）：放行",
+                [],
+                run({
+                    data: withHost({
+                        hedge: [
+                            "host testing pending",
+                            "not yet tested",
+                            "awaiting",
+                            "尚未[^，。\\n]{0,10}(?:测试|验证)",
+                            "designed so",
+                            "按设计",
+                            "built for macOS 11\\+",
+                        ],
+                    }),
+                }),
+            ],
+            // hedge 与 strong 自相匹配。两个方向的夹具都带着免责词（only），只触发自相匹配这一条，
+            // 不与「hedge 不能是正面断言」混在一起
+            [
+                "hedge 的典型命中本身含 strong（tested on macOS [0-9]+ only）",
+                ["claims-shape"],
+                run({
+                    data: withHost({
+                        id: "min-macos",
+                        strong: ["tested on macOS"],
+                        hedge: ["built for macOS 11\\+", "tested on macOS [0-9]+ only"],
+                    }),
+                }),
+            ],
+            [
+                "strong 的典型命中本身满足 hedge（works in LUNA only 满足 only）",
+                ["claims-shape"],
+                run({ data: withHost({ strong: ["works in LUNA only"], hedge: ["only"] }) }),
+            ],
+            [
+                "旧写法 hedge「tested on macOS [0-9]」既自相匹配又不含免责词",
                 ["claims-shape"],
                 run({
                     data: withHost({
@@ -1098,11 +1281,6 @@ export async function selfTest(root = ROOT) {
                         hedge: ["built for macOS 11\\+", "tested on macOS [0-9]"],
                     }),
                 }),
-            ],
-            [
-                "strong 的典型命中本身满足 hedge",
-                ["claims-shape"],
-                run({ data: withHost({ strong: ["works in LUNA"], hedge: ["LUNA"] }) }),
             ],
             [
                 "hedge 是真正的免责或限定语：与 strong 不自相匹配",
@@ -1214,13 +1392,18 @@ export async function selfTest(root = ROOT) {
             expect: [],
         });
         cases.push({
-            label: "临时目录之外的路径拒绝删除",
-            bad: true,
-            passed: throws(() => removeTemp(root)),
+            label: "免责词表不宽到匹配任意句子，也不吞掉正面断言（passes auval and pluginval 不含免责词）",
+            bad: false,
+            passed:
+                !disclaimerTooBroad() &&
+                disclaimerProblem("passes auval and pluginval") !== null &&
+                disclaimerProblem("通过 auval 与 pluginval") !== null &&
+                disclaimerProblem("not yet tested") === null &&
+                disclaimerProblem("尚未[^，。\\n]{0,10}(?:测试|验证)") === null,
             expect: [],
         });
     } finally {
-        for (const d of temps) removeTemp(d);
+        for (const d of temps) cleanupTempDir(d);
     }
     const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.expect.includes(r)));
     cases.push({

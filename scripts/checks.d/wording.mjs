@@ -23,7 +23,8 @@
 //   scope-closed      仓内跟踪的文本文件必须登记在扫描范围或排除清单里，新增的用户面文档不会悄悄漏扫
 //   scope-parse       扫描范围里的 JSON / JS 词条文件读不出来，就没法按字符串值扫描，直接判红
 //   scope-data        范围表 docs/wording-scope.json 自己的形状：没有未知字段、路径不重复、同一路径不既在扫描范围又在排除清单、
-//                     排除清单每组写明理由、核心用户面文件不得挪出扫描范围
+//                     排除清单每组写明理由、核心用户面文件（两份 README、中文用户指南、硬规则词条）不得挪出扫描范围、
+//                     排除清单不得盖住词条目录 web/i18n/（它下面的 .js 一律扫，用引号与否定放行合法的反例）
 //
 // 扫描范围与排除清单是数据，放在 docs/wording-scope.json，不放在本文件里：本文件在基础设施路径之内，
 // 如果范围表写在这里，以后每新增一份面向用户的文档都要改本文件、都不能自合。数据文件不在基础设施清单里，
@@ -71,14 +72,23 @@ export const RULES = {
     "scope-closed": "仓内跟踪的文本文件必须在扫描范围或排除清单里，扫描范围里至少有一个文件存在",
     "scope-parse": "扫描范围里的 JSON / JS 词条文件必须读得出来",
     "scope-data":
-        "docs/wording-scope.json 的形状：字段齐全且没有未知字段，路径合法且不重复，同一路径不既在扫描范围又在排除清单，排除每组有理由，核心用户面文件留在扫描范围",
+        "docs/wording-scope.json 的形状：字段齐全且没有未知字段，路径合法且不重复，同一路径不既在扫描范围又在排除清单，排除每组有理由，核心用户面文件留在扫描范围，排除清单不盖住词条目录 web/i18n/",
 };
 
 /** 范围表：扫描范围与排除清单的数据文件（相对仓根）。 */
 export const SCOPE_FILE = "docs/wording-scope.json";
 
-/** 核心用户面文件：任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，这是它的底线）。 */
-export const REQUIRED_SCOPE = ["README.md", "README.zh-CN.md", "docs/hard-rules.i18n.json"];
+/**
+ * 核心用户面文件：任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，这是它的底线）。
+ * 用户指南的中文版与英文版同级，都是用户天天读的文字。
+ */
+export const REQUIRED_SCOPE = ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/hard-rules.i18n.json"];
+
+/**
+ * 总是要扫的目录：scopedFiles 读这里的全部 .js 词条文件，新增词条文件不用登记。
+ * 排除清单不许盖住它们（否则界面文字悄悄整体漏扫）；词条里合法的反例靠引号与否定放行，不靠排除。
+ */
+export const SCANNED_DIRS = ["web/i18n/"];
 
 const TOP_KEYS = ["version", "scope", "excluded"];
 const GROUP_KEYS = ["reason", "paths"];
@@ -97,7 +107,8 @@ function pathProblem(p, { dirOk }) {
 /**
  * 范围表的形状问题；返回问题字符串数组，每条以 [scope-data] 开头。
  * 逐项核对：顶层与排除组里没有未知字段；路径合法；路径在全表里不重复；同一路径不既在扫描范围又在排除清单；
- * 扫描范围里的文件不落在排除目录之下（会被悄悄跳过）；排除每组有理由；核心用户面文件留在扫描范围。
+ * 扫描范围里的文件不落在排除目录之下（会被悄悄跳过）；排除每组有理由；核心用户面文件留在扫描范围；
+ * 排除清单不盖住总是要扫的词条目录 web/i18n/。
  */
 export function scopeTableProblems(data) {
     const out = [];
@@ -147,6 +158,10 @@ export function scopeTableProblems(data) {
         if (dir) bad(`的 scope 里「${p}」落在排除目录「${dir}」之下，会被悄悄跳过`);
     }
     for (const p of REQUIRED_SCOPE) if (!seen.has(p)) bad(`的 scope 里缺核心用户面文件「${p}」，它们不许挪出扫描范围`);
+    for (const e of seenEx)
+        for (const d of SCANNED_DIRS)
+            if (e.endsWith("/") ? d.startsWith(e) || e.startsWith(d) : e.startsWith(d))
+                bad(`的 excluded 里「${e}」盖住了总是要扫的词条目录「${d}」，界面文字不许整体排除`);
     return out;
 }
 
@@ -885,6 +900,34 @@ export async function selfTest() {
         edited((t) => (t.scope = t.scope.filter((p) => p !== "README.zh-CN.md"))),
         "缺核心用户面文件「README.zh-CN.md」",
     );
+    badTable(
+        "中文用户指南被挪出 scope",
+        edited((t) => (t.scope = t.scope.filter((p) => p !== "docs/USER_GUIDE.zh-CN.md"))),
+        "缺核心用户面文件「docs/USER_GUIDE.zh-CN.md」",
+    );
+    badTable(
+        "排除清单盖住词条目录 web/i18n/",
+        edited((t) => t.excluded[0].paths.push("web/i18n/")),
+        "盖住了总是要扫的词条目录「web/i18n/」",
+    );
+    badTable(
+        "排除清单盖住词条目录的上级 web/",
+        edited((t) => t.excluded[0].paths.push("web/")),
+        "盖住了总是要扫的词条目录「web/i18n/」",
+    );
+    badTable(
+        "排除清单排除了一个词条文件",
+        edited((t) => t.excluded[0].paths.push("web/i18n/common.js")),
+        "盖住了总是要扫的词条目录「web/i18n/」",
+    );
+    cases.push({
+        label: "范围表：排除 web/js/ 与 web-preview/ 不算盖住词条目录",
+        bad: false,
+        passed:
+            scopeTableProblems(edited((t) => t.excluded[0].paths.push("web/js/", "web/fonts/", "web-preview/")))
+                .length === 0,
+        expect: [],
+    });
     cases.push({
         label: "范围表：不是合法 JSON",
         bad: true,
@@ -942,7 +985,7 @@ export async function selfTest() {
     {
         const goodText = JSON.stringify({
             version: 1,
-            scope: ["README.md", "README.zh-CN.md", "docs/hard-rules.i18n.json"],
+            scope: ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/hard-rules.i18n.json"],
             excluded: [{ reason: "不是用户面文字", paths: ["docs/wording-scope.json", "docs/BUILDING.md"] }],
         });
         const repo = (files) => {
@@ -993,6 +1036,47 @@ export async function selfTest() {
                 bad: true,
                 passed: extra.lines.some((l) => ruleOfLine(l) === "zero-latency" && l.includes("docs/EXTRA.md")),
                 expect: ["zero-latency"],
+            });
+            // 界面词条（web/i18n/）不用登记，总是被扫：里面的禁用词判红，用引号圈起来的反例放行
+            const i18nDirty = runOn({
+                ...base,
+                "web/i18n/common.js": "export default { en: { 'a.b': 'Rinne is zero latency.' } };\n",
+            });
+            cases.push({
+                label: "整条流程：界面词条里的禁用词被扫到：判红",
+                bad: true,
+                passed: i18nDirty.lines.some(
+                    (l) => ruleOfLine(l) === "zero-latency" && l.includes("web/i18n/common.js"),
+                ),
+                expect: ["zero-latency"],
+            });
+            const i18nQuoted = runOn({
+                ...base,
+                "web/i18n/common.js":
+                    "export default { zh: { 'a.b': '说明：「零延迟」这种写法不写。' }, en: { 'a.b': 'We do not claim “zero latency”.' } };\n",
+            });
+            cases.push({
+                label: "整条流程：界面词条里用引号圈起来的反例放行",
+                bad: false,
+                passed: i18nQuoted.ok && i18nQuoted.lines.length === 0,
+                expect: [],
+            });
+            const i18nExcluded = runOn({
+                ...base,
+                "docs/wording-scope.json": JSON.stringify({
+                    ...JSON.parse(goodText),
+                    excluded: [{ reason: "不是用户面文字", paths: ["docs/wording-scope.json", "web/i18n/"] }],
+                }),
+                "web/i18n/common.js": "export default { en: { 'a.b': 'Rinne is zero latency.' } };\n",
+            });
+            cases.push({
+                label: "整条流程：范围表把 web/i18n/ 排除：范围表判红，不靠排除漏扫词条",
+                bad: true,
+                passed:
+                    !i18nExcluded.ok &&
+                    i18nExcluded.lines.length > 0 &&
+                    i18nExcluded.lines.every((l) => ruleOfLine(l) === "scope-data"),
+                expect: ["scope-data"],
             });
             const unreg = runOn({ ...base, "docs/FAQ.md": "Hello.\n" });
             cases.push({

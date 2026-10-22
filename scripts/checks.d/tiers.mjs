@@ -32,12 +32,12 @@
 // 它们读的是同一份 daw-tiers.json。
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { ROOT, caseResult, readText } from "../lib/check-kit.mjs";
+import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
 import { CHECK_FIELDS, STATUS_VALUES, TIER_VALUES, selfTestCases as dawTiersCases } from "../gen-docs.d/daw-tiers.mjs";
 import { selfTestCases as platformBadgeCases } from "../gen-docs.d/platform-badge.mjs";
-import { TEMP_PREFIX, ciJobs, evidenceState, removeTemp } from "./claims.mjs";
+import { ciJobs, evidenceState } from "./claims.mjs";
 
 export { STATUS_VALUES, TIER_VALUES };
 export const TIERS_FILE = "docs/daw-tiers.json";
@@ -119,7 +119,7 @@ const OS_TOKENS = { windows: ["win", "windows"], macos: ["mac", "macos"], linux:
 
 /**
  * 一条 validation 记录能不能给这一行作证；返回不能的原因，能则返回 null。
- * 记录文件名的形态是 <YYYY-MM-DD>-<宿主 slug>[-版本]-<系统>.md（docs/validation/TEMPLATE.md）：
+ * 记录文件名的形态是本检查约定的 <YYYY-MM-DD>-<宿主 slug>[-版本]-<系统>.md：
  *   宿主：slug 要是整个宿主名（cubase-pro，不是 cubase；fl-studio，不是 studio），后面直接是版本或系统，不许多出别的词；
  *   版本：这一行写了具体版本时，文件名里的版本要对得上（15 对 15 与 15.0.30，不对 14）；
  *         文件名没写版本时，记录正文里要出现「宿主名 版本」；版本写 any 的行不核对；
@@ -404,7 +404,8 @@ export async function selfTest(root = ROOT) {
         "2026-11-06-reaper-win.md": "REAPER 6.80 on Windows 11\n",
         "cubase-pro-15-win.md": "Cubase Pro 15 on Windows 11\n",
     };
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), TEMP_PREFIX));
+    // 临时目录的建与删都走 scripts/lib/safe-rm.mjs
+    const tmp = makeTempDir("rinne-tiers-");
     let cases;
     try {
         fs.mkdirSync(path.join(tmp, "docs", "validation"), { recursive: true });
@@ -706,7 +707,7 @@ export async function selfTest(root = ROOT) {
             };
         });
     } finally {
-        removeTemp(tmp);
+        cleanupTempDir(tmp);
     }
     const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.expect.includes(r)));
     cases.push({

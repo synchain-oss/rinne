@@ -49,12 +49,7 @@
     {
       "id": "mac-hosts",
       "strong": ["works in LUNA", "在 LUNA 可用"],
-      "hedge": [
-        "passes auval and pluginval",
-        "host testing pending",
-        "通过 auval 与 pluginval",
-        "尚未[^，。\\n]{0,10}(?:测试|验证)"
-      ],
+      "hedge": ["host testing pending", "not yet tested", "awaiting", "尚未[^，。\\n]{0,10}(?:测试|验证)"],
       "hedgeWhilePending": true,
       "evidence": [],
       "pending": ["validation:docs/validation/*-luna-macos.md"]
