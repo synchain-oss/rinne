@@ -5,8 +5,9 @@
 // 判定顺序固定（先到先得），与设计稿的优先级表一致：
 //   validator, ipcUnavailable, abiMismatch, srMismatch, conflict, unassigned, stale, bypassed,
 //   crossProcess, crossTrack, waitingAudio, searching, connectedUnverified, connected / connectedStill。
-// 其中 stale 与 bypassed 之后的各项都以「有对端」为前提（searching 之前），bypassed 看的是本端（Input 或
-// Output）被宿主旁路。
+// 其中 stale、crossProcess、crossTrack 以「有对端」为前提；waitingAudio 不需要对端。bypassed 只对 Output 判：
+// Input 被宿主旁路时没有自己的配对状态，由壳把它并入 loopSilent（已连接时落在 connectedStill），旁路提示走消息条。
+// buildPairModel 与 formatVersion 会分配内存（std::string），只能在消息线程调用，不得进音频线程。
 #pragma once
 
 #include <cstdint>
@@ -53,7 +54,8 @@ enum class PairColour : std::uint8_t
 PairColour colourOf(PairState s) noexcept;
 // 稳定的机读标识（桥与诊断共用），例如 "connectedStill"
 const char* idOf(PairState s) noexcept;
-// 只有绿色两态（connectedUnverified / connected）在音频流动时脉冲；connectedStill 不脉冲
+// 只有绿色两态（connectedUnverified / connected）在音频流动时脉冲；connectedStill 不脉冲。
+// connectedUnverified 不看 loopSilent（名字未知时不单列静止态），界面必须同时按 loopSilent 停止脉冲
 bool pulses(PairState s) noexcept;
 
 // 名字核验：两端哈希都已知且相等 = same；都已知但不等 = different；有一端未知 = unknown
@@ -95,7 +97,7 @@ struct PairInputs
     bool conflict = false; // 槽被别人占着，或者我们的被接管了
     bool allGroupsFull = false; // 智能默认找不到组
     bool realtimeAudioSeen = false; // 已经收到过实时块
-    bool selfBypassed = false; // 宿主旁路了本端
+    bool selfBypassed = false; // 宿主旁路了本端；只有 Output 据此判 bypassed，Input 的旁路并入 loopSilent
     bool loopSilent = false; // 回送静音：切断、锁定、环路关、任一端旁路、宿主暂停、断档
     PeerFacts peer;
     std::string occupantName; // 冲突时占着本角色槽的实例的轨道名；可空

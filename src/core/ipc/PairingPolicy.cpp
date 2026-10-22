@@ -65,6 +65,17 @@ bool pairingTriggered(const PairingTrigger& t) noexcept
 
 PairingDecision decideOutput(const PairingSelf& self, const GroupViews& groups) noexcept
 {
+    // 已经配上了：所在组里有同进程的活 Input，就留在原地。重评是给还在等对端的 Output 做的，不能把一个已经工作的
+    // 环路拆开，否则结果取决于重评落在别的 Input 认领之前还是之后
+    if (self.heldGroup >= 1u && self.heldGroup <= kGroupCount)
+    {
+        const EndView& held = groups[static_cast<std::size_t>(self.heldGroup - 1)].input;
+        if (held.isLive() && held.pid == self.pid)
+        {
+            const bool sameName = self.nameHash != 0 && held.nameHash == self.nameHash;
+            return {self.heldGroup, sameName ? PairingReason::kSameNameInput : PairingReason::kLatestInput, false};
+        }
+    }
     u32 sameNameGroup = 0;
     u32 sameNameCount = 0;
     u32 latestGroup = 0;
@@ -109,6 +120,15 @@ PairingDecision decideOutput(const PairingSelf& self, const GroupViews& groups) 
 
 PairingDecision decideInput(const PairingSelf& self, const GroupViews& groups) noexcept
 {
+    // 对称地：所在组里已有同进程的活 Output，就留在原地（Input 本身不重评，这里只是不让调用方得到迁走的结果）
+    if (self.heldGroup >= 1u && self.heldGroup <= kGroupCount)
+    {
+        const EndView& held = groups[static_cast<std::size_t>(self.heldGroup - 1)].output;
+        if (held.isLive() && held.pid == self.pid)
+        {
+            return {self.heldGroup, PairingReason::kWaitingOutput, false};
+        }
+    }
     u32 latestGroup = 0;
     u64 latestClaimMs = 0;
     for (std::size_t i = 0; i < groups.size(); ++i)
@@ -178,7 +198,9 @@ RepairPlan repairOutput(const PairingSelf& self, const GroupViews& groups) noexc
     for (std::size_t i = 0; i < groups.size(); ++i)
     {
         const GroupView& view = groups[i];
-        if (view.output.isDormant() && view.output.pid == self.pid)
+        // 对面的 Input 端要么空、要么也是本进程的：不能接管之后配到别的进程的 Input 上
+        if (view.output.isDormant() && view.output.pid == self.pid &&
+            (view.input.isFree() || view.input.pid == self.pid))
         {
             return {static_cast<u32>(i) + 1, true};
         }

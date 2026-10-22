@@ -37,7 +37,7 @@ struct PairingTrigger
     bool userPicked = false; // 本会话里用户手选过组
 };
 
-// 四项条件同时满足才做一次决定
+// 五项条件同时满足才做一次决定
 bool pairingTriggered(const PairingTrigger& t) noexcept;
 
 // 一个端点槽的快照。phase 取 SegmentLayout.h 的 kCtlPhase*；fresh 表示心跳新鲜、没有被判陈旧
@@ -49,7 +49,6 @@ struct EndView
     u64 claimMs = 0;
     u32 nameHash = 0; // 0 = 名字未知
     bool neverPaired = false; // cfg_flags 的 kCfgNeverPaired
-    bool provisional = false; // ctl 的 provisional 位
 
     bool isFree() const noexcept { return phase == kCtlPhaseFree; }
     bool isLive() const noexcept { return phase == kCtlPhaseActive && fresh; }
@@ -86,7 +85,7 @@ struct PairingDecision
 {
     u32 group = 0; // 1..8；0 = 没有组（kAllFull）
     PairingReason reason = PairingReason::kAllFull;
-    // Output 进了空组等对端：壳每 kPairingReevalMs 用 decideOutput 重评
+    // Output 进了空组等对端：壳每 kPairingReevalMs 用 decideOutput 重评，拿到非 waiting 的决定（含「留在原组」）就停止
     bool waiting = false;
     // 智能认领一律带 provisional 标记（Rendezvous 的 kSmart），可被工程 state 的恢复抢占
 };

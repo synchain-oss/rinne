@@ -519,7 +519,8 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
         !conflict || nowMs >= nextConflictRetryMs_ || nextConflictRetryMs_ - nowMs > RendezvousTiming::kConflictRetryMs;
     // 工程恢复与用户确认在原意图有效期内：不到重试的拍子也每一拍看一次休眠档，证据一攒够就拿到
     // intentHeld 每一拍都要问：它记着有效期内评估过没有，到期那一拍据此补评一次
-    const bool hold = intentHeld(nowMs);
+    u64 holdEvalMs = nowMs;
+    const bool hold = intentHeld(nowMs, holdEvalMs);
     const bool held = conflict && hold;
     if (!retryDue && !held)
     {
@@ -551,9 +552,10 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
                 tier = TakeoverTier::kPreemptProvisional;
             }
         }
-        // 原意图有效期只放宽休眠这一档，其余各档照旧只在重试的拍子上按 kConflictRetry 判。不传探活：这里只认休眠
+        // 原意图有效期只放宽休眠这一档，其余各档照旧只在重试的拍子上按 kConflictRetry 判。不传探活：这里只认休眠。
+        // 判定时刻是 holdEvalMs：补评那一拍取截止时刻，证据按截止时刻算，不按这一拍落在多晚算
         if (latest.ctl == observed && tier == TakeoverTier::kNone && held &&
-            takeoverTier(latest, nowMs, currentProcessId(), intent_, nullptr) == TakeoverTier::kDormant)
+            takeoverTier(latest, holdEvalMs, currentProcessId(), intent_, nullptr) == TakeoverTier::kDormant)
         {
             tier = TakeoverTier::kDormant;
         }
@@ -637,12 +639,14 @@ void Rendezvous::armIntentHold(u64 nowMs) noexcept
 // kIntentHoldMs。时钟倒退也拉不长它：离截止还有不止 kIntentHoldMs 就当已经到期（与冲突闸门的上界同一个口径）；
 // 有效期内时钟比上一次看到的还早，也当已经到期，否则按原截止时刻算就多出了倒退的那一段。到期就清掉，之后时钟
 // 再怎么倒退也不会让它复活。
-// 一个例外：证据是按拍子比的，拍子稀的时候（宿主让消息线程饿了几拍）上一次评估可能还在证据攒满之前，下一拍
-// 已经过了截止时刻，休眠档就这样被错过。所以有效期内评估过的话，过期之后的第一拍按原意图补评一次（只这一次，
-// 之后照旧清掉）；补评只在时钟正常前进、且迟到不超过一个扫描间隔时给（倒退的一拍、迟到更久的都不算），所以有效期最长也就是
-// kIntentHoldMs 加一个扫描间隔
-bool Rendezvous::intentHeld(u64 nowMs) noexcept
+// 一个例外：证据是按拍子比的，拍子稀的时候（宿主让消息线程饿了几拍，工程加载时尤其常见）上一次评估可能还在证据攒满
+// 之前，下一拍已经过了截止时刻，休眠档就这样被错过。所以有效期内评估过的话，过期之后的第一拍按原意图补评一次
+// （只这一次，之后照旧清掉）。补评不设迟到上界，但休眠档的证据按截止时刻判（evalMs 取截止时刻之前一毫秒）：
+// 截止之前已经攒满、且到这一拍整字没变（认领 CAS 对观察到的整字，槽动过就会输）才拿；休眠在有效期末段才开始、
+// 按不卡顿的时序本来攒不满的，不会因为这一拍来得晚就拿到。倒退的一拍不补评
+bool Rendezvous::intentHeld(u64 nowMs, u64& evalMs) noexcept
 {
+    evalMs = nowMs;
     if (intentUntilMs_ == 0)
     {
         return false;
@@ -653,8 +657,11 @@ bool Rendezvous::intentHeld(u64 nowMs) noexcept
         intentEvaluated_ = true;
         return true;
     }
-    const bool catchUp = intentEvaluated_ && nowMs >= intentSeenMs_ && nowMs >= intentUntilMs_ &&
-                         nowMs - intentUntilMs_ <= SlotObserver::kScanIntervalMs;
+    const bool catchUp = intentEvaluated_ && nowMs >= intentSeenMs_ && nowMs >= intentUntilMs_;
+    if (catchUp)
+    {
+        evalMs = intentUntilMs_ - 1;
+    }
     intentUntilMs_ = 0;
     intentEvaluated_ = false;
     return catchUp;

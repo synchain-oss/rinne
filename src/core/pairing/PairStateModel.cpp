@@ -139,7 +139,7 @@ PairModel buildPairModel(const PairInputs& in, const rinne::ipc::GroupViews& gro
     {
         state = PairState::kStale;
     }
-    else if (in.selfBypassed)
+    else if (in.role == Role::kOutput && in.selfBypassed)
     {
         state = PairState::kBypassed;
     }

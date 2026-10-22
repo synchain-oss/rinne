@@ -6,6 +6,7 @@
 // （句柄析构里调的是 util::monoNowMs()）。
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -602,7 +603,7 @@ TEST_CASE("a clock that goes backwards never stretches the intent hold", "[ipc][
     CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == holder.myCtl());
 }
 
-TEST_CASE("the extra dormant look inside the intent hold never delays the normal retry", "[ipc][rendezvous]")
+TEST_CASE("an unsuccessful extra dormant look inside the intent hold never delays the normal retry", "[ipc][rendezvous]")
 {
     SegmentBackendInProcess::resetAllForTesting();
     const Naming naming(NameScope::randomForTesting());
@@ -612,6 +613,7 @@ TEST_CASE("the extra dormant look inside the intent hold never delays the normal
     const StreamFormat format{48000, 512, 2};
     constexpr u64 kTick = 40;
 
+    // 本用例只验没判出档位（槽是活跃的）这条路径；认领 CAS 输掉的两个分支单线程里走不到，只靠代码审查。
     // 工程恢复首拍时组被一个正式认领占着，进冲突，常规重试排在 1 s 之后。有效期内每一拍都多看一眼休眠档（看不到），
     // 这些拍子不推迟常规重试：属主在 320 ms 时放开了槽，工程恢复在 1 s 的那次常规重试上就拿到空槽
     Rendezvous holder(configFor(Role::kInput, backend, naming.scope(), 91));
@@ -670,22 +672,71 @@ TEST_CASE("a sparse tick that lands past the intent hold still re-checks the dor
     CHECK(restore.state() == RendezvousState::kActive);
     CHECK(roleSlot(rv, 3, Role::kInput).ctl.load() == restore.myCtl());
 
-    // 迟到太久的一拍不补评：证据虽然早就满了，但拍子晚过一个扫描间隔，有效期已经结束
-    Rendezvous slow(configFor(Role::kInput, backend, naming.scope(), 85));
-    Rendezvous slowHolder(configFor(Role::kInput, backend, naming.scope(), 86));
-    slowHolder.setGroup(5, ClaimIntent::kManual, kT0);
-    slowHolder.prepare(format, kT0);
-    slowHolder.tick(kT0);
-    REQUIRE(slowHolder.state() == RendezvousState::kActive);
-    slowHolder.releaseResources(kT0 + 10);
-    slow.setGroup(5, ClaimIntent::kRestore, loadAt);
-    slow.prepare(format, loadAt);
-    slow.tick(firstTickAt);
-    REQUIRE(slow.state() == RendezvousState::kConflict);
-    slow.tick(firstTickAt + 1900);
-    slow.tick(firstTickAt + RendezvousTiming::kIntentHoldMs + SlotObserver::kScanIntervalMs + 1);
-    CHECK(slow.state() == RendezvousState::kConflict);
-    CHECK(roleSlot(rv, 5, Role::kInput).ctl.load() == slowHolder.myCtl());
+    // 补评不设迟到上界：证据在截止之前已经攒满、整字也没变，卡顿多久都一样拿得到（工程加载时消息线程常连续卡几百
+    // 毫秒到几秒）。同一份时序，下一拍分别迟到 600 ms、1500 ms、5000 ms
+    const u64 lateBy[] = {600, 1500, 5000};
+    const u32 groups[] = {1, 2, 6};
+    for (std::size_t k = 0; k < 3; ++k)
+    {
+        INFO("late by " << lateBy[k] << " ms");
+        Rendezvous stalledHolder(configFor(Role::kInput, backend, naming.scope(), 100 + static_cast<u32>(k) * 2));
+        Rendezvous stalled(configFor(Role::kInput, backend, naming.scope(), 101 + static_cast<u32>(k) * 2));
+        stalledHolder.setGroup(groups[k], ClaimIntent::kManual, kT0);
+        stalledHolder.prepare(format, kT0);
+        stalledHolder.tick(kT0);
+        REQUIRE(stalledHolder.state() == RendezvousState::kActive);
+        stalledHolder.releaseResources(kT0 + 10);
+        stalled.setGroup(groups[k], ClaimIntent::kRestore, loadAt);
+        stalled.prepare(format, loadAt);
+        stalled.tick(firstTickAt);
+        REQUIRE(stalled.state() == RendezvousState::kConflict);
+        stalled.tick(firstTickAt + 1900);
+        CHECK(stalled.state() == RendezvousState::kConflict);
+        stalled.tick(firstTickAt + RendezvousTiming::kIntentHoldMs + lateBy[k]);
+        CHECK(stalled.state() == RendezvousState::kActive);
+        CHECK(roleSlot(rv, groups[k], Role::kInput).ctl.load() == stalled.myCtl());
+    }
+
+    // 卡顿期间槽动过（ctl 的整字变了），补评就拿不到：观察者把静止起点重置到这一拍，认领也只对观察到的整字
+    Rendezvous movedSleeper(configFor(Role::kInput, backend, naming.scope(), 110));
+    Rendezvous moved(configFor(Role::kInput, backend, naming.scope(), 111));
+    movedSleeper.setGroup(7, ClaimIntent::kManual, kT0);
+    movedSleeper.prepare(format, kT0);
+    movedSleeper.tick(kT0);
+    REQUIRE(movedSleeper.state() == RendezvousState::kActive);
+    movedSleeper.releaseResources(kT0 + 10);
+    moved.setGroup(7, ClaimIntent::kRestore, loadAt);
+    moved.prepare(format, loadAt);
+    moved.tick(firstTickAt);
+    REQUIRE(moved.state() == RendezvousState::kConflict);
+    moved.tick(firstTickAt + 1900);
+    {
+        std::atomic<u64>& ctl = roleSlot(rv, 7, Role::kInput).ctl;
+        const u64 word = ctl.load();
+        REQUIRE(casCtl(ctl, word, ctlState(word)).ok); // 槽在卡顿期间转移过一次，整字的 gen 变了
+    }
+    moved.tick(firstTickAt + RendezvousTiming::kIntentHoldMs + 600);
+    CHECK(moved.state() == RendezvousState::kConflict);
+    CHECK(ctlPhase(roleSlot(rv, 7, Role::kInput).ctl.load()) == kCtlPhaseDormant);
+
+    // 休眠在有效期末段才开始（T + 1500 休眠，T + 1900 的拍子才看到，按不卡顿的时序到截止时刻只攒了 350 ms），
+    // 下一拍到 T + 5000 才来：按这一拍的时间算静止已经够 2 s，但证据按截止时刻判，不能因为这一拍来得晚就拿到
+    Rendezvous lateSleeper(configFor(Role::kInput, backend, naming.scope(), 112));
+    Rendezvous lateStart(configFor(Role::kInput, backend, naming.scope(), 113));
+    lateSleeper.setGroup(8, ClaimIntent::kManual, kT0);
+    lateSleeper.prepare(format, kT0);
+    lateSleeper.tick(kT0);
+    REQUIRE(lateSleeper.state() == RendezvousState::kActive);
+    lateStart.setGroup(8, ClaimIntent::kRestore, loadAt);
+    lateStart.prepare(format, loadAt);
+    lateStart.tick(firstTickAt);
+    REQUIRE(lateStart.state() == RendezvousState::kConflict);
+    lateSleeper.releaseResources(firstTickAt + 1500);
+    lateStart.tick(firstTickAt + 1900);
+    CHECK(lateStart.state() == RendezvousState::kConflict);
+    lateStart.tick(firstTickAt + 5000);
+    CHECK(lateStart.state() == RendezvousState::kConflict);
+    CHECK(ctlPhase(roleSlot(rv, 8, Role::kInput).ctl.load()) == kCtlPhaseDormant);
 
     // 补评只有一次：补评时证据还不满的话，再往后拿不到。对端在首拍之后 1 s 才休眠，证据从那时重新计
     Rendezvous busy(configFor(Role::kInput, backend, naming.scope(), 83));

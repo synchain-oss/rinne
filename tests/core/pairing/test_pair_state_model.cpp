@@ -227,6 +227,11 @@ TEST_CASE("the state priority is first match wins", "[pairing][model]")
     conflict.peer.pid = kOtherPid;
     cases.push_back({"conflict beats stale and crossProcess", conflict, PairState::kConflict});
 
+    PairInputs conflictFull = linkedInputs();
+    conflictFull.conflict = true;
+    conflictFull.allGroupsFull = true;
+    cases.push_back({"conflict beats unassigned", conflictFull, PairState::kConflict});
+
     PairInputs unassigned = linkedInputs();
     unassigned.allGroupsFull = true;
     unassigned.peer.lost = true;
@@ -236,6 +241,12 @@ TEST_CASE("the state priority is first match wins", "[pairing][model]")
     stale.peer.lost = true;
     stale.peer.pid = kOtherPid;
     cases.push_back({"stale beats crossProcess", stale, PairState::kStale});
+
+    PairInputs staleBypassed = linkedInputs();
+    staleBypassed.role = Role::kOutput;
+    staleBypassed.selfBypassed = true;
+    staleBypassed.peer.lost = true;
+    cases.push_back({"stale beats bypassed", staleBypassed, PairState::kStale});
 
     PairInputs bypassed = linkedInputs();
     bypassed.role = Role::kOutput;
@@ -378,7 +389,7 @@ TEST_CASE("occupied and peer masks follow the role's own and opposite ends", "[p
     inputGroups[0].input = activeSlot(kOtherPid); // bit0：本角色端，另一个组，active 也算占着
     inputGroups[1].output = activeSlot(kSelfPid); // bit1：对端端，同进程
     inputGroups[2].input = dormantSlot(kSelfPid); // 自己组：occupiedMask 排除
-    inputGroups[2].output = dormantSlot(kSelfPid); // 自己组：peerMask 不排除
+    inputGroups[2].output = dormantSlot(kSelfPid); // 自己组：对端是休眠的，不算 peerMask
     inputGroups[3].input = dormantSlot(kSelfPid); // bit3：dormant 也算占着
     inputGroups[4].output = activeSlot(kOtherPid); // 对端在别的进程，不算 peerMask
     inputGroups[7].output = dormantSlot(kSelfPid); // bit7
@@ -393,7 +404,7 @@ TEST_CASE("occupied and peer masks follow the role's own and opposite ends", "[p
     GroupViews outputGroups{};
     outputGroups[0].output = activeSlot(kSelfPid); // bit0：本角色端
     outputGroups[1].output = dormantSlot(kSelfPid); // 自己组：occupiedMask 排除
-    outputGroups[1].input = activeSlot(kSelfPid); // 自己组：peerMask 不排除
+    outputGroups[1].input = activeSlot(kSelfPid); // 自己组：本角色端非空（休眠），已经配上，不算 peerMask
     outputGroups[2].input = dormantSlot(kOtherPid); // 对端在别的进程
     outputGroups[3].input = dormantSlot(kSelfPid); // bit3
     outputGroups[4].output = dormantSlot(kOtherPid); // bit4
@@ -483,10 +494,25 @@ TEST_CASE("loopSilent only turns connected into connectedStill", "[pairing][mode
     CHECK(buildPairModel(unnamedPeer, kEmptyGroups).state == PairState::kConnectedUnverified);
 }
 
-TEST_CASE("an Input bypassed by the host shows bypassed too", "[pairing][model]")
+TEST_CASE("an Input bypassed by the host never shows bypassed", "[pairing][model]")
 {
-    PairInputs in = baseInputs();
-    in.role = Role::kInput;
-    in.selfBypassed = true;
-    CHECK(buildPairModel(in, GroupViews{}).state == PairState::kBypassed);
+    // Input 没有 bypassed 配对态：旁路由壳并入 loopSilent，已连接时是 connectedStill，没有对端时是 searching，
+    // 跨进程、跨轨道的琥珀提示照常
+    PairInputs linked = linkedInputs();
+    linked.role = Role::kInput;
+    linked.selfBypassed = true;
+    linked.loopSilent = true;
+    CHECK(buildPairModel(linked, GroupViews{}).state == PairState::kConnectedStill);
+
+    PairInputs alone = baseInputs();
+    alone.role = Role::kInput;
+    alone.selfBypassed = true;
+    alone.realtimeAudioSeen = true;
+    CHECK(buildPairModel(alone, GroupViews{}).state == PairState::kSearching);
+
+    PairInputs cross = linkedInputs();
+    cross.role = Role::kInput;
+    cross.selfBypassed = true;
+    cross.peer.pid = kOtherPid;
+    CHECK(buildPairModel(cross, GroupViews{}).state == PairState::kCrossProcess);
 }

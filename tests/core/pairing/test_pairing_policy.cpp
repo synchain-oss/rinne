@@ -115,6 +115,12 @@ std::vector<Placement> withDormantOutput(std::vector<Placement> placements, u32 
     return placements;
 }
 
+std::vector<Placement> withInputEnd(std::vector<Placement> placements, u32 group, const EndView& input)
+{
+    placements[static_cast<std::size_t>(group - 1)].input = input;
+    return placements;
+}
+
 PairingSelf selfOf(Role role, u32 nameHash = 0, u32 heldGroup = 0)
 {
     PairingSelf self;
@@ -287,6 +293,25 @@ TEST_CASE("a new Output prefers a unique same-name input, then the latest claim,
          6,
          PairingReason::kLatestInput,
          false},
+        {"an output already paired in its held group does not move to a later claim",
+         selfOf(Role::kOutput, 0, 2),
+         {{2, liveSlot(kSelfPid, 100, 0), liveSlot(kSelfPid, 150, 0)}, {5, liveSlot(kSelfPid, 900, 0, true), freeSlot()}},
+         2,
+         PairingReason::kLatestInput,
+         false},
+        {"an output already paired in its held group does not move to a unique same-name input elsewhere",
+         selfOf(Role::kOutput, kSelfHash, 2),
+         {{2, liveSlot(kSelfPid, 100, kOtherNameHash), liveSlot(kSelfPid, 150, kSelfHash)},
+          {5, liveSlot(kSelfPid, 900, kSelfHash, true), freeSlot()}},
+         2,
+         PairingReason::kLatestInput,
+         false},
+        {"an output paired with a same-name input reports it as the reason",
+         selfOf(Role::kOutput, kSelfHash, 2),
+         {{2, liveSlot(kSelfPid, 100, kSelfHash), liveSlot(kSelfPid, 150, kSelfHash)}},
+         2,
+         PairingReason::kSameNameInput,
+         false},
         {"all eight groups occupied means no group at all", selfOf(Role::kOutput, 0), allGroupsOccupied(kOtherPid), 0,
          PairingReason::kAllFull, false},
     };
@@ -334,6 +359,13 @@ TEST_CASE("a new Input joins a waiting output, then the smallest empty group", "
          {{1, freeSlot(), freeSlot()}, {4, liveSlot(kSelfPid, 100, 0), freeSlot()}},
          4,
          PairingReason::kEmptyGroup,
+         false},
+        {"an input already beside a live output of its process does not move to another waiting output",
+         selfOf(Role::kInput, 0, 4),
+         {{4, liveSlot(kSelfPid, 100, 0), liveSlot(kSelfPid, 90, 0, false)},
+          {6, freeSlot(), liveSlot(kSelfPid, 900, 0, true)}},
+         4,
+         PairingReason::kWaitingOutput,
          false},
         {"a waiting output from another pid is ignored",
          selfOf(Role::kInput),
@@ -395,7 +427,11 @@ TEST_CASE("repair plans move to a free group or ask before taking a dormant slot
          2,
          false},
         {"repairOutput falls back to a dormant output of the same process, with confirmation", selfOf(Role::kOutput),
-         withDormantOutput(occupiedInputs(kOtherPid), 3), 3, true},
+         withDormantOutput(withInputEnd(occupiedInputs(kOtherPid), 3, freeSlot()), 3), 3, true},
+        {"repairOutput accepts a dormant output whose input end is of the same process", selfOf(Role::kOutput),
+         withDormantOutput(withInputEnd(occupiedInputs(kOtherPid), 3, dormantSlot(kSelfPid)), 3), 3, true},
+        {"repairOutput will not take a dormant output whose input belongs to another process", selfOf(Role::kOutput),
+         withDormantOutput(occupiedInputs(kOtherPid), 3), 0, false},
         {"repairOutput has nowhere to go", selfOf(Role::kOutput), allGroupsOccupied(kOtherPid), 0, false},
     };
     for (const RepairCase& c : cases)
