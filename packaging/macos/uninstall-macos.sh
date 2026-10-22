@@ -86,20 +86,31 @@ bundle_removable() { # $1 bundle 名 $2 目标根 $3 解析后的目标根 $4 �
     return 0
 }
 
-# 真正去删：先把事实收集齐，交给纯函数判；判过才删。删的是解析后的真实路径。
-# 目标本来就不在，返回 0（没东西可删不算错）。
-remove_bundle() { # $1 目标根目录 $2 bundle 名
+# 判：把事实收集齐，交给纯函数判；判过就把解析后的真实路径打印出来。这一步不删任何东西。
+# 返回 0 = 可以删（路径已打印）；1 = 拒绝；2 = 目标本来就不在（没东西可删）。
+# 悬空的符号链接 -e 为假，但它占着名字：要走判据（会被拒），不能当「没有」放过去。
+bundle_verdict() { # $1 目标根目录 $2 bundle 名
     local root="$1" name="$2" root_real path real is_link=no
-    [ -d "$root" ] || return 0
+    [ -d "$root" ] || return 2
     root_real="$(cd -- "$root" 2>/dev/null && pwd -P)" || return 1
     path="$root/$name"
-    # 悬空的符号链接 -e 为假，但它占着名字：要走下面的判据（会被拒），不能当「没有」放过去。
-    { [ -e "$path" ] || [ -L "$path" ]; } || return 0
+    { [ -e "$path" ] || [ -L "$path" ]; } || return 2
     if [ -L "$path" ]; then is_link=yes; fi
     real="$(cd -- "$path" 2>/dev/null && pwd -P)" || real=""
-    if ! bundle_removable "$name" "$root" "$root_real" "$is_link" "$real"; then
-        return 1
-    fi
+    bundle_removable "$name" "$root" "$root_real" "$is_link" "$real" || return 1
+    printf '%s\n' "$real"
+}
+
+# 真正去删：先过 bundle_verdict，判过才删。删的是解析后的真实路径。
+# 目标本来就不在，返回 0（没东西可删不算错）。
+remove_bundle() { # $1 目标根目录 $2 bundle 名
+    local real rc=0
+    real="$(bundle_verdict "$1" "$2")" || rc=$?
+    case "$rc" in
+        0) ;;
+        2) return 0 ;;
+        *) return 1 ;;
+    esac
     # rinne-delete-ok: 名字锚定的四个 bundle 之一；bundle_removable 已核真实路径等于期望路径、不是符号链接、根不是 / 与 HOME 本身
     rm -rf -- "$real" || return 1
     return 0
@@ -335,6 +346,7 @@ EOF
     fi
 
     # ── 真的文件系统上：符号链接、悬空链接、白名单外的名字都拒绝，被指向的东西和链接本身都原样留下 ──
+    # “应被拒”的用例只调 bundle_verdict（判，不删）：守卫一旦坏了，这里也不会真的去递归删除任何东西。
     local sl_root="$work/symlink-root" sl_target="$work/symlink-target"
     mkdir -p "$sl_root" "$sl_target/Rinne Output.vst3" "$sl_root/别的插件.vst3"
     printf 'x\n' > "$sl_target/Rinne Output.vst3/marker"
@@ -342,16 +354,16 @@ EOF
     ln -s "$sl_target/Rinne Output.vst3" "$sl_root/Rinne Output.vst3" 2>/dev/null
     ln -s "$work/nowhere-at-all" "$sl_root/Rinne Input.vst3" 2>/dev/null
     if [ -L "$sl_root/Rinne Output.vst3" ]; then
-        remove_bundle "$sl_root" "Rinne Output.vst3" 2>/dev/null
-        if [ $? -ne 0 ] && [ -L "$sl_root/Rinne Output.vst3" ] && [ -f "$sl_target/Rinne Output.vst3/marker" ]; then
+        bundle_verdict "$sl_root" "Rinne Output.vst3" >/dev/null 2>&1
+        if [ $? -eq 1 ] && [ -L "$sl_root/Rinne Output.vst3" ] && [ -f "$sl_target/Rinne Output.vst3/marker" ]; then
             say 0 "符号链接的 bundle：拒绝删，链接和它指向的目录都原样留下"
         else
             say 1 "符号链接的 bundle：拒绝删，链接和它指向的目录都原样留下"
         fi
     fi
     if [ -L "$sl_root/Rinne Input.vst3" ]; then
-        remove_bundle "$sl_root" "Rinne Input.vst3" 2>/dev/null
-        if [ $? -ne 0 ] && [ -L "$sl_root/Rinne Input.vst3" ]; then
+        bundle_verdict "$sl_root" "Rinne Input.vst3" >/dev/null 2>&1
+        if [ $? -eq 1 ] && [ -L "$sl_root/Rinne Input.vst3" ]; then
             say 0 "悬空的符号链接占着名字：拒绝删，不当成「没装」放过去"
         else
             say 1 "悬空的符号链接占着名字：拒绝删，不当成「没装」放过去"
@@ -359,11 +371,27 @@ EOF
     else
         echo "SKIP  这个系统建不了符号链接：符号链接的用例跳过"
     fi
-    remove_bundle "$sl_root" "别的插件.vst3" 2>/dev/null
-    if [ $? -ne 0 ] && [ -f "$sl_root/别的插件.vst3/marker" ]; then
-        say 0 "名字不在白名单里：remove_bundle 拒绝删，目录原样留下"
+    bundle_verdict "$sl_root" "别的插件.vst3" >/dev/null 2>&1
+    if [ $? -eq 1 ] && [ -f "$sl_root/别的插件.vst3/marker" ]; then
+        say 0 "名字不在白名单里：bundle_verdict 拒绝，目录原样留下"
     else
-        say 1 "名字不在白名单里：remove_bundle 拒绝删，目录原样留下"
+        say 1 "名字不在白名单里：bundle_verdict 拒绝，目录原样留下"
+    fi
+
+    # 判的正例与“不在”：普通的白名单 bundle 给出解析后的真实路径；目标不在返回 2；都不删任何东西。
+    mkdir -p "$work/verdict-root/Rinne Input.vst3"
+    local vd
+    vd="$(bundle_verdict "$work/verdict-root" "Rinne Input.vst3" 2>/dev/null)"
+    if [ $? -eq 0 ] && [ "$vd" = "$(cd -- "$work/verdict-root" && pwd -P)/Rinne Input.vst3" ] && [ -d "$work/verdict-root/Rinne Input.vst3" ]; then
+        say 0 "bundle_verdict：普通的白名单 bundle 给出解析后的真实路径，并且没有删它"
+    else
+        say 1 "bundle_verdict：普通的白名单 bundle 给出解析后的真实路径，并且没有删它"
+    fi
+    bundle_verdict "$work/verdict-root" "Rinne Output.vst3" >/dev/null 2>&1
+    if [ $? -eq 2 ]; then
+        say 0 "bundle_verdict：目标不在时返回 2（没东西可删）"
+    else
+        say 1 "bundle_verdict：目标不在时返回 2（没东西可删）"
     fi
 
     # ── HOME 指到别处时也不越界 ───────────────────────────────────────────

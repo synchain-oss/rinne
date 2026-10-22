@@ -17,7 +17,8 @@
 #   5. zip 根目录带 LICENSE / THIRD-PARTY-NOTICES.md / LICENSES/ / third_party/notices/ / SHA256SUMS /
 #      install-macos.sh / uninstall-macos.sh，与 Windows 包同一批合规文件（多两个脚本与两个 .component）。
 #   6. 打包后断言：zip 根条目集合与打包清单相同、4 个 Contents/MacOS 条目全带可执行位、
-#      禁入条目一个没有、解压回来逐文件比对字节、对应源码指引那几行在；
+#      禁入条目一个没有、解压回来逐文件比对字节、解出来的 4 个 bundle 再验一次 ad-hoc 签名、
+#      对应源码指引那几行在（位置也对：标题后第一段，在「READ THIS FIRST」之前）；
 #      .sha256 用 INSTALL.txt 里教用户的那条 `shasum -a 256 -c` 自验。
 #
 # **合规判据只有一份**：本脚本调 `pwsh scripts/package.ps1 -Preflight -PreflightOut <清单>`，
@@ -73,6 +74,7 @@ otool_cmd() { printf '%s' "${RINNE_OTOOL:-otool}"; }
 unzip_cmd() { printf '%s' "${RINNE_UNZIP:-unzip}"; }
 shasum_cmd() { printf '%s' "${RINNE_SHASUM:-shasum}"; }
 strings_cmd() { printf '%s' "${RINNE_STRINGS:-strings}"; }
+codesign_cmd() { printf '%s' "${RINNE_CODESIGN:-codesign}"; }
 
 die() {
     echo "$PROG: $*" >&2
@@ -93,7 +95,7 @@ native_path() {
 # 缺的一次列全，不是撞上一个就停。
 tools_missing() {
     local tool miss=""
-    for tool in "$(ditto_cmd)" "$(lipo_cmd)" "$(file_cmd)" "$(otool_cmd)" "$(unzip_cmd)" "$(shasum_cmd)" "$(strings_cmd)"; do
+    for tool in "$(ditto_cmd)" "$(lipo_cmd)" "$(file_cmd)" "$(otool_cmd)" "$(unzip_cmd)" "$(shasum_cmd)" "$(strings_cmd)" "$(codesign_cmd)"; do
         command -v "$tool" >/dev/null 2>&1 || miss="$miss $tool"
     done
     printf '%s' "$miss"
@@ -288,6 +290,23 @@ zip_exec_bits_error() {
     if [ -n "$bad" ]; then
         echo "zip 里的可执行条目丢了 x 位："
         printf '%s\n' "$bad"
+        return 1
+    fi
+    return 0
+}
+
+# kit 的 tools/rinne_nulltest 要在 zip 里并带 x 位（kit 的用途就是运行它）。
+# $1 unzip -Z 的输出
+zip_kit_tool_error() {
+    local line
+    line="$(printf '%s\n' "$1" | grep -E '[[:space:]]tools/rinne_nulltest[[:space:]]*$' || true)"
+    if [ -z "$line" ]; then
+        echo "zip 里没有 tools/rinne_nulltest 条目"
+        return 1
+    fi
+    if ! printf '%s\n' "$line" | grep -qE '^[[:space:]]*[-l]..[xs]..[xs]..[xt]'; then
+        echo "tools/rinne_nulltest 丢了 x 位："
+        printf '%s\n' "$line"
         return 1
     fi
     return 0
@@ -521,35 +540,71 @@ render_provenance() {
     (cd -- "$REPO_ROOT" && "$node" scripts/gen-docs.mjs --emit provenance)
 }
 
+# 某个固定串第一次出现在第几行（没有则不打印）。awk 的 index 是固定串匹配，不是正则。
+# $1 全文 $2 固定串
+text_line_of() {
+    printf '%s\n' "$1" | awk -v pat="$2" 'index($0, pat) { print NR; exit }'
+}
+
+# 对应源码指引里的一行：必须在，且落在「READ THIS FIRST」所在行之前。有问题就打印一句并返回 1。
+# $1 全文 $2 READ THIS FIRST 所在行（可空）$3 固定串 $4 缺的时候怎么说
+source_needle_problem() {
+    local at
+    at="$(text_line_of "$1" "$3")"
+    if [ -z "$at" ]; then
+        echo "INSTALL.txt 缺对应源码指引的一行：$4"
+        return 1
+    fi
+    if [ -n "$2" ] && [ "$at" -gt "$2" ]; then
+        echo "INSTALL.txt 里对应源码指引的一行落在「READ THIS FIRST」之后：$4"
+        return 1
+    fi
+    return 0
+}
+
 # INSTALL.txt 里必须有的对应源码指引那几行（GPLv3 第 6 条 (d)）。纯函数。
+# 三层判据：逐行在；位置对（标题行之后的第一段就是这个块，各行都在「READ THIS FIRST」之前）；kit 另有一条。
 # mac 上没有 WebView2，所以不查 WebView2 那一行。
-# $1 文本 $2 版本 $3 源码链接（preflight 清单的 sourceUrl，已含 tag）$4 commit $5 JUCE 版本 $6 JUCE commit
+# kit 没有 tag：链接要钉在 40 位 commit 上（$3 以 /tree/$4 结尾），正文里不许有 tree/v<版本> 的死链。
+# $1 文本 $2 版本 $3 源码链接（已含 tag；kit 时是含 commit 的）$4 commit $5 JUCE 版本 $6 JUCE commit $7 是否 kit（1 或 0，缺省 0）
 install_source_problems() {
-    local text="$1" version="$2" source_url="$3" commit="$4" juce_version="$5" juce_commit="$6" bad=0
-    case "$text" in
-        *"Rinne  $version: $source_url"*) ;;
-        *) echo "INSTALL.txt 缺对应源码指引的一行：Rinne $version 对应 $source_url"; bad=$((bad + 1)) ;;
+    local text="$1" version="$2" source_url="$3" commit="$4" juce_version="$5" juce_commit="$6" kit="${7:-0}" bad=0
+    local head_pat='Corresponding Source for this build (GPLv3' first read_line
+    if [ "$kit" = "1" ]; then
+        case "$source_url" in
+            */tree/"$commit") ;;
+            *) echo "kit 包没有 tag：对应源码链接要钉在 40 位 commit 上，实际是 $source_url"; bad=$((bad + 1)) ;;
+        esac
+        case "$text" in
+            *"tree/v$version"*) echo "kit 包的 INSTALL.txt 里有指向 tree/v$version 的链接：kit 没有这个 tag，是死链"; bad=$((bad + 1)) ;;
+        esac
+    fi
+    read_line="$(text_line_of "$text" 'READ THIS FIRST')"
+    if [ -z "$read_line" ]; then
+        echo "INSTALL.txt 缺「READ THIS FIRST」段：对应源码指引的位置无从核对"
+        bad=$((bad + 1))
+    fi
+    first="$(printf '%s\n' "$text" | awk 'NR > 1 && NF { print; exit }')"
+    case "$first" in
+        "$head_pat"*) ;;
+        *) echo "INSTALL.txt 标题之后的第一段不是对应源码指引（要以「$head_pat」开头）"; bad=$((bad + 1)) ;;
     esac
-    case "$text" in
-        *"(commit $commit)"*) ;;
-        *) echo "INSTALL.txt 缺对应源码指引的一行：源码 commit $commit"; bad=$((bad + 1)) ;;
-    esac
-    case "$text" in
-        *"JUCE   $juce_version"*) ;;
-        *) echo "INSTALL.txt 缺对应源码指引的一行：JUCE $juce_version"; bad=$((bad + 1)) ;;
-    esac
-    case "$text" in
-        *"/tree/$juce_commit"*) ;;
-        *) echo "INSTALL.txt 缺对应源码指引的一行：JUCE 的 40 位 commit"; bad=$((bad + 1)) ;;
-    esac
-    case "$text" in
-        *"Build steps: docs/BUILDING.md"*) ;;
-        *) echo "INSTALL.txt 缺对应源码指引的一行：构建说明的路径"; bad=$((bad + 1)) ;;
-    esac
+    source_needle_problem "$text" "$read_line" "Rinne  $version: $source_url" "Rinne $version 对应 $source_url" || bad=$((bad + 1))
+    source_needle_problem "$text" "$read_line" "(commit $commit)" "源码 commit $commit" || bad=$((bad + 1))
+    source_needle_problem "$text" "$read_line" "JUCE   $juce_version" "JUCE $juce_version" || bad=$((bad + 1))
+    source_needle_problem "$text" "$read_line" "/tree/$juce_commit" "JUCE 的 40 位 commit" || bad=$((bad + 1))
+    source_needle_problem "$text" "$read_line" "Build steps: docs/BUILDING.md" "构建说明的路径" || bad=$((bad + 1))
     case "$text" in
         *"{{"* | *"}}"*) echo "INSTALL.txt 里还有未替换的占位符"; bad=$((bad + 1)) ;;
     esac
     return "$bad"
+}
+
+# kit 没有 tag（不打演练 tag，kit 的构建提交也不在任何 tag 上）：把 preflight 清单里含 tag 的源码链接
+# 改成钉在 40 位 commit 上的。纯函数。
+# $1 清单里的 sourceUrl（形如 …/tree/<tag>）$2 40 位 commit
+kit_source_url() {
+    printf '%s/tree/%s' "${1%/tree/*}" "$2"
 }
 
 # INSTALL.txt 里必须带上 preflight 清单点名的使用前必读规则（ruleEn / ruleZh 各一行一条，逐字）。
@@ -700,6 +755,11 @@ stage_epoch() {
     epoch="${SOURCE_DATE_EPOCH:-}"
     case "$epoch" in '' | *[!0-9]*) epoch="$(git -C "$1" log -1 --format=%ct 2>/dev/null || true)" ;; esac
     case "$epoch" in '' | *[!0-9]*) epoch=315532800 ;; esac
+    # 与 package.ps1 同一口径：不低于 1980-01-01（zip 的 DOS 时间下限；更早的值写进 DOS 时间会下溢），
+    # 取整到偶数秒（DOS 时间只有两秒粒度）。位数过多的当作无效（免得算术溢出）。
+    [ "${#epoch}" -le 12 ] || epoch=315532800
+    if [ "$epoch" -lt 315532800 ]; then epoch=315532800; fi
+    epoch=$((epoch - epoch % 2))
     printf '%s' "$epoch"
 }
 
@@ -883,7 +943,7 @@ main() {
     gate "preflight 清单不合契约" preflight_problems "$pf"
 
     # 清单里的版本与本脚本的版本必须一致；回落读的版本还要与 package.ps1 的解析器读到的一致。
-    local mf_version mf_cmake tag source_url juce_version juce_commit
+    local mf_version mf_cmake tag source_url source_ref juce_version juce_commit
     mf_version="$(mf_one "$pf" version)"
     mf_cmake="$(mf_one "$pf" cmakeVersion)"
     [ "$mf_version" = "$version" ] \
@@ -894,6 +954,12 @@ main() {
     fi
     tag="$(mf_one "$pf" tag)"
     source_url="$(mf_one "$pf" sourceUrl)"
+    # 对应源码链接钉在哪：发行包钉 tag；kit 没有 tag，钉 40 位 commit（钉在不存在的 tag 上，主链接就是 404）。
+    source_ref="$tag"
+    if [ "$kit" -eq 1 ]; then
+        source_url="$(kit_source_url "$source_url" "$source_commit")"
+        source_ref="$source_commit"
+    fi
     juce_version="$(mf_one "$pf" juceVersion)"
     juce_commit="$(mf_one "$pf" juceCommit)"
 
@@ -1001,11 +1067,11 @@ EOF
     # 由文档生成器渲染（mac 版），不在这里抄第二份；渲染后断言对应源码指引那几行与使用前必读的规则在。
     local vars
     vars="$(printf '{"VERSION":"%s","TAG":"%s","COMMIT":"%s","JUCE_VERSION":"%s","JUCE_COMMIT":"%s","ZIP":"%s"}' \
-        "$version" "$tag" "$source_commit" "$juce_version" "$juce_commit" "$zip_name")"
+        "$version" "$source_ref" "$source_commit" "$juce_version" "$juce_commit" "$zip_name")"
     render_install_txt "$vars" > "$stage/INSTALL.txt" || die "渲染 mac 版 INSTALL.txt 失败"
     local install_text
     install_text="$(cat -- "$stage/INSTALL.txt")"
-    gate "INSTALL.txt 的判据没过" install_source_problems "$install_text" "$version" "$source_url" "$source_commit" "$juce_version" "$juce_commit"
+    gate "INSTALL.txt 的判据没过" install_source_problems "$install_text" "$version" "$source_url" "$source_commit" "$juce_version" "$juce_commit" "$kit"
     gate "INSTALL.txt 缺使用前必读的规则" install_rule_problems "$install_text" "$(mf_all "$pf" ruleEn; mf_all "$pf" ruleZh)"
 
     # ── SHA256SUMS、权限与时间戳（硬要求 6） ─────────────────────────────────
@@ -1046,6 +1112,7 @@ $forbidden"
     # 可执行位（zip 元数据）：Contents/MacOS/ 下的文件条目恰好 4 个，全带 x 位。
     info="$("$(unzip_cmd)" -Z "$zip_w")" || die "读不出 zip 的权限信息"
     gate "zip 里的 Contents/MacOS 条目不合格" zip_exec_bits_error "$info" 4
+    if [ "$kit" -eq 1 ]; then gate "kit 的工具条目不合格" zip_kit_tool_error "$info"; fi
 
     # 真解压一遍（ditto -x -k，与 INSTALL.txt 教用户的同一条命令），与暂存区逐文件比对：
     # 文件集合相同、每个文件字节相同、符号链接指向相同；解出来的可执行文件仍可执行、仍是 arm64。
@@ -1076,6 +1143,15 @@ $forbidden"
 $EXPECTED_BUNDLES
 EOF
 
+    # 重打包之后再验一次 ad-hoc 签名：构建 job 的 sign-and-verify 只验过构建树里的 bundle，复制、规整权限与时间、
+    # 重压之后封印有没有被破坏，要对着最终 zip 解出来的 bundle 再验一次。
+    while IFS= read -r name <&3; do
+        "$(codesign_cmd)" --verify --deep --strict "$unpack/$name" > "$work/codesign.out" 2>&1 \
+            || { cat -- "$work/codesign.out" >&2; die "'$name' 从 zip 解出来之后 codesign --verify 没过（重打包可能破坏了签名封印）"; }
+    done 3<<EOF
+$EXPECTED_BUNDLES
+EOF
+
     # ── .sha256 与 summary（硬要求 3） ───────────────────────────────────────
     local hash size
     hash="$("$(shasum_cmd)" -a 256 "$zip_w" | awk '{ print $1 }')"
@@ -1100,7 +1176,7 @@ EOF
         echo "| key | value |"
         echo "| --- | --- |"
         echo "| version | $version |"
-        echo "| tag | $tag |"
+        echo "| tag | $(if [ "$kit" -eq 1 ]; then echo 'n/a (kit build: no tag, source pinned to the commit)'; else echo "$tag"; fi) |"
         echo "| sourceCommit | $source_commit |"
         echo "| cmakeVersion | $mf_cmake |"
         echo "| juceVersion | $juce_version |"
@@ -1118,6 +1194,8 @@ EOF
         echo "| validation | $(if [ -n "$validation" ]; then echo "$validation"; else echo 'n/a'; fi) |"
         echo ""
         echo "Corresponding source: $source_url"
+        echo "JUCE ${juce_version}: https://github.com/juce-framework/JUCE/tree/${juce_commit}"
+        echo "Build steps: docs/BUILDING.md at the source above"
         echo ""
         echo "## zip contents ($n_entries files)"
         echo ""
@@ -1353,6 +1431,9 @@ case "$1" in
         # RINNE_STUB_STRIPX：模拟「压缩时丢了可执行位」——读回来的权限串里 x 全变成 -。
         if [ -n "${RINNE_STUB_STRIPX:-}" ]; then
             tar -tvf "$2" | sed -E 's/^([-l])(.)(.)x(.)(.)x(.)(.)x/\1\2\3-\4\5-\6\7-/'
+        elif [ -n "${RINNE_STUB_STRIPTOOLX:-}" ]; then
+            # 只丢 tools/rinne_nulltest 的可执行位（4 个 bundle 条目照旧），盯住 kit 工具那一道判据。
+            tar -tvf "$2" | sed -E '/ tools\/rinne_nulltest$/ s/^([-l])(.)(.)x(.)(.)x(.)(.)x/\1\2\3-\4\5-\6\7-/'
         else
             tar -tvf "$2"
         fi
@@ -1412,16 +1493,28 @@ case "$*" in
             shift
         done
         g() { printf '%s' "$json" | sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p'; }
-        printf 'Rinne %s - macOS arm64\n' "$(g VERSION)"
+        printf 'Rinne %s - macOS arm64\n\n' "$(g VERSION)"
+        read_block() {
+            printf 'READ THIS FIRST / 使用前必读\n\n'
+            [ -n "${RINNE_STUB_NODE_DROPRULES:-}" ] || printf 'Placement: Put Rinne Input first\n放置位置：先放 Input\n'
+        }
+        [ -z "${RINNE_STUB_NODE_READFIRST:-}" ] || { read_block; printf '\n'; }
+        printf 'Corresponding Source for this build (GPLv3 section 6 (d)):\n'
         printf '  Rinne  %s: https://example.invalid/rinne/tree/%s  (commit %s)\n' "$(g VERSION)" "$(g TAG)" "$(g COMMIT)"
         printf '  JUCE   %s (stub): https://example.invalid/juce/tree/%s\n' "$(g JUCE_VERSION)" "$(g JUCE_COMMIT)"
         [ -n "${RINNE_STUB_NODE_DROP:-}" ] || printf '  Build steps: docs/BUILDING.md at the tag above\n'
-        [ -n "${RINNE_STUB_NODE_DROPRULES:-}" ] || printf 'Placement: Put Rinne Input first\n放置位置：先放 Input\n'
+        [ -n "${RINNE_STUB_NODE_READFIRST:-}" ] || { printf '\n'; read_block; }
         ;;
     *) exit 2 ;;
 esac
 STUB
-    chmod 0755 "$bin/ditto" "$bin/file" "$bin/lipo" "$bin/otool" "$bin/strings" "$bin/unzip" "$bin/pwsh" "$bin/node"
+    cat > "$bin/codesign" <<'STUB'
+#!/bin/bash
+# 自测用的 codesign 桩：每次调用记一行日志；RINNE_STUB_CODESIGN_FAIL 非空时验签判红。
+printf '%s\n' "$*" >> "${RINNE_STUB_SCRATCH:-/tmp}/codesign.log"
+[ -z "${RINNE_STUB_CODESIGN_FAIL:-}" ] || { echo "stub codesign: invalid signature" >&2; exit 1; }
+STUB
+    chmod 0755 "$bin/ditto" "$bin/file" "$bin/lipo" "$bin/otool" "$bin/strings" "$bin/unzip" "$bin/pwsh" "$bin/node" "$bin/codesign"
 }
 
 # 假仓库：把本脚本、两个安装脚本和真的打包清单复制进去，再写最小的 CMakeLists / 合规文件 / NOTICES。
@@ -1644,6 +1737,14 @@ drwxr-xr-x  2.1 unx        0 bx stor 23-Nov-14 22:13 Rinne Input.vst3/Contents/M
     zi_link="$(printf '%s\n' "$zi_ok" | sed 's|^-rwxr-xr-x\(.*Rinne Input.component/Contents/MacOS/Rinne Input\)$|lrwxr-xr-x\1|')"
     st_ok "可执行位：符号链接条目（l 开头）也算" zip_exec_bits_error "$zi_link" 4
 
+    # kit 的 tools/rinne_nulltest 要带 x 位。
+    local zk_ok
+    zk_ok="$zi_ok
+-rwxr-xr-x  2.1 unx     1234 bx defN 23-Nov-14 22:13 tools/rinne_nulltest"
+    st_ok "kit 工具：带 x 位" zip_kit_tool_error "$zk_ok"
+    st_red "kit 工具：丢了 x 位" zip_kit_tool_error "$(printf '%s\n' "$zk_ok" | sed 's|^-rwxr-xr-x\(.*tools/rinne_nulltest\)$|-rw-r--r--\1|')"
+    st_red "kit 工具：zip 里没有这个条目" zip_kit_tool_error "$zi_ok"
+
     # ── 6. 禁入条目与 third_party ─────────────────────────────────────────────
     st_eq "禁入条目：干净的清单没有命中" "$(forbidden_entry_lines "INSTALL.txt
 Rinne Input.vst3/Contents/MacOS/Rinne Input
@@ -1735,9 +1836,14 @@ tools/rinne_nulltest")"
     # ── 9. INSTALL.txt 的对应源码指引与使用前必读 ─────────────────────────────
     local it
     it="Rinne 0.9.0 - macOS arm64
+
+Corresponding Source for this build (GPLv3 section 6 (d)):
   Rinne  0.9.0: https://example.invalid/rinne/tree/v0.9.0  (commit $ST_C40)
   JUCE   8.0.8 (bundles the SDKs): https://example.invalid/juce/tree/$ST_JUCE40
   Build steps: docs/BUILDING.md at the tag above
+
+READ THIS FIRST / 使用前必读
+
 Placement: Put Rinne Input first"
     st_ok "INSTALL.txt：对应源码指引齐全" install_source_problems "$it" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
     st_red "INSTALL.txt：缺 Rinne 版本行" install_source_problems "$(printf '%s\n' "$it" | grep -v '^  Rinne  ')" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
@@ -1748,6 +1854,49 @@ Placement: Put Rinne Input first"
     st_red "INSTALL.txt：缺构建说明路径" install_source_problems "$(printf '%s\n' "$it" | grep -v 'Build steps')" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
     st_red "INSTALL.txt：还有未替换的占位符" install_source_problems "$it
 {{VERSION}}" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
+    st_red "INSTALL.txt：JUCE 版本不对" install_source_problems "$it" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.7 "$ST_JUCE40"
+    # 位置：源码块要在标题之后的第一段，各行都在 READ THIS FIRST 之前。
+    local it_head it_block it_read
+    it_head="Rinne 0.9.0 - macOS arm64"
+    it_block="$(printf '%s\n' "$it" | sed -n '/^Corresponding Source/,/Build steps/p')"
+    it_read="$(printf '%s\n' "$it" | sed -n '/^READ THIS FIRST/,$p')"
+    st_ok "INSTALL.txt：拆开再拼回去的样例没有问题（拼法没有写错）" install_source_problems "$it_head
+
+$it_block
+
+$it_read" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
+    st_red "INSTALL.txt：源码块被挪到 READ THIS FIRST 之后" install_source_problems "$it_head
+
+$it_read
+
+$it_block" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
+    st_red "INSTALL.txt：标题之后先来了别的段落，源码块不是第一段" install_source_problems "$it_head
+
+Some other paragraph first.
+
+$it_block
+
+$it_read" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
+    st_red "INSTALL.txt：没有 READ THIS FIRST 段" install_source_problems "$it_head
+
+$it_block" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
+    # 位置判据单独盯一例：第一段确实是源码块，只有构建步骤那一行落在 READ THIS FIRST 之后。
+    st_red "INSTALL.txt：构建步骤一行落在 READ THIS FIRST 之后（其余都对）" install_source_problems "$it_head
+
+$(printf '%s\n' "$it_block" | grep -v 'Build steps')
+
+$it_read
+  Build steps: docs/BUILDING.md at the tag above" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40"
+    # kit 没有 tag：链接钉在 commit 上，正文里不许有 tree/v<版本> 的死链。
+    local itk
+    itk="$(printf '%s\n' "$it" | sed "s|tree/v0.9.0|tree/$ST_C40|")"
+    st_ok "INSTALL.txt：kit 的链接钉在 commit 上" install_source_problems "$itk" 0.9.0 "https://example.invalid/rinne/tree/$ST_C40" "$ST_C40" 8.0.8 "$ST_JUCE40" 1
+    st_red "INSTALL.txt：kit 却还用 tag 链接" install_source_problems "$it" 0.9.0 https://example.invalid/rinne/tree/v0.9.0 "$ST_C40" 8.0.8 "$ST_JUCE40" 1
+    # 链接不是 commit，但正文里没有 tree/v<版本> 的死链：只剩“钉在 commit 上”这一条判据在红。
+    st_red "INSTALL.txt：kit 的源码链接不是 commit（正文里没有死链）" install_source_problems "$(printf '%s\n' "$it" | sed 's|tree/v0.9.0|tree/release-x|')" 0.9.0 https://example.invalid/rinne/tree/release-x "$ST_C40" 8.0.8 "$ST_JUCE40" 1
+    st_red "INSTALL.txt：kit 的正文里有 tree/v<版本> 的死链" install_source_problems "$itk
+see https://example.invalid/rinne/tree/v0.9.0" 0.9.0 "https://example.invalid/rinne/tree/$ST_C40" "$ST_C40" 8.0.8 "$ST_JUCE40" 1
+    st_eq "kit 的源码链接：把 tag 换成 40 位 commit" "$(kit_source_url https://example.invalid/rinne/tree/v0.9.0 "$ST_C40")" "https://example.invalid/rinne/tree/$ST_C40"
     st_ok "INSTALL.txt：使用前必读的规则在" install_rule_problems "$it" "Placement: Put Rinne Input first"
     st_red "INSTALL.txt：缺一条使用前必读的规则" install_rule_problems "$it" "Placement: Put Rinne Input first
 Start from 0: A new instance starts at 0"
@@ -1804,6 +1953,10 @@ EOF
     st_eq "规整：确实枚举到了条目（不是空循环）" "$([ "$seen" -ge 10 ] && echo yes || echo no)" yes
     st_eq "时间戳：SOURCE_DATE_EPOCH 优先" "$(SOURCE_DATE_EPOCH=1234567890 stage_epoch "$work")" "1234567890"
     st_eq "时间戳：SOURCE_DATE_EPOCH 不是数字时落到 1980（非仓库目录里）" "$(SOURCE_DATE_EPOCH=abc stage_epoch "$work")" "315532800"
+    st_eq "时间戳：SOURCE_DATE_EPOCH=0 抬到 1980 的下限（DOS 时间不能更早）" "$(SOURCE_DATE_EPOCH=0 stage_epoch "$work")" "315532800"
+    st_eq "时间戳：低于下限的值抬到下限" "$(SOURCE_DATE_EPOCH=100000 stage_epoch "$work")" "315532800"
+    st_eq "时间戳：奇数秒取整到偶数秒（与 package.ps1 同一口径）" "$(SOURCE_DATE_EPOCH=1234567891 stage_epoch "$work")" "1234567890"
+    st_eq "时间戳：位数过多的当作无效" "$(SOURCE_DATE_EPOCH=99999999999999999999 stage_epoch "$work")" "315532800"
     pack_zip "$sa" "$work/a1.zip"
     pack_zip "$sa" "$work/a2.zip"
     pack_zip "$sb" "$work/b1.zip"
@@ -1907,6 +2060,10 @@ st_pipeline() {
         "$(printf '%s' "$sha1" | grep -cE "^[0-9a-f]{64}  $zip0\$")" "1"
     st_eq "流水线：.sha256 没有 CR" "$(file_has_cr "$o1/$zip0.sha256" && echo yes || echo no)" no
     st_contains "流水线：summary 里有 sha256" "$(cat "$o1/package-summary-macos-arm64.md")" "${sha1%% *}"
+    st_contains "流水线：summary 带 JUCE 版本与 40 位 commit 的链接" "$(cat "$o1/package-summary-macos-arm64.md")" "JUCE 8.0.8: https://github.com/juce-framework/JUCE/tree/$ST_JUCE40"
+    st_contains "流水线：summary 带构建步骤一行" "$(cat "$o1/package-summary-macos-arm64.md")" "Build steps: docs/BUILDING.md"
+    st_eq "流水线：解出来的 4 个 bundle 都验过签（codesign --verify --deep --strict）" \
+        "$(grep -c -- '--verify --deep --strict' "$work/scratch/codesign.log" 2>/dev/null || true)" "4"
     st_eq "流水线：zip 里恰好 4 个 Contents/MacOS 条目" "$(tar -tf "$o1/$zip0" | grep -c '/Contents/MacOS/[^/]')" "4"
     st_eq "流水线：_deps 里的 bundle 被跳过" "$(tar -tf "$o1/$zip0" | grep -c 'Stray')" "0"
     st_eq "流水线：发行包里没有 tools/" "$(tar -tf "$o1/$zip0" | grep -c '^tools/')" "0"
@@ -1976,6 +2133,16 @@ st_pipeline() {
     st_red_run "流水线：zip 里丢了可执行位 → 红" "$work/ob$n" "$zip0" --version 0.9.0 --build-dir "$bx"
     ST_ENV=""
     nb
+    ST_ENV="RINNE_STUB_CODESIGN_FAIL=1"
+    ST_EXPECT="codesign --verify 没过"
+    st_red_run "流水线：重打包后解出来的 bundle 验签不过 → 红" "$work/ob$n" "$zip0" --version 0.9.0 --build-dir "$bx"
+    ST_ENV=""
+    nb
+    ST_ENV="RINNE_STUB_NODE_READFIRST=1"
+    ST_EXPECT="INSTALL.txt 的判据没过"
+    st_red_run "流水线：INSTALL.txt 的对应源码块被挪到 READ THIS FIRST 之后 → 红" "$work/ob$n" "$zip0" --version 0.9.0 --build-dir "$bx"
+    ST_ENV=""
+    nb
     cp "$work/fake/$MANIFEST_FILE" "$work/manifest.orig"
     printf 'extra.txt\n' >> "$work/fake/$MANIFEST_FILE"
     ST_EXPECT="根条目与打包清单不一致"
@@ -2035,12 +2202,20 @@ st_pipeline() {
     if st_run_pkg "$work/okit" --version 0.9.0 --build-dir "$bk" --kit --kit-name "$kitn"; then
         st_pass "kit：--kit --kit-name 通过"
         st_eq "kit：包里有 tools/rinne_nulltest" "$(tar -tf "$work/okit/$kitn.zip" | grep -c '^tools/rinne_nulltest$')" "1"
+        st_contains "kit：INSTALL.txt 的对应源码链接钉在 40 位 commit 上" "$(tar -xOf "$work/okit/$kitn.zip" INSTALL.txt)" "https://example.invalid/rinne/tree/$ST_C40"
+        st_eq "kit：INSTALL.txt 里没有 tree/v<版本> 的死链" "$(tar -xOf "$work/okit/$kitn.zip" INSTALL.txt | grep -c 'tree/v0.9.0' || true)" "0"
+        st_contains "kit：summary 的 Corresponding source 钉在 commit 上" "$(cat "$work/okit/package-summary-$kitn.md")" "Corresponding source: https://example.invalid/rinne/tree/$ST_C40"
+        st_eq "kit：summary 里没有 tree/v<版本> 的死链" "$(grep -c 'tree/v0.9.0' "$work/okit/package-summary-$kitn.md" || true)" "0"
         st_eq "kit：产出 kit 的 zip、.sha256 与带 kit 名字的 summary" \
             "$(ls "$work/okit" | LC_ALL=C sort | paste -sd, -)" "$kitn.zip,$kitn.zip.sha256,package-summary-$kitn.md"
     else
         st_fail "kit：--kit --kit-name 通过"
         sed 's/^/        | /' "$work/last.log"
     fi
+    ST_ENV="RINNE_STUB_STRIPTOOLX=1"
+    ST_EXPECT="kit 的工具条目不合格"
+    st_red_run "kit：zip 里 tools/rinne_nulltest 丢了可执行位 → 红" "$work/okit6" "$kitn.zip" --version 0.9.0 --build-dir "$bk" --kit --kit-name "$kitn"
+    ST_ENV=""
     ST_EXPECT="必须同时给 --kit-name"
     st_red_run "kit：--kit 没给 --kit-name → 红" "$work/okit2" "$zip0" --version 0.9.0 --build-dir "$bk" --kit
     ST_EXPECT="只能与 --kit 一起用"
@@ -2147,7 +2322,7 @@ self_test() {
     chmod 0644 "$work/probe-chmod"
     if [ -x "$work/probe-chmod" ]; then ST_FS_CHMOD=0; fi
     export RINNE_DITTO="$work/bin/ditto" RINNE_FILE="$work/bin/file" RINNE_LIPO="$work/bin/lipo"
-    export RINNE_OTOOL="$work/bin/otool" RINNE_STRINGS="$work/bin/strings" RINNE_UNZIP="$work/bin/unzip"
+    export RINNE_OTOOL="$work/bin/otool" RINNE_STRINGS="$work/bin/strings" RINNE_UNZIP="$work/bin/unzip" RINNE_CODESIGN="$work/bin/codesign"
 
     if [ "$which" = all ] || [ "$which" = units ]; then st_units; fi
     if [ "$which" = all ] || [ "$which" = pipeline ]; then st_pipeline; fi

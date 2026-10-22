@@ -86,7 +86,8 @@ Unlock first, then open your DAW. Requirements: macOS 11 or later on an Apple Si
    shasum -a 256 ~/Downloads/{{ZIP}}
    ```
 
-2. Extract the zip.
+2. Extract the zip into a new folder. If `~/Downloads/Rinne` is already there (an earlier version), move it to the Trash
+   first: `ditto` merges into an existing folder and keeps its old files.
 
    ```sh
    ditto -x -k ~/Downloads/{{ZIP}} ~/Downloads/Rinne
@@ -126,7 +127,8 @@ Intel Mac 与 GarageBand。
    shasum -a 256 ~/Downloads/{{ZIP}}
    ```
 
-2. 解压 zip。
+2. 解压 zip 到一个新文件夹。如果 `~/Downloads/Rinne` 已经在（旧版本解压的），先把它移到废纸篓：`ditto` 会合并进已有的文件夹，
+   旧文件会留着。
 
    ```sh
    ditto -x -k ~/Downloads/{{ZIP}} ~/Downloads/Rinne

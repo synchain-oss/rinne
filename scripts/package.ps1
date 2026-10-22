@@ -25,8 +25,11 @@
        NOTICES 点名的每个声明路径在 zip 里、根条目集合与打包清单相同、没有任何条目带本机路径、
        .sha256 是 LF。
   确定性：条目按序数排序写盘，时间戳统一取 SOURCE_DATE_EPOCH > HEAD 提交时间 > 1980-01-01，
-  每个条目的权限位写死，所以同一份输入在同一运行时下重打，zip 的 sha256 不变。
-  不同 .NET 运行时（PS 5.1 与 7）的 deflate 实现不同，跨运行时不保证字节一致。
+  每个条目的属性写死，所以同一份输入在同一操作系统、同一 .NET 运行时下重打，zip 的 sha256 不变。
+  不同 .NET 运行时（PS 5.1 与 7）的 deflate 实现不同，条目头里的 VersionMadeBy 也随操作系统变
+  （Windows 与 Linux 不同），所以跨运行时、跨操作系统都不保证字节一致。
+  kit 包没有 tag（不打演练 tag，kit 的构建提交也不在任何 tag 上）：INSTALL.txt 与 summary 里的对应源码链接
+  钉在 40 位源码 commit 上，不是 tag。
   macOS 包由 scripts/package-macos.sh 打，但合规判据与打包清单**仍只在本脚本**：
   它调 `-Preflight -PreflightOut <文件>`，本脚本把 preflight 核过的结果写成机读清单，sh 只读这份清单，
   不在 sh 里重写第二套解析。不传 -PreflightOut 时行为与输出逐字不变。
@@ -295,20 +298,30 @@ function Get-RinneSha256Problems([string]$Text, [string]$ExpectedName) {
   $out.ToArray()
 }
 
-# 本机路径扫描：读字节按 latin-1 解码，找盘符路径与几个要查的字面量（构建目录、仓根、用户目录）。
+# 本机路径扫描：找盘符路径与几个要查的字面量（构建目录、仓根、用户目录）。
+# 同一份字节解三遍：latin-1（窄字符串，逐字节）、UTF-16LE 两种对齐（L"C:\..." 这类宽字符串中间夹 NUL，
+# 窄解码下字面量与盘符正则都命中不了；宽字符串在文件里可能落在奇数偏移，所以偏移 0 与 1 各解一次）。
 # 纯函数：吃字节与字面量，返回命中的片段列表。
 function Get-RinneLocalPathHits([byte[]]$Bytes, [string[]]$Literals) {
-  $text = [Text.Encoding]::GetEncoding(28591).GetString($Bytes)
-  $hits = New-Object System.Collections.Generic.List[string]
-  foreach ($lit in $Literals) {
-    if (-not $lit) { continue }
-    foreach ($form in @($lit, ($lit -replace '\\', '/'))) {
-      if (-not $form) { continue }
-      if ($text.Contains($form)) { $hits.Add($form) }
-    }
+  $texts = New-Object System.Collections.Generic.List[string]
+  $texts.Add([Text.Encoding]::GetEncoding(28591).GetString($Bytes))
+  foreach ($off in 0, 1) {
+    $len = $Bytes.Length - $off
+    $len -= ($len % 2)
+    if ($len -gt 0) { $texts.Add([Text.Encoding]::Unicode.GetString($Bytes, $off, $len)) }
   }
-  foreach ($m in [regex]::Matches($text, '[A-Za-z]:[\\/](?:[A-Za-z0-9_.$()+ -]{2,}[\\/]){1,}[A-Za-z0-9_.$()+ -]{1,}')) {
-    $hits.Add($m.Value)
+  $hits = New-Object System.Collections.Generic.List[string]
+  foreach ($text in $texts) {
+    foreach ($lit in $Literals) {
+      if (-not $lit) { continue }
+      foreach ($form in @($lit, ($lit -replace '\\', '/'))) {
+        if (-not $form) { continue }
+        if ($text.Contains($form)) { $hits.Add($form) }
+      }
+    }
+    foreach ($m in [regex]::Matches($text, '[A-Za-z]:[\\/](?:[A-Za-z0-9_.$()+ -]{2,}[\\/]){1,}[A-Za-z0-9_.$()+ -]{1,}')) {
+      $hits.Add($m.Value)
+    }
   }
   $hits.ToArray()
 }
@@ -378,6 +391,10 @@ function Invoke-RinneCommand([string]$Exe, [string[]]$Arguments, [string]$Cwd) {
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
+  # node 写出去的是 UTF-8；不显式指定时按系统代码页解码（中文系统是 GBK，英文系统是 1252），
+  # INSTALL.txt 与来源表里的中文与弯引号就变成乱码，写进 zip 的也是乱码。
+  $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+  $psi.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
   $p = [Diagnostics.Process]::Start($psi)
   try {
     $out = $p.StandardOutput.ReadToEndAsync()
@@ -425,13 +442,24 @@ function Add-RinneProvenanceTable([string]$NoticesText, [string]$Table) {
 }
 
 # INSTALL.txt 里必须有的对应源码指引那几行（GPLv3 第 6 条 (d)）。纯函数。
-function Get-RinneInstallProblems([string]$Text, [hashtable]$Vars) {
+# 三层判据：① 变量齐全；② 六行逐字在（Rinne 的 tag 行、源码 commit、JUCE 版本、JUCE 的 40 位 commit、
+# WebView2 SDK 版本、构建步骤）；③ 位置对：标题行之后的第一段就是这个块，六行都落在「READ THIS FIRST」之前
+# （GPLv3 第 6 条 (d) 的指引必须在用户最先读到的地方，不能被挪到文末）。
+# -Kit：kit 没有 tag，链接钉在 40 位 commit 上（TAG 变量就是 COMMIT），且正文里不许出现 tree/v<版本> 的死链。
+function Get-RinneInstallProblems([string]$Text, [hashtable]$Vars, [switch]$Kit) {
   $out = New-Object System.Collections.Generic.List[string]
   # 变量本身先查一遍：缺一个就红（渲染器会拒，但判据自己也要站得住，
   # 免得「WebView2 SDK 」这种「前缀 + 空值」的字样把缺变量糊过去）。
   foreach ($k in 'VERSION', 'TAG', 'COMMIT', 'JUCE_VERSION', 'JUCE_COMMIT', 'WEBVIEW2_VERSION') {
     if (-not $Vars.ContainsKey($k) -or -not $Vars[$k]) { $out.Add("INSTALL.txt 的变量缺一个：$k") }
   }
+  if ($Kit -and $Vars.ContainsKey('TAG') -and $Vars.ContainsKey('COMMIT') -and $Vars['TAG'] -cne $Vars['COMMIT']) {
+    $out.Add('kit 包没有 tag：对应源码链接要钉在 40 位 commit 上（TAG 变量应等于 COMMIT）')
+  }
+  if ($Kit -and $Vars.ContainsKey('VERSION') -and $Vars['VERSION'] -and $Text.Contains("tree/v$($Vars['VERSION'])")) {
+    $out.Add("kit 包的 INSTALL.txt 里有指向 tree/v$($Vars['VERSION']) 的链接：kit 没有这个 tag，是死链")
+  }
+  $srcHead = 'Corresponding Source for this build (GPLv3'
   $need = @(
     "Rinne  $($Vars['VERSION']): https://github.com/$RepoSlug/tree/$($Vars['TAG'])",
     "(commit $($Vars['COMMIT']))",
@@ -440,8 +468,39 @@ function Get-RinneInstallProblems([string]$Text, [hashtable]$Vars) {
     "WebView2 SDK $($Vars['WEBVIEW2_VERSION'])",
     'Build steps: docs/BUILDING.md'
   )
-  foreach ($n in $need) { if (-not $Text.Contains($n)) { $out.Add("INSTALL.txt 缺对应源码指引的一行：$n") } }
+  $readAt = $Text.IndexOf('READ THIS FIRST', [StringComparison]::Ordinal)
+  if ($readAt -lt 0) { $out.Add('INSTALL.txt 缺「READ THIS FIRST」段：对应源码指引的位置无从核对') }
+  # 标题行之后的第一段（跳过空行）必须就是对应源码指引。
+  $lines = @($Text -split "`r?`n")
+  $first = $null
+  for ($i = 1; $i -lt $lines.Count; $i++) { if ($lines[$i].Trim()) { $first = $lines[$i]; break } }
+  if ($null -eq $first -or -not $first.StartsWith($srcHead, [StringComparison]::Ordinal)) {
+    $out.Add("INSTALL.txt 标题之后的第一段不是对应源码指引（要以「$srcHead」开头）")
+  }
+  foreach ($n in $need) {
+    $at = $Text.IndexOf($n, [StringComparison]::Ordinal)
+    if ($at -lt 0) { $out.Add("INSTALL.txt 缺对应源码指引的一行：$n") }
+    elseif ($readAt -ge 0 -and $at -gt $readAt) { $out.Add("INSTALL.txt 里对应源码指引的一行落在「READ THIS FIRST」之后：$n") }
+  }
   if ($Text -match '\{\{|\}\}') { $out.Add('INSTALL.txt 里还有未替换的占位符') }
+  $out.ToArray()
+}
+
+# INSTALL.txt 里必须带上「使用前必读」里标了 installTxt 的规则（中英各一条，逐字）。
+# 规则原文只在文档真源里；生成器一旦漏渲其中一条，包里的说明就少了一条安全提示，所以这里再核一遍。
+# Rules 是 Get-RinneInstallRules 的返回值（每项有 En 与 Zh）。纯函数。
+function Get-RinneInstallRuleProblems([string]$Text, [object[]]$Rules) {
+  $out = New-Object System.Collections.Generic.List[string]
+  if (-not $Rules -or $Rules.Count -eq 0) { $out.Add('没有可核对的使用前必读规则'); return $out.ToArray() }
+  foreach ($r in $Rules) {
+    foreach ($form in @($r.En, $r.Zh)) {
+      if (-not $form) { $out.Add('使用前必读的规则里有一条是空的'); continue }
+      if (-not $Text.Contains($form)) {
+        $head = if ($form.Length -gt 40) { $form.Substring(0, 40) } else { $form }
+        $out.Add("INSTALL.txt 缺使用前必读的一条：$head…")
+      }
+    }
+  }
   $out.ToArray()
 }
 
@@ -516,6 +575,9 @@ function Invoke-RinnePackage {
     try { $SourceCommit = ((& git -C $RepoRoot rev-parse HEAD 2>$null) | Out-String).Trim() } catch { $SourceCommit = '' }
   }
   if ($SourceCommit -notmatch '^[0-9a-f]{40}$') { Stop-RinnePackage "源码 commit 不是 40 位小写十六进制：'$SourceCommit'" }
+  # 对应源码链接钉在哪：发行包钉 tag；kit 没有 tag（不打演练 tag，kit 的构建提交也不在任何 tag 上），
+  # 钉 40 位 commit —— 钉在不存在的 tag 上，GPLv3 §6(d) 的指引主链接就是 404。
+  $sourceRef = if ($Kit) { $SourceCommit } else { $Tag }
 
   $juceVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot '.juce-version') -Raw).Trim()
   $juceCommit = (Get-Content -LiteralPath (Join-Path $RepoRoot '.juce-commit') -Raw).Trim()
@@ -585,13 +647,14 @@ function Invoke-RinnePackage {
 
   # ── INSTALL.txt 的渲染（preflight 与正式打包都要） ────────────────────────
   $installVars = @{
-    VERSION = $Version; TAG = $Tag; COMMIT = $SourceCommit
+    VERSION = $Version; TAG = $sourceRef; COMMIT = $SourceCommit
     JUCE_VERSION = $juceVersion; JUCE_COMMIT = $juceCommit; WEBVIEW2_VERSION = $webview2Version
     ZIP = $zipName
   }
   try { $installText = Invoke-RinneInstallTxt $RepoRoot $installVars 'win' }
   catch { Stop-RinnePackage $_.Exception.Message }
-  $installProblems = @(Get-RinneInstallProblems $installText $installVars)
+  $installProblems = @(Get-RinneInstallProblems $installText $installVars -Kit:$Kit)
+  $installProblems += @(Get-RinneInstallRuleProblems $installText @(Get-RinneInstallRules $RepoRoot))
   if ($installProblems.Count) {
     $installProblems | ForEach-Object { Write-Host "package.ps1: $_" -ForegroundColor Red }
     Stop-RinnePackage 'INSTALL.txt 的判据没过'
@@ -615,7 +678,7 @@ function Invoke-RinnePackage {
       & $addKv 'tag' $Tag
       & $addKv 'cmakeVersion' $cmakeVersion
       & $addKv 'sourceCommit' $SourceCommit
-      & $addKv 'sourceUrl' "https://github.com/$RepoSlug/tree/$Tag"
+      & $addKv 'sourceUrl' "https://github.com/$RepoSlug/tree/$sourceRef"
       # 对应源码指引那几行（GPLv3 第 6 条 (d)）：逐行一行，同名键按出现顺序累积。
       foreach ($l in @($installText -split "`r?`n")) {
         if ($l -match '^\s+(Rinne\s|JUCE\s|WebView2 SDK|Build steps|Corresponding Source)') { & $addKv 'sourceLine' $l.Trim() }
@@ -728,7 +791,8 @@ function Invoke-RinnePackage {
         foreach ($k in $keys) {
           $e = $zip.CreateEntry($k, [System.IO.Compression.CompressionLevel]::Optimal)
           $e.LastWriteTime = $entryTime
-          # 权限位写死：普通文件 0644 的位模式，不带任何平台相关的附加位。
+          # 属性写死成 DOS 的 archive 位（32，低 16 位）；不写 Unix 权限（高 16 位）。Windows 包解压时用默认权限，
+          # 字节一致性靠“每个条目都是同一个值”。同一操作系统、同一 .NET 运行时下重打字节一致，跨系统不保证。
           $e.ExternalAttributes = 32
           $dst = $e.Open()
           try {
@@ -761,17 +825,16 @@ function Invoke-RinnePackage {
       foreach ($p in @(Get-RinneCitedPaths $noticesText)) {
         if (-not $zipNames.Contains($p)) { Stop-RinnePackage "THIRD-PARTY-NOTICES.md 点名的 $p 不在 zip 里（大小写须一致）" }
       }
-      # 根条目集合与打包清单比对（集合相等 + 数量相等）。kit 包另有一套清单，不在这里比。
-      if (-not $Kit) {
-        $dirUnits = @('Rinne Input.vst3/', 'Rinne Output.vst3/', 'LICENSES/', 'third_party/notices/')
-        if ($kitTool) { $dirUnits += 'tools/' }
-        $roots = Get-RinneRootEntries ([string[]]$inZip.Keys) $dirUnits
-        if ($roots.Stray.Count) { Stop-RinnePackage "zip 里出现清单外的目录条目：$($roots.Stray[0])" }
-        $manifestProblems = @(Get-RinneManifestProblems $manifestLines $roots.Roots)
-        if ($manifestProblems.Count) {
-          $manifestProblems | ForEach-Object { Write-Host "package.ps1: $_" -ForegroundColor Red }
-          Stop-RinnePackage 'zip 的根条目与打包清单不一致'
-        }
+      # 根条目集合与打包清单比对（集合相等 + 数量相等）。kit 包用同一份清单外加 tools/（kit 才有的工具目录）。
+      $dirUnits = @('Rinne Input.vst3/', 'Rinne Output.vst3/', 'LICENSES/', 'third_party/notices/')
+      $manifestWant = @($manifestLines)
+      if ($kitTool) { $dirUnits += 'tools/'; $manifestWant += 'tools/' }
+      $roots = Get-RinneRootEntries ([string[]]$inZip.Keys) $dirUnits
+      if ($roots.Stray.Count) { Stop-RinnePackage "zip 里出现清单外的目录条目：$($roots.Stray[0])" }
+      $manifestProblems = @(Get-RinneManifestProblems $manifestWant $roots.Roots)
+      if ($manifestProblems.Count) {
+        $manifestProblems | ForEach-Object { Write-Host "package.ps1: $_" -ForegroundColor Red }
+        Stop-RinnePackage 'zip 的根条目与打包清单不一致'
       }
       # 探针不进包。
       foreach ($n in $zipNames) { if ($n -match '(?i)probe') { Stop-RinnePackage "zip 里出现了探针条目：$n" } }
@@ -805,7 +868,7 @@ function Invoke-RinnePackage {
       '| key | value |',
       '| --- | --- |',
       "| version | $Version |",
-      "| tag | $Tag |",
+      "| tag | $(if ($Kit) { 'n/a (kit build: no tag, source pinned to the commit)' } else { $Tag }) |",
       "| sourceCommit | $SourceCommit |",
       "| cmakeVersion | $cmakeVersion |",
       "| juceVersion | $juceVersion |",
@@ -822,7 +885,10 @@ function Invoke-RinnePackage {
       "| buildRun | $(if ($BuildRun) { $BuildRun } else { 'n/a' }) |",
       "| validation | $(if ($Validation) { $Validation } else { 'n/a' }) |",
       '',
-      "Corresponding source: https://github.com/$RepoSlug/tree/$Tag",
+      "Corresponding source: https://github.com/$RepoSlug/tree/$sourceRef",
+      "JUCE ${juceVersion}: https://github.com/juce-framework/JUCE/tree/$juceCommit",
+      "WebView2 SDK ${webview2Version} (NuGet package Microsoft.Web.WebView2; binary only, published by Microsoft)",
+      'Build steps: docs/BUILDING.md at the source above',
       '',
       '## zip contents',
       '',
@@ -919,6 +985,10 @@ function Invoke-RinneSelfTest {
   & $check '清单比对：一致时没有问题' $false (0 -eq @(Get-RinneManifestProblems $manifestOk $manifestOk).Count)
   & $check '清单比对：manifest 多一项，红' $true (@(Get-RinneManifestProblems @($manifestOk + 'EXTRA/') $manifestOk).Count -gt 0)
   & $check '清单比对：zip 里多一项，红' $true (@(Get-RinneManifestProblems $manifestOk @($manifestOk + 'EXTRA/')).Count -gt 0)
+  # kit 的清单 = 发行包清单 + tools/：kit 的 zip 里多出清单以外的根条目要红，不再是整段跳过比对。
+  & $check '清单比对：kit 的清单带 tools/，zip 里也有，没有问题' $false (0 -eq @(Get-RinneManifestProblems @($manifestOk + 'tools/') @($manifestOk + 'tools/')).Count)
+  & $check '清单比对：kit 的 zip 里有 tools/ 而清单没有，红' $true (@(Get-RinneManifestProblems $manifestOk @($manifestOk + 'tools/')).Count -gt 0)
+  & $check '清单比对：kit 的 zip 里多出清单以外的根条目，红' $true (@(Get-RinneManifestProblems @($manifestOk + 'tools/') @($manifestOk + 'tools/' + 'EXTRA/')).Count -gt 0)
 
   # 4b. 根条目的推导：目录单元由打包计划给出，不靠切第一段。
   $dirUnits = @('Rinne Input.vst3/', 'Rinne Output.vst3/', 'LICENSES/', 'third_party/notices/')
@@ -978,6 +1048,12 @@ VST is a registered trademark.
   & $check '路径扫描：干净的文件没有命中' $false (0 -eq @(Get-RinneLocalPathHits $clean @('C:\work\rinne')).Count)
   & $check '路径扫描：命中盘符路径，红' $true (@(Get-RinneLocalPathHits $dirty @('C:\work\rinne')).Count -gt 0)
   & $check '路径扫描：命中给定的字面量，红' $true (@(Get-RinneLocalPathHits ([Text.Encoding]::UTF8.GetBytes('built at D:\ci\rinne')) @('D:\ci\rinne')).Count -gt 0)
+  # 宽字符串（L"C:\..."，UTF-16LE，字符之间夹 NUL）：窄解码命中不了，要另解。奇数偏移的再各来一个。
+  $wideDirty = [Text.Encoding]::Unicode.GetBytes('built at C:\work\rinne\build\x.obj')
+  & $check '路径扫描：UTF-16 的盘符路径，红' $true (@(Get-RinneLocalPathHits $wideDirty @()).Count -gt 0)
+  & $check '路径扫描：UTF-16 且落在奇数偏移的盘符路径，红' $true (@(Get-RinneLocalPathHits ([byte[]](@(0x41) + $wideDirty)) @()).Count -gt 0)
+  & $check '路径扫描：UTF-16 的给定字面量，红' $true (@(Get-RinneLocalPathHits ([Text.Encoding]::Unicode.GetBytes('built at D:\ci\rinne')) @('D:\ci\rinne')).Count -gt 0)
+  & $check '路径扫描：干净的 UTF-16 文本没有命中' $false (0 -eq @(Get-RinneLocalPathHits ([Text.Encoding]::Unicode.GetBytes('nothing to see here')) @('D:\ci\rinne')).Count)
 
   # 7. INSTALL.txt 的判据。
   # ZIP 也是渲染变量：docs/INSTALL.md 的 install:win 块里有 {{ZIP}}（校验与解压命令）。
@@ -990,19 +1066,68 @@ Corresponding Source for this build (GPLv3 section 6 (d)):
   JUCE   8.0.8 (bundles the VST3 SDK and AudioUnitSDK): https://github.com/juce-framework/JUCE/tree/$($installVars['JUCE_COMMIT'])
   WebView2 SDK 1.0.2957.106 (Windows only; NuGet package Microsoft.Web.WebView2)
   Build steps: docs/BUILDING.md at the tag above
+
+READ THIS FIRST / 使用前必读
+
+Feedback can get loud.
 "@
-  & $check 'INSTALL.txt：该有的一行都在，没有问题' $false (0 -eq @(Get-RinneInstallProblems $installSample $installVars).Count)
+  $installSample = $installSample -replace "`r`n", "`n"
+  $installBlock = $installSample.Substring(0, $installSample.IndexOf('READ THIS FIRST'))
+  $installRead = $installSample.Substring($installSample.IndexOf('READ THIS FIRST'))
+  $installTitle = 'Rinne 1.2.3 - Windows x64'
+  $ipCount = { param([string]$t, [hashtable]$v, [bool]$k) @(Get-RinneInstallProblems $t $v -Kit:$k).Count }
+  & $check 'INSTALL.txt：该有的一行都在、位置对，没有问题' $false (0 -eq (& $ipCount $installSample $installVars $false))
   $missing = $installVars.Clone(); $missing.Remove('WEBVIEW2_VERSION')
-  & $check 'INSTALL.txt：变量缺一个，红' $true (@(Get-RinneInstallProblems $installSample $missing).Count -gt 0)
-  & $check 'INSTALL.txt：正文少一行，红' $true (@(Get-RinneInstallProblems ($installSample -replace 'Build steps: docs/BUILDING\.md', 'Build steps: elsewhere') $installVars).Count -gt 0)
+  & $check 'INSTALL.txt：变量缺一个（WebView2 版本），红' $true (0 -lt (& $ipCount $installSample $missing $false))
+  $missingTag = $installVars.Clone(); $missingTag.Remove('TAG')
+  & $check 'INSTALL.txt：变量缺一个（TAG），红' $true (0 -lt (& $ipCount $installSample $missingTag $false))
+  # 六条判据各删（或改坏）一条，必须红：Rinne 的 tag 行、源码 commit、JUCE 版本、JUCE 的 40 位 commit、WebView2 行、构建步骤。
+  & $check 'INSTALL.txt：Rinne 行的 tag 链接不对，红' $true (0 -lt (& $ipCount ($installSample -replace 'tree/v1\.2\.3', 'tree/v9.9.9') $installVars $false))
+  & $check 'INSTALL.txt：Rinne 行整行没有，红' $true (0 -lt (& $ipCount (($installSample -split "`n" | Where-Object { $_ -notlike '  Rinne  *' }) -join "`n") $installVars $false))
+  & $check 'INSTALL.txt：源码 commit 不是传入的那个，红' $true (0 -lt (& $ipCount $installSample.Replace("(commit $($installVars['COMMIT']))", "(commit $('c' * 40))") $installVars $false))
+  & $check 'INSTALL.txt：JUCE 版本不对，红' $true (0 -lt (& $ipCount $installSample.Replace('JUCE   8.0.8', 'JUCE   8.0.7') $installVars $false))
+  & $check 'INSTALL.txt：JUCE 的 40 位 commit 不是 .juce-commit 的那个，红' $true (0 -lt (& $ipCount $installSample.Replace("tree/$($installVars['JUCE_COMMIT'])", "tree/$('d' * 40)") $installVars $false))
+  & $check 'INSTALL.txt：WebView2 行没有，红' $true (0 -lt (& $ipCount (($installSample -split "`n" | Where-Object { $_ -notlike '  WebView2 SDK*' }) -join "`n") $installVars $false))
+  & $check 'INSTALL.txt：WebView2 版本不对，红' $true (0 -lt (& $ipCount $installSample.Replace('WebView2 SDK 1.0.2957.106', 'WebView2 SDK 9.9') $installVars $false))
+  & $check 'INSTALL.txt：构建步骤那行被改掉，红' $true (0 -lt (& $ipCount ($installSample -replace 'Build steps: docs/BUILDING\.md', 'Build steps: elsewhere') $installVars $false))
+  & $check 'INSTALL.txt：还有未替换的占位符，红' $true (0 -lt (& $ipCount ($installSample + "`n{{ZIP}}`n") $installVars $false))
+  # 位置：源码块要在标题之后的第一段，且六行都在「READ THIS FIRST」之前。
+  & $check 'INSTALL.txt：源码块被挪到 READ THIS FIRST 之后，红' $true (0 -lt (& $ipCount ($installTitle + "`n`n" + $installRead + "`n" + $installBlock.Substring($installTitle.Length)) $installVars $false))
+  & $check 'INSTALL.txt：标题之后先来了别的段落，源码块不是第一段，红' $true (0 -lt (& $ipCount ($installTitle + "`n`nSome other paragraph first.`n" + $installBlock.Substring($installTitle.Length) + $installRead) $installVars $false))
+  & $check 'INSTALL.txt：没有 READ THIS FIRST 段，红' $true (0 -lt (& $ipCount $installBlock $installVars $false))
+  # 位置判据单独盯一例：第一段确实是源码块，只有构建步骤那一行落在 READ THIS FIRST 之后。
+  $lateBuild = $installTitle + "`n`n" + ($installBlock.Substring($installTitle.Length).TrimStart("`n") -replace '(?m)^  Build steps:[^\n]*\n', '') + $installRead + "`n  Build steps: docs/BUILDING.md at the tag above`n"
+  & $check 'INSTALL.txt：构建步骤一行落在 READ THIS FIRST 之后（其余都对），红' $true (0 -lt (& $ipCount $lateBuild $installVars $false))
+  # kit：没有 tag，链接钉在 40 位 commit 上；正文里不许有 tree/v<版本> 的死链。
+  $kitVars = $installVars.Clone(); $kitVars['TAG'] = $installVars['COMMIT']
+  $kitSample = $installSample -replace 'tree/v1\.2\.3', "tree/$($installVars['COMMIT'])"
+  & $check 'INSTALL.txt：kit 的链接钉在 commit 上，没有问题' $false (0 -eq (& $ipCount $kitSample $kitVars $true))
+  & $check 'INSTALL.txt：kit 却还用 tag 链接（TAG 变量不是 commit），红' $true (0 -lt (& $ipCount $installSample $installVars $true))
+  # TAG 变量不是 commit，但正文里没有 tree/v<版本> 的死链：只剩“钉在 commit 上”这一条判据在红。
+  $kitOddVars = $installVars.Clone(); $kitOddVars['TAG'] = 'release-x'
+  & $check 'INSTALL.txt：kit 的 TAG 变量不是 commit（正文里没有死链），红' $true (0 -lt (& $ipCount ($installSample -replace 'tree/v1\.2\.3', 'tree/release-x') $kitOddVars $true))
+  & $check 'INSTALL.txt：kit 的正文里有 tree/v<kit 版本> 的死链，红' $true (0 -lt (& $ipCount ($kitSample + "`nhttps://github.com/synchain-oss/rinne/tree/v1.2.3`n") $kitVars $true))
+  # 使用前必读的规则逐字在。
+  $ruleSample = @([pscustomobject]@{ En = 'Placement: Put Rinne Input first'; Zh = '放置位置：Rinne Input 放在第一格' })
+  $ruleText = "1. Placement: Put Rinne Input first`n`n放置位置：Rinne Input 放在第一格`n"
+  & $check '规则：中英两条都在，没有问题' $false (0 -eq @(Get-RinneInstallRuleProblems $ruleText $ruleSample).Count)
+  & $check '规则：英文那条缺，红' $true (0 -lt @(Get-RinneInstallRuleProblems "放置位置：Rinne Input 放在第一格`n" $ruleSample).Count)
+  & $check '规则：中文那条缺，红' $true (0 -lt @(Get-RinneInstallRuleProblems "Placement: Put Rinne Input first`n" $ruleSample).Count)
+  & $check '规则：没有可核对的规则，红' $true (0 -lt @(Get-RinneInstallRuleProblems $ruleText @()).Count)
+  # 子进程的输出按 UTF-8 解码：弯引号与中文原样回来。按系统代码页解码的话，INSTALL.txt 和来源表里的非 ASCII 字符全是乱码。
+  $encRun = Invoke-RinneCommand (Get-RinneNode $RepoRoot) @('-e', 'process.stdout.write("a\u2019b\u4e2d")') $RepoRoot
+  & $check 'Invoke-RinneCommand：子进程的 UTF-8 输出（弯引号、中文）原样解码' $false (($encRun.Code -eq 0) -and ($encRun.Out -ceq "a$([char]0x2019)b$([char]0x4e2d)"))
   # 渲染器自己也要拒缺变量的：走真的 gen-docs 渲染（假 vars），缺一个必须抛错。
   $renderMissing = $installVars.Clone(); $renderMissing.Remove('WEBVIEW2_VERSION')
   $renderRed = $false
   try { $null = Invoke-RinneInstallTxt $RepoRoot $renderMissing 'win' } catch { $renderRed = $true }
   & $check 'INSTALL.txt：渲染器缺变量时必须红' $true $renderRed
   $renderOk = $false
-  try { $rendered = Invoke-RinneInstallTxt $RepoRoot $installVars 'win'; $renderOk = (0 -eq @(Get-RinneInstallProblems $rendered $installVars).Count) } catch { $renderOk = $false }
-  & $check 'INSTALL.txt：渲染器用齐变量时给出合规的正文' $false $renderOk
+  try {
+    $rendered = Invoke-RinneInstallTxt $RepoRoot $installVars 'win'
+    $renderOk = (0 -eq @(Get-RinneInstallProblems $rendered $installVars).Count) -and (0 -eq @(Get-RinneInstallRuleProblems $rendered @(Get-RinneInstallRules $RepoRoot)).Count)
+  } catch { $renderOk = $false }
+  & $check 'INSTALL.txt：渲染器用齐变量时给出合规的正文（对应源码块在最前、规则逐字在）' $false $renderOk
 
   # 8. 临时目录的删除纪律：只做纯函数断言，不对真实路径发起删除。
   $owned = Test-RinneRemovableTempPath (Join-Path ([IO.Path]::GetTempPath()) 'rinne-package-0123456789abcdef') @('rinne-package-')
@@ -1106,8 +1231,24 @@ Corresponding Source for this build (GPLv3 section 6 (d)):
     $kitOut = Join-Path $tmp 'out-kit'
     $kitRes = Invoke-RinnePackage -Version '0.0.0-local' -Tag 'v0.0.0-local' -BuildDir $kitBuild -OutDir $kitOut -SourceCommit $fakeCommit -Manifest 'packaging/manifest-win64.txt' -Kit -KitName 'Rinne-kit-win64-0.0.0-local-0123456789abcdef0123456789abcdef01234567'
     & $check 'kit：带 -Kit 时包里才有 tools/rinne_nulltest' $false (@($kitRes.Entries | Where-Object { $_ -like 'tools/*' }).Count -eq 1)
+    # kit 没有 tag：INSTALL.txt 与 summary 里的对应源码链接钉在 40 位 commit 上，不能指向不存在的 tag。
+    $zkit = [System.IO.Compression.ZipFile]::OpenRead($kitRes.ZipPath)
+    try {
+      $sr = New-Object System.IO.StreamReader($zkit.GetEntry('INSTALL.txt').Open(), (New-Object System.Text.UTF8Encoding($false)))
+      try { $kitInstallText = $sr.ReadToEnd() } finally { $sr.Dispose() }
+    } finally { $zkit.Dispose() }
+    & $check 'kit：INSTALL.txt 的对应源码链接是 tree/<40 位 commit>，没有 tree/v<kit 版本>' $false (
+      $kitInstallText.Contains("tree/$fakeCommit") -and -not $kitInstallText.Contains('tree/v0.0.0-local'))
+    $kitSummaryText = [IO.File]::ReadAllText($kitRes.SummaryPath)
+    & $check 'kit：summary 的 Corresponding source 钉在 commit 上，没有 tree/v<kit 版本>' $false (
+      $kitSummaryText.Contains("Corresponding source: https://github.com/$RepoSlug/tree/$fakeCommit") -and -not $kitSummaryText.Contains('tree/v0.0.0-local'))
     $noKitRes = Invoke-RinnePackage -Version '0.0.0-local' -Tag 'v0.0.0-local' -BuildDir $kitBuild -OutDir (Join-Path $tmp 'out-nokit') -SourceCommit $fakeCommit -Manifest 'packaging/manifest-win64.txt'
     & $check 'kit：不带 -Kit 时包里没有工具' $false (@($noKitRes.Entries | Where-Object { $_ -like 'tools/*' }).Count -eq 0)
+    # 发行包的 summary：对应源码钉在 tag 上，另带 JUCE 的版本与链接、构建步骤。
+    $relSummaryText = [IO.File]::ReadAllText($noKitRes.SummaryPath)
+    & $check 'summary：发行包的 Corresponding source 钉在 tag 上' $false ($relSummaryText.Contains("Corresponding source: https://github.com/$RepoSlug/tree/v0.0.0-local"))
+    & $check 'summary：带 JUCE 版本与 40 位 commit 的链接' $false ($relSummaryText -match 'JUCE [^\r\n]+: https://github\.com/juce-framework/JUCE/tree/[0-9a-f]{40}')
+    & $check 'summary：带构建步骤一行' $false ($relSummaryText.Contains('Build steps: docs/BUILDING.md'))
     # kit 包与发行包的 summary 不同名：同一个输出目录里，发行包的 summary 不能被 kit 包顶掉。
     & $check 'kit：kit 包的 summary 与发行包的 summary 不同名' $false (
         ($kitRes.SummaryPath -ne $noKitRes.SummaryPath) -and
