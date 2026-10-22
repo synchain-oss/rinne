@@ -77,6 +77,7 @@ verify() { # $1 构建目录 $2 formal|probe
 
 if [ "${1:-}" = "--self-test" ]; then
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
+  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
   trap 'rm -rf "$tmp"' EXIT
   bad=0
   mk() { # $1 目录 $2 架构 $3 目标 $4 前缀 $5 默认前缀 $6 探针开关 [$7 编进去的前缀] [$8 编进去的探针]

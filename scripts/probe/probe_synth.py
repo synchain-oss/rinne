@@ -508,7 +508,11 @@ def _render():
 
 
 def write():
-    shutil.rmtree(FIXTURE_DIR, ignore_errors=True)  # 去掉已不再生成的旧夹具
+    # 去掉已不再生成的旧夹具。只清脚本旁写死的 fixtures 目录：真实路径必须正好是它，且本身不是链接
+    if os.path.islink(FIXTURE_DIR) or os.path.realpath(FIXTURE_DIR) != os.path.join(os.path.realpath(HERE), "fixtures"):
+        raise SystemExit(f"拒绝清理 {FIXTURE_DIR}：不是脚本旁写死的 fixtures 目录")
+    # rinne-delete-ok: 上面核对过真实路径正好是脚本旁的 fixtures 目录
+    shutil.rmtree(FIXTURE_DIR, ignore_errors=True)
     for rel, text in _render().items():
         p = os.path.join(FIXTURE_DIR, *rel.split("/"))
         os.makedirs(os.path.dirname(p), exist_ok=True)

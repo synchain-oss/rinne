@@ -81,6 +81,7 @@ jobs:
           node scripts/run-checks.mjs --group compliance --only licenses-closure
           node scripts/run-checks.mjs --group compliance --only modules-closure
           node scripts/run-checks.mjs --group compliance --only offline
+          node scripts/run-checks.mjs --group compliance --only recursive-delete
       - name: Worktree privacy
         env:
           PRIVACY_NEEDLES: ${{ secrets.PRIVACY_NEEDLES }}

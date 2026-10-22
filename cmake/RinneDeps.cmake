@@ -23,6 +23,7 @@ if(WIN32)
   if(NOT _rinne_wv2_have STREQUAL _rinne_wv2_want)
     # 下载放在 .download/ 里：FindWebView2 只看 packages/ 下一层名字带 Microsoft.Web.WebView2 的条目，多一个就告警
     set(_rinne_wv2_pkg "${_rinne_wv2_root}/.download/Microsoft.Web.WebView2.${WEBVIEW2_VERSION}.nupkg")
+    # rinne-delete-ok: 构建目录 packages/ 下写死的 WebView2 包目录与 .download，换版本时整个重下
     file(REMOVE_RECURSE "${_rinne_wv2_dir}" "${_rinne_wv2_root}/.download")
     message(STATUS "下载 Microsoft.Web.WebView2 ${WEBVIEW2_VERSION}")
     file(DOWNLOAD "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${WEBVIEW2_VERSION}" "${_rinne_wv2_pkg}"
@@ -34,6 +35,7 @@ if(WIN32)
       message(FATAL_ERROR "下载 WebView2 包失败：${_rinne_wv2_status}")
     endif()
     file(ARCHIVE_EXTRACT INPUT "${_rinne_wv2_pkg}" DESTINATION "${_rinne_wv2_dir}" PATTERNS "build/native/*")
+    # rinne-delete-ok: 构建目录 packages/ 下写死的下载暂存目录，刚在上面建出来
     file(REMOVE_RECURSE "${_rinne_wv2_root}/.download")
     if(NOT EXISTS "${_rinne_wv2_dir}/build/native/include/WebView2.h")
       message(FATAL_ERROR "WebView2 包解开后缺 build/native/include/WebView2.h")

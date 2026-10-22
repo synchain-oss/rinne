@@ -24,8 +24,12 @@ if [ -z "$tag" ] || [ "$tag" != "$pinned_tag" ]; then
   exit 1
 fi
 
-work="${RUNNER_TEMP:-$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")}/pluginval"
-rm -rf "$work"
+# 每次都在新建的目录里干活，不去清旧目录；退出时把这次新建的目录删掉，别在开发机上攒下来
+work_root="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rinne.XXXXXX")"
+# rinne-delete-ok: 本脚本 mktemp -d 新建的目录，退出时只删它自己
+cleanup() { local rc=$?; rm -rf "$work_root" || true; exit $rc; }
+trap cleanup EXIT
+work="$work_root/pluginval"
 mkdir -p "$work"
 curl -fsSL --retry 3 --retry-delay 5 -o "$work/pluginval_macOS.zip" \
   "https://github.com/Tracktion/pluginval/releases/download/$tag/pluginval_macOS.zip"

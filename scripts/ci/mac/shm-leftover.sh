@@ -48,6 +48,7 @@ probe() { # $1 仓根 $2 构建目录 $3 说明
 
 if [ "${1:-}" = "--self-test" ]; then
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
+  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
   trap 'rm -rf "$tmp"' EXIT
   export GITHUB_STEP_SUMMARY=/dev/null
   bad=0

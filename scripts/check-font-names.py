@@ -88,12 +88,12 @@ def nnbsp_problems(fonts_dir, expected, tolerance=0.005):
         path = os.path.join(fonts_dir, fname)
         if not os.path.isfile(path):
             continue
-        font = TTFont(path)
-        glyph = font.getBestCmap().get(0x202F)
-        if glyph is None:
-            out.append("%s：没有 U+202F 的字形" % fname)
-            continue
-        got = font["hmtx"][glyph][0] / font["head"].unitsPerEm
+        with TTFont(path) as font:  # 用完就关：Windows 上还开着的字体文件会让临时目录删不掉
+            glyph = font.getBestCmap().get(0x202F)
+            if glyph is None:
+                out.append("%s：没有 U+202F 的字形" % fname)
+                continue
+            got = font["hmtx"][glyph][0] / font["head"].unitsPerEm
         if abs(got - want) > tolerance:
             out.append("%s：U+202F 的前进宽度是 %.3f em，check-text-fit.py 里写的是 %.3f em" % (fname, got, want))
     return out
@@ -108,8 +108,8 @@ def find_problems(fonts_dir, reuse, nnbsp_expected=None):
         if not os.path.isfile(path):
             problems.append("%s：文件不存在" % fname)
             continue
-        font = TTFont(path)
-        recs = records(font)
+        with TTFont(path) as font:
+            recs = records(font)
         by_id = {}
         for nid, val in recs:
             by_id.setdefault(nid, set()).add(val)
@@ -166,12 +166,16 @@ def self_test():
             for f in RESERVED:
                 shutil.copy(os.path.join(fonts_dir, f), tmp)
             font = TTFont(os.path.join(tmp, fname))
-            edit(font)
-            font.flavor = "woff2"
-            font.save(os.path.join(tmp, fname))
+            try:
+                edit(font)
+                font.flavor = "woff2"
+                font.save(os.path.join(tmp, fname))
+            finally:
+                font.close()  # Windows 上字体文件还开着时删不掉目录，ignore_errors 会把失败吞掉、留下残留
             return find_problems(tmp, reuse)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            # rinne-delete-ok: tmp 是本函数 mkdtemp 新建的目录，变量没有被改过
+            shutil.rmtree(tmp, onerror=lambda _f, p, e: print("临时目录没清掉：%s：%s" % (p, e[1]), file=sys.stderr))
 
     def set_name(nid, value):
         def edit(font):

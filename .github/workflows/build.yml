@@ -383,6 +383,7 @@ jobs:
         run: |
           set -euo pipefail
           dist="$RUNNER_TEMP/dist"
+          # rinne-delete-ok: RUNNER_TEMP 下写死的 dist 子目录，由本 job 自己建、自己用
           rm -rf "$dist"
           mkdir -p "$dist"
           while IFS= read -r b; do ditto -c -k --keepParent "$b" "$dist/$(basename "$b").zip"; done < bundles.txt
@@ -456,6 +457,7 @@ jobs:
           node scripts/ci/mac/check-bundles.mjs --build build-probe --minos "$MINOS" --probe --list probe-bundles.txt
           bash scripts/ci/mac/sign-and-verify.sh probe-bundles.txt
           dist="$RUNNER_TEMP/dist-probe"
+          # rinne-delete-ok: RUNNER_TEMP 下写死的 dist 子目录，由本 job 自己建、自己用
           rm -rf "$dist"
           mkdir -p "$dist"
           while IFS= read -r b; do ditto -c -k --keepParent "$b" "$dist/$(basename "$b").zip"; done < probe-bundles.txt
