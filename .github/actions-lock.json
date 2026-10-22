@@ -23,6 +23,11 @@
       "using": "node24",
       "nested": []
     },
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093": {
+      "version": "v4.3.0",
+      "using": "node20",
+      "nested": []
+    },
     "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1": {
       "version": "v7.1.0",
       "using": "node24",

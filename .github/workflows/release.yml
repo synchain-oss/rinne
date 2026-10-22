@@ -1,0 +1,394 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# 发版流水线：推一个 v* tag ⇒ verify-tag → build → package-win ∥ package-mac → publish（草稿 Release）。
+#
+# 五个 job 的分工：
+#   1. verify-tag   tag 的形态、版本、来源分支、CHANGELOG 与正式版的源码一致性；再判发版就绪与打包前置。
+#                   判据先自测再实判：自测红就停，不往下走。
+#   2. build        以 workflow_call 调用 build.yml 的 release 模式（构建、ctest、pluginval、auval）。
+#                   tag 靠 github 上下文隐式传递：release.yml 由 push tag 触发，被调用方拿到的
+#                   github.ref 就是 refs/tags/<tag>，github.ref_name 就是 tag 名，github.sha 就是被 tag 的提交。
+#                   with: 留空是因为 tag 是不可信文本，而工作流检查禁止在 with: 里插值表达式。
+#   3. package-win  取回 Windows 的构建产物，打成发行 zip（外加 .sha256 与 package-summary）。
+#   4. package-mac  取回 macOS 的构建产物，同上。mac 包用 ditto 压缩，保留可执行位与符号链接。
+#   5. publish       唯一持 contents: write 的 job：收齐 6 件、核哈希、建**草稿** Release。
+#
+# 两条与姊妹仓不同的口径（故意的）：
+#   - Win 或 mac 任一红都不建草稿（publish 的 needs 同时含 package-win 与 package-mac）；
+#   - Release 恒为 6 个资产（2 个 zip + 2 个 .sha256 + 2 个 package-summary），kit 包只进 Actions artifact。
+#
+# 权限：顶层 contents: read；只有 publish 持 contents: write。
+# 不用第三方 release action：runner 上自带 gh CLI，少一个持写权限的第三方依赖。
+# 不设 workflow_dispatch：手动跑既没有 tag 可比对，也没有 tag 可挂 Release。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  # tag 推送不取消：每次推送对应确定的提交，取消会让同一次发版的两轮跑互相踩。
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-tag:
+    name: verify-tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      kind: ${{ steps.check.outputs.kind }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tag 门禁要跟 origin/prod 比祖先关系，要完整的历史。
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      # runner 上的 node 必须够新：check-release-ready 与 gen-docs 都用到较新的语法。
+      - name: Node is at least 22
+        shell: bash
+        run: |
+          set -euo pipefail
+          major="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$major" -lt 22 ]; then
+            echo "::error::node $major is older than 22"; exit 1
+          fi
+          echo "node $major"
+
+      # 两步分开写：pwsh 块只带出最后一条命令的退出码，合在一起的话「自测红、实判绿」会整步变绿。
+      - name: Tag gate self-test
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/check-release-tag.ps1 -SelfTest
+
+      - name: Verify version matches tag
+        id: check
+        shell: pwsh
+        # tag 名经 env 传入，不直接插值进脚本正文（它是推送者给的字符串）。
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: pwsh -NoProfile -File scripts/check-release-tag.ps1 -Tag "$env:TAG_NAME"
+
+      # 发版就绪：README 状态行、CHANGELOG 节、frReview、强声明的证据、INSTALL.txt 引用的仓内文件。
+      # 判的是被打 tag 的那棵提交，不是工作树。
+      - name: Release is ready
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/check-release-ready.mjs --tag "$TAG_NAME"
+
+      # 不依赖构建产物的打包检查（许可证全文覆盖、NOTICES 点名的声明文件、INSTALL.txt 的规则提取）提前到构建之前，
+      # 缺许可证全文之类的问题不必白烧二十分钟构建才红。package-win 与 package-mac 打包时会再判一次。
+      - name: Package preflight
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: pwsh -NoProfile -File scripts/package.ps1 -Preflight -Version "$env:VERSION" -Tag "$env:TAG_NAME"
+
+  build:
+    name: build
+    needs: verify-tag
+    permissions:
+      contents: read
+    # with: 留空：tag 通过 github 上下文隐式传递（见文件头）。工作流检查禁止在 with: 里插值表达式。
+    uses: ./.github/workflows/build.yml
+
+  package-win:
+    name: package-win
+    needs: [verify-tag, build]
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # 默认浅克隆：package.ps1 只要 HEAD 的提交时间（给 zip 条目定时间戳，保证重跑字节一致）。
+      # 不把 token 留在 .git/config：建 Release 那步经 GH_TOKEN 单独拿。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Node is at least 22
+        shell: pwsh
+        run: |
+          $major = [int](node -p 'process.versions.node.split(".")[0]')
+          if ($major -lt 22) { Write-Error "node $major is older than 22"; exit 1 }
+          Write-Host "node $major"
+
+      # artifact 名是 build.yml 的 release 模式写下的：Rinne-release-win64-<tag>。
+      # tag 已经被 verify-tag 的形态判据放行过；这里只是 action 的输入，不进任何脚本正文。
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Rinne-release-win64-${{ github.ref_name }}
+          path: build-artifact
+
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          TAG_NAME: ${{ github.ref_name }}
+          BUILD_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          pwsh -NoProfile -File scripts/package.ps1 -Version "$env:VERSION" -Tag "$env:TAG_NAME" -BuildDir build-artifact -OutDir dist -BuildRun "$env:BUILD_RUN"
+
+      - name: Package summary
+        shell: pwsh
+        run: Get-Content dist/package-summary-win64.md | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+      # 三件产物按名字传上去：publish 那一步按名字收齐，核「恰好 6 个资产」。
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Rinne-release-assets-win64
+          path: |
+            dist/Rinne-v${{ needs.verify-tag.outputs.version }}-win64.zip
+            dist/Rinne-v${{ needs.verify-tag.outputs.version }}-win64.zip.sha256
+            dist/package-summary-win64.md
+          if-no-files-found: error
+          retention-days: 7
+
+  package-mac:
+    name: package-mac
+    needs: [verify-tag, build]
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Node is at least 22
+        shell: bash
+        run: |
+          set -euo pipefail
+          major="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$major" -lt 22 ]; then
+            echo "::error::node $major is older than 22"; exit 1
+          fi
+          echo "node $major"
+
+      # build.yml 的 mac 构建把每个 bundle 各打成一个 ditto zip 再上传（upload-artifact 会丢可执行位与符号链接）。
+      # artifact 名里的 tag 已经被 verify-tag 的形态判据放行过。
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Rinne-release-macos-arm64-${{ github.ref_name }}
+          path: build-artifact
+
+      # 解回真正的 bundle 目录：打包脚本按目录枚举 bundle。用 ditto 解（与打 zip 同一把工具），
+      # 解到本 job 新建的目录里，不覆盖任何已有文件。
+      - name: Unpack bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir bundles
+          count=0
+          for z in build-artifact/*.vst3.zip build-artifact/*.component.zip; do
+            [ -f "$z" ] || continue
+            ditto -x -k "$z" bundles
+            count=$((count + 1))
+          done
+          if [ "$count" -ne 4 ]; then
+            echo "::error::expected 4 bundle zips (2 VST3 + 2 AU) in the build artifact, found $count"; exit 1
+          fi
+          ls -1 bundles
+
+      # zip 名与产物名由打包脚本按版本号定；tag 就是 v<version>，脚本从合规清单里取。
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          BUILD_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          bash scripts/package-macos.sh --version "$VERSION" --build-dir bundles --out-dir dist --build-run "$BUILD_RUN"
+
+      - name: Package summary
+        shell: bash
+        run: cat dist/package-summary-macos-arm64.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload macOS release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Rinne-release-assets-macos-arm64
+          path: |
+            dist/Rinne-v${{ needs.verify-tag.outputs.version }}-macos-arm64.zip
+            dist/Rinne-v${{ needs.verify-tag.outputs.version }}-macos-arm64.zip.sha256
+            dist/package-summary-macos-arm64.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish
+    # needs 同时含两个打包 job：任一红都不建草稿（与姊妹仓「mac 失败不挡 Windows」故意不同）。
+    needs: [verify-tag, build, package-win, package-mac]
+    # ubuntu 而不是 macos：核哈希用 sha256sum -c（与 INSTALL.txt 教用户的 shasum -a 256 -c 同一格式），不占 mac 队列。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # 建草稿 Release + 上传资产；整个流水线只有这一处有写权限
+    steps:
+      # fetch-depth 0：要按 tag 解析出被 tag 的提交，核对 summary 里的 sourceCommit。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Node is at least 22
+        shell: bash
+        run: |
+          set -euo pipefail
+          major="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$major" -lt 22 ]; then
+            echo "::error::node $major is older than 22"; exit 1
+          fi
+          echo "node $major"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Rinne-release-assets-win64
+          path: assets/win
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Rinne-release-assets-macos-arm64
+          path: assets/mac
+
+      # 收齐的资产必须恰好 6 个，名字逐字相同：多一个少一个都红。
+      - name: Exactly six assets, hashes match, LF endings
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp assets/win/* assets/mac/* dist/
+          win_zip="Rinne-v$VERSION-win64.zip"
+          mac_zip="Rinne-v$VERSION-macos-arm64.zip"
+          want="$(printf '%s\n' "$win_zip" "$win_zip.sha256" package-summary-win64.md "$mac_zip" "$mac_zip.sha256" package-summary-macos-arm64.md | LC_ALL=C sort)"
+          got="$(ls -1A dist | LC_ALL=C sort)"
+          if [ "$got" != "$want" ]; then
+            printf '%s\n' "$got" | sed 's/^/  asset: /'
+            echo "::error::assets are not exactly the six expected ones"; exit 1
+          fi
+          # 两个 .sha256 各自校验自己那份 zip。
+          (cd dist && sha256sum -c "$win_zip.sha256")
+          (cd dist && sha256sum -c "$mac_zip.sha256")
+          # .sha256 必须是 LF：Windows 上产的 .sha256 最容易出 CRLF，sha256sum -c 也能过，但用户按 INSTALL.txt
+          # 在 mac 上用 shasum 校验时，CRLF 会让它找不到文件。
+          for f in "$win_zip.sha256" "$mac_zip.sha256"; do
+            if grep -q $'\r' "dist/$f"; then
+              echo "::error::$f contains CR (must be LF only)"; exit 1
+            fi
+            if [ "$(tail -c 1 "dist/$f" | od -An -c | tr -d ' \n')" != '\n' ]; then
+              echo "::error::$f does not end with LF"; exit 1
+            fi
+          done
+          # 两份 summary 的 sha256 行要跟 .sha256 文件逐字相同；sourceCommit 两份一致。
+          want_sha="$(awk '{print $1}' "dist/$win_zip.sha256")"
+          want_sha_mac="$(awk '{print $1}' "dist/$mac_zip.sha256")"
+          if ! grep -Fqx -- "| sha256 | $want_sha |" dist/package-summary-win64.md; then
+            echo "::error::package-summary-win64.md has no sha256 row equal to the one in $win_zip.sha256"; exit 1
+          fi
+          if ! grep -Fqx -- "| sha256 | $want_sha_mac |" dist/package-summary-macos-arm64.md; then
+            echo "::error::package-summary-macos-arm64.md has no sha256 row equal to the one in $mac_zip.sha256"; exit 1
+          fi
+          sc_win="$(awk -F'|' '/^\| sourceCommit \|/ {gsub(/ /,"",$3); print $3}' dist/package-summary-win64.md)"
+          sc_mac="$(awk -F'|' '/^\| sourceCommit \|/ {gsub(/ /,"",$3); print $3}' dist/package-summary-macos-arm64.md)"
+          if [ -z "$sc_win" ] || [ "$sc_win" != "$sc_mac" ]; then
+            echo "::error::the two summaries disagree on sourceCommit ($sc_win vs $sc_mac)"; exit 1
+          fi
+          # summary 的源码 commit 必须等于被 tag 的提交。
+          tagged="$(git rev-parse "$TAG_NAME^{commit}")"
+          if [ "$sc_win" != "$tagged" ]; then
+            echo "::error::sourceCommit $sc_win is not the tagged commit $tagged"; exit 1
+          fi
+          # JUCE commit 两份都要等于仓里的 .juce-commit。
+          juce_want="$(tr -d '[:space:]' < .juce-commit)"
+          for f in dist/package-summary-win64.md dist/package-summary-macos-arm64.md; do
+            got_juce="$(awk -F'|' '/^\| juceCommit \|/ {gsub(/ /,"",$3); print $3}' "$f")"
+            if [ "$got_juce" != "$juce_want" ]; then
+              echo "::error::$f says juceCommit $got_juce, expected $juce_want"; exit 1
+            fi
+          done
+
+      # 正文由 docs/RELEASE.md 的发布说明模板块渲染：第一行两个资产直链，第二行「不要下载 Source code」。
+      - name: Render release notes
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/check-release-ready.mjs --render-notes --version "$VERSION" --tag "$TAG_NAME" --dist dist --out dist/release-notes.md
+          head -n 2 dist/release-notes.md
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          win_zip="Rinne-v$VERSION-win64.zip"
+          mac_zip="Rinne-v$VERSION-macos-arm64.zip"
+          assets=("dist/$win_zip" "dist/$win_zip.sha256" "dist/package-summary-win64.md" "dist/$mac_zip" "dist/$mac_zip.sha256" "dist/package-summary-macos-arm64.md")
+          title="Synchain Rinne v$VERSION (Windows x64 · macOS Apple Silicon)"
+
+          # 同一个 tag 重跑：已有**草稿**就覆盖资产并把正文重置为本次渲染的结果（否则正文里的 SHA-256
+          # 会是上一次的）；已发布的 Release 一律不碰。三种状态各走各的分支，不靠真值语义兜底。
+          # 「没有 Release」是正常路径上的非零退出：显式关掉 native 命令的 ErrorActionPreference 联动。
+          rc=0
+          is_draft="$(gh release view "$TAG_NAME" --json isDraft -q .isDraft 2>/dev/null)" || rc=$?
+          if [ "$rc" != "0" ]; then
+            # 没有 Release：新建草稿。
+            flags=(--draft --verify-tag --title "$title" --notes-file dist/release-notes.md)
+            if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+            gh release create "$TAG_NAME" "${assets[@]}" "${flags[@]}"
+            exit $?
+          fi
+          # 已发布 ⇒ 有意判红（不是 exit 0）：重跑一个已发布的 tag 需要人来看一眼，别当 bug 改成放行。
+          if [ "$is_draft" = "false" ]; then
+            echo "::error::the release of tag $TAG_NAME is already published; the pipeline does not touch it"; exit 1
+          fi
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::cannot make sense of isDraft='$is_draft' from gh release view; not touching it"; exit 1
+          fi
+          echo "there is already a draft release: overwriting the assets and resetting the notes"
+          gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+          gh release edit "$TAG_NAME" --notes-file dist/release-notes.md
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$TAG_NAME" --prerelease=true
+          fi
+          echo "::notice::draft release $TAG_NAME updated; check the six assets and both .sha256 files before publishing."
