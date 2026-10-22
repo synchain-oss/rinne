@@ -270,6 +270,18 @@ status: draft
 - `ctl`：acq_rel 的 CAS。映射句柄的租约握手四处访问一律 seq_cst。
 - 内存序的缺陷在 x86（TSO）上查不出来，压测必须在原生 arm64 上跑。两个变异构建只许在 core-only 构建里打开，发布构建从不定义：`RINNE_STRESS_MUTATE=no_read_fence` 去掉环与标签读侧的 acquire fence，`no_intent` 去掉 `write_intent` 的推进。环的判据是每个判为有效的帧都解码回它自己的位置（左右两个声道各带一份圈号，撕开的一帧也认得出），标签的判据是读成功的每一份都自洽、且落在读前后两次序号夹住的那次写上；arm64 上两个变异都必须判红，`no_intent` 在任何 CPU 上都红。变异构建里每个用例先对自己那套机制做正向取证：跑到判据命中够 20 次为止（封顶 25 s），环在两个变异下都要，标签只在 `no_read_fence` 下要；不够、或者某一轮的非空转计数没达标，进程直接退出、不出测试汇总，CI 判「没有按预期变红」。`no_intent` 下两个写方本来就没有互斥，那一组跳过与 `write_intent` 有关的两条检查，也不计入命中。
 
+## 跨进程验证
+
+`tools/rinne_ipc_peer` 是只链 `rinne_core` 的对端进程（插件实例的骨架：25 Hz 消息线程跑 `Rendezvous::tick`，10 ms 的“音频”线程按绑定块读写环），`tests/ipc`（`rinne_ipc_tests`）用 `tests/support/Spawn.h` 起它。每个用例用随机的测试作用域，不碰正式段名。覆盖：
+
+- 数据连续：Output 写出的位置编码斜坡，另一个进程的 Input 读到的每一帧都能解码回自己的位置，两个方向各一条用例；对端的 pid 出现在本进程对其槽的观察样本里。
+- abi：别的 abi 先发布会合段时，本进程只报 `abiMismatch`、不写那份段（逐字节核对）；本进程先发布时，`--abi 2` 的对端同样判 `abiMismatch`。两个方向都要看见失配，不能两边都停在等待配对（`waitingPrepare`、`opening`）。
+- 死进程接管：杀掉持有 Output 的 peer，死进程窗口（5 s）走完之前不接管，之后本进程的同组 Output 接管。
+- 竞争：两个 Output peer 抢同一个 (组, 角色)，恰好一个胜出。
+- 残段：`[shm-leftover]` 按正式作用域探测本构建前缀的全部段名，一个都不许存在；它与跨进程用例共用 `RESOURCE_LOCK rinne_formal_shm`，互斥执行。
+
+Linux 的平台后端是进程内后端，跨进程不可能，这些用例在那里 SKIP 并写明原因；Windows 与 macOS 上跑真实的跨进程。
+
 ## 对拍
 
 - [`tests/golden/ipc-layout.json`](../../tests/golden/ipc-layout.json)：常量、结构、字段（每字段一行、键序固定）、前缀族与 108 个段名。
