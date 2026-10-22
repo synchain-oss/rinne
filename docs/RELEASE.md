@@ -138,7 +138,7 @@ the WebView2 loader as a binary only. macOS uses the system WKWebView.
 ## Rolling back
 
 A published release is never rewritten. If this version is bad, publish a PATCH and add
-"Superseded by v<版本>" on top of its notes.
+"Superseded by vX.Y.Z" (the new version) on top of its notes.
 
 ## 中文摘要
 
