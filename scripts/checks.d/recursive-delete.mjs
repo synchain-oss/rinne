@@ -33,7 +33,7 @@ const ALLOWED = new Set([
  */
 const PENDING = new Map([["scripts/build.ps1", /Remove-Item -LiteralPath \$tmp -Recurse -Force/]]);
 
-const EXEMPT = /(#|\/\/|<#|\/\*|::)\s*rinne-delete-ok:\s*\S.{8,}/;
+const EXEMPT = /(#|\/\/|<#|\/\*|::)\s*rinne-delete-ok:\s*\S.{9,}/;
 const PS = ["ps1", "psm1"];
 const JS = ["mjs", "js", "cjs", "ts"];
 const SH = ["sh", "bash", "yml", "yaml"];
@@ -291,6 +291,8 @@ const good = [
     ["scripts/build.ps1", `${rm} -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue`],
     ["a.ps1", `${rm} $d -Recurse -Force # rinne-delete-ok: 只删上面新建的目录，删前核对过真实路径`],
     ["a.ps1", `# rinne-delete-ok: 本进程新建的目录，前缀已断言\n${rm} $d -Recurse`],
+    // 理由正好 10 个字符（门槛的下界）：够长，放行
+    ["a.ps1", `# rinne-delete-ok: 一二三四五六七八九十\n${rm} $d -Recurse`],
     ["a.mjs", "// rinne-delete-ok: 仓内写死的输出目录，核对过真实路径\nfs.rmSync(out, { recursive: true });"],
     ["scripts/lib/TempDir.psm1", `${rm} -LiteralPath $c.Real -Recurse -Force`],
     ["scripts/lib/safe-rm.mjs", "fs.rmSync(dir, { recursive: true });"],
@@ -318,13 +320,26 @@ function cases(rules) {
     const bad = (label, rel, text) =>
         out.push({ label: `豁免无效仍判红：${label}`, bad: true, passed: scanText(rel, text, rules).length > 0 });
     bad("没写理由", "a.mjs", "// rinne-delete-ok:\nfs.rmSync(d, { recursive: true });");
-    bad("理由太短", "a.mjs", "// rinne-delete-ok: abcd\nfs.rmSync(d, { recursive: true });");
-    bad("隔了一行", "a.mjs", "// rinne-delete-ok: 理由写得很清楚\n\nfs.rmSync(d, { recursive: true });");
-    bad("标记在字符串里", "a.mjs", 'const s = "rinne-delete-ok: 理由写得很清楚"; fs.rmSync(d, { recursive: true });');
+    bad("理由太短", "a.mjs", "// rinne-delete-ok: 123456789\nfs.rmSync(d, { recursive: true });");
+    bad(
+        "隔了一行",
+        "a.mjs",
+        "// rinne-delete-ok: 本进程新建的目录，删前核对过真实路径\n\nfs.rmSync(d, { recursive: true });",
+    );
+    bad(
+        "标记在字符串里",
+        "a.mjs",
+        'const s = "rinne-delete-ok: 本进程新建的目录，删前核对过真实路径"; fs.rmSync(d, { recursive: true });',
+    );
     bad(
         "一条只盖一处",
         "a.mjs",
-        "// rinne-delete-ok: 理由写得很清楚\nfs.rmSync(a, { recursive: true });\nfs.rmSync(b, { recursive: true });",
+        "// rinne-delete-ok: 本进程新建的目录，删前核对过真实路径\nfs.rmSync(a, { recursive: true });\nfs.rmSync(b, { recursive: true });",
+    );
+    bad(
+        "一条只盖一处（标记在本行的删除上）",
+        "a.mjs",
+        "fs.rmSync(a, { recursive: true }); // rinne-delete-ok: 本进程新建的目录，删前核对过真实路径\nfs.rmSync(b, { recursive: true });",
     );
     return out;
 }
