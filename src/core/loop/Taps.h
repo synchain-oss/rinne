@@ -11,6 +11,10 @@
 //   env     包络：0..1 的线性淡变，用来淡入（新读头）与淡出（旧读头）。
 //
 // 包络按样本推进，与块长无关：同一段输入怎么切块，输出逐位相同。
+//   淡出按时间走：从挂上淡出的那个样本起，每个输出样本走一步。
+//   淡入（onset）按位置走：从读头读到的第一个有效位置（validFrom）起，每读一个位置走一步。
+//   新读头建好之后要过 D 个样本才读到第一帧新数据；onset 若从建好的那一刻起算，D 大于 20 ms 时
+//   还没读到数据 onset 就走完了，新数据会以满增益突然出现。按位置起算，新数据总是从 0 起淡入。
 //
 // 一个读头可以同时在淡入与淡出（重同步时旧读头淡出、新读头淡入，但它们是不同读头；
 // 同一个读头在「预拷贝尾巴」的情形下要先把旧数据淡出再把新数据接上，用 tail 段表达）。
@@ -39,7 +43,8 @@ struct TapEnvelope
     std::int64_t fadeOutSteps = 0;
     std::int64_t fadeOutStep = 0;
 
-    // 淡入（onset）：走完之后 fadeInSteps 归零（包络恒为 1）。
+    // 淡入（onset）：从 validFrom 起按位置走 fadeInSteps 步；fadeInStep 是块末已走到第几步（诊断与选读头用）。
+    // 走完之后 fadeInSteps 归零（包络恒为 1）。
     std::int64_t fadeInSteps = 0;
     std::int64_t fadeInStep = 0;
 
@@ -52,10 +57,10 @@ struct TapEnvelope
 struct Tap
 {
     bool active = false;
-    i64 offset = 0;   // 同步偏移
-    i64 delay = 0;    // 这个读头用的 D
+    i64 offset = 0; // 同步偏移
+    i64 delay = 0; // 这个读头用的 D
     i64 validFrom = 0;
-    i64 validTo = 0;  // +∞ = 没有上界
+    i64 validTo = 0; // +∞ = 没有上界
     TapEnvelope env;
 };
 
@@ -128,8 +133,9 @@ public:
     Tap& at(int index) noexcept { return taps_[index]; }
     const Tap& at(int index) const noexcept { return taps_[index]; }
 
-    // 读头当前的包络值：淡出与淡入相乘。两者都不在进行时是 1。
+    // 读头当前的包络值（块边界上的值）：淡出与淡入相乘。两者都不在进行时是 1。
     // 淡出的起点是 1（读头刚建立时满增益），线性降到 0；淡入从 0 线性升到 1。
+    // 还没读到第一帧有效数据的新读头，淡入是 0：它现在还不出声。
     static float currentEnvelope(const Tap& tap) noexcept
     {
         float env = 1.0f;
@@ -145,35 +151,12 @@ public:
         return env;
     }
 
-    // 推进所有读头的包络一个样本。淡出走完的读头被释放；淡入走完的留着（包络恒为 1）。
-    void advance() noexcept
-    {
-        for (int i = 0; i < kMaxTaps; ++i)
-        {
-            Tap& tap = taps_[i];
-            if (!tap.active)
-            {
-                continue;
-            }
-            if (tap.env.fadingOut() && ++tap.env.fadeOutStep >= tap.env.fadeOutSteps)
-            {
-                tap = Tap{};
-                continue;
-            }
-            if (tap.env.fadingIn() && ++tap.env.fadeInStep >= tap.env.fadeInSteps)
-            {
-                tap.env.fadeInSteps = 0;
-                tap.env.fadeInStep = 0;
-            }
-        }
-    }
-
 private:
     // 读头槽：定长 3 个。不用容器：读头集合的大小是编译期常量，音频线程上不分配。
     Tap taps_[kMaxTaps]{};
 };
 
-// 下面四个是读头混音的落点，实现见 Taps.cpp。它们按样本推进包络，与块长无关：
+// 下面五个是读头混音的落点，实现见 Taps.cpp。它们按样本推进包络，与块长无关：
 // 同一段输入怎么切块，输出逐位相同。
 //
 // mixTaps：把全部活跃读头按各自的包络混进 outLeft / outRight。position 是本块的读位起点（Input 已处理的帧数 R）。
@@ -184,8 +167,11 @@ private:
 //   返回本块读到的非零样本个数。
 std::uint64_t mixTaps(const TapSet& taps, const LocalLine& line, i64 position, float* outLeft, float* outRight,
                       std::int64_t count, std::uint8_t* valid = nullptr) noexcept;
-// advanceTaps：推进全部读头的包络 n 个样本。淡出走完的读头被释放。
+// advanceTaps：推进全部读头的淡出 n 个样本。淡出走完的读头被释放。
 void advanceTaps(TapSet& taps, std::int64_t n) noexcept;
+// settleOnsets：记下每个淡入中的读头在本块末走到了第几步（按位置：本块最后一个读位置 − validFrom + 1）。
+//   走完的读头淡入结束（包络恒为 1）。position 是本块的读位起点 R，n 是块长。
+void settleOnsets(TapSet& taps, i64 position, std::int64_t n) noexcept;
 // largestTapDelay：全部活跃读头里最大的 D（估计窗口用的那个）。没有活跃读头时是 0。
 std::int64_t largestTapDelay(const TapSet& taps) noexcept;
 // tapsSettledSilent：全部读头都已经彻底安静（没有活跃读头，或每个活跃读头的包络都是 0）。

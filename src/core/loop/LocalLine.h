@@ -71,10 +71,17 @@ public:
 
     // 清空：有效区间从下一个位置起算，已有的样本读不出来。
     // pulled_ 归零、lineValidFrom_ 归零：之后拉进来的帧从 0 开始算起。尾巴快照也作废。
-    void reset() noexcept
+    void reset() noexcept { resetTo(0); }
+
+    // 清空并把起点锚在 position（通常是当前的写头 W）：pulled_ 与 lineValidFrom_ 都落在 position，
+    // 比它早的位置一律读成 0，之后从 position 起往后拉。尾巴快照也作废。
+    //
+    // 为什么要锚在 W 而不是 0：写头是段寿命内的绝对帧位置，配对或清空的那一刻 W 可能早已很大。
+    // 从 0 起拉的话，拉取的位置永远追不上写头，读头读的位置 R + off − D 永远落在已拉取区间之外，回送从此是 0。
+    void resetTo(i64 position) noexcept
     {
-        pulled_ = 0;
-        lineValidFrom_ = 0;
+        pulled_ = position;
+        lineValidFrom_ = position;
         tailStart_ = 0;
         tailCount_ = 0;
     }
@@ -109,10 +116,7 @@ public:
     }
 
     // 有效区间的下界被抬高：环里比 intent − 一圈更早的帧可能被覆盖了，从这个位置起算
-    void raiseValidFrom(i64 from) noexcept
-    {
-        lineValidFrom_ = std::max(lineValidFrom_, from);
-    }
+    void raiseValidFrom(i64 from) noexcept { lineValidFrom_ = std::max(lineValidFrom_, from); }
 
     // 读一个绝对位置。返回 false 表示这个位置不在有效区间里（调用方按 0 处理）。
     bool read(i64 position, float& left, float& right) const noexcept

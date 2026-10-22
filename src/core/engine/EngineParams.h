@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 引擎的输入面：外壳与 core 之间的唯一通道。壳只做映射（宿主参数 → EngineParams，宿主播放头 → TransportInfo，
-// 宿主缓冲 → AudioView），core 只认这里定义的类型。这个头文件一次定全：之后的卡只读它，
-// 要改字段或语义一律返回 needs-user，由统筹裁。
+// 宿主缓冲 → AudioView），core 只认这里定义的类型。这个头文件一次定全：之后只读，
+// 改字段或语义是接口变更，要经维护者裁定。
 //
-// 宿主音频缓冲的视图在 AudioView.h（它不是参数：参数面只有这一份）。
+// 宿主音频缓冲的视图在 AudioView.h，块首的段上下文在 EngineContext.h（它们都不是参数：参数面只有这一份）。
 //
 // 本文件里有三样东西：
-//   1. EngineParams：11 个参数 + 3 个命令序号 + 3 个工程设置。
+//   1. EngineParams：11 个参数 + 4 个命令序号 + 3 个工程设置。
 //   2. CommandBaseline：命令序号的基线。
 //   3. DelayMode 与 TailMode 两个枚举（它们是参数的取值，不进参数表）。
 //
@@ -31,8 +31,8 @@
 //   limiter    限制器，默认开
 //   ceiling    限制器上限，-24..0 dBFS，默认 -6
 //
-// 三个命令序号：界面动作不是参数，改一下加一，引擎在音频线程比对。实例第一块只记下序号、不执行，
-// 所以重载工程不会重放旧命令（紧急切断尤其不能重放）。
+// 四个命令序号：界面动作不是参数，改一下加一，引擎在音频线程比对。基线在构造引擎后给一次（CommandBaseline），
+// 基线之外的变化才执行，所以重载工程不会重放旧命令（紧急切断尤其不能重放），首块之前的命令也不会被吞掉。
 //
 // presetSeq 与 stateSeq 分开的原因：安全状态机有两种不同的淡入原因
 // （FadeReason::Preset = 载入工厂预设；FadeReason::SetState = 宿主设置工程状态，含宿主预设、A/B、撤销）。
@@ -43,8 +43,8 @@
 //
 // 三个来自工程设置的开关：失控保护、起播复位、尾长模式。它们不可自动化，但引擎要读。
 //
-// 线程：消息线程在每块开头读一遍宿主参数，填成一份快照交给引擎；引擎在音频线程只读这份快照，
-// 不持有宿主的原子指针（宿主怎么切块因此不会影响结论）。
+// 线程：壳在音频线程的块首把宿主参数（原子量）读一遍，填成一份快照交给引擎；引擎只读这份快照，
+// 不持有宿主的原子指针（一块之内参数不变，宿主怎么切块因此不会影响结论）。
 #pragma once
 
 #include <cstdint>
@@ -78,20 +78,20 @@ inline constexpr int kDelayNoteCount = 16;
 inline constexpr double kDelayNoteBeats[kDelayNoteCount] = {
     1.0 / 16.0, // 0  1/64
     1.0 / 12.0, // 1  1/32T
-    1.0 / 8.0,  // 2  1/32
-    1.0 / 6.0,  // 3  1/16T
-    1.0 / 4.0,  // 4  1/16
-    1.0 / 3.0,  // 5  1/8T
-    3.0 / 8.0,  // 6  1/16D
-    1.0 / 2.0,  // 7  1/8
-    2.0 / 3.0,  // 8  1/4T
-    3.0 / 4.0,  // 9  1/8D
-    1.0,        // 10 1/4（默认）
-    4.0 / 3.0,  // 11 1/2T
-    3.0 / 2.0,  // 12 1/4D
-    2.0,        // 13 1/2
-    3.0,        // 14 1/2D
-    4.0,        // 15 1/1
+    1.0 / 8.0, // 2  1/32
+    1.0 / 6.0, // 3  1/16T
+    1.0 / 4.0, // 4  1/16
+    1.0 / 3.0, // 5  1/8T
+    3.0 / 8.0, // 6  1/16D
+    1.0 / 2.0, // 7  1/8
+    2.0 / 3.0, // 8  1/4T
+    3.0 / 4.0, // 9  1/8D
+    1.0, // 10 1/4（默认）
+    4.0 / 3.0, // 11 1/2T
+    3.0 / 2.0, // 12 1/4D
+    2.0, // 13 1/2
+    3.0, // 14 1/2D
+    4.0, // 15 1/1
 };
 inline constexpr int kDefaultDelayNote = 10; // 1/4
 
@@ -100,7 +100,7 @@ inline constexpr int kDefaultDelayNote = 10; // 1/4
 inline constexpr float kDefaultFeedbackPercent = 0.0f;
 inline constexpr float kDefaultMixPercent = 25.0f;
 inline constexpr float kDefaultDelayMs = 100.0f;
-inline constexpr float kDefaultLowCutHz = 20.0f;   // 20 = 关
+inline constexpr float kDefaultLowCutHz = 20.0f; // 20 = 关
 inline constexpr float kDefaultHighCutHz = 20000.0f; // 20000 = 关
 inline constexpr float kDefaultCeilingDb = -6.0f;
 inline constexpr float kMinFeedbackPercent = 0.0f;
@@ -124,22 +124,22 @@ struct EngineParams
     bool loopOn = true;
     float mixPercent = kDefaultMixPercent; // 0..100
     DelayMode delayMode = DelayMode::kTime;
-    float delayMs = kDefaultDelayMs;         // 1..4000
+    float delayMs = kDefaultDelayMs; // 1..4000
     std::uint8_t delayNote = kDefaultDelayNote; // 0..15
-    float lowCutHz = kDefaultLowCutHz;         // 20 = 关
-    float highCutHz = kDefaultHighCutHz;       // 20000 = 关
+    float lowCutHz = kDefaultLowCutHz; // 20 = 关
+    float highCutHz = kDefaultHighCutHz; // 20000 = 关
     bool polarityInvert = false;
     bool limiterOn = true;
     float ceilingDb = kDefaultCeilingDb; // -24..0
 
     // ---- 命令序号：变了就执行一次 ----
     std::uint32_t presetSeq = 0; // 载入工厂预设
-    std::uint32_t stateSeq = 0;  // 宿主设置工程状态（宿主预设、A/B、撤销）
-    std::uint32_t panicSeq = 0;  // 紧急切断
+    std::uint32_t stateSeq = 0; // 宿主设置工程状态（宿主预设、A/B、撤销）
+    std::uint32_t panicSeq = 0; // 紧急切断
     std::uint32_t recoverSeq = 0; // 恢复回送
 
     // ---- 工程设置里的三个开关 ----
-    bool guardOn = true;     // 失控保护
+    bool guardOn = true; // 失控保护
     bool resetOnPlay = true; // 起播复位
     TailMode tailMode = TailMode::kAuto;
 };

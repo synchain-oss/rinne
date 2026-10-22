@@ -10,7 +10,8 @@
 // 环路延迟恰为 D。
 //
 // 包络按样本推进，与块长无关：同一段输入怎么切块，输出逐位相同（安全不变量 7）。
-// 混音按样本算包络（本块内的第 i 个样本用「本块起点 + i」处的包络），块末再把包络推进 n 个样本。
+// 混音按样本算包络（本块内的第 i 个样本用「本块起点 + i」处的包络），块末再把淡出推进 n 个样本。
+// 淡入按位置算：读位置 p 处的淡入是 (p − validFrom + 1) / onset（截在 [0, 1]），从第一帧有效数据起淡入。
 //
 // 实时约定：不分配、不加锁、不读时钟、不抛异常。
 #include <algorithm>
@@ -27,22 +28,34 @@ namespace
 // 混音时的浮点下限：低于它的值当成 0，避免 denormal 拖慢音频线程。
 constexpr float kDenormalFloor = 1.0e-30f;
 
-// 第 i 个样本处的包络：淡出与淡入相乘。两者都不在进行时是 1。
-// 淡出的起点是 1（读头刚建立时满增益），线性降到 0；淡入从 0 线性升到 1。
-float envelopeAt(const Tap& tap, std::int64_t i) noexcept
+// 第 i 个样本处的淡出：起点是 1（读头刚挂上淡出时满增益），线性降到 0。不在淡出时是 1。
+float fadeOutAt(const Tap& tap, std::int64_t i) noexcept
 {
-    float env = 1.0f;
-    if (tap.env.fadingOut())
+    if (!tap.env.fadingOut())
     {
-        const auto remaining = tap.env.fadeOutSteps - (tap.env.fadeOutStep + i);
-        env *= remaining > 0 ? static_cast<float>(remaining) / static_cast<float>(tap.env.fadeOutSteps) : 0.0f;
+        return 1.0f;
     }
-    if (tap.env.fadingIn())
+    const auto remaining = tap.env.fadeOutSteps - (tap.env.fadeOutStep + i);
+    return remaining > 0 ? static_cast<float>(remaining) / static_cast<float>(tap.env.fadeOutSteps) : 0.0f;
+}
+
+// 读位置 p 处的淡入：从 validFrom 起按位置线性升到 1（第一帧有效数据是 1/onset）。不在淡入时是 1。
+float fadeInAt(const Tap& tap, i64 p) noexcept
+{
+    if (!tap.env.fadingIn())
     {
-        const auto step = tap.env.fadeInStep + i;
-        env *= static_cast<float>(step) / static_cast<float>(tap.env.fadeInSteps);
+        return 1.0f;
     }
-    return env;
+    const i64 step = p - tap.validFrom + 1;
+    if (step <= 0)
+    {
+        return 0.0f;
+    }
+    if (step >= tap.env.fadeInSteps)
+    {
+        return 1.0f;
+    }
+    return static_cast<float>(static_cast<double>(step) / static_cast<double>(tap.env.fadeInSteps));
 }
 } // namespace
 
@@ -85,21 +98,20 @@ std::uint64_t mixTaps(const TapSet& taps, const LocalLine& line, i64 position, f
         {
             continue;
         }
-        const float env0 = envelopeAt(tap, 0);
-        if (env0 <= 0.0f && !tap.env.fadingIn())
+        if (fadeOutAt(tap, 0) <= 0.0f)
         {
-            continue; // 包络已经是 0 且不会再涨：这个读头不贡献任何东西
+            continue; // 淡出已经走完：这个读头不贡献任何东西
         }
         for (std::int64_t i = 0; i < count; ++i)
         {
-            const float env = envelopeAt(tap, i);
-            if (env <= 0.0f)
-            {
-                continue;
-            }
             const i64 p = position + i + tap.offset - tap.delay;
             // 读头的有效区间是半开的 [validFrom, validTo)：区间外一律读成 0，绝不读旧数据
             if (p < tap.validFrom || p >= tap.validTo)
+            {
+                continue;
+            }
+            const float env = fadeOutAt(tap, i) * fadeInAt(tap, p);
+            if (env <= 0.0f)
             {
                 continue;
             }
@@ -128,7 +140,7 @@ std::uint64_t mixTaps(const TapSet& taps, const LocalLine& line, i64 position, f
     return nonZero;
 }
 
-// 推进全部读头的包络 n 个样本。淡出走完的读头被释放；淡入走完的留着（包络恒为 1）。
+// 推进全部读头的淡出 n 个样本。淡出走完的读头被释放。淡入按位置算，不在这里推进（见 settleOnsets）。
 void advanceTaps(TapSet& taps, std::int64_t n) noexcept
 {
     if (n <= 0)
@@ -148,17 +160,36 @@ void advanceTaps(TapSet& taps, std::int64_t n) noexcept
             if (tap.env.fadeOutStep >= tap.env.fadeOutSteps)
             {
                 tap = Tap{};
-                continue;
             }
         }
-        if (tap.env.fadingIn())
+    }
+}
+
+// 记下每个淡入中的读头在本块末走到了第几步。本块最后一个读位置是 position + n − 1 + off − D，
+// 走到的步数 = 它 − validFrom + 1（还没读到有效数据时是 0）。走满 onset 的读头淡入结束。
+void settleOnsets(TapSet& taps, i64 position, std::int64_t n) noexcept
+{
+    if (n <= 0)
+    {
+        return;
+    }
+    for (int i = 0; i < kMaxTaps; ++i)
+    {
+        Tap& tap = taps.at(i);
+        if (!tap.active || !tap.env.fadingIn())
         {
-            tap.env.fadeInStep += n;
-            if (tap.env.fadeInStep >= tap.env.fadeInSteps)
-            {
-                tap.env.fadeInSteps = 0;
-                tap.env.fadeInStep = 0;
-            }
+            continue;
+        }
+        const i64 last = position + n - 1 + tap.offset - tap.delay;
+        const i64 step = last - tap.validFrom + 1;
+        if (step >= tap.env.fadeInSteps)
+        {
+            tap.env.fadeInSteps = 0;
+            tap.env.fadeInStep = 0;
+        }
+        else
+        {
+            tap.env.fadeInStep = step > 0 ? step : 0;
         }
     }
 }
@@ -190,7 +221,8 @@ bool tapsSettledSilent(const TapSet& taps) noexcept
         {
             continue;
         }
-        if (TapSet::currentEnvelope(tap) > 0.0f)
+        // 淡入中的读头（含还没读到第一帧有效数据的新读头）马上要出声：不算安静。
+        if (tap.env.fadingIn() || TapSet::currentEnvelope(tap) > 0.0f)
         {
             return false;
         }

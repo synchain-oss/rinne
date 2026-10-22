@@ -7,7 +7,8 @@
 //   - 参数与走带整体下传：D 的目标值（时间 / 节拍、毫秒与节拍到样本的换算、钳位与抬升）全在环路层算，
 //     引擎不预先把 delay_ms 换算成样本。节拍同步因此只需要改环路层，不必改引擎。
 //   - 读头归环路层：读头槽、每个读头的包络、读头混合都在环路层。引擎只拿走混好的回送。
-//   - 违约路径在环路层：「块长超过声明值 → 补 0 并抬升 D 下限」在环路层实现，后续卡可以在同一处挂导出锁存。
+//   - 违约路径在环路层：「块长超过声明值 → 补 0 并抬升 D 下限」在环路层实现，导出锁存将来也挂在同一处。
+//   - 拉环归环路层：每块把环里 [pulled, W) 的帧全部搬进本地延迟线（一圈之内），pulled 每块追到 W。
 //   - 状态对象归环路层：诊断与界面要的量都落在一个结构里，引擎原样交出去。
 //   - 对端槽归环路层读：宿主时间戳、块序号与实时标志是「谁在谁前面」的证据，判据也在环路层。
 //
@@ -55,7 +56,7 @@ struct BlockContext
     ipc::RvSegment* rendezvous = nullptr;
     // 组号 1..8。会合段按组块排布，组号 0 或越界时不去读对端槽（读会越界）。
     std::uint32_t group = 0;
-    // 本端在会合段里的角色。环路层按它找对端槽（对端是它的反面）。
+    // 本端在会合段里的角色。环路层按它找对端槽（对端是它的反面）。InputEngine 恒填 kInput。
     ipc::Role role = ipc::Role::kInput;
 
     // 本端准备时声明的最大块长（N_prep）
@@ -106,18 +107,24 @@ struct BlockResult
 
     // 本块实际写了多少个非零回送样本（快速路径的判据之一）
     std::uint64_t nonZeroReturn = 0;
-    // 宿主违约：块长超过声明值，补 0 的样本数
+    // 补 0 的样本数：主读头本该有数据（落在它的有效区间里）、但环里还没写到的那些样本。
     std::uint64_t overrun = 0;
+    // 宿主违约：块长超过声明值（D 的下限已在本块抬到块长）
     bool hostViolation = false;
     // 块长超过支持上限（32768）
     bool unsupportedBlock = false;
 
     // 事件
     bool resynced = false;
-    bool resetDsp = false;   // 起播沿：引擎要复位 DSP 与本地延迟线
-    // 起播沿的复位点（块内绝对样本号）：引擎在这个样本上执行 DSP 复位。
-    // 没有复位点时是 -1。口径见 ADR-0002：导出与播放从 s0 + T 起逐位一致。
+    // DSP 的复位点落在本块里：引擎（与它后面的 DSP）在 resetAtSample 那个样本上复位。
+    // 本地延迟线已由环路层在起播沿上复位过，引擎不必、也不该再清它（再清会把新读头一起作废）。
+    bool resetDsp = false;
+    // 起播沿的复位点（绝对样本号，与读位 R 同一坐标；本块内的偏移 = resetAtSample − 本块读位起点）。
+    // 起播沿那一块就给出（预告），复位点所在的那一块再给一次并置 resetDsp。没有时是 -1。
+    // 口径见 ADR-0002：导出与播放从 s0 + T 起逐位一致。
     std::int64_t resetAtSample = -1;
+    // 本块的读位起点 R（绝对样本号）。resetAtSample 减去它就是块内偏移。
+    std::int64_t blockStart = 0;
     bool lineCleared = false; // 本地延迟线被清空
     bool stalled = false;
     bool enteredTolerant = false;
@@ -166,6 +173,11 @@ public:
 private:
     std::int64_t computeDelay(const BlockContext& ctx) noexcept;
     void updateBpm(const BlockContext& ctx) noexcept;
+    // 拉环：把环里 [pulled, W) 的帧搬进本地延迟线（经定长暂存分段搬）。比 W 早一圈减护栏的帧不读（可能正被覆盖），
+    // 记 overflow；写方公告领先一圈以上的帧当作撕裂，记 torn。之后 pulled == W。
+    void pullRing(const ipc::RingSegment& ring, i64 writeHead, i64 peerMaxBlock) noexcept;
+    // 主读头（没在淡出的那个）本块里「落在有效区间、但环里还没写到」的样本数：这些样本只能补 0。
+    std::int64_t mainTapOverrun(i64 blockStart, i64 n) const noexcept;
     // 建一个新读头（onset 走 20 ms）。槽满时丢包络最小的那个，返回槽下标；没有槽时返回 -1。
     int newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept;
     // 对端槽的事实：宿主时间戳、块序号、实时标志。没有会合段或组号不合法时什么都不读。
@@ -182,10 +194,12 @@ private:
     double sampleRate_ = 0.0;
     bool prepared_ = false;
 
-    std::int64_t offset_ = 0;        // 主读头的同步偏移
+    std::int64_t offset_ = 0; // 主读头的同步偏移
     std::int64_t delayEffective_ = 0;
     std::int64_t delayMin_ = 0;
     std::int64_t delayRequested_ = 0; // 用户要的 D（样本）
+    DelayMinReason delayMinReason_ = DelayMinReason::kNone; // 下限从哪来
+    std::int64_t maxBlockSeen_ = 0; // 本会话见过的最大块长（引擎给的 N_obs 与本块 n 取大；prepare 换采样率清零）
     bool lastPlaying_ = false;
     std::uint64_t lastWriterToken_ = 0;
     std::uint64_t lastEpoch_ = 0;
@@ -200,9 +214,7 @@ private:
     std::uint32_t peerMaxBlock_ = 0;
 
     // 错序判据的账
-    std::uint64_t lastHostNs_ = 0;   // 本端上一块的宿主时间戳
-    std::uint64_t myBlockSeq_ = 0;   // 本端已开始的块数（与会合段里发布的序号一致）
-    std::uint32_t orderVotes_ = 0;   // 连续判为「Output 在 Input 之前」的次数
+    std::uint32_t orderVotes_ = 0; // 连续判为「Output 在 Input 之前」的次数
     std::uint8_t orderVerdict_ = static_cast<std::uint8_t>(OrderVerdict::kUnknown);
 
     // 速度：宿主给的有效值、来源

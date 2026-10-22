@@ -18,8 +18,8 @@ namespace rinne::engine
 struct AudioView
 {
     float* const* channels = nullptr; // 每声道一串样本；不小于 numChannels 个
-    int numChannels = 0;              // 声道数（1 = mono，2 = stereo）
-    int length = 0;                   // 样本数
+    int numChannels = 0; // 声道数（1 = mono，2 = stereo）
+    int length = 0; // 样本数
 
     // 左右声道的取法：mono 时左右都取第 0 个（环与回送恒按立体声走）。
     float* left() const noexcept { return channels != nullptr && numChannels > 0 ? channels[0] : nullptr; }

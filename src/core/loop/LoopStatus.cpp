@@ -39,6 +39,12 @@ void LoopStatus::setDelay(float userMs, std::int64_t effective, std::int64_t min
     delayMode_.store(mode, std::memory_order_relaxed);
 }
 
+void LoopStatus::setDelayFloor(std::uint8_t reason, std::int64_t maxBlockSeen) noexcept
+{
+    delayMinReason_.store(reason, std::memory_order_relaxed);
+    maxBlockSeen_.store(maxBlockSeen, std::memory_order_relaxed);
+}
+
 void LoopStatus::setBpm(std::uint32_t centi, std::uint8_t source) noexcept
 {
     bpmCenti_.store(centi, std::memory_order_relaxed);
@@ -96,6 +102,8 @@ LoopStatusFields LoopStatus::snapshot() const noexcept
     fields.delayUserMs = static_cast<float>(delayUserCenti_.load(std::memory_order_relaxed)) * 0.01f;
     fields.delayEffective = delayEffective_.load(std::memory_order_relaxed);
     fields.delayMin = delayMin_.load(std::memory_order_relaxed);
+    fields.delayMinReason = delayMinReason_.load(std::memory_order_relaxed);
+    fields.maxBlockSeen = maxBlockSeen_.load(std::memory_order_relaxed);
     fields.delayMode = delayMode_.load(std::memory_order_relaxed);
     fields.bpmCenti = bpmCenti_.load(std::memory_order_relaxed);
     fields.bpmSource = bpmSource_.load(std::memory_order_relaxed);

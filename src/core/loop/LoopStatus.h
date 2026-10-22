@@ -3,8 +3,7 @@
 // 环路层的状态：音频线程写，消息线程读。每个字段一个无锁原子量，音频线程只写、消息线程只读。
 //
 // 存在的理由：诊断文本的环路段与顺序段（DiagLoop / DiagSync / DiagOrder）与界面的常驻显示都要这些量，
-// 而它们现在一个都不在 core 里。这个结构是它们唯一的落点：后续卡往里加字段属于后续卡的范围，
-// 引擎的代码不用改（加字段只改这一个头与它的实现）。
+// 这个结构是它们唯一的落点：之后往里加字段只改这一个头与它的实现，引擎的代码不用改。
 //
 // 分两层：
 //   LoopStatus        原子量容器，音频线程拥有并写。
@@ -20,11 +19,11 @@
 // 这里补的是 m / w / off 三个。
 //
 // **不在这个结构里的量**：安全段的六个（state / trips / tail_peak_max_db / limiter_gr_max_db /
-// nonfinite_ring / clamp_ring）归安全链自己的既有字段（engine::Meters 与安全事件日志）。
-// 诊断报告自己合并两处，不要把它们塞进这里。
+// nonfinite_ring / clamp_ring）不是环路层的量，由引擎层的 engine::SafetyDiag 汇总
+// （InputEngine::safetyDiag()：前四个来自安全链的测量量，后两个来自环头的清洗计数），不要把它们塞进这里。
 //
-// d_eff 的发布归属：会合段端点槽里的 d_eff 写在 **Input 槽**（RoleSlot::d_eff），
-// 本模块不写它——探针读 Input 槽时读到 0 是预期的，不是漏写。
+// d_eff 的发布归属：会合段端点槽里的 d_eff 写在 **Input 槽**（RoleSlot::d_eff），由 InputEngine 每块发布；
+// 环路层本身不碰会合段的写侧（只读对端槽）。
 #pragma once
 
 #include <atomic>
@@ -46,8 +45,8 @@ enum class OrderVerdict : std::uint8_t
 // 速度的来源。
 enum class BpmSource : std::uint8_t
 {
-    kNone = 0,    // 从没拿到过宿主速度
-    kHost = 1,    // 宿主给的
+    kNone = 0, // 从没拿到过宿主速度
+    kHost = 1, // 宿主给的
     kFallback = 2, // 回退到 120
 };
 
@@ -55,40 +54,42 @@ enum class BpmSource : std::uint8_t
 struct LoopStatusFields
 {
     // ---- 环路（D）----
-    float delayUserMs = 0.0f;      // 用户要的 D（毫秒）
+    float delayUserMs = 0.0f; // 用户要的 D（毫秒）
     std::int64_t delayEffective = 0; // 实际用的 D（样本）
-    std::int64_t delayMin = 0;       // 抬升后的下限（样本）
-    std::uint8_t delayMode = 0;      // 0 = 时间，1 = 节拍
-    std::uint32_t bpmCenti = 0;      // 速度（百分之一拍/分钟）
-    std::uint8_t bpmSource = 0;      // BpmSource
+    std::int64_t delayMin = 0; // 抬升后的下限（样本）
+    std::uint8_t delayMinReason = 0; // 下限从哪来：loop::DelayMinReason（声明值 / 实测块长 / 宿主违约）
+    std::int64_t maxBlockSeen = 0; // 本会话见过的最大块长（N_obs，每次 prepare 清零）
+    std::uint8_t delayMode = 0; // 0 = 时间，1 = 节拍
+    std::uint32_t bpmCenti = 0; // 速度（百分之一拍/分钟）
+    std::uint8_t bpmSource = 0; // BpmSource
 
     // ---- 读头 ----
     std::uint32_t tapsActive = 0; // 当前活跃的读头数
-    std::uint32_t tapDrop = 0;    // 累计丢掉的读头数
+    std::uint32_t tapDrop = 0; // 累计丢掉的读头数
 
     // ---- 同步 ----
-    std::uint32_t resyncCount = 0;      // 累计重同步次数
-    std::uint32_t resyncByReason[9]{};  // 按原因分：索引是 loop::SyncReason（0..8）
-    std::uint64_t overflow = 0;         // 被环覆盖而丢掉的帧数
-    std::uint64_t torn = 0;             // 撕裂的帧数
-    std::uint64_t overrun = 0;          // 补 0 的样本数
-    std::uint32_t wCasFail = 0;         // 写头 CAS 失败次数（写侧统计，读侧从环头读）
-    std::uint32_t unstable = 0;         // 时序不稳定（置位次数）
+    std::uint32_t resyncCount = 0; // 累计重同步次数
+    std::uint32_t resyncByReason[9]{}; // 按原因分：索引是 loop::SyncReason（0..8）
+    std::uint64_t overflow = 0; // 被环覆盖而丢掉的帧数
+    std::uint64_t torn = 0; // 撕裂的帧数
+    std::uint64_t overrun = 0; // 补 0 的样本数
+    std::uint32_t wCasFail = 0; // 写头 CAS 失败次数（写侧统计，读侧从环头读）
+    std::uint32_t unstable = 0; // 时序不稳定（置位次数）
     std::uint32_t offsetDriftBlocks = 0; // 漂移被吸收的块数
-    std::uint32_t frozenMax = 0;        // 连续最多几块写头没动（块数）
-    std::uint32_t stalled = 0;          // 当前是否断档
-    std::uint32_t tolerant = 0;         // 当前是否容忍模式
-    std::uint32_t paired = 0;           // 当前是否有对端
+    std::uint32_t frozenMax = 0; // 连续最多几块写头没动（块数）
+    std::uint32_t stalled = 0; // 当前是否断档
+    std::uint32_t tolerant = 0; // 当前是否容忍模式
+    std::uint32_t paired = 0; // 当前是否有对端
 
     // ---- 当前的几何量（逐块刷新；探针与诊断要看「现在是多少」）----
-    std::int64_t drift = 0;     // m = W − (R + off)。正数 = 写头领先
+    std::int64_t drift = 0; // m = W − (R + off)。正数 = 写头领先
     std::int64_t writeHead = 0; // w = Output 已写总帧数
-    std::int64_t offset = 0;    // off = 读头的同步偏移
+    std::int64_t offset = 0; // off = 读头的同步偏移
 
     // ---- 顺序 ----
-    std::uint8_t orderVerdict = 0;  // OrderVerdict
-    std::uint32_t orderVotes = 0;   // 判定的票数（连续 3 次即判定）
-    std::uint32_t hostNsValid = 0;  // 宿主时间戳是否有效
+    std::uint8_t orderVerdict = 0; // OrderVerdict
+    std::uint32_t orderVotes = 0; // 判定的票数（连续 3 次即判定）
+    std::uint32_t hostNsValid = 0; // 宿主时间戳是否有效
 };
 
 // 原子量容器。音频线程写，消息线程读。
@@ -102,6 +103,8 @@ public:
     void setTolerant(bool on) noexcept { tolerant_.store(on ? 1u : 0u, std::memory_order_relaxed); }
     void setUnstable(bool on) noexcept { unstable_.store(on ? 1u : 0u, std::memory_order_relaxed); }
     void setDelay(float userMs, std::int64_t effective, std::int64_t min, std::uint8_t mode) noexcept;
+    // 界面常驻的「实际 / 最小 / 原因 / 本会话最大块长」里的后两项。
+    void setDelayFloor(std::uint8_t reason, std::int64_t maxBlockSeen) noexcept;
     void setBpm(std::uint32_t centi, std::uint8_t source) noexcept;
     void setTaps(std::uint32_t active, std::uint32_t dropped) noexcept;
     // reason 是 loop::SyncReason 的值（0..8）；越界的值被忽略
@@ -130,6 +133,8 @@ private:
     std::atomic<std::uint32_t> delayUserCenti_{0}; // 毫秒的百分之一
     std::atomic<std::int64_t> delayEffective_{0};
     std::atomic<std::int64_t> delayMin_{0};
+    std::atomic<std::uint8_t> delayMinReason_{0};
+    std::atomic<std::int64_t> maxBlockSeen_{0};
     std::atomic<std::uint8_t> delayMode_{0};
 
     std::atomic<std::uint32_t> bpmCenti_{0};

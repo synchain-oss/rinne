@@ -7,8 +7,9 @@
 //   0x0300–0x03FF  环路层独占（src/core/loop/LoopEvents.h）
 //   0x0400–0x04FF  引擎独占（src/core/engine/EngineEvents.h）
 //   0x0500–0x05FF  探针独占（src/core/diag/ProbeEvents.h）
-// 四段是跨卡的数值契约：段归属定死，之后只能追加，不能把别的段的码挪进这一段。
-// 引擎层与环路层定义的码一律落在 0x0300 与 0x04FF 两段里，绝不碰 0x0200–0x02FF。
+// 每段 256 个码；探针段从 0x0500 起（0x0300 段已归环路层）。
+// 四段是跨模块的数值契约：段归属定死，之后只能追加，不能把别的段的码挪进这一段。
+// 环路层与引擎层定义的码一律落在 0x0300–0x03FF 与 0x0400–0x04FF 两段里，绝不碰 0x0200–0x02FF。
 //
 // 实时约定：push 不加锁、不分配、不读时钟、不抛异常；队列满了就丢掉这一条并计数，绝不阻塞音频线程，
 // 也绝不覆盖还没被读走的那一条（覆盖会让读者读到写了一半的条目）。消息线程每拍排空一次，
@@ -88,10 +89,7 @@ public:
     std::uint64_t dropped() const noexcept { return dropped_.load(std::memory_order_relaxed); }
 
     // 清空（重新绑定或实例析构时，由消费者一侧调用）
-    void clear() noexcept
-    {
-        tail_.store(head_.load(std::memory_order_acquire), std::memory_order_release);
-    }
+    void clear() noexcept { tail_.store(head_.load(std::memory_order_acquire), std::memory_order_release); }
 
 private:
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free, "音频线程每块都碰这两个原子量");

@@ -2,13 +2,8 @@
 //
 // EngineHost 的实现。见 EngineHost.h 的说明。
 //
-// 宿主信号：按样本递增的编号（0, 1, 2, …），左声道写编号、右声道写编号加一个偏移。
-// 这样「读到的是哪一帧」一眼能看出来，场景断言「一个冲激在 D 个样本后回到读头」时不用猜。
-//
-// 拓扑（每一周期）：
-//   Output 侧：宿主缓冲 → 引擎清洗 → 写进环。
-//   Input 侧：从环读回 → 混好的回送 + 干声 → 宿主缓冲。
-//   中间链在环内：Input 的输出经中间链之后才是 Output 写进环的东西。
+// 一周期：信号源往轨道缓冲里填这一周期的样本，缓冲按调用顺序依次流过各级（Input 就地加回送、中间链、
+// Output 只读并写环）。Input 先、Output 后时，Input 加上去的回送经中间链再被 Output 写进环：环路是闭合的。
 
 #include "rig/EngineHost.h"
 
@@ -20,15 +15,40 @@
 namespace rinne::rig
 {
 
-namespace
+SourceFn silenceSource()
 {
-// 宿主信号的右声道偏移：让左右不一样，两声道混起来时能看出是哪一边
-constexpr float kRightOffset = 0.5f;
-// 宿主信号每帧的步长：0.001，48 kHz 下约 48 秒绕回一圈（够场景用，又不丢精度）
-constexpr float kHostStep = 0.001f;
-} // namespace
+    return [](std::uint64_t, float* left, float* right, int n) {
+        std::fill(left, left + n, 0.0f);
+        std::fill(right, right + n, 0.0f);
+    };
+}
 
-EngineHost::EngineHost() = default;
+SourceFn impulseSource(std::uint64_t at, float amplitude)
+{
+    return [at, amplitude](std::uint64_t first, float* left, float* right, int n) {
+        for (int i = 0; i < n; ++i)
+        {
+            const bool hit = first + static_cast<std::uint64_t>(i) == at;
+            left[i] = hit ? amplitude : 0.0f;
+            right[i] = hit ? amplitude : 0.0f;
+        }
+    };
+}
+
+SourceFn rampSource()
+{
+    return [](std::uint64_t first, float* left, float* right, int n) {
+        for (int i = 0; i < n; ++i)
+        {
+            const auto k = static_cast<std::uint32_t>((first + static_cast<std::uint64_t>(i)) & 0xffffu);
+            const float v = static_cast<float>(k) / 65536.0f;
+            left[i] = v;
+            right[i] = -v;
+        }
+    };
+}
+
+EngineHost::EngineHost() : source_(rampSource()) {}
 EngineHost::~EngineHost() = default;
 
 bool EngineHost::open(std::uint32_t group)
@@ -40,13 +60,14 @@ bool EngineHost::open(std::uint32_t group)
         return false;
     }
 
-    // Output 公告自己：写权 token 与采样率。epoch 与 writer_token 由 publishWriter 写。
+    // 第一个 Output 拿写权：token 与采样率。epoch 与 writer_token 由 publishWriter 写。
     auto* ring = segments_.ring(group);
     if (ring == nullptr)
     {
         return false;
     }
     ipc::LoopRing::publishWriter(*ring, outputToken_, static_cast<std::uint32_t>(sampleRate_), 2);
+    writerIsSecond_ = false;
     return true;
 }
 
@@ -58,28 +79,7 @@ void EngineHost::prepare(double sampleRate, int maxBlock)
     config_.maxBlock = maxBlock_;
 
     // 缓冲按支持的最大块长给：场景要能塞违约块与超长块。
-    const std::size_t capacity = static_cast<std::size_t>(ipc::kMaxSupportedBlock) + 8u;
-    hostLeft_.assign(capacity, 0.0f);
-    hostRight_.assign(capacity, 0.0f);
-    outLeft_.assign(capacity, 0.0f);
-    outRight_.assign(capacity, 0.0f);
-    fedLeft_.assign(capacity, 0.0f);
-    fedRight_.assign(capacity, 0.0f);
-    chainLeft_.assign(capacity, 0.0f);
-    chainRight_.assign(capacity, 0.0f);
-    secondLeft_.assign(capacity, 0.0f);
-    secondRight_.assign(capacity, 0.0f);
-
-    hostChannels_[0] = hostLeft_.data();
-    hostChannels_[1] = hostRight_.data();
-    outChannels_[0] = outLeft_.data();
-    outChannels_[1] = outRight_.data();
-    fedChannels_[0] = fedLeft_.data();
-    fedChannels_[1] = fedRight_.data();
-    secondChannels_[0] = secondLeft_.data();
-    secondChannels_[1] = secondRight_.data();
-    chainChannels_[0] = chainLeft_.data();
-    chainChannels_[1] = chainRight_.data();
+    ensureHostCapacity();
 
     chain_.prepare(sampleRate_, maxBlock_);
 
@@ -94,13 +94,74 @@ void EngineHost::prepare(double sampleRate, int maxBlock)
         secondOutput_.prepare(sampleRate_, maxBlock_);
     }
 
+    // 认领一侧（会合层）的事：写方按新的采样率重新发布自己，两端槽里写上 prepare 声明的最大块长。
+    if (auto* ring = segments_.ring(group_))
+    {
+        ipc::LoopRing::publishWriter(*ring, writerIsSecond_ ? secondOutputToken_ : outputToken_,
+                                     static_cast<std::uint32_t>(sampleRate_), 2);
+    }
+    if (auto* rv = segments_.rv())
+    {
+        ipc::roleSlot(*rv, group_, ipc::Role::kInput).max_block.store(static_cast<std::uint32_t>(maxBlock_));
+        ipc::roleSlot(*rv, group_, ipc::Role::kOutput).max_block.store(static_cast<std::uint32_t>(maxBlock_));
+    }
+
     prepared_ = true;
 }
 
-void EngineHost::setBlockScripts(BlockScript input, BlockScript output) noexcept
+// 宿主缓冲的容量：容得下支持的最大块长（超长块也要送进引擎，引擎才判得出超限）。
+namespace
+{
+std::size_t hostCapacityFor(const BlockScript& input, const BlockScript& output)
+{
+    std::size_t capacity = static_cast<std::size_t>(ipc::kMaxSupportedBlock) + 8u;
+    // 脚本里写了更长的块长就按它给：否则宿主信号会被写越界。
+    for (const BlockScript* script : {&input, &output})
+    {
+        for (const int length : script->lengths)
+        {
+            if (length > 0 && static_cast<std::size_t>(length) + 8u > capacity)
+            {
+                capacity = static_cast<std::size_t>(length) + 8u;
+            }
+        }
+    }
+    return capacity;
+}
+} // namespace
+
+void EngineHost::ensureHostCapacity()
+{
+    const std::size_t capacity = hostCapacityFor(inputScript_, outputScript_);
+
+    trackLeft_.assign(capacity, 0.0f);
+    trackRight_.assign(capacity, 0.0f);
+    outLeft_.assign(capacity, 0.0f);
+    outRight_.assign(capacity, 0.0f);
+    fedLeft_.assign(capacity, 0.0f);
+    fedRight_.assign(capacity, 0.0f);
+    chainLeft_.assign(capacity, 0.0f);
+    chainRight_.assign(capacity, 0.0f);
+    secondInLeft_.assign(capacity, 0.0f);
+    secondInRight_.assign(capacity, 0.0f);
+
+    trackChannels_.assign(2, nullptr);
+    secondInChannels_.assign(2, nullptr);
+    trackChannels_[0] = trackLeft_.data();
+    trackChannels_[1] = trackRight_.data();
+    secondInChannels_[0] = secondInLeft_.data();
+    secondInChannels_[1] = secondInRight_.data();
+}
+
+void EngineHost::setBlockScripts(BlockScript input, BlockScript output)
 {
     inputScript_ = std::move(input);
     outputScript_ = std::move(output);
+    // 脚本里的块长可能比 prepare 时给的容量大（超长块）：重新按脚本给缓冲。
+    if (prepared_)
+    {
+        ensureHostCapacity();
+    }
 }
 
 void EngineHost::setTransportScript(TransportScript script) noexcept
@@ -119,17 +180,14 @@ void EngineHost::setCommandBaseline(const engine::CommandBaseline& baseline) noe
     secondInput_.setCommandBaseline(baseline);
 }
 
-void EngineHost::fillHostBuffers(int n, std::uint64_t cycle) noexcept
+void EngineHost::switchWriter(bool toSecond)
 {
-    // 宿主信号：按绝对样本计编号。跨周期连续，场景可以按位置断言。
-    for (int i = 0; i < n; ++i)
+    writerIsSecond_ = toSecond;
+    if (auto* ring = segments_.ring(group_))
     {
-        const auto index = static_cast<std::uint32_t>((hostCounter_ + static_cast<std::uint64_t>(i)) & 0xffffu);
-        hostLeft_[static_cast<std::size_t>(i)] = static_cast<float>(index) * kHostStep;
-        hostRight_[static_cast<std::size_t>(i)] = static_cast<float>(index) * kHostStep + kRightOffset;
+        ipc::LoopRing::publishWriter(*ring, toSecond ? secondOutputToken_ : outputToken_,
+                                     static_cast<std::uint32_t>(sampleRate_), 2);
     }
-    (void)cycle;
-    hostCounter_ += static_cast<std::uint64_t>(std::max(n, 0));
 }
 
 engine::TransportInfo EngineHost::transportFor(std::size_t index, std::int64_t hostNsOffset) const noexcept
@@ -144,6 +202,26 @@ engine::TransportInfo EngineHost::transportFor(std::size_t index, std::int64_t h
     return info;
 }
 
+engine::EngineContext EngineHost::inputContext() const noexcept
+{
+    engine::EngineContext ctx;
+    ctx.ring = segments_.ring(group_);
+    ctx.rendezvous = segments_.rv();
+    ctx.group = group_;
+    return ctx;
+}
+
+engine::EngineContext EngineHost::outputContext(bool second) const noexcept
+{
+    engine::EngineContext ctx;
+    ctx.ring = segments_.ring(group_);
+    ctx.group = group_;
+    ctx.token = second ? secondOutputToken_ : outputToken_;
+    // Output 槽只给现任写方（它是槽的属主）；另一个 Output 拿不到槽，不写任何端点槽。
+    ctx.rendezvous = second == writerIsSecond_ ? segments_.rv() : nullptr;
+    return ctx;
+}
+
 int EngineHost::runCycle(std::size_t index)
 {
     if (!prepared_)
@@ -154,48 +232,81 @@ int EngineHost::runCycle(std::size_t index)
     // 这一周期两端的块长：各自查自己的脚本。
     const int inputLength = inputScript_.lengthAt(index);
     const int outputLength = outputScript_.lengthAt(index);
-    const bool inputSkip = inputScript_.skipAt(index);
-    const bool outputSkip = outputScript_.skipAt(index);
+    const bool doInput = !inputScript_.skipAt(index) && order_ != CallOrder::kOutputOnly;
+    const bool doOutput = !outputScript_.skipAt(index) && order_ != CallOrder::kInputOnly;
 
-    // 走带：同一周期两端拿同一份（加各自的偏移量）。
-    transport_ = transportScript_.at(index);
+    // 信号源：给这一周期跑的那几端里最长的那一段。
+    const int sourceLength =
+        std::max({doInput ? inputLength : 0, doOutput ? outputLength : 0, secondInputActive_ ? inputLength : 0});
+    const auto capacity = static_cast<int>(trackLeft_.size());
+    const int filled = std::clamp(sourceLength, 0, capacity);
+    if (filled > 0)
+    {
+        source_(sourceCounter_, trackLeft_.data(), trackRight_.data(), filled);
+        std::copy(trackLeft_.begin(), trackLeft_.begin() + filled, secondInLeft_.begin());
+        std::copy(trackRight_.begin(), trackRight_.begin() + filled, secondInRight_.begin());
+        sourceCounter_ += static_cast<std::uint64_t>(filled);
+    }
 
-    const bool doInput = !inputSkip && order_ != CallOrder::kOutputOnly;
-    const bool doOutput = !outputSkip && order_ != CallOrder::kInputOnly;
-
-    int processed = 0;
     switch (order_)
     {
     case CallOrder::kInputFirst:
         if (doInput)
         {
-            processed = runInput(index, inputLength);
+            runInput(index, inputLength);
+        }
+        if (secondInputActive_)
+        {
+            runSecondInput(index, inputLength);
         }
         if (doOutput)
         {
+            runChain(outputLength);
             runOutput(index, outputLength);
+        }
+        if (secondOutputActive_)
+        {
+            runSecondOutput(index, outputLength);
         }
         break;
     case CallOrder::kOutputFirst:
         if (doOutput)
         {
+            runChain(outputLength);
             runOutput(index, outputLength);
+        }
+        if (secondOutputActive_)
+        {
+            runSecondOutput(index, outputLength);
         }
         if (doInput)
         {
-            processed = runInput(index, inputLength);
+            runInput(index, inputLength);
+        }
+        if (secondInputActive_)
+        {
+            runSecondInput(index, inputLength);
         }
         break;
     case CallOrder::kOutputOnly:
         if (doOutput)
         {
+            runChain(outputLength);
             runOutput(index, outputLength);
+        }
+        if (secondOutputActive_)
+        {
+            runSecondOutput(index, outputLength);
         }
         break;
     case CallOrder::kInputOnly:
         if (doInput)
         {
-            processed = runInput(index, inputLength);
+            runInput(index, inputLength);
+        }
+        if (secondInputActive_)
+        {
+            runSecondInput(index, inputLength);
         }
         break;
     }
@@ -205,7 +316,7 @@ int EngineHost::runCycle(std::size_t index)
     {
         secondInputStatus_ = secondInput_.loopStatus();
     }
-    return processed;
+    return doInput ? std::max(inputLength, 0) : 0;
 }
 
 void EngineHost::runCycles(std::size_t count, std::size_t first)
@@ -216,102 +327,114 @@ void EngineHost::runCycles(std::size_t count, std::size_t first)
     }
 }
 
-int EngineHost::runInput(std::size_t index, int n) noexcept
+void EngineHost::runInput(std::size_t index, int n) noexcept
 {
     engine::AudioView view;
-    view.channels = hostChannels_.data();
+    view.channels = trackChannels_.data();
     view.numChannels = 2;
     view.length = n;
 
-    engine::EngineContext ctx;
-    ctx.ring = segments_.ring(group_);
-    ctx.rendezvous = segments_.rv();
-    ctx.group = group_;
-    ctx.role = ipc::Role::kInput;
-
+    // 0 样本：引擎必须立刻返回、不推进任何计数。仍然调一次，验它真的不推进。
+    // 超长块：缓冲按脚本给足了，引擎自己判超限。
+    input_.process(view, paramsScript_.at(index), transportFor(index, config_.inputHostNsOffset), inputBypassed_,
+                   inputContext());
     if (n <= 0)
     {
-        // 0 样本：引擎必须立刻返回、不推进任何计数。仍然调一次，验它真的不推进。
-        input_.process(view, paramsScript_.at(index), transportFor(index, config_.inputHostNsOffset), inputBypassed_,
-                       ctx);
-        return 0;
+        return;
     }
+    const auto count = static_cast<std::size_t>(n);
+    std::copy(trackLeft_.begin(), trackLeft_.begin() + static_cast<std::ptrdiff_t>(count), outLeft_.begin());
+    std::copy(trackRight_.begin(), trackRight_.begin() + static_cast<std::ptrdiff_t>(count), outRight_.begin());
 
-    fillHostBuffers(n, 0);
+    // 起播沿的 DSP 复位点落在这一块：中间链（环内插件的替身）在同一个样本上复位。
+    // Input 先跑时中间链紧接着跑同一块，复位点就是块内偏移；Output 先跑时中间链这一周期已经跑过，下一次开头复位。
+    const loop::BlockResult& result = input_.lastBlockResult();
+    if (result.resetDsp && result.resetAtSample >= result.blockStart)
+    {
+        chainResetAt_ = order_ == CallOrder::kInputFirst ? result.resetAtSample - result.blockStart : 0;
+    }
+}
 
-    // 干声逐位直通：引擎把宿主缓冲当输入、结果写进同一块缓冲（Input 侧是允许的）。
-    std::copy(hostLeft_.begin(), hostLeft_.begin() + n, outLeft_.begin());
-    std::copy(hostRight_.begin(), hostRight_.begin() + n, outRight_.begin());
-
-    view.channels = hostChannels_.data();
-    view.length = n;
-    input_.process(view, paramsScript_.at(index), transportFor(index, config_.inputHostNsOffset), inputBypassed_, ctx);
-    return n;
+void EngineHost::runChain(int n) noexcept
+{
+    if (n <= 0)
+    {
+        return;
+    }
+    // 中间链：环内插件的替身。轨道缓冲经中间链，再由 Output 读走。
+    const std::int64_t split = chainResetAt_ >= 0 && chainResetAt_ < n ? chainResetAt_ : -1;
+    if (split >= 0)
+    {
+        const auto k = static_cast<int>(split);
+        if (k > 0)
+        {
+            chain_.process(trackLeft_.data(), trackRight_.data(), chainLeft_.data(), chainRight_.data(), k);
+        }
+        chain_.reset();
+        chain_.process(trackLeft_.data() + k, trackRight_.data() + k, chainLeft_.data() + k, chainRight_.data() + k,
+                       n - k);
+        chainResetAt_ = -1;
+    }
+    else
+    {
+        chain_.process(trackLeft_.data(), trackRight_.data(), chainLeft_.data(), chainRight_.data(), n);
+        if (chainResetAt_ >= n)
+        {
+            chainResetAt_ -= n; // 复位点在下一段里
+        }
+    }
+    std::copy(chainLeft_.begin(), chainLeft_.begin() + n, trackLeft_.begin());
+    std::copy(chainRight_.begin(), chainRight_.begin() + n, trackRight_.begin());
 }
 
 void EngineHost::runOutput(std::size_t index, int n) noexcept
 {
     engine::AudioView view;
-    view.channels = hostChannels_.data();
+    view.channels = trackChannels_.data();
     view.numChannels = 2;
     view.length = n;
 
+    output_.process(view, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset), outputBypassed_,
+                    outputContext(false));
     if (n <= 0)
     {
-        output_.process(view, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset), outputBypassed_,
-                        segments_.ring(group_), outputToken_);
         return;
     }
-
-    fillHostBuffers(n, 0);
-
-    // 中间链：环内插件的替身。宿主信号先过中间链，再由 Output 写进环。
-    chain_.process(hostLeft_.data(), hostRight_.data(), chainLeft_.data(), chainRight_.data(), n);
-
-    engine::AudioView chainView;
-    chainView.channels = chainChannels_.data();
-    chainView.numChannels = 2;
-    chainView.length = n;
-
-    output_.process(chainView, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset), outputBypassed_,
-                    segments_.ring(group_), outputToken_);
-
-    // 引擎清洗之后真正写进环的那份：宿主缓冲可能被引擎改过（Output 侧不改宿主 buffer，
-    // 所以 fed 就是宿主缓冲的副本；场景要断言「逐位直通」就看这两份相同）。
-    std::copy(chainLeft_.begin(), chainLeft_.begin() + n, fedLeft_.begin());
-    std::copy(chainRight_.begin(), chainRight_.begin() + n, fedRight_.begin());
+    // Output 看到的那一份（它不改宿主 buffer：处理之后逐位相同，场景断言「逐位直通」就看这一份）。
+    std::copy(trackLeft_.begin(), trackLeft_.begin() + n, fedLeft_.begin());
+    std::copy(trackRight_.begin(), trackRight_.begin() + n, fedRight_.begin());
 }
 
 void EngineHost::runSecondOutput(std::size_t index, int n) noexcept
 {
-    if (!haveSecondOutput_ || n <= 0)
+    if (!haveSecondOutput_)
     {
         return;
     }
+    // 第二个 Output 读同一条轨道缓冲（复制体或接管者插在同一处）。
     engine::AudioView view;
-    view.channels = secondChannels_.data();
+    view.channels = trackChannels_.data();
     view.numChannels = 2;
     view.length = n;
-    secondOutput_.process(view, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset), outputBypassed_,
-                          segments_.ring(group_), secondOutputToken_);
+    secondOutput_.process(view, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset),
+                          outputBypassed_, outputContext(true));
 }
 
 void EngineHost::runSecondInput(std::size_t index, int n) noexcept
 {
-    if (!haveSecondInput_ || n <= 0)
+    if (!haveSecondInput_)
     {
         return;
     }
+    // 复制体在另一条轨道上：自己的一份信号源，拿不到 Input 槽；默认也不读环（冲突者不写也不读）。
     engine::AudioView view;
-    view.channels = secondChannels_.data();
+    view.channels = secondInChannels_.data();
     view.numChannels = 2;
     view.length = n;
 
     engine::EngineContext ctx;
-    ctx.ring = segments_.ring(group_);
-    ctx.rendezvous = segments_.rv();
+    ctx.ring = secondInputReadsRing_ ? segments_.ring(group_) : nullptr;
     ctx.group = group_;
-    ctx.role = ipc::Role::kInput;
     secondInput_.process(view, paramsScript_.at(index), transportFor(index, config_.inputHostNsOffset), inputBypassed_,
                          ctx);
 }
@@ -322,7 +445,7 @@ bool EngineHost::addSecondOutput()
     {
         return false;
     }
-    // 第二个 Output：新的写权 token。第一个写方还持有写权时，第二个拿不到写权（冲突场景）。
+    // 第二个 Output：自己的写权 token。第一个写方还持有写权时，第二个写就是冲突（不写环）。
     secondOutput_.prepare(sampleRate_, maxBlock_);
     haveSecondOutput_ = true;
     config_.outputCount = 2;
@@ -339,6 +462,12 @@ bool EngineHost::addSecondInput()
     haveSecondInput_ = true;
     config_.inputCount = 2;
     return true;
+}
+
+const ipc::RoleSlot* EngineHost::slot(ipc::Role role) const noexcept
+{
+    auto* rv = segments_.rv();
+    return rv == nullptr ? nullptr : &ipc::roleSlot(*rv, group_, role);
 }
 
 std::uint64_t EngineHost::writeHead() const noexcept

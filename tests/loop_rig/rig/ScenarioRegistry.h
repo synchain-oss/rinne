@@ -3,7 +3,7 @@
 // 场景自注册：每个场景一个 .cpp，用宏把自己挂进注册表。
 //
 // 注册表是「函数指针 + id」的定长表，不进全局可变状态，避免静态初始化顺序问题。
-// 场景文件由各自的卡拥有（tests/loop_rig/scenarios/**），本模块只提供框架与一个占位场景。
+// 场景文件放在 tests/loop_rig/scenarios/**（各自的归属另行登记），本模块只提供框架与一个占位场景。
 
 #pragma once
 
@@ -50,18 +50,25 @@ struct ScenarioEntry
 //       return new MyScenario();
 //   }
 //
-// 参数是场景 id 的字符串字面量。宏造出唯一的符号名（用 __LINE__，一个文件里每个场景占一行）。
+// 参数是场景 id 的字符串字面量。宏造出唯一的符号名：行号先展开再拼接（两层宏，直接 ## __LINE__ 拼出来的是
+// 字面的 __LINE__，每个场景都会撞名），结构体放在无名命名空间里（每个翻译单元一份，多个场景文件链接时不撞符号）。
+// 一个文件里每个场景占一行。
 // 展开成一个结构体（声明工厂函数与注册器）+ 注册器的定义 + 工厂函数的类外定义头：
 // 用户的那个块正好是工厂函数体，宏在它之前已经把结构体闭合了，所以拼起来是完整的定义。
-#define RINNE_RIG_SCENARIO(idText)                                                                            \
-    struct rinneRigScenario_##__LINE__                                                                      \
-    {                                                                                                         \
-        static ::rinne::rig::Scenario* make();                                                               \
-        static const ::rinne::rig::Registrar registrar;                                                      \
-    };                                                                                                        \
-    const ::rinne::rig::Registrar rinneRigScenario_##__LINE__::registrar(idText,                              \
-                                                                          &rinneRigScenario_##__LINE__::make);  \
-    ::rinne::rig::Scenario* rinneRigScenario_##__LINE__::make()
+#define RINNE_RIG_CONCAT_INNER(a, b) a##b
+#define RINNE_RIG_CONCAT(a, b) RINNE_RIG_CONCAT_INNER(a, b)
+#define RINNE_RIG_SCENARIO(idText) RINNE_RIG_SCENARIO_NAMED(idText, RINNE_RIG_CONCAT(rinneRigScenario_, __LINE__))
+#define RINNE_RIG_SCENARIO_NAMED(idText, name)                          \
+    namespace                                                           \
+    {                                                                   \
+    struct name                                                         \
+    {                                                                   \
+        static ::rinne::rig::Scenario* make();                          \
+        static const ::rinne::rig::Registrar registrar;                 \
+    };                                                                  \
+    const ::rinne::rig::Registrar name::registrar(idText, &name::make); \
+    }                                                                   \
+    ::rinne::rig::Scenario* name::make()
 // 注册器：构造时把自己挂进注册表。注册表是静态的，进程内一直活着（不释放，场景跑完就删）。
 class Registrar
 {

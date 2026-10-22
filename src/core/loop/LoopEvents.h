@@ -7,7 +7,8 @@
 //   0x0300–0x03FF  环路层独占（本文件）
 //   0x0400–0x04FF  引擎独占（src/core/engine/EngineEvents.h）
 //   0x0500–0x05FF  探针独占（src/core/diag/ProbeEvents.h）
-// 本段内的新码只能追加；已有的值不改不删（诊断日志与桥都按数值存）。
+// 每段 256 个码；探针段从 0x0500 起（0x0300 段已归环路层）。本段内的新码只能追加；
+// 四段是跨模块的数值契约：段归属定死，已有的值不改不删（诊断日志与桥都按数值存）。
 #pragma once
 
 #include <cstdint>
@@ -19,14 +20,14 @@ namespace rinne::loop
 enum class ResyncReason : std::uint8_t
 {
     kBindSwitch = 0, // 换了绑定（换组、换对端）
-    kWriter = 1,      // 换了写方
-    kFormat = 2,      // 写方改了采样率（epoch 变了）
-    kPlay = 3,        // 起播沿
+    kWriter = 1, // 换了写方
+    kFormat = 2, // 写方改了采样率（epoch 变了）
+    kPlay = 3, // 起播沿
     kStallResume = 4, // 断档后写头恢复
-    kJump = 5,        // 漂移跳变（超过 N_cap）
-    kShift = 6,       // 漂移持续同一个非零值
-    kOffset = 7,      // 漂移被吸收（只记诊断）
-    kDChange = 8,     // 改 D 引起的交叉淡化
+    kJump = 5, // 漂移跳变（超过 N_cap）
+    kShift = 6, // 漂移持续同一个非零值
+    kOffset = 7, // 漂移被吸收（只记诊断）
+    kDChange = 8, // 改 D 引起的交叉淡化
 };
 
 // 事件码。a 放原因或计数，b 放次级信息。
@@ -42,7 +43,7 @@ enum class LoopEventCode : std::uint16_t
     kUnsupportedBlock = 0x0307, // a = 块长 n，b = 支持的上限
     kLineCleared = 0x0308, // a = 1（本地延迟线被清空）
     kOverflow = 0x0309, // a = 被环覆盖而丢掉的帧数
-    kTorn = 0x030A,    // a = 撕裂的帧数
+    kTorn = 0x030A, // a = 撕裂的帧数
     kOverrun = 0x030B, // a = 补 0 的样本数
     kTapDropped = 0x030C, // a = 1（读头槽满，丢掉了一个）
 };

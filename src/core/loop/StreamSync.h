@@ -10,12 +10,16 @@
 //   - W 与 R 只单调前进。差值一律走有符号运算：W = 0 的新段、W ≈ 2^40、from > pulled 都按有符号算。
 //   - 断档：W 未动且 R 前进 ≥ 2·N_max → STALLED，5 ms 淡出。
 //   - 对齐：严格模式下 Δ 两次不为 0 就重同步（Δ 是写头每块前进的帧数）。
-//   - 容忍模式：10 s 内 ≥ 3 次重同步 → 转容忍模式并置「时序不稳定」。容忍模式下不再因 Δ 变化重同步，
-//     但断档判据仍然生效（断档要淡出，这是安全侧）。
+//   - 容忍模式：10 s 内 ≥ 3 次**对齐重同步**（漂移跳变或持续漂移）→ 转容忍模式并置「时序不稳定」。
+//     换写方、改采样率、断档恢复与起播沿不计入：那些是宿主或用户的动作，不是时序不稳定的证据。
+//     容忍模式下不再因 Δ 变化重同步，但断档判据仍然生效（断档要淡出，这是安全侧）。
 //   - 两端停用 > 250 ms → 清空本地延迟线（防停用止啸后原样复燃）。
+//   - 对端没了 → 活跃读头 10 ms 淡出；读位照常前进（读头不会反复读同一段）。
 //   - 同采样率重新 prepare → 保持流连续（不动读头与延迟线）。
 //   - reset() → 只记诊断，不动任何音频状态。
-//   - 起播（reset_on_play，默认开）：在 s0 用 5 ms 淡出旧回送（不做阶跃），同时复位 DSP 与本地延迟线。
+//   - 起播（reset_on_play，默认开）：在 s0 用 T = min(5 ms, D_eff) 淡出旧回送（读预拷贝的尾巴，不做阶跃），
+//     本地延迟线在沿上复位（沿后 T 帧之前的帧不再读），DSP 的复位点是绝对样本号 s0 + T。
+//     全部按样本定位，所以复位点与宿主怎么切块无关。
 //   - 宿主违约（n > N_prep）→ 取不到的样本补 0，D_min 立即抬升。
 //
 // 线程：音频线程每块调 process。全部按样本计数，不读墙钟、不分配、不加锁、不抛异常。
@@ -52,26 +56,27 @@ enum class SyncState : std::uint8_t
 {
     kUnpaired = 0, // 没有对端或读不了环
     kStreaming = 1, // 正常
-    kStalled = 2,  // 断档（写头不动）
+    kStalled = 2, // 断档（写头不动）
     kTolerant = 3, // 容忍模式：时序不稳定，不再因漂移重同步
 };
 
 // 一块的处理输入。宿主每块给的事实。
 struct SyncInputs
 {
-    bool paired = false;        // 有对端且能读环
+    bool paired = false; // 有对端且能读环
     bool writerChanged = false; // 写方换了
     bool formatChanged = false; // 写方改了采样率（epoch 变了）
-    bool playEdge = false;      // 起播沿（上一块没走、这一块走了）
-    bool resetOnPlay = true;    // 起播复位开关
+    bool playEdge = false; // 起播沿（上一块没走、这一块走了）
+    bool resetOnPlay = true; // 起播复位开关
     bool resetRequested = false; // 宿主调用了 reset()：只记诊断
-    bool inactive = false;      // 两端都停用（宿主没在调我们，或对端报告停调）
-    i64 writeHead = 0;          // W 的快照
-    i64 peerMaxBlock = 0;       // 对端 prepare 声明的最大块长
-    i64 processed = 0;          // R（Input 本地已处理帧数）
-    i64 declaredBlock = 0;      // N_prep
-    i64 delayEffective = 0;     // D_eff（样本）。起播淡出的长度取 min(5 ms, D_eff)
-    int blockLength = 0;        // n
+    bool domainReset = false; // 写头倒退（换段遗漏一类）：本地延迟线已从 W 起重来，重新锚定偏移
+    bool inactive = false; // 两端都停用（宿主没在调我们，或对端报告停调）
+    i64 writeHead = 0; // W 的快照
+    i64 peerMaxBlock = 0; // 对端 prepare 声明的最大块长
+    i64 processed = 0; // R（Input 本地已处理帧数）
+    i64 declaredBlock = 0; // N_prep
+    i64 delayEffective = 0; // D_eff（样本）。起播淡出的长度取 min(5 ms, D_eff)
+    int blockLength = 0; // n
 };
 
 // 一次重同步的结果：读头重建后，LoopSession 据此决定要不要复位 DSP。
@@ -79,17 +84,18 @@ struct SyncOutcome
 {
     bool resynced = false;
     SyncReason reason = SyncReason::kOffset;
-    bool resetDsp = false;        // 起播沿：复位 DSP 与本地延迟线
-    // 起播沿的复位点（绝对样本号，与 R 同一坐标）：引擎在这个样本上执行 DSP 复位。
-    // 没有复位点时是 -1。口径见 ADR-0002：导出与播放从 s0 + T 起逐位一致，T = min(5 ms, D_eff)。
+    // DSP 的复位点落在本块里：引擎在 resetAtSample 那个样本上复位 DSP（本地延迟线已在沿上复位过）。
+    bool resetDsp = false;
+    // 起播沿的复位点（绝对样本号，与 R 同一坐标）。起播沿那一块就给出（预告），复位点所在的那一块
+    // 再给一次并置 resetDsp。都没有时是 -1。口径见 ADR-0002：导出与播放从 s0 + T 起逐位一致，T = min(5 ms, D_eff)。
     std::int64_t resetAtSample = -1;
-    bool lineCleared = false;     // 本地延迟线被清空
+    bool lineCleared = false; // 本地延迟线被清空
     bool enteredTolerant = false; // 本次转入容忍模式
-    bool stalled = false;         // 本次判为断档
-    bool hostViolation = false;   // 本块宿主违约（n > N_prep）
+    bool stalled = false; // 本次判为断档
+    bool hostViolation = false; // 本块宿主违约（n > N_prep）
     std::int64_t overrunSamples = 0; // 补 0 的样本数
 
-    // 旧读头要开始淡出（重同步、断档、起播沿都是这一种）。LoopSession 据此给旧读头挂 5 ms 淡出包络。
+    // 旧读头开始淡出（重同步、断档、起播沿、对端没了都是这一种）。包络与预拷贝的尾巴已在本块挂好。
     bool fadeStarted = false;
     SyncReason fadeReason = SyncReason::kOffset;
 };
@@ -98,11 +104,12 @@ struct SyncOutcome
 namespace timing
 {
 inline constexpr double kResyncFadeOutSeconds = 0.005; // 旧读头淡出：5 ms
-inline constexpr double kResyncOnsetSeconds = 0.020;   // 新数据 onset：20 ms
-inline constexpr double kStallFadeOutSeconds = 0.005;  // 断档淡出：5 ms
-inline constexpr double kPlayFadeOutSeconds = 0.005;   // 起播淡出：5 ms
+inline constexpr double kResyncOnsetSeconds = 0.020; // 新数据 onset：20 ms
+inline constexpr double kStallFadeOutSeconds = 0.005; // 断档淡出：5 ms
+inline constexpr double kPlayFadeOutSeconds = 0.005; // 起播淡出：5 ms
+inline constexpr double kUnpairFadeOutSeconds = 0.010; // 对端没了：活跃读头 10 ms 淡出
 inline constexpr double kInactiveClearSeconds = 0.250; // 两端停用 > 250 ms 清空本地延迟线
-inline constexpr double kTolerantWindowSeconds = 10.0; // 10 s 内 ≥ 3 次重同步转容忍模式
+inline constexpr double kTolerantWindowSeconds = 10.0; // 10 s 内 ≥ 3 次对齐重同步转容忍模式
 inline constexpr int kTolerantThreshold = 3;
 } // namespace timing
 
@@ -158,9 +165,14 @@ public:
 private:
     void resync(SyncReason reason, LocalLine& line, TapSet& taps, i64 writeHead, i64 processed,
                 SyncOutcome& outcome) noexcept;
-    void clearLine(LocalLine& line, SyncOutcome& outcome) noexcept;
-    // 旧回送开始 5 ms 淡出：预拷贝尾巴 + 给全部活跃读头挂淡出包络。
-    void startFade(LocalLine& line, TapSet& taps, i64 processed, SyncOutcome& outcome) noexcept;
+    // 清空本地延迟线并把起点锚在写头 W（之后从 W 起往后拉）。
+    void clearLine(LocalLine& line, i64 writeHead, SyncOutcome& outcome) noexcept;
+    // 旧回送开始淡出（fadeLength 个样本）：预拷贝尾巴 + 给还没在淡出的活跃读头挂淡出包络。
+    // 已经在淡出的读头照它自己的进度走完，不重新起算（重新起算会让包络跳回 1，是一处阶跃）。
+    void startFade(LocalLine& line, TapSet& taps, i64 processed, std::int64_t fadeLength, i64 fadeEnd,
+                   SyncOutcome& outcome) noexcept;
+    // 起播沿的 DSP 复位点落在本块 [R, R + n) 里吗：落在里面就置 resetDsp 并给出复位点。
+    void notePlayReset(i64 processed, i64 n, SyncOutcome& outcome) noexcept;
     void noteResyncTime(i64 processed) noexcept;
     // 记账：写头与读位推进，Δ 记下这一块的写头增量。
     // keepDelta 为假时不记 Δ（重同步之后的第一块没有可比的基准）。
@@ -171,11 +183,11 @@ private:
     bool prepared_ = false;
 
     SyncState state_ = SyncState::kUnpaired;
-    i64 writeHead_ = 0;      // 上一块的 W
-    i64 processed_ = 0;      // 上一块的 R
-    i64 offset_ = 0;         // 主读头的同步偏移
+    i64 writeHead_ = 0; // 上一块的 W
+    i64 processed_ = 0; // 上一块的 R
+    i64 offset_ = 0; // 主读头的同步偏移
     bool havePrevious_ = false;
-    i64 lastDelta_ = 0;      // 上一块的 Δ（写头每块前进的帧数）
+    i64 lastDelta_ = 0; // 上一块的 Δ（写头每块前进的帧数）
     bool haveDelta_ = false;
     i64 stalledSamples_ = 0; // W 一直没动时 R 前进了多少（断档判据按样本计）
     i64 inactiveSamples_ = 0; // 两端都停用时过了多少样本（> 250 ms 清空延迟线）
@@ -185,17 +197,17 @@ private:
     std::uint32_t frozenBlocks_ = 0;
     std::uint32_t maxFrozenBlocks_ = 0;
 
-    // 小漂移被吸收的块数：连续 8 块同一个非零漂移就转成一次重同步
+    // 漂移持续同一个非零值的块数：连续 8 块就转成一次重同步。lastDrift_ 是上一次判据看到的 m。
     int driftBlocks_ = 0;
+    i64 lastDrift_ = 0;
+    bool haveLastDrift_ = false;
     bool absorbedDrift_ = false;
     // 累计被吸收的漂移块数（诊断用：漂移被吸收是真实事件，计数要看得见）
     std::uint32_t absorbedDriftBlocks_ = 0;
 
-    // 起播沿：旧回送 5 ms 淡出；淡出走完之后的下一块复位 DSP 与本地延迟线。
-    // 淡出的结束点按样本记（R + fadeOut），不读墙钟。
+    // 起播沿的 DSP 复位点（绝对样本号 R_edge + T）：按样本记，不读墙钟。
     bool pendingPlayReset_ = false;
-    bool playFadeStarted_ = false;
-    i64 playFadeEnd_ = 0;
+    i64 playResetAt_ = 0;
 
     std::uint32_t resyncCount_ = 0;
     std::uint32_t resetCount_ = 0;
@@ -211,6 +223,7 @@ private:
 
     // 淡变时长（样本）
     std::int64_t fadeOut_ = 1;
+    std::int64_t unpairFade_ = 1;
     std::int64_t onset_ = 1;
     std::int64_t inactiveClear_ = 1;
     std::int64_t tolerantWindow_ = 1;

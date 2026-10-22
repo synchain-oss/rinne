@@ -21,7 +21,10 @@
 //
 // **旁路的 10 ms 斜坡**：宿主旁路这一端时，写进环的数据在 10 ms 内线性淡到 0
 // （不是阶跃：阶跃会在环里留下一处咔嗒）。写头照常推进（那 10 ms 里写的是正在淡出的值）。
-// 解除旁路时同样 10 ms 淡回。
+// 解除旁路时同样 10 ms 淡回。斜坡按写进环的帧逐个推进，与宿主怎么切块无关。
+//
+// 端点槽：给了会合段时，每块发布本端（Output）槽的块序号、宿主时间戳与实时标志。
+// Input 靠 Output 槽的宿主时间戳判「Output 在不在 Input 之前」（错序判据），靠块序号判对端是否还活着。
 //
 // 线程：
 //   - prepare（非实时线程）：换采样率时重算常数。
@@ -37,6 +40,8 @@
 
 #include "diag/EventQueue.h"
 #include "dsp/LinearSmoother.h"
+#include "engine/AudioView.h"
+#include "engine/EngineContext.h"
 #include "engine/EngineEvents.h"
 #include "engine/EngineParams.h"
 #include "engine/TransportInfo.h"
@@ -48,10 +53,10 @@ namespace rinne::engine
 // Output 的状态（写环状态，取值与 ipc::kWrite* 一致）。
 enum class WriteState : std::uint8_t
 {
-    kIdle = 0,             // 没有环或没有写权
-    kActive = 1,           // 正在写
-    kBypassedZeros = 2,    // 旁路：写零，写头照常推进
-    kConflict = 3,         // 冲突：写权不是自己的，不写
+    kIdle = 0, // 没有环或没有写权
+    kActive = 1, // 正在写
+    kBypassedZeros = 2, // 旁路：写零，写头照常推进
+    kConflict = 3, // 冲突：写权不是自己的，不写
     kUnsupportedBlock = 4, // 块长超限：不写
 };
 
@@ -64,11 +69,12 @@ public:
     // 非实时线程：准备。sampleRate 是宿主声明的值。
     void prepare(double sampleRate, int maxBlock) noexcept;
 
-    // 音频线程：处理一块。bypassed 为真表示宿主旁路了这一端：写零进环，写头照常推进。
-    // seg 与 token 是调用方给的：段（经租约拿到）与自己的写权 token。
-    // 返回 true 表示这一块写进了环；false 表示没写（没有段、没有写权、冲突或块长超限）。
+    // 音频线程：处理一块。bypassed 为真表示宿主旁路了这一端：写零进环（10 ms 斜坡），写头照常推进。
+    // context.ring 与 context.token 是调用方给的段（经租约拿到）与自己的写权 token；
+    // context.rendezvous 与 context.group 给了时发布本端槽。宿主 buffer 一个字节都不改。
+    // 返回 true 表示这一块写进了环；false 表示没写（0 样本、没有段、没有写权、冲突或块长超限）。
     bool process(const AudioView& buffer, const EngineParams& params, const TransportInfo& transport, bool bypassed,
-                 ipc::RingSegment* seg, std::uint64_t token) noexcept;
+                 const EngineContext& context) noexcept;
 
     // 消息线程：排空诊断事件
     template<typename Sink>
@@ -93,13 +99,18 @@ public:
     int maxBlock() const noexcept { return maxBlock_; }
 
 private:
+    // 写环状态：状态变了才推一条事件（冲突一类的状态会连续很多块，不能每块推一条把队列灌满）。
     void publishState(WriteState state) noexcept;
+    // 发布本端（Output）的会合槽：块序号、宿主时间戳、实时标志、本会话最大块长。
+    void publishToSlot(const EngineContext& context, const TransportInfo& transport, bool bypassed, WriteState state,
+                       std::uint32_t n) noexcept;
     // 写一段（不超过 kMaxWriteChunk 帧）。返回这一段的结果。
-    ipc::RingWriteResult writeChunk(ipc::RingSegment& seg, const AudioView& buffer, bool bypassed, std::uint64_t token,
-                                     std::uint32_t offset, std::uint32_t frames) noexcept;
+    ipc::RingWriteResult writeChunk(ipc::RingSegment& seg, const AudioView& buffer, std::uint32_t offset,
+                                    std::uint32_t frames) noexcept;
 
     double sampleRate_ = 0.0;
     int maxBlock_ = 0;
+    std::uint32_t maxBlockSeen_ = 0; // 本会话见过的最大块长（每次 prepare 清零）
     bool prepared_ = false;
 
     ipc::RingWriter writer_;

@@ -351,13 +351,24 @@ TEST_CASE("loop sync L2-08 起播沿：s0 起 5 ms 淡出旧回送；reset_on_pl
     driver.feed(0, 64);
 
     SyncInputs in;
+    in.paired = true;
     in.playEdge = true;
     in.resetOnPlay = true;
 
-    const SyncOutcome outcome = driver.feedWith(in, 0, 64);
+    // 起播沿这一块写方推进到了 W = 512（本地延迟线还只拉到 0）。
+    const SyncOutcome outcome = driver.feedWith(in, 512, 64);
     REQUIRE(outcome.fadeStarted);
-    // 旧读头开始淡出。
+    REQUIRE(outcome.resynced);
+    REQUIRE(outcome.reason == SyncReason::kPlay);
+    // 旧读头开始淡出，淡出长度 T = min(5 ms, D_eff) = 240 帧。
     REQUIRE(tap.env.fadingOut());
+    REQUIRE(tap.env.fadeOutSteps == 240);
+    // ⛔ 删除式验证点：旧读头的读上界取「上一块拉到的位置」→ 淡出读到多少随宿主切块变 → 本用例变红。
+    // 上界取当前的 W：淡出要读的那 T 帧一定在 W 之前，这一块拉环之后都在。
+    REQUIRE(tap.validTo == 512);
+    // 新的对齐锚在 W − R；复位点是绝对样本号：沿的块首 R = 64，加 T。
+    REQUIRE(driver.sync().offset() == 512 - 64);
+    REQUIRE(outcome.resetAtSample == 64 + 240);
 
     // reset_on_play 关时：不起作用（读头不淡出）。
     Driver other;
@@ -370,6 +381,7 @@ TEST_CASE("loop sync L2-08 起播沿：s0 起 5 ms 淡出旧回送；reset_on_pl
     other.feed(0, 64);
 
     SyncInputs off;
+    off.paired = true;
     off.playEdge = true;
     off.resetOnPlay = false;
     other.feedWith(off, 0, 64);
@@ -459,4 +471,78 @@ TEST_CASE("loop sync 没有对端：只判断为未配对，不做判据")
     const SyncOutcome outcome = driver.feed(0, 512, false);
     REQUIRE_FALSE(outcome.resynced);
     REQUIRE(driver.sync().state() == SyncState::kUnpaired);
+}
+
+TEST_CASE("loop sync 容忍模式只数对齐重同步：10 s 内换写方 4 次不转容忍模式")
+{
+    // ⛔ 删除式验证点：把换写方、改采样率、断档恢复、起播沿也算进容忍模式 → 本用例变红。
+    // 那些是宿主或用户的动作，不是「时序不稳定」的证据：反复换写方不该让环路进容忍模式、亮「时序不稳定」。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    driver.feed(0, 512);
+    for (int i = 1; i <= 4; ++i)
+    {
+        SyncInputs in;
+        in.paired = true;
+        in.writerChanged = true;
+        const SyncOutcome outcome = driver.feedWith(in, 512 * i, 512);
+        REQUIRE(outcome.resynced);
+        REQUIRE(outcome.reason == SyncReason::kWriter);
+    }
+    REQUIRE(driver.sync().resyncCount() == 4);
+    REQUIRE_FALSE(driver.sync().tolerant());
+    REQUIRE_FALSE(driver.sync().unstable());
+}
+
+TEST_CASE("loop sync 对端没了：活跃读头 10 ms 淡出，读位照常前进")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    Tap& tap = driver.taps().at(0);
+    tap.active = true;
+    tap.delay = 100;
+    tap.validFrom = 0;
+    tap.validTo = 1000000;
+
+    driver.feed(0, 64);
+    const i64 before = driver.sync().processed();
+
+    SyncInputs in;
+    in.paired = false;
+    const SyncOutcome outcome = driver.feedWith(in, 0, 64);
+    REQUIRE(outcome.fadeStarted);
+    REQUIRE(tap.env.fadingOut());
+    REQUIRE(tap.env.fadeOutSteps == 480); // 10 ms @ 48 kHz
+    // 读位照常前进：不推进的话淡出期间读头会反复读同一段。
+    REQUIRE(driver.sync().processed() == before + 64);
+    REQUIRE(driver.sync().state() == SyncState::kUnpaired);
+}
+
+TEST_CASE("loop sync 已经在淡出的读头不被重新起算（重新起算是一处阶跃）")
+{
+    Driver driver;
+    driver.setDeclaredBlock(512);
+
+    Tap& tap = driver.taps().at(0);
+    tap.active = true;
+    tap.delay = 100;
+    tap.validFrom = 0;
+    tap.validTo = 1000000;
+
+    // 先因断档开始淡出，走一半。块要小：5 ms 的淡出是 240 个样本，块太大淡出就在块末走完了。
+    for (int i = 0; i < 16; ++i)
+    {
+        driver.feed(0, 64); // 第 16 块累计 1024 = 2·N_max → 断档，挂上 240 帧淡出
+    }
+    REQUIRE(driver.sync().state() == SyncState::kStalled);
+    REQUIRE(tap.env.fadingOut());
+    advanceTaps(driver.taps(), 100);
+    const float midway = TapSet::currentEnvelope(tap);
+    REQUIRE(midway < 1.0f);
+
+    // 写头恢复（断档恢复重同步）：已在淡出的读头照它自己的进度走，包络不跳回 1。
+    driver.feed(256, 64);
+    REQUIRE(TapSet::currentEnvelope(tap) <= midway);
 }

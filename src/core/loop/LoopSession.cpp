@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// LoopSession：环路层的门面。参数与走带整体下传、D 的计算、读头混合、违约路径、状态发布都在这里。
+// LoopSession：环路层的门面。参数与走带整体下传、D 的计算、拉环、读头混合、违约路径、状态发布都在这里。
 //
 // 一块的流程：
-//   1. 算 D：用户要的（毫秒或节拍）→ 样本 → 抬到下限（max(N_prep, N_obs)）→ 截到上限。
-//   2. 判据：交给 StreamSync（断档、对齐、容忍、重同步、停用清空、起播复位）。
-//   3. 拉环：把环里 [pulled, min(W, pulled + n)) 的帧搬进本地延迟线。读不到的帧补 0。
-//   4. 混音：把读头按包络混成一路，写进 ctx.returnLeft / ctx.returnRight，并标出逐样本的有效位。
-//   5. 判错序：读对端槽的宿主时间戳，按 ADR-0002 的口径累票。
-//   6. 发布状态：写进 LoopStatus（原子量），消息线程读快照。
+//   1. 算 D：用户要的（毫秒或节拍）→ 样本 → 抬到下限（max(N_prep, N_obs, n)）→ 截到上限。
+//   2. 域锚定：第一次配上或写头倒退时，本地延迟线从当前写头 W 起重来（比 W 早的帧一律作废）。
+//   3. 判据：交给 StreamSync（断档、对齐、容忍、重同步、停用清空、起播复位）。
+//   4. 拉环：把环里 [pulled, W) 的帧全部搬进本地延迟线（一圈之内），pulled 追到 W。
+//   5. 建新读头（需要时），把读头按包络混成一路，写进 ctx.returnLeft / ctx.returnRight，并标出逐样本的有效位。
+//   6. 判错序：读对端槽的宿主时间戳，按 ADR-0002 的口径累票。
+//   7. 发布状态：写进 LoopStatus（原子量），消息线程读快照。
 //
 // 读头的生命周期（3 个槽）：
-//   稳态      1 个读头在跑（槽 0），包络恒为 1。
+//   稳态      1 个读头在跑，包络恒为 1。
 //   淡出期间  旧读头在淡出（5 ms），新读头同时在 onset（20 ms）：两个槽。
 //   重同步    旧读头淡出 + 新读头 onset：两个槽。第三个槽留给「改 D 的交叉淡化」。
 //   槽满      丢掉包络最小的那个（不是硬丢），并记一次 tapDrop。
 //
-// 读位 R 只有一份：判据那一半（StreamSync）持有它，本文件每块把同一个值传进去，不再自己推进一份。
-// 两份 R 是「漂移量 m 算错」的典型来源：m = W − (R + off) 里的 R 必须是同一个。
+// 读位 R 只有一份：判据那一半（StreamSync）持有它。本块的读位起点 R0 在判据之前取一次，
+// 混音、漂移量与逐样本的位置全部用这同一个 R0；判据之后 R 已推进到 R0 + n，那是下一块的起点。
+// 两份 R（或混音用推进之后的 R）是「漂移量 m 算错」与「环路延迟变成 D − n」的典型来源。
 //
 // 实时约定：不分配、不加锁、不读墙钟、不抛异常；0 样本的调用立刻返回，不推进任何计数。
 #include "loop/LoopSession.h"
@@ -42,6 +44,11 @@ constexpr std::int64_t kNoUpperBound = std::numeric_limits<std::int64_t>::max();
 
 // 错序判据：连续这么多次判为「Output 在 Input 之前」才定案（口径见 ADR-0002）。
 constexpr std::uint32_t kOrderVotesToJudge = 3;
+
+// 拉环的护栏 G：写方最多有一段（≤ 8192 帧）公告了还没发布，比 W 早 (一圈 − G) 帧以上的位置可能正被覆盖。
+// 取 max(8192, 对端声明的最大块长)，截在 [8192, 32768]。
+constexpr std::int64_t kMinPullGuard = 8192;
+constexpr std::int64_t kMaxPullGuard = 32768;
 } // namespace
 
 bool LoopSession::prepare(double sampleRate) noexcept
@@ -65,8 +72,11 @@ bool LoopSession::prepare(double sampleRate) noexcept
         orderVotes_ = 0;
         orderVerdict_ = static_cast<std::uint8_t>(OrderVerdict::kUnknown);
     }
+    // N_obs 每次 prepare 清零（同采样率也清）：下限因此回落到声明值。
+    maxBlockSeen_ = 0;
+    delayMinReason_ = DelayMinReason::kNone;
 
-    // 拉环的暂存：定长，容得下支持的最大块长。音频线程上不再分配。
+    // 拉环的暂存：定长，容得下支持的最大块长。音频线程上不再分配（一次拉不完就分段拉）。
     const std::size_t stage = static_cast<std::size_t>(ipc::kMaxSupportedBlock);
     if (pullLeft_.size() != stage)
     {
@@ -88,6 +98,8 @@ void LoopSession::setEventSink(LoopEventSink sink) noexcept
 // D 的目标值：按参数里的模式（时间 / 节拍）算成样本，再落到合法范围。
 //
 // 毫秒与节拍到样本的换算全在环路层做（引擎不预先把 delay_ms 换算成样本）：节拍同步因此只需要改环路层。
+// 下限 = max(N_prep, N_obs)，其中 N_obs 取引擎给的值与本块块长 n 里较大的：宿主违约（n > N_prep）的那一块
+// D 下限就立即抬到 n，不等引擎下一块再报。
 std::int64_t LoopSession::computeDelay(const BlockContext& ctx) noexcept
 {
     const engine::EngineParams& params = ctx.params;
@@ -97,8 +109,8 @@ std::int64_t LoopSession::computeDelay(const BlockContext& ctx) noexcept
     if (params.delayMode == engine::DelayMode::kSync)
     {
         // 节拍同步：拍数 × 60/BPM × sr。bpm 无效时用回退值（120）。
-        const double bpm = bpmCenti_ > 0 ? static_cast<double>(bpmCenti_) * 0.01
-                                        : static_cast<double>(engine::kFallbackBpm);
+        const double bpm =
+            bpmCenti_ > 0 ? static_cast<double>(bpmCenti_) * 0.01 : static_cast<double>(engine::kFallbackBpm);
         const int note = static_cast<int>(params.delayNote) % engine::kDelayNoteCount;
         const double beats = engine::kDelayNoteBeats[note];
         const auto frames = static_cast<std::int64_t>(std::llround(beats * 60.0 / bpm * sr));
@@ -110,22 +122,37 @@ std::int64_t LoopSession::computeDelay(const BlockContext& ctx) noexcept
         requested = msToFrames(static_cast<double>(params.delayMs), sr);
     }
 
-    // 下限：max(N_prep, N_obs)。N_obs 由引擎每块更新。
-    const DelayChoice choice = chooseDelay(requested, ctx.declaredBlock, ctx.observedBlock, sr);
+    const std::int64_t n = ctx.blockLength;
+    maxBlockSeen_ = std::max({maxBlockSeen_, ctx.observedBlock, n});
+    const DelayChoice choice = chooseDelay(requested, ctx.declaredBlock, maxBlockSeen_, sr);
+
+    // 下限从哪来（界面常驻「实际 / 最小 / 原因 / 本会话最大块长」里的原因；与用户的 D 是否高于下限无关）：
+    //   见过的块比声明值长 → 宿主违约（声明值未知时只算实测块长）；否则就是声明值。
+    DelayMinReason floor = DelayMinReason::kNone;
+    if (maxBlockSeen_ > ctx.declaredBlock)
+    {
+        floor = ctx.declaredBlock > 0 ? DelayMinReason::kHostViolation : DelayMinReason::kObserved;
+    }
+    else if (ctx.declaredBlock > 0)
+    {
+        floor = DelayMinReason::kPrepare;
+    }
 
     if (choice.raised && choice.effective != delayEffective_)
     {
-        sink_.emit(LoopEventCode::kDMinRaised, static_cast<std::uint8_t>(choice.minimum),
-                   static_cast<std::uint8_t>(choice.reason));
+        sink_.emit(LoopEventCode::kDMinRaised, static_cast<std::uint8_t>(std::min<std::int64_t>(choice.minimum, 255)),
+                   static_cast<std::uint8_t>(floor));
     }
 
     delayRequested_ = requested;
     delayMin_ = choice.minimum;
     delayEffective_ = choice.effective;
+    delayMinReason_ = floor;
     return choice.effective;
 }
 
-// 速度：宿主给的有效值、来源。宿主没给（或给的值超出 20..999）就回退到 120 并记成 fallback。
+// 速度：宿主给的有效值、来源。宿主没给（或给的值超出 20..999）就沿用本会话最后一个有效值，
+// 从没拿到过就回退到 120 并记成 fallback。
 void LoopSession::updateBpm(const BlockContext& ctx) noexcept
 {
     const engine::TransportInfo& transport = ctx.transport;
@@ -137,7 +164,7 @@ void LoopSession::updateBpm(const BlockContext& ctx) noexcept
         centi = static_cast<std::uint32_t>(std::lround(static_cast<double>(transport.bpm) * 100.0));
         source = static_cast<std::uint8_t>(BpmSource::kHost);
     }
-    else if (bpmCenti_ != 0)
+    else if (bpmSource_ == static_cast<std::uint8_t>(BpmSource::kHost))
     {
         // 宿主这一次没给，但之前给过：保留上一次的值，来源仍然标成 host（那个值仍然有效）
         centi = bpmCenti_;
@@ -157,7 +184,8 @@ void LoopSession::updateBpm(const BlockContext& ctx) noexcept
 void LoopSession::flushLocalDelayLine() noexcept
 {
     // 跳闸淡出后清空：只改两个整数，不 memset（几兆字节清零不能在音频线程上做）。
-    line_.reset();
+    // 起点锚在已拉到的位置：之后从那里往后拉，比它早的帧一律读不出来。
+    line_.resetTo(line_.pulled());
     taps_.clear();
 }
 
@@ -177,6 +205,7 @@ int LoopSession::newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept
         {
             return -1;
         }
+        taps_.at(slot) = Tap{};
     }
     Tap& tap = taps_.at(slot);
     tap.active = true;
@@ -194,9 +223,87 @@ int LoopSession::newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept
     return slot;
 }
 
+// 拉环：把 [pulled, W) 的帧搬进本地延迟线。
+//
+// 下界：比 W 早 (一圈 − G) 帧以上的位置可能正被写方的下一段覆盖，不读，记 overflow 并抬高有效区间的下界。
+// 撕裂：读完一段之后读写方的公告 intent，intent − 一圈之前的帧可能是半截数据，同样作废并记 torn。
+// 环里的帧先落在暂存里（定长，prepare 里分配），再一次搬进延迟线：延迟线的 pull 是按区间搬的。
+void LoopSession::pullRing(const ipc::RingSegment& ring, i64 writeHead, i64 peerMaxBlock) noexcept
+{
+    const i64 lap = static_cast<i64>(ipc::kRingFrames);
+    const i64 guard = std::clamp<i64>(std::max<i64>(kMinPullGuard, peerMaxBlock), kMinPullGuard, kMaxPullGuard);
+
+    i64 from = line_.pulled();
+    if (writeHead <= from)
+    {
+        return;
+    }
+    const i64 earliest = writeHead - (lap - guard);
+    if (earliest > from)
+    {
+        const auto dropped = static_cast<std::uint64_t>(earliest - from);
+        status_.addOverflow(dropped);
+        sink_.emit(LoopEventCode::kOverflow, static_cast<std::uint8_t>(std::min<std::uint64_t>(dropped, 255u)));
+        line_.raiseValidFrom(earliest);
+        from = earliest;
+    }
+
+    const auto stage = static_cast<i64>(pullLeft_.size());
+    while (from < writeHead && stage > 0)
+    {
+        const i64 to = std::min(writeHead, from + stage);
+        const i64 base = from;
+        const ipc::RingPull pulled = ipc::LoopRing::pull(ring, base, to, [&](i64 p, float l, float r) {
+            const auto at = static_cast<std::size_t>(p - base);
+            pullLeft_[at] = l;
+            pullRight_[at] = r;
+        });
+        // validFrom 之前的帧可能已被覆盖或只写了一半：一律当 0，并把有效区间的下界抬上去（绝不读旧数据）。
+        const i64 validFrom = pulled.validFrom;
+        line_.pull(base, to, [&](i64 p, float& l, float& r) {
+            if (p < validFrom)
+            {
+                l = 0.0f;
+                r = 0.0f;
+                return;
+            }
+            const auto at = static_cast<std::size_t>(p - base);
+            l = pullLeft_[at];
+            r = pullRight_[at];
+        });
+        if (validFrom > base)
+        {
+            const auto torn = static_cast<std::uint64_t>(std::min(validFrom, to) - base);
+            status_.addTorn(torn);
+            sink_.emit(LoopEventCode::kTorn, static_cast<std::uint8_t>(std::min<std::uint64_t>(torn, 255u)));
+            line_.raiseValidFrom(std::min(validFrom, to));
+        }
+        from = to;
+    }
+}
+
+// 主读头本块里补 0 的样本数：位置 s = R0 + i + off − D 落在读头的有效区间里，但还没被拉进来（s ≥ pulled）。
+// 主读头是「没在淡出」的那个；都在淡出时本块没有主读头，不计。
+std::int64_t LoopSession::mainTapOverrun(i64 blockStart, i64 n) const noexcept
+{
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        const Tap& tap = taps_.at(slot);
+        if (!tap.active || tap.env.fadingOut())
+        {
+            continue;
+        }
+        const i64 base = blockStart + tap.offset - tap.delay;
+        const i64 lo = std::max({base, line_.pulled(), tap.validFrom});
+        const i64 hi = std::min(base + n, tap.validTo);
+        return hi > lo ? hi - lo : 0;
+    }
+    return 0;
+}
+
 // 对端槽的事实：宿主时间戳、块序号、实时标志、对端声明的最大块长。
 //
-// 会合段按组块排布（组 G 在 1024·G），组号 0 或越界时不去读：那会越界访问。
+// 会合段按组块排布，组号 0 或越界时不去读：那会越界访问。
 // 读不到就当没有对端槽：判据退回 unknown，绝不猜。
 void LoopSession::readPeerSlot(const BlockContext& ctx) noexcept
 {
@@ -221,10 +328,13 @@ void LoopSession::readPeerSlot(const BlockContext& ctx) noexcept
 
 // 错序判据（口径见 ADR-0002）：
 //
-//   宿主时间戳有效时，比对两端的时间戳：谁的更小，谁的那一端的块首更早被处理。
-//   连续 3 次都判为「对端（Output）在本端（Input）之前」才定为错序（界面给琥珀提示）。
-//   宿主时间戳无效（没给，或给了 0）时一律记 unknown，票数清零：不猜、不用别的时间源代替。
-//   判为正确一次就把票数清零（票是连续计数）。
+//   两端在同一个宿主周期里拿到的是同一个宿主时间戳（它是这一块的时间戳，不是各自被调用的时刻）。
+//   Input 在块首读 Output 槽里发布的 last_host_ns：
+//     比本块的时间戳小  → Output 还停在上一块，本块里 Input 先被处理 → 顺序正确；
+//     等于或大于本块的  → Output 已经处理过本块（或更晚的块）→ Output 在 Input 之前，记一票。
+//   连续 3 票才定为错序（界面给琥珀提示）；判对一次就把票数清零（票是连续计数）。
+//   宿主时间戳无效（没给，或给了 0）、或读不到对端槽、或对端还没发布过时间戳时，一律记 unknown，票数清零：
+//   不猜、不用别的时间源代替。
 void LoopSession::judgeOrder(const BlockContext& ctx) noexcept
 {
     const engine::TransportInfo& transport = ctx.transport;
@@ -234,15 +344,17 @@ void LoopSession::judgeOrder(const BlockContext& ctx) noexcept
     {
         orderVotes_ = 0;
         orderVerdict_ = static_cast<std::uint8_t>(OrderVerdict::kUnknown);
-        status_.setOrder(orderVerdict_, 0, false);
+        status_.setOrder(orderVerdict_, 0, hostNsValid);
         return;
     }
 
-    // 对端的时间戳更小 = 对端那一端的块首更早被处理 = Output 在 Input 之前。
-    const bool peerFirst = peerHostNs_ < transport.hostNs;
-    if (peerFirst)
+    const bool outputFirst = peerHostNs_ >= transport.hostNs;
+    if (outputFirst)
     {
-        ++orderVotes_;
+        if (orderVotes_ < kOrderVotesToJudge)
+        {
+            ++orderVotes_;
+        }
         orderVerdict_ = orderVotes_ >= kOrderVotesToJudge ? static_cast<std::uint8_t>(OrderVerdict::kOutputFirst)
                                                           : static_cast<std::uint8_t>(OrderVerdict::kUnknown);
     }
@@ -253,12 +365,12 @@ void LoopSession::judgeOrder(const BlockContext& ctx) noexcept
     }
 
     status_.setOrder(orderVerdict_, orderVotes_, true);
-    lastHostNs_ = transport.hostNs;
 }
 
 BlockResult LoopSession::process(const BlockContext& ctx) noexcept
 {
     BlockResult result;
+    result.blockStart = sync_.processed();
 
     // 0 样本的调用立刻返回，不推进任何计数
     if (ctx.blockLength <= 0)
@@ -276,8 +388,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     if (static_cast<std::uint64_t>(ctx.blockLength) > static_cast<std::uint64_t>(ipc::kMaxSupportedBlock))
     {
         result.unsupportedBlock = true;
-        sink_.emit(LoopEventCode::kUnsupportedBlock, static_cast<std::uint8_t>(ctx.blockLength),
-                   static_cast<std::uint8_t>(ipc::kMaxSupportedBlock));
+        sink_.emit(LoopEventCode::kUnsupportedBlock, 255, 0);
         return result;
     }
 
@@ -293,17 +404,20 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
 
     // 对端的事实：写头、epoch、写权
     i64 writeHead = 0;
+    i64 writeIntent = 0;
     bool paired = false;
     bool writerChanged = false;
     bool formatChanged = false;
+    const bool wasPaired = havePeer_;
 
     if (ctx.ring != nullptr)
     {
         const ipc::RingFormat format = ipc::LoopRing::readFormat(*ctx.ring);
         writeHead = static_cast<i64>(ipc::LoopRing::writeHead(*ctx.ring));
+        writeIntent = static_cast<i64>(ipc::LoopRing::writeIntent(*ctx.ring));
         paired = format.writerToken != 0;
 
-        if (havePeer_)
+        if (havePeer_ && paired)
         {
             writerChanged = format.writerToken != lastWriterToken_;
             formatChanged = format.epoch != lastEpoch_;
@@ -322,6 +436,26 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     // 对端槽：宿主时间戳、块序号、实时标志。组号不合法时读不到。
     readPeerSlot(ctx);
 
+    // 本块的读位起点。判据会把 R 推进到 R0 + n，混音与几何量都用推进之前的这一个。
+    const i64 R0 = sync_.processed();
+
+    // 域锚定：第一次配上时本地延迟线从当前写头起算（W 可能早已很大，从 0 起拉永远追不上）；
+    // 写头倒退（换段遗漏一类）时整个域重来，读头作废，判据重新锚定偏移。
+    bool domainReset = false;
+    if (paired)
+    {
+        if (!wasPaired)
+        {
+            line_.resetTo(writeHead);
+        }
+        else if (writeHead < line_.pulled())
+        {
+            line_.resetTo(writeHead);
+            taps_.clear();
+            domainReset = true;
+        }
+    }
+
     // 判据。R 只有一份：判据那一半持有它，这里把同一个值传进去。
     SyncInputs in;
     in.paired = paired;
@@ -330,10 +464,11 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     in.playEdge = playEdge;
     in.resetOnPlay = ctx.params.resetOnPlay;
     in.resetRequested = ctx.resetRequested;
+    in.domainReset = domainReset;
     in.inactive = !paired;
     in.writeHead = writeHead;
     in.peerMaxBlock = peerMaxBlock_ > 0 ? peerMaxBlock_ : ctx.peerMaxBlock;
-    in.processed = sync_.processed();
+    in.processed = R0;
     in.declaredBlock = ctx.declaredBlock;
     in.delayEffective = delay;
     in.blockLength = static_cast<int>(n);
@@ -346,114 +481,47 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     const SyncOutcome outcome = sync_.process(in, line_, taps_);
     offset_ = sync_.offset();
 
-    // 拉环：把 [pulled, min(W, pulled + n)) 的帧搬进延迟线。读不到的帧补 0。
-    //
-    // 补 0 的样本数 = n − 读到的帧数。这是「宿主违约」的可见后果：宿主送来的块长超过声明值时，
-    // 环里没有那么多帧可读，多出来的那些只能是 0。
-    //
-    // 环里的帧先落在暂存里（定长，prepare 里分配），再一次搬进延迟线：延迟线的 pull 是按区间搬的，
-    // 不能在环的 sink 里逐帧调用（那会把 pulled 改得不成样子）。
-    std::int64_t readFrames = 0;
-    if (paired && ctx.ring != nullptr)
-    {
-        const i64 from = line_.pulled();
-        const i64 to = std::min(writeHead, from + n);
-        if (to > from)
-        {
-            // 暂存按位置对齐：pullPositions_[i] 是这一帧的绝对位置。
-            // 环的 pull 是连续的，位置就是 from + i，所以不需要另外记位置。
-            const ipc::RingPull pulled = ipc::LoopRing::pull(*ctx.ring, from, to, [&](i64 p, float l, float r) {
-                const auto at = static_cast<std::size_t>(p - from);
-                if (at < pullLeft_.size())
-                {
-                    pullLeft_[at] = l;
-                    pullRight_[at] = r;
-                }
-            });
-            // validFrom 之前的帧可能已被覆盖，一律当 0（绝不读旧数据）
-            const i64 validFrom = pulled.validFrom;
-            readFrames = to - from;
-            // 整段搬进延迟线：位置 p 的样本取自暂存的 [p - from]
-            line_.pull(from, to, [&](i64 p, float& l, float& r) {
-                const auto at = static_cast<std::size_t>(p - from);
-                if (p < validFrom || at >= pullLeft_.size())
-                {
-                    l = 0.0f;
-                    r = 0.0f;
-                    return;
-                }
-                l = pullLeft_[at];
-                r = pullRight_[at];
-            });
-            // 两种「被丢掉」的帧要分开记（诊断报告按这两个字段取数，不能混）：
-            //   overflow 环只有一圈：from 比 to 早一圈以上的那些帧，已经被覆盖，丢帧数 = lo − from。
-            //   torn     写方的公告（intent）领先一圈以上：那一段没写完就被下一段盖掉了，
-            //            读到的可能是半截数据，丢帧数 = validFrom − lo。
-            // lo 与 pull 内部算的是同一个：环只有一圈，比 to 早一圈的帧一定已经不存在了。
-            const i64 lap = static_cast<i64>(ipc::kRingFrames);
-            const i64 lo = std::max(std::max(from, to - lap), static_cast<i64>(0));
-            if (lo > from)
-            {
-                const std::uint64_t dropped = static_cast<std::uint64_t>(lo - from);
-                status_.addOverflow(dropped);
-                sink_.emit(LoopEventCode::kOverflow, static_cast<std::uint8_t>(dropped));
-            }
-            if (validFrom > lo)
-            {
-                const std::uint64_t torn = static_cast<std::uint64_t>(validFrom - lo);
-                status_.addTorn(torn);
-                sink_.emit(LoopEventCode::kTorn, static_cast<std::uint8_t>(torn));
-            }
-            // 有效区间的下界要跟着抬：比它更早的位置一律读成 0（绝不读旧数据或别名数据）。
-            line_.raiseValidFrom(validFrom);
-        }
-    }
-
-    // 旧读头要开始淡出：断档、重同步、起播沿都是这一种。淡出是 5 ms 线性。
-    // validTo 收到「这一块拉进来的最后一帧 + 1」：淡出期间不再读新位置。
-    if (outcome.fadeStarted)
-    {
-        const i64 fadeEnd = line_.pulled();
-        for (int slot = 0; slot < kMaxTaps; ++slot)
-        {
-            Tap& tap = taps_.at(slot);
-            if (!tap.active)
-            {
-                continue;
-            }
-            tap.validTo = std::min(tap.validTo, fadeEnd);
-            tap.env.fadeOutSteps = sync_.fadeOutSamples();
-            tap.env.fadeOutStep = 0;
-        }
-    }
-
     // 延迟线被清空：读头全部作废（否则会读到清空前的位置）。
     if (outcome.lineCleared)
     {
         taps_.clear();
     }
 
+    // 拉环：pulled 追到 W。
+    if (paired && ctx.ring != nullptr)
+    {
+        pullRing(*ctx.ring, writeHead, in.peerMaxBlock);
+    }
+
     // 建新读头：环上「从哪一帧起才有数据」。
     //
-    // 起播沿的新读头 validFrom = W + T（T = min(5 ms, D_eff)）：沿后的那 T 帧没有回送。
-    // 稳态与重同步：validFrom = 当前拉到的最后一帧 + 1（新数据从下一帧起）。
+    // 起播沿：validFrom = W + T（T = min(5 ms, D_eff)），沿后的那 T 帧没有回送。
+    // 换写方：validFrom = max(W, intent)，旧写方公告过但没发布的那一段不读。
+    // 其他（第一次配上、重同步）：validFrom = W，新数据从下一帧起。
     if (paired && !outcome.lineCleared)
     {
         const bool needFreshTap = outcome.resynced || taps_.count() == 0;
         if (needFreshTap)
         {
-            const i64 validFrom = outcome.fadeReason == SyncReason::kPlay
-                                      ? writeHead + sync_.playFadeSamples(delay)
-                                      : line_.pulled();
+            i64 validFrom = writeHead;
+            if (outcome.resynced && outcome.reason == SyncReason::kPlay)
+            {
+                validFrom = writeHead + sync_.playFadeSamples(delay);
+            }
+            else if (outcome.resynced && outcome.reason == SyncReason::kWriter)
+            {
+                validFrom = std::max(writeHead, writeIntent);
+            }
             newTap(validFrom, delay, sync_.onsetSamples());
         }
         else
         {
-            // D 变了：把主读头的 D 更新到新值（改 D 的交叉淡化由改 D 的那一张卡接）
+            // D 变了：把主读头的 D 更新到新值。改 D 的 40 ms 交叉淡化与 100 ms 去抖不在本层做
+            // （常量与口径已在 LoopTiming.h 与 ADR-0002 钉住），这里只保证读头用的是当前的 D。
             for (int slot = 0; slot < kMaxTaps; ++slot)
             {
                 Tap& tap = taps_.at(slot);
-                if (tap.active && tap.env.fadeOutSteps == 0)
+                if (tap.active && !tap.env.fadingOut())
                 {
                     tap.delay = delay;
                     break;
@@ -462,15 +530,15 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         }
     }
 
-    // 混音：读头按包络混成一路，并标出逐样本的有效位。
+    // 混音：读头按包络混成一路，并标出逐样本的有效位。位置用本块的读位起点 R0。
     std::uint64_t nonZero = 0;
     if (ctx.returnLeft != nullptr && ctx.returnRight != nullptr)
     {
-        nonZero = mixTaps(taps_, line_, sync_.processed(), ctx.returnLeft, ctx.returnRight, n, ctx.returnValid);
+        nonZero = mixTaps(taps_, line_, R0, ctx.returnLeft, ctx.returnRight, n, ctx.returnValid);
     }
 
-    // 补 0 的样本数：本块 n 个样本里读不到的那些
-    const std::int64_t overrun = std::max<i64>(0, n - readFrames);
+    // 补 0 的样本数：主读头本该有数据、但环里还没写到的那些样本。
+    const std::int64_t overrun = paired ? mainTapOverrun(R0, n) : 0;
 
     result.returnLeft = ctx.returnLeft;
     result.returnRight = ctx.returnRight;
@@ -486,12 +554,20 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     result.resynced = outcome.resynced;
     result.resetDsp = outcome.resetDsp;
     result.resetAtSample = outcome.resetAtSample;
+    result.blockStart = R0;
     result.lineCleared = outcome.lineCleared;
     result.stalled = outcome.stalled;
     result.enteredTolerant = outcome.enteredTolerant;
     result.tapSettledSilent = tapsSettledSilent(taps_) && nonZero == 0;
 
-    // 包络按样本推进 n（与块长无关）。读位 R 由判据那一半推进，这里不再另推一份。
+    if (overrun > 0)
+    {
+        sink_.emit(LoopEventCode::kOverrun, static_cast<std::uint8_t>(std::min<std::int64_t>(overrun, 255)), 0, R0);
+    }
+
+    // 包络按样本推进 n（与块长无关）：淡入按本块读到的位置记账，淡出按样本推进。
+    // 读位 R 由判据那一半推进，这里不再另推一份。
+    settleOnsets(taps_, R0, n);
     advanceTaps(taps_, n);
 
     // 错序判据：宿主时间戳有效时比两端的时间戳。
@@ -502,8 +578,8 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     status_.setStalled(sync_.state() == SyncState::kStalled);
     status_.setTolerant(sync_.tolerant());
     status_.setUnstable(sync_.unstable());
-    status_.setDelay(result.delayUserMs, delayEffective_, delayMin_,
-                      static_cast<std::uint8_t>(ctx.params.delayMode));
+    status_.setDelay(result.delayUserMs, delayEffective_, delayMin_, static_cast<std::uint8_t>(ctx.params.delayMode));
+    status_.setDelayFloor(static_cast<std::uint8_t>(delayMinReason_), maxBlockSeen_);
     status_.setTaps(static_cast<std::uint32_t>(taps_.count()), tapDropCount_);
     status_.addOverrun(static_cast<std::uint64_t>(overrun));
     if (outcome.resynced)
@@ -514,8 +590,13 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     status_.setFrozenMax(sync_.maxFrozenBlocks());
     // 漂移被吸收的块数：漂移被吸收是真实事件，计数要看得见。
     status_.setOffsetDriftBlocks(sync_.absorbedDriftBlocks());
-    // 当前的几何量：m = W − (R + off)。正数 = 写头领先。
-    status_.setGeometry(drift(writeHead, sync_.processed(), offset_), writeHead, offset_);
+    // 写头 CAS 失败次数：写方在环头里记的（读侧只是转出来）。
+    if (ctx.ring != nullptr)
+    {
+        status_.setWCasFail(ctx.ring->header.w_cas_fail.load(std::memory_order_relaxed));
+    }
+    // 当前的几何量：m = W − R − off，R 取本块的读位起点，与判据看到的是同一组 W、R、off。正数 = 写头领先。
+    status_.setGeometry(drift(writeHead, R0, offset_), writeHead, offset_);
 
     return result;
 }

@@ -115,8 +115,7 @@ void MiddleChain::process(const float* inLeft, const float* inRight, float* outL
             r *= gain_;
             break;
 
-        case ChainKind::kOnePoleLowpass:
-        {
+        case ChainKind::kOnePoleLowpass: {
             lpLeft_ += lpA_ * (l - lpLeft_);
             lpRight_ += lpA_ * (r - lpRight_);
             l = lpLeft_;
@@ -124,27 +123,25 @@ void MiddleChain::process(const float* inLeft, const float* inRight, float* outL
             break;
         }
 
-        case ChainKind::kDelay:
-        {
+        case ChainKind::kDelay: {
             // 延迟 k 个样本：输出是 k 个样本之前的输入。
             // 延迟线用「先读后写」的环形缓冲：读到的那一格恰好是 k 个样本前写进去的值。
+            // 长度恰好是 k，不一定是 2 的幂：游标按长度回绕（不能用按位与）。
             if (!delayLeft_.empty())
             {
-                const std::size_t mask = delayLeft_.size() - 1u;
-                const std::size_t slot = delayCursor_ & mask;
+                const std::size_t slot = delayCursor_;
                 const float dl = delayLeft_[slot];
                 const float dr = delayRight_[slot];
                 delayLeft_[slot] = l;
                 delayRight_[slot] = r;
-                delayCursor_ = (delayCursor_ + 1u) & mask;
+                delayCursor_ = slot + 1u < delayLeft_.size() ? slot + 1u : 0u;
                 l = dl;
                 r = dr;
             }
             break;
         }
 
-        case ChainKind::kNanInject:
-        {
+        case ChainKind::kNanInject: {
             // 从 nanAt_ 个样本起往后都是 NaN：用来验 Output 侧的清洗（NaN → 0）与计数。
             if (nanAt_ >= 0 && sampleCounter_ >= static_cast<std::int64_t>(nanAt_))
             {
@@ -159,8 +156,7 @@ void MiddleChain::process(const float* inLeft, const float* inRight, float* outL
             r = -r;
             break;
 
-        case ChainKind::kLowShelfBoost:
-        {
+        case ChainKind::kLowShelfBoost: {
             shelfLeft_ += lpA_ * (l - shelfLeft_);
             shelfRight_ += lpA_ * (r - shelfRight_);
             l = shelfLowGain_ * shelfLeft_ + (l - shelfLeft_) * shelfHighGain_;

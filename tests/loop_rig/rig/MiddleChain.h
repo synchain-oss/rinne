@@ -19,12 +19,12 @@ namespace rinne::rig
 // 中间链的形态。
 enum class ChainKind : std::uint8_t
 {
-    kIdentity = 0,   // 恒等
-    kGain = 1,       // 增益
+    kIdentity = 0, // 恒等
+    kGain = 1, // 增益
     kOnePoleLowpass = 2, // 一阶低通
-    kDelay = 3,      // k 样本延迟
-    kNanInject = 4,  // NaN 注入
-    kInvert = 5,     // 反相
+    kDelay = 3, // k 样本延迟
+    kNanInject = 4, // NaN 注入
+    kInvert = 5, // 反相
     kLowShelfBoost = 6, // 低架提升
 };
 

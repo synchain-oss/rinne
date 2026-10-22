@@ -217,3 +217,33 @@ TEST_CASE("loop line 有效区间的下界可以抬高（环覆盖了更早的�
     REQUIRE(line.read(50, l, r));
     REQUIRE(l == encode(50));
 }
+
+TEST_CASE("loop line 清空并锚在写头：比锚点早的帧读不出来，之后从锚点起往后拉")
+{
+    // ⛔ 删除式验证点：清空之后把起点留在 0（不锚在写头）→ 本用例变红。
+    // 写头是段寿命内的绝对位置，配对或清空的那一刻可能早已很大：从 0 起拉永远追不上它。
+    LocalLine line;
+    REQUIRE(line.allocate(kSr));
+
+    const std::int64_t far = (static_cast<std::int64_t>(1) << 40) + 12345;
+    fill(line, 0, 100);
+    line.resetTo(far);
+    REQUIRE(line.pulled() == far);
+    REQUIRE(line.lineValidFrom() == far);
+
+    float l = 1.0f;
+    float r = 1.0f;
+    // 清空前的帧读不出来（同一个下标在新位置上也不算数）。
+    REQUIRE_FALSE(line.read(42, l, r));
+    REQUIRE_FALSE(line.read(far - 1, l, r));
+    // 锚点本身还没拉进来。
+    REQUIRE_FALSE(line.read(far, l, r));
+
+    // 从锚点起往后拉一段：读得到，值对得上位置。
+    fill(line, far, 64);
+    REQUIRE(line.pulled() == far + 64);
+    REQUIRE(line.read(far, l, r));
+    REQUIRE(l == encode(far));
+    REQUIRE(line.read(far + 63, l, r));
+    REQUIRE(l == encode(far + 63));
+}

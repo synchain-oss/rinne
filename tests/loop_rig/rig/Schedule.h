@@ -2,7 +2,7 @@
 //
 // 脚本：每周期给什么块长、什么走带、什么参数、按什么顺序驱动两端。
 //
-// 能力（对应下游卡的脚本清单）：
+// 能力（对应下游场景要的脚本清单）：
 //   1. 每周期的调用顺序（Input 先 / Output 先 / 同周期）。
 //   2. 两端各自的块长脚本：恒定、随机、交替、0 样本穿插、违约块（n 大于声明值）、超长块（n 大于 32768）。
 //   3. 单端跳过 k 块：这一端这一周期不被调用。
@@ -46,10 +46,7 @@ struct BlockScript
         return lengths[at % lengths.size()];
     }
 
-    bool skipAt(std::size_t index) const noexcept
-    {
-        return skips.size() > index && skips[index];
-    }
+    bool skipAt(std::size_t index) const noexcept { return skips.size() > index && skips[index]; }
 };
 
 // 每周期给两端的走带脚本。
@@ -111,10 +108,10 @@ struct ParamsScript
 // 每周期的调用顺序。
 enum class CallOrder : std::uint8_t
 {
-    kInputFirst = 0,  // 先驱动 Input，后驱动 Output
+    kInputFirst = 0, // 先驱动 Input，后驱动 Output
     kOutputFirst = 1, // 先驱动 Output，后驱动 Input
-    kOutputOnly = 2,  // 只驱动 Output（Input 这一周期不调）
-    kInputOnly = 3,   // 只驱动 Input
+    kOutputOnly = 2, // 只驱动 Output（Input 这一周期不调）
+    kInputOnly = 3, // 只驱动 Input
 };
 
 } // namespace rinne::rig

@@ -43,8 +43,8 @@ inline constexpr double kDelayDefaultMs = 100.0;
 // 不用等功率交叉：两路信号相关时等功率会抬高约 3 dB，线性不过冲。
 // 去抖 100 ms：重新定目标必须距上一次定目标 ≥ 100 ms（按样本计），窗口内的目标变化被丢掉。
 //
-// 这两个时长由改 D 的那一张卡使用（它在改 D 时开第二个读头并挂交叉淡化包络）；
-// 本模块只把常量与口径钉住，避免两张卡各写一套。
+// 这两个时长给改 D 的交叉淡化用（改 D 时开第二个读头并挂交叉淡化包络，读头槽已留够 3 个）；
+// 这里先把常量与口径钉住，交叉淡化接上时照它做，避免两处各写一套。
 inline constexpr double kDelayCrossfadeSeconds = 0.040;
 inline constexpr double kDelayDebounceSeconds = 0.100;
 
@@ -82,18 +82,18 @@ inline std::int64_t delayMinFrames(std::int64_t nPrep, std::int64_t nObs) noexce
 // 为什么 D 被抬升：界面常驻显示「实际 / 最小 / 原因 / 本会话最大块长」，原因就是这几项。
 enum class DelayMinReason : std::uint8_t
 {
-    kNone = 0,       // 没有被抬升
-    kPrepare = 1,    // 本端 prepare 声明的最大块长
-    kObserved = 2,   // 本会话观察到的最大块长
+    kNone = 0, // 没有被抬升
+    kPrepare = 1, // 本端 prepare 声明的最大块长
+    kObserved = 2, // 本会话观察到的最大块长
     kHostViolation = 3, // 宿主违约（送来的块长超过声明值）
 };
 
 // 一次 D 的计算结果。
 struct DelayChoice
 {
-    std::int64_t effective = 0;  // 实际用的 D（样本）
-    std::int64_t minimum = 0;    // 抬升后的下限
-    std::int64_t requested = 0;  // 用户要的 D（样本）
+    std::int64_t effective = 0; // 实际用的 D（样本）
+    std::int64_t minimum = 0; // 抬升后的下限
+    std::int64_t requested = 0; // 用户要的 D（样本）
     DelayMinReason reason = DelayMinReason::kNone;
     bool raised = false; // 是否被抬升过
 };

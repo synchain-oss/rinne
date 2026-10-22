@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ipc/ISegmentBackend.h"
@@ -68,7 +69,14 @@ public:
 #endif
     }
 
-    ~Segments() = default;
+    // 解映射全部段：rig 用完不留残段（真实后端在最后一个映射解除时回收段）。
+    ~Segments()
+    {
+        for (SegmentView& view : views_)
+        {
+            backend_->unmap(view);
+        }
+    }
     Segments(const Segments&) = delete;
     Segments& operator=(const Segments&) = delete;
 
@@ -127,23 +135,26 @@ private:
                 return false;
             }
             rv_ = rv;
+            views_.push_back(std::move(view));
             return true;
         }
 
         auto* ring = static_cast<RingSegment*>(view.base);
-        if (backend_->initHeader(view, headerFields(ring->header), spec,
-                                 [&] { LoopRing::initGeometry(*ring); }) != InitResult::kOk)
+        if (backend_->initHeader(view, headerFields(ring->header), spec, [&] { LoopRing::initGeometry(*ring); }) !=
+            InitResult::kOk)
         {
             backend_->unmap(view);
             return false;
         }
         rings_[id.group] = ring;
+        views_.push_back(std::move(view));
         return true;
     }
 
     NameScope scope_;
     Naming naming_;
     std::unique_ptr<ISegmentBackend> backend_;
+    std::vector<SegmentView> views_;
     RvSegment* rv_ = nullptr;
     RingSegment* rings_[kGroupCount + 1]{};
 };
