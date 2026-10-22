@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "claims": [
+    {
+      "id": "loop-delay-fixed",
+      "scope": ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md"],
+      "strong": ["does not change with", "not to depend on buffer size", "不受缓冲大小", "不随[^。\\n]{0,20}变化"],
+      "hedge": ["designed", "按设计"],
+      "evidence": [],
+      "pending": ["validation:docs/validation/2026-10-20-cubase15-win.md"]
+    },
+    {
+      "id": "render-matches-playback",
+      "scope": ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md"],
+      "strong": ["matches playback", "与播放一致"],
+      "hedge": ["designed", "按设计"],
+      "evidence": [],
+      "pending": ["validation:docs/validation/2026-10-20-cubase15-win.md"]
+    },
+    {
+      "id": "builtins-in-loop",
+      "scope": ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/hard-rules.i18n.json"],
+      "strong": ["including the host’s own insert effects", "包括宿主自带的插入效果器"],
+      "hedge": ["between Rinne Input and Rinne Output", "Input 与 Output 之间插入槽里的插件"],
+      "evidence": [],
+      "pending": ["validation:docs/validation/2026-10-20-cubase15-win.md"]
+    },
+    {
+      "id": "safe-defaults",
+      "scope": ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/hard-rules.i18n.json"],
+      "strong": [
+        "starts with feedback at zero",
+        "starts at 0% feedback",
+        "默认反馈为 0",
+        "反馈量是 0",
+        "on by default",
+        "默认开启"
+      ],
+      "hedge": ["designed", "按设计"],
+      "evidence": [],
+      "pending": ["golden:tests/golden/params-input.json#feedback.default == 0"]
+    },
+    {
+      "id": "auto-protection",
+      "scope": ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/hard-rules.i18n.json"],
+      "strong": ["auto-protection", "失控保护", "runaway protection"],
+      "hedge": ["designed", "按设计"],
+      "evidence": ["ci:core-sanitizers"],
+      "pending": []
+    },
+    {
+      "id": "mac-hosts",
+      "scope": ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/INSTALL.md"],
+      "strong": ["works in LUNA", "在 LUNA 可用"],
+      "hedge": ["passes auval and pluginval", "host testing pending"],
+      "evidence": ["ci:build-mac"],
+      "pending": ["validation:docs/validation/2026-10-20-luna-macos.md"]
+    },
+    {
+      "id": "min-macos",
+      "scope": ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/INSTALL.md"],
+      "strong": ["tested on macOS", "在 macOS [^。\\n]{0,20}上可用"],
+      "hedge": ["built for macOS 11+", "tested on macOS [0-9]"],
+      "evidence": [],
+      "pending": ["validation:docs/validation/2026-10-20-luna-macos.md"]
+    }
+  ]
+}
