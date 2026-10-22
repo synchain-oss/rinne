@@ -392,7 +392,7 @@ TEST_CASE("occupied and peer masks follow the role's own and opposite ends", "[p
     inputGroups[2].output = dormantSlot(kSelfPid); // 自己组：对端是休眠的，不算 peerMask
     inputGroups[3].input = dormantSlot(kSelfPid); // bit3：dormant 也算占着
     inputGroups[4].output = activeSlot(kOtherPid); // 对端在别的进程，不算 peerMask
-    inputGroups[7].output = dormantSlot(kSelfPid); // bit7
+    inputGroups[7].output = dormantSlot(kSelfPid); // 休眠的对端，不算 peerMask
     const PairModel inputModel = buildPairModel(input, inputGroups);
     CHECK(inputModel.occupiedMask == (bitAt(0) | bitAt(3)));
     // 只有活着的同进程对端、而本角色一端空着才算在等：休眠的对端和已经配好的组都不算
