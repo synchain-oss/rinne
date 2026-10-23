@@ -37,6 +37,8 @@
 # （clean 只清当前配置，所以按配置分开记），没有记录（含 0 字节的残留文件）或记录不同的目录也 clean 一次。
 # 构建后再查 ninja -t deps：至少记下一条依赖，且第一方编译单元（源文件里有 #include "…" 的）各自都要记下，否则判红；本次新编的与记录里
 # 之前留下的一视同仁（断言判红时 ninja 已把没记依赖的对象的 #deps 0 写进记录，下一次构建不会重编它，不能靠「下一次会重编」放过）。
+# 记录里只判当前配置的对象（对象路径里 `.dir/<配置>/` 那一段）：.ninja_deps 整个构建目录共用，别的配置留下的不是这次构建的问题，clean 当前配置也清不掉。
+# 对象路径统一成正斜杠再比：构建日志里是反斜杠，ninja -t deps 在本机打印的是正斜杠，不能指望两边一致。
 # 第一方 = git 跟踪的源文件（git ls-files），third_party/ 下的除外；不按目录位置判：CI 把 JUCE 检出在仓根下的 JUCE/（未被跟踪），
 # 本机在仓外，按「在不在仓根下」判会把 CI 上的 JUCE 编译单元算成第一方（有的整个文件包在 #if 里，Windows 上一个头文件都不进，没有依赖可记）。
 # 前缀的空白口径：ninja 逐字节比前缀，前缀之后只跳过空格（0x20），Tab、换行、0x85、0xA0 都会让路径记错。核对只容忍空格。
@@ -211,34 +213,56 @@ function Test-DepsRecorded([string[]]$Lines) {
     $n ? '' : 'ninja -t deps 里没有任何一个目标记下头文件依赖：只改 .h 时含它的编译单元不会重编'
 }
 
-# ninja -t deps 的输出解析成 { 对象路径 => 依赖个数 }；对象路径以构建目录为基准（ninja 就是这么记的）。
+# 对象路径的规范写法：正斜杠。构建日志的描述行里是反斜杠（`src\core\…`），ninja -t deps 在这台机器上打印的是正斜杠（CMake 生成的
+# 构建文件里就是正斜杠），不能指望两边一直一致；产生对象路径的两个函数（Get-DepsCounts、Get-BuiltObjects）都过这一个函数，
+# 后面按路径查表、还原源文件、取配置段都只认这种写法。
+function ConvertTo-ObjectKey([string]$Path) { $Path -replace '\\', '/' }
+
+# ninja -t deps 的输出解析成 { 对象路径 => 依赖个数 }；对象路径以构建目录为基准（ninja 就是这么记的），键用规范写法（ConvertTo-ObjectKey）。
 function Get-DepsCounts([string[]]$Lines) {
     $out = @{}
     foreach ($l in $Lines) {
-        if ($l -match '^(?<obj>.+?): #deps (?<n>\d+),') { $out[$Matches.obj] = [int]$Matches.n }
+        if ($l -match '^(?<obj>.+?): #deps (?<n>\d+),') { $out[(ConvertTo-ObjectKey $Matches.obj)] = [int]$Matches.n }
     }
     $out
 }
 
-# 构建日志里这次新编的对象（形如 `[3/264] Building CXX object src\core\…\Foo.cpp.obj`）；返回构建目录为基准的相对路径。
+# 构建日志里这次新编的对象（形如 `[3/264] Building CXX object src\core\…\Foo.cpp.obj`）；返回构建目录为基准的相对路径（规范写法）。
 function Get-BuiltObjects([string[]]$Lines) {
     @($Lines | ForEach-Object {
             if ($_ -match '^\[\d+/\d+\] Building C(?:XX)? object (?<obj>.+?\.obj)\s*$') {
-                $Matches.obj -replace '\\', '/'
+                ConvertTo-ObjectKey $Matches.obj
             }
         })
+}
+
+# 规范写法（正斜杠）的对象路径拆成 @{ Dir; Config; Src }：<目标目录>/CMakeFiles/<目标>.dir/<配置>/<源路径>.obj，根 CMakeLists.txt 里的目标没有
+# <目标目录>（Dir 为空）。不是这个形状返回 $null。配置段只有 Ninja Multi-Config 这类多配置生成器才有；本脚本固定用 Ninja Multi-Config 配置，
+# 单配置生成器（对象路径是 <目标>.dir/<源路径>.obj，没有配置段）不在支持之列，见 Get-ObjectConfig。
+function Get-ObjectParts([string]$Obj) {
+    if ($Obj -notmatch '^(?:(?<dir>.+)/)?CMakeFiles/(?<tgt>[^/]+)\.dir/(?<cfg>[^/]+)/(?<src>.+)\.obj$') { return $null }
+    @{ Dir = $Matches.dir; Config = $Matches.cfg; Src = $Matches.src }
+}
+
+# 对象路径里 `.dir/<配置>/` 那一段（规范写法的路径）；不是 CMake 对象的形状返回 $null。.ninja_deps 整个构建目录共用一份，里面有别的配置
+# （例如 Debug）留下的记录，要判当前配置的构建，只能认这一段等于当前配置的记录。没有配置段的路径（单配置生成器的 <目标>.dir/<源路径>.obj）
+# 要么解析不出（$null），要么被当成第一段目录是配置名（不会等于当前配置），都不算当前配置的记录；本脚本不会生成这样的路径。
+function Get-ObjectConfig([string]$Obj) {
+    $parts = Get-ObjectParts $Obj
+    $parts ? $parts.Config : $null
 }
 
 # 对象路径 → 源文件（相对仓根的路径）：CMake 的对象路径是 <目标目录>/CMakeFiles/<目标>.dir/<配置>/<源路径>.obj（根 CMakeLists.txt
 # 里的目标没有 <目标目录>），源路径里的 `__` 是 CMake 对 `..` 的转义。还原出仓根之外的路径、或不是 CMake 对象的形状，返回 $null。
 # 这里只还原路径，不判第一方：JUCE 检出在仓根下时（CI）也会还原成 JUCE/…，是不是第一方由 Test-FirstPartySource 判。
 function Get-ObjectSource([string]$Obj) {
-    if ($Obj -notmatch '^(?:(?<dir>.+)/)?CMakeFiles/(?<tgt>[^/]+)\.dir/[^/]+/(?<src>.+)\.obj$') { return $null }
+    $parts = Get-ObjectParts $Obj
+    if ($null -eq $parts) { return $null }
     # `__` 只在整段是 `__` 时才还原。用前后断言而不消耗分隔符：消耗掉的话相邻的两个 `__`（`__/__/x`）
     # 共用中间那个 `/`，第二个匹配不上，被还原成 `../__/x`，这个第一方 TU 就被当成仓外文件跳过。
-    $rel = $Matches.src -replace '(?<=^|/)__(?=$|/)', '..'
+    $rel = $parts.Src -replace '(?<=^|/)__(?=$|/)', '..'
     $segs = [System.Collections.Generic.List[string]]::new()
-    foreach ($s in (("$($Matches.dir)/$rel") -split '/')) {
+    foreach ($s in (("$($parts.Dir)/$rel") -split '/')) {
         # 退到仓根之外就是仓外的文件：不能夹回仓根（夹回去会和仓内同名的路径撞上）
         if ($s -eq '..') { if (-not $segs.Count) { return $null }; $segs.RemoveAt($segs.Count - 1) }
         elseif ($s -and $s -ne '.') { $segs.Add($s) }
@@ -287,10 +311,15 @@ function Test-SourceHasQuotedInclude([string]$Abs) {
 # 先判本次新编的对象，再判 ninja 记录里的每个第一方对象（记录跨构建保留，含之前的构建留下的；本次没新编任何第一方 TU 时就只剩这一遍），
 # 记录里还要至少有一个第一方对象记下依赖。只看「目录里有任意一个目标记了依赖」抓不到「第一方 TU 这次没记依赖」（增量构建里旧记录一直在）；
 # 记录那一遍也不能只要求「有一个第一方对象记了」：断言判红后 ninja 已把那个对象的 #deps 0 写进记录，下一次构建不会重编它。
-# $Objects 是本次新编的对象（构建目录为基准），$Counts 是 ninja -t deps 的 { 对象 => 依赖个数 }，$RepoRoot 是仓根，
-# $Tracked 是仓里被 git 跟踪的文件的集合（Get-TrackedFiles）：第一方就是它里面的源文件，见 Test-FirstPartySource。
+# 记录那一遍只判当前配置的：.ninja_deps 整个构建目录（Ninja Multi-Config 的各个配置）共用一份，别的配置（例如 Debug）留下的 #deps 0
+# 不是这次构建的问题，判红也清不掉它（clean 只清 --config 指定的那个配置）。按对象路径里 `.dir/<配置>/` 那一段等于当前配置筛，
+# 没有配置段的路径不算（见 Get-ObjectConfig）。「本次新编」那一遍不用筛：它们来自这次 `--config <当前配置>` 的构建日志。
+# $Objects 是本次新编的对象（构建目录为基准，规范写法），$Counts 是 ninja -t deps 的 { 对象 => 依赖个数 }（键也是规范写法，
+# 见 Get-DepsCounts），$RepoRoot 是仓根，$Tracked 是仓里被 git 跟踪的文件的集合（Get-TrackedFiles）：第一方就是它里面的源文件，
+# 见 Test-FirstPartySource。$ConfigName 是这次构建的配置（脚本的 -Config；形参不能叫 $Config，会遮住脚本参数）。
 # 返回错误文字，都记下了返回空。
-function Test-FirstPartyDeps([string[]]$Objects, $Counts, [string]$RepoRoot, $Tracked) {
+function Test-FirstPartyDeps([string[]]$Objects, $Counts, [string]$RepoRoot, $Tracked, [string]$ConfigName) {
+    if (-not $ConfigName) { throw 'Test-FirstPartyDeps 要给这次构建的配置名' }
     $bad = [System.Collections.Generic.List[string]]::new()
     foreach ($obj in $Objects) {
         $src = Get-ObjectSource $obj
@@ -311,17 +340,18 @@ function Test-FirstPartyDeps([string[]]$Objects, $Counts, [string]$RepoRoot, $Tr
     $stale = [System.Collections.Generic.List[string]]::new()
     $recorded = $false
     foreach ($obj in ($Counts.Keys | Sort-Object)) {
+        if ((Get-ObjectConfig $obj) -ne $ConfigName) { continue }   # 不分大小写：-Config 的取值不分大小写，Windows 的目录也不分
         $src = Get-ObjectSource $obj
         if (-not (Test-FirstPartySource $src $Tracked)) { continue }
         if ($Counts[$obj] -ge 1) { $recorded = $true; continue }
         if (Test-SourceHasQuotedInclude (Join-Path $RepoRoot $src)) { $stale.Add("$src（$obj）") }
     }
     if ($stale.Count) {
-        return "ninja 的记录里这些第一方编译单元没有记下头文件依赖（多半是上一次构建的断言判红时留下的：对象是最新的，增量构建不会重编它们）：$($stale -join '、')；" +
-        '查明原因后 clean 当前配置的目标再构建（cmake --build <构建目录> --config <配置> --target clean）'
+        return "ninja 的记录里这些第一方编译单元（配置 ${ConfigName}）没有记下头文件依赖（多半是上一次构建的断言判红时留下的：对象是最新的，增量构建不会重编它们）：$($stale -join '、')；" +
+        "查明原因后 clean 当前配置的目标再构建（cmake --build <构建目录> --config $ConfigName --target clean）"
     }
     if ($recorded) { return '' }
-    'ninja -t deps 里没有任何一个第一方对象记下头文件依赖：只改 .h 时含它的编译单元不会重编'
+    "ninja -t deps 里没有任何一个配置 $ConfigName 的第一方对象记下头文件依赖：只改 .h 时含它的编译单元不会重编"
 }
 
 # 核对通过的前缀（Latin-1 字符串）的十六进制，记在构建目录的 rinne-deps-prefix-<配置>.txt 里。
@@ -349,10 +379,11 @@ function Sync-DepsMarker($Resolved, [string]$MarkerFile, [string]$Verified, [scr
 }
 
 # 构建后的依赖断言：ninja -t deps 里至少一个目标记下依赖，且本次新编的第一方编译单元各自都记下，否则抛 BuildStop。
-function Assert-DepsAfterBuild([string[]]$DepsLines, [string[]]$BuildLines, [string]$RepoRoot, $Tracked) {
+# 记录里只判 $ConfigName（这次构建的配置）的对象，见 Test-FirstPartyDeps。
+function Assert-DepsAfterBuild([string[]]$DepsLines, [string[]]$BuildLines, [string]$RepoRoot, $Tracked, [string]$ConfigName) {
     $noDeps = Test-DepsRecorded $DepsLines
     if ($noDeps) { throw [BuildStop]::new($noDeps, 1) }
-    $bad = Test-FirstPartyDeps (Get-BuiltObjects $BuildLines) (Get-DepsCounts $DepsLines) $RepoRoot $Tracked
+    $bad = Test-FirstPartyDeps (Get-BuiltObjects $BuildLines) (Get-DepsCounts $DepsLines) $RepoRoot $Tracked $ConfigName
     if ($bad) { throw [BuildStop]::new($bad, 1) }
 }
 
@@ -605,7 +636,7 @@ function Invoke-Build([string]$Flavor) {
     $depsLines = Get-LogLines (Invoke-Step 'ninja-deps' $ninjaExe @('-C', $BuildDir, '-t', 'deps') 600)
     # 本次新编的第一方编译单元各自都要记下依赖：只看「有任意一个目标记了依赖」抓不到「第一方 TU 这次没记」。
     $tracked = Get-TrackedFiles $Root
-    Assert-DepsAfterBuild $depsLines (Get-LogLines $log) $Root $tracked
+    Assert-DepsAfterBuild $depsLines (Get-LogLines $log) $Root $tracked $Config
     $warnings = @(Get-FirstPartyWarnings (Get-LogLines $log) $Root @($juce, $BuildDir))
     if ($warnings.Count) {
         $warnings | ForEach-Object { Write-Host "    $_" }
@@ -885,21 +916,22 @@ function Invoke-SelfTest {
     $null = New-Item -ItemType Directory -Force -Path $fpJuce
     Set-Content -LiteralPath (Join-Path $fpJuce 'juce_audio_processors_lv2_libs.cpp') -Value @('#if JUCE_PLUGINHOST_LV2', '#include "format_types/juce_LV2SupportLibs.cpp"', '#endif')
     $fpTracked = ConvertTo-TrackedSet "src/core/A.cpp`0src/core/B.cpp`0src/core/C.cpp`0"
+    $fpCfg = 'Release'   # 这次构建的配置（脚本的 -Config）；夹具里的对象路径都在 .dir/Release/ 下
     $fpObj = 'src/core/CMakeFiles/rinne_core.dir/Release/A.cpp.obj'
     $fpLog = @("[1/2] Building CXX object src\core\CMakeFiles\rinne_core.dir\Release\A.cpp.obj",
         "[2/2] Building CXX object src\core\CMakeFiles\rinne_core.dir\Release\B.cpp.obj")
     $fpDeps = @("$fpObj`: #deps 3, deps mtime 1 (VALID)")
     $fpZero = @("$fpObj`: #deps 0, deps mtime 1 (VALID)")
     $fpOther = "_deps/juce/CMakeFiles/juce.dir/Release/a.cpp.obj`: #deps 9, deps mtime 1 (VALID)"
-    & $check '第一方依赖：本次新编的带引号头文件的 TU 记下了依赖（只含系统头的 TU 没记也不要紧）' $false (-not (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpDeps) $fpRoot $fpTracked))
-    & $check '第一方依赖：本次新编的 TU 没记下依赖时判红' $true (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpZero) $fpRoot $fpTracked)
-    & $check '第一方依赖：别处有依赖记录也不能替这次新编的第一方 TU 作数' $true (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts ($fpZero + $fpOther)) $fpRoot $fpTracked)
-    & $check '第一方依赖：本次没新编第一方 TU 时查 ninja 的记录，都没有依赖就判红' $true (Test-FirstPartyDeps @() @{} $fpRoot $fpTracked)
-    & $check '第一方依赖：本次没新编第一方 TU 时 ninja 的记录里有第一方对象记下依赖就不判红' $false (-not (Test-FirstPartyDeps @() (Get-DepsCounts $fpDeps) $fpRoot $fpTracked))
-    & $check '第一方依赖：本次没新编第一方 TU 时只有第三方对象记了依赖，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts @($fpOther)) $fpRoot $fpTracked)
-    & $check '第一方依赖：本次没新编第一方 TU 时第一方对象的依赖个数是 0，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts $fpZero) $fpRoot $fpTracked)
-    & $check '第一方依赖：记录里的对象路径不是 CMake 对象的形状，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts @('weird.obj: #deps 5, deps mtime 1 (VALID)')) $fpRoot $fpTracked)
-    & $check '第一方依赖：本次新编的对象路径不是 CMake 对象的形状时跳过，不抛错也不判红' $false (-not (Test-FirstPartyDeps @('weird.obj', $fpObj) (Get-DepsCounts $fpDeps) $fpRoot $fpTracked))
+    & $check '第一方依赖：本次新编的带引号头文件的 TU 记下了依赖（只含系统头的 TU 没记也不要紧）' $false (-not (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
+    & $check '第一方依赖：本次新编的 TU 没记下依赖时判红' $true (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpZero) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：别处有依赖记录也不能替这次新编的第一方 TU 作数' $true (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts ($fpZero + $fpOther)) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次没新编第一方 TU 时查 ninja 的记录，都没有依赖就判红' $true (Test-FirstPartyDeps @() @{} $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次没新编第一方 TU 时 ninja 的记录里有第一方对象记下依赖就不判红' $false (-not (Test-FirstPartyDeps @() (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
+    & $check '第一方依赖：本次没新编第一方 TU 时只有第三方对象记了依赖，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts @($fpOther)) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次没新编第一方 TU 时第一方对象的依赖个数是 0，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts $fpZero) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：记录里的对象路径不是 CMake 对象的形状，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts @('weird.obj: #deps 5, deps mtime 1 (VALID)')) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次新编的对象路径不是 CMake 对象的形状时跳过，不抛错也不判红' $false (-not (Test-FirstPartyDeps @('weird.obj', $fpObj) (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
     # 对象路径 → 源文件：`__` 是 CMake 对 `..` 的转义，只有整段是 `__` 才还原；相邻的 `__/__/` 每个都要还原
     # （消耗分隔符的正则让两个 `__` 共用中间的 `/`，第二个漏掉，源文件被当成仓外文件跳过）
     $objSrc = { param($Rel) Get-ObjectSource "p/q/r/s/CMakeFiles/t.dir/Release/$Rel.obj" }
@@ -910,8 +942,8 @@ function Invoke-SelfTest {
     & $check '对象路径还原：只是以 __ 开头或结尾的名字不还原' $true ((& $objSrc '__x/a__/__b/y.cpp') -ceq 'p/q/r/s/__x/a__/__b/y.cpp')
     $fpFar = 'src/core/CMakeFiles/rinne_core.dir/Release/__/__/src/core/A.cpp.obj'
     & $check '第一方依赖：对象路径里连续的 __/__/ 还原成仓内路径，没记依赖的第一方 TU 照样判红' $true (
-        (Test-FirstPartyDeps @($fpFar) @{} $fpRoot $fpTracked) -match '本次新编的第一方编译单元没有记下')
-    & $check '第一方依赖：对象路径里连续的 __/__/ 的第一方 TU 记下了依赖，不判红' $false (-not (Test-FirstPartyDeps @($fpFar) @{ $fpFar = 3 } $fpRoot $fpTracked))
+        (Test-FirstPartyDeps @($fpFar) @{} $fpRoot $fpTracked $fpCfg) -match '本次新编的第一方编译单元没有记下')
+    & $check '第一方依赖：对象路径里连续的 __/__/ 的第一方 TU 记下了依赖，不判红' $false (-not (Test-FirstPartyDeps @($fpFar) @{ $fpFar = 3 } $fpRoot $fpTracked $fpCfg))
     & $check '对象路径还原：根 CMakeLists.txt 里的目标（对象路径前面没有目录）也还原' $true ((Get-ObjectSource 'CMakeFiles/t.dir/Release/src/x.cpp.obj') -ceq 'src/x.cpp')
     & $check '对象路径还原：刚好退到仓根的路径还原成根下的文件' $true ((& $objSrc '__/__/__/__/x.cpp') -ceq 'x.cpp')
     & $check '对象路径还原：退到仓根之外的返回 $null，不夹回仓根（夹回去会和仓内同名的路径撞上）' $true (
@@ -924,15 +956,16 @@ function Invoke-SelfTest {
     $ciJuceZero = "$($ciObjs[0])`: #deps 0, deps mtime 1 (VALID)"
     & $check 'CI 布局：夹具里的 JUCE 文件按文本有带引号的 include（用例不是靠「没有 include」放过它）' $false (Test-SourceHasQuotedInclude (Join-Path $fpRoot $ciSrc))
     & $check 'CI 布局：JUCE 检出在仓根下时对象路径还原成 JUCE/…（目标目录深度不同的两种都对）' $false ((Get-ObjectSource $ciObjs[0]) -ceq $ciSrc -and (Get-ObjectSource $ciObjs[1]) -ceq $ciSrc)
-    & $check 'CI 布局：JUCE 的编译单元没记依赖，不判红' $false (-not (Test-FirstPartyDeps $ciBuilt (Get-DepsCounts $fpDeps) $fpRoot $fpTracked))
-    $ciBad = Test-FirstPartyDeps $ciBuilt (Get-DepsCounts $fpZero) $fpRoot $fpTracked
+    & $check 'CI 布局：JUCE 的编译单元没记依赖，不判红' $false (-not (Test-FirstPartyDeps $ciBuilt (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
+    $ciBad = Test-FirstPartyDeps $ciBuilt (Get-DepsCounts $fpZero) $fpRoot $fpTracked $fpCfg
     & $check 'CI 布局：同一次构建里仓内第一方 TU 没记依赖仍判红，文字里只点名第一方 TU、不点名 JUCE' $true ($ciBad -match '本次新编的第一方编译单元没有记下' -and $ciBad -match 'src/core/A\.cpp' -and $ciBad -notmatch 'JUCE')
     & $check 'CI 布局：本次没新编第一方 TU 时，只有 JUCE 的对象记了依赖不能顶替第一方，仍判红' $true (
-        Test-FirstPartyDeps @() (Get-DepsCounts @("$($ciObjs[0])`: #deps 9, deps mtime 1 (VALID)")) $fpRoot $fpTracked)
+        Test-FirstPartyDeps @() (Get-DepsCounts @("$($ciObjs[0])`: #deps 9, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg)
     & $check 'CI 布局：本次没新编第一方 TU 时，第一方对象记了依赖就不判红，JUCE 的对象没记不碍事' $false (
-        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + $ciJuceZero)) $fpRoot $fpTracked))
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + $ciJuceZero)) $fpRoot $fpTracked $fpCfg))
     # 构建后断言的包装：抛 BuildStop 就返回消息文字，不抛返回空串
-    $assert = { param($Deps, $Log) try { Assert-DepsAfterBuild $Deps $Log $fpRoot $fpTracked; '' } catch [BuildStop] { $_.Exception.Message } }
+    # 不只接 BuildStop：断言自己出了别的错（例如漏传配置名）也返回消息，对应的用例变红，而不是整个自测中途崩掉
+    $assert = { param($Deps, $Log) try { Assert-DepsAfterBuild $Deps $Log $fpRoot $fpTracked $fpCfg; '' } catch { $_.Exception.Message } }
     $ciLog = $fpLog + @("[3/4] Building CXX object src\input\CMakeFiles\RinneInput.dir\Release\__\__\JUCE\modules\juce_audio_processors\juce_audio_processors_lv2_libs.cpp.obj",
         "[4/4] Building CXX object tests\CMakeFiles\rinne_host_tests.dir\Release\__\JUCE\modules\juce_audio_processors\juce_audio_processors_lv2_libs.cpp.obj")
     & $check 'CI 布局：构建后断言整条走一遍（构建日志里有 JUCE 的对象），不抛' $false ((& $assert ($fpDeps + $ciJuceZero) $ciLog) -eq '')
@@ -975,7 +1008,61 @@ function Invoke-SelfTest {
         (& $assert $b4.Deps $b4.Log) -eq '' -and $b5.Log[0] -match 'no work to do' -and (& $assert $b5.Deps $b5.Log) -eq '')
     # 记录里没有第一方的带引号 include 就没有要记的依赖：B 记 0 不碍事；第三方与 JUCE 的 0 也不碍事
     & $check '记录里的判据：只含系统头的第一方单元（B）记 0 不判红' $false (
-        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpObjB`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked))
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpObjB`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg))
+    # 边界：依赖个数恰好是 1 就算记下了（判据是 >= 1）；新编的那一遍与记录那一遍各一个
+    $fpOne = @("$fpObj`: #deps 1, deps mtime 1 (VALID)")
+    & $check '边界：本次新编的第一方对象恰好 #deps 1，不判红' $false (-not (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpOne) $fpRoot $fpTracked $fpCfg))
+    & $check '边界：本次没新编第一方 TU，记录里的第一方对象恰好 #deps 1，不判红' $false (-not (Test-FirstPartyDeps @() (Get-DepsCounts $fpOne) $fpRoot $fpTracked $fpCfg))
+    $oneAndZero = Test-FirstPartyDeps @() (Get-DepsCounts ($fpOne + "$fpObjC`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg
+    & $check '边界：记录里 A 恰好 #deps 1、C 是 0：只点名 C，不点名 A' $true ($oneAndZero -match 'C\.cpp' -and $oneAndZero -notmatch 'A\.cpp')
+    # 配置：.ninja_deps 整个构建目录共用（默认目录是 Ninja Multi-Config，各个配置的记录都在里面），回退检查只判当前配置的对象。
+    # 别的配置（Debug）留下的 #deps 0 不是 Release 这次构建的问题，判红文字里的 clean 只清 --config 指定的配置，也清不掉它
+    $fpDbg = 'src/core/CMakeFiles/rinne_core.dir/Debug/A.cpp.obj'
+    $fpDbgZero, $fpDbgDeps = "$fpDbg`: #deps 0, deps mtime 1 (VALID)", "$fpDbg`: #deps 3, deps mtime 1 (VALID)"
+    & $check '配置：记录里 Debug 的对象 #deps 0、这次构建 Release 且 Release 的对象记下了依赖，不判红' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + $fpDbgZero)) $fpRoot $fpTracked $fpCfg))
+    $cfgRel = Test-FirstPartyDeps @() (Get-DepsCounts ($fpZero + $fpDbgDeps)) $fpRoot $fpTracked $fpCfg
+    & $check '配置：Release 的对象 #deps 0（Debug 的记下了依赖）：判红，点名 Release 的对象' $true ($cfgRel -match 'dir/Release/A\.cpp\.obj' -and $cfgRel -notmatch 'Debug')
+    $cfgOnly = Test-FirstPartyDeps @() (Get-DepsCounts @($fpDbgDeps)) $fpRoot $fpTracked $fpCfg
+    & $check '配置：记录里只有 Debug 的第一方对象记了依赖、Release 一个都没有：判红，Debug 的依赖不能替当前配置作数' $true ($cfgOnly -match '配置 Release 的第一方对象')
+    $cfgBoth = Test-FirstPartyDeps @() (Get-DepsCounts ($fpZero + $fpDbgZero)) $fpRoot $fpTracked $fpCfg
+    & $check '配置：Release 与 Debug 的对象都是 #deps 0：只点名 Release 的，文字里没有 Debug，clean 命令带当前配置' $true (
+        $cfgBoth -match 'dir/Release/A\.cpp\.obj' -and $cfgBoth -notmatch 'Debug' -and $cfgBoth -match '--config Release --target clean')
+    $cfgDbg = Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + $fpDbgZero)) $fpRoot $fpTracked 'Debug'
+    & $check '配置：这次构建是 Debug 时，同一份记录判红，点名 Debug 的对象，文字里没有 Release，clean 命令带 Debug' $true (
+        $cfgDbg -match 'dir/Debug/A\.cpp\.obj' -and $cfgDbg -notmatch 'Release' -and $cfgDbg -match '--config Debug --target clean')
+    & $check '配置：这次构建是 Debug 时，Release 的 #deps 0 不碍事' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpZero + $fpDbgDeps)) $fpRoot $fpTracked 'Debug'))
+    $fpLowC = 'src/core/CMakeFiles/rinne_core.dir/release/C.cpp.obj'
+    $cfgLow = Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpLowC`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg
+    & $check '配置：配置名不分大小写（-Config 的取值不分大小写，Windows 的目录也不分），release 的 #deps 0 算 Release 的' $true ($cfgLow -match 'C\.cpp')
+    & $check '配置：对象路径里取配置段（Release、Debug；根目标没有目标目录也取得到）' $true (
+        (Get-ObjectConfig $fpObj) -ceq 'Release' -and (Get-ObjectConfig $fpDbg) -ceq 'Debug' -and (Get-ObjectConfig 'CMakeFiles/t.dir/Debug/src/x.cpp.obj') -ceq 'Debug')
+    # 单配置生成器的对象路径没有配置段（<目标>.dir/<源路径>.obj），本脚本固定用 Ninja Multi-Config，不会生成这样的路径：
+    # 取不出配置段（或把第一段目录当配置名），都不等于当前配置，既不算当前配置的记录、也不替它作数
+    $fpSingle = 'src/core/CMakeFiles/rinne_core.dir/A.cpp.obj'
+    & $check '配置：没有配置段的对象路径（单配置生成器）取不出配置段；不是 CMake 对象的形状也取不出' $true (
+        $null -eq (Get-ObjectConfig $fpSingle) -and $null -eq (Get-ObjectConfig 'weird.obj') -and (Get-ObjectConfig 'src/core/CMakeFiles/rinne_core.dir/util/X.cpp.obj') -ceq 'util')
+    & $check '配置：没有配置段的记录 #deps 0 不算当前配置的，不判红' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpSingle`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg))
+    & $check '配置：没有配置段的记录记了依赖也不替当前配置作数，仍判红' $true (
+        Test-FirstPartyDeps @() (Get-DepsCounts @("$fpSingle`: #deps 5, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg)
+    & $check '配置：构建后断言整条走一遍，记录里有 Debug 留下的 #deps 0、这次是 Release：不抛' $false ((& $assert ($fpDeps + $fpDbgZero) $fpLog) -eq '')
+    & $check '配置：构建后断言整条走一遍，Release 的对象 #deps 0：抛，理由是新编的第一方 TU' $true ((& $assert ($fpZero + $fpDbgDeps) $fpLog) -match '本次新编的第一方编译单元没有记下')
+    # 路径写法：构建日志的描述行是反斜杠，ninja -t deps 在本机打印的是正斜杠（真实的构建目录核对过），但不能指望两边一直一致；
+    # 两边的路径都过 ConvertTo-ObjectKey，查表、还原源文件、取配置段才对得上。夹具把记录里的路径写成反斜杠
+    $fpObjBs = $fpObj -replace '/', '\'
+    $bsDeps, $bsZero = "$fpObjBs`: #deps 3, deps mtime 1 (VALID)", "$fpObjBs`: #deps 0, deps mtime 1 (VALID)"
+    $bsCounts = Get-DepsCounts @($bsDeps)
+    & $check '路径写法：规范化把反斜杠转成正斜杠，正斜杠不动' $true ((ConvertTo-ObjectKey 'a\b/c\d.obj') -ceq 'a/b/c/d.obj')
+    & $check '路径写法：ninja -t deps 若打印反斜杠，解析出的键也是正斜杠' $true ($bsCounts.Count -eq 1 -and $bsCounts.ContainsKey($fpObj))
+    & $check '路径写法：新编的那一遍，反斜杠的记录记下了依赖，不判红' $false (-not (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) $bsCounts $fpRoot $fpTracked $fpCfg))
+    & $check '路径写法：新编的那一遍，反斜杠的记录 #deps 0，判红并点名（不是被当成别的路径悄悄跳过）' $true (
+        (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts @($bsZero)) $fpRoot $fpTracked $fpCfg) -match '本次新编的第一方编译单元没有记下.*A\.cpp')
+    & $check '路径写法：回退检查，反斜杠的记录记下了依赖，不判红' $false (-not (Test-FirstPartyDeps @() $bsCounts $fpRoot $fpTracked $fpCfg))
+    & $check '路径写法：回退检查，反斜杠的记录 #deps 0，判红并点名' $true ((Test-FirstPartyDeps @() (Get-DepsCounts @($bsZero)) $fpRoot $fpTracked $fpCfg) -match 'A\.cpp')
+    & $check '路径写法：构建后断言整条走一遍，反斜杠的记录：记下依赖不抛，#deps 0 抛' $true (
+        (& $assert @($bsDeps) $fpLog) -eq '' -and (& $assert @($bsZero + $fpOther) $fpLog) -match '本次新编的第一方编译单元没有记下')
     # 第一方的判据本身：git 跟踪的文件，third_party/ 除外
     $setT = ConvertTo-TrackedSet "src/core/A.cpp`0third_party/v/v.cpp`0"
     & $check '第一方判据：git 跟踪的源文件算' $false (Test-FirstPartySource 'src/core/A.cpp' $setT)
@@ -996,8 +1083,11 @@ function Invoke-SelfTest {
     try { $null = Get-TrackedFiles (Join-Path $fpRoot 'no-such-dir') } catch [BuildStop] { $noGit = $_.Exception.Message -match '取不到仓里被 git 跟踪的文件清单' }
     & $check '跟踪的文件清单：取不到时抛 BuildStop，不返回空集（空集会让每个编译单元都被跳过，断言整个失效）' $true $noGit
     $noTracked = $false
-    try { $null = Test-FirstPartyDeps @($fpObj) @{} $fpRoot $null } catch { $noTracked = $true }
+    try { $null = Test-FirstPartyDeps @($fpObj) @{} $fpRoot $null $fpCfg } catch { $noTracked = $_.Exception.Message -match '被 git 跟踪的文件集合' }
     & $check '第一方依赖：没给跟踪的文件集合时抛，不悄悄跳过所有对象' $true $noTracked
+    $noCfg = $false
+    try { $null = Test-FirstPartyDeps @($fpObj) @{} $fpRoot $fpTracked } catch { $noCfg = $_.Exception.Message -match '要给这次构建的配置名' }
+    & $check '第一方依赖：没给这次构建的配置名时抛，不当成「没有任何记录属于当前配置」悄悄判红或放过' $true $noCfg
     $cLog = @('[1/2] Building C object tools\CMakeFiles\x.dir\Release\a.c.obj','[2/2] Linking CXX executable tools\Release\x.exe')
     $builtCxx, $builtC = @(Get-BuiltObjects $fpLog), @(Get-BuiltObjects $cLog)   # 单个结果会被函数返回值展开成字符串，用 @() 兜住
     & $check '构建日志：取出本次新编的对象（CXX 与 C，不含链接行）' $false ($builtCxx.Count -eq 2 -and $builtCxx[0] -eq $fpObj -and
@@ -1013,6 +1103,10 @@ function Invoke-SelfTest {
     $pos = @($wired | ForEach-Object { [array]::IndexOf($called, $_) })
     & $check 'Invoke-Build 的接线：表态覆盖文件、核对前缀、记录与 clean、取 git 跟踪的文件清单、断言依赖，五步都在且先后不乱' $false (
         @($pos | Where-Object { $_ -lt 0 }).Count -eq 0 -and ($pos -join ',') -eq (($pos | Sort-Object) -join ','))
+    # 断言依赖的那次调用要带着这次构建的配置（脚本的 $Config）：漏传的话记录里别的配置的 #deps 0 照样让这次构建判红，或者直接抛错
+    $assertCall = @((Get-Command Invoke-Build).ScriptBlock.Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq 'Assert-DepsAfterBuild' }, $true))
+    $passesConfig = $assertCall.Count -eq 1 -and @($assertCall[0].CommandElements | Where-Object { $_ -is [Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.UserPath -ceq 'Config' }).Count -eq 1
+    & $check 'Invoke-Build 的接线：断言依赖时带着这次构建的配置（$Config）' $false $passesConfig
     # 函数里与脚本参数同名的变量（赋值或形参）：PowerShell 的变量名不分大小写，`$probe = {…}` 会把 -Probe 开关盖成脚本块，
     # 形参 `$Probe` 经动态作用域也会遮住下游读到的 $Probe；之后 Get-ExpectedBundles $Probe 才在真跑里抛错，上面那些纯函数的用例碰不到它。
     $astTokens, $astErrors = $null, $null
