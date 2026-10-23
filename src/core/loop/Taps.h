@@ -156,7 +156,7 @@ private:
     Tap taps_[kMaxTaps]{};
 };
 
-// 下面五个是读头混音的落点，实现见 Taps.cpp。它们按样本推进包络，与块长无关：
+// 下面这几个是读头混音的落点，实现见 Taps.cpp。它们按样本推进包络，与块长无关：
 // 同一段输入怎么切块，输出逐位相同。
 //
 // mixTaps：把全部活跃读头按各自的包络混进 outLeft / outRight。position 是本块的读位起点（Input 已处理的帧数 R）。
@@ -174,6 +174,8 @@ void advanceTaps(TapSet& taps, std::int64_t n) noexcept;
 void settleOnsets(TapSet& taps, i64 position, std::int64_t n) noexcept;
 // largestTapDelay：全部活跃读头里最大的 D（估计窗口用的那个）。没有活跃读头时是 0。
 std::int64_t largestTapDelay(const TapSet& taps) noexcept;
+// mainTapDelay：主读头（第一个没在淡出的活跃读头）正在读的 D。没有主读头时返回 fallback。
+std::int64_t mainTapDelay(const TapSet& taps, std::int64_t fallback) noexcept;
 // tapsSettledSilent：全部读头都已经彻底安静（没有活跃读头，或每个活跃读头的包络都是 0）。
 bool tapsSettledSilent(const TapSet& taps) noexcept;
 

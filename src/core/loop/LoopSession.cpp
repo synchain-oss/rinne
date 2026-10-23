@@ -64,7 +64,8 @@ bool LoopSession::prepare(double sampleRate) noexcept
         line_.allocate(sampleRate_);
         taps_.clear();
         offset_ = 0;
-        delayEffective_ = 0;
+        delayTarget_ = 0;
+        delayInUse_ = 0;
         delayMin_ = 0;
         delayRequested_ = 0;
         havePeer_ = false;
@@ -140,7 +141,7 @@ std::int64_t LoopSession::computeDelay(const BlockContext& ctx) noexcept
         floor = DelayMinReason::kPrepare;
     }
 
-    if (choice.raised && choice.effective != delayEffective_)
+    if (choice.raised && choice.effective != delayTarget_)
     {
         // 载荷：a = D_min ÷256（向上取整、钳 255），b = 原因；准确值在状态快照的 delayMin 里。
         sink_.emit(LoopEventCode::kDMinRaised, eventUnits256(choice.minimum), static_cast<std::uint8_t>(floor));
@@ -148,7 +149,7 @@ std::int64_t LoopSession::computeDelay(const BlockContext& ctx) noexcept
 
     delayRequested_ = requested;
     delayMin_ = choice.minimum;
-    delayEffective_ = choice.effective;
+    delayTarget_ = choice.effective;
     delayMinReason_ = floor;
     return choice.effective;
 }
@@ -239,6 +240,8 @@ int LoopSession::newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept
 // 主读头还没出声（onset 还没读到第一帧有效数据）时不必等：它这时淡出，最多只在淡出途中读到开头几帧，
 // onset 与淡出两条斜坡相乘，幅度很小而且连续。
 // 挂着的那几块里主读头的 D 可能低于刚抬上去的下限（宿主违约）：那时它读到还没写到的位置，由「写头落后时先淡到 0」接住。
+// 对外发布的实际 D（状态快照、Input 槽的 d_eff）取主读头正在读的 D，不取目标 D：挂着的那几块里仍是旧的 D，
+// 新读头建起来的那一块起才是新的 D，报的延迟与正在读的位置始终一致。
 bool LoopSession::changeDelay(i64 blockStart, i64 delay) noexcept
 {
     int main = -1;
@@ -441,6 +444,8 @@ void LoopSession::fadeMainTapAtUnderrun(i64 blockStart) noexcept
 //
 // 会合段按组块排布，组号 0 或越界时不去读：那会越界访问。
 // 读不到就当没有对端槽：判据退回 unknown，绝不猜。
+// 读序：先 acquire 读块序号，再读其余字段。写方（publishToSlot）先写时间戳、标志，最后才 release 块序号，
+// 对端 acquire 读到某个块序号，就保证看得见这个序号之前写下的时间戳；反过来先读时间戳，读到的可能是上一块的。
 void LoopSession::readPeerSlot(const BlockContext& ctx) noexcept
 {
     havePeerSlot_ = false;
@@ -455,8 +460,8 @@ void LoopSession::readPeerSlot(const BlockContext& ctx) noexcept
     }
 
     const ipc::RoleSlot& peer = ipc::roleSlot(*ctx.rendezvous, ctx.group, ipc::peerOf(ctx.role));
-    peerHostNs_ = peer.last_host_ns.load(std::memory_order_acquire);
     peerBlockSeq_ = peer.block_seq.load(std::memory_order_acquire);
+    peerHostNs_ = peer.last_host_ns.load(std::memory_order_acquire);
     peerRtFlags_ = peer.rt_flags.load(std::memory_order_acquire);
     peerMaxBlock_ = peer.max_block.load(std::memory_order_acquire);
     havePeerSlot_ = true;
@@ -511,7 +516,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     // 0 样本的调用立刻返回，不推进任何计数
     if (ctx.blockLength <= 0)
     {
-        result.delayEffective = delayEffective_;
+        result.delayEffective = delayInUse_;
         result.delayMin = delayMin_;
         result.estimatorDelay = largestTapDelay(taps_);
         result.tapSettledSilent = tapsSettledSilent(taps_);
@@ -536,7 +541,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         result.returnRight = ctx.returnRight;
         result.returnValid = ctx.returnValid;
         result.returnLength = static_cast<int>(faded);
-        result.delayEffective = delayEffective_;
+        result.delayEffective = delayInUse_;
         result.delayMin = delayMin_;
         result.estimatorDelay = largestTapDelay(taps_);
         return result;
@@ -720,7 +725,10 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     result.returnRight = ctx.returnRight;
     result.returnLength = ctx.blockLength;
     result.returnValid = ctx.returnValid;
-    result.delayEffective = delayEffective_;
+    // 发布主读头本块实际读的 D：改 D 的过渡没走完时，目标 D 已经算好了，读头还没换上它（见 changeDelay）。
+    // 状态快照、Input 槽的 d_eff 与界面读的都是这一个，和正在读的位置一致。
+    delayInUse_ = mainTapDelay(taps_, delayTarget_);
+    result.delayEffective = delayInUse_;
     result.delayMin = delayMin_;
     result.delayUserMs = ctx.params.delayMs;
     result.estimatorDelay = largestTapDelay(taps_);
@@ -754,7 +762,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     status_.setStalled(sync_.state() == SyncState::kStalled);
     status_.setTolerant(sync_.tolerant());
     status_.setUnstable(sync_.unstable());
-    status_.setDelay(result.delayUserMs, delayEffective_, delayMin_, static_cast<std::uint8_t>(ctx.params.delayMode));
+    status_.setDelay(result.delayUserMs, delayInUse_, delayMin_, static_cast<std::uint8_t>(ctx.params.delayMode));
     status_.setDelayFloor(static_cast<std::uint8_t>(delayMinReason_), maxBlockSeen_);
     status_.setTaps(static_cast<std::uint32_t>(taps_.count()), tapDropCount_);
     status_.addOverrun(static_cast<std::uint64_t>(overrun));

@@ -56,7 +56,7 @@ struct LoopStatusFields
 {
     // ---- 环路（D）----
     float delayUserMs = 0.0f; // 用户要的 D（毫秒）
-    std::int64_t delayEffective = 0; // 实际用的 D（样本）
+    std::int64_t delayEffective = 0; // 实际用的 D（样本）：主读头正在读的 D；改 D 的过渡没走完时仍是旧的 D
     std::int64_t delayMin = 0; // 抬升后的下限（样本）
     std::uint8_t delayMinReason = 0; // 下限从哪来：loop::DelayMinReason（声明值 / 实测块长 / 宿主违约）
     std::int64_t maxBlockSeen = 0; // 本会话见过的最大块长（N_obs，每次 prepare 清零）

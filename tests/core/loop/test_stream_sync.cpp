@@ -302,6 +302,47 @@ TEST_CASE("loop sync L2-05 两端停用 > 250 ms 清空本地延迟线；恰好 
     REQUIRE(driver.line().pulled() == 0);
 }
 
+TEST_CASE("loop sync 两端停用：一段停用只清一次、只发一条提示码；回到活跃之后再停用超过 250 ms 再清一次")
+{
+    // ⛔ 删除式验证点：去掉「一段停用只清一次」的锁存 → 超过 250 ms 之后每一块都清一遍、都发一条提示码，本用例变红。
+    Driver driver;
+    driver.setDeclaredBlock(512);
+    EventLog log;
+    driver.sync().setEventSink(LoopEventSink(&EventLog::sink, &log));
+    const auto clearedCount = [&] {
+        return std::count(log.codes.begin(), log.codes.end(), static_cast<std::uint16_t>(LoopEventCode::kLineCleared));
+    };
+
+    SyncInputs in;
+    in.paired = false;
+    in.inactive = true;
+
+    // 第一段停用：跨过 250 ms 的那一块清一次，之后继续停用的 40 块不再清。
+    driver.feedWith(in, 0, 12000);
+    CHECK(clearedCount() == 0);
+    CHECK(driver.feedWith(in, 0, 512).lineCleared);
+    CHECK(clearedCount() == 1);
+    for (int block = 0; block < 40; ++block)
+    {
+        CHECK_FALSE(driver.feedWith(in, 0, 512).lineCleared);
+    }
+    CHECK(clearedCount() == 1);
+
+    // 回到活跃：计时与锁存都归零。再停用，超过 250 ms 之后又清一次（也只一次）。
+    SyncInputs active;
+    active.paired = true;
+    driver.feedWith(active, 100, 512);
+    CHECK(clearedCount() == 1);
+    driver.feedWith(in, 100, 12000);
+    CHECK(clearedCount() == 1);
+    CHECK(driver.feedWith(in, 100, 512).lineCleared);
+    for (int block = 0; block < 10; ++block)
+    {
+        CHECK_FALSE(driver.feedWith(in, 100, 512).lineCleared);
+    }
+    CHECK(clearedCount() == 2);
+}
+
 TEST_CASE("loop sync L2-06 同采样率重新 prepare：W、R、读头、延迟线内容逐位不变")
 {
     Driver driver;

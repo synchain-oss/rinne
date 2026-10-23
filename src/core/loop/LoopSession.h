@@ -102,7 +102,10 @@ struct BlockResult
     // 引擎据此区分「补出来的 0」与「真的是 0」。
     std::uint8_t* returnValid = nullptr;
 
-    // 本块实际的 D（样本）与延迟下限（样本）
+    // 本块实际的 D（样本）：主读头正在读的 D，不是目标 D。改 D 的过渡里新的 D 先挂着的那几块（最长约 25 ms），
+    // 主读头还在读旧的 D，这里就还是旧的；过渡起来、新读头成为主读头的那一块起才是新的 D。还没有主读头
+    // （没配对、延迟线刚清空）时没有「正在读的位置」，退回目标 D。
+    // 延迟下限（样本）是下一行。
     std::int64_t delayEffective = 0;
     std::int64_t delayMin = 0;
     // 用户要的 D（毫秒）
@@ -163,8 +166,10 @@ public:
     // 事件出口（消息线程装，音频线程只调）
     void setEventSink(LoopEventSink sink) noexcept;
 
-    // 只读：当前实际的 D（样本）
-    std::int64_t delayEffective() const noexcept { return delayEffective_; }
+    // 只读：当前实际的 D（样本），含义同 BlockResult::delayEffective（主读头正在读的 D）
+    std::int64_t delayEffective() const noexcept { return delayInUse_; }
+    // 只读：目标 D（样本）：用户要的 D 抬到下限、截到上限之后的值。改 D 的过渡没走完时它与实际的 D 不同
+    std::int64_t delayTarget() const noexcept { return delayTarget_; }
     // 只读：当前延迟下限（样本）
     std::int64_t delayMin() const noexcept { return delayMin_; }
     // 只读：读位 R（已处理帧数）。R 由判据那一半持有，这里只是转出来。
@@ -214,7 +219,8 @@ private:
     bool prepared_ = false;
 
     std::int64_t offset_ = 0; // 主读头的同步偏移
-    std::int64_t delayEffective_ = 0;
+    std::int64_t delayTarget_ = 0; // 目标 D（样本）：换算、抬到下限、截到上限之后。读头换上它之前，实际读的还是旧的 D
+    std::int64_t delayInUse_ = 0; // 发布的实际 D：主读头正在读的 D（没有主读头时是目标 D）
     std::int64_t delayMin_ = 0;
     std::int64_t delayRequested_ = 0; // 用户要的 D（样本）
     DelayMinReason delayMinReason_ = DelayMinReason::kNone; // 下限从哪来

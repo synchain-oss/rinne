@@ -983,6 +983,65 @@ TEST_CASE("环路 拖着改 D（每块都变）：一次只走一个过渡，不
     checkSettledOn(trace, trace.size() - static_cast<std::size_t>(kBlock), 3480);
 }
 
+TEST_CASE("环路 改 D 的过渡里发布的实际 D 是主读头正在读的 D：新的 D 挂着时仍是旧的，读头换上之后才是新的")
+{
+    // ⛔ 删除式验证点：发布目标 D（不跟主读头走）→ 新的 D 挂着的那几块里，发布的已经是新值，而主读头还在读旧的，
+    //    本用例变红。
+    //
+    // D 逐次变大（600 → 1200 → 1800）：每次换上的新读头都是全部活跃读头里 D 最大的，所以 estimatorDelay
+    // （最大的读头 D，另一条代码路径算出来的）就是主读头正在读的 D，拿它当参照。
+    constexpr int kBlock = 64;
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kBlock);
+    s.attachRing(*ring, 1);
+    EngineParams params;
+    params.delayMs = 12.5f; // D = 600
+    std::vector<float> trace;
+    for (int block = 0; block < 40; ++block)
+    {
+        feedEncoded(s, *ring, kBlock, params, trace);
+    }
+    REQUIRE(s.status().delayEffective == 600);
+    REQUIRE(s.session().delayTarget() == 600);
+
+    // 每一块都核对三处出口一致（块结果、状态快照、会话的只读访问），且等于主读头的 D。
+    const auto feedChecked = [&](float delayMs, std::int64_t& published) {
+        params.delayMs = delayMs;
+        const BlockResult result = s.feed(kBlock, TransportInfo{}, params);
+        trace.insert(trace.end(), s.left(), s.left() + kBlock);
+        writeFrames(*ring, kBlock);
+        published = result.delayEffective;
+        CHECK(result.delayEffective == result.estimatorDelay);
+        CHECK(s.status().delayEffective == result.delayEffective);
+        CHECK(s.session().delayEffective() == result.delayEffective);
+    };
+
+    // 第一次改（没有过渡在跑）：当块就换上新读头，发布的就是新的 D。
+    std::int64_t published = 0;
+    feedChecked(25.0f, published); // D = 1200
+    CHECK(published == 1200);
+    CHECK(s.session().delayTarget() == 1200);
+
+    // 第二次改（上一个过渡的新读头 onset 已经出声）：1800 先挂着，发布的仍是主读头在读的 1200，目标 D 已是 1800。
+    int pending = 0;
+    std::int64_t previous = published;
+    for (int block = 0; block < 60; ++block)
+    {
+        feedChecked(37.5f, published); // D = 1800
+        CHECK(s.session().delayTarget() == 1800);
+        CHECK(published >= previous); // 只在读头换上的那一块跳一次
+        CHECK((published == 1200 || published == 1800));
+        pending += published == 1200 ? 1 : 0;
+        previous = published;
+    }
+    CHECK(pending >= 10); // onset 20 ms = 15 块，挂着的不会是一两块
+    // 过渡走完：发布的是新的 D，读的位置也是它。
+    CHECK(published == 1800);
+    CHECK(s.status().delayEffective == 1800);
+    checkSettledOn(trace, trace.size() - static_cast<std::size_t>(kBlock), 1800);
+}
+
 TEST_CASE("环路 改 D：D 变大到配对之前时，新读头从配对那一帧起 onset，数据出现时不以满增益冒出来")
 {
     // ⛔ 删除式验证点：新读头的 validFrom 只取它本块读的第一个位置（不取旧读头的下界）→ onset 从配对之前算起，

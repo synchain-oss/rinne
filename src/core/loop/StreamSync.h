@@ -210,6 +210,7 @@ private:
     int misaligned_ = 0;
     i64 stalledSamples_ = 0; // W 一直没动时 R 前进了多少（断档判据按样本计）
     i64 inactiveSamples_ = 0; // 两端都停用时过了多少样本（> 250 ms 清空延迟线）
+    bool inactiveCleared_ = false; // 这一段停用已经清过线：一段停用只清一次，回到活跃时解锁
     bool lastPaired_ = false;
 
     // 连续多少块写头没动（诊断用：frozenMax）

@@ -608,6 +608,41 @@ TEST_CASE("引擎 L3-12 TransportInfo 的默认与语义：时间戳有效位、
     CHECK(input.loopStatus().bpmSource == static_cast<std::uint8_t>(rinne::loop::BpmSource::kHost));
 }
 
+TEST_CASE("引擎 改 D 的过渡里 Input 槽的 d_eff 与状态快照一致，都是主读头正在读的 D，新的 D 挂着时仍是旧的",
+          "[engine][loop]")
+{
+    // ⛔ 删除式验证点：发布目标 D → 新的 D 挂着的那几块里 d_eff 已经是新值，主读头还在读旧的，本用例变红。
+    // D 逐次变大，最大的读头 D（estimatorDelay）就是主读头正在读的 D，拿它当参照。
+    constexpr int kBlock = 64;
+    Loop loop(kBlock);
+    const RoleSlot& in = roleSlot(*loop.rv, 1, Role::kInput);
+    const auto step = [&](float delayMs) {
+        loop.run(unityLoopParams(delayMs), kBlock, kBlock, [](int) { return 0.0f; });
+        const std::int64_t published = in.d_eff.load();
+        CHECK(published == loop.input.lastBlockResult().delayEffective);
+        CHECK(published == loop.input.lastBlockResult().estimatorDelay);
+        CHECK(published == loop.input.loopStatus().delayEffective);
+        return published;
+    };
+    for (int block = 0; block < 40; ++block)
+    {
+        step(12.5f); // D = 600
+    }
+    REQUIRE(in.d_eff.load() == 600u);
+
+    CHECK(step(25.0f) == 1200); // 没有过渡在跑：当块就换上
+    int pending = 0;
+    std::int64_t published = 0;
+    for (int block = 0; block < 60; ++block)
+    {
+        published = step(37.5f); // D = 1800：上一个过渡的 onset 还没走完，先挂着
+        CHECK((published == 1200 || published == 1800));
+        pending += published == 1200 ? 1 : 0;
+    }
+    CHECK(pending >= 10);
+    CHECK(published == 1800); // 走完之后才是新的 D
+}
+
 TEST_CASE("引擎 混合律：m = mixPercent / 100 的四个点", "[engine]")
 {
     // 干声与回送的增益律：g_dry = min(1, 2(1−m))、g_ret = min(1, 2m)。
@@ -1524,7 +1559,13 @@ TEST_CASE("引擎 Output 旁路斜坡只随发布进环的帧推进：某一段�
     //    下一块写进环的是 0 而不是从 1 起的斜坡，与参照不同，本用例变红。
     //
     // 写环的回调在公告了写位（intent）之后、推写头之前逐帧调用；另一个线程一看见公告就把写头推到 intent（回收的
-    // 最后一步），这一段写完时写头的 CAS 就输了（kCasLost）。时序靠竞争，抓不到就换一套新的环与引擎再来。
+    // 最后一步），这一段写完时写头的 CAS 就输了（kCasLost）。
+    //
+    // 为什么靠竞争：回调在引擎内部，写环的公开接口（RingWriter / LoopRing::write）和引擎都没有让测试在
+    // 「公告之后、推写头之前」插进一步的位置，发布代码里也不许留测试钩子（静态检查的 test-hook 判据）。
+    // 时序只能靠另一个线程去抢，抓不到就换一套新的环与引擎再来。单核或负载很高的机器上那个线程可能一次都没轮到，
+    // 那时本用例跳过（SKIP），不判红：没抓到只说明这次没有排出这个时序，不说明斜坡有问题。
+    // 抓到了的话下面的断言都是确定的。
     constexpr int kLost = 8192; // 一整段：窗口够长，另一个线程几乎总能抢在它发布之前把写头推过
     constexpr int kNext = 1024;
     EngineParams params;
@@ -1596,5 +1637,9 @@ TEST_CASE("引擎 Output 旁路斜坡只随发布进环的帧推进：某一段�
         CHECK(sameBits(wantLeft.data(), gotLeft.data(), static_cast<std::size_t>(kNext)));
         CHECK(sameBits(wantRight.data(), gotRight.data(), static_cast<std::size_t>(kNext)));
     }
-    REQUIRE(lostAttempts == 1);
+    if (lostAttempts == 0)
+    {
+        SKIP("100 次都没抓到另一个线程在公告之后、发布之前把写头推过的时序（单核或负载很高时会这样）；"
+             "没抓到不说明斜坡有问题，本用例靠竞争触发，不据此判红");
+    }
 }

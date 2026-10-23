@@ -86,6 +86,7 @@ void StreamSync::prepare(double sampleRate) noexcept
     frozenBlocks_ = 0;
     maxFrozenBlocks_ = 0;
     inactiveSamples_ = 0;
+    inactiveCleared_ = false;
     lastPaired_ = false;
     resyncTimeCount_ = 0;
     resyncCursor_ = 0;
@@ -251,11 +252,14 @@ SyncOutcome StreamSync::process(const SyncInputs& in, LocalLine& line, TapSet& t
     }
 
     // 两端都停用：累计样本数，超过 250 ms 就清空本地延迟线（防停用止啸后原样复燃）。
+    // 一段停用只清一次（锁存）：线已经清空，停用期间不会再拉进数据，每块再清一遍白白让提示码灌满诊断队列。
+    // 回到活跃（inactive 为假）时解锁，下一段停用超过 250 ms 再清。
     if (in.inactive)
     {
         inactiveSamples_ += n;
-        if (inactiveSamples_ > inactiveClear_)
+        if (inactiveSamples_ > inactiveClear_ && !inactiveCleared_)
         {
+            inactiveCleared_ = true;
             clearLine(line, W, outcome);
             offset_ = W - R;
             havePrevious_ = false;
@@ -266,6 +270,7 @@ SyncOutcome StreamSync::process(const SyncInputs& in, LocalLine& line, TapSet& t
     else
     {
         inactiveSamples_ = 0;
+        inactiveCleared_ = false;
     }
 
     // 没有对端：读不了环，只出干声。活跃读头 10 ms 淡出（读头不会反复读同一段），读位照常前进。

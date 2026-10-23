@@ -210,6 +210,20 @@ std::int64_t largestTapDelay(const TapSet& taps) noexcept
     return largest;
 }
 
+// 主读头 = 第一个没在淡出的活跃读头（改 D 的过渡、拉环不足时的淡出都认这一个）。没有时返回 fallback。
+std::int64_t mainTapDelay(const TapSet& taps, std::int64_t fallback) noexcept
+{
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        const Tap& tap = taps.at(slot);
+        if (tap.active && !tap.env.fadingOut())
+        {
+            return tap.delay;
+        }
+    }
+    return fallback;
+}
+
 // 全部读头都已经彻底安静：没有活跃读头，或者每个活跃读头的包络都是 0。
 // 快速路径（逐位直通的干声）据此决定要不要走完整路径。
 bool tapsSettledSilent(const TapSet& taps) noexcept
