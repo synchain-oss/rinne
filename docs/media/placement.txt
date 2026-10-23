@@ -1,0 +1,11 @@
+One mixer channel - inserts (Cubase shown)
++----------------------------------------------+
+| 1   Rinne Input   <--- fed back after D --+  |   return end: mixes the loop back in
+| 2   any plugin                            |  |   inside the loop
+| 3   another plugin                        |  |   inside the loop
+| ..  ...                                   |  |
+| n   Rinne Output  ------------------------+  |   send end: last pre-fader slot
+|----------- pre/post-fader divider -----------|
+|     post-fader inserts                       |   outside the loop
++----------------------------------------------+
+    fader / pan / sends                            outside the loop
