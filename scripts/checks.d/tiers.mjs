@@ -25,7 +25,8 @@
 //                       partial 只在 tier 是 1…3 的具体等级且 tier > targetTier（还没到目标）时才对；
 //                       awaiting-test 与 out-of-scope 要求 tier 为 null
 //   out-of-scope        status == "out-of-scope" ⇒ tier 为 null、evidence 为空、targetTier 为 "out-of-scope"
-//   hosts-unique        (host, versions, os) 不重复，同一宿主不会写两行互相矛盾的等级
+//   hosts-unique        (host, versions, os) 不重复，同一宿主不会写两行互相矛盾的等级；宿主名按 slug、os 按小写比较，
+//                       「Windows」与「windows」、「Cubase Pro」与「cubase-pro」算同一行
 //   hosts-platform      不是 out-of-scope 的行：os 在平台清单里（或 any），formats 是同 os 平台所发布格式的子集
 //   platforms-shape     platforms 每项有 id / os / arch / formats / minVersion；formats 取值在 identity.json 登记的格式内；
 //                       id 唯一；macOS 的最低版本与 CMake 的部署目标一致
@@ -67,7 +68,7 @@ export const RULES = {
     "verified-consistent":
         "status 与等级自洽（当且仅当）：verified ⇔ tier ≤ targetTier；partial 要求 tier 是 1…3 且 tier > targetTier；awaiting-test 与 out-of-scope 要求 tier 为 null",
     "out-of-scope": "out-of-scope 的行 tier 为 null、evidence 为空、targetTier 为 out-of-scope",
-    "hosts-unique": "(host, versions, os) 不重复",
+    "hosts-unique": "(host, versions, os) 不重复，宿主名按 slug、os 按小写比较",
     "hosts-platform": "不是 out-of-scope 的行：os 在平台清单里（或 any），formats 是同 os 平台所发布格式的子集",
     "platforms-shape":
         "platforms 每项的字段齐全、formats 取值在登记的格式内、id 唯一、macOS 最低版本与 CMake 部署目标一致",
@@ -251,7 +252,9 @@ export function tierProblems({
         if (h?.status !== undefined && !isStatus(h.status))
             add("status-values", `${TIERS_FILE} 的宿主「${name}」的 status「${h.status}」不在登记的取值内`);
 
-        const key = `${h?.host}|${h?.versions}|${h?.os}`;
+        // 去重键按 hosts-platform 与 recordProblem 的口径规范化：宿主名取 slug，系统转小写。
+        // 「windows」与「Windows」、「Cubase Pro」与「cubase-pro」是同一行，不能各过各的
+        const key = `${hostSlug(h?.host)}|${h?.versions}|${String(h?.os ?? "").toLowerCase()}`;
         if (seen.has(key))
             add("hosts-unique", `${TIERS_FILE} 的宿主「${name}」（版本 ${h?.versions}，${h?.os}）写了不止一行`);
         seen.add(key);
@@ -753,9 +756,29 @@ export async function selfTest(root = ROOT) {
             ["host 缺字段", ["tiers-shape"], { ...good, hosts: [{ host: "X" }] }],
             ["同一宿主同系统同版本写了两行", ["hosts-unique"], withHosts(cubase(), luna, host())],
             [
+                "同一宿主同版本，系统只差大小写（windows 与 Windows）写了两行",
+                ["hosts-unique"],
+                withHosts(cubase(), cubase({ os: "Windows" })),
+            ],
+            [
+                "同一宿主同版本，系统只差大小写（macos 与 macOS）写了两行",
+                ["hosts-unique"],
+                withHosts(cubase(), luna, host({ os: "macOS" })),
+            ],
+            [
+                "同一宿主同系统同版本，宿主名只差大小写与连字符（Cubase Pro 与 cubase-pro）写了两行",
+                ["hosts-unique"],
+                withHosts(cubase(), cubase({ host: "cubase-pro" })),
+            ],
+            [
                 "同一宿主两个系统各一行合规",
                 [],
                 withHosts(cubase(), host({ host: "Cubase Pro", versions: "15", os: "macos", targetTier: 3 })),
+            ],
+            [
+                "同一宿主同系统两个版本各一行合规",
+                [],
+                withHosts(cubase(), cubase({ versions: "14", evidence: [rec("2026-11-02-cubase-pro-14-win.md")] })),
             ],
             ["Windows 上的宿主写了 AU", ["hosts-platform"], withHosts(cubase({ formats: ["VST3", "AU"] }), luna)],
             ["os 不在 platforms 里也不是 any", ["hosts-platform"], withHosts(cubase(), host({ os: "linux" }))],

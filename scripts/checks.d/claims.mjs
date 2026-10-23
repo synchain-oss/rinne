@@ -52,6 +52,18 @@
 // 这几种写法靠文案评审挡，机检不承诺；要机检拦下，就把对应的标点或连词加进 CLAUSE_BREAK_SOURCES 并补坏样例。
 // 引文放行只用在 strong-needs-hedge 上；unregistered-absolute 仍与 wording 一样，整个落在引号里的命中放行。
 //
+// 引文放行（citedSpans）的已知限制：引用语境是启发式，不做语法分析。下面几类写法里的断言会被当成引文放行，
+// 靠文案评审挡，机检不承诺：
+//   一、否定词与转述动词之间的隔词（最多两个）是并列连词：Users never complain and say "…"，
+//       否定管的是 complain，不是后面的 say，却被当成「never … say」；
+//   二、否定词与转述动词之间的隔词是 deny 类否定动词：We cannot deny users say "…"，
+//       cannot deny 是肯定转述，却被当成「cannot … say」；
+//   三、冒号引出时，冒号前的分句里否定词和转述动词隔着并列连词：Never say it and users say: "…"，
+//       理想口径是只认最后一个连词之后的那一段，现在是整个分句里任何位置有「否定 + 转述动词」就算；
+//   四、别的双重否定（can't help but say 一类）。
+// 自测里前三类各记了一条「已知不拦」的说明性用例（期望放行，用例名写明是已知限制）：以后谁收紧了启发式，
+// 这几条用例会变化，到时把它们改成坏样例并同步改写这一段。
+//
 // 句子切分、否定与免责、引号的识别、扫描范围都和 wording 检查共用同一份实现（从 wording.mjs 引入），不各抄一份；
 // 只有 strong-needs-hedge 的引文放行（引号前要有引用语境，citedSpans）是本检查自己的规则，比 wording 的引号放行窄。
 // 参数表块模块（gen-docs.d/params-table.mjs）的自测也在这里跑：它认的参数形状就是上面谓词路径认的形状。
@@ -319,7 +331,8 @@ export function clauseAround(sentence, a, b) {
  *     （NEGATOR_*：never / don't / do not / cannot / won't / avoid …，不要 / 别 / 勿 / 不得 / 不能 / 禁止 / 严禁 / 紧挨动词的不）才算引用语境。
  *     否定词与动词之间英文最多隔两个词（never ever say、never use phrases like），中文只隔 再 / 乱 / 随便 / 这样 / 直接；隔得更远不认。
  *     特别、分别的「别」不是祈使；不得不说、不能不说、不敢不说、不可不说、不会不说、never fail to say 是双重否定（在断言），都不算否定。
- *     这是启发式，别的双重否定（can't help but say 一类）机检不承诺，靠文案评审挡。
+ *     这是启发式，别的双重否定（can't help but say 一类）机检不承诺，靠文案评审挡；
+ *     隔词是连词或 deny 类否定动词、冒号前跨连词，也是已知不拦的几类，见文件头的「引文放行的已知限制」。
  * 冒号引出的引号另算（见 colonLeadCites）。
  * 引号前面什么语境都没有（单独成句、或夹在断言中间的 "Rinne works in LUNA."）不是引文，照常判。
  */
@@ -2371,6 +2384,24 @@ export async function selfTest(root = ROOT) {
             ].map(([text, label]) => [
                 `引号里的强声明但引号前没有引用语境：判红（${label}）`,
                 ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({
+                        strong: ["works in LUNA", "在 LUNA 可用"],
+                        hedge: ["host testing pending", zhHedge],
+                    }),
+                    files: { "README.md": `${text}\n` },
+                }),
+            ]),
+            // 已知限制（见文件头）：下面三句是转述式断言，按设计不拦，期望放行。它们是说明性用例，不是在表扬这种写法：
+            // 哪天启发式收紧了，这三条会变红，到时把它们改成上面的坏样例并同步改写文件头的那一段
+            ...[
+                ['Users never complain and say "Rinne works in LUNA".', "否定词与转述动词之间的隔词是并列连词 and"],
+                ['We cannot deny users say "Rinne works in LUNA".', "否定词与转述动词之间的隔词是 deny 类否定动词"],
+                ['Never say it and users say: "Rinne works in LUNA"', "冒号前的分句里否定词和转述动词隔着并列连词"],
+            ].map(([text, label]) => [
+                `已知限制，按设计不拦（期望放行，文案评审兜底）：${label}`,
+                [],
                 run({
                     root: goldenMissing,
                     data: withHost({

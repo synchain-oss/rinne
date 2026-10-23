@@ -347,7 +347,9 @@ export const NEGATION_BEFORE = [
     /n['’]t\b/i,
     /\bno (?:software|plug-?in|tool|product|one|guarantee|promise)\b/i,
     /(?:不能|无法|没法|不会|不可|不得|不要|不应|禁止|勿|并非|不是|没有|尚未|未能|不保证|不承诺|不声称|不宣称|绝不|并不|从不|从未)/,
-    /[不无未非没别]\s*$/, // 紧挨着命中片段的单字否定：「不支持所有 DAW」
+    // 紧挨着命中片段的单字否定：「不支持所有 DAW」。特别 / 分别 / 区别 的「别」是副词或名词，不是祈使：
+    // 「Rinne 特别支持所有 DAW」「Rinne 特别零延迟」是肯定式，不能被它放过
+    /(?:[不无未非没]|(?<![特分区])别)\s*$/,
 ];
 
 /** 命中片段紧后面直接跟着的否定：「zero latency is not claimed」「零延迟是不可能的」。 */
@@ -425,8 +427,11 @@ export const FAMILIES = [
         note: "永不啸叫、绝对安全、100% safe",
         patterns: [
             {
-                // 英文的免责形态写在正则的否定后顾里：「no software can guarantee a loop will never howl」不命中
-                re: /(?<!(?:guarantee|cannot|can't|no software)[^.\n]{0,40})\bnever howls?\b/i,
+                // 英文的免责形态写在正则的否定后顾里：「no software can guarantee a loop will never howl」不命中。
+                // 后顾只认否定语境：cannot / can't / no software，或带否定的 guarantee（not / n't / no 紧挨 guarantee，
+                // 中间最多隔一个词：「does not guarantee」「doesn't really guarantee」「no guarantee」）。
+                // 单独的 guarantee(s) 是肯定的承诺（「Rinne guarantees it never howls」），不放过
+                re: /(?<!(?:cannot|can['’]t|no software|(?:\bnot|n['’]t|\bno)\s+(?:\w+\s+)?guarantee)[^.\n]{0,40})\bnever howls?\b/i,
                 negation: false,
             },
             { re: /\b100\s?% safe\b/i },
@@ -645,6 +650,10 @@ export async function selfTest() {
         ["The loop is zero latency.", "zero-latency"],
         ["这条链是零延迟的。", "zero-latency-zh"],
         ["Rinne never howls.", "safety-promise"],
+        // 肯定的承诺：单独的 guarantee(s) 不是免责，只有带否定的才放行
+        ["Rinne guarantees it never howls.", "safety-promise"],
+        ["We guarantee the loop never howls.", "safety-promise"],
+        ["Rinne does not need setup and guarantees it never howls.", "safety-promise"],
         ["Rinne is 100% safe.", "safety-promise"],
         ["Rinne protects your ears.", "safety-promise"],
         ["本插件绝对安全。", "safety-promise"],
@@ -707,6 +716,11 @@ export async function selfTest() {
         ["我们不保证绝对稳定并且这条链是零延迟的。", "zero-latency-zh"],
         ["We do not promise much and the loop is zero latency.", "zero-latency"],
         ["Rinne 不是玩具，并且支持所有 DAW。", "all-daw-zh"],
+        // 「别」只有紧挨着命中的祈使才是否定：特别 / 分别 / 区别 里的「别」是副词或名词
+        ["Rinne 特别支持所有 DAW。", "all-daw-zh"],
+        ["Rinne 特别零延迟。", "zero-latency-zh"],
+        ["Rinne 分别零延迟。", "zero-latency-zh"],
+        ["二者区别零延迟。", "zero-latency-zh"],
         ...["and", "but", "while", "whereas", "although", "though", "however"].map((c) => [
             `Rinne is not a toy ${c} it supports all DAWs.`,
             "absolute-support",
@@ -738,6 +752,18 @@ export async function selfTest() {
         ["Logic Pro is not tested."],
         ["使用微软官方安装程序。"],
         ["No software can guarantee a loop will never howl."],
+        ["No software can guarantee it never howls."],
+        ["We cannot guarantee it never howls."],
+        ["We can’t guarantee it never howls."],
+        ["Rinne does not guarantee it never howls."],
+        ["Rinne doesn't really guarantee it never howls."],
+        ["Rinne doesn’t guarantee it never howls."],
+        ["There is no guarantee that it never howls."],
+        // 否定管的不一定是 guarantee：cannot / can't / no software 本身就是免责语境
+        ["We cannot promise it never howls."],
+        ["We can't promise it never howls."],
+        ["We can’t promise it never howls."],
+        ["No software can promise it never howls."],
         ["无法保证环路永远不啸叫。"],
         ["我们不能保证本插件不会爆音。"],
         ["Put Rinne Output above the fader divider."],
@@ -754,6 +780,13 @@ export async function selfTest() {
         ["Zero latency isn't something we promise."],
         ["零延迟是不可能的。"],
         ["Rinne 不支持所有 DAW。"],
+        // 紧挨着命中的祈使「别」仍是否定，只有 特别 / 分别 / 区别 里的「别」不算
+        ["别支持所有 DAW。"],
+        ["千万别零延迟。"],
+        ["本插件无零延迟承诺。"],
+        ["目前未支持所有 DAW。"],
+        ["这是非零延迟的链路。"],
+        ["目前还没支持所有 DAW。"],
         ["Rinne does not support all DAWs."],
         ["Rinne is a toy and does not support all DAWs."],
         ["Rinne is a toy but does not support all DAWs."],
