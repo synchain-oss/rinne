@@ -2,7 +2,7 @@
 //
 // 参数表（src/input/ParamTable.h）与 tests/golden/params-input.json 的对拍。参数表是冻结前的草案：
 //   · 表自身：11 个 ID 与序号；类型、范围、默认与可自动化同契约字面量相等；ID 唯一；
-//     默认值在范围内；布尔与档位的形状；delay_note 16 档顺序；
+//     默认值在范围内；布尔与档位的形状；delay_note 16 档顺序，以及每一档的桥取值 id（与桥文档逐个对应、时值严格升序）；
 //   · 宿主参数 ID（vst3 / au 两列）：用纯 C++ 复算 JUCE 的散列，已知答案另算一份，不靠 golden 自证；
 //   · golden：逐参数逐字段与表相等，行数与顺序一致，全文与表渲染出的规范排版逐字节相同。
 // 重新生成：设环境变量 RINNE_PARAMS_GOLDEN_REGEN=1 跑 [golden] 用例，再不带开关跑一遍，看一眼 diff。
@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstdint>
 #include <fstream>
 #include <optional>
@@ -63,6 +64,33 @@ const std::vector<Contract> kContract = {
 // delay_note 的 16 档：顺序冻结，只能在末尾追加
 const std::vector<std::string> kNoteLabels = {"1/64", "1/32T", "1/32", "1/16T", "1/16", "1/8T", "1/16D", "1/8",
                                               "1/4T", "1/8D",  "1/4",  "1/2T",  "1/4D", "1/2",  "1/2D",  "1/1"};
+
+// 界面桥的参数表（docs/UI_BRIDGE.md 里 delay_note 一行）列出的 16 个取值 id，字面量照抄。
+// 那一行列的先后不作准：宿主下标与 id 的对应以参数表为准，这里只比集合。
+const std::vector<std::string> kBridgeNoteIds = {"n64", "n32t", "n32", "n16t", "n16", "n16d", "n8t", "n8",
+                                                 "n8d", "n4t",  "n4",  "n4d",  "n2t", "n2",   "n2d", "n1"};
+
+// 桥取值 id 的时值（拍数）：n<分母>，末尾 t 是三连音、d 是附点；读不懂时返回 -1
+double noteBeats(const std::string& bridge)
+{
+    if (bridge.size() < 2 || bridge[0] != 'n')
+    {
+        return -1.0;
+    }
+    const bool triplet = bridge.back() == 't';
+    const bool dotted = bridge.back() == 'd';
+    const double denominator = std::atof(bridge.substr(1, bridge.size() - (triplet || dotted ? 2 : 1)).c_str());
+    return denominator <= 0.0 ? -1.0 : 4.0 / denominator * (triplet ? 2.0 / 3.0 : dotted ? 1.5 : 1.0);
+}
+
+// 宿主文字 "1/16D" 对应的桥取值 id "n16d"
+std::string bridgeIdOfLabel(const std::string& label)
+{
+    std::string id = "n" + (label.size() > 2 ? label.substr(2) : std::string());
+    std::transform(id.begin(), id.end(), id.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return id;
+}
 
 } // namespace
 
@@ -198,7 +226,11 @@ TEST_CASE("delay_note keeps its sixteen steps in the frozen order", "[params][ta
         INFO("档 " << i);
         CHECK(labels[i] == kNoteLabels[i]);
     }
-    CHECK(labels[static_cast<std::size_t>(byId("delay_note").def)] == "1/4"); // 默认 1/4
+    // 默认档先 REQUIRE 挡住越界再取下标：默认值被改出范围时判红，不会读到数组外面
+    const double noteDefault = byId("delay_note").def;
+    REQUIRE(noteDefault >= 0.0);
+    REQUIRE(noteDefault < static_cast<double>(labels.size()));
+    CHECK(labels.at(static_cast<std::size_t>(noteDefault)) == "1/4"); // 默认 1/4
     // 档位行的序号逐档递增，不跳不重
     int expected = 0;
     for (const auto& c : choices())
@@ -210,6 +242,50 @@ TEST_CASE("delay_note keeps its sixteen steps in the frozen order", "[params][ta
     }
     const std::vector<std::string> modes = {"Time", "Sync"};
     CHECK(choicesOf("delay_mode") == modes);
+}
+
+TEST_CASE("delay_note bridge ids map the host steps one to one in rising note value", "[params][table]")
+{
+    const auto ids = bridgeIdsOf("delay_note");
+    const auto labels = choicesOf("delay_note");
+    REQUIRE(ids.size() == kNoteLabels.size());
+    REQUIRE(labels.size() == ids.size());
+
+    // 16 个 id 互不相同，且恰好是桥文档列出的那 16 个
+    const std::set<std::string> idSet(ids.begin(), ids.end());
+    CHECK(idSet.size() == ids.size());
+    CHECK(idSet == std::set<std::string>(kBridgeNoteIds.begin(), kBridgeNoteIds.end()));
+
+    // 按本表的先后，时值严格递增；每个 id 与同一行的宿主文字互相对得上
+    double previous = 0.0;
+    for (std::size_t i = 0; i < ids.size(); ++i)
+    {
+        INFO("档 " << i << "：" << labels[i] << " ↔ " << ids[i]);
+        const double beats = noteBeats(ids[i]);
+        CHECK(beats > previous);
+        previous = beats;
+        CHECK(ids[i] == bridgeIdOfLabel(labels[i]));
+    }
+    // 时值解析本身的几个已知值
+    CHECK(noteBeats("n64") == 0.0625);
+    CHECK(noteBeats("n4") == 1.0);
+    CHECK(noteBeats("n8d") == 0.75);
+    CHECK(noteBeats("n1") == 4.0);
+
+    // 默认档的桥 id 是 n4；delay_mode 的两个 id 是 time / sync
+    const double noteDefault = byId("delay_note").def;
+    REQUIRE(noteDefault >= 0.0);
+    REQUIRE(noteDefault < static_cast<double>(ids.size()));
+    CHECK(ids.at(static_cast<std::size_t>(noteDefault)) == "n4");
+    const std::vector<std::string> modeIds = {"time", "sync"};
+    CHECK(bridgeIdsOf("delay_mode") == modeIds);
+
+    // 只有档位参数带桥 id
+    for (const auto& p : table())
+    {
+        INFO("参数 " << p.id);
+        CHECK(bridgeIdsOf(p.id).empty() == (p.kind != 'C'));
+    }
 }
 
 TEST_CASE("host parameter ids reproduce the juce hash", "[params][hash]")
@@ -270,10 +346,12 @@ TEST_CASE("golden rows match the table field by field", "[params][golden]")
         if (p.kind == 'C')
         {
             CHECK(row->list("choices") == std::optional<std::vector<std::string>>(choicesOf(p.id)));
+            CHECK(row->list("bridgeIds") == std::optional<std::vector<std::string>>(bridgeIdsOf(p.id)));
         }
         else
         {
             CHECK(!row->list("choices").has_value());
+            CHECK(!row->list("bridgeIds").has_value());
         }
     }
 }

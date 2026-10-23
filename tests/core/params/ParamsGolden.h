@@ -38,7 +38,8 @@ struct Choice
 {
     const char* id;
     int index;
-    const char* label;
+    const char* bridge; // 界面桥上这一档的取值 id
+    const char* label; // 宿主里看到的文字
 };
 
 // 同一张 X-macro 表展开两次：参数行与档位行各取一半，另一半展开成空
@@ -56,23 +57,34 @@ inline const std::vector<Choice>& choices()
 {
     static const std::vector<Choice> all = {
 #define RINNE_PARAM(id, index, kind, lo, hi, def, step, skew, automatable, unit, name)
-#define RINNE_CHOICE(id, index, label) {#id, index, label},
+#define RINNE_CHOICE(id, index, bridge, label) {#id, index, #bridge, label},
 #include "../../../src/input/ParamTable.h"
     };
     return all;
 }
 
-inline std::vector<std::string> choicesOf(const std::string& id)
+// 某个档位参数的一列（文字或桥 id），按表里的先后
+inline std::vector<std::string> choiceColumn(const std::string& id, const char* Choice::*column)
 {
-    std::vector<std::string> labels;
+    std::vector<std::string> out;
     for (const auto& c : choices())
     {
         if (id == c.id)
         {
-            labels.push_back(c.label);
+            out.push_back(c.*column);
         }
     }
-    return labels;
+    return out;
+}
+
+inline std::vector<std::string> choicesOf(const std::string& id)
+{
+    return choiceColumn(id, &Choice::label);
+}
+
+inline std::vector<std::string> bridgeIdsOf(const std::string& id)
+{
+    return choiceColumn(id, &Choice::bridge);
 }
 
 // ---- 宿主参数 ID ----
@@ -133,6 +145,16 @@ inline std::string unitText(const std::string& token)
                             : "?" + token;
 }
 
+inline std::string listText(const std::vector<std::string>& items)
+{
+    std::string text = "[";
+    for (std::size_t i = 0; i < items.size(); ++i)
+    {
+        text += (i == 0 ? "\"" : ", \"") + items[i] + "\"";
+    }
+    return text + "]";
+}
+
 inline std::string rowText(const Param& p)
 {
     const std::string id = p.id;
@@ -145,13 +167,7 @@ inline std::string rowText(const Param& p)
                       ", \"au\": " + std::to_string(hostParamId(id));
     if (p.kind == 'C')
     {
-        row += ", \"choices\": [";
-        const auto labels = choicesOf(id);
-        for (std::size_t i = 0; i < labels.size(); ++i)
-        {
-            row += (i == 0 ? "\"" : ", \"") + labels[i] + "\"";
-        }
-        row += "]";
+        row += ", \"choices\": " + listText(choicesOf(id)) + ", \"bridgeIds\": " + listText(bridgeIdsOf(id));
     }
     return row + " }";
 }

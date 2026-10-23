@@ -15,8 +15,10 @@
 //     automatable  1 宿主可自动化、0 不可
 //     unit         none、pct、ms、hz、db
 //     name         宿主里看到的英文名。是草案；中文名与界面文案归 i18n，不在这里
-//   RINNE_CHOICE(id, index, label)
-//     C 档位参数的第 index 档的文字。delay_note 的 16 档顺序冻结，只能在末尾追加。
+//   RINNE_CHOICE(id, index, bridge, label)
+//     C 档位参数的第 index 档。bridge 是界面桥上这一档的取值 id（小写 ASCII 与数字），label 是宿主里看到的文字。
+//     宿主的档位下标与桥取值 id 的对应以本表为准，桥文档列取值的先后不作准。
+//     delay_note 的 16 档顺序冻结，按时值严格升序，只能在末尾追加。
 //
 // 约定：low_cut 取下限 20 Hz 表示关，high_cut 取上限 20000 Hz 表示关。
 // 每个 RINNE_PARAM / RINNE_CHOICE 占一行、全是字面量、不含表达式，写成 clang-format 的规范形（单空格、不对齐）：
@@ -26,7 +28,7 @@
 #error "先定义 RINNE_PARAM(id, index, kind, lo, hi, def, step, skew, automatable, unit, name) 再包含 ParamTable.h"
 #endif
 #ifndef RINNE_CHOICE
-#define RINNE_CHOICE(id, index, label)
+#define RINNE_CHOICE(id, index, bridge, label)
 #endif
 
 RINNE_PARAM(feedback, 0, F, 0.0, 150.0, 0.0, 0.1, lin, 1, pct, "Feedback")
@@ -41,25 +43,25 @@ RINNE_PARAM(polarity, 8, B, 0, 1, 0, 1, lin, 1, none, "Invert")
 RINNE_PARAM(limiter, 9, B, 0, 1, 1, 1, lin, 0, none, "Return Limiter")
 RINNE_PARAM(ceiling, 10, F, -24.0, 0.0, -6.0, 0.1, lin, 0, db, "Ceiling")
 
-RINNE_CHOICE(delay_mode, 0, "Time")
-RINNE_CHOICE(delay_mode, 1, "Sync")
+RINNE_CHOICE(delay_mode, 0, time, "Time")
+RINNE_CHOICE(delay_mode, 1, sync, "Sync")
 
-RINNE_CHOICE(delay_note, 0, "1/64")
-RINNE_CHOICE(delay_note, 1, "1/32T")
-RINNE_CHOICE(delay_note, 2, "1/32")
-RINNE_CHOICE(delay_note, 3, "1/16T")
-RINNE_CHOICE(delay_note, 4, "1/16")
-RINNE_CHOICE(delay_note, 5, "1/8T")
-RINNE_CHOICE(delay_note, 6, "1/16D")
-RINNE_CHOICE(delay_note, 7, "1/8")
-RINNE_CHOICE(delay_note, 8, "1/4T")
-RINNE_CHOICE(delay_note, 9, "1/8D")
-RINNE_CHOICE(delay_note, 10, "1/4")
-RINNE_CHOICE(delay_note, 11, "1/2T")
-RINNE_CHOICE(delay_note, 12, "1/4D")
-RINNE_CHOICE(delay_note, 13, "1/2")
-RINNE_CHOICE(delay_note, 14, "1/2D")
-RINNE_CHOICE(delay_note, 15, "1/1")
+RINNE_CHOICE(delay_note, 0, n64, "1/64")
+RINNE_CHOICE(delay_note, 1, n32t, "1/32T")
+RINNE_CHOICE(delay_note, 2, n32, "1/32")
+RINNE_CHOICE(delay_note, 3, n16t, "1/16T")
+RINNE_CHOICE(delay_note, 4, n16, "1/16")
+RINNE_CHOICE(delay_note, 5, n8t, "1/8T")
+RINNE_CHOICE(delay_note, 6, n16d, "1/16D")
+RINNE_CHOICE(delay_note, 7, n8, "1/8")
+RINNE_CHOICE(delay_note, 8, n4t, "1/4T")
+RINNE_CHOICE(delay_note, 9, n8d, "1/8D")
+RINNE_CHOICE(delay_note, 10, n4, "1/4")
+RINNE_CHOICE(delay_note, 11, n2t, "1/2T")
+RINNE_CHOICE(delay_note, 12, n4d, "1/4D")
+RINNE_CHOICE(delay_note, 13, n2, "1/2")
+RINNE_CHOICE(delay_note, 14, n2d, "1/2D")
+RINNE_CHOICE(delay_note, 15, n1, "1/1")
 
 #undef RINNE_PARAM
 #undef RINNE_CHOICE
