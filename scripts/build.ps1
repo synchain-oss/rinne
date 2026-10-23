@@ -35,7 +35,8 @@
 # 判红而不是悄悄放过的理由：前缀对不上时 ninja 不报错，只是不记依赖，只改 .h 时 gates 会跑在旧对象上。
 # clean：修过的构建目录 clean 一次（旧目标文件没有依赖记录）；核对通过的前缀记在 <构建目录>/rinne-deps-prefix-<配置>.txt
 # （clean 只清当前配置，所以按配置分开记），没有记录（含 0 字节的残留文件）或记录不同的目录也 clean 一次。
-# 构建后再查 ninja -t deps：至少记下一条依赖，且本次新编的第一方编译单元（源文件里有 #include "…" 的）各自都要记下，否则判红。
+# 构建后再查 ninja -t deps：至少记下一条依赖，且第一方编译单元（源文件里有 #include "…" 的）各自都要记下，否则判红；本次新编的与记录里
+# 之前留下的一视同仁（断言判红时 ninja 已把没记依赖的对象的 #deps 0 写进记录，下一次构建不会重编它，不能靠「下一次会重编」放过）。
 # 第一方 = git 跟踪的源文件（git ls-files），third_party/ 下的除外；不按目录位置判：CI 把 JUCE 检出在仓根下的 JUCE/（未被跟踪），
 # 本机在仓外，按「在不在仓根下」判会把 CI 上的 JUCE 编译单元算成第一方（有的整个文件包在 #if 里，Windows 上一个头文件都不进，没有依赖可记）。
 # 前缀的空白口径：ninja 逐字节比前缀，前缀之后只跳过空格（0x20），Tab、换行、0x85、0xA0 都会让路径记错。核对只容忍空格。
@@ -270,6 +271,10 @@ function Test-FirstPartySource([string]$Src, $Tracked) {
 }
 
 # 仓内源文件里有 #include "…" 的（尖括号的是系统或第三方头文件，不算第一方）。
+# 只做文本匹配，不看 #if：带引号的 include 在本平台为假的 #if 里时，预处理后头文件不进来，ninja 记下的依赖个数是 0，这个单元会被判红。
+# 这是有意的取舍，误判的方向是红（看得见，不会放过）：目前被跟踪的第一方编译单元没有这种情形，真出现了，改源文件的结构，
+# 或让这个单元不被当作第一方，都比悄悄放过好。改成只认预处理深度 0 的 include 会走向另一头：带引号的 include 全在「本平台为真」
+# 的 #if 里的单元（例如整个文件包在 #if JUCE_WINDOWS 里）会被整个跳过，它没记下依赖时反而放过真缺陷。
 function Test-SourceHasQuotedInclude([string]$Abs) {
     if (-not (Test-Path -LiteralPath $Abs -PathType Leaf)) { return $false }
     foreach ($l in @(Get-Content -LiteralPath $Abs)) {
@@ -278,9 +283,10 @@ function Test-SourceHasQuotedInclude([string]$Abs) {
     $false
 }
 
-# 本次新编的第一方编译单元各自都要记下依赖：源文件里有 #include "…" 的，ninja 必须给它记下至少一条。
-# 只看「目录里有任意一个目标记了依赖」抓不到「第一方 TU 这次没记依赖」（增量构建里旧记录一直在）。
-# 本次没有新编第一方 TU（增量构建无事可做）时退回查 ninja 的记录：记录跨构建保留，至少要有一个第一方对象记下依赖。
+# 第一方编译单元各自都要记下依赖：源文件里有 #include "…" 的，ninja 必须给它记下至少一条。判两遍，判据相同：
+# 先判本次新编的对象，再判 ninja 记录里的每个第一方对象（记录跨构建保留，含之前的构建留下的；本次没新编任何第一方 TU 时就只剩这一遍），
+# 记录里还要至少有一个第一方对象记下依赖。只看「目录里有任意一个目标记了依赖」抓不到「第一方 TU 这次没记依赖」（增量构建里旧记录一直在）；
+# 记录那一遍也不能只要求「有一个第一方对象记了」：断言判红后 ninja 已把那个对象的 #deps 0 写进记录，下一次构建不会重编它。
 # $Objects 是本次新编的对象（构建目录为基准），$Counts 是 ninja -t deps 的 { 对象 => 依赖个数 }，$RepoRoot 是仓根，
 # $Tracked 是仓里被 git 跟踪的文件的集合（Get-TrackedFiles）：第一方就是它里面的源文件，见 Test-FirstPartySource。
 # 返回错误文字，都记下了返回空。
@@ -298,12 +304,23 @@ function Test-FirstPartyDeps([string[]]$Objects, $Counts, [string]$RepoRoot, $Tr
     if ($bad.Count) {
         return "本次新编的第一方编译单元没有记下头文件依赖：$($bad -join '、')"
     }
-    # 都记下了，或者本次没有新编第一方 TU：查 ninja 的记录里有没有第一方对象记下依赖（记录跨构建保留；
-    # 本次新编的第一方 TU 都记下了的话，它们自己就在记录里，这一步必然通过）
-    foreach ($obj in $Counts.Keys) {
-        if (-not (Test-FirstPartySource (Get-ObjectSource $obj) $Tracked)) { continue }
-        if ($Counts[$obj] -ge 1) { return '' }
+    # 再按记录逐个查，判据与上面「本次新编」那一支相同：记录里的每个第一方对象，源文件有带引号的 include 的都要记下依赖。
+    # 不能只要求「记录里有一个第一方对象记了依赖」：构建后断言判红时，ninja 已把没记依赖的对象的 #deps 0 写进 .ninja_deps，
+    # 那个对象是最新的，下一次增量构建一个都不编，别的单元记下的依赖会让「有一个就行」放过它；只重编了几个别的单元时也一样。
+    # 记录跨构建保留，所以这一步对本次新编的、之前留下的第一方对象一视同仁。
+    $stale = [System.Collections.Generic.List[string]]::new()
+    $recorded = $false
+    foreach ($obj in ($Counts.Keys | Sort-Object)) {
+        $src = Get-ObjectSource $obj
+        if (-not (Test-FirstPartySource $src $Tracked)) { continue }
+        if ($Counts[$obj] -ge 1) { $recorded = $true; continue }
+        if (Test-SourceHasQuotedInclude (Join-Path $RepoRoot $src)) { $stale.Add("$src（$obj）") }
     }
+    if ($stale.Count) {
+        return "ninja 的记录里这些第一方编译单元没有记下头文件依赖（多半是上一次构建的断言判红时留下的：对象是最新的，增量构建不会重编它们）：$($stale -join '、')；" +
+        '查明原因后 clean 当前配置的目标再构建（cmake --build <构建目录> --config <配置> --target clean）'
+    }
+    if ($recorded) { return '' }
     'ninja -t deps 里没有任何一个第一方对象记下头文件依赖：只改 .h 时含它的编译单元不会重编'
 }
 
@@ -855,18 +872,19 @@ function Invoke-SelfTest {
     $msg = ''
     try { $null = & $prefixFlow @{ Probe = $badProbe; Configure = { param($f) & $badProbe }; WriteOverride = { 'x' } } } catch [BuildStop] { $threw = $true; $msg = $_.Exception.Message }
     & $check '前缀接线：覆盖之后仍对不上时判红' $true ($threw -and $msg -match '覆盖之后头文件依赖前缀仍对不上')
-    # 构建后：本次新编的第一方编译单元各自都要记下依赖（夹具只有三个文件，逐个删、不递归删）
+    # 构建后：本次新编的第一方编译单元各自都要记下依赖（夹具只有四个文件，逐个删、不递归删）
     $fpRoot = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-fp-$PID-$(Get-Random)"
     $fpCore = Join-Path $fpRoot 'src/core'
     $null = New-Item -ItemType Directory -Force -Path $fpCore
     Set-Content -LiteralPath (Join-Path $fpCore 'A.cpp') -Value '#include "A.h"'
     Set-Content -LiteralPath (Join-Path $fpCore 'B.cpp') -Value '#include <vector>'
-    # CI 布局：JUCE 检出在仓根下的 JUCE/，没被 git 跟踪（下面的 $fpTracked 里只有 src/core 的两个文件）。这个文件的形状同 JUCE 的
+    Set-Content -LiteralPath (Join-Path $fpCore 'C.cpp') -Value '#include "C.h"'
+    # CI 布局：JUCE 检出在仓根下的 JUCE/，没被 git 跟踪（下面的 $fpTracked 里只有 src/core 的三个文件）。这个文件的形状同 JUCE 的
     # LV2 编译单元：有带引号的 include（按文本看是），但整个包在 #if 里，Windows 上预处理后一个头文件都不进来
     $fpJuce = Join-Path $fpRoot 'JUCE/modules/juce_audio_processors'
     $null = New-Item -ItemType Directory -Force -Path $fpJuce
     Set-Content -LiteralPath (Join-Path $fpJuce 'juce_audio_processors_lv2_libs.cpp') -Value @('#if JUCE_PLUGINHOST_LV2', '#include "format_types/juce_LV2SupportLibs.cpp"', '#endif')
-    $fpTracked = ConvertTo-TrackedSet "src/core/A.cpp`0src/core/B.cpp`0"
+    $fpTracked = ConvertTo-TrackedSet "src/core/A.cpp`0src/core/B.cpp`0src/core/C.cpp`0"
     $fpObj = 'src/core/CMakeFiles/rinne_core.dir/Release/A.cpp.obj'
     $fpLog = @("[1/2] Building CXX object src\core\CMakeFiles\rinne_core.dir\Release\A.cpp.obj",
         "[2/2] Building CXX object src\core\CMakeFiles\rinne_core.dir\Release\B.cpp.obj")
@@ -919,6 +937,45 @@ function Invoke-SelfTest {
         "[4/4] Building CXX object tests\CMakeFiles\rinne_host_tests.dir\Release\__\JUCE\modules\juce_audio_processors\juce_audio_processors_lv2_libs.cpp.obj")
     & $check 'CI 布局：构建后断言整条走一遍（构建日志里有 JUCE 的对象），不抛' $false ((& $assert ($fpDeps + $ciJuceZero) $ciLog) -eq '')
     & $check 'CI 布局：构建后断言整条走一遍，第一方 TU 没记依赖照样抛' $true ((& $assert ($fpZero + $fpOther + $ciJuceZero) $ciLog) -match '本次新编的第一方编译单元没有记下')
+    # 断言判红之后的下一次构建：判红时 ninja 已经把没记依赖的对象的 #deps 0 写进 .ninja_deps，对象本身是最新的，下一次增量构建什么都不编。
+    # 回退检查若只要求「记录里有一个第一方对象记了依赖」，别的单元记下了就放过，没记的那个永远不会再被查到。
+    # 桩模拟 ninja 的这一行为（真 ninja 也是这样，实测过）：记录 $fpNinja 跨构建保留，记录里已有的对象不再编；
+    # $fpRun 的参数是各对象这次编译时 cl 给出的头文件个数，返回这次构建的日志与此后 ninja -t deps 的输出
+    $fpObjB = 'src/core/CMakeFiles/rinne_core.dir/Release/B.cpp.obj'
+    $fpObjC = 'src/core/CMakeFiles/rinne_core.dir/Release/C.cpp.obj'
+    $fpNinja = @{}
+    $fpRun = {
+        param($ClDeps)
+        $new = @($ClDeps.Keys | Sort-Object | Where-Object { -not $fpNinja.ContainsKey($_) })
+        foreach ($o in $new) { $fpNinja[$o] = $ClDeps[$o] }
+        $i = 0
+        $log = $new.Count ? @($new | ForEach-Object { $i++; "[$i/$($new.Count)] Building CXX object $($_ -replace '/', '\')" }) : @('ninja: no work to do.')
+        @{ Log = $log; Deps = @($fpNinja.Keys | Sort-Object | ForEach-Object { "$_`: #deps $($fpNinja[$_]), deps mtime 1 (VALID)" }) }
+    }
+    $clDeps = @{ $fpObj = 3; $fpObjB = 0; $fpObjC = 0 }   # A、C 都有带引号的 include，cl 只给 A 记下了头文件；B 只含系统头，没有可记的
+    $b1 = & $fpRun $clDeps
+    & $check '断言判红之后：第一次构建，没记依赖的 C 被点名判红' $true ((& $assert $b1.Deps $b1.Log) -match '本次新编的第一方编译单元没有记下.*C\.cpp')
+    $b2 = & $fpRun $clDeps
+    & $check '断言判红之后：第二次构建零新编，C 的 #deps 0 还留在 ninja 的记录里' $false (
+        $b2.Log.Count -eq 1 -and $b2.Log[0] -match 'no work to do' -and $b2.Deps -contains "$fpObjC`: #deps 0, deps mtime 1 (VALID)")
+    $r2 = & $assert $b2.Deps $b2.Log
+    & $check '断言判红之后：第二次构建零新编，回退检查照样判红，点名 C、不点名已经记下依赖的 A' $true ($r2 -match 'C\.cpp' -and $r2 -notmatch 'A\.cpp')
+    & $check '断言判红之后：回退检查的判红文字给出怎么清（clean 的命令）' $true ($r2 -match '--target clean')
+    # 部分重编：只有 A 重编（记下了依赖），本次新编的都没问题，C 留在记录里的 #deps 0 仍要判红
+    $null = $fpNinja.Remove($fpObj)
+    $b3 = & $fpRun $clDeps
+    & $check '断言判红之后：只重编了别的单元（新编的都记下了依赖）时，记录里 C 的 #deps 0 仍判红' $true (
+        $b3.Log.Count -eq 1 -and $b3.Log[0] -match 'A\.cpp\.obj' -and (& $assert $b3.Deps $b3.Log) -match 'C\.cpp')
+    # 按提示 clean 之后（对象与记录都清掉）重编，C 这回记下了依赖：通过，之后无事可做的构建也通过
+    $fpNinja.Clear()
+    $clDeps[$fpObjC] = 2
+    $b4 = & $fpRun $clDeps
+    $b5 = & $fpRun $clDeps
+    & $check '断言判红之后：clean 重编、C 记下依赖，通过；之后零新编的构建也通过' $false (
+        (& $assert $b4.Deps $b4.Log) -eq '' -and $b5.Log[0] -match 'no work to do' -and (& $assert $b5.Deps $b5.Log) -eq '')
+    # 记录里没有第一方的带引号 include 就没有要记的依赖：B 记 0 不碍事；第三方与 JUCE 的 0 也不碍事
+    & $check '记录里的判据：只含系统头的第一方单元（B）记 0 不判红' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpObjB`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked))
     # 第一方的判据本身：git 跟踪的文件，third_party/ 除外
     $setT = ConvertTo-TrackedSet "src/core/A.cpp`0third_party/v/v.cpp`0"
     & $check '第一方判据：git 跟踪的源文件算' $false (Test-FirstPartySource 'src/core/A.cpp' $setT)
@@ -974,7 +1031,7 @@ function Invoke-SelfTest {
     & $check '同名检查：函数名后括号里的同名形参（大小写不论），抓到' $true ((& $shadowKinds "$scriptParam`nfunction F([scriptblock]`$builddir) { }") -ceq '形参')
     & $check '同名检查：脚本块 param 里的同名形参，抓到' $true ((& $shadowKinds "$scriptParam`n`$sb = { param(`$Probe) }") -ceq '形参')
     & $check '同名检查：改了名的形参与变量、脚本自己的 param 块，不误报' $false ((& $shadowKinds "$scriptParam`nfunction F { param([scriptblock]`$ProbeStep); `$probeStep = 1 }") -ceq '')
-    Remove-Item -LiteralPath (Join-Path $fpCore 'A.cpp'), (Join-Path $fpCore 'B.cpp'), (Join-Path $fpJuce 'juce_audio_processors_lv2_libs.cpp') -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $fpCore 'A.cpp'), (Join-Path $fpCore 'B.cpp'), (Join-Path $fpCore 'C.cpp'), (Join-Path $fpJuce 'juce_audio_processors_lv2_libs.cpp') -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fpCore, (Join-Path $fpRoot 'src'), $fpJuce, (Join-Path $fpRoot 'JUCE/modules'), (Join-Path $fpRoot 'JUCE'), $fpRoot -ErrorAction SilentlyContinue
     $formal, $probeBundles = (Get-ExpectedBundles $false), (Get-ExpectedBundles $true)
     & $check '产物断言：正式版恰好两个' $false (-not (Test-BundleSet $formal $formal))
