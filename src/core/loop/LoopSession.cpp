@@ -14,7 +14,9 @@
 // 读头的生命周期（3 个槽）：
 //   稳态      1 个读头在跑，包络恒为 1。
 //   淡出期间  旧读头在淡出（5 ms），新读头同时在 onset（20 ms）：两个槽。
-//   重同步    旧读头淡出 + 新读头 onset：两个槽。第三个槽留给「改 D 的交叉淡化」。
+//   重同步    旧读头淡出 + 新读头 onset：两个槽。
+//   改 D      过渡做法同上（旧读头 5 ms 淡出 + 新读头 onset），一次只走一个过渡：两个槽。
+//             改 D 的过渡还没走完时来了重同步，用到第三个槽。40 ms 双读头交叉淡化由时序扩展接入，同样是两个槽。
 //   槽满      丢掉包络最小的那个（不是硬丢），并记一次 tapDrop。
 //
 // 读位 R 只有一份：判据那一半（StreamSync）持有它。本块的读位起点 R0 在判据之前取一次，
@@ -223,6 +225,120 @@ int LoopSession::newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept
     return slot;
 }
 
+// 改 D 的过渡（安全链与时序扩展接入之前的过渡做法）。
+//
+// 主读头的 D 不当场改写：那样读位置跳变，回送里是一处阶跃（宿主违约当场抬 D 下限、节拍模式下 BPM 变了也走到这里）。
+// 旧读头按重同步的口径淡出（名义 5 ms，读到本块拉环之后有数据的上界为止，数据不够时缩短到恰好用完），新读头按新的 D
+// 建起来，从它读到的第一个有效位置起 20 ms onset。新读头的 validFrom 不早于旧读头的（起播沿、换写方定下的下界照旧），
+// 也不早于本地延迟线的有效下界：D 变大、新位置落在延迟线还没有数据的地方时，onset 从数据真正开始的那一帧起算，
+// 不会在数据出现时已经走完、以满增益突然冒出来。
+//
+// 一次只走一个过渡：还有读头在淡出、或主读头的 onset 已经出声但还没走完时不换，新的 D 先挂着（主读头照旧的 D 读，
+// 不跳变），过渡走完的那一块再换成当时的 D。拖着旋钮时 D 每块都变，每块都起一个过渡的话，读头槽很快用完（丢一个
+// 还在出声的读头是一处凹陷），预拷贝的尾巴也会被下一次淡出盖掉。挂着的时间不超过一个淡出加一个 onset（约 25 ms）。
+// 主读头还没出声（onset 还没读到第一帧有效数据）时不必等：它这时淡出，最多只在淡出途中读到开头几帧，
+// onset 与淡出两条斜坡相乘，幅度很小而且连续。
+// 挂着的那几块里主读头的 D 可能低于刚抬上去的下限（宿主违约）：那时它读到还没写到的位置，由「写头落后时先淡到 0」接住。
+bool LoopSession::changeDelay(i64 blockStart, i64 delay) noexcept
+{
+    int main = -1;
+    bool fading = false;
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        const Tap& tap = taps_.at(slot);
+        if (!tap.active)
+        {
+            continue;
+        }
+        if (tap.env.fadingOut())
+        {
+            fading = true;
+        }
+        else if (main < 0)
+        {
+            main = slot;
+        }
+    }
+    if (main < 0 || taps_.at(main).delay == delay)
+    {
+        return false;
+    }
+    const Tap& current = taps_.at(main);
+    const bool audibleOnset = current.env.fadingIn() && current.env.fadeInStep > 0;
+    if (fading || audibleOnset)
+    {
+        return false; // 上一个过渡还没走完：新的 D 先挂着
+    }
+
+    const i64 validFrom = std::max({current.validFrom, blockStart + offset_ - delay, line_.lineValidFrom()});
+    if (!sync_.fadeForDelayChange(line_, taps_, blockStart, line_.pulled()))
+    {
+        return false;
+    }
+    newTap(validFrom, delay, sync_.onsetSamples());
+    sink_.emit(LoopEventCode::kResync, static_cast<std::uint8_t>(ResyncReason::kDChange), 0, blockStart);
+    return true;
+}
+
+// 超长块（n > 32768）：环路的时间线在这一块不走 —— 读位 R、读头的包络与判据都不动（Output 那一端同样不写环，
+// 写头也不动），回送缓冲也只容得下支持的最大块长。正在响的回送不在块首直接掉到
+// 0：读头从本块的读位起点照常往下读，在开头淡到 0 （名义 5
+// ms，主读头的数据不够时缩短到恰好用完），写进回送缓冲的开头，其余的样本是 0；引擎再把回送增益在这一块里 滑到
+// 0，下一块从 0 起淡回。这一块只读、不推进：回到支持的块长之后从同一个读位接着读（淡出读过的那几毫秒那时 从增益 0
+// 起淡回来，不是旧数据，是同一段流）。 同一个段、同一个写方还在、写头没有倒退时先把环拉到
+// W（下一块本来也要拉这一段）：淡出读得到上一周期刚写下的帧， D
+// 只比块长多一点时也走得满。换了段、换了写方或写头倒退时不拉，只用已经拉进来的数据（判据留给下一块）。
+std::int64_t LoopSession::fadeOutUnsupportedBlock(const BlockContext& ctx) noexcept
+{
+    if (ctx.returnLeft == nullptr || ctx.returnRight == nullptr)
+    {
+        return 0;
+    }
+    if (ctx.ring != nullptr && havePeer_ && ctx.ring == lastRing_ && ctx.ringGeneration == lastRingGeneration_)
+    {
+        const ipc::RingFormat format = ipc::LoopRing::readFormat(*ctx.ring);
+        const auto writeHead = static_cast<i64>(ipc::LoopRing::writeHead(*ctx.ring));
+        if (format.writerToken == lastWriterToken_ && format.epoch == lastEpoch_ && writeHead >= line_.pulled())
+        {
+            pullRing(*ctx.ring, writeHead, peerMaxBlock_ > 0 ? peerMaxBlock_ : ctx.peerMaxBlock);
+        }
+    }
+
+    // 淡出的长度：名义 5 ms；主读头（没在淡出的那个）从块首起只剩不到 5 ms 的数据时，缩短到恰好在数据用完时走到 0。
+    // 在淡出的读头自己的淡出恰好在它的数据用完时走到 0，再乘上这一段淡出照样连续，不必算进来。
+    // 没有读头时回送本来就是 0。
+    if (taps_.count() == 0)
+    {
+        return 0;
+    }
+    const i64 R0 = sync_.processed();
+    i64 length = sync_.fadeOutSamples();
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        const Tap& tap = taps_.at(slot);
+        if (!tap.active || tap.env.fadingOut())
+        {
+            continue;
+        }
+        const i64 from = R0 + tap.offset - tap.delay;
+        const i64 lo = std::max({from, tap.validFrom, line_.lineValidFrom()});
+        const i64 hi = std::min(tap.validTo, line_.pulled());
+        if (hi > lo)
+        {
+            length = std::min(length, hi - from);
+        }
+        break;
+    }
+    mixTaps(taps_, line_, R0, ctx.returnLeft, ctx.returnRight, length, ctx.returnValid);
+    for (i64 i = 0; i < length; ++i)
+    {
+        const float g = static_cast<float>(length - i) / static_cast<float>(length);
+        ctx.returnLeft[i] *= g;
+        ctx.returnRight[i] *= g;
+    }
+    return length;
+}
+
 // 拉环：把 [pulled, W) 的帧搬进本地延迟线。
 //
 // 下界：比 W 早 (一圈 − G) 帧以上的位置可能正被写方的下一段覆盖，不读，记 overflow 并抬高有效区间的下界。
@@ -404,8 +520,8 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
 
     const i64 n = static_cast<i64>(ctx.blockLength);
 
-    // 块长超过支持的上限：只出干声并给提示码。提示码只在进入超限时发一条（超限会连续很多块，
-    // 每块一条会把诊断队列灌满）；回到支持的块长之后再超限，再发一条。
+    // 块长超过支持的上限：环路这一块不走，只出干声并给提示码；正在响的回送在开头淡到 0（见 fadeOutUnsupportedBlock）。
+    // 提示码只在进入超限时发一条（超限会连续很多块，每块一条会把诊断队列灌满）；回到支持的块长之后再超限，再发一条。
     if (static_cast<std::uint64_t>(ctx.blockLength) > static_cast<std::uint64_t>(ipc::kMaxSupportedBlock))
     {
         result.unsupportedBlock = true;
@@ -415,6 +531,14 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
                        eventUnits256(static_cast<std::int64_t>(ipc::kMaxSupportedBlock)), sync_.processed());
         }
         lastUnsupported_ = true;
+        const std::int64_t faded = fadeOutUnsupportedBlock(ctx);
+        result.returnLeft = ctx.returnLeft;
+        result.returnRight = ctx.returnRight;
+        result.returnValid = ctx.returnValid;
+        result.returnLength = static_cast<int>(faded);
+        result.delayEffective = delayEffective_;
+        result.delayMin = delayMin_;
+        result.estimatorDelay = largestTapDelay(taps_);
         return result;
     }
     lastUnsupported_ = false;
@@ -549,6 +673,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     // 换写方、换段：validFrom = max(W, intent)，旧写方公告过但没发布的那一段不读；换段时新段 W 之前的帧
     // （拉进来的位置与旧段相接，但那是另一条流）也不读。
     // 其他（第一次配上、重同步）：validFrom = W，新数据从下一帧起。
+    bool delayTransition = false;
     if (paired && !outcome.lineCleared)
     {
         const bool needFreshTap = outcome.resynced || taps_.count() == 0;
@@ -568,17 +693,9 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         }
         else
         {
-            // D 变了：把主读头的 D 更新到新值。改 D 的 40 ms 交叉淡化与 100 ms 去抖不在本层做
-            // （常量与口径已在 LoopTiming.h 与 ADR-0002 钉住），这里只保证读头用的是当前的 D。
-            for (int slot = 0; slot < kMaxTaps; ++slot)
-            {
-                Tap& tap = taps_.at(slot);
-                if (tap.active && !tap.env.fadingOut())
-                {
-                    tap.delay = delay;
-                    break;
-                }
-            }
+            // D 变了：旧读头淡出、新读头 onset（过渡做法，读位置不跳变）。40 ms 交叉淡化与 100 ms 去抖由时序扩展接入
+            // （常量与口径已在 LoopTiming.h 与 ADR-0002 钉住）。
+            delayTransition = changeDelay(R0, delay);
         }
     }
 
@@ -644,6 +761,10 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     if (outcome.resynced)
     {
         status_.addResync(static_cast<std::uint8_t>(outcome.reason));
+    }
+    if (delayTransition)
+    {
+        status_.addResync(static_cast<std::uint8_t>(SyncReason::kDChange));
     }
     // frozenMax 是「连续最多几块写头没动」（块数），不是断档推进的样本数。
     status_.setFrozenMax(sync_.maxFrozenBlocks());

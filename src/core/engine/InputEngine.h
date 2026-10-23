@@ -7,8 +7,9 @@
 // 把测量量、诊断事件与本端的端点槽发布出去。
 //
 // 最小实现与安全链的分工：
-//   - 本引擎的回送路径是「读头 → 增益（feedback × g_ret，30 ms 线性平滑）→ 硬钳 |ret| < 1.0 → 加到干声上」。
-//     硬钳是安全链接入之前的兜底（回送有硬上界这条不变量不能等）；反馈默认 0，所以默认就没有回送。
+//   - 本引擎的回送路径是「读头 → 清洗（非有限 → 0、钳 ±16，逐声道）→ 增益（feedback × g_ret，30 ms 线性平滑）
+//     → 硬钳 |ret| < 1.0 → 加到干声上」。清洗与硬钳是安全链接入之前的兜底（读环后清洗、回送有硬上界这两条不能等）；
+//     反馈默认 0，所以默认就没有回送。
 //   - 安全链（清洗、DC 阻断、限制器、软削波、失控保护、500 ms 淡入与锁存）接入之后，回送路径换成安全链处理过的那一路，
 //     淡入、上界与锁存都由安全链负责；本引擎不削弱它们。
 //
@@ -141,7 +142,7 @@ public:
     // 采样率与最大块长（诊断用）
     double sampleRate() const noexcept { return sampleRate_; }
     int maxBlock() const noexcept { return maxBlock_; }
-    // 本会话观察到的最大块长（N_obs）。每次 prepare 清零。
+    // 本会话观察到的最大块长（N_obs）。每次 prepare 清零；超长块（n > 32768，环路不走的块）不计入。
     int maxBlockSeen() const noexcept { return maxBlockSeen_; }
 
     // 干声的增益（线性律：m = mixPercent / 100，g_dry = min(1, 2(1−m))）。
@@ -191,6 +192,11 @@ private:
 
     // 离线渲染的进入沿（只发一次事件）
     bool lastNonrealtime_ = false;
+
+    // 回送直流均值（清洗之后、乘增益之前）：左右各一个一阶平均，时间常数 300 ms（与安全链的同一个量相同）
+    double dcMeanLeft_ = 0.0;
+    double dcMeanRight_ = 0.0;
+    double dcCoeff_ = 0.0;
 
     // 诊断安全段的账：读头峰值（线性，本会话最大）、跳闸次数、环头的清洗计数
     AtomicFloat tailPeakMax_;

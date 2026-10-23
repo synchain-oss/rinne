@@ -45,7 +45,8 @@ inline constexpr double kDelayDefaultMs = 100.0;
 //
 // 这两个时长给改 D 的交叉淡化用（改 D 时开第二个读头并挂交叉淡化包络，读头槽已留够 3 个）；
 // 这里先把常量与口径钉住，交叉淡化接上时照它做，避免两处各写一套。
-// **尚未接上**：本层改 D 目前直接把主读头换到新的 D（读位置跳变），交叉淡化与去抖由后续的时序扩展接入。
+// **尚未接上**：交叉淡化与去抖由后续的时序扩展接入。在那之前改 D 走过渡做法（LoopSession::changeDelay）：
+// 旧读头按重同步的口径 5 ms 淡出、新读头 20 ms onset，读位置不跳变；一次只走一个过渡。
 inline constexpr double kDelayCrossfadeSeconds = 0.040;
 inline constexpr double kDelayDebounceSeconds = 0.100;
 

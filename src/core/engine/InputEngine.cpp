@@ -6,10 +6,11 @@
 //   1. 块首的命令序号比对：变了就执行一次（紧急切断 / 恢复 / 载入预设 / 宿主设置状态）。
 //   2. 干声的增益（线性律：m = mixPercent / 100）与回送增益的目标（feedback × g_ret）。
 //   3. 交给环路层：参数与走带整体下传，环路层算好 D、拉环、混好回送。
-//   4. 干声 + 回送写进宿主缓冲。回送增益为 0 且没有在滑动时，干声逐位直通。
+//   4. 回送先清洗（非有限 → 0、钳 ±16），再乘增益、硬钳，加到干声上写进宿主缓冲。回送增益为 0 且没有在滑动时，
+//      干声逐位直通。
 //   5. 发布本端的会合槽与诊断的账。
 //
-// 安全链接上之后，第 4 步的回送换成「安全链处理过的回送」；本引擎的最小实现只做增益与硬钳。
+// 安全链接上之后，第 4 步的回送换成「安全链处理过的回送」（清洗是它的第一级）；本引擎的最小实现只做清洗、增益与硬钳。
 //
 // 实时约定：不分配、不加锁、不读墙钟、不抛异常；0 样本的调用立刻返回，不推进任何计数。
 #include "engine/InputEngine.h"
@@ -19,6 +20,7 @@
 #include <cstring>
 
 #include "dsp/Sanitize.h"
+#include "engine/SafetyMachine.h"
 
 namespace rinne::engine
 {
@@ -48,6 +50,8 @@ inline constexpr double kGainRampSeconds = 0.030;
 // 安全链接入之前的回送硬上界：|ret| < 1.0（回送有硬上界这条不变量的兜底）。
 inline constexpr float kInterimReturnBound = 0.99999994f; // 1.0f 的前一个 float
 
+// 只钳位、不判有限性：它的输入是「读环之后清洗过的样本（|x| ≤ 16）× 增益（0..1）」，恒为有限值。
+// std::clamp 碰到 NaN 会原样返回，所以清洗必须在它之前做（见 process 里读回送的那一步）。
 inline float boundReturn(float v) noexcept
 {
     return std::clamp(v, -kInterimReturnBound, kInterimReturnBound);
@@ -93,11 +97,20 @@ void InputEngine::setSafetyChain(void* chain, FadeInRequest request) noexcept
 void InputEngine::prepare(double sampleRate, int maxBlock) noexcept
 {
     const double sr = sampleRate > 0.0 ? sampleRate : 48000.0;
+    const bool rateChanged = !prepared_ || sampleRate_ != sr;
     sampleRate_ = sr;
     maxBlock_ = maxBlock > 0 ? maxBlock : 0;
     // N_obs 每次 prepare 清零：延迟下限因此回落，重新按声明值算。
     maxBlockSeen_ = 0;
     prepared_ = true;
+
+    // 回送直流均值：左右各一个一阶平均，时间常数与安全链的同一个量相同（300 ms）。换采样率时从 0 重来。
+    dcCoeff_ = 1.0 - std::exp(-1.0 / (safety::kDcMeanSeconds * sr));
+    if (rateChanged)
+    {
+        dcMeanLeft_ = 0.0;
+        dcMeanRight_ = 0.0;
+    }
 
     loop_.prepare(sr);
     // 平滑长度按采样率换算；当前值不动（同采样率重新 prepare 时增益不跳）。
@@ -239,10 +252,17 @@ bool InputEngine::process(const AudioView& buffer, const EngineParams& params, c
     }
 
     const int n = buffer.length;
+    // 超长块（n > 32768）：环路这一块不走（两端都不碰环），只出干声。
+    const bool oversize = static_cast<std::uint64_t>(n) > static_cast<std::uint64_t>(ipc::kMaxSupportedBlock);
 
     // 块首：命令序号比对与块长观察。
+    // 超长块不计入 N_obs：D 的下限保证的是「读头读的帧在本块之前已经写好」，超长块里环路根本不走、Output 也不写环，
+    // 它不构成这个约束。计进去的话一块 40000 帧就会把 D 下限抬到 40000（约 0.83 s）直到下一次 prepare。
     checkCommands(params);
-    noteBlockLength(n);
+    if (!oversize)
+    {
+        noteBlockLength(n);
+    }
 
     // 进入离线渲染：只发一次事件（不改变 DSP）。
     if (transport.nonrealtime && !lastNonrealtime_)
@@ -257,7 +277,10 @@ bool InputEngine::process(const AudioView& buffer, const EngineParams& params, c
     const float feedback = std::clamp(params.feedbackPercent, kMinFeedbackPercent, kMaxFeedbackPercent) / 100.0f;
     returnGain_ = params.loopOn && !bypassed ? feedback * gRet : 0.0f;
     // 30 ms 线性平滑：目标没变时进行中的斜坡照常走完，不会每块重新起算。
-    returnSmoother_.setTargetValue(returnGain_);
+    // 超长块里目标是 0：环路层只给开头一段淡出，增益同时滑到 0（超长块不短于 32769 帧，采样率不超过 1 MHz 时都比
+    // 30 ms 的平滑长，块末增益已到 0），回到支持的块长之后增益从 0 起按 30 ms 淡回：回送在进出超长块的两头都不阶跃。
+    const float returnTarget = oversize ? 0.0f : returnGain_;
+    returnSmoother_.setTargetValue(returnTarget);
 
     // 环路层：参数与走带整体下传。
     loop::BlockContext ctx(params, transport);
@@ -284,21 +307,41 @@ bool InputEngine::process(const AudioView& buffer, const EngineParams& params, c
     // 回送增益为 0 且不在滑动时：干声逐位直通（含 −0.0 与 NaN 载荷）。
     //   干声增益恰为 1 时不乘；回送增益为 0 时不加（加 +0.0 会把 −0.0 变成 +0.0）。
     // mono（一个声道）时回送取两格的平均 0.5·(L + R)，不放大环路增益。
+    // 回送只有 returnLength 个样本（一般等于块长；超长块里只有开头那段淡出），之后的样本当 0。
     float* outLeft = buffer.left();
     float* outRight = buffer.numChannels > 1 ? buffer.right() : nullptr;
     const bool mono = buffer.numChannels == 1;
-    const float* const retLeft = result.returnLength > 0 ? result.returnLeft : nullptr;
-    const float* const retRight = result.returnLength > 0 ? result.returnRight : nullptr;
+    const int retLength = result.returnLeft != nullptr && result.returnRight != nullptr ? result.returnLength : 0;
+    const float* const retLeft = result.returnLeft;
+    const float* const retRight = result.returnRight;
     const bool dryIsUnity = dryGain_ == 1.0f;
     const bool noReturn =
-        returnGain_ == 0.0f && !returnSmoother_.isSmoothing() && returnSmoother_.getCurrentValue() == 0.0f;
+        returnTarget == 0.0f && !returnSmoother_.isSmoothing() && returnSmoother_.getCurrentValue() == 0.0f;
 
     float blockPeak = 0.0f;
+    std::uint32_t nonFinite = 0;
     for (int i = 0; i < n; ++i)
     {
-        const float rawL = retLeft != nullptr ? retLeft[i] : 0.0f;
-        const float rawR = retRight != nullptr ? retRight[i] : 0.0f;
+        // 读环之后的清洗（回送链第一级，与安全链的第一级同一个函数）：非有限 → 0、钳 ±16、极小值冲 0，逐声道做。
+        // 环在跨进程的共享内存里，Output 写环前清洗过也不能担保读出来的一定有限（别的版本或异常的写方、内存损坏）。
+        // 清洗在 mono 取平均、峰值与直流均值之前：一个声道坏了，另一个声道照常；之后的增益与硬钳都只见有限值。
+        // 这里置 0 的是环里来的坏样本（环内的 NaN 由清洗处理、不跳闸），计进 returnNonFinite（按帧计，与安全链一致）。
+        float rawL = 0.0f;
+        float rawR = 0.0f;
+        if (i < retLength)
+        {
+            bool bad = false;
+            rawL = dsp::sanitizeSample(retLeft[i], bad);
+            rawR = dsp::sanitizeSample(retRight[i], bad);
+            if (bad)
+            {
+                ++nonFinite;
+            }
+        }
         blockPeak = std::max({blockPeak, std::fabs(rawL), std::fabs(rawR)});
+        // 回送直流均值（清洗之后、乘增益之前）：左右各自平均，发布时取绝对值较大的那个声道。
+        dcMeanLeft_ = dsp::flushTiny(dcMeanLeft_ + dcCoeff_ * (static_cast<double>(rawL) - dcMeanLeft_));
+        dcMeanRight_ = dsp::flushTiny(dcMeanRight_ + dcCoeff_ * (static_cast<double>(rawR) - dcMeanRight_));
 
         if (noReturn)
         {
@@ -342,26 +385,13 @@ bool InputEngine::process(const AudioView& buffer, const EngineParams& params, c
     // 发布到本端的会合槽（写的是自己的槽，安全不变量 9）。
     publishToSlot(context, transport, bypassed, result, blockPeak);
 
-    // 测量量：回送 DC 均值（本引擎只知道自己这一层能算的量；安全链接上之后由安全链填）。
-    // 非有限值立刻计数：Input 内部产生的非有限值是跳闸的判据之一。
-    std::uint32_t nonFinite = 0;
-    double dcSum = 0.0;
-    for (int i = 0; i < n && retLeft != nullptr && retRight != nullptr; ++i)
-    {
-        const float l = retLeft[i];
-        const float r = retRight[i];
-        if (!dsp::isFiniteSample(l) || !dsp::isFiniteSample(r))
-        {
-            ++nonFinite;
-            continue;
-        }
-        dcSum += std::fabs(l) > std::fabs(r) ? l : r;
-    }
+    // 测量量（本引擎只填自己这一层算得出的量；安全链接上之后由安全链填）：读环后清洗掉的非有限帧数、
+    // 回送直流均值（左右各自 300 ms 平均，取绝对值较大者，口径见 Meters）。
     if (nonFinite > 0)
     {
         meters_.returnNonFinite.fetch_add(nonFinite, std::memory_order_relaxed);
     }
-    meters_.returnDcMean.store(static_cast<float>(dcSum / static_cast<double>(n)));
+    meters_.returnDcMean.store(static_cast<float>(std::max(std::fabs(dcMeanLeft_), std::fabs(dcMeanRight_))));
 
     // 诊断安全段的账：读头峰值、限制器增益缩减的最大值、跳闸次数、环头的清洗计数。
     tailPeakMax_.publishMax(blockPeak);

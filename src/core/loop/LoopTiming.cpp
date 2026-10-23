@@ -23,7 +23,7 @@ static_assert(drift(400, 1000, 0) == -600, "读位跑到写头前面时漂移量
 static_assert(drift(0, 0, -100) == 100, "偏移为负时写头照样领先");
 
 // 帧位置的差值：回绕之后仍然给出正确的有符号差。
-static_assert(frameDiff(10u, 4u) == 6, "帧位置的差是右操作数减左操作数");
+static_assert(frameDiff(10u, 4u) == 6, "帧位置的差是左操作数减右操作数");
 static_assert(frameDiff(4u, 10u) == -6, "帧位置的差是有符号的");
 static_assert(frameDiff(0u, 0u) == 0, "相同位置的差是 0");
 

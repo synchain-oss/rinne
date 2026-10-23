@@ -90,39 +90,50 @@ ipc::RingWriteResult OutputEngine::writeChunk(ipc::RingSegment& seg, const Audio
     const float* left = buffer.left();
     const float* right = buffer.right(); // mono 时与 left 是同一串：两格写同一个值（环恒为立体声）
 
-    return writer_.write(seg, frames, [&](std::uint32_t i, std::uint64_t, float& outLeft, float& outRight) noexcept {
-        // 旁路的斜坡：写进环的数据在旁路时 10 ms 淡到 0，解除旁路时 10 ms 淡回。
-        // 斜坡按写进环的帧推进，与块长无关：同一段输入怎么切块，写进环的值逐位相同。
-        const float ramp = bypassRamp_.getNextValue();
-        const float l = left != nullptr ? left[offset + i] : 0.0f;
-        const float r = right != nullptr ? right[offset + i] : l;
+    // 旁路的斜坡按「真正发布进环的帧」推进。RingWriter::write 在公告了这一段（write_intent 推到 W + k）之后、
+    // 推写头之前逐帧调回调；写头的 CAS 输了（kCasLost：这一段在写的时候被回收推过，没有发布）时回调已经全部跑过。
+    // 所以回调里推进的是斜坡的一份拷贝，这一段发布了（kOk）才交回去；kInFlight 时回调一次都没调，拷贝也没动。
+    // 否则丢掉的那一段照样把斜坡往前推，之后真正写进环的数据就和斜坡错开了。
+    dsp::LinearSmoother ramp = bypassRamp_;
+    const ipc::RingWriteResult result =
+        writer_.write(seg, frames, [&](std::uint32_t i, std::uint64_t, float& outLeft, float& outRight) noexcept {
+            // 旁路的斜坡：写进环的数据在旁路时 10 ms 淡到 0，解除旁路时 10 ms 淡回。
+            // 斜坡按写进环的帧推进，与块长无关：同一段输入怎么切块，写进环的值逐位相同。
+            const float gain = ramp.getNextValue();
+            const float l = left != nullptr ? left[offset + i] : 0.0f;
+            const float r = right != nullptr ? right[offset + i] : l;
 
-        // 清洗：非有限 → 0；|v| > 16 → ±16；|v| < 1e−30 → 0。先清洗再乘斜坡（非有限 × 0 仍是非有限）。
-        bool bad = false;
-        float sl = dsp::sanitizeSample(l, bad);
-        float sr = dsp::sanitizeSample(r, bad);
-        if (bad)
-        {
-            nonFinite_.fetch_add(1, std::memory_order_relaxed);
-            seg.header.nonfinite_count.fetch_add(1, std::memory_order_relaxed);
-        }
-        // 钳位计数：|v| 超过 16 的帧数（非有限的不算，非有限已经变成 0）。
-        if (std::fabs(l) > dsp::kSanitizeLimit || std::fabs(r) > dsp::kSanitizeLimit)
-        {
-            if (dsp::isFiniteSample(l) && dsp::isFiniteSample(r))
+            // 清洗：非有限 → 0；|v| > 16 → ±16；|v| < 1e−30 → 0。先清洗再乘斜坡（非有限 × 0 仍是非有限）。
+            bool bad = false;
+            float sl = dsp::sanitizeSample(l, bad);
+            float sr = dsp::sanitizeSample(r, bad);
+            if (bad)
             {
-                clamps_.fetch_add(1, std::memory_order_relaxed);
-                seg.header.clamp_count.fetch_add(1, std::memory_order_relaxed);
+                nonFinite_.fetch_add(1, std::memory_order_relaxed);
+                seg.header.nonfinite_count.fetch_add(1, std::memory_order_relaxed);
             }
-        }
-        if (ramp != 1.0f)
-        {
-            sl = dsp::flushTiny(sl * ramp);
-            sr = dsp::flushTiny(sr * ramp);
-        }
-        outLeft = sl;
-        outRight = sr;
-    });
+            // 钳位计数：|v| 超过 16 的帧数（非有限的不算，非有限已经变成 0）。
+            if (std::fabs(l) > dsp::kSanitizeLimit || std::fabs(r) > dsp::kSanitizeLimit)
+            {
+                if (dsp::isFiniteSample(l) && dsp::isFiniteSample(r))
+                {
+                    clamps_.fetch_add(1, std::memory_order_relaxed);
+                    seg.header.clamp_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            if (gain != 1.0f)
+            {
+                sl = dsp::flushTiny(sl * gain);
+                sr = dsp::flushTiny(sr * gain);
+            }
+            outLeft = sl;
+            outRight = sr;
+        });
+    if (result == ipc::RingWriteResult::kOk)
+    {
+        bypassRamp_ = ramp;
+    }
+    return result;
 }
 
 // 发布本端（Output）的会合槽。写的是自己的槽（安全不变量 9），角色固定为 Output。

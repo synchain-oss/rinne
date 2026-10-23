@@ -172,6 +172,13 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
     }
 }
 
+bool StreamSync::fadeForDelayChange(LocalLine& line, TapSet& taps, i64 processed, i64 fadeEnd) noexcept
+{
+    SyncOutcome outcome;
+    startFade(line, taps, processed, fadeOut_, fadeEnd, outcome);
+    return outcome.fadeStarted;
+}
+
 void StreamSync::notePlayReset(i64 processed, i64 n, SyncOutcome& outcome) noexcept
 {
     if (pendingPlayReset_ && playResetAt_ < processed + n)

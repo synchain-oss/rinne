@@ -777,3 +777,241 @@ TEST_CASE("环路 状态快照：m / w / off 三元组出自同一块（顺序�
     CHECK(mixed == 0u);
     CHECK(consistent > 0u);
 }
+
+namespace
+{
+// 改 D 的用例：环里每帧写位置编码 encode(p)（缓慢上升的斜坡，相邻两帧差 1/65536）。读头读的位置一跳，回送就跳
+// ΔD/65536；常数信号看不出读位置跳没跳，所以这里不用常数。位置都在 65536 以内，编码不回绕。
+constexpr float kEncodeSlope = 1.0f / 65536.0f;
+
+// 读一块（块长 n），把混好的回送接在轨迹后面，再让写方写 n 帧位置编码（Input 在前、写方在后）。
+void feedEncoded(Session& s, ipc::RingSegment& ring, int n, const EngineParams& params, std::vector<float>& trace,
+                 const TransportInfo& transport = TransportInfo{})
+{
+    s.feed(n, transport, params);
+    trace.insert(trace.end(), s.left(), s.left() + n);
+    writeFrames(ring, static_cast<std::uint32_t>(n));
+}
+
+float maxAbs(const std::vector<float>& trace, std::size_t from)
+{
+    float worst = 0.0f;
+    for (std::size_t i = from; i < trace.size(); ++i)
+    {
+        worst = std::max(worst, std::fabs(trace[i]));
+    }
+    return worst;
+}
+
+// 改 D 时相邻样本差的上界：旧读头 5 ms（240 个样本）淡出、新读头 20 ms（960 个样本）onset，两路同时在场。
+// 每一步的变化不超过「幅度 × (1/240 + 1/960)」加上两路信号自己的变化（各一个斜率）。读位置跳 ΔD 的话，
+// 一步就是 ΔD × 斜率，本组用例的 ΔD 都让它远大于这个上界。
+float delayChangeStepBound(float amplitude)
+{
+    return amplitude * (1.0f / 240.0f + 1.0f / 960.0f) + 2.0f * kEncodeSlope + 1.0e-6f;
+}
+
+// 反例：旧实现「直接改 tap.delay」时，从改 D 的那一块起读头就读新的位置（包络恒为 1）。
+std::vector<float> directSwitchTrace(const std::vector<float>& trace, std::size_t mark, std::int64_t newDelay)
+{
+    std::vector<float> direct(trace.begin(), trace.begin() + static_cast<std::ptrdiff_t>(mark));
+    for (std::size_t t = mark; t < trace.size(); ++t)
+    {
+        direct.push_back(encode(static_cast<std::int64_t>(t) - newDelay));
+    }
+    return direct;
+}
+
+// 过渡走完之后（新读头的 onset 走满）输出下标 t 读的正是环位置 t − D：配对时 W = 0、R = 0，偏移为 0。
+void checkSettledOn(const std::vector<float>& trace, std::size_t from, std::int64_t delay)
+{
+    for (std::size_t t = from; t < trace.size(); t += 17)
+    {
+        CHECK(trace[t] == encode(static_cast<std::int64_t>(t) - delay));
+    }
+}
+} // namespace
+
+TEST_CASE("环路 改 D（用户改延迟）：旧读头 5 ms 淡出、新读头 20 ms onset，相邻样本差不超过斜坡一步；直接改 tap.delay "
+          "会超出")
+{
+    // ⛔ 删除式验证点：D 一变就直接改写主读头的 tap.delay（读位置当场跳 600 个样本）→ 回送一步跳 600/65536，
+    //    远大于斜坡一步的上界，本用例变红。
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kNearBlock);
+    s.attachRing(*ring, 1);
+    EngineParams params;
+    params.delayMs = 12.5f; // D = 600
+    std::vector<float> trace;
+    for (int block = 0; block < 12; ++block)
+    {
+        feedEncoded(s, *ring, kNearBlock, params, trace);
+    }
+    REQUIRE(s.status().delayEffective == 600);
+    const std::size_t mark = trace.size();
+    REQUIRE(trace[mark - 1] == encode(static_cast<std::int64_t>(mark - 1) - 600));
+
+    params.delayMs = 25.0f; // D = 1200
+    for (int block = 0; block < 8; ++block)
+    {
+        feedEncoded(s, *ring, kNearBlock, params, trace);
+    }
+    const LoopStatusFields fields = s.status();
+    CHECK(fields.delayEffective == 1200);
+    CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
+    CHECK(fields.resyncCount == 1u);
+    CHECK(fields.tapDrop == 0u);
+    CHECK(fields.overrun == 0u);
+
+    const float bound = delayChangeStepBound(maxAbs(trace, mark - 1));
+    CHECK(maxStep(trace, mark - 1) <= bound);
+    // 第一个样本：旧读头满幅 + 新读头 onset 的第一步，不是跳到新位置上。
+    CHECK(std::fabs(trace[mark] - trace[mark - 1]) <= bound);
+    // onset 走满之后读的正是新的 D。
+    checkSettledOn(trace, mark + 960, 1200);
+    // 反例：直接改 tap.delay 的轨迹在改 D 的那一点跳 600 × 斜率，判据抓得住。
+    CHECK(maxStep(directSwitchTrace(trace, mark, 1200), mark - 1) > 2.0f * bound);
+}
+
+TEST_CASE("环路 改 D（宿主违约当场抬 D 下限）：同样走淡出与 onset，不阶跃、不补 0；直接改 tap.delay 会超出")
+{
+    // ⛔ 删除式验证点：同上（直接改 tap.delay）→ 违约那一块读位置跳 424 个样本，本用例变红。
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kNearBlock);
+    s.attachRing(*ring, 1);
+    EngineParams params;
+    params.delayMs = 12.5f; // D = 600，声明块长 512
+    std::vector<float> trace;
+    for (int block = 0; block < 12; ++block)
+    {
+        feedEncoded(s, *ring, kNearBlock, params, trace);
+    }
+    const std::size_t mark = trace.size();
+
+    // 宿主违约：送来 1024 帧（声明 512）→ D 下限当场抬到 1024，D 从 600 变成 1024。之后回到 512。
+    feedEncoded(s, *ring, 1024, params, trace);
+    for (int block = 0; block < 6; ++block)
+    {
+        feedEncoded(s, *ring, kNearBlock, params, trace);
+    }
+    const LoopStatusFields fields = s.status();
+    CHECK(fields.delayEffective == 1024);
+    CHECK(fields.delayMinReason == static_cast<std::uint8_t>(DelayMinReason::kHostViolation));
+    CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
+    CHECK(fields.overrun == 0u); // 旧读头淡出读的、新读头读的都是已经写好的帧
+    CHECK(fields.tapDrop == 0u);
+
+    const float bound = delayChangeStepBound(maxAbs(trace, mark - 1));
+    CHECK(maxStep(trace, mark - 1) <= bound);
+    checkSettledOn(trace, mark + 960, 1024);
+    CHECK(maxStep(directSwitchTrace(trace, mark, 1024), mark - 1) > 2.0f * bound);
+}
+
+TEST_CASE("环路 改 D（节拍模式下 BPM 变了）：同样走淡出与 onset，不阶跃；直接改 tap.delay 会超出")
+{
+    // ⛔ 删除式验证点：同上（直接改 tap.delay）→ BPM 从 120 变成 150 时读位置跳 300 个样本，本用例变红。
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kNearBlock);
+    s.attachRing(*ring, 1);
+    EngineParams params;
+    params.delayMode = DelayMode::kSync;
+    params.delayNote = 0; // 1/16 拍：120 BPM → 1500 个样本，150 BPM → 1200 个样本
+    TransportInfo transport;
+    transport.bpm = 120.0f;
+    std::vector<float> trace;
+    for (int block = 0; block < 12; ++block)
+    {
+        feedEncoded(s, *ring, kNearBlock, params, trace, transport);
+    }
+    REQUIRE(s.status().delayEffective == 1500);
+    const std::size_t mark = trace.size();
+
+    transport.bpm = 150.0f;
+    for (int block = 0; block < 8; ++block)
+    {
+        feedEncoded(s, *ring, kNearBlock, params, trace, transport);
+    }
+    const LoopStatusFields fields = s.status();
+    CHECK(fields.delayEffective == 1200);
+    CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
+    CHECK(fields.tapDrop == 0u);
+
+    const float bound = delayChangeStepBound(maxAbs(trace, mark - 1));
+    CHECK(maxStep(trace, mark - 1) <= bound);
+    checkSettledOn(trace, mark + 960, 1200);
+    CHECK(maxStep(directSwitchTrace(trace, mark, 1200), mark - 1) > 2.0f * bound);
+}
+
+TEST_CASE("环路 拖着改 D（每块都变）：一次只走一个过渡，不丢读头、不阶跃，停下之后落在最后的 D 上")
+{
+    // ⛔ 删除式验证点：去掉「上一个过渡没走完时新的 D 先挂着」→ 块长 64 时每块起一个过渡，第三块读头槽就满了，
+    //    丢掉一个还在出声的读头（一处凹陷），本用例变红。
+    constexpr int kBlock = 64;
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kBlock);
+    s.attachRing(*ring, 1);
+    EngineParams params;
+    params.delayMs = 12.5f; // D = 600
+    std::vector<float> trace;
+    for (int block = 0; block < 40; ++block)
+    {
+        feedEncoded(s, *ring, kBlock, params, trace);
+    }
+    const std::size_t mark = trace.size();
+    // 拖 60 块：每块 D 加 1 ms（48 个样本），600 → 3480。
+    for (int block = 1; block <= 60; ++block)
+    {
+        params.delayMs = 12.5f + static_cast<float>(block);
+        feedEncoded(s, *ring, kBlock, params, trace);
+    }
+    // 停下：挂着的那个 D 在上一个过渡走完之后换上，再等它的 onset 走满。
+    for (int block = 0; block < 80; ++block)
+    {
+        feedEncoded(s, *ring, kBlock, params, trace);
+    }
+    const LoopStatusFields fields = s.status();
+    CHECK(fields.delayEffective == 3480);
+    CHECK(fields.tapDrop == 0u);
+    const std::uint32_t transitions = fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)];
+    CHECK(transitions >= 2u);
+    CHECK(transitions < 60u); // 挂着的 D 被合并了：过渡比 D 的变化少得多
+    CHECK(maxStep(trace, mark - 1) <= delayChangeStepBound(maxAbs(trace, mark - 1)));
+    checkSettledOn(trace, trace.size() - static_cast<std::size_t>(kBlock), 3480);
+}
+
+TEST_CASE("环路 超长块（n > 32768）：环路这一块不走，读头先把环拉到 W，在开头 5 ms 淡到 0，之后补 0")
+{
+    // ⛔ 删除式验证点：超长块直接给 0 个回送样本（块首从 0.5 直接掉到 0）→ 本用例变红；
+    //    超长块不先把环拉到 W（D 只比块长多 88 个样本，淡出只剩 88 个样本）→ 本用例变红。
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kNearBlock);
+    s.attachRing(*ring, 1);
+    const EngineParams params = nearBlockDelay(); // D = 600
+    std::vector<float> trace;
+    runSteady(s, *ring, params, trace, 12);
+    REQUIRE(trace.back() == 0.5f);
+    const std::int64_t before = s.session().processed();
+
+    // 超长块：写方那一端同样不写环（这里不写）。
+    const BlockResult result = s.feed(40000, TransportInfo{}, params);
+    CHECK(result.unsupportedBlock);
+    REQUIRE(result.returnLength == 240);
+    std::vector<float> faded(trace);
+    faded.insert(faded.end(), s.left(), s.left() + result.returnLength);
+    faded.push_back(0.0f); // 淡出之后补 0
+    for (int i = 0; i < 240; i += 7)
+    {
+        CHECK(std::fabs(s.left()[i] - 0.5f * static_cast<float>(240 - i) / 240.0f) < 1.0e-6f);
+    }
+    CHECK(maxStep(faded, trace.size() - 1) <= 0.5f / 240.0f + 1.0e-6f);
+    // 时间线不走：读位不动，下一块从同一个读位接着读（增益在引擎里从 0 淡回）。
+    CHECK(s.session().processed() == before);
+    feedInto(s, params, trace);
+    CHECK(s.left()[0] == 0.5f);
+    CHECK(s.session().processed() == before + kNearBlock);
+}

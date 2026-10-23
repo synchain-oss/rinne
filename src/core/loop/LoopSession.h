@@ -90,8 +90,10 @@ struct BlockContext
 // 一块的结果。引擎用它决定输出与后续动作。
 struct BlockResult
 {
-    // 混好的回送（左右各一份，长度 = 块长）。引擎提供缓冲（预分配），环路层往里写；
+    // 混好的回送（左右各一份，长度 = returnLength）。引擎提供缓冲（预分配），环路层往里写；
     // 指针为空时环路层只算账不出样本。
+    // returnLength 一般等于块长；超长块（n > 32768）里只有开头那一段淡出（不超过 5 ms），returnLength 是它的长度，
+    // 之后的样本一律当 0（它们不在缓冲里：缓冲只容得下支持的最大块长）。
     float* returnLeft = nullptr;
     float* returnRight = nullptr;
     int returnLength = 0;
@@ -180,6 +182,11 @@ private:
     void fadeMainTapAtUnderrun(i64 blockStart) noexcept;
     // 建一个新读头（onset 走 20 ms）。槽满时丢包络最小的那个，返回槽下标；没有槽时返回 -1。
     int newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept;
+    // 改 D 的过渡：旧读头 5 ms 淡出、新读头按新的 D 建起来 20 ms onset（读位置不跳变）。一次只走一个过渡：
+    // 还有读头在淡出、或主读头的 onset 已经出声但还没走完时不换，新的 D 先挂着。返回本块是否起了一个过渡。
+    bool changeDelay(i64 blockStart, i64 delay) noexcept;
+    // 超长块：环路这一块不走（只读不推进），回送在开头淡到 0。返回写进回送的样本数（淡出的长度，可以是 0）。
+    std::int64_t fadeOutUnsupportedBlock(const BlockContext& ctx) noexcept;
     // 对端槽的事实：宿主时间戳、块序号、实时标志。没有会合段或组号不合法时什么都不读。
     void readPeerSlot(const BlockContext& ctx) noexcept;
     // 错序判据（口径见 ADR-0002）：对端的时间戳更小 = 对端那一端的块首更早被处理。
