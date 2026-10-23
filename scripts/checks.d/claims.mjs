@@ -24,9 +24,10 @@
 //   pending-listed      证据产物尚不存在时允许直述，并把待办列出来（INFO 行，不判红）
 //   strong-needs-hedge  一条声明没有成立的 evidence，又没有 pending（或有 pending 但属于要求 hedge 的宿主兼容类）时，
 //                       它的每一处 strong 命中，所在的分句里都要有 hedge 短语（分句规则见 clauseSpans）；
-//                       引文放行：命中整个落在行内代码里，或整个落在处在引用语境里的引号中（紧跟在写成 / 不要写 / 例如 /
-//                       such as / e.g. / 冒号之后，或括号里举例，见 citedSpans）；引号前面没有引用语境的引号
-//                       （单独成句的 "Rinne works in LUNA."）不是引文，照判
+//                       引文放行：命中整个落在行内代码里，或整个落在处在引用语境里的引号中（紧跟在 例如 / such as / e.g. /
+//                       避免 / 措辞 之类直接谈措辞的词之后；紧跟在带否定或祈使的转述动词之后，如 never say / 不要写，没有否定的
+//                       Users say "…" 是转述式断言，不算；冒号引出而冒号之前的分句在谈措辞；或括号里举例，见 citedSpans）；
+//                       引号前面没有引用语境的引号（单独成句的 "Rinne works in LUNA."、Status: "…"）不是引文，照判
 //   unregistered-absolute 用户面文本里出现绝对化强断言句式、又没有被任何已登记声明的 strong 覆盖时判红；
 //                       覆盖按命中片段算：声明的 strong 命中要与绝对化句式的命中片段重叠，同一句里别处另有 strong 不算
 //
@@ -307,22 +308,53 @@ export function clauseAround(sentence, a, b) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * 引用语境：紧挨在引号之前（中间只隔空白与开括号）的词。命中就说明引号里的话是被提到的，不是被断言的：
- *   英文  such as / e.g. / i.e. / for example / for instance / like / write(s) / writing / written / wrote /
- *         say(s) / saying / said / avoid(s) / avoiding / quote(s) / quoted / quoting / phrase(s) / wording / word(s) / term(s)
- *   中文  写成 / 写作 / 写 / 说成 / 说 / 避免 / 如 / 用语 / 措辞 / 字样；例如、比如、譬如、诸如都以「如」结尾，由「如」管着，
- *         不另列（另列了，删掉它们没有任何输出变化）；不如、假如的「如」不算
- * 冒号引出的引号另算（见 COLON_LEAD）。
+ * 引用语境分两类。引号里的话是被「提到」的，不是被断言的，才放行；转述（有人说它成立）本身就是把断言换个人说出来，不放行。
+ *
+ * 一、直接的引用语境：紧挨在引号之前（中间只隔空白与开括号）的词，本身就在谈措辞，不带转述：
+ *   英文  such as / e.g. / i.e. / for example / for instance / avoid(s) / avoiding / phrase(s) / wording / word(s) / term(s)
+ *   中文  避免 / 如 / 用语 / 措辞 / 字样；例如、比如、譬如、诸如都以「如」结尾，由「如」管着，不另列
+ *         （另列了，删掉它们没有任何输出变化）；不如、假如的「如」不算
+ * 二、转述动词（REPORT_VERB_*）：say / write / quote 的各种词形、like，以及 写成 / 写作 / 写 / 说成 / 说。
+ *     "Users say "Rinne works in LUNA"." 与「可以说「Rinne 在 LUNA 可用」」是转述式断言，所以动词前面要带否定或祈使
+ *     （NEGATOR_*：never / don't / do not / cannot / won't / avoid …，不要 / 别 / 勿 / 不得 / 不能 / 禁止 / 严禁 / 紧挨动词的不）才算引用语境。
+ *     否定词与动词之间英文最多隔两个词（never ever say、never use phrases like），中文只隔 再 / 乱 / 随便 / 这样 / 直接；隔得更远不认。
+ *     特别、分别的「别」不是祈使；不得不说、不能不说、不敢不说、不可不说、不会不说、never fail to say 是双重否定（在断言），都不算否定。
+ *     这是启发式，别的双重否定（can't help but say 一类）机检不承诺，靠文案评审挡。
+ * 冒号引出的引号另算（见 colonLeadCites）。
  * 引号前面什么语境都没有（单独成句、或夹在断言中间的 "Rinne works in LUNA."）不是引文，照常判。
  */
 const CITE_LEAD_IN = new RegExp(
-    "(?:\\b(?:such as|e\\.g\\.|i\\.e\\.|for example|for instance|like|writes?|writing|written|wrote|says?|saying|said|" +
-        "avoids?|avoiding|quotes?|quoted|quoting|phrases?|wording|words?|terms?)|" +
-        "写成|写作|写|说成|说|避免|(?<![不假])如|用语|措辞|字样)$",
+    "(?:\\b(?:such as|e\\.g\\.|i\\.e\\.|for example|for instance|avoids?|avoiding|phrases?|wording|words?|terms?)|" +
+        "避免|(?<![不假])如|用语|措辞|字样)$",
     "i",
 );
-/** 冒号引出：「Never write: "works in LUNA"」「注意：「在 LUNA 可用」」。 */
+const REPORT_VERB_EN = "says?|saying|said|writes?|writing|written|wrote|quotes?|quoted|quoting|like";
+const REPORT_VERB_ZH = "写成|写作|写|说成|说";
+const NEGATOR_EN =
+    "never|(?:do|does|did|will|should|must)(?:\\s+not|n['’]t)|cannot|can\\s+not|can['’]t|won['’]t|avoid(?:s|ing)?";
+const NEGATOR_ZH = "(?:不要|(?<![特分])别|勿|不得|不能|禁止|严禁)(?:再|乱|随便|这样|直接)?|(?<![得能敢可会])不";
+/** 带否定或祈使的转述动词：never say / don't write / 不要写 / 别再说。 */
+const NEGATED_REPORT =
+    "\\b(?:" +
+    NEGATOR_EN +
+    ")(?:\\s+(?!fail\\b)[\\w'’-]+){0,2}\\s+(?:" +
+    REPORT_VERB_EN +
+    ")\\b|(?:" +
+    NEGATOR_ZH +
+    ")(?:" +
+    REPORT_VERB_ZH +
+    ")";
+/** 紧挨在引号之前的（动词是引号前最后一个词）。 */
+const NEGATED_REPORT_LEAD = new RegExp("(?:" + NEGATED_REPORT + ")$", "i");
+/** 冒号前的分句里任何位置（Never write this: "…"）。 */
+const NEGATED_REPORT_ANYWHERE = new RegExp(NEGATED_REPORT, "i");
+/** 冒号引出：「Never use this wording: "works in LUNA"」「不要这样写：「在 LUNA 可用」」。 */
 const COLON_LEAD = /[:：]$/;
+/**
+ * 冒号前同一分句里在谈措辞的词。故意不收 claim / statement / 声明 / 结论 这类词：「Our claim: "…"」「声明：「…」」本身就是在断言。
+ * 转述动词不在这里：它们要带否定或祈使（NEGATED_REPORT_ANYWHERE），「Users say: "…"」是转述式断言。
+ */
+const COLON_TALK = /\b(?:phrases?|wording|words?|terms?|quotes?|quoted|quoting)\b|说法|措辞|写法|用语|字样|短语/i;
 /** 引号后面直接跟着的指称：「「在 LUNA 可用」这种写法不写」。 */
 const CITE_LEAD_OUT = /^\s*(?:这种|这样|这类|此类|这句)(?:写法|说法|话|措辞|用语|字样|表述)/;
 /** 括号里举例：「Strong claims about behaviour ("does not change with...")」，括号之前的话在谈声明或措辞。 */
@@ -331,10 +363,24 @@ const CLAIM_TALK = /\b(?:claims?|phrases?|wording|statements?)\b|声明|说法|�
 const QUOTE_LIST_GAP = /^\s*(?:[,，、]\s*)?(?:(?:or|and)\s+|或者?|和)?$/i;
 
 /**
+ * 冒号引出的引号是不是引文：冒号之前同一分句（clauseSpans 的分句界）里要有谈措辞的词（COLON_TALK）、直接的引用语境
+ * （「For example:」「Avoid:」「避免：」）或带否定 / 祈使的转述动词（「Never write this: "…"」「不要这样写：「…」」）。
+ * 「Status: "Rinne works in LUNA."」「结论：「Rinne 在 LUNA 可用」」冒号前什么都没在谈措辞，那是断言。
+ */
+function colonLeadCites(lead) {
+    if (!COLON_LEAD.test(lead)) return false;
+    const head = lead.replace(COLON_LEAD, "").trimEnd();
+    const spans = clauseSpans(head);
+    const clause = head.slice(spans[spans.length - 1][0]);
+    return COLON_TALK.test(clause) || CITE_LEAD_IN.test(head) || NEGATED_REPORT_ANYWHERE.test(clause);
+}
+
+/**
  * 一句话里「引文」的区间：行内代码，以及处在引用语境里的引号。
- * 引号的判定（任一成立）：紧跟在引用语境之后（CITE_LEAD_IN 或冒号）；引号之后紧跟「这种写法」一类指称；
+ * 引号的判定（任一成立）：紧跟在直接的引用语境之后（CITE_LEAD_IN），或紧跟在带否定 / 祈使的转述动词之后（NEGATED_REPORT_LEAD）；
+ * 冒号引出且冒号前同一分句在谈措辞（colonLeadCites）；引号之后紧跟「这种写法」一类指称；
  * 紧跟在开括号之后、且括号之前的话在谈声明或措辞；与前一个已算引文的引号用列举连接。
- * 其余引号（单独成句的 "Rinne works in LUNA."、夹在断言里的引号）不是引文，里面的 strong 照判。
+ * 其余引号（单独成句的 "Rinne works in LUNA."、夹在断言里的引号、没有否定的 Users say "…"）不是引文，里面的 strong 照判。
  */
 export function citedSpans(sentence) {
     const out = [];
@@ -346,7 +392,8 @@ export function citedSpans(sentence) {
         const lead = before.replace(/[\s(（]+$/, "");
         const cited =
             CITE_LEAD_IN.test(lead) ||
-            COLON_LEAD.test(lead) ||
+            NEGATED_REPORT_LEAD.test(lead) ||
+            colonLeadCites(lead) ||
             CITE_LEAD_OUT.test(sentence.slice(b)) ||
             (open && CLAIM_TALK.test(lead.slice(-80))) ||
             (prev !== null && prev.cited && QUOTE_LIST_GAP.test(sentence.slice(prev.end, a)));
@@ -940,7 +987,8 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
         covered.push({
             id,
             phrases: c.strong,
-            hedges: c.hedge ?? [],
+            // hedge 不是数组时 claims-shape 已经报了；这里按没有 hedge 算，免得 hedges.some 抛 TypeError 把形状错误盖掉
+            hedges: Array.isArray(c.hedge) ? c.hedge : [],
             needsHedge: !hasProof && (!pendings.length || holdsHedge),
             pendingOnly,
             c,
@@ -981,7 +1029,8 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
                     if (found === undefined) continue;
                     const bare = found.clause;
                     const unciting = quotes.some(([qa, qb]) => found.a >= qa && found.b <= qb)
-                        ? "（它在引号里，但引号前没有引用语境，不算引文：引文要紧跟在写成 / 不要写 / 例如 / such as / e.g. / 冒号之后，或写在行内代码里）"
+                        ? "（它在引号里，但引号前没有引用语境，不算引文：引文要紧跟在不要写 / never say / 例如 / such as / e.g. 之后，" +
+                          "或冒号之前的分句在谈措辞，或写在行内代码里；say / write / 说 / 写 这类转述动词前面要带 never / don't / avoid / 不要 / 别 / 勿）"
                         : "";
                     add(
                         "strong-needs-hedge",
@@ -1096,6 +1145,14 @@ export async function selfTest(root = ROOT) {
             jobs: over.jobs ?? jobs,
             scope: over.scope,
         });
+    /** 同 run，但抛错也当结果返回（一行 [crash]）：形状写坏的数据不该让检查崩，用例要能点名是哪一条崩了。 */
+    const safeRun = (over) => {
+        try {
+            return run(over);
+        } catch (e) {
+            return { errors: [`[crash] ${e.message}`], infos: [] };
+        }
+    };
     /** 规则名 → 触发它的行（errors 与 infos 合在一起看）。 */
     const fired = (result) => [...result.errors, ...result.infos];
 
@@ -1895,6 +1952,20 @@ export async function selfTest(root = ROOT) {
                     files: { "README.md": "Rinne works in LUNA (host testing pending), and it works in LUNA.\n" },
                 }),
             ],
+            // hedge 写成别的类型（claims-shape 已经报了）：不抛 TypeError 盖掉形状错误，也不把它当 hedge 用，strong 照判
+            ...[
+                ["字符串", "host testing pending"],
+                ["对象", { phrase: "host testing pending" }],
+                ["数字", 5],
+            ].map(([label, hedge]) => [
+                `hedge 写成${label}而不是数组：报形状错误，检查不抛错，strong 照判`,
+                ["claims-shape", "strong-needs-hedge"],
+                safeRun({
+                    root: goldenMissing,
+                    data: withHost({ hedge }),
+                    files: { "README.md": "Rinne works in LUNA (host testing pending).\n" },
+                }),
+            ]),
             // 引文不是断言，但只有引号紧跟在引用语境之后才算引文；其余引号里的 strong 照判
             [
                 "strong 整个在引号里（引用示例，引号前是 write）：放行",
@@ -1945,23 +2016,9 @@ export async function selfTest(root = ROOT) {
                 "i.e.",
                 "for example",
                 "for instance",
-                "like",
-                "write",
-                "writes",
-                "writing",
-                "written",
-                "wrote",
-                "say",
-                "says",
-                "saying",
-                "said",
                 "avoid",
                 "avoids",
                 "avoiding",
-                "quote",
-                "quotes",
-                "quoted",
-                "quoting",
                 "phrase",
                 "phrases",
                 "wording",
@@ -1978,22 +2035,7 @@ export async function selfTest(root = ROOT) {
                     files: { "README.md": `Docs ${w} "Rinne works in LUNA" must carry a note.\n` },
                 }),
             ]),
-            ...[
-                "写成",
-                "写作",
-                "写",
-                "说成",
-                "说",
-                "避免",
-                "例如",
-                "比如",
-                "譬如",
-                "诸如",
-                "如",
-                "用语",
-                "措辞",
-                "字样",
-            ].map((w) => [
+            ...["避免", "例如", "比如", "譬如", "诸如", "如", "用语", "措辞", "字样"].map((w) => [
                 `引文放行（中文）：引号紧跟在「${w}」之后`,
                 [],
                 run({
@@ -2021,6 +2063,169 @@ export async function selfTest(root = ROOT) {
                     files: { "README.md": `${text}\n` },
                 }),
             ]),
+            // 冒号引出：冒号前同一分句里要在谈措辞（COLON_TALK）、有直接的引用语境，或有带否定 / 祈使的转述动词
+            ...[
+                "phrase",
+                "phrases",
+                "wording",
+                "word",
+                "words",
+                "term",
+                "terms",
+                "quote",
+                "quotes",
+                "quoted",
+                "quoting",
+            ].map((w) => [
+                `引文放行：冒号前的分句在谈措辞（${w}）`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    // 词不放在冒号紧前面：紧挨冒号的 phrases / wording 之类另有 CITE_LEAD_IN 管着，这里要单独测 COLON_TALK
+                    files: { "README.md": `Banned ${w} for hosts: "Rinne works in LUNA"\n` },
+                }),
+            ]),
+            ...["说法", "措辞", "写法", "用语", "字样", "短语"].map((w) => [
+                `引文放行（中文）：冒号前的分句在谈措辞（${w}）`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": `禁用${w}的例子：「在 LUNA 可用」\n` },
+                }),
+            ]),
+            ...[
+                ["For example", 'For example: "Rinne works in LUNA"'],
+                ["Avoid", 'Avoid: "Rinne works in LUNA"'],
+                ["避免", "避免：「Rinne 在 LUNA 可用」"],
+                ["例如", "例如：「Rinne 在 LUNA 可用」"],
+                ["冒号前的分句里有带否定的 write", 'Never write this: "Rinne works in LUNA"'],
+                [
+                    "冒号前的分句里有带否定的 say（动词不是冒号前最后一个词）",
+                    'Do not say these things: "Rinne works in LUNA"',
+                ],
+                ["中文：请勿说", "请勿说：「Rinne 在 LUNA 可用」"],
+                ["中文：不要这样写成", "不要这样写成这种形式：「Rinne 在 LUNA 可用」"],
+                ["冒号前的分句是顿号 / 逗号之后的那一段", 'Be careful, never write: "Rinne works in LUNA"'],
+            ].map(([label, text]) => [
+                `引文放行：冒号引出（${label}）`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({
+                        strong: ["works in LUNA", "在 LUNA 可用"],
+                        hedge: ["host testing pending", zhHedge],
+                    }),
+                    files: { "README.md": `${text}\n` },
+                }),
+            ]),
+            // 转述动词（say / write / quote 的各种词形、like，写成 / 写作 / 写 / 说成 / 说）要带否定或祈使才算引用语境：
+            // 每个动词、每个否定词、否定词与动词之间的隔词各一条正例
+            ...[
+                "say",
+                "says",
+                "said",
+                "saying",
+                "write",
+                "writes",
+                "writing",
+                "written",
+                "wrote",
+                "quote",
+                "quotes",
+                "quoted",
+                "quoting",
+                "like",
+            ].map((v) => [
+                `引文放行：带否定的转述动词「${v}」（Never ${v}）`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": `Never ${v} "Rinne works in LUNA" in the docs.\n` },
+                }),
+            ]),
+            ...[
+                "never",
+                "don't",
+                "don’t",
+                "do not",
+                "does not",
+                "doesn't",
+                "did not",
+                "didn't",
+                "will not",
+                "won't",
+                "should not",
+                "shouldn't",
+                "must not",
+                "mustn't",
+                "cannot",
+                "can not",
+                "can't",
+                "avoid",
+                "avoids",
+                "avoiding",
+            ].map((n) => [
+                `引文放行：否定 / 祈使词「${n}」带出的 say`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": `We ${n} say "Rinne works in LUNA" in the docs.\n` },
+                }),
+            ]),
+            ...[
+                ["Never ever say", 'Never ever say "Rinne works in LUNA" in the docs.'],
+                ["Do not just write", 'Do not just write "Rinne works in LUNA" in the docs.'],
+                ["Never use phrases like", 'Never use phrases like "Rinne works in LUNA" in the docs.'],
+                ["前面还有别的分句", 'Docs are short, and we never say "Rinne works in LUNA" alone.'],
+            ].map(([label, text]) => [
+                `引文放行：否定词与转述动词之间隔词（${label}）`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": `${text}\n` },
+                }),
+            ]),
+            ...["写成", "写作", "写", "说成", "说"].map((v) => [
+                `引文放行（中文）：带否定的转述动词「${v}」（不要${v}）`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": `文档里不要${v}「在 LUNA 可用」要带说明。\n` },
+                }),
+            ]),
+            ...["不要", "别", "勿", "不得", "不能", "禁止", "严禁", "不"].map((n) => [
+                `引文放行（中文）：否定 / 祈使词「${n}」带出的写`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": `文档里${n}写「在 LUNA 可用」要带说明。\n` },
+                }),
+            ]),
+            ...["再", "乱", "随便", "这样", "直接"].map((adv) => [
+                `引文放行（中文）：不要与动词之间隔「${adv}」`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": `文档里不要${adv}写「在 LUNA 可用」。\n` },
+                }),
+            ]),
+            [
+                "引文放行：「The wording ... is banned:」（引号前是 wording，句尾的冒号不影响）",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": 'The wording "works in LUNA" is banned:\n' },
+                }),
+            ],
             ...["这种", "这样", "这类", "此类", "这句"].flatMap((lead) =>
                 ["写法", "说法", "话", "措辞", "用语", "字样", "表述"].map((tail) => [
                     `引文放行（中文）：引号后面直接跟着「${lead}${tail}」`,
@@ -2123,6 +2328,46 @@ export async function selfTest(root = ROOT) {
                 ["不如「Rinne 在 LUNA 可用」。", "不如的「如」不算引用语境"],
                 ["假如「Rinne 在 LUNA 可用」。", "假如的「如」不算引用语境"],
                 ["「在 LUNA 可用」这个 Rinne 很好。", "引号后面不是指称写法的话"],
+                // 冒号：冒号前的分句要在谈措辞，光有冒号不够
+                ['Status: "Rinne works in LUNA."', "冒号前不在谈措辞（Status）"],
+                ['In short: "Rinne works in LUNA."', "冒号前不在谈措辞（In short）"],
+                ["Verdict: “Rinne works in LUNA.”", "弯引号开头的冒号引出也一样"],
+                ['Our claim: "Rinne works in LUNA."', "冒号前是 claim：那是声明本身，不是在谈措辞"],
+                ['Our statement: "Rinne works in LUNA."', "冒号前是 statement：同上"],
+                ["结论：「Rinne 在 LUNA 可用」", "中文冒号，冒号前不在谈措辞（结论）"],
+                ["声明：「Rinne 在 LUNA 可用」", "中文冒号，冒号前是声明本身"],
+                ['Wording rules, status: "Rinne works in LUNA."', "谈措辞的词在上一个分句，冒号前的分句不在谈"],
+                ['Users say: "Rinne works in LUNA"', "冒号前的转述动词没有否定"],
+                ["他们说：「Rinne 在 LUNA 可用」", "中文冒号，冒号前的转述动词没有否定"],
+                // 转述动词：前面没有否定或祈使，就是把断言换个人说出来
+                ['Users say "Rinne works in LUNA".', "say 前面没有否定"],
+                ['The docs said "Rinne works in LUNA".', "said 前面没有否定"],
+                ['Reviewers write "Rinne works in LUNA".', "write 前面没有否定"],
+                ['The page is quoting "Rinne works in LUNA".', "quoting 前面没有否定"],
+                ['Users like "Rinne works in LUNA".', "like 前面没有否定"],
+                ["可以说「Rinne 在 LUNA 可用」。", "中文「说」前面没有否定"],
+                ["据说「Rinne 在 LUNA 可用」。", "据说"],
+                ["也就是说「Rinne 在 LUNA 可用」。", "也就是说"],
+                ["他们写成「Rinne 在 LUNA 可用」。", "中文「写成」前面没有否定"],
+                ["别人说「Rinne 在 LUNA 可用」。", "别人的「别」不是祈使"],
+                ["特别说「Rinne 在 LUNA 可用」。", "特别的「别」不是祈使"],
+                ["分别写「Rinne 在 LUNA 可用」。", "分别的「别」不是祈使"],
+                ["不得不说「Rinne 在 LUNA 可用」。", "不得不说是双重否定，在断言"],
+                ["不能不说「Rinne 在 LUNA 可用」。", "不能不说是双重否定，在断言"],
+                ["不敢不说「Rinne 在 LUNA 可用」。", "不敢不说是双重否定，在断言"],
+                ["不可不说「Rinne 在 LUNA 可用」。", "不可不说是双重否定，在断言"],
+                ["不会不说「Rinne 在 LUNA 可用」。", "不会不说是双重否定，在断言"],
+                ["不少人写「Rinne 在 LUNA 可用」。", "不少人：「不」没有紧挨动词"],
+                ['Never fail to say "Rinne works in LUNA".', "never fail to 是双重否定"],
+                ['Never say it, and users say "Rinne works in LUNA".', "否定在前一个分句里，管不到后面的转述"],
+                [
+                    'Never write "Rinne is great" and users say "Rinne works in LUNA".',
+                    "前一个引号带否定，后一个引号的转述不带",
+                ],
+                ['Never mind that users say "Rinne works in LUNA".', "否定词与动词隔了三个词"],
+                ['We never claim it ever and say "Rinne works in LUNA".', "否定词与动词隔了四个词"],
+                ['Whenever users say "Rinne works in LUNA".', "whenever 里的 never 不是否定词（要词边界）"],
+                ['Never use these sayings: "Rinne works in LUNA"', "sayings 不是转述动词 saying（要词边界）"],
             ].map(([text, label]) => [
                 `引号里的强声明但引号前没有引用语境：判红（${label}）`,
                 ["strong-needs-hedge"],
@@ -2581,7 +2826,11 @@ export async function selfTest(root = ROOT) {
                 citedSpans('Never write "works in LUNA" and `works in LUNA`.').length === 2 &&
                 citedSpans('"Rinne works in LUNA."').length === 0 &&
                 citedSpans('Rinne "works in LUNA" too.').length === 0 &&
-                citedSpans("Rinne works in LUNA.").length === 0,
+                citedSpans("Rinne works in LUNA.").length === 0 &&
+                citedSpans('Never say "works in LUNA".').length === 1 &&
+                citedSpans('Users say "works in LUNA".').length === 0 &&
+                citedSpans('Banned wording: "works in LUNA".').length === 1 &&
+                citedSpans('Status: "works in LUNA".').length === 0,
             expect: [],
         });
         // 参数表块模块（paramsOf）与这里的 findParam 读同一份 golden：条目里自带的 id 以键为准，两边取到同一个值
