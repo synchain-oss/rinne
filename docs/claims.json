@@ -22,6 +22,7 @@
       "strong": ["including the host['’]s own insert effects", "包括宿主自带的插入效果器"],
       "hedge": ["between Rinne Input and Rinne Output", "Input 与 Output 之间插入槽里的插件"],
       "hedgeWhilePending": false,
+      "hedgeExemptReason": "真机实测前沿用现有用户指南与硬规则的措辞，文案在实测后统一修订",
       "evidence": [],
       "pending": ["validation:docs/validation/*-cubase-pro-15-win.md"]
     },

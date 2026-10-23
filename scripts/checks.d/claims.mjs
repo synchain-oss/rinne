@@ -2,31 +2,38 @@
 //
 // 强声明登记与证据（docs-truth 的一部分）。数据是 docs/claims.json：每条声明登记它的 strong 短语（肯定式的强断言，
 // 写成完整的断言，不写功能名这类宽词）、hedge 短语（免责或「按设计」这类限定语）、evidence（证据）、pending（证据产物
-// 尚未到位）与可选的 hedgeWhilePending（宿主兼容这类声明：证据没到位时，直述也要求同一句带 hedge）。
+// 尚未到位），以及宿主兼容类声明的开关 hedgeWhilePending / hedgeExemptReason（见下面的「宿主兼容类」）。
 //
 // 判据：
 //   claims-shape        claims.json 是合法 JSON；每条有 id / strong / hedge / evidence；id 唯一且为小写连字符；strong 非空；
 //                       strong / hedge 的每个短语都是能编译的、不会匹配任意句子的正则；hedge 与 strong 不自相匹配
 //                       （hedge 的典型命中本身含 strong，或 strong 的典型命中本身满足 hedge，免责就形同虚设）；
 //                       hedge 不是另一个正面断言（典型命中里每一个都要含 DISCLAIMER_TERMS 里的免责词）；
-//                       hedgeWhilePending 是布尔值，为真时 hedge 非空；scope 里的每一项都是扫描范围内的文件
+//                       hedgeWhilePending 是布尔值；写 false 必须同时写非空的 hedgeExemptReason，hedgeExemptReason 也
+//                       只能跟 false 一起出现；pending 期间要求 hedge 的声明（见下）仍在 pending 时 hedge 非空；
+//                       scope 里的每一项都是扫描范围内的文件
 //   host-claim-evidence 宿主兼容类声明的 evidence 只认真机的 validation 记录：构建 CI 通过证明不了宿主可用。
-//                       宿主兼容类 = 声明了 hedgeWhilePending，或 pending / evidence 里有 validation 记录，二者任一，
-//                       关掉 hedgeWhilePending 躲不开这条
+//                       豁免 hedge 不豁免这一条
 //   evidence-kind       每条 evidence / pending 的类型是 validation: / issue: / ci: / golden: 之一，形态可解析；
-//                       validation 的文件名通配（*）只允许写在 pending 里（记录的日期要等上机才知道）
+//                       validation 的文件名通配（*）只允许写在 pending 里（记录的日期要等上机才知道）；
+//                       validation 的路径必须是仓内的规范相对路径（repoPathProblem：拒绝 .. 段、绝对路径、反斜杠、盘符，
+//                       规范化后仍在仓根之内），文件名必须以 -win.md / -macos.md / -linux.md 之一结尾
+//                       （recordNameTail：tiers 检查核对记录文件名的系统后缀用的是同一个函数）
 //   evidence-satisfied  evidence 里的每一条都成立：validation 文件存在；issue 是 https URL；ci 是仓内存在的 job 名；
 //                       golden 的谓词为真（目标文件不存在时按 pending 处理，不在这里判红）
 //   pending-listed      证据产物尚不存在时允许直述，并把待办列出来（INFO 行，不判红）
-//   strong-needs-hedge  一条声明没有成立的 evidence，又没有 pending（或有 pending 但声明了 hedgeWhilePending）时，
-//                       它的 strong 短语只能出现在同一句里含 hedge 短语的句子上
+//   strong-needs-hedge  一条声明没有成立的 evidence，又没有 pending（或有 pending 但属于要求 hedge 的宿主兼容类）时，
+//                       它的每一处 strong 命中，所在的分句里都要有 hedge 短语（分句规则见 clauseSpans）
 //   unregistered-absolute 用户面文本里出现绝对化强断言句式、又没有被任何已登记声明的 strong 覆盖时判红；
-//                       覆盖按命中片段算：声明的 strong 命中要与绝对化句式的命中片段重叠，同一句里别处另有 strong 不算覆盖
+//                       覆盖按命中片段算：声明的 strong 命中要与绝对化句式的命中片段重叠，同一句里别处另有 strong 不算
 //
 // 证据待到位的口径：pending 里的产物还没进仓时，直述允许、只列待办；产物已在仓内但谓词为假，说明声明被证据反驳，判红。
 // 这样今天不会因为证据产物还没造出来就判红，产物一落地又立刻被它自己的数据约束。
-// 例外是声明了 hedgeWhilePending 的宿主兼容类声明：真机记录还没到位就不能直述，同一句要带 hedge；
-// 记录到位后把它从 pending 移到 evidence，才解除这条要求。
+//
+// 宿主兼容类：pending / evidence 里有 validation 真机记录的声明，或写了 hedgeWhilePending: true 的声明。
+// 真机记录还没到位前，它的 strong 不能直述，所在分句要带 hedge；记录到位后把它从 pending 移到 evidence，才解除这条要求。
+// 这是默认口径，省掉字段躲不开。唯一的豁免是同时写 "hedgeWhilePending": false 与非空的 "hedgeExemptReason"
+// （说明为什么暂不要求），理由随数据进评审的视线；只写 false 不写理由、或只写理由不写 false，都判形状错误。
 //
 // 判据名见 RULES，报错行以 [名字] 开头。自测的每个坏样例写明它必须触发哪几条判据，并核对每条判据都至少被一个坏样例
 // 点名：删掉任何一条判据，点名它的坏样例就变红。
@@ -60,15 +67,15 @@ export const CLAIMS_FILE = "docs/claims.json";
 /** 判据名 → 说明。 */
 export const RULES = {
     "claims-shape":
-        "claims.json 的形状：id 唯一且为小写连字符，每条有 id / strong / hedge / evidence，strong 非空，短语是可用的正则，hedge 与 strong 不自相匹配，hedge 不是不含免责词的正面断言，hedgeWhilePending 是布尔值且为真时 hedge 非空，scope 在扫描范围内",
+        "claims.json 的形状：id 唯一且为小写连字符，每条有 id / strong / hedge / evidence，strong 非空，短语是可用的正则，hedge 与 strong 不自相匹配，hedge 不是不含免责词的正面断言，hedgeWhilePending 是布尔值，写 false 必须带非空的 hedgeExemptReason（理由也只能跟 false 一起写），要求 hedge 的声明仍在 pending 时 hedge 非空，scope 在扫描范围内",
     "host-claim-evidence":
-        "宿主兼容类声明（声明了 hedgeWhilePending，或 pending / evidence 里有 validation 记录）的 evidence 只认 validation 真机记录，ci 与 golden 证明不了宿主可用",
+        "宿主兼容类声明（pending / evidence 里有 validation 记录，或声明了 hedgeWhilePending）的 evidence 只认 validation 真机记录，ci 与 golden 证明不了宿主可用；豁免 hedge 也不豁免这条",
     "evidence-kind":
-        "每条 evidence / pending 的类型与形态可解析（validation: / issue: / ci: / golden:），通配只允许 pending",
+        "每条 evidence / pending 的类型与形态可解析（validation: / issue: / ci: / golden:），通配只允许 pending；validation 路径必须是仓内规范相对路径（无 .. 段、绝对路径、反斜杠、盘符），文件名以 -win.md / -macos.md / -linux.md 之一结尾",
     "evidence-satisfied": "evidence 里的每一条都成立",
     "pending-listed": "证据产物尚未到位时列出待办（INFO，不判红）",
     "strong-needs-hedge":
-        "没有成立 evidence 的声明，若也没有 pending（或声明了 hedgeWhilePending），strong 短语只能出现在含 hedge 的同一句里",
+        "没有成立 evidence 的声明，若也没有 pending（或属于要求 hedge 的宿主兼容类），每一处 strong 命中所在的分句里都要有 hedge 短语",
     "unregistered-absolute": "绝对化强断言必须被某条已登记声明的 strong 命中片段覆盖，同一句里别处的 strong 不算",
 };
 
@@ -96,6 +103,141 @@ export function sentences(text) {
 
 /** 声明的 id 形态：小写连字符。 */
 const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+// ---------------------------------------------------------------------------------------------
+// 验证记录的路径与文件名（claims 与 tiers 共用）
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * 验证记录文件名里的系统后缀，只有这一种写法：daw-tiers.json 的 os 值 windows / macos / linux
+ * 对应 win / macos / linux，win 与 windows、mac 与 macos 不混用。claims 的 validation 路径与 tiers 核对记录文件名
+ * 都从这里取（recordNameTail），不各写各的。
+ */
+export const RECORD_OS_SUFFIX = Object.freeze({ windows: "win", macos: "macos", linux: "linux" });
+
+/** 一个系统取值（daw-tiers.json 的 os）对应的后缀：已登记的系统一个，any 取全部，不认识的系统返回空数组。 */
+export function recordOsSuffixes(osName) {
+    const key = String(osName ?? "").toLowerCase();
+    if (key === "any") return Object.values(RECORD_OS_SUFFIX);
+    return Object.hasOwn(RECORD_OS_SUFFIX, key) ? [RECORD_OS_SUFFIX[key]] : [];
+}
+
+/**
+ * 记录文件名结尾的正则源码：-<系统后缀>.md。osName 省掉就是 any（接受登记的全部后缀，claims 用）；
+ * tiers 传这一行的 os，只接受这一行系统对应的后缀。系统不认识时返回 null。
+ */
+export function recordNameTail(osName = "any") {
+    const suffixes = recordOsSuffixes(osName);
+    return suffixes.length ? `-(?:${suffixes.join("|")})\\.md` : null;
+}
+
+/** rel 按 root 解析、规范化之后是否落在仓根之外（或就是仓根本身）。纯函数，供 repoPathProblem 与自测用。 */
+export function escapesRoot(root, rel) {
+    const base = path.resolve(root);
+    const back = path.relative(base, path.resolve(base, rel));
+    return back === "" || back === ".." || back.startsWith(`..${path.sep}`) || path.isAbsolute(back);
+}
+
+/**
+ * 仓内相对路径的问题；没问题返回 null。validation 证据的路径只准是仓内的规范相对路径：
+ * 不许反斜杠、盘符、绝对路径、空段与 . 段、.. 段；给了仓根时，规范化之后还要落在仓根之内（escapesRoot）。
+ * claims 的 parseEvidence / validationExists 与 tiers 的 recordProblem 都用这一个函数。
+ */
+export function repoPathProblem(rel, root) {
+    if (typeof rel !== "string" || !rel) return "不是非空字符串";
+    if (rel.includes("\\")) return "含反斜杠，路径一律写正斜杠";
+    if (rel.includes("\0")) return "含空字符";
+    if (/^[A-Za-z]:/.test(rel)) return "带盘符";
+    if (rel.startsWith("/")) return "是绝对路径，要写相对仓根的路径";
+    const segments = rel.split("/");
+    if (segments.includes("..")) return "含上级目录段 ..";
+    if (segments.some((s) => s === "" || s === ".")) return "含空段或 . 段，路径要写成规范形式";
+    if (root !== undefined && escapesRoot(root, rel)) return "规范化后落在仓根之外";
+    return null;
+}
+
+/** validation 记录路径的形态问题（不含是否存在）；没问题返回 null。glob 为真时文件名允许用 *。 */
+export function validationShapeProblem(body, { glob = false } = {}) {
+    const why = repoPathProblem(body);
+    if (why) return `路径${why}`;
+    if (!/^(?:docs|tests)\//.test(body)) return "路径要在 docs/ 或 tests/ 之下";
+    const slash = body.lastIndexOf("/");
+    const dir = body.slice(0, slash);
+    const last = body.slice(slash + 1);
+    if (body.includes("*")) {
+        if (!glob) return "通配只允许写在 pending 里";
+        if (dir.includes("*") || !last.includes("*") || last.includes("**")) return "通配只允许出现在最后一段文件名里";
+    }
+    if (!new RegExp(`${recordNameTail()}$`).test(last))
+        return `文件名要以 ${Object.values(RECORD_OS_SUFFIX)
+            .map((s) => `-${s}.md`)
+            .join(" / ")} 之一结尾（系统后缀只有这一种写法）`;
+    return null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 分句：hedge 要落在 strong 所在的分句里
+// ---------------------------------------------------------------------------------------------
+
+/** 括号：括号里的内容算括号所在分句的一部分，里面的逗号与连词不切分。 */
+const OPEN_BRACKETS = "(（[【";
+const CLOSE_BRACKETS = ")）]】";
+
+/**
+ * 分句界（在括号之外）：
+ *   标点  英文逗号与冒号（数字之间的千分位逗号、时间的冒号不算）、中文 ，：（；已经是句子界）、破折号 —、带空格的 –
+ *   转折连词  while / whereas / but / however / although / though；但（含但是）/ 不过 / 可是 / 而（含然而；而已、而且除外）
+ * 不切：and / 和 / 与 / 以及 / 而且 这类并列，以及 not yet 里的 yet（并列留在同一分句里）。
+ * 所以「works in LUNA, while Pro Tools is not yet tested」「在 LUNA 可用，而 Cubase 尚未测试」的免责语在另一个分句里，
+ * 不算 LUNA 那一句的 hedge；要写成「works in LUNA (host testing pending)」或把 hedge 放进同一个分句。
+ */
+const CLAUSE_BREAK_SOURCES = {
+    comma: "(?<!\\d),(?!\\d)",
+    colon: "(?<!\\d):(?!\\d)",
+    "zh-punct": "[，：]",
+    dash: "—|\\s–\\s",
+    while: "\\bwhile\\b",
+    whereas: "\\bwhereas\\b",
+    but: "\\bbut\\b",
+    however: "\\bhowever\\b",
+    although: "\\balthough\\b",
+    though: "\\bthough\\b",
+    但: "但",
+    不过: "不过",
+    可是: "可是",
+    而: "而(?![已且])",
+};
+const CLAUSE_BREAK_RE = new RegExp(Object.values(CLAUSE_BREAK_SOURCES).join("|"), "gi");
+
+/**
+ * 一句话切成的分句区间 [起, 止)。括号配平时括号里的内容遮掉再找分句界；括号不配平（只开不关）时按没有括号处理，
+ * 免得一个落单的括号把后面所有的分句界都吞了。
+ */
+export function clauseSpans(sentence) {
+    let masked = "";
+    let depth = 0;
+    for (const ch of sentence) {
+        if (OPEN_BRACKETS.includes(ch)) depth++;
+        masked += depth > 0 ? "\u0001".repeat(ch.length) : ch;
+        if (CLOSE_BRACKETS.includes(ch) && depth > 0) depth--;
+    }
+    const text = depth === 0 ? masked : sentence;
+    const spans = [];
+    let from = 0;
+    for (const m of text.matchAll(CLAUSE_BREAK_RE)) {
+        spans.push([from, m.index]);
+        from = m.index + m[0].length;
+    }
+    spans.push([from, sentence.length]);
+    return spans;
+}
+
+/** strong 的一处命中 [a, b) 所在的分句合起来的区间（命中跨过分句界时，跨到的每个分句都算）。 */
+export function clauseAround(sentence, a, b) {
+    const hit = clauseSpans(sentence).filter(([from, to]) => from < b && a < to);
+    if (!hit.length) return [0, sentence.length];
+    return [hit[0][0], hit[hit.length - 1][1]];
+}
 
 /** 短语按正则匹配，大小写不敏感。写坏的正则直接抛错——悄悄退回逐字匹配会让一条声明永远不命中。 */
 export function matchPhrase(phrase, text) {
@@ -238,10 +380,15 @@ export function selfMatchProblem(strong, hedge) {
  * 免责词表：hedge 短语的每个典型命中至少含其中一个，否则它不是限定或免责，只是另一个正面断言
  * （「passes auval and pluginval」放在 works in LUNA 的 hedge 里，同一句「works in LUNA and passes auval and pluginval」
  * 就被放行了）。词表按用途分三类，英文词带词界，中文不带：
- *   没验证过   not yet / untested / pending / awaiting / 尚未 / 未验证 / 待
+ *   没验证过   not yet / untested / pending / awaiting / 尚未 / 未验证 / 待测、待验证、待确认、待上机、待实测
  *   按设计     designed / by design / intended / 按设计 / 设计上 / 旨在
- *   限定范围   built for / between / only / except / unless / until / if / 面向 / 之间 / 仅 / 除非
- * 要加词就改这里，评审看得见；词不能宽到匹配任意句子（自测拿探针句核对）。
+ *   限定范围   built for / between / except / unless / until / 面向 / 之间 / 除非，
+ *              以及带限定搭配的 only 与 if、仅（见下）
+ * 单词太宽的不收：单字「待」会把期待、对待、待机放进来，只认「待」后面跟 测 / 验证 / 确认 / 上机 / 实测；
+ * 裸的 only 与 if 是普通词（「works in LUNA only」没有说明任何限制），只认限定搭配——
+ * only 后面跟 if / when / once / after / on / for（only on macOS 11+、only if tested），
+ * if 前面不用 only 时只认 if tested / verified / confirmed / validated；中文的仅只认仅在 / 仅限 / 仅当 / 仅适用 / 仅用于
+ * （不仅、仅仅不算）。要加词就改这里，评审看得见；词不能宽到匹配任意句子（自测拿探针句核对）。
  */
 export const DISCLAIMER_TERMS = [
     "\\bnot yet\\b",
@@ -254,7 +401,7 @@ export const DISCLAIMER_TERMS = [
     "尚未",
     "未(?:经|能)?(?:测试|验证|确认)",
     "没有(?:测试|验证|确认)",
-    "待",
+    "待(?:测|验证|确认|上机|实测)",
     "\\bdesigned\\b",
     "\\bby design\\b",
     "\\bintended\\b",
@@ -263,14 +410,14 @@ export const DISCLAIMER_TERMS = [
     "旨在",
     "\\bbuilt for\\b",
     "\\bbetween\\b",
-    "\\bonly\\b",
+    "\\bonly (?:if|when|once|after|on|for)\\b",
     "\\bexcept\\b",
     "\\bunless\\b",
     "\\buntil\\b",
-    "\\bif\\b",
+    "\\bif (?:tested|verified|confirmed|validated)\\b",
     "面向",
     "之间",
-    "仅",
+    "(?<!不)仅(?:在|限|当|适用|用于)",
     "除非",
 ];
 const DISCLAIMER_RE = new RegExp(DISCLAIMER_TERMS.join("|"), "i");
@@ -303,8 +450,9 @@ export function phraseSpans(phrase, text) {
 const inScope = (f, scope = SCOPE) => typeof f === "string" && (scope.includes(f) || /^web\/i18n\/[^/]+\.js$/.test(f));
 
 /**
- * 把一条 evidence / pending 拆成 { kind, body }；形态不对时返回 null。
+ * 把一条 evidence / pending 拆成 { kind, body }；形态不对时返回 null（原因用 evidenceShapeProblem 取）。
  * glob 为真时 validation 的文件名允许用 *（只在最后一段里、不跨目录），给还不知道日期的上机记录用。
+ * validation 与 golden 的路径只准是仓内的规范相对路径（repoPathProblem），validation 的文件名要以登记的系统后缀结尾。
  */
 export function parseEvidence(item, { glob = false } = {}) {
     if (typeof item !== "string") return null;
@@ -314,22 +462,37 @@ export function parseEvidence(item, { glob = false } = {}) {
     const body = item.slice(i + 1);
     if (!body) return null;
     if (kind === "validation") {
-        if (!/^(?:docs|tests)\//.test(body)) return null;
-        if (!body.includes("*")) return { kind, body };
-        const last = body.slice(body.lastIndexOf("/") + 1);
-        const dir = body.slice(0, body.lastIndexOf("/"));
-        return glob && !dir.includes("*") && last.includes("*") && !last.includes("**")
-            ? { kind, body, glob: true }
-            : null;
+        if (validationShapeProblem(body, { glob })) return null;
+        return body.includes("*") ? { kind, body, glob: true } : { kind, body };
     }
     if (kind === "issue") return /^https:\/\/\S+$/.test(body) ? { kind, body } : null;
     if (kind === "ci") return /^[a-z0-9][a-z0-9_-]*$/.test(body) ? { kind, body } : null;
-    if (kind === "golden") return /^[^#\s]+\.json#\S+\s+(?:==|!=|>=|<=|>|<)\s+\S+$/.test(body) ? { kind, body } : null;
+    if (kind === "golden") {
+        if (!/^[^#\s]+\.json#\S+\s+(?:==|!=|>=|<=|>|<)\s+\S+$/.test(body)) return null;
+        return repoPathProblem(body.split("#")[0]) ? null : { kind, body };
+    }
     return null;
 }
 
-/** validation 记录是否存在；带 * 的按最后一段的文件名通配。 */
-function validationExists(root, body, glob) {
+/** 一条 evidence / pending 形态不对的原因（说给人看）；形态没问题返回 null。 */
+export function evidenceShapeProblem(item, { glob = false } = {}) {
+    if (parseEvidence(item, { glob })) return null;
+    if (typeof item === "string" && item.startsWith("validation:"))
+        return validationShapeProblem(item.slice("validation:".length), { glob });
+    if (typeof item === "string" && item.startsWith("golden:")) {
+        const file = item.slice("golden:".length).split("#")[0];
+        const why = repoPathProblem(file);
+        return why ? `golden 目标文件路径${why}` : null;
+    }
+    return null;
+}
+
+/**
+ * validation 记录是否存在；带 * 的按最后一段的文件名通配。
+ * 路径先过 repoPathProblem（带仓根，规范化后必须仍在仓根之内），不合格就当不存在，不去碰仓外的文件。
+ */
+export function validationExists(root, body, glob) {
+    if (repoPathProblem(body, root)) return false;
     if (!glob) return fs.existsSync(path.join(root, body));
     const slash = body.lastIndexOf("/");
     const re = new RegExp(
@@ -352,6 +515,7 @@ export function evalGolden(root, body) {
     const m = /^(.*?)\s+(==|!=|>=|<=|>|<)\s+(\S+)$/.exec(rest ?? "");
     if (!m) return null;
     const [, pathExpr, op, raw] = m;
+    if (repoPathProblem(file, root)) return null; // 仓外的文件不读
     const text = readText(path.join(root, file));
     if (text === null) return null;
     let data;
@@ -484,6 +648,24 @@ export function evidenceState(root, item, jobs, { glob = false } = {}) {
     return "malformed";
 }
 
+const isRecord = (x) => typeof x === "string" && x.startsWith("validation:");
+
+/** 宿主兼容类声明：pending / evidence 里有 validation 真机记录，或写了 hedgeWhilePending: true。不看 false，也不看字段有没有。 */
+export function isHostClaim(c) {
+    const items = [...(Array.isArray(c?.evidence) ? c.evidence : []), ...(Array.isArray(c?.pending) ? c.pending : [])];
+    return c?.hedgeWhilePending === true || items.some(isRecord);
+}
+
+/** 显式豁免 hedge：hedgeWhilePending 写的是 false，并且同时写了非空的 hedgeExemptReason。 */
+export function hedgeExempt(c) {
+    return (
+        c?.hedgeWhilePending === false && typeof c?.hedgeExemptReason === "string" && c.hedgeExemptReason.trim() !== ""
+    );
+}
+
+/** 真机记录到位前是否要求 hedge：宿主兼容类，且没有显式豁免。 */
+export const hedgeRequiredWhilePending = (c) => isHostClaim(c) && !hedgeExempt(c);
+
 /**
  * 判据的实现。data 是 claims.json 解析后的对象；files 是 { 路径: 文本 }；root 是仓根（golden 与 ci 查表用）；
  * scope 是扫描范围（范围表里的文件清单，默认取仓里的范围表）。
@@ -541,26 +723,31 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
             const why = disclaimerProblem(hedge);
             if (why) add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的${why}`);
         }
-        if (c?.hedgeWhilePending !== undefined) {
-            if (typeof c.hedgeWhilePending !== "boolean")
-                add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的 hedgeWhilePending 不是布尔值`);
-            else if (c.hedgeWhilePending && !(Array.isArray(c.hedge) && c.hedge.length))
-                add(
-                    "claims-shape",
-                    `${CLAIMS_FILE} 的条目「${where}」声明了 hedgeWhilePending 却没有 hedge 短语，没有句子能满足它`,
-                );
-        }
-        // 宿主兼容类声明：声明了 hedgeWhilePending，或 pending / evidence 里有 validation 真机记录（不看开关）。
-        // 构建通过证明不了宿主可用，evidence 只认真机记录；真机记录到位前放在 pending 里
-        const isRecord = (x) => typeof x === "string" && x.startsWith("validation:");
-        const evidenceList = Array.isArray(c?.evidence) ? c.evidence : [];
-        const pendingList = Array.isArray(c?.pending) ? c.pending : [];
-        if (c?.hedgeWhilePending === true || [...evidenceList, ...pendingList].some(isRecord))
-            for (const item of evidenceList)
+        // hedgeWhilePending: false 是显式豁免，必须同时写非空的 hedgeExemptReason 说明为什么暂不要求；理由也只能跟 false 一起写
+        const flag = c?.hedgeWhilePending;
+        const reason = c?.hedgeExemptReason;
+        if (flag !== undefined && typeof flag !== "boolean")
+            add("claims-shape", `${CLAIMS_FILE} 的条目「${where}」的 hedgeWhilePending 不是布尔值`);
+        const reasonOk = typeof reason === "string" && reason.trim() !== "";
+        if (flag === false && !reasonOk)
+            add(
+                "claims-shape",
+                `${CLAIMS_FILE} 的条目「${where}」写了 hedgeWhilePending: false（豁免 hedge）却没有非空的 hedgeExemptReason，` +
+                    "豁免要写明为什么暂不要求",
+            );
+        else if (reason !== undefined && flag !== false)
+            add(
+                "claims-shape",
+                `${CLAIMS_FILE} 的条目「${where}」写了 hedgeExemptReason 却没有 "hedgeWhilePending": false，理由没有对应的豁免`,
+            );
+        // 宿主兼容类声明：evidence 只认 validation 真机记录（不看开关，豁免 hedge 也不豁免这一条）。
+        // 构建通过证明不了宿主可用；真机记录到位前放在 pending 里
+        if (isHostClaim(c))
+            for (const item of Array.isArray(c?.evidence) ? c.evidence : [])
                 if (!isRecord(item))
                     add(
                         "host-claim-evidence",
-                        `${CLAIMS_FILE} 的条目「${where}」是宿主兼容类声明（hedgeWhilePending，或 pending / evidence 里有 validation 记录），` +
+                        `${CLAIMS_FILE} 的条目「${where}」是宿主兼容类声明（pending / evidence 里有 validation 记录，或写了 hedgeWhilePending），` +
                             `evidence「${item}」不是 validation 真机记录：构建 CI 与 golden 证明不了宿主可用，真机记录到位前放在 pending 里`,
                     );
         if (c?.scope !== undefined) {
@@ -576,6 +763,10 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
     }
 
     // 证据形态与成立情况
+    const shapeWhy = (item, opts) => {
+        const why = evidenceShapeProblem(item, opts);
+        return why ? `：${why}` : "";
+    };
     const covered = [];
     for (const c of data.claims) {
         const id = c?.id ?? "(没有 id)";
@@ -584,7 +775,7 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
         for (const item of c.evidence) {
             const state = evidenceState(root, item, jobs);
             if (state === "malformed")
-                add("evidence-kind", `${CLAIMS_FILE} 的条目「${id}」的 evidence「${item}」形态不认识`);
+                add("evidence-kind", `${CLAIMS_FILE} 的条目「${id}」的 evidence「${item}」形态不认识${shapeWhy(item)}`);
             else if (state === "missing")
                 add("evidence-satisfied", `${CLAIMS_FILE} 的条目「${id}」的 evidence「${item}」指向的产物不在仓内`);
             else if (state === "false")
@@ -599,7 +790,10 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
         for (const item of pendings) {
             const state = evidenceState(root, item, jobs, { glob: true });
             if (state === "malformed")
-                add("evidence-kind", `${CLAIMS_FILE} 的条目「${id}」的 pending「${item}」形态不认识`);
+                add(
+                    "evidence-kind",
+                    `${CLAIMS_FILE} 的条目「${id}」的 pending「${item}」形态不认识${shapeWhy(item, { glob: true })}`,
+                );
             else if (state === "missing") note("pending-listed", `待办：${id} 的证据「${item}」尚未到位`);
             else if (state === "false")
                 // 产物已经在仓内但谓词不成立：这条声明被证据反驳，判红
@@ -610,14 +804,21 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
                 );
             else note("pending-listed", `待办：${id} 的 pending「${item}」已经成立，请把它移到 evidence`);
         }
-        if (unusable.has(c)) continue;
-        // 要不要 hedge：有成立的 evidence 就不要；只有 pending 时直述允许，声明了 hedgeWhilePending 的除外
+        // 要不要 hedge：有成立的 evidence 就不要；只有 pending 时直述允许，宿主兼容类（没有显式豁免的）除外
         const pendingOnly = !hasProof && pendings.length > 0;
+        const holdsHedge = pendingOnly && hedgeRequiredWhilePending(c);
+        if (holdsHedge && !(Array.isArray(c.hedge) && c.hedge.length))
+            add(
+                "claims-shape",
+                `${CLAIMS_FILE} 的条目「${id}」是宿主兼容类声明，真机记录到位前要求 hedge，却没有 hedge 短语，没有句子能满足它；` +
+                    "确有理由暂不要求的，写 hedgeWhilePending: false 并附 hedgeExemptReason",
+            );
+        if (unusable.has(c)) continue;
         covered.push({
             id,
             phrases: c.strong,
             hedges: c.hedge ?? [],
-            needsHedge: !hasProof && (!pendings.length || c.hedgeWhilePending === true),
+            needsHedge: !hasProof && (!pendings.length || holdsHedge),
             pendingOnly,
             c,
         });
@@ -634,23 +835,31 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
         return units.flatMap((u) => sentences(u));
     };
 
-    // strong-needs-hedge：没有成立 evidence 又没有 pending 的声明，以及声明了 hedgeWhilePending、证据还在 pending 的声明
+    // strong-needs-hedge：没有成立 evidence 又没有 pending 的声明，以及证据还在 pending 的宿主兼容类声明（没有显式豁免的）。
+    // strong 的每一处命中，所在的分句（clauseSpans 的规则）里都要有 hedge 短语；同一句里别的分句有 hedge 不算
     for (const { id, phrases, hedges, needsHedge, pendingOnly, c } of covered) {
         if (!needsHedge) continue;
         const scope = c?.scope;
         for (const [file, text] of Object.entries(files)) {
             if (Array.isArray(scope) && scope.length && !scope.includes(file)) continue;
             for (const s of sentencesOf(file, text)) {
+                // 整个落在引号里的命中是在引用这句话（贡献指南里举例的「"does not change with..."」），不是在断言：
+                // 与 wording、unregistered-absolute 同一个口径放行
+                const quoted = quotedSpans(s);
                 for (const phrase of phrases) {
-                    if (!matchPhrase(phrase, s)) continue;
-                    if (!hedges.some((h) => matchPhrase(h, s)))
-                        add(
-                            "strong-needs-hedge",
-                            pendingOnly
-                                ? `${file} 里的强声明「${phrase}」（${id}）的真机记录还没有到位（pending），同一句里要有 hedge 短语；` +
-                                      "记录到位后把它从 pending 移到 evidence"
-                                : `${file} 里的强声明「${phrase}」（${id}）既没有成立的 evidence 也没有 pending，同一句里要有 hedge 短语`,
-                        );
+                    const bare = phraseSpans(phrase, s)
+                        .filter(([a, b]) => !quoted.some(([qa, qb]) => a >= qa && b <= qb))
+                        .map(([a, b]) => clauseAround(s, a, b))
+                        .map(([from, to]) => s.slice(from, to).trim())
+                        .find((clause) => !hedges.some((h) => matchPhrase(h, clause)));
+                    if (bare === undefined) continue;
+                    add(
+                        "strong-needs-hedge",
+                        pendingOnly
+                            ? `${file} 里的强声明「${phrase}」（${id}）的真机记录还没有到位（pending），它所在的分句「${bare}」里要有 hedge 短语；` +
+                                  "记录到位后把它从 pending 移到 evidence"
+                            : `${file} 里的强声明「${phrase}」（${id}）既没有成立的 evidence 也没有 pending，它所在的分句「${bare}」里要有 hedge 短语`,
+                    );
                 }
             }
         }
@@ -771,6 +980,13 @@ export async function selfTest(root = ROOT) {
         fs.mkdirSync(path.join(withLuna, "docs", "validation"), { recursive: true });
         fs.writeFileSync(path.join(withLuna, "docs", "validation", "2026-11-03-luna-macos.md"), "x\n");
         const lunaRecord = "validation:docs/validation/2026-11-03-luna-macos.md";
+        // 仓根之外有一份文件名合规的记录：用 .. 绕出去的路径在旧写法下会读到它、算作成立的证据
+        const escapeBase = mkTemp();
+        const escapeRepo = path.join(escapeBase, "repo");
+        fs.mkdirSync(path.join(escapeRepo, "docs", "validation"), { recursive: true });
+        fs.writeFileSync(path.join(escapeBase, "2026-11-03-luna-macos.md"), "x\n");
+        fs.writeFileSync(path.join(escapeBase, "outside.json"), JSON.stringify({ a: 1 }));
+        const escapedRecord = "validation:docs/../../2026-11-03-luna-macos.md";
         // state-schema 形状的 golden（cfgs.keys 是数组）：guard_on 的默认值可改，顺序可换，另有一份缺 guard_on 的
         const withCfgs = (guardDefault, { swap = false, noGuard = false } = {}) => {
             const dir = mkTemp();
@@ -802,6 +1018,45 @@ export async function selfTest(root = ROOT) {
             pending: ["validation:docs/validation/*-luna-macos.md"],
         };
         const withHost = (over = {}) => ({ version: 1, claims: [{ ...hostClaim, ...over }] });
+        // 显式豁免 hedge：hedgeWhilePending: false 加非空的理由，缺一不可
+        const exemptReason = "真机实测前沿用现有措辞，文案在实测后统一修订";
+        const exempt = { hedgeWhilePending: false, hedgeExemptReason: exemptReason };
+        const zhHedge = "尚未[^，。\\n]{0,10}(?:测试|验证)";
+        const withMinMacos = () =>
+            withHost({
+                id: "min-macos",
+                strong: ["tested on macOS", "在 macOS [^。\\n]{0,20}上可用"],
+                hedge: ["built for macOS 11\\+", "not yet tested", zhHedge],
+            });
+        // 文件名系统后缀写成 mac 的记录（文件真的存在）：后缀不是登记的写法，存在也不行
+        const withMacRecord = mkTemp();
+        fs.mkdirSync(path.join(withMacRecord, "docs", "validation"), { recursive: true });
+        fs.writeFileSync(path.join(withMacRecord, "docs", "validation", "2026-11-03-luna-mac.md"), "x\n");
+        // 每个分句界一个坏样例：strong 在界之前，免责语在界之后的另一个分句里
+        const CLAUSE_BREAK_SAMPLES = [
+            ...[",", ":", " —", " –", ";", " while", " whereas", " but", " however", " although", " though"].map(
+                (b) => [`英文「${b.trim()}」`, `Rinne works in LUNA${b} Pro Tools is not yet tested.\n`],
+            ),
+            ...["，", "：", "但是", "但", "然而", "不过", "可是", "而"].map((b) => [
+                `中文「${b}」`,
+                `Rinne 在 LUNA 可用${b}Cubase 尚未测试。\n`,
+            ]),
+        ];
+        // validation 证据的坏路径：.. 段、绝对路径、反斜杠、盘符、空段（文件名都带着合规的系统后缀，只测路径）
+        const BAD_RECORD_PATHS = [
+            ["docs/../../x", "validation:docs/../../x"],
+            ["docs/../../x-win.md", "validation:docs/../../x-win.md"],
+            ["docs/validation/../../../x-win.md", "validation:docs/validation/../../../x-win.md"],
+            ["docs/validation/..", "validation:docs/validation/.."],
+            ["/etc/x", "validation:/etc/x"],
+            ["/etc/x-win.md", "validation:/etc/x-win.md"],
+            ["/docs/validation/x-win.md", "validation:/docs/validation/x-win.md"],
+            ["docs\\x", "validation:docs\\x"],
+            ["docs\\validation\\x-win.md", "validation:docs\\validation\\x-win.md"],
+            ["C:/x-win.md", "validation:C:/x-win.md"],
+            ["C:\\x-win.md", "validation:C:\\x-win.md"],
+            ["docs//validation/x-win.md", "validation:docs//validation/x-win.md"],
+        ];
         // 窄的完整断言：只有整句断言才算命中，同一句里别的绝对化说法不被它放过
         const narrowClaims = {
             version: 1,
@@ -922,7 +1177,7 @@ export async function selfTest(root = ROOT) {
             [
                 "evidence 指向不存在的 validation 记录",
                 ["evidence-satisfied"],
-                run({ data: withClaim({ pending: [], evidence: ["validation:docs/validation/nowhere.md"] }) }),
+                run({ data: withClaim({ pending: [], evidence: ["validation:docs/validation/nowhere-win.md"] }) }),
             ],
             ["pending 的形态不认识", ["evidence-kind"], run({ data: withClaim({ pending: ["wiki:x"] }) })],
             [
@@ -1080,24 +1335,25 @@ export async function selfTest(root = ROOT) {
                     },
                 }),
             ],
-            // hedgeWhilePending：宿主兼容类声明，真机记录没到位时直述也要同一句带 hedge
+            // 宿主兼容类声明（pending / evidence 里有 validation 真机记录）：真机记录没到位时，直述要在所在分句里带 hedge。
+            // 这是默认口径，不用写 hedgeWhilePending；唯一的豁免是 hedgeWhilePending: false 加非空的 hedgeExemptReason
             [
                 "hedgeWhilePending：真机记录没到位，直述判红",
                 ["strong-needs-hedge"],
                 run({ root: goldenMissing, data: withHost(), files: { "README.md": "Rinne works in LUNA.\n" } }),
             ],
             [
-                "hedgeWhilePending：同句带 hedge 放行",
+                "hedgeWhilePending：括号里带 hedge，同一分句放行",
                 [],
                 run({
                     root: goldenMissing,
                     data: withHost(),
-                    files: { "README.md": "Rinne works in LUNA, host testing pending.\n" },
+                    files: { "README.md": "Rinne works in LUNA (host testing pending).\n" },
                 }),
             ],
             [
-                "没声明 hedgeWhilePending 的 pending 声明可以直述",
-                [],
+                "没写 hedgeWhilePending、pending 里有 validation 记录：默认也要求 hedge，直述判红",
+                ["strong-needs-hedge"],
                 run({
                     root: goldenMissing,
                     data: withHost({ hedgeWhilePending: undefined }),
@@ -1105,11 +1361,80 @@ export async function selfTest(root = ROOT) {
                 }),
             ],
             [
-                "hedgeWhilePending 写成 false 等于没声明：可以直述",
+                "没写 hedgeWhilePending、pending 里有 validation 记录：同一分句带 hedge 放行",
                 [],
                 run({
                     root: goldenMissing,
+                    data: withHost({ hedgeWhilePending: undefined }),
+                    files: { "README.md": "Rinne works in LUNA (host testing pending).\n" },
+                }),
+            ],
+            [
+                "没写 hedgeWhilePending、pending 里有 validation 记录却没有 hedge 短语：形状错误",
+                ["claims-shape"],
+                run({ root: goldenMissing, data: withHost({ hedgeWhilePending: undefined, hedge: [] }) }),
+            ],
+            [
+                "pending 里只有 golden 的声明不算宿主兼容类：没写 hedgeWhilePending 可以直述",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withClaim({ hedgeWhilePending: undefined }),
+                    files: { "README.md": "Rinne starts with feedback at zero.\n" },
+                }),
+            ],
+            [
+                "hedgeWhilePending: false 且写了理由：显式豁免，可以直述",
+                [],
+                run({ root: goldenMissing, data: withHost(exempt), files: { "README.md": "Rinne works in LUNA.\n" } }),
+            ],
+            [
+                "hedgeWhilePending: false 且写了理由、没有 hedge 短语：豁免了就不要求",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ ...exempt, hedge: [] }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "只写 hedgeWhilePending: false、不写理由：形状错误，豁免不生效，直述仍判红",
+                ["claims-shape", "strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
                     data: withHost({ hedgeWhilePending: false }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            ...[
+                ["是空串", ""],
+                ["只有空白", "  "],
+                ["不是字符串", 1],
+                ["是 null", null],
+            ].map(([label, reason]) => [
+                `hedgeExemptReason ${label}：形状错误，豁免不生效，直述仍判红`,
+                ["claims-shape", "strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedgeWhilePending: false, hedgeExemptReason: reason }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ]),
+            [
+                "只写 hedgeExemptReason、不写 hedgeWhilePending: false：形状错误，直述仍判红",
+                ["claims-shape", "strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedgeWhilePending: undefined, hedgeExemptReason: exemptReason }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "hedgeWhilePending: true 又写了 hedgeExemptReason：形状错误，直述仍判红",
+                ["claims-shape", "strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedgeExemptReason: exemptReason }),
                     files: { "README.md": "Rinne works in LUNA.\n" },
                 }),
             ],
@@ -1119,6 +1444,15 @@ export async function selfTest(root = ROOT) {
                 run({
                     root: withLuna,
                     data: withHost({ evidence: [lunaRecord], pending: [] }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "没写 hedgeWhilePending、真机记录在 evidence 并成立：直述放行",
+                [],
+                run({
+                    root: withLuna,
+                    data: withHost({ hedgeWhilePending: undefined, evidence: [lunaRecord], pending: [] }),
                     files: { "README.md": "Rinne works in LUNA.\n" },
                 }),
             ],
@@ -1139,12 +1473,9 @@ export async function selfTest(root = ROOT) {
             ],
             // 宿主兼容类的认定不看 hedgeWhilePending 开关：pending / evidence 里有 validation 记录就是
             [
-                "关掉 hedgeWhilePending（false）、evidence 加回 ci 证据：仍判红",
+                "显式豁免 hedge、evidence 加回 ci 证据：仍判红（豁免不豁免证据口径）",
                 ["host-claim-evidence"],
-                run({
-                    root: goldenMissing,
-                    data: withHost({ hedgeWhilePending: false, evidence: ["ci:core-sanitizers"] }),
-                }),
+                run({ root: goldenMissing, data: withHost({ ...exempt, evidence: ["ci:core-sanitizers"] }) }),
             ],
             [
                 "去掉 hedgeWhilePending 字段、evidence 加回 ci 证据：仍判红",
@@ -1155,28 +1486,24 @@ export async function selfTest(root = ROOT) {
                 }),
             ],
             [
-                "关掉 hedgeWhilePending、evidence 加回 golden 证据：仍判红",
+                "显式豁免 hedge、evidence 加回 golden 证据：仍判红",
                 ["host-claim-evidence"],
-                run({ root: cfgsOn, data: withHost({ hedgeWhilePending: false, evidence: [guardPred] }) }),
+                run({ root: cfgsOn, data: withHost({ ...exempt, evidence: [guardPred] }) }),
             ],
             [
-                "关掉 hedgeWhilePending、真机记录已在 evidence 却混着 ci 证据（pending 已清空）：仍判红",
+                "显式豁免 hedge、真机记录已在 evidence 却混着 ci 证据（pending 已清空）：仍判红",
                 ["host-claim-evidence"],
                 run({
                     root: withLuna,
-                    data: withHost({
-                        hedgeWhilePending: false,
-                        evidence: [lunaRecord, "ci:core-sanitizers"],
-                        pending: [],
-                    }),
+                    data: withHost({ ...exempt, evidence: [lunaRecord, "ci:core-sanitizers"], pending: [] }),
                 }),
             ],
             [
-                "关掉 hedgeWhilePending、evidence 全是 validation 真机记录：放行",
+                "显式豁免 hedge、evidence 全是 validation 真机记录：放行",
                 [],
                 run({
                     root: withLuna,
-                    data: withHost({ hedgeWhilePending: false, evidence: [lunaRecord], pending: [] }),
+                    data: withHost({ ...exempt, evidence: [lunaRecord], pending: [] }),
                     files: { "README.md": "Rinne works in LUNA.\n" },
                 }),
             ],
@@ -1193,7 +1520,327 @@ export async function selfTest(root = ROOT) {
                 }),
             ],
             ["hedgeWhilePending 不是布尔值", ["claims-shape"], run({ data: withHost({ hedgeWhilePending: "yes" }) })],
-            ["声明了 hedgeWhilePending 却没有 hedge 短语", ["claims-shape"], run({ data: withHost({ hedge: [] }) })],
+            [
+                "宿主兼容类声明在真机记录到位前没有 hedge 短语",
+                ["claims-shape"],
+                run({ root: goldenMissing, data: withHost({ hedge: [] }) }),
+            ],
+            // hedge 要落在 strong 所在的分句里：别的分句里的免责语不算
+            [
+                "「works in LUNA, while Pro Tools is not yet tested」：免责语在 while 之后的另一个分句，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["host testing pending", "not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA, while Pro Tools is not yet tested.\n" },
+                }),
+            ],
+            [
+                "「works in LUNA, host testing pending」：免责语在逗号之后的另一个分句，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA, host testing pending.\n" },
+                }),
+            ],
+            [
+                "中文「在 LUNA 可用，而 Cubase 尚未测试」：免责语在而之后的另一个分句，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": "Rinne 在 LUNA 可用，而 Cubase 尚未测试。\n" },
+                }),
+            ],
+            [
+                "min-macos 同理：「tested on macOS 14, while Windows is not yet tested」判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withMinMacos(),
+                    files: { "README.md": "Rinne is tested on macOS 14, while Windows is not yet tested.\n" },
+                }),
+            ],
+            [
+                "min-macos 同理：「在 macOS 14 上可用，但 Windows 尚未验证」判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withMinMacos(),
+                    files: { "README.md": "Rinne 在 macOS 14 上可用，但 Windows 尚未验证。\n" },
+                }),
+            ],
+            [
+                "min-macos 同理：同一分句带 hedge 放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withMinMacos(),
+                    files: {
+                        "README.md":
+                            "Rinne is tested on macOS 14 (built for macOS 11+), while Windows is not yet tested.\n",
+                    },
+                }),
+            ],
+            ...CLAUSE_BREAK_SAMPLES.map(([label, text, extra]) => [
+                `分句界「${label}」：免责语在界之后的另一个分句，判红`,
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({
+                        strong: ["works in LUNA", "在 LUNA 可用"],
+                        hedge: ["not yet tested", zhHedge],
+                        ...extra,
+                    }),
+                    files: { "README.md": text },
+                }),
+            ]),
+            [
+                "同一句里 strong 出现两处，只有第一处所在的分句带 hedge：第二处判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA (host testing pending), and it works in LUNA.\n" },
+                }),
+            ],
+            // 整个落在引号里的命中是在引用，不是在断言（口径与 wording、unregistered-absolute 相同）
+            [
+                "strong 整个在引号里（引用示例）：放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": 'Never write "works in LUNA" without a note.\n' },
+                }),
+            ],
+            [
+                "strong 整个在「」里（中文引用示例）：放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": "我们不写「在 LUNA 可用」这种话。\n" },
+                }),
+            ],
+            [
+                "strong 只有一部分在引号里：仍判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withMinMacos(),
+                    files: { "README.md": 'Rinne 在 macOS "14 上可用"。\n' },
+                }),
+            ],
+            [
+                "同一句里引号外还有一处 strong：引号外那处仍判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": 'Rinne works in LUNA, and we never say "works in LUNA" alone.\n' },
+                }),
+            ],
+            [
+                "括号里带 hedge、括号内有逗号：仍算括号所在的分句，放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA (see the notes, host testing pending).\n" },
+                }),
+            ],
+            [
+                "中文括号里带 hedge、括号内有逗号：放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": "Rinne 在 LUNA 可用（见说明，尚未测试）。\n" },
+                }),
+            ],
+            [
+                "括号没配平时按没有括号处理：免责语在逗号之后，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA (see the notes, host testing pending.\n" },
+                }),
+            ],
+            [
+                "strong 与 hedge 在同一分句、转折连词在 strong 之后：放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["delay does not change with"], hedge: ["designed so"] }),
+                    files: {
+                        "README.md":
+                            "Rinne is designed so that the delay does not change with buffer size while you play.\n",
+                    },
+                }),
+            ],
+            [
+                "转折连词把 strong 与前面的无关分句隔开：strong 自己的分句带 hedge 放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["not yet tested", "host testing pending"] }),
+                    files: {
+                        "README.md": "Pro Tools is not yet tested, but Rinne works in LUNA (host testing pending).\n",
+                    },
+                }),
+            ],
+            [
+                "not yet 里的 yet 不是转折连词：同一分句放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA which is not yet tested.\n" },
+                }),
+            ],
+            [
+                "并列的 and 不切分句：同一分句放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA and Cubase and is not yet tested.\n" },
+                }),
+            ],
+            [
+                "中文并列的「而且」不切分句：同一分句放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": "Rinne 在 LUNA 可用而且尚未测试。\n" },
+                }),
+            ],
+            // strong 的命中本身跨过分句界时，跨到的每个分句合起来算它所在的区间
+            [
+                "strong 的命中跨过逗号，hedge 在跨到的第二个分句里：放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["不随[^。\\n]{0,20}变化"], hedge: ["按设计"] }),
+                    files: { "README.md": "环路延迟不随缓冲大小，按设计也不随导出方式变化。\n" },
+                }),
+            ],
+            [
+                "strong 的命中跨过逗号，hedge 在命中之外的第三个分句里：判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["不随[^。\\n]{0,20}变化"], hedge: ["按设计"] }),
+                    files: { "README.md": "环路延迟不随缓冲大小，导出方式变化，按设计。\n" },
+                }),
+            ],
+            [
+                "时间里的冒号不切分句：同一分句放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA since 10:30 (host testing pending).\n" },
+                }),
+            ],
+            [
+                "数字里的逗号不切分句：同一分句放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA at 1,024 samples (host testing pending).\n" },
+                }),
+            ],
+            // validation 证据的路径只准是仓内的规范相对路径：用 .. 绕出仓根、绝对路径、反斜杠、盘符都是形状错误
+            [
+                "validation 证据用 .. 绕到仓根之外的真实文件：形状错误，不当证据（旧写法会读到它）",
+                ["evidence-kind"],
+                run({
+                    root: escapeRepo,
+                    data: withHost({ ...exempt, evidence: [escapedRecord], pending: [] }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            [
+                "validation 的 pending 用 .. 绕出去：形状错误",
+                ["evidence-kind"],
+                run({
+                    root: escapeRepo,
+                    data: withHost({ pending: ["validation:docs/../*-luna-macos.md"] }),
+                }),
+            ],
+            ...BAD_RECORD_PATHS.map(([label, item]) => [
+                `validation 证据「${label}」：形状错误`,
+                ["evidence-kind"],
+                run({ root: goldenMissing, data: withHost({ ...exempt, evidence: [item], pending: [] }) }),
+            ]),
+            [
+                "golden 证据的目标文件用 .. 绕出仓根：形状错误",
+                ["evidence-kind"],
+                run({
+                    root: goldenMissing,
+                    data: withClaim({ pending: [], evidence: ["golden:tests/../../x.json#feedback.default == 0"] }),
+                }),
+            ],
+            [
+                "validation 证据路径里的 . 段与空段不是规范形式：形状错误",
+                ["evidence-kind"],
+                run({
+                    root: withLuna,
+                    data: withHost({
+                        ...exempt,
+                        evidence: ["validation:docs/./validation/2026-11-03-luna-macos.md"],
+                        pending: [],
+                    }),
+                }),
+            ],
+            [
+                "validation 证据是仓内的规范路径、文件存在：放行",
+                [],
+                run({
+                    root: withLuna,
+                    data: withHost({ ...exempt, evidence: [lunaRecord], pending: [] }),
+                    files: { "README.md": "Rinne works in LUNA.\n" },
+                }),
+            ],
+            // 记录文件名的系统后缀只有一种写法：win / macos / linux
+            ...[
+                ["mac", "validation:docs/validation/*-luna-mac.md"],
+                ["windows", "validation:docs/validation/*-cubase-pro-15-windows.md"],
+                ["osx", "validation:docs/validation/*-luna-osx.md"],
+                ["没有系统后缀", "validation:docs/validation/*-luna.md"],
+                ["后缀大小写不同", "validation:docs/validation/*-luna-MacOS.md"],
+            ].map(([label, item]) => [
+                `pending 的记录文件名系统后缀写成「${label}」：形状错误`,
+                ["evidence-kind"],
+                run({ root: goldenMissing, data: withHost({ pending: [item] }) }),
+            ]),
+            [
+                "evidence 的记录文件名系统后缀写成 mac（文件存在也不行）：形状错误",
+                ["evidence-kind"],
+                run({
+                    root: withMacRecord,
+                    data: withHost({
+                        ...exempt,
+                        evidence: ["validation:docs/validation/2026-11-03-luna-mac.md"],
+                        pending: [],
+                    }),
+                }),
+            ],
+            ...[
+                ["win", "validation:docs/validation/*-cubase-pro-15-win.md"],
+                ["macos", "validation:docs/validation/*-luna-macos.md"],
+                ["linux", "validation:docs/validation/*-reaper-linux.md"],
+            ].map(([label, item]) => [
+                `pending 的记录文件名系统后缀写成「${label}」：放行`,
+                [],
+                run({ root: goldenMissing, data: withHost({ pending: [item] }), files: { "README.md": "x.\n" } }),
+            ]),
             // hedge 不能是不含任何免责词的正面断言
             [
                 "hedge 是另一个正面断言（passes auval and pluginval）",
@@ -1253,24 +1900,57 @@ export async function selfTest(root = ROOT) {
                     }),
                 }),
             ],
-            // hedge 与 strong 自相匹配。两个方向的夹具都带着免责词（only），只触发自相匹配这一条，
+            // hedge 与 strong 自相匹配。两个方向的夹具都带着免责词（pending / only on），只触发自相匹配这一条，
             // 不与「hedge 不能是正面断言」混在一起
             [
-                "hedge 的典型命中本身含 strong（tested on macOS [0-9]+ only）",
+                "hedge 的典型命中本身含 strong（tested on macOS [0-9]+ pending）",
                 ["claims-shape"],
                 run({
                     data: withHost({
                         id: "min-macos",
                         strong: ["tested on macOS"],
-                        hedge: ["built for macOS 11\\+", "tested on macOS [0-9]+ only"],
+                        hedge: ["built for macOS 11\\+", "tested on macOS [0-9]+ pending"],
                     }),
                 }),
             ],
             [
-                "strong 的典型命中本身满足 hedge（works in LUNA only 满足 only）",
+                "strong 的典型命中本身满足 hedge（works in LUNA only on macOS 满足 only on macOS）",
                 ["claims-shape"],
-                run({ data: withHost({ strong: ["works in LUNA only"], hedge: ["only"] }) }),
+                run({
+                    data: withHost({ strong: ["works in LUNA only on macOS"], hedge: ["only on macOS"] }),
+                }),
             ],
+            // 免责词表收窄：单字「待」、裸的 only 与 if 不算免责，hedge 里只有它们时就是另一个正面断言
+            ...[
+                ["期待", "期待"],
+                ["期待…可用", "期待[^。]{0,6}可用"],
+                ["待机", "待机"],
+                ["对待", "对待"],
+                ["works in LUNA only（only 在句尾，没有限定搭配）", "available only"],
+                ["裸的 if", "if you like"],
+                ["不仅在（不仅不是仅在）", "不仅在"],
+            ].map(([label, hedge]) => [
+                `hedge「${label}」不算免责：形状错误`,
+                ["claims-shape"],
+                run({ data: withHost({ hedge: ["host testing pending", hedge] }) }),
+            ]),
+            ...[
+                ["待测试", "待测试"],
+                ["待验证", "待验证"],
+                ["待确认", "待确认"],
+                ["待上机", "待上机"],
+                ["待实测", "待实测"],
+                ["only on", "only on macOS 11\\+"],
+                ["only if", "only if tested"],
+                ["only when", "only when verified"],
+                ["if tested", "if tested"],
+                ["仅在", "仅在实测后"],
+                ["仅限", "仅限 macOS 11"],
+            ].map(([label, hedge]) => [
+                `hedge「${label}」是真正的免责或限定：放行`,
+                [],
+                run({ data: withHost({ hedge: ["host testing pending", hedge] }) }),
+            ]),
             [
                 "旧写法 hedge「tested on macOS [0-9]」既自相匹配又不含免责词",
                 ["claims-shape"],
@@ -1400,6 +2080,117 @@ export async function selfTest(root = ROOT) {
                 disclaimerProblem("通过 auval 与 pluginval") !== null &&
                 disclaimerProblem("not yet tested") === null &&
                 disclaimerProblem("尚未[^，。\\n]{0,10}(?:测试|验证)") === null,
+            expect: [],
+        });
+        // 收窄后的词表：期待 / 待机 / 对待、句尾的 only、裸的 if 不算免责；带限定搭配的才算
+        const notDisclaimers = [
+            "期待",
+            "待机",
+            "对待",
+            "works in LUNA only",
+            "only",
+            "if",
+            "if you like",
+            "不仅在",
+            "仅仅",
+        ];
+        const disclaimers = [
+            "待测",
+            "待测试",
+            "待验证",
+            "待确认",
+            "待上机",
+            "待实测",
+            "only on macOS 11+",
+            "only if tested",
+            "only when verified",
+            "only after testing",
+            "only for tested hosts",
+            "if tested",
+            "仅在 LUNA 实测后",
+            "仅限已验证的宿主",
+        ];
+        cases.push({
+            label: `免责词表收窄：${notDisclaimers.join(" / ")} 不算免责`,
+            bad: true,
+            passed: notDisclaimers.every((p) => disclaimerProblem(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) !== null),
+            expect: [],
+        });
+        cases.push({
+            label: `免责词表收窄后仍认：${disclaimers.join(" / ")}`,
+            bad: false,
+            passed: disclaimers.every((p) => disclaimerProblem(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) === null),
+            expect: [],
+        });
+        // 记录文件名的系统后缀：只有一种写法，生成与校验是同一个函数
+        cases.push({
+            label: "recordOsSuffixes / recordNameTail：windows→win、macos→macos、linux→linux，any 取全部，不认识的系统没有后缀",
+            bad: false,
+            passed:
+                recordOsSuffixes("windows").join() === "win" &&
+                recordOsSuffixes("macOS").join() === "macos" &&
+                recordOsSuffixes("linux").join() === "linux" &&
+                recordOsSuffixes("any").join() === "win,macos,linux" &&
+                recordOsSuffixes("freebsd").length === 0 &&
+                recordNameTail("freebsd") === null &&
+                ["mac", "windows", "osx"].every(
+                    (s) => !new RegExp(`${recordNameTail()}$`).test(`2026-11-03-x-${s}.md`),
+                ) &&
+                ["win", "macos", "linux"].every((s) => new RegExp(`${recordNameTail()}$`).test(`2026-11-03-x-${s}.md`)),
+            expect: [],
+        });
+        // 仓内路径函数：坏路径各一条，规范的相对路径放行；给了仓根时规范化后还要在仓根之内
+        const badPaths = [
+            "docs/../../x",
+            "../x",
+            "docs/validation/..",
+            "/etc/x",
+            "docs\\x",
+            "C:/x",
+            "c:x",
+            "docs/x\0y",
+            "docs//x",
+            "docs/./x",
+            "docs/x/",
+            "",
+        ];
+        cases.push({
+            label: "repoPathProblem：.. 段、绝对路径、反斜杠、盘符、空段、. 段都拒绝",
+            bad: true,
+            passed: badPaths.every((p) => repoPathProblem(p) !== null) && repoPathProblem(undefined) !== null,
+            expect: [],
+        });
+        cases.push({
+            label: "repoPathProblem：仓内的规范相对路径放行，带仓根时规范化后在仓根之内也放行",
+            bad: false,
+            passed:
+                repoPathProblem("docs/validation/2026-11-03-luna-macos.md") === null &&
+                repoPathProblem("docs/validation/2026-11-03-luna-macos.md", escapeRepo) === null &&
+                repoPathProblem("docs/..x/y.md", escapeRepo) === null,
+            expect: [],
+        });
+        cases.push({
+            label: "validationExists / evalGolden 直接拒绝仓外的文件：路径不合格就不去读，仓内的照常",
+            bad: true,
+            passed:
+                validationExists(escapeRepo, "docs/../../2026-11-03-luna-macos.md", false) === false &&
+                validationExists(escapeRepo, "docs/validation/../../*-luna-macos.md", true) === false &&
+                validationExists(withLuna, "docs/validation/2026-11-03-luna-macos.md", false) === true &&
+                validationExists(withLuna, "docs/validation/*-luna-macos.md", true) === true &&
+                evalGolden(escapeRepo, "../outside.json#a == 1") === null &&
+                evalGolden(cfgsOn, "tests/golden/state-schema.json#cfgs.keys[name=guard_on].default == 1") === true,
+            expect: [],
+        });
+        cases.push({
+            label: "escapesRoot：规范化后落在仓根之外（或就是仓根本身）的路径判为越界",
+            bad: true,
+            passed:
+                escapesRoot(escapeRepo, "docs/../../x") &&
+                escapesRoot(escapeRepo, "../x") &&
+                escapesRoot(escapeRepo, "..") &&
+                escapesRoot(escapeRepo, ".") &&
+                !escapesRoot(escapeRepo, "docs/x") &&
+                !escapesRoot(escapeRepo, "docs/..x/y"),
             expect: [],
         });
     } finally {

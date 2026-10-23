@@ -14,9 +14,12 @@
 //   status-values       status ∈ {awaiting-test, partial, verified, out-of-scope}
 //   awaiting-null       status == "awaiting-test" ⇒ tier 为 null 且 evidence 为空
 //   tier-evidence       有等级的行必须有证据，且每条都成立：Tier 1 / 2 至少一条 validation 记录；Tier 3 至少一条 ci 证据；
-//                       validation 记录必须是这一行自己的：文件名 <YYYY-MM-DD>-<整个宿主名的 slug>[-版本]-<系统>.md，
+//                       validation 记录必须是这一行自己的：文件名 <YYYY-MM-DD>-<整个宿主名的 slug>[-版本]-<系统后缀>.md，
 //                       宿主名整个对上（cubase-pro 不是 cubase，fl-studio 不是 studio），版本对得上（文件名里的版本，
-//                       或文件名没写时正文里有「宿主名 版本」），系统对得上；同族宿主、别的版本、别的系统的记录都不算
+//                       或文件名没写时正文里有「宿主名 版本」），系统对得上；同族宿主、别的版本、别的系统的记录都不算。
+//                       系统后缀只有一种写法 win / macos / linux（与 claims 的 validation 路径共用 recordNameTail，
+//                       不认 -windows.md、-mac.md）；记录路径只准是仓内的规范相对路径（与 claims 共用 repoPathProblem：
+//                       拒绝 .. 段、绝对路径、反斜杠、盘符，规范化后仍在仓根之内）
 //   tier1-checks        tier === 1 ⇒ checks 全部为 true
 //   verified-consistent status 与等级自洽，是「当且仅当」：verified ⇔ tier 是数字且 tier ≤ targetTier；
 //                       partial 只在 tier 是 1…3 的具体等级且 tier > targetTier（还没到目标）时才对；
@@ -37,7 +40,7 @@ import { ROOT, caseResult, readText } from "../lib/check-kit.mjs";
 import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
 import { CHECK_FIELDS, STATUS_VALUES, TIER_VALUES, selfTestCases as dawTiersCases } from "../gen-docs.d/daw-tiers.mjs";
 import { selfTestCases as platformBadgeCases } from "../gen-docs.d/platform-badge.mjs";
-import { ciJobs, evidenceState } from "./claims.mjs";
+import { ciJobs, evidenceState, recordNameTail, recordOsSuffixes, repoPathProblem } from "./claims.mjs";
 
 export { STATUS_VALUES, TIER_VALUES };
 export const TIERS_FILE = "docs/daw-tiers.json";
@@ -114,30 +117,32 @@ export function hostSlug(host) {
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** 记录文件名里系统部分的写法。 */
-const OS_TOKENS = { windows: ["win", "windows"], macos: ["mac", "macos"], linux: ["linux"] };
-
 /**
  * 一条 validation 记录能不能给这一行作证；返回不能的原因，能则返回 null。
- * 记录文件名的形态是本检查约定的 <YYYY-MM-DD>-<宿主 slug>[-版本]-<系统>.md：
+ * 记录文件名的形态是本检查约定的 <YYYY-MM-DD>-<宿主 slug>[-版本]-<系统后缀>.md：
+ *   路径：只准是仓内的规范相对路径（repoPathProblem，与 claims 的 validation 证据同一个函数）：
+ *         拒绝 .. 段、绝对路径、反斜杠、盘符，规范化后必须仍在仓根之内，不去读仓外的文件；
  *   宿主：slug 要是整个宿主名（cubase-pro，不是 cubase；fl-studio，不是 studio），后面直接是版本或系统，不许多出别的词；
  *   版本：这一行写了具体版本时，文件名里的版本要对得上（15 对 15 与 15.0.30，不对 14）；
  *         文件名没写版本时，记录正文里要出现「宿主名 版本」；版本写 any 的行不核对；
- *   系统：这一行的系统要对得上文件名里的系统（windows 对 win / windows，macos 对 mac / macos）；系统写 any 的行不核对。
+ *   系统：后缀只有一种写法，win / macos / linux（recordNameTail，与 claims 的 validation 路径同一个函数生成）：
+ *         windows 的行只认 -win.md，macos 的行只认 -macos.md，不认 -windows.md、-mac.md；系统写 any 的行认全部后缀。
  * 记录的正文是人写的自由格式，这里只核对文件名与版本，不去解析 checks 各项的结论。
  */
 export function recordProblem(row, item, root) {
     const rel = String(item).slice("validation:".length);
+    const pathWhy = repoPathProblem(rel, root);
+    if (pathWhy) return `路径${pathWhy}，验证记录只准是仓内的规范相对路径`;
     const file = path.basename(rel).toLowerCase();
     const slug = hostSlug(row?.host);
     if (!slug) return null; // 没有宿主名由 tiers-shape 报
     const osName = String(row?.os ?? "").toLowerCase();
-    const osTokens = osName === "any" ? ["[a-z0-9]+"] : (OS_TOKENS[osName] ?? [escapeRe(osName)]);
-    const m = new RegExp(
-        `^\\d{4}-\\d{2}-\\d{2}-${escapeRe(slug)}(?:-?(\\d+(?:\\.\\d+)*))?-(?:${osTokens.join("|")})\\.md$`,
-    ).exec(file);
-    const want = `<YYYY-MM-DD>-${slug}[-版本]-${osName === "any" ? "<系统>" : (OS_TOKENS[osName]?.[0] ?? osName)}.md`;
-    if (!m) return `文件名不是这一行（${row.host}，${osName || "未写系统"}）自己的记录，应写成 ${want}`;
+    const tail = recordNameTail(osName);
+    if (!tail) return `系统「${osName || "未写"}」没有登记记录文件名的系统后缀，不能用验证记录作证`;
+    const m = new RegExp(`^\\d{4}-\\d{2}-\\d{2}-${escapeRe(slug)}(?:-?(\\d+(?:\\.\\d+)*))?${tail}$`).exec(file);
+    const suffixes = recordOsSuffixes(osName);
+    const want = `<YYYY-MM-DD>-${slug}[-版本]-${suffixes.length === 1 ? suffixes[0] : "<系统>"}.md`;
+    if (!m) return `文件名不是这一行（${row.host}，${osName}）自己的记录，应写成 ${want}`;
     const versions = String(row?.versions ?? "").trim();
     if (!versions || versions.toLowerCase() === "any") return null;
     const ver = versions.replace(/\.x$/i, "");
@@ -395,6 +400,9 @@ export async function selfTest(root = ROOT) {
     const records = {
         "2026-11-02-cubase-pro-15-win.md": "Cubase Pro 15.0.30 on Windows 11\n",
         "2026-11-02-cubase-pro-14-win.md": "Cubase Pro 14.0.5 on Windows 11\n",
+        "2026-11-02-cubase-pro-15-macos.md": "Cubase Pro 15.0.30 on macOS 14\n",
+        // 系统后缀的旧写法（windows / mac）：文件存在也不能作证
+        "2026-11-02-cubase-pro-15-windows.md": "Cubase Pro 15.0.30 on Windows 11\n",
         "2026-11-02-cubase-pro-15-mac.md": "Cubase Pro 15.0.30 on macOS 14\n",
         "2026-11-02-cubase-elements-15-win.md": "Cubase Elements 15 on Windows 11\n",
         "2026-11-04-studio-one-win.md": "Studio One 7 on Windows 11\n",
@@ -406,11 +414,16 @@ export async function selfTest(root = ROOT) {
     };
     // 临时目录的建与删都走 scripts/lib/safe-rm.mjs
     const tmp = makeTempDir("rinne-tiers-");
+    const outside = makeTempDir("rinne-tiers-out-");
     let cases;
     try {
         fs.mkdirSync(path.join(tmp, "docs", "validation"), { recursive: true });
         for (const [f, body] of Object.entries(records))
             fs.writeFileSync(path.join(tmp, "docs", "validation", f), body);
+        // 仓根之外有一份文件名完全合规的记录：用 .. 绕出去的路径在旧写法下会读到它、算作成立的证据
+        const escapeRepo = path.join(outside, "repo");
+        fs.mkdirSync(path.join(escapeRepo, "docs", "validation"), { recursive: true });
+        fs.writeFileSync(path.join(outside, "2026-11-02-cubase-pro-15-win.md"), "Cubase Pro 15.0.30 on Windows 11\n");
         const run = (data, opts = {}) =>
             tierProblems({ data: data ?? good, root: tmp, jobs, formats: ["VST3", "AU"], macMajor: 11, ...opts });
         cases = [
@@ -596,10 +609,60 @@ export async function selfTest(root = ROOT) {
                     partial2({
                         os: "macos",
                         formats: ["VST3", "AU"],
+                        evidence: [rec("2026-11-02-cubase-pro-15-macos.md")],
+                    }),
+                ),
+            ],
+            // 系统后缀只有一种写法（win / macos / linux）：生成与校验是同一个函数
+            [
+                "Windows 的行拿 -windows.md 的记录作证：后缀不是登记的写法（win），文件存在也不行",
+                ["tier-evidence"],
+                withHosts(partial2({ evidence: [rec("2026-11-02-cubase-pro-15-windows.md")] })),
+            ],
+            [
+                "macOS 的行拿 -mac.md 的记录作证：后缀不是登记的写法（macos），文件存在也不行",
+                ["tier-evidence"],
+                withHosts(
+                    partial2({
+                        os: "macos",
+                        formats: ["VST3", "AU"],
                         evidence: [rec("2026-11-02-cubase-pro-15-mac.md")],
                     }),
                 ),
             ],
+            [
+                "系统写 any 的行认全部登记的后缀（-macos.md）",
+                [],
+                withHosts(partial2({ os: "any", evidence: [rec("2026-11-02-cubase-pro-15-macos.md")] })),
+            ],
+            [
+                "系统写 any 的行也不认 -mac.md",
+                ["tier-evidence"],
+                withHosts(partial2({ os: "any", evidence: [rec("2026-11-02-cubase-pro-15-mac.md")] })),
+            ],
+            [
+                "系统没有登记后缀（freebsd）的行不能用验证记录作证",
+                ["tier-evidence"],
+                withHosts(partial2({ os: "freebsd", evidence: [cubaseRecord] })),
+            ],
+            // 记录路径只准是仓内的规范相对路径（与 claims 的 validation 证据同一个函数）
+            [
+                "validation 证据用 .. 绕到仓根之外的真实记录（文件名完全合规）：不当证据，旧写法会读到它",
+                ["tier-evidence"],
+                withHosts(partial2({ evidence: ["validation:docs/../../2026-11-02-cubase-pro-15-win.md"] })),
+                { root: escapeRepo },
+            ],
+            ...[
+                ["validation:docs/../../x", "docs/../../x"],
+                ["validation:/etc/x", "/etc/x"],
+                ["validation:docs\\x", "docs\\x"],
+                ["validation:C:/x-win.md", "盘符"],
+                ["validation:docs//x-win.md", "空段"],
+            ].map(([item, label]) => [
+                `validation 证据「${label}」：形状错误`,
+                ["tier-evidence"],
+                withHosts(partial2({ evidence: [item] })),
+            ]),
             [
                 "记录文件名没有日期，不是模板规定的形态",
                 ["tier-evidence"],
@@ -706,8 +769,29 @@ export async function selfTest(root = ROOT) {
                 expect,
             };
         });
+        // 直接调 recordProblem：路径不合格就在读文件之前拒绝，不去碰仓外的文件
+        for (const [label, item, root] of [
+            ["docs/../../x", "validation:docs/../../x", tmp],
+            ["/etc/x", "validation:/etc/x", tmp],
+            ["docs\\x", "validation:docs\\x", tmp],
+            ["C:/x-win.md", "validation:C:/x-win.md", tmp],
+            ["仓外的真实记录", "validation:docs/../../2026-11-02-cubase-pro-15-win.md", escapeRepo],
+        ])
+            cases.push({
+                label: `recordProblem 直接拒绝「${label}」`,
+                bad: true,
+                passed: String(recordProblem(cubase(), item, root)).startsWith("路径"),
+                expect: [],
+            });
+        cases.push({
+            label: "recordProblem：仓内规范路径、文件名与这一行对得上：放行",
+            bad: false,
+            passed: recordProblem(cubase(), cubaseRecord, tmp) === null,
+            expect: [],
+        });
     } finally {
         cleanupTempDir(tmp);
+        cleanupTempDir(outside);
     }
     const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.expect.includes(r)));
     cases.push({

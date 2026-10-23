@@ -79,10 +79,22 @@ export const RULES = {
 export const SCOPE_FILE = "docs/wording-scope.json";
 
 /**
- * 核心用户面文件：任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，这是它的底线）。
- * 用户指南的中文版与英文版同级，都是用户天天读的文字。
+ * 核心用户面文件（底线）：仓里已经存在的所有公开用户面文档——两份 README、更新日志、安全策略、贡献指南、安装说明、
+ * 中文用户指南与硬规则词条。任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，这是它的底线）。
+ * 以实际存在为准：英文版用户指南 docs/USER_GUIDE.md、docs/DAW_COMPATIBILITY.md、docs/KNOWN_ISSUES.md 现在都不存在，
+ * 它们落地的同一个 PR 要把路径加进这张清单（范围表里已经先登记了它们的路径，文件一出现就被扫；
+ * 加进这里是为了此后不许挪出去）。
  */
-export const REQUIRED_SCOPE = ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/hard-rules.i18n.json"];
+export const REQUIRED_SCOPE = [
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "docs/INSTALL.md",
+    "docs/USER_GUIDE.zh-CN.md",
+    "docs/hard-rules.i18n.json",
+];
 
 /**
  * 总是要扫的目录：scopedFiles 读这里的全部 .js 词条文件，新增词条文件不用登记。
@@ -895,16 +907,37 @@ export async function selfTest() {
         edited((t) => t.scope.push("docs/*.md")),
         "通配符",
     );
-    badTable(
-        "核心用户面文件被挪出 scope",
-        edited((t) => (t.scope = t.scope.filter((p) => p !== "README.zh-CN.md"))),
-        "缺核心用户面文件「README.zh-CN.md」",
-    );
-    badTable(
-        "中文用户指南被挪出 scope",
-        edited((t) => (t.scope = t.scope.filter((p) => p !== "docs/USER_GUIDE.zh-CN.md"))),
-        "缺核心用户面文件「docs/USER_GUIDE.zh-CN.md」",
-    );
+    // 底线清单里的每一个文件：挪出 scope 判红（单纯删掉，或者挪进排除清单，两种写法都拦）
+    for (const required of REQUIRED_SCOPE) {
+        badTable(
+            `核心用户面文件 ${required} 被挪出 scope`,
+            edited((t) => (t.scope = t.scope.filter((p) => p !== required))),
+            `缺核心用户面文件「${required}」`,
+        );
+        badTable(
+            `核心用户面文件 ${required} 被挪进排除清单`,
+            edited((t) => {
+                t.scope = t.scope.filter((p) => p !== required);
+                t.excluded[0].paths.push(required);
+            }),
+            `缺核心用户面文件「${required}」`,
+        );
+    }
+    cases.push({
+        label: "核心用户面文件清单覆盖仓里已有的公开用户面文档（两份 README、更新日志、安全策略、贡献指南、安装说明、中文用户指南、硬规则词条）",
+        bad: false,
+        passed: [
+            "README.md",
+            "README.zh-CN.md",
+            "CHANGELOG.md",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+            "docs/INSTALL.md",
+            "docs/USER_GUIDE.zh-CN.md",
+            "docs/hard-rules.i18n.json",
+        ].every((p) => REQUIRED_SCOPE.includes(p)),
+        expect: [],
+    });
     badTable(
         "排除清单盖住词条目录 web/i18n/",
         edited((t) => t.excluded[0].paths.push("web/i18n/")),
@@ -985,7 +1018,7 @@ export async function selfTest() {
     {
         const goodText = JSON.stringify({
             version: 1,
-            scope: ["README.md", "README.zh-CN.md", "docs/USER_GUIDE.zh-CN.md", "docs/hard-rules.i18n.json"],
+            scope: [...REQUIRED_SCOPE],
             excluded: [{ reason: "不是用户面文字", paths: ["docs/wording-scope.json", "docs/BUILDING.md"] }],
         });
         const repo = (files) => {

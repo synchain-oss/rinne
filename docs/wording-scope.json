@@ -5,6 +5,7 @@
     "README.zh-CN.md",
     "CHANGELOG.md",
     "SECURITY.md",
+    "CONTRIBUTING.md",
     "docs/USER_GUIDE.md",
     "docs/USER_GUIDE.zh-CN.md",
     "docs/INSTALL.md",
@@ -34,7 +35,7 @@
     },
     {
       "reason": "维护者规则：禁言清单本身就列着这些词",
-      "paths": ["CLAUDE.md", "CONTRIBUTING.md", ".github/"]
+      "paths": ["CLAUDE.md", ".github/"]
     },
     {
       "reason": "脚本、测试、构建与第三方：不是用户面文字",
