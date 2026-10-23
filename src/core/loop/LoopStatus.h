@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 环路层的状态：音频线程写，消息线程读。每个字段一个无锁原子量，音频线程只写、消息线程只读。
+// 字段之间一般不保证出自同一块（显示允许前后差一个事件）；几何量 m / w / off 例外，三个一起经顺序锁发布。
 //
 // 存在的理由：诊断文本的环路段与顺序段（DiagLoop / DiagSync / DiagOrder）与界面的常驻显示都要这些量，
 // 这个结构是它们唯一的落点：之后往里加字段只改这一个头与它的实现，引擎的代码不用改。
@@ -74,17 +75,21 @@ struct LoopStatusFields
     std::uint64_t torn = 0; // 撕裂的帧数
     std::uint64_t overrun = 0; // 补 0 的样本数
     std::uint32_t wCasFail = 0; // 写头 CAS 失败次数（写侧统计，读侧从环头读）
-    std::uint32_t unstable = 0; // 时序不稳定（置位次数）
-    std::uint32_t offsetDriftBlocks = 0; // 漂移被吸收的块数
+    std::uint32_t unstable = 0; // 时序不稳定：0 或 1。进过一次容忍模式就是 1，之后不再清零（不是次数）
+    std::uint32_t offsetDriftBlocks = 0; // 漂移被吸收的检查次数（m 不为 0、还没到重同步门槛）
     std::uint32_t frozenMax = 0; // 连续最多几块写头没动（块数）
     std::uint32_t stalled = 0; // 当前是否断档
     std::uint32_t tolerant = 0; // 当前是否容忍模式
     std::uint32_t paired = 0; // 当前是否有对端
 
     // ---- 当前的几何量（逐块刷新；探针与诊断要看「现在是多少」）----
+    // 三个量出自同一块：音频线程按顺序锁（seqlock）一起发布，快照读到的三元组满足 m = w − R − off（R
+    // 是那一块的块首读位）。
     std::int64_t drift = 0; // m = W − (R + off)。正数 = 写头领先
     std::int64_t writeHead = 0; // w = Output 已写总帧数
     std::int64_t offset = 0; // off = 读头的同步偏移
+    // 1 = 上面三个量出自同一块；0 = 读的时候一直撞上音频线程正在写（重试够了次数仍没读到一份完整的），三个量不可信。
+    std::uint32_t geometryConsistent = 1;
 
     // ---- 顺序 ----
     std::uint8_t orderVerdict = 0; // OrderVerdict
@@ -116,7 +121,7 @@ public:
     // 漂移被吸收的块数（累计值，由判据那一半给）。漂移被吸收是真实事件，计数要看得见。
     void setOffsetDriftBlocks(std::uint32_t blocks) noexcept { offsetDrift_.store(blocks, std::memory_order_relaxed); }
     void setFrozenMax(std::uint32_t blocks) noexcept { frozenMax_.store(blocks, std::memory_order_relaxed); }
-    // 当前的几何量：m（漂移量）、w（写头）、off（同步偏移）。每块写一次。
+    // 当前的几何量：m（漂移量）、w（写头）、off（同步偏移）。每块写一次，三个量按顺序锁一起发布（只有音频线程写）。
     void setGeometry(std::int64_t driftValue, std::int64_t writeHead, std::int64_t offset) noexcept;
     void setOrder(std::uint8_t verdict, std::uint32_t votes, bool hostNsValid) noexcept;
 
@@ -125,6 +130,9 @@ public:
     LoopStatusFields snapshot() const noexcept;
 
 private:
+    // 按顺序锁读几何量（m / w / off 出自同一块）
+    void readGeometry(LoopStatusFields& fields) const noexcept;
+
     std::atomic<bool> paired_{false};
     std::atomic<bool> stalled_{false};
     std::atomic<bool> tolerant_{false};
@@ -153,6 +161,8 @@ private:
     std::atomic<std::uint32_t> offsetDrift_{0};
     std::atomic<std::uint32_t> frozenMax_{0};
 
+    // 几何量的顺序锁：音频线程写之前把序号加到奇数、写完加到偶数；消息线程前后两次读到同一个偶数才算一份完整的。
+    std::atomic<std::uint32_t> geometrySeq_{0};
     std::atomic<std::int64_t> drift_{0};
     std::atomic<std::int64_t> writeHead_{0};
     std::atomic<std::int64_t> offset_{0};

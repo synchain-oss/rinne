@@ -10,6 +10,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -37,11 +38,13 @@ public:
     }
 
     // 推进一块：writeHead 是这一块看到的写头 W，n 是块长。
+    // 有数据的上界取 max(已拉到的位置, W)：模拟 LoopSession 在判据之后照常把环拉到 W。
     SyncOutcome feed(i64 writeHead, int n, bool paired = true)
     {
         SyncInputs in;
         in.paired = paired;
         in.writeHead = writeHead;
+        in.dataEnd = std::max(line_.pulled(), writeHead);
         in.processed = processed_;
         in.declaredBlock = declaredBlock_;
         in.peerMaxBlock = peerMaxBlock_;
@@ -52,10 +55,14 @@ public:
         return outcome;
     }
 
-    // 推进一块并带上一批事实（起播沿、换写方、停用…）
+    // 推进一块并带上一批事实（起播沿、换写方、停用…）。in.dataEnd 为 0 时按 feed 的口径补上。
     SyncOutcome feedWith(SyncInputs& in, i64 writeHead, int n)
     {
         in.writeHead = writeHead;
+        if (in.dataEnd == 0)
+        {
+            in.dataEnd = std::max(line_.pulled(), writeHead);
+        }
         in.processed = processed_;
         in.declaredBlock = declaredBlock_;
         in.peerMaxBlock = peerMaxBlock_;
@@ -141,23 +148,51 @@ TEST_CASE("loop sync L2-01b 断档之后写头恢复推进，判据解除")
     REQUIRE(driver.sync().state() != SyncState::kStalled);
 }
 
-TEST_CASE("loop sync L2-02 严格模式：Δ 序列 0,0 不重同步；0,256 重同步")
+TEST_CASE("loop sync L2-02 严格模式：Δ = W − R（扣掉 off）连续两次不为 0 才重同步；块长与写头增量怎么变都不算")
 {
-    // ⛔ 删除式验证点：去掉严格模式的 Δ 判据 → 本用例变红。
+    // ⛔ 删除式验证点：把判据改回「写头每块的增量与上一块比」→ 第一段（块长 512 / 480 交替）就重同步，本用例变红。
     Driver driver;
     driver.setDeclaredBlock(512);
 
-    // 先配上：这一块只锚定偏移，不做判据。
-    driver.feed(0, 512);
+    // 正确摆放：写方与读方处理同一串样本，每块看到的 W 恰好等于本块的块首读位 R（偏移锚在 0）。
+    // 块长 512、480 交替：写头每块的增量跟着交替，但 m = W − (R + off) 恒为 0。
+    for (int block = 0; block < 40; ++block)
+    {
+        const int n = block % 2 == 0 ? 512 : 480;
+        const SyncOutcome outcome = driver.feed(driver.processed(), n);
+        REQUIRE_FALSE(outcome.resynced);
+    }
+    REQUIRE(driver.sync().resyncCount() == 0);
+    REQUIRE(driver.sync().misalignedChecks() == 0);
+
+    // Output 晚到一块：这一块写头没动（不算一次检查），下一块补上（m 回到 0）。不重同步。
+    const i64 frozen = driver.processed();
+    REQUIRE_FALSE(driver.feed(frozen, 512).resynced);
+    REQUIRE_FALSE(driver.feed(frozen, 512).resynced);
+    REQUIRE_FALSE(driver.feed(driver.processed(), 512).resynced);
     REQUIRE(driver.sync().resyncCount() == 0);
 
-    // Δ = 0 的第二块：仍然不重同步。
-    driver.feed(0, 512);
+    // m 只有一次不为 0、下一次回到 0：吸收，不重同步。
+    REQUIRE_FALSE(driver.feed(driver.processed() - 128, 512).resynced);
+    REQUIRE(driver.sync().misalignedChecks() == 1);
+    REQUIRE_FALSE(driver.feed(driver.processed(), 512).resynced);
+    REQUIRE(driver.sync().misalignedChecks() == 0);
     REQUIRE(driver.sync().resyncCount() == 0);
 
-    // Δ = 256：与上一块的 Δ 不同 → 重同步。
-    const SyncOutcome outcome = driver.feed(256, 512);
+    // 真错位：写方丢了一块（那一块写头没动，不算检查），之后照常前进，但 W 从此比 R + off 少 512：
+    // m 连续两次检查都不为 0 → 第二次检查时重同步（原因：对齐）。
+    REQUIRE_FALSE(driver.feed(driver.processed() - 512, 512).resynced); // 写头没动
+    REQUIRE_FALSE(driver.feed(driver.processed() - 512, 512).resynced); // 第一次检查：m = −512
+    REQUIRE(driver.sync().misalignedChecks() == 1);
+    const SyncOutcome outcome = driver.feed(driver.processed() - 512, 512); // 第二次检查
     REQUIRE(outcome.resynced);
+    REQUIRE(outcome.reason == SyncReason::kShift);
+    REQUIRE(driver.sync().resyncCount() == 1);
+    // 重同步之后偏移重新锚定：同样的落后量下 m 回到 0，不再重同步。
+    for (int block = 0; block < 8; ++block)
+    {
+        REQUIRE_FALSE(driver.feed(driver.processed() - 512, 512).resynced);
+    }
     REQUIRE(driver.sync().resyncCount() == 1);
 }
 
@@ -216,11 +251,13 @@ TEST_CASE("loop sync L2-04 重同步：旧读头 5 ms 淡出、新读头 20 ms o
     tap.validFrom = 0;
     tap.validTo = 1000000;
 
-    // 触发一次重同步（漂移跳变）。块要小：5 ms 的淡出是 240 个样本，块太大淡出就在块末走完了。
+    // 触发一次重同步（漂移跳变：写头一下子领先超过门限）。块要小：5 ms 的淡出是 240 个样本，块太大淡出就在块末走完了。
     driver.feed(0, 64);
-    driver.feed(0, 64);
-    const SyncOutcome outcome = driver.feed(256, 64);
+    driver.feed(64, 64);
+    const SyncOutcome outcome = driver.feed(128 + 20000, 64);
     REQUIRE(outcome.resynced);
+    REQUIRE(outcome.reason == SyncReason::kJump);
+    REQUIRE(tap.env.fadeOutSteps == 240);
 
     // 旧读头开始淡出：包络在下降（不再是 1）。
     REQUIRE(tap.env.fadingOut());
@@ -500,6 +537,12 @@ TEST_CASE("loop sync 对端没了：活跃读头 10 ms 淡出，读位照常前�
     Driver driver;
     driver.setDeclaredBlock(512);
 
+    // 延迟线里有足够的数据（对端走之前写下的），淡出能走满 10 ms。
+    driver.line().pull(0, 2000, [&](std::int64_t, float& l, float& r) {
+        l = 0.5f;
+        r = 0.5f;
+    });
+
     Tap& tap = driver.taps().at(0);
     tap.active = true;
     tap.delay = 100;
@@ -515,15 +558,94 @@ TEST_CASE("loop sync 对端没了：活跃读头 10 ms 淡出，读位照常前�
     REQUIRE(outcome.fadeStarted);
     REQUIRE(tap.env.fadingOut());
     REQUIRE(tap.env.fadeOutSteps == 480); // 10 ms @ 48 kHz
+    REQUIRE(tap.validTo == 2000); // 读上界 = 本块拉环之后有数据的上界
     // 读位照常前进：不推进的话淡出期间读头会反复读同一段。
     REQUIRE(driver.sync().processed() == before + 64);
     REQUIRE(driver.sync().state() == SyncState::kUnpaired);
+}
+
+TEST_CASE("loop sync 淡出的读上界与长度：取本块拉环之后的上界；数据不够一个淡出时缩短到恰好用完，不以阶跃收尾")
+{
+    // ⛔ 删除式验证点：读上界改回「上一块拉到的位置」→ 第一段 validTo 停在上一块的位置、淡出被截短，本用例变红。
+    // ⛔ 删除式验证点：去掉「按剩下的样本缩短淡出」→ 第二段的淡出长度仍是名义值（读到一半撞上界就是阶跃），本用例变红。
+    // 几何：块长 512，D = 600（只比上一块的块长多 88，不到一个 5 ms 淡出）。第一块 R = 0、W = 488，偏移锚在 488；
+    // 上一块拉到 488。第二块 R = 512、W = 1000（m = 0），读头从 R + off − D = 400 起读：离上一块拉到的位置只剩 88
+    // 个样本， 离本块的 W 还有 600 个。
+    const auto setUp = [](Driver& driver) -> Tap& {
+        driver.setDeclaredBlock(512);
+        driver.line().pull(0, 488, [&](std::int64_t, float& l, float& r) {
+            l = 0.5f;
+            r = 0.5f;
+        });
+        driver.feed(488, 512);
+        REQUIRE(driver.sync().offset() == 488);
+        Tap& tap = driver.taps().at(0);
+        tap.active = true;
+        tap.offset = driver.sync().offset();
+        tap.delay = 600;
+        tap.validFrom = 0;
+        tap.validTo = 1000000;
+        return tap;
+    };
+
+    // 直接调判据（不经 Driver：Driver 每块末推进包络，淡出在 512 的块里就走完释放了，这里要看挂上那一刻的读头）。
+    {
+        // 环还在（换写方：同一个环上的接力）：读上界是本块的 W，淡出走满 5 ms（240 个样本）。
+        Driver driver;
+        Tap& tap = setUp(driver);
+        SyncInputs in;
+        in.paired = true;
+        in.writerChanged = true;
+        in.writeHead = 1000;
+        in.dataEnd = 1000; // LoopSession 的口径：本块照常把环拉到 W
+        in.processed = driver.processed();
+        in.declaredBlock = 512;
+        in.blockLength = 512;
+        const SyncOutcome outcome = driver.sync().process(in, driver.line(), driver.taps());
+        REQUIRE(outcome.resynced);
+        REQUIRE(outcome.reason == SyncReason::kWriter);
+        REQUIRE(tap.validTo == 1000);
+        REQUIRE(tap.env.fadeOutSteps == 240);
+    }
+    {
+        // 环没了（对端连段一起走了）：只剩上一块拉到的 488，读头只剩 88 个样本。淡出缩短到 88，恰好在数据用完时走到 0。
+        // 直接调判据（不经 Driver：Driver 每块末推进包络，这里要看挂上那一刻的包络）。
+        Driver driver;
+        Tap& tap = setUp(driver);
+        LocalLine& line = driver.line();
+        TapSet& taps = driver.taps();
+        StreamSync& sync = driver.sync();
+        SyncInputs in;
+        in.paired = false;
+        in.writeHead = 0;
+        in.dataEnd = line.pulled();
+        in.processed = driver.processed();
+        in.declaredBlock = 512;
+        in.blockLength = 512;
+        const SyncOutcome outcome = sync.process(in, line, taps);
+        REQUIRE(outcome.fadeStarted);
+        REQUIRE(tap.validTo == 488);
+        REQUIRE(tap.env.fadeOutSteps == 88);
+        // 包络在第 88 个样本（读位置 488，第一个读不到的位置）恰好是 0：之后补的 0 与它相接，没有阶跃。
+        REQUIRE(TapSet::currentEnvelope(tap) == 1.0f);
+        advanceTaps(taps, 87);
+        REQUIRE(TapSet::currentEnvelope(tap) > 0.0f);
+        REQUIRE(TapSet::currentEnvelope(tap) <= 1.0f / 88.0f + 1.0e-6f);
+        advanceTaps(taps, 1);
+        REQUIRE_FALSE(tap.active); // 走完即释放（包络为 0）
+    }
 }
 
 TEST_CASE("loop sync 已经在淡出的读头不被重新起算（重新起算是一处阶跃）")
 {
     Driver driver;
     driver.setDeclaredBlock(512);
+
+    // 延迟线里有足够的数据，淡出能走满 5 ms。
+    driver.line().pull(0, 2000, [&](std::int64_t, float& l, float& r) {
+        l = 0.5f;
+        r = 0.5f;
+    });
 
     Tap& tap = driver.taps().at(0);
     tap.active = true;

@@ -86,6 +86,15 @@ public:
         tailCount_ = 0;
     }
 
+    // 换段：主区从 position 起重来（比它早的位置一律读不出来），但尾巴快照保留 —— 旧读头的淡出正在读它。
+    // 只许 position 不小于已拉到的位置时用：旧读头读的位置都在 position 之前，从此只可能从尾巴里读到，
+    // 新段的帧（落在 position 及以后）进不了旧读头。
+    void rebaseKeepingTail(i64 position) noexcept
+    {
+        pulled_ = position;
+        lineValidFrom_ = position;
+    }
+
     // 已经拉进来的帧数（绝对位置）
     i64 pulled() const noexcept { return pulled_; }
     // 有效区间的下界：这个位置之前的帧一律读成 0

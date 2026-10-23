@@ -9,10 +9,14 @@
 // 状态与判据（全部按样本计，与宿主怎么切块无关）：
 //   - W 与 R 只单调前进。差值一律走有符号运算：W = 0 的新段、W ≈ 2^40、from > pulled 都按有符号算。
 //   - 断档：W 未动且 R 前进 ≥ 2·N_max → STALLED，5 ms 淡出。
-//   - 对齐：严格模式下 Δ 两次不为 0 就重同步（Δ 是写头每块前进的帧数）。
-//   - 容忍模式：10 s 内 ≥ 3 次**对齐重同步**（漂移跳变或持续漂移）→ 转容忍模式并置「时序不稳定」。
+//   - 对齐：严格模式下 Δ 连续两次检查都不为 0 就重同步。Δ = W − R 扣掉同步偏移 off，即漂移量
+//     m = W − (R + off)；正确摆放时恒为 0。一次检查 = 写头在这一块动了的那一次判据。
+//     宿主改块长、Output 晚到一块再补上都不改变 m（它回到 0），不重同步。|m| 超过跳变门限时立刻重同步。
+//   - 容忍模式：10 s 内 ≥ 3 次**对齐重同步**（跳变、m 连续两次不为 0）→ 转容忍模式并置「时序不稳定」。
 //     换写方、改采样率、断档恢复与起播沿不计入：那些是宿主或用户的动作，不是时序不稳定的证据。
-//     容忍模式下不再因 Δ 变化重同步，但断档判据仍然生效（断档要淡出，这是安全侧）。
+//     容忍模式下不再因 m 不为 0 重同步，但跳变与断档判据仍然生效（断档要淡出，这是安全侧）。
+//   - 淡出（重同步、断档、对端没了、起播沿）：旧读头读到「本块拉环之后有数据的上界」为止（环还在时就是当前的 W，
+//     不是上一块拉到的位置）。数据不够一个完整的淡出时，淡出缩短到恰好在数据用完时走到 0：绝不以阶跃收尾。
 //   - 两端停用 > 250 ms → 清空本地延迟线（防停用止啸后原样复燃）。
 //   - 对端没了 → 活跃读头 10 ms 淡出；读位照常前进（读头不会反复读同一段）。
 //   - 同采样率重新 prepare → 保持流连续（不动读头与延迟线）。
@@ -70,8 +74,14 @@ struct SyncInputs
     bool resetOnPlay = true; // 起播复位开关
     bool resetRequested = false; // 宿主调用了 reset()：只记诊断
     bool domainReset = false; // 写头倒退（换段遗漏一类）：本地延迟线已从 W 起重来，重新锚定偏移
+    // 换了段（换组、重新映射）而两边都配着：重建读头。旧读头只读旧段已经拉进来的数据（dataEnd 由调用方给成
+    // 已拉到的位置），新段的帧不进旧读头的淡出。
+    bool ringSwitched = false;
     bool inactive = false; // 两端都停用（宿主没在调我们，或对端报告停调）
     i64 writeHead = 0; // W 的快照
+    // 本块拉环之后本地延迟线里有数据的上界（绝对位置）：环还在（配上了，或上一块还配着、对端刚走）时就是 W，
+    // 环不在时就是已经拉到的位置。旧读头的淡出只读到这里为止。
+    i64 dataEnd = 0;
     i64 peerMaxBlock = 0; // 对端 prepare 声明的最大块长
     i64 processed = 0; // R（Input 本地已处理帧数）
     i64 declaredBlock = 0; // N_prep
@@ -155,28 +165,31 @@ public:
     i64 writeHead() const noexcept { return writeHead_; }
     i64 processed() const noexcept { return processed_; }
     i64 offset() const noexcept { return offset_; }
-    i64 lastDelta() const noexcept { return lastDelta_; }
+    // 严格模式的连续计数：最近连续几次检查漂移量 m 不为 0（够 kMisalignedChecksToResync 次就重同步）。
+    int misalignedChecks() const noexcept { return misaligned_; }
     i64 stalledSamples() const noexcept { return stalledSamples_; }
     // 连续最多几块写头没动（块数）。诊断字段 frozenMax 用的是这个，不是 stalledSamples（那是样本数）。
     std::uint32_t maxFrozenBlocks() const noexcept { return maxFrozenBlocks_; }
-    // 小漂移被吸收的块数（漂移被吸收是真实事件，诊断要看得见）。
+    // m 不为 0、但还没到重同步门槛的检查次数（累计；漂移被吸收是真实事件，诊断要看得见）。
     std::uint32_t absorbedDriftBlocks() const noexcept { return absorbedDriftBlocks_; }
 
 private:
-    void resync(SyncReason reason, LocalLine& line, TapSet& taps, i64 writeHead, i64 processed,
+    // 重同步：旧读头淡出（读到 dataEnd 为止），偏移重新锚定在 W − R，连续计数清零。
+    void resync(SyncReason reason, LocalLine& line, TapSet& taps, i64 writeHead, i64 processed, i64 dataEnd,
                 SyncOutcome& outcome) noexcept;
     // 清空本地延迟线并把起点锚在写头 W（之后从 W 起往后拉）。
     void clearLine(LocalLine& line, i64 writeHead, SyncOutcome& outcome) noexcept;
-    // 旧回送开始淡出（fadeLength 个样本）：预拷贝尾巴 + 给还没在淡出的活跃读头挂淡出包络。
+    // 旧回送开始淡出（名义上 fadeLength 个样本）：预拷贝尾巴 + 给还没在淡出的活跃读头挂淡出包络。
+    // 每个读头只读到 fadeEnd 为止；它在 fadeEnd 之前剩下的样本不够 fadeLength 时，这个读头的淡出缩短到那么长，
+    // 恰好在数据用完时走到 0（淡出不以阶跃收尾）。
     // 已经在淡出的读头照它自己的进度走完，不重新起算（重新起算会让包络跳回 1，是一处阶跃）。
     void startFade(LocalLine& line, TapSet& taps, i64 processed, std::int64_t fadeLength, i64 fadeEnd,
                    SyncOutcome& outcome) noexcept;
     // 起播沿的 DSP 复位点落在本块 [R, R + n) 里吗：落在里面就置 resetDsp 并给出复位点。
     void notePlayReset(i64 processed, i64 n, SyncOutcome& outcome) noexcept;
     void noteResyncTime(i64 processed) noexcept;
-    // 记账：写头与读位推进，Δ 记下这一块的写头增量。
-    // keepDelta 为假时不记 Δ（重同步之后的第一块没有可比的基准）。
-    void account(i64 writeHead, i64 processed, i64 n, i64 delta, bool keepDelta) noexcept;
+    // 记账：写头与读位推进。
+    void account(i64 writeHead, i64 processed, i64 n) noexcept;
     std::int64_t samples(double seconds) const noexcept;
 
     double sampleRate_ = 0.0;
@@ -187,8 +200,8 @@ private:
     i64 processed_ = 0; // 上一块的 R
     i64 offset_ = 0; // 主读头的同步偏移
     bool havePrevious_ = false;
-    i64 lastDelta_ = 0; // 上一块的 Δ（写头每块前进的帧数）
-    bool haveDelta_ = false;
+    // 严格模式：最近连续几次检查 m 不为 0（饱和在 kMisalignedChecksToResync）
+    int misaligned_ = 0;
     i64 stalledSamples_ = 0; // W 一直没动时 R 前进了多少（断档判据按样本计）
     i64 inactiveSamples_ = 0; // 两端都停用时过了多少样本（> 250 ms 清空延迟线）
     bool lastPaired_ = false;
@@ -197,12 +210,7 @@ private:
     std::uint32_t frozenBlocks_ = 0;
     std::uint32_t maxFrozenBlocks_ = 0;
 
-    // 漂移持续同一个非零值的块数：连续 8 块就转成一次重同步。lastDrift_ 是上一次判据看到的 m。
-    int driftBlocks_ = 0;
-    i64 lastDrift_ = 0;
-    bool haveLastDrift_ = false;
-    bool absorbedDrift_ = false;
-    // 累计被吸收的漂移块数（诊断用：漂移被吸收是真实事件，计数要看得见）
+    // 累计被吸收的漂移检查次数（m 不为 0、还没到重同步门槛；诊断用：漂移被吸收是真实事件，计数要看得见）
     std::uint32_t absorbedDriftBlocks_ = 0;
 
     // 起播沿的 DSP 复位点（绝对样本号 R_edge + T）：按样本记，不读墙钟。

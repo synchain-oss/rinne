@@ -45,6 +45,7 @@ inline constexpr double kDelayDefaultMs = 100.0;
 //
 // 这两个时长给改 D 的交叉淡化用（改 D 时开第二个读头并挂交叉淡化包络，读头槽已留够 3 个）；
 // 这里先把常量与口径钉住，交叉淡化接上时照它做，避免两处各写一套。
+// **尚未接上**：本层改 D 目前直接把主读头换到新的 D（读位置跳变），交叉淡化与去抖由后续的时序扩展接入。
 inline constexpr double kDelayCrossfadeSeconds = 0.040;
 inline constexpr double kDelayDebounceSeconds = 0.100;
 
@@ -162,16 +163,30 @@ inline std::int64_t stallThreshold(std::int64_t nPrep, std::int64_t peerMaxBlock
     return 2 * nMax;
 }
 
-// 严格模式的对齐判据：Δ 两次不为 0 就重同步。
-// Δ 是本块读到的写头与上一块的写头之差（写头每块前进的帧数）。两次都是同一个非零值才算稳定。
-// 返回 true 表示「Δ 变了」，需要重同步。
-inline bool alignmentChanged(i64 delta, i64 previousDelta, bool havePrevious) noexcept
+// 严格模式的对齐判据：Δ 连续两次检查都不为 0 就重同步。
+//
+// Δ = W − R，扣掉锚定时记下的同步偏移 off，就是漂移量 m = W − (R + off)：同一条通道上正确摆放时，
+// 两端处理的是同一串样本，W 与 R 同步前进，m 恒为 0，环路延迟恰为 D。Δ 不是「写头每块前进了多少帧」：
+// 宿主改块长（512、480 交替）或 Output 晚到一块再补上时，写头每块的增量会变，但 m 仍回到 0，延迟没有变，不该重同步。
+//
+// 一次检查 = 写头在这一块动了的那一次判据（写头没动时没有对齐可言，交给断档判据）。
+// 连续计数在 m 为 0 时清零，饱和在门槛上（容忍模式下一直计也不会溢出）。
+inline constexpr int kMisalignedChecksToResync = 2;
+
+// 记一次检查：m 不为 0 就把连续计数加一（饱和），为 0 就清零。返回新的连续计数。
+constexpr int countMisaligned(i64 m, int previous) noexcept
 {
-    if (!havePrevious)
+    if (m == 0)
     {
-        return false;
+        return 0;
     }
-    return delta != previousDelta;
+    return previous < kMisalignedChecksToResync ? previous + 1 : kMisalignedChecksToResync;
+}
+
+// 连续计数够了：失去对齐，要重同步。
+constexpr bool alignmentLost(int consecutive) noexcept
+{
+    return consecutive >= kMisalignedChecksToResync;
 }
 
 // 容忍模式：最近 window 帧内重同步 ≥ threshold 次就转容忍模式。

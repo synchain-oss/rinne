@@ -52,6 +52,9 @@ struct BlockContext
 
     // 环：调用方经租约拿到的段。环路层用它读写头与样本。
     ipc::RingSegment* ring = nullptr;
+    // 段的映射代号（EngineContext::ringGeneration 原样传下来）。环路层据此（连同段的地址）判「换了段」：
+    // 换了段时旧读头只读旧段已经拉进来的数据，新段从它自己的写头起重建读头。0 = 壳没给（只按地址判）。
+    std::uint64_t ringGeneration = 0;
     // 会合段：读对端槽（宿主时间戳、块序号、实时标志）。可以是空（没有对端）。
     ipc::RvSegment* rendezvous = nullptr;
     // 组号 1..8。会合段按组块排布，组号 0 或越界时不去读对端槽（读会越界）。
@@ -165,11 +168,6 @@ public:
     // 只读：读位 R（已处理帧数）。R 由判据那一半持有，这里只是转出来。
     std::int64_t processed() const noexcept { return sync_.processed(); }
 
-    // 拉环的暂存：环里读到的帧先落在这里，再整段搬进延迟线。
-    // 暂存是定长的（最大块长 32768 帧），在 prepare 里分配，音频线程上不再分配。
-    std::vector<float> pullLeft_;
-    std::vector<float> pullRight_;
-
 private:
     std::int64_t computeDelay(const BlockContext& ctx) noexcept;
     void updateBpm(const BlockContext& ctx) noexcept;
@@ -178,6 +176,8 @@ private:
     void pullRing(const ipc::RingSegment& ring, i64 writeHead, i64 peerMaxBlock) noexcept;
     // 主读头（没在淡出的那个）本块里「落在有效区间、但环里还没写到」的样本数：这些样本只能补 0。
     std::int64_t mainTapOverrun(i64 blockStart, i64 n) const noexcept;
+    // 主读头本块要读到还没写到的位置时：在它还读得到的样本里淡到 0，补 0 之前不留阶跃。
+    void fadeMainTapAtUnderrun(i64 blockStart) noexcept;
     // 建一个新读头（onset 走 20 ms）。槽满时丢包络最小的那个，返回槽下标；没有槽时返回 -1。
     int newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept;
     // 对端槽的事实：宿主时间戳、块序号、实时标志。没有会合段或组号不合法时什么都不读。
@@ -190,6 +190,18 @@ private:
     StreamSync sync_;
     LoopStatus status_;
     LoopEventSink sink_;
+
+    // 拉环的暂存：环里读到的帧先落在这里，再整段搬进延迟线。
+    // 暂存是定长的（最大块长 32768 帧），在 prepare 里分配，音频线程上不再分配。
+    std::vector<float> pullLeft_;
+    std::vector<float> pullRight_;
+
+    // 上一块是不是超长块：超限的提示码只在进入超限时发一条
+    bool lastUnsupported_ = false;
+
+    // 上一块读的是哪一个段（地址与映射代号）：只用来判「是不是同一个段」，从不经它去读（段只在块内有效）。
+    const ipc::RingSegment* lastRing_ = nullptr;
+    std::uint64_t lastRingGeneration_ = 0;
 
     double sampleRate_ = 0.0;
     bool prepared_ = false;

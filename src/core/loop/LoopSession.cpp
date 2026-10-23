@@ -140,8 +140,8 @@ std::int64_t LoopSession::computeDelay(const BlockContext& ctx) noexcept
 
     if (choice.raised && choice.effective != delayEffective_)
     {
-        sink_.emit(LoopEventCode::kDMinRaised, static_cast<std::uint8_t>(std::min<std::int64_t>(choice.minimum, 255)),
-                   static_cast<std::uint8_t>(floor));
+        // 载荷：a = D_min ÷256（向上取整、钳 255），b = 原因；准确值在状态快照的 delayMin 里。
+        sink_.emit(LoopEventCode::kDMinRaised, eventUnits256(choice.minimum), static_cast<std::uint8_t>(floor));
     }
 
     delayRequested_ = requested;
@@ -301,6 +301,26 @@ std::int64_t LoopSession::mainTapOverrun(i64 blockStart, i64 n) const noexcept
     return 0;
 }
 
+// 主读头本块会读到还没写到的位置：让它在还读得到的样本里线性淡到 0（读上界收到已拉到的位置）。
+// 剩下的样本数就是淡出的长度（至少一步），淡出在数据用完的那一点恰好走到 0，之后补的 0 与它相接，没有阶跃。
+// 淡出的长度不超过本块的块长，本块末这个读头就释放了。
+void LoopSession::fadeMainTapAtUnderrun(i64 blockStart) noexcept
+{
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        Tap& tap = taps_.at(slot);
+        if (!tap.active || tap.env.fadingOut())
+        {
+            continue;
+        }
+        const i64 from = blockStart + tap.offset - tap.delay;
+        tap.validTo = std::min(tap.validTo, line_.pulled());
+        tap.env.fadeOutSteps = std::max<std::int64_t>(tap.validTo - from, 1);
+        tap.env.fadeOutStep = 0;
+        return;
+    }
+}
+
 // 对端槽的事实：宿主时间戳、块序号、实时标志、对端声明的最大块长。
 //
 // 会合段按组块排布，组号 0 或越界时不去读：那会越界访问。
@@ -384,13 +404,20 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
 
     const i64 n = static_cast<i64>(ctx.blockLength);
 
-    // 块长超过支持的上限：只出干声并给提示码。
+    // 块长超过支持的上限：只出干声并给提示码。提示码只在进入超限时发一条（超限会连续很多块，
+    // 每块一条会把诊断队列灌满）；回到支持的块长之后再超限，再发一条。
     if (static_cast<std::uint64_t>(ctx.blockLength) > static_cast<std::uint64_t>(ipc::kMaxSupportedBlock))
     {
         result.unsupportedBlock = true;
-        sink_.emit(LoopEventCode::kUnsupportedBlock, 255, 0);
+        if (!lastUnsupported_)
+        {
+            sink_.emit(LoopEventCode::kUnsupportedBlock, eventUnits256(n),
+                       eventUnits256(static_cast<std::int64_t>(ipc::kMaxSupportedBlock)), sync_.processed());
+        }
+        lastUnsupported_ = true;
         return result;
     }
+    lastUnsupported_ = false;
 
     // 速度与 D
     updateBpm(ctx);
@@ -409,6 +436,11 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     bool writerChanged = false;
     bool formatChanged = false;
     const bool wasPaired = havePeer_;
+
+    // 是不是上一块那个段：地址与映射代号都相同才算（同一个地址上可能是一块新的映射）。只比，不经旧地址去读。
+    const bool sameRing = ctx.ring != nullptr && ctx.ring == lastRing_ && ctx.ringGeneration == lastRingGeneration_;
+    lastRing_ = ctx.ring;
+    lastRingGeneration_ = ctx.ring != nullptr ? ctx.ringGeneration : 0u;
 
     if (ctx.ring != nullptr)
     {
@@ -455,6 +487,16 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
             domainReset = true;
         }
     }
+    // 两边都配着、但换了段（换组、重新映射）：读头重建（原因：换绑定）。新段的写头不比已拉到的位置小时
+    // 走这一条；比它小时上面已经按写头倒退整个域重来。
+    const bool ringSwitched = paired && wasPaired && !sameRing && !domainReset;
+
+    // 本块拉环之后本地延迟线里有数据的上界。同一个段还在、而且这一块配着或上一块还配着（对端刚走）时，
+    // 本块照常把环拉到 W：对端走之前发布的帧都是它写完了的真数据，旧读头的淡出要读到它们。
+    // 环不在、或换了段时，旧读头只剩已经拉进来的那部分（新段的帧不进旧读头的淡出）。
+    // 判据在拉环之前跑，淡出的读上界用的就是这个值（不是上一块拉到的位置）。
+    const bool pullThisBlock = ctx.ring != nullptr && (paired || (wasPaired && sameRing));
+    const i64 dataEnd = pullThisBlock && !ringSwitched ? std::max(line_.pulled(), writeHead) : line_.pulled();
 
     // 判据。R 只有一份：判据那一半持有它，这里把同一个值传进去。
     SyncInputs in;
@@ -465,8 +507,10 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     in.resetOnPlay = ctx.params.resetOnPlay;
     in.resetRequested = ctx.resetRequested;
     in.domainReset = domainReset;
+    in.ringSwitched = ringSwitched;
     in.inactive = !paired;
     in.writeHead = writeHead;
+    in.dataEnd = dataEnd;
     in.peerMaxBlock = peerMaxBlock_ > 0 ? peerMaxBlock_ : ctx.peerMaxBlock;
     in.processed = R0;
     in.declaredBlock = ctx.declaredBlock;
@@ -486,9 +530,15 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     {
         taps_.clear();
     }
+    // 换了段：判据已经让旧读头淡出、并把它淡出要读的那一段拷进了尾巴。主区从新段的写头起重来：
+    // 新段 W 之前的帧不拉（那是另一条流，没有读头要读），旧读头之后只从尾巴里读到旧段的数据。
+    if (ringSwitched)
+    {
+        line_.rebaseKeepingTail(writeHead);
+    }
 
-    // 拉环：pulled 追到 W。
-    if (paired && ctx.ring != nullptr)
+    // 拉环：pulled 追到 W（对端刚走的那一块也拉：见 dataEnd）。延迟线被清空的那一块不拉（清空锚在 W，没有可拉的）。
+    if (pullThisBlock && !outcome.lineCleared)
     {
         pullRing(*ctx.ring, writeHead, in.peerMaxBlock);
     }
@@ -496,7 +546,8 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     // 建新读头：环上「从哪一帧起才有数据」。
     //
     // 起播沿：validFrom = W + T（T = min(5 ms, D_eff)），沿后的那 T 帧没有回送。
-    // 换写方：validFrom = max(W, intent)，旧写方公告过但没发布的那一段不读。
+    // 换写方、换段：validFrom = max(W, intent)，旧写方公告过但没发布的那一段不读；换段时新段 W 之前的帧
+    // （拉进来的位置与旧段相接，但那是另一条流）也不读。
     // 其他（第一次配上、重同步）：validFrom = W，新数据从下一帧起。
     if (paired && !outcome.lineCleared)
     {
@@ -508,7 +559,8 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
             {
                 validFrom = writeHead + sync_.playFadeSamples(delay);
             }
-            else if (outcome.resynced && outcome.reason == SyncReason::kWriter)
+            else if (outcome.resynced &&
+                     (outcome.reason == SyncReason::kWriter || outcome.reason == SyncReason::kBindSwitch))
             {
                 validFrom = std::max(writeHead, writeIntent);
             }
@@ -530,15 +582,22 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         }
     }
 
+    // 补 0 的样本数：主读头本该有数据、但环里还没写到的那些样本。
+    // 写头落后得比 D 还多（Output 停了、晚到或丢了块）时会出现：取不到的样本只能补 0。补 0 之前先让主读头
+    // 在它还读得到的那几个样本里淡到 0，回送不在数据断开的那一点上阶跃；之后写头恢复时由「没有读头 → 建新读头」
+    // 接上（新数据 20 ms onset）。正确摆放、D 不小于块长时写头从不落后到这一步，这条路径不碰稳态的输出。
+    const std::int64_t overrun = paired ? mainTapOverrun(R0, n) : 0;
+    if (overrun > 0)
+    {
+        fadeMainTapAtUnderrun(R0);
+    }
+
     // 混音：读头按包络混成一路，并标出逐样本的有效位。位置用本块的读位起点 R0。
     std::uint64_t nonZero = 0;
     if (ctx.returnLeft != nullptr && ctx.returnRight != nullptr)
     {
         nonZero = mixTaps(taps_, line_, R0, ctx.returnLeft, ctx.returnRight, n, ctx.returnValid);
     }
-
-    // 补 0 的样本数：主读头本该有数据、但环里还没写到的那些样本。
-    const std::int64_t overrun = paired ? mainTapOverrun(R0, n) : 0;
 
     result.returnLeft = ctx.returnLeft;
     result.returnRight = ctx.returnRight;

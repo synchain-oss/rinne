@@ -145,7 +145,7 @@ TEST_CASE("loop timing L1-07 N_obs 每次 prepare 清零；清零后 D_min 回�
     REQUIRE(choice.raised);
 }
 
-TEST_CASE("loop timing L1-08 漂移跳变立即重同步；小漂移持续 8 块后 shift")
+TEST_CASE("loop timing L1-08 漂移跳变的门限：|m| 超过 max(两端声明的最大块长, 8192) 即跳变")
 {
     // 跳变门限：max(两端声明的最大块长, 8192)。
     REQUIRE(jumpCap(256, 0) == 8192);
@@ -171,14 +171,37 @@ TEST_CASE("loop timing 断档门限按样本计")
     REQUIRE(limit >= limit);
 }
 
-TEST_CASE("loop timing 严格模式的对齐判据")
+TEST_CASE("loop timing 严格模式的对齐判据：Δ = W − R（扣掉 off，即 m）连续两次不为 0 才失去对齐")
 {
-    // Δ 序列 0,0 不重同步。
-    REQUIRE_FALSE(alignmentChanged(0, 0, true));
-    // Δ 序列 0,256 重同步。
-    REQUIRE(alignmentChanged(256, 0, true));
-    // 第一次没有前一个 Δ：不重同步。
-    REQUIRE_FALSE(alignmentChanged(0, 0, false));
+    // 门槛是两次。
+    STATIC_REQUIRE(kMisalignedChecksToResync == 2);
+
+    // m 一直是 0：连续计数恒为 0，不失去对齐。
+    int count = 0;
+    for (int i = 0; i < 10; ++i)
+    {
+        count = countMisaligned(0, count);
+        REQUIRE(count == 0);
+        REQUIRE_FALSE(alignmentLost(count));
+    }
+
+    // m 只出现一次不为 0、下一次回到 0（块长变化或 Output 晚到一块再补上之后的样子）：不失去对齐。
+    count = countMisaligned(-512, 0);
+    REQUIRE(count == 1);
+    REQUIRE_FALSE(alignmentLost(count));
+    count = countMisaligned(0, count);
+    REQUIRE(count == 0);
+
+    // m 连续两次不为 0（值不必相同）：失去对齐。
+    count = countMisaligned(-512, countMisaligned(256, 0));
+    REQUIRE(alignmentLost(count));
+
+    // 计数饱和在门槛上：一直不为 0 也不会溢出。
+    for (int i = 0; i < 1000; ++i)
+    {
+        count = countMisaligned(7, count);
+    }
+    REQUIRE(count == kMisalignedChecksToResync);
 }
 
 TEST_CASE("loop timing 容忍模式：10 s 内第 3 次重同步就转容忍模式")

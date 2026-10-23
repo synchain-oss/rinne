@@ -24,13 +24,14 @@ enum class ResyncReason : std::uint8_t
     kFormat = 2, // 写方改了采样率（epoch 变了）
     kPlay = 3, // 起播沿
     kStallResume = 4, // 断档后写头恢复
-    kJump = 5, // 漂移跳变（超过 N_cap）
-    kShift = 6, // 漂移持续同一个非零值
+    kJump = 5, // 漂移跳变（|m| 超过 N_cap）
+    kShift = 6, // 严格模式：漂移量 m 连续两次检查不为 0
     kOffset = 7, // 漂移被吸收（只记诊断）
     kDChange = 8, // 改 D 引起的交叉淡化
 };
 
-// 事件码。a 放原因或计数，b 放次级信息。
+// 事件码。a、b 各一个字节；装不下的量按下面写明的方式编码（钳位或分单位），准确值在状态快照里。
+// 「÷256」= 以 256 个样本为单位向上取整、钳到 255；「钳 255」= 超过 255 记 255。
 enum class LoopEventCode : std::uint16_t
 {
     kResync = 0x0300, // a = ResyncReason，b = 0
@@ -38,15 +39,29 @@ enum class LoopEventCode : std::uint16_t
     kStallCleared = 0x0302, // a = 1
     kTolerantMode = 0x0303, // a = 1（转入容忍模式：10 s 内 ≥3 次重同步）
     kUnstable = 0x0304, // a = 1（时序不稳定）
-    kDMinRaised = 0x0305, // a = 新的 D_min（样本），b = 原因
-    kHostViolation = 0x0306, // a = 宿主送来的块长 n，b = 声明值 N
-    kUnsupportedBlock = 0x0307, // a = 块长 n，b = 支持的上限
+    kDMinRaised = 0x0305, // a = 新的 D_min ÷256，b = 原因（DelayMinReason）；准确值见状态快照的 delayMin
+    kHostViolation = 0x0306, // a:b = 宿主送来的块长 n 的 16 位值（a 高字节、b 低字节；这条路径上 n ≤ 32768）
+    kUnsupportedBlock = 0x0307, // a = 块长 n ÷256，b = 支持的上限 ÷256（32768 → 128）；只在进入超限时发一条
     kLineCleared = 0x0308, // a = 1（本地延迟线被清空）
-    kOverflow = 0x0309, // a = 被环覆盖而丢掉的帧数
-    kTorn = 0x030A, // a = 撕裂的帧数
-    kOverrun = 0x030B, // a = 补 0 的样本数
+    kOverflow = 0x0309, // a = 被环覆盖而丢掉的帧数（钳 255）
+    kTorn = 0x030A, // a = 撕裂的帧数（钳 255）
+    kOverrun = 0x030B, // a = 补 0 的样本数（钳 255）
     kTapDropped = 0x030C, // a = 1（读头槽满，丢掉了一个）
 };
+
+// 「÷256」的编码：以 256 个样本为单位向上取整，钳到 255（0 仍是 0）。
+constexpr std::uint8_t eventUnits256(std::int64_t samples) noexcept
+{
+    if (samples <= 0)
+    {
+        return 0;
+    }
+    if (samples > 255 * 256)
+    {
+        return 255;
+    }
+    return static_cast<std::uint8_t>((samples + 255) / 256);
+}
 
 // 事件出口：环路层不直接依赖诊断队列，只经这一个函数指针往外出码。
 // 出口可以是空（不装就什么都不发生），因此事件从来不是音频决策的依据。

@@ -300,6 +300,67 @@ TEST_CASE("rig L5-01 框架自检：冲激经真实共享内存的闭环，恰�
     CHECK(host.ringFrames() == 65536u);
 }
 
+TEST_CASE("rig 严格模式：两端块长同一次运行里 512 / 480 交替不重同步、输出与恒定块长逐位相同；Output 丢一块才重同步",
+          "[rig][script]")
+{
+    // ⛔ 删除式验证点：严格模式的判据改回「写头每块的增量与上一块比」→ 交替块长就重同步，本用例变红。
+    rinne::engine::EngineParams params = unityLoop(100.0f);
+    params.feedbackPercent = 50.0f;
+    constexpr std::size_t kCycles = 120;
+
+    auto runWith = [&](const BlockScript& script, rinne::loop::LoopStatusFields& status) {
+        EngineHost host;
+        REQUIRE(host.open(1));
+        host.prepare(48000.0, 512);
+        host.setBlockScripts(script, script);
+        host.setChain(ChainKind::kOnePoleLowpass);
+        host.setParamsScript(paramsOf(params));
+        std::vector<float> out;
+        for (std::size_t i = 0; i < kCycles; ++i)
+        {
+            host.runCycle(i);
+            const int n = script.lengthAt(i);
+            out.insert(out.end(), host.inputOutputLeft().begin(), host.inputOutputLeft().begin() + n);
+        }
+        status = host.inputStatus();
+        return out;
+    };
+
+    BlockScript alternating;
+    alternating.lengths = {512, 480};
+    rinne::loop::LoopStatusFields altStatus;
+    const std::vector<float> alt = runWith(alternating, altStatus);
+    CHECK(altStatus.resyncCount == 0u);
+
+    // 恒定 512：取同样多的样本比较。
+    BlockScript steady = fixedScript(512, 1);
+    rinne::loop::LoopStatusFields steadyStatus;
+    const std::vector<float> fixed = runWith(steady, steadyStatus);
+    CHECK(steadyStatus.resyncCount == 0u);
+    const std::size_t common = std::min(alt.size(), fixed.size());
+    REQUIRE(common > 48000u);
+    bool same = true;
+    for (std::size_t i = 0; i < common && same; ++i)
+    {
+        same = alt[i] == fixed[i];
+    }
+    CHECK(same);
+
+    // Output 第 30 周期被跳过（那一块的数据丢了）：m 从此不为 0，两次检查之后重同步一次（原因：对齐）。
+    BlockScript inputScript = fixedScript(512, 1);
+    BlockScript outputScript = fixedScript(512, 1);
+    outputScript.skips.assign(kCycles, false);
+    outputScript.skips[30] = true;
+    EngineHost host;
+    REQUIRE(host.open(1));
+    host.prepare(48000.0, 512);
+    host.setBlockScripts(inputScript, outputScript);
+    host.setParamsScript(paramsOf(params));
+    host.runCycles(kCycles);
+    CHECK(host.inputStatus().resyncCount == 1u);
+    CHECK(host.inputStatus().resyncByReason[static_cast<std::size_t>(rinne::loop::SyncReason::kShift)] == 1u);
+}
+
 TEST_CASE("rig 九项脚本能力：违约块、0 样本、超长块、走带、参数、多台引擎、换写方都能脚本化", "[rig][script]")
 {
     EngineHost host;

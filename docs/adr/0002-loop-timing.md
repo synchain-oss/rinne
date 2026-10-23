@@ -4,7 +4,7 @@
 
 - **Decision**: address the loop by stream-relative positions, not the host timeline; heads only advance, D is clamped.
 - **Consequences**: reported latency is always zero; output is bit-identical however the host chops blocks.
-- **Compatibility**: changing the delay range, note order, fade lengths or the order criterion is a compat event.
+- **Compatibility**: changing the delay range, note order, fade lengths, the alignment or the order criterion is a compat event.
 
 ## 状态
 
@@ -30,7 +30,12 @@
 
 ### 去抖
 
-改 D 用 40 ms 线性双读头交叉淡化（两路增益和恒为 1；相关信号上等功率会过冲），目标变化按 100 ms 去抖（按样本计）。常量在 `loop/LoopTiming.h`。
+改 D 用 40 ms 线性双读头交叉淡化（两路增益和恒为 1；相关信号上等功率会过冲），目标变化按 100 ms 去抖（按样本计）。常量在 `loop/LoopTiming.h`。**尚未接上**：现在改 D 直接换读头，由后续的时序扩展接入。
+
+### 对齐判据
+
+- Δ = W − R 扣掉锚定时的偏移 off，即 m = W − (R + off)；同通道正确摆放时恒为 0。
+- 一次检查 = 写头在这一块动了的那次判据。严格模式下 m 连续两次检查不为 0 才重同步；|m| > max(两端声明的最大块长, 8192) 立即重同步。改块长、Output 晚到一块再补上，m 都回到 0，不重同步。
 
 ### 错序判据
 
@@ -40,8 +45,9 @@
 ### 淡变与复位
 
 - 重同步：旧读头 5 ms 淡出（预拷贝尾巴），新数据从首个有效位置起 20 ms onset。断档 5 ms、对端消失 10 ms 淡出。
+- 判据在拉环之前跑：淡出读到本块拉环后有数据的上界（环在即 W），不取上一块拉到的位置。数据不够一个淡出时缩短到恰好用完；写头落后到主读头取不到样本时，先在剩下的样本里淡到 0 再补 0。
 - 起播：旧回送淡出 T = min(5 ms, D_eff)；本地延迟线在沿上复位（沿后 T 帧之前不再读）；DSP 复位点是绝对样本号 s0 + T。
-- 容忍模式：10 s 内 ≥ 3 次对齐重同步（跳变、持续漂移）。两端停用 > 250 ms 清空本地延迟线；同采样率重 prepare 保持流连续；`reset()` 只记诊断。
+- 容忍模式：10 s 内 ≥ 3 次对齐重同步（跳变、m 连续两次不为 0）。两端停用 > 250 ms 清空本地延迟线；同采样率重 prepare 保持流连续；`reset()` 只记诊断。
 
 ## 后果
 
