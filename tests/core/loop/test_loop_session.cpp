@@ -983,6 +983,74 @@ TEST_CASE("环路 拖着改 D（每块都变）：一次只走一个过渡，不
     checkSettledOn(trace, trace.size() - static_cast<std::size_t>(kBlock), 3480);
 }
 
+TEST_CASE("环路 改 D：D 变大到配对之前时，新读头从配对那一帧起 onset，数据出现时不以满增益冒出来")
+{
+    // ⛔ 删除式验证点：新读头的 validFrom 只取它本块读的第一个位置（不取旧读头的下界）→ onset 从配对之前算起，
+    //    数据在配对那一帧出现时 onset 早已走完，回送从 0 直接跳到 0.5，本用例变红。
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kNearBlock);
+    s.attachRing(*ring, 1);
+    EngineParams params;
+    params.delayMs = 10.0f; // D = 480
+    std::vector<float> trace;
+    runSteady(s, *ring, params, trace, 4); // 2048 个样本：旧读头的 onset 已走满
+    REQUIRE(trace.back() == 0.5f);
+    const std::size_t mark = trace.size();
+
+    params.delayMs = 100.0f; // D = 4800：新位置 2048 − 4800 落在配对（位置 0）之前
+    runSteady(s, *ring, params, trace, 16);
+    CHECK(s.status().resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
+    // 旧读头 5 ms 淡出之后是一段静音；新读头在 t = 4800 读到位置 0（配对那一帧），从那里起 20 ms onset。
+    CHECK(trace[mark + 240] == 0.0f);
+    CHECK(trace[4799] == 0.0f);
+    CHECK(trace[4800] > 0.0f);
+    CHECK(trace[4800] < 0.01f);
+    CHECK(trace.back() == 0.5f);
+    CHECK(maxStep(trace, mark - 1) <= 0.5f / 240.0f + 1.0e-6f);
+}
+
+TEST_CASE("环路 改 D：起播沿之后改 D，新读头不越过沿上定下的下界，沿前写下的帧不会被读回来")
+{
+    // ⛔ 删除式验证点：同上（不取旧读头的下界）→ D 变大之后新读头读到沿前写下的帧，本用例变红。
+    constexpr int kBlock = 128;
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kBlock);
+    s.attachRing(*ring, 1);
+    EngineParams params;
+    params.delayMs = 10.0f; // D = 480
+    TransportInfo transport;
+    transport.isPlaying = false;
+    std::vector<float> trace;
+    for (int block = 0; block < 20; ++block)
+    {
+        feedEncoded(s, *ring, kBlock, params, trace, transport);
+    }
+    // 起播沿：R = W = 2560。旧回送 5 ms 淡出，沿上建的读头只读 W + 240 = 2800 起的帧。
+    transport.isPlaying = true;
+    const std::size_t edge = trace.size();
+    feedEncoded(s, *ring, kBlock, params, trace, transport);
+    // 紧接着改 D：480 → 960。沿上的淡出走完之后换（R = 2816），新读头本块读的第一个位置 2816 − 960 在沿之前。
+    params.delayMs = 20.0f;
+    for (int block = 0; block < 20; ++block)
+    {
+        feedEncoded(s, *ring, kBlock, params, trace, transport);
+    }
+    const LoopStatusFields fields = s.status();
+    CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kPlay)] == 1u);
+    CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
+    // 沿上的淡出走完之后，到新读头读到 2800（t = 3760）之前全是 0：沿前写下的帧一帧都没回来。
+    std::size_t leaked = 0;
+    for (std::size_t t = edge + 240; t < 3760; ++t)
+    {
+        leaked += trace[t] != 0.0f ? 1u : 0u;
+    }
+    CHECK(leaked == 0u);
+    CHECK(trace[3760] > 0.0f);
+    checkSettledOn(trace, 3760 + 960, 960);
+}
+
 TEST_CASE("环路 超长块（n > 32768）：环路这一块不走，读头先把环拉到 W，在开头 5 ms 淡到 0，之后补 0")
 {
     // ⛔ 删除式验证点：超长块直接给 0 个回送样本（块首从 0.5 直接掉到 0）→ 本用例变红；

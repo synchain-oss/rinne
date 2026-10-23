@@ -229,9 +229,9 @@ int LoopSession::newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept
 //
 // 主读头的 D 不当场改写：那样读位置跳变，回送里是一处阶跃（宿主违约当场抬 D 下限、节拍模式下 BPM 变了也走到这里）。
 // 旧读头按重同步的口径淡出（名义 5 ms，读到本块拉环之后有数据的上界为止，数据不够时缩短到恰好用完），新读头按新的 D
-// 建起来，从它读到的第一个有效位置起 20 ms onset。新读头的 validFrom 不早于旧读头的（起播沿、换写方定下的下界照旧），
-// 也不早于本地延迟线的有效下界：D 变大、新位置落在延迟线还没有数据的地方时，onset 从数据真正开始的那一帧起算，
-// 不会在数据出现时已经走完、以满增益突然冒出来。
+// 建起来，从它读到的第一个有效位置起 20 ms onset。新读头的 validFrom 取「它本块读的第一个位置」与旧读头的 validFrom
+// 里较晚的那个：起播沿、换写方定下的下界照旧（沿前写下的帧不会被新读头读回来）；配对时旧读头的 validFrom 就是
+// 延迟线的起点，D 变大、新位置落在配对之前时 onset 从配对那一帧起算，不会在数据出现时已经走完、以满增益冒出来。
 //
 // 一次只走一个过渡：还有读头在淡出、或主读头的 onset 已经出声但还没走完时不换，新的 D 先挂着（主读头照旧的 D 读，
 // 不跳变），过渡走完的那一块再换成当时的 D。拖着旋钮时 D 每块都变，每块都起一个过渡的话，读头槽很快用完（丢一个
@@ -270,7 +270,7 @@ bool LoopSession::changeDelay(i64 blockStart, i64 delay) noexcept
         return false; // 上一个过渡还没走完：新的 D 先挂着
     }
 
-    const i64 validFrom = std::max({current.validFrom, blockStart + offset_ - delay, line_.lineValidFrom()});
+    const i64 validFrom = std::max(current.validFrom, blockStart + offset_ - delay);
     if (!sync_.fadeForDelayChange(line_, taps_, blockStart, line_.pulled()))
     {
         return false;
