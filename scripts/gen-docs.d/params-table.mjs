@@ -16,8 +16,9 @@
 //
 // golden 的参数集合有两种形状，都认：
 //   数组形  {"params": [{ "id": "feedback", "default": 0, ... }, ...]}（键名 parameters 同义）
-//   映射形  {"feedback": { "default": 0, ... }, ...}——键就是参数 ID。
-// 映射形与 claims 检查的谓词路径一致（golden:…#feedback.default == 0），两种形状都要能取到同一个 default。
+//   映射形  {"feedback": { "default": 0, ... }, ...}——键就是参数 ID；条目里自带的 id 字段以键为准，盖不掉键。
+// 映射形与 claims 检查的谓词路径一致（golden:…#feedback.default == 0），两种形状都要能取到同一个 default；
+// 条目里的 id 与键不一致时，两边都按键认（claims 的 findParam 与这里的 paramsOf 同一个口径）。
 //
 // 显示名的取法：golden 的每条参数用 i18nKey 指到 web/i18n/input.js 里的一个词条；没有 i18nKey 时退到「词条表里
 // 有一项的键与参数 ID 同名」。两条都取不到就报错——显示名是界面那条线的真源，本模块不猜哪条参数该用哪个词条。
@@ -93,7 +94,9 @@ export function paramsOf(golden) {
     if (Array.isArray(golden.params)) return golden.params;
     if (Array.isArray(golden.parameters)) return golden.parameters;
     const entries = Object.entries(golden).filter(([, v]) => v && typeof v === "object" && !Array.isArray(v));
-    return entries.map(([id, v]) => ({ id, ...v }));
+    // 键最后写、以键为准：条目里自己带的 id 字段不能盖掉键（否则 {"a": {"id": "b"}} 会被读成参数 b，
+    // 与 claims 的 findParam 读到的不是同一条）
+    return entries.map(([id, v]) => ({ ...v, id }));
 }
 
 /** 表格单元：竖线转义（否则列数会算错），换行换成 <br>（否则表格会被撕开）。 */
@@ -231,6 +234,41 @@ export function selfTestCases() {
         dict,
         [],
     );
+    // 映射形里条目自带的 id 以键为准：键最后写，盖不掉
+    const dictFg = {
+        zh: { feedback: "反馈", gain: "增益" },
+        en: { feedback: "Feedback", gain: "Gain" },
+        fr: { feedback: "Retour", gain: "Gain" },
+    };
+    const keyedA = { range: "0…1", default: 0, unit: "", automatable: false };
+    const keyedB = { range: "0…1", default: 1, unit: "", automatable: true };
+    add(
+        "映射形：条目里写了另一个键的 id，以键为准，不算 id 重名",
+        { feedback: { ...keyedA, id: "gain" }, gain: keyedB },
+        dictFg,
+        [],
+    );
+    cases.push({
+        label: "映射形：条目里的 id 盖不掉键（paramsOf 取到的 id 就是键）",
+        bad: false,
+        passed:
+            paramsOf({ feedback: { ...keyedA, id: "ghost" } })
+                .map((p) => p.id)
+                .join() === "feedback" &&
+            paramsOf({ feedback: { ...keyedA, id: "gain" }, gain: keyedB })
+                .map((p) => p.id)
+                .join() === "feedback,gain",
+        expect: [],
+    });
+    cases.push({
+        label: "映射形：条目里写了别的 id 时，渲染出的表格与没写 id 的逐字相同，不出现条目里的 id",
+        bad: false,
+        passed:
+            paramTableOf({ feedback: { ...keyedA, id: "ghost" } }, dict, "en") ===
+                paramTableOf({ feedback: keyedA }, dict, "en") &&
+            !paramTableOf({ feedback: { ...keyedA, id: "ghost" } }, dict, "en").includes("ghost"),
+        expect: [],
+    });
     add("缺参数集合", {}, dict, ["golden-shape"]);
     add("参数集合是空的", { params: [] }, dict, ["golden-shape"]);
     add("某项缺 id", { params: [{ range: "0…1", default: 0, unit: "", automatable: true }] }, dict, ["golden-shape"]);

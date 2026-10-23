@@ -23,7 +23,10 @@
 //                       golden 的谓词为真（目标文件不存在时按 pending 处理，不在这里判红）
 //   pending-listed      证据产物尚不存在时允许直述，并把待办列出来（INFO 行，不判红）
 //   strong-needs-hedge  一条声明没有成立的 evidence，又没有 pending（或有 pending 但属于要求 hedge 的宿主兼容类）时，
-//                       它的每一处 strong 命中，所在的分句里都要有 hedge 短语（分句规则见 clauseSpans）
+//                       它的每一处 strong 命中，所在的分句里都要有 hedge 短语（分句规则见 clauseSpans）；
+//                       引文放行：命中整个落在行内代码里，或整个落在处在引用语境里的引号中（紧跟在写成 / 不要写 / 例如 /
+//                       such as / e.g. / 冒号之后，或括号里举例，见 citedSpans）；引号前面没有引用语境的引号
+//                       （单独成句的 "Rinne works in LUNA."）不是引文，照判
 //   unregistered-absolute 用户面文本里出现绝对化强断言句式、又没有被任何已登记声明的 strong 覆盖时判红；
 //                       覆盖按命中片段算：声明的 strong 命中要与绝对化句式的命中片段重叠，同一句里别处另有 strong 不算
 //
@@ -46,15 +49,17 @@
 //   `/`；作连词的 yet（「works in LUNA yet not tested elsewhere」）；so；except；括号里给别的主语的免责
 //   （「works in LUNA (but Pro Tools is not yet tested)」：括号里的内容算括号所在分句的一部分）。
 // 这几种写法靠文案评审挡，机检不承诺；要机检拦下，就把对应的标点或连词加进 CLAUSE_BREAK_SOURCES 并补坏样例。
+// 引文放行只用在 strong-needs-hedge 上；unregistered-absolute 仍与 wording 一样，整个落在引号里的命中放行。
 //
-// 句子切分、否定与免责、引号放行、扫描范围都和 wording 检查共用同一份实现（从 wording.mjs 引入），不各抄一份。
+// 句子切分、否定与免责、引号的识别、扫描范围都和 wording 检查共用同一份实现（从 wording.mjs 引入），不各抄一份；
+// 只有 strong-needs-hedge 的引文放行（引号前要有引用语境，citedSpans）是本检查自己的规则，比 wording 的引号放行窄。
 // 参数表块模块（gen-docs.d/params-table.mjs）的自测也在这里跑：它认的参数形状就是上面谓词路径认的形状。
 
 import fs from "node:fs";
 import path from "node:path";
 import { ROOT, caseResult, readText } from "../lib/check-kit.mjs";
 import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
-import { selfTestCases as paramsTableCases } from "../gen-docs.d/params-table.mjs";
+import { selfTestCases as paramsTableCases, paramsOf } from "../gen-docs.d/params-table.mjs";
 import {
     SCOPE,
     loadScopeTable,
@@ -80,7 +85,7 @@ export const RULES = {
     "evidence-satisfied": "evidence 里的每一条都成立",
     "pending-listed": "证据产物尚未到位时列出待办（INFO，不判红）",
     "strong-needs-hedge":
-        "没有成立 evidence 的声明，若也没有 pending（或属于要求 hedge 的宿主兼容类），每一处 strong 命中所在的分句里都要有 hedge 短语",
+        "没有成立 evidence 的声明，若也没有 pending（或属于要求 hedge 的宿主兼容类），每一处 strong 命中所在的分句里都要有 hedge 短语；行内代码和紧跟在引用语境之后的引号里的引文除外",
     "unregistered-absolute": "绝对化强断言必须被某条已登记声明的 strong 命中片段覆盖，同一句里别处的 strong 不算",
 };
 
@@ -295,6 +300,60 @@ export function clauseAround(sentence, a, b) {
     const hit = clauseSpans(sentence).filter(([from, to]) => from < b && a < to);
     if (!hit.length) return [0, sentence.length];
     return [hit[0][0], hit[hit.length - 1][1]];
+}
+
+// ---------------------------------------------------------------------------------------------
+// 引文：什么样的引号才算「在引用这句话」
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * 引用语境：紧挨在引号之前（中间只隔空白与开括号）的词。命中就说明引号里的话是被提到的，不是被断言的：
+ *   英文  such as / e.g. / i.e. / for example / for instance / like / write(s) / writing / written / wrote /
+ *         say(s) / saying / said / avoid(s) / avoiding / quote(s) / quoted / quoting / phrase(s) / wording / word(s) / term(s)
+ *   中文  写成 / 写作 / 写 / 说成 / 说 / 避免 / 如 / 用语 / 措辞 / 字样；例如、比如、譬如、诸如都以「如」结尾，由「如」管着，
+ *         不另列（另列了，删掉它们没有任何输出变化）；不如、假如的「如」不算
+ * 冒号引出的引号另算（见 COLON_LEAD）。
+ * 引号前面什么语境都没有（单独成句、或夹在断言中间的 "Rinne works in LUNA."）不是引文，照常判。
+ */
+const CITE_LEAD_IN = new RegExp(
+    "(?:\\b(?:such as|e\\.g\\.|i\\.e\\.|for example|for instance|like|writes?|writing|written|wrote|says?|saying|said|" +
+        "avoids?|avoiding|quotes?|quoted|quoting|phrases?|wording|words?|terms?)|" +
+        "写成|写作|写|说成|说|避免|(?<![不假])如|用语|措辞|字样)$",
+    "i",
+);
+/** 冒号引出：「Never write: "works in LUNA"」「注意：「在 LUNA 可用」」。 */
+const COLON_LEAD = /[:：]$/;
+/** 引号后面直接跟着的指称：「「在 LUNA 可用」这种写法不写」。 */
+const CITE_LEAD_OUT = /^\s*(?:这种|这样|这类|此类|这句)(?:写法|说法|话|措辞|用语|字样|表述)/;
+/** 括号里举例：「Strong claims about behaviour ("does not change with...")」，括号之前的话在谈声明或措辞。 */
+const CLAIM_TALK = /\b(?:claims?|phrases?|wording|statements?)\b|声明|说法|措辞|写法|用语|字样|短语/i;
+/** 两个引号之间只有列举连接：`"a", "b"`、`"a" or "b"`、`「a」、「b」`。 */
+const QUOTE_LIST_GAP = /^\s*(?:[,，、]\s*)?(?:(?:or|and)\s+|或者?|和)?$/i;
+
+/**
+ * 一句话里「引文」的区间：行内代码，以及处在引用语境里的引号。
+ * 引号的判定（任一成立）：紧跟在引用语境之后（CITE_LEAD_IN 或冒号）；引号之后紧跟「这种写法」一类指称；
+ * 紧跟在开括号之后、且括号之前的话在谈声明或措辞；与前一个已算引文的引号用列举连接。
+ * 其余引号（单独成句的 "Rinne works in LUNA."、夹在断言里的引号）不是引文，里面的 strong 照判。
+ */
+export function citedSpans(sentence) {
+    const out = [];
+    for (const m of sentence.matchAll(/`[^`\n]+`/g)) out.push([m.index, m.index + m[0].length]);
+    let prev = null; // 前一个引号：{ end, cited }
+    for (const [a, b] of quotedSpans(sentence)) {
+        const before = sentence.slice(0, a);
+        const open = /[(（]\s*$/.test(before);
+        const lead = before.replace(/[\s(（]+$/, "");
+        const cited =
+            CITE_LEAD_IN.test(lead) ||
+            COLON_LEAD.test(lead) ||
+            CITE_LEAD_OUT.test(sentence.slice(b)) ||
+            (open && CLAIM_TALK.test(lead.slice(-80))) ||
+            (prev !== null && prev.cited && QUOTE_LIST_GAP.test(sentence.slice(prev.end, a)));
+        if (cited) out.push([a, b]);
+        prev = { end: b, cited };
+    }
+    return out;
 }
 
 /** 短语按正则匹配，大小写不敏感。写坏的正则直接抛错——悄悄退回逐字匹配会让一条声明永远不命中。 */
@@ -642,7 +701,8 @@ export function findParam(data, id) {
           ? data.parameters
           : Object.entries(data)
                 .filter(([, v]) => v && typeof v === "object" && !Array.isArray(v))
-                .map(([k, v]) => ({ id: k, ...v }));
+                // 键最后写、以键为准：条目里自己带的 id 字段不能盖掉键，与 params-table 的 paramsOf 同一个口径
+                .map(([k, v]) => ({ ...v, id: k }));
     const hit = list.find((p) => p && typeof p === "object" && p.id === id);
     return hit ?? null;
 }
@@ -906,22 +966,29 @@ export function claimProblems({ data, files, root, jobs = ciJobs(root), scope: s
         for (const [file, text] of Object.entries(files)) {
             if (Array.isArray(scope) && scope.length && !scope.includes(file)) continue;
             for (const s of sentencesOf(file, text)) {
-                // 整个落在引号里的命中是在引用这句话（贡献指南里举例的「"does not change with..."」），不是在断言：
-                // 与 wording、unregistered-absolute 同一个口径放行
-                const quoted = quotedSpans(s);
+                // 引文不是断言：整个落在行内代码、或处在引用语境里的引号（写成 / 不要写 / 例如 / such as / e.g. / 冒号 /
+                // 括号里举例，见 citedSpans）里的命中放行。引号前面没有引用语境的引号（单独成句的 "Rinne works in LUNA."）照判
+                const cited = citedSpans(s);
+                const quotes = quotedSpans(s);
                 for (const phrase of phrases) {
-                    const bare = phraseSpans(phrase, s)
-                        .filter(([a, b]) => !quoted.some(([qa, qb]) => a >= qa && b <= qb))
-                        .map(([a, b]) => clauseAround(s, a, b))
-                        .map(([from, to]) => s.slice(from, to).trim())
-                        .find((clause) => !hedges.some((h) => matchPhrase(h, clause)));
-                    if (bare === undefined) continue;
+                    const found = phraseSpans(phrase, s)
+                        .filter(([a, b]) => !cited.some(([ca, cb]) => a >= ca && b <= cb))
+                        .map(([a, b]) => {
+                            const [from, to] = clauseAround(s, a, b);
+                            return { a, b, clause: s.slice(from, to).trim() };
+                        })
+                        .find(({ clause }) => !hedges.some((h) => matchPhrase(h, clause)));
+                    if (found === undefined) continue;
+                    const bare = found.clause;
+                    const unciting = quotes.some(([qa, qb]) => found.a >= qa && found.b <= qb)
+                        ? "（它在引号里，但引号前没有引用语境，不算引文：引文要紧跟在写成 / 不要写 / 例如 / such as / e.g. / 冒号之后，或写在行内代码里）"
+                        : "";
                     add(
                         "strong-needs-hedge",
                         pendingOnly
-                            ? `${file} 里的强声明「${phrase}」（${id}）的真机记录还没有到位（pending），它所在的分句「${bare}」里要有 hedge 短语；` +
+                            ? `${file} 里的强声明「${phrase}」（${id}）的真机记录还没有到位（pending），它所在的分句「${bare}」里要有 hedge 短语${unciting}；` +
                                   "记录到位后把它从 pending 移到 evidence"
-                            : `${file} 里的强声明「${phrase}」（${id}）既没有成立的 evidence 也没有 pending，它所在的分句「${bare}」里要有 hedge 短语`,
+                            : `${file} 里的强声明「${phrase}」（${id}）既没有成立的 evidence 也没有 pending，它所在的分句「${bare}」里要有 hedge 短语${unciting}`,
                     );
                 }
             }
@@ -1041,6 +1108,17 @@ export async function selfTest(root = ROOT) {
         const goldenMissing = mkTemp();
         const goldenLimiterBool = withGolden(0, "map", true);
         const goldenLimiterOff = withGolden(0, "list", false);
+        // 映射形的条目里自带了和键不一样的 id：以键为准。ghost 只出现在条目的 id 字段里，没有叫 ghost 的键
+        const withIdGolden = (body) => {
+            const dir = mkTemp();
+            fs.mkdirSync(path.join(dir, "tests", "golden"), { recursive: true });
+            fs.writeFileSync(path.join(dir, "tests", "golden", "params-input.json"), JSON.stringify(body));
+            return dir;
+        };
+        const idGhost = { feedback: { id: "ghost", default: 0 } };
+        const idSwap = { feedback: { id: "limiter", default: 0.5 }, limiter: { default: 1 } };
+        const goldenIdGhost = withIdGolden(idGhost);
+        const goldenIdSwap = withIdGolden(idSwap);
         // 带一份 validation 记录的仓，用来测文件名通配
         const withRecord = mkTemp();
         fs.mkdirSync(path.join(withRecord, "docs", "validation"), { recursive: true });
@@ -1817,9 +1895,9 @@ export async function selfTest(root = ROOT) {
                     files: { "README.md": "Rinne works in LUNA (host testing pending), and it works in LUNA.\n" },
                 }),
             ],
-            // 整个落在引号里的命中是在引用，不是在断言（口径与 wording、unregistered-absolute 相同）
+            // 引文不是断言，但只有引号紧跟在引用语境之后才算引文；其余引号里的 strong 照判
             [
-                "strong 整个在引号里（引用示例）：放行",
+                "strong 整个在引号里（引用示例，引号前是 write）：放行",
                 [],
                 run({
                     root: goldenMissing,
@@ -1834,6 +1912,236 @@ export async function selfTest(root = ROOT) {
                     root: goldenMissing,
                     data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
                     files: { "README.md": "我们不写「在 LUNA 可用」这种话。\n" },
+                }),
+            ],
+            // 引文放行只认两处：行内代码，以及紧跟在引用语境之后的引号（citedSpans）。下面每个引用语境各一条正例
+            [
+                "引文放行：CONTRIBUTING.md 里的写法（括号里举例，括号前在谈 claims，第二个引号用列举连接第一个）",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["does not change with", "safe by default"], hedge: ["designed so"] }),
+                    files: {
+                        "README.md":
+                            'Strong claims about behaviour ("does not change with...", "safe by default") need evidence registered in\ndocs/claims.json.\n',
+                    },
+                }),
+            ],
+            [
+                "引文放行：只有第二个引号里有 strong，它靠列举连接前一个已算引文的引号",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["safe by default"], hedge: ["designed so"] }),
+                    files: {
+                        "README.md":
+                            'Strong claims about behaviour ("does not change with..." or "safe by default") need evidence.\n',
+                    },
+                }),
+            ],
+            ...[
+                "such as",
+                "e.g.",
+                "i.e.",
+                "for example",
+                "for instance",
+                "like",
+                "write",
+                "writes",
+                "writing",
+                "written",
+                "wrote",
+                "say",
+                "says",
+                "saying",
+                "said",
+                "avoid",
+                "avoids",
+                "avoiding",
+                "quote",
+                "quotes",
+                "quoted",
+                "quoting",
+                "phrase",
+                "phrases",
+                "wording",
+                "word",
+                "words",
+                "term",
+                "terms",
+            ].map((w) => [
+                `引文放行：引号紧跟在「${w}」之后`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": `Docs ${w} "Rinne works in LUNA" must carry a note.\n` },
+                }),
+            ]),
+            ...[
+                "写成",
+                "写作",
+                "写",
+                "说成",
+                "说",
+                "避免",
+                "例如",
+                "比如",
+                "譬如",
+                "诸如",
+                "如",
+                "用语",
+                "措辞",
+                "字样",
+            ].map((w) => [
+                `引文放行（中文）：引号紧跟在「${w}」之后`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": `文档里${w}「在 LUNA 可用」要带说明。\n` },
+                }),
+            ]),
+            ...[
+                ["英文冒号", 'Never use this wording: "Rinne works in LUNA."', "Rinne works in LUNA"],
+                ["英文冒号加弯引号", "Never use this wording: “Rinne works in LUNA.”", "Rinne works in LUNA"],
+                ["中文冒号", "不要这样写：「在 LUNA 可用」。", "在 LUNA 可用"],
+                [
+                    "开括号之后（e.g. 在括号里）",
+                    'Wording (e.g. "Rinne works in LUNA") needs a note.',
+                    "Rinne works in LUNA",
+                ],
+                ["中文开括号之后", "比如（「在 LUNA 可用」）要带说明。", "在 LUNA 可用"],
+            ].map(([label, text, strong]) => [
+                `引文放行：${label}`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: [strong], hedge: [zhHedge, "host testing pending"] }),
+                    files: { "README.md": `${text}\n` },
+                }),
+            ]),
+            ...["这种", "这样", "这类", "此类", "这句"].flatMap((lead) =>
+                ["写法", "说法", "话", "措辞", "用语", "字样", "表述"].map((tail) => [
+                    `引文放行（中文）：引号后面直接跟着「${lead}${tail}」`,
+                    [],
+                    run({
+                        root: goldenMissing,
+                        data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                        files: { "README.md": `我们认为「在 LUNA 可用」${lead}${tail}要带说明。\n` },
+                    }),
+                ]),
+            ),
+            // 括号里举例：括号前面的话在谈声明或措辞，用的词放在远处，避免被紧挨着的引用语境盖住
+            ...["claim", "claims", "phrase", "phrases", "wording", "statement", "statements"].map((w) => [
+                `引文放行：开括号之后，括号前在谈「${w}」`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": `Strong ${w} about behaviour ("Rinne works in LUNA") need evidence.\n` },
+                }),
+            ]),
+            ...["声明", "说法", "措辞", "写法", "用语", "字样", "短语"].map((w) => [
+                `引文放行（中文）：开括号之后，括号前在谈「${w}」`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": `关于${w}的行为（「在 LUNA 可用」）要有证据。\n` },
+                }),
+            ]),
+            // 列举：第二个引号靠前一个已算引文的引号带入，两个引号之间只能是列举连接
+            ...[
+                [", ", "英文逗号"],
+                ["，", "中文逗号"],
+                ["、", "顿号"],
+                [" or ", "or"],
+                [" and ", "and"],
+                [", or ", "逗号加 or"],
+                ["或", "或"],
+                ["或者", "或者"],
+                ["和", "和"],
+            ].map(([gap, label]) => [
+                `引文放行：列举里的第二个引号（${label}）由前一个引文带入`,
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["works in LUNA"], hedge: ["host testing pending"] }),
+                    files: { "README.md": `Never write "Rinne is great"${gap}"Rinne works in LUNA" in the docs.\n` },
+                }),
+            ]),
+            [
+                "引文放行：行内代码里的命中（不带引号）",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Do not ship the string `Rinne works in LUNA` before testing.\n" },
+                }),
+            ],
+            [
+                "引文放行：行内代码里的中文命中",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ strong: ["在 LUNA 可用"], hedge: [zhHedge] }),
+                    files: { "README.md": "不写 `Rinne 在 LUNA 可用`。\n" },
+                }),
+            ],
+            // 引号前面没有引用语境：不是引文，里面的 strong 照判
+            [
+                "引号里的强声明单独成句（前面没有引用语境）：判红，报错点明引号前没有引用语境",
+                ["strong-needs-hedge"],
+                (() => {
+                    const r = run({
+                        root: goldenMissing,
+                        data: withHost(),
+                        files: { "README.md": '"Rinne works in LUNA."\n' },
+                    });
+                    // 提示串写进了报错行：缺它就看不出为什么引号没放行
+                    return r.errors.some((l) => l.includes("没有引用语境")) ? r : { errors: [], infos: [] };
+                })(),
+            ],
+            ...[
+                ['"Rinne works in LUNA."', "引号开头的整句"],
+                ['Rinne "works in LUNA".', "夹在断言里的引号"],
+                ['Rinne is great and "works in LUNA" too.', "and 之后的引号"],
+                ['Rinne ("works in LUNA") is great.', "括号里的引号，括号之前不在谈声明或措辞"],
+                ['Never write it that way, Rinne is "works in LUNA".', "引用语境离引号太远"],
+                ['"Rinne is great", "Rinne works in LUNA"', "列举连接的前一个引号不是引文"],
+                ['Never write "Rinne is great" but Rinne "works in LUNA".', "前一个是引文，但两个引号之间不是列举连接"],
+                ['Never write "Rinne is great", so Rinne "works in LUNA".', "前一个是引文，两个引号之间隔着别的话"],
+                ["Rinne is great, and “Rinne works in LUNA.”", "弯引号开头也一样"],
+                ["The page says nothing. “Rinne works in LUNA.”", "上一句里的语境不管到下一句"],
+                [
+                    "Rinne works well e.g. in Cubase. “Rinne works in LUNA.”",
+                    "e.g. 后面的句点不切，但上一句的语境仍不管到下一句",
+                ],
+                ["他们认为 Rinne「在 LUNA 可用」。", "夹在断言里的中文引号"],
+                ["「Rinne 在 LUNA 可用。」", "中文引号开头的整句"],
+                ["不如「Rinne 在 LUNA 可用」。", "不如的「如」不算引用语境"],
+                ["假如「Rinne 在 LUNA 可用」。", "假如的「如」不算引用语境"],
+                ["「在 LUNA 可用」这个 Rinne 很好。", "引号后面不是指称写法的话"],
+            ].map(([text, label]) => [
+                `引号里的强声明但引号前没有引用语境：判红（${label}）`,
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({
+                        strong: ["works in LUNA", "在 LUNA 可用"],
+                        hedge: ["host testing pending", zhHedge],
+                    }),
+                    files: { "README.md": `${text}\n` },
+                }),
+            ]),
+            [
+                "引号在引用语境之后，但命中跨出了引号一部分（引号里只有「在 macOS 14」，「上可用」在引号外）：仍判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withMinMacos(),
+                    files: { "README.md": "例如「在 macOS 14」上可用。\n" },
                 }),
             ],
             [
@@ -2202,6 +2510,44 @@ export async function selfTest(root = ROOT) {
                 run({ root: cfgsOff, data: withClaim({ pending: [], evidence: [guardPred] }) }),
             ],
             [
+                "映射形 golden 的条目里写了别的 id：谓词按键取值，feedback.default == 0 照常成立",
+                [],
+                run({ root: goldenIdGhost, data: withClaim({ pending: [], evidence: [goldenPred] }) }),
+            ],
+            [
+                "映射形 golden 的条目里写了别的 id（ghost）：按条目里的 id 取不到参数，ghost.default == 0 判红",
+                ["evidence-satisfied"],
+                run({
+                    root: goldenIdGhost,
+                    data: withClaim({
+                        pending: [],
+                        evidence: ["golden:tests/golden/params-input.json#ghost.default == 0"],
+                    }),
+                }),
+            ],
+            [
+                "映射形 golden 的条目 id 与另一个键重名：limiter.default == 1 取的是键 limiter 自己的条目，成立",
+                [],
+                run({
+                    root: goldenIdSwap,
+                    data: withClaim({
+                        pending: [],
+                        evidence: ["golden:tests/golden/params-input.json#limiter.default == 1"],
+                    }),
+                }),
+            ],
+            [
+                "映射形 golden 的条目 id 与另一个键重名：feedback.default == 0.5 取的是键 feedback 自己的条目，成立",
+                [],
+                run({
+                    root: goldenIdSwap,
+                    data: withClaim({
+                        pending: [],
+                        evidence: ["golden:tests/golden/params-input.json#feedback.default == 0.5"],
+                    }),
+                }),
+            ],
+            [
                 "按 name 选数组项：数组里没有 guard_on 时判红",
                 ["evidence-satisfied"],
                 run({ root: cfgsNoGuard, data: withClaim({ pending: [], evidence: [guardPred] }) }),
@@ -2224,6 +2570,40 @@ export async function selfTest(root = ROOT) {
             passed: golden05Lines.some((l) => l.includes("starts with feedback at zero")),
             expect: [],
         });
+        // 引文区间：CONTRIBUTING.md 那句的两个引号都算，单独成句或夹在断言里的引号不算，行内代码算
+        cases.push({
+            label: "citedSpans：括号里举例的两个引号与行内代码算引文，单独成句和夹在断言里的引号不算",
+            bad: false,
+            passed:
+                citedSpans(
+                    'Strong claims about behaviour ("does not change with...", "safe by default") need evidence.',
+                ).length === 2 &&
+                citedSpans('Never write "works in LUNA" and `works in LUNA`.').length === 2 &&
+                citedSpans('"Rinne works in LUNA."').length === 0 &&
+                citedSpans('Rinne "works in LUNA" too.').length === 0 &&
+                citedSpans("Rinne works in LUNA.").length === 0,
+            expect: [],
+        });
+        // 参数表块模块（paramsOf）与这里的 findParam 读同一份 golden：条目里自带的 id 以键为准，两边取到同一个值
+        for (const [label, body] of [
+            ["条目 id 是 ghost，没有叫 ghost 的键", idGhost],
+            ["条目 id 与另一个键重名", idSwap],
+        ])
+            cases.push({
+                label: `params-table 的 paramsOf 与 claims 的 findParam 读到同一个值：${label}`,
+                bad: false,
+                passed:
+                    paramsOf(body)
+                        .map((p) => p.id)
+                        .join() === Object.keys(body).join() &&
+                    [...Object.keys(body), "ghost"].every(
+                        (id) =>
+                            (findParam(body, id)?.default ?? null) ===
+                            (paramsOf(body).find((p) => p.id === id)?.default ?? null),
+                    ) &&
+                    findParam(body, "ghost") === null,
+                expect: [],
+            });
         // 工具函数
         const throws = (fn) => {
             try {

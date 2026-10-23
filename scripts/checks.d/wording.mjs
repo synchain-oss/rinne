@@ -43,6 +43,9 @@
 //      或它的紧后面直接跟着「is not」「是不可能的」这类否定。分句以逗号、冒号、分号、顿号、破折号、括号、带空格的连字符与 -- 为界。
 //      故意不认同一句里远处的单字「不」「无」「no」：「永不啸叫，不用担心」「works with Logic, no extra setup」
 //      这类肯定式强断言，随手一个「不用」「no」不能把它放过。
+//      否定要直接管到命中：否定词与命中之间不能隔着并列或转折连词（and / but / while…；并且 / 以及 / 和 / 但 / 而…），
+//      连词引出的是另一个谓语，「Rinne is not a toy and supports all DAWs」里的 not 管的是玩具，不是后面的支持声明
+//      （取舍见 COORDINATOR 的注释）。
 // 排除清单里的文件不扫（它们合法地引用禁用词本身）。
 //
 // 判据名见 RULES。自测的每个坏样例写明它必须触发哪一条，并核对每一条、每个子模式都至少被一个坏样例命中：
@@ -312,10 +315,13 @@ export function proseUnits(file, text) {
 /** 引号：短语在引号里就放过。 */
 const QUOTE_RE = /「[^」]*」|“[^”]*”|‘[^’]*’|"[^"\n]*"/g;
 
-/** 句子切分：句号、问号、感叹号、分号、换行，以及英文的句点加空白。 */
+/**
+ * 句子切分：句号、问号、感叹号、分号、换行，以及英文的句点加空白。
+ * e.g. 与 i.e. 后面的句点不切：「(e.g. "…")」里的引文要和它的引用语境留在同一句，否则引号前的语境被切到上一句。
+ */
 export function sentences(text) {
     return text
-        .split(/(?<=[。！？!?;；\n])|(?<=\.)[ \t]+/)
+        .split(/(?<=[。！？!?;；\n])|(?<=(?<!\be\.g|\bi\.e)\.)[ \t]+/i)
         .map((s) => s.trim())
         .filter(Boolean);
 }
@@ -351,12 +357,25 @@ export const NEGATION_AFTER = [
     /^[的是]?(?:不对|不成立|不可信|不可能|做不到|无法|不能|并非|不是)/,
 ];
 
-/** 命中片段之前同一分句里、最近 WINDOW 个字符。 */
+/**
+ * 并列与转折连词：连词后面引出的是另一个谓语，连词前面的否定管不到它。
+ * 「Rinne is not a toy and supports all DAWs」「Rinne 不是玩具并且支持所有 DAW」里的 not / 不是 管的是玩具，不是后面的支持声明。
+ * 英文 and（含 and also）/ but / while / whereas / although / though / however；中文 并且 / 以及 / 和 / 但 / 不过 / 可是 / 而。
+ * 而且、但是、然而 已经被 而、但 管着，不再单列（单列了，删掉它们也没有任何输出变化，是等价变异）。
+ * 连词本身带来的取舍：否定管着并列的宾语时（「不承诺零延迟和 100% 安全」「does not claim A and zero latency」），
+ * 连词之后的那一项也被切掉否定、判红，要写成顿号或逗号分开、或把禁用词放进引号。宁可多拦，不放过被连词带出的肯定式。
+ */
+const COORDINATOR = /\b(?:and|but|while|whereas|although|though|however)\b|并且|以及|和|但|不过|可是|而/gi;
+
+/** 命中片段之前同一分句里、最近 WINDOW 个字符，并且只取最后一个连词之后的那一段（否定要直接管到命中，中间不隔着连词）。 */
 function clauseBefore(sentence, index) {
     const before = sentence.slice(0, index);
     let cut = 0;
     for (const m of before.matchAll(CLAUSE_BREAK)) cut = m.index + m[0].length;
-    return before.slice(cut).slice(-WINDOW);
+    const window = before.slice(cut).slice(-WINDOW);
+    let from = 0;
+    for (const m of window.matchAll(COORDINATOR)) from = m.index + m[0].length;
+    return window.slice(from);
 }
 
 /** 一个命中（在 sentence 里从 index 起、长 len）是否被登记过的否定或免责放过。 */
@@ -680,10 +699,23 @@ export async function selfTest() {
         ["Rinne is not a toy, it supports all DAWs.", "absolute-support"],
         ["Rinne is not a toy - it supports all DAWs.", "absolute-support"],
         ["Rinne is not a toy -- it supports all DAWs.", "absolute-support"],
-        [
-            "Rinne does not do many things in this section of the manual and then it supports all DAWs.",
+        // 否定要直接管到命中：中间隔着并列或转折连词引出的另一个谓语，连词前面的否定管不到它
+        ["Rinne is not a toy and supports all DAWs.", "absolute-support"],
+        ["Rinne is not a toy and also supports all DAWs.", "absolute-support"],
+        ["Rinne never crashes and works with all DAWs.", "absolute-support"],
+        ["Rinne does not need setup and is 100% safe.", "safety-promise"],
+        ["我们不保证绝对稳定并且这条链是零延迟的。", "zero-latency-zh"],
+        ["We do not promise much and the loop is zero latency.", "zero-latency"],
+        ["Rinne 不是玩具，并且支持所有 DAW。", "all-daw-zh"],
+        ...["and", "but", "while", "whereas", "although", "though", "however"].map((c) => [
+            `Rinne is not a toy ${c} it supports all DAWs.`,
             "absolute-support",
-        ],
+        ]),
+        ...["并且", "而且", "以及", "和", "但", "但是", "不过", "然而", "可是", "而"].map((c) => [
+            `Rinne 不是玩具${c}支持所有 DAW。`,
+            "all-daw-zh",
+        ]),
+        ["Rinne does not do many things in this section of the manual so it supports all DAWs.", "absolute-support"],
         // JSON 与 JS 词条的字符串值整个被引号包着，必须按值内部扫描
         ['{"en":{"body":"Rinne is zero latency."}}', "zero-latency", "docs/hard-rules.i18n.json"],
         ['export default { en: { "x.y": "Rinne is zero latency and 100% safe." } };', "zero-latency", "web/i18n/x.js"],
@@ -722,6 +754,15 @@ export async function selfTest() {
         ["Zero latency isn't something we promise."],
         ["零延迟是不可能的。"],
         ["Rinne 不支持所有 DAW。"],
+        ["Rinne does not support all DAWs."],
+        ["Rinne is a toy and does not support all DAWs."],
+        ["Rinne is a toy but does not support all DAWs."],
+        ["Rinne does not claim it supports all DAWs."],
+        ["Rinne does not promise a standard that supports all DAWs."],
+        ["We cannot and do not promise zero latency."],
+        ["Rinne 是玩具并且不支持所有 DAW。"],
+        ["Rinne 是玩具而且不支持所有 DAW。"],
+        ["Rinne 不是玩具，也不支持所有 DAW。"],
         ["「支持所有 DAW」这种写法不写。"],
         ['The words "zero latency" are not used.'],
         ["Rinne Input（返回端）与 Rinne Output（发送端）。"],
@@ -746,6 +787,18 @@ export async function selfTest() {
     }
     for (const [text, file] of allowed)
         cases.push({ label: `放行：${text}`, bad: false, passed: lint(text, file).length === 0, expect: [] });
+    // 切句：e.g. 与 i.e. 后面的句点不切，引文和它的引用语境留在同一句；别的句点加空白照切
+    cases.push({
+        label: "切句：e.g. 与 i.e. 后面不切，普通句点后面照切",
+        bad: false,
+        passed:
+            sentences('Wording (e.g. "zero latency") is quoted. Next one.').length === 2 &&
+            sentences('Wording (e.g. "zero latency") is quoted. Next one.')[0].includes('e.g. "zero latency"') &&
+            sentences("That is, i.e. this one. Next.").length === 2 &&
+            sentences("Use it. E.g. this one.").length === 2 &&
+            sentences("Use it. Then go.").length === 2,
+        expect: [],
+    });
 
     // 范围闭合
     const tracked = [
