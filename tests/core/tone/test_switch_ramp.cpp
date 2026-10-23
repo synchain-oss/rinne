@@ -46,14 +46,6 @@ double maxStep(const std::vector<float>& v)
     return worst;
 }
 
-double peakOf(const std::vector<float>& v)
-{
-    double worst = 0.0;
-    for (const float x : v)
-        worst = std::fmax(worst, std::fabs(static_cast<double>(x)));
-    return worst;
-}
-
 // 限制器一路：连续跑（状态是热的），给出「开」那一路的样本
 std::vector<float> limitedPath(double sr, double ceiling, const std::vector<float>& x)
 {
