@@ -207,6 +207,8 @@ private:
     std::uint64_t secondOutputToken_ = 2;
 
     std::uint32_t group_ = 1;
+    // 段的映射代号（Output 判「换段」用）：每次 open 加一
+    std::uint64_t ringGeneration_ = 0;
     double sampleRate_ = 48000.0;
     int maxBlock_ = 1024;
     bool prepared_ = false;

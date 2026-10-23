@@ -59,6 +59,7 @@ bool EngineHost::open(std::uint32_t group)
     {
         return false;
     }
+    ++ringGeneration_;
 
     // 第一个 Output 拿写权：token 与采样率。epoch 与 writer_token 由 publishWriter 写。
     auto* ring = segments_.ring(group);
@@ -206,6 +207,7 @@ engine::EngineContext EngineHost::inputContext() const noexcept
 {
     engine::EngineContext ctx;
     ctx.ring = segments_.ring(group_);
+    ctx.ringGeneration = ctx.ring != nullptr ? ringGeneration_ : 0u;
     ctx.rendezvous = segments_.rv();
     ctx.group = group_;
     return ctx;
@@ -217,6 +219,8 @@ engine::EngineContext EngineHost::outputContext(bool second) const noexcept
     ctx.ring = segments_.ring(group_);
     ctx.group = group_;
     ctx.token = second ? secondOutputToken_ : outputToken_;
+    // 段的映射代号：每次 open 建一份新映射，代号随之变（壳里取绑定快照的发布序号）。
+    ctx.ringGeneration = ctx.ring != nullptr ? ringGeneration_ : 0u;
     // Output 槽只给现任写方（它是槽的属主）；另一个 Output 拿不到槽，不写任何端点槽。
     ctx.rendezvous = second == writerIsSecond_ ? segments_.rv() : nullptr;
     return ctx;

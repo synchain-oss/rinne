@@ -98,22 +98,25 @@ bool sameBits(const float* a, const float* b, std::size_t n)
 constexpr double kSr = 48000.0;
 constexpr std::uint64_t kToken = 1;
 
-// Output 侧的块首上下文：环 + 写权（+ 可选的会合段）。
-EngineContext outputCtx(RingSegment* ring, std::uint64_t token = kToken, RvSegment* rv = nullptr)
+// Output 侧的块首上下文：环 + 写权（+ 可选的会合段）+ 段的映射代号（同一块映射恒为 1）。
+EngineContext outputCtx(RingSegment* ring, std::uint64_t token = kToken, RvSegment* rv = nullptr,
+                        std::uint64_t generation = 1)
 {
     EngineContext ctx;
     ctx.ring = ring;
     ctx.token = token;
     ctx.rendezvous = rv;
     ctx.group = rv != nullptr ? 1u : 0u;
+    ctx.ringGeneration = ring != nullptr ? generation : 0u;
     return ctx;
 }
 
-// Input 侧的块首上下文：环（+ 可选的会合段）。
-EngineContext inputCtx(RingSegment* ring, RvSegment* rv = nullptr)
+// Input 侧的块首上下文：环（+ 可选的会合段）+ 段的映射代号（同一块映射恒为 1）。
+EngineContext inputCtx(RingSegment* ring, RvSegment* rv = nullptr, std::uint64_t generation = 1)
 {
     EngineContext ctx;
     ctx.ring = ring;
+    ctx.ringGeneration = ring != nullptr ? generation : 0u;
     ctx.rendezvous = rv;
     ctx.group = rv != nullptr ? 1u : 0u;
     return ctx;
@@ -175,6 +178,52 @@ struct Loop
     std::vector<float> run(const EngineParams& params, int blockLength, int total, Source&& source)
     {
         return run(params, blockLength, total, source, [](int) { return TransportInfo{}; });
+    }
+
+    // 逐周期的脚本（Input 在前、Output 在后）：块长按 lengths 循环取；
+    //   deferOutput 里的周期：Output 晚到 —— 这一周期不调它，下一周期 Input 之后先补上这一块、再处理那一周期自己的块
+    //                         （宿主把 Output 的这一块排到了下一次 Input 之后；数据一帧不丢，只是晚到）；
+    //   dropOutput 里的周期：Output 这一周期不被调用，这一块的数据从此丢了（真错位）。
+    template<typename Source>
+    std::vector<float> runScript(const EngineParams& params, const std::vector<int>& lengths, int total,
+                                 Source&& source, const std::vector<int>& deferOutput = {},
+                                 const std::vector<int>& dropOutput = {})
+    {
+        const auto listed = [](const std::vector<int>& list, int cycle) {
+            return std::find(list.begin(), list.end(), cycle) != list.end();
+        };
+        std::vector<float> out;
+        out.reserve(static_cast<std::size_t>(total));
+        std::unique_ptr<HostBuffer> pending;
+        int at = 0;
+        for (int cycle = 0; at < total; ++cycle)
+        {
+            const int n = std::min(lengths[static_cast<std::size_t>(cycle) % lengths.size()], total - at);
+            HostBuffer host(n);
+            for (int i = 0; i < n; ++i)
+            {
+                host.left[static_cast<std::size_t>(i)] = source(at + i);
+                host.right[static_cast<std::size_t>(i)] = source(at + i);
+            }
+            input.process(host.view(), params, TransportInfo{}, false, inputCtx(ring.get(), rv.get()));
+            out.insert(out.end(), host.left.begin(), host.left.end());
+            if (pending)
+            {
+                output.process(pending->view(), params, TransportInfo{}, false,
+                               outputCtx(ring.get(), kToken, rv.get()));
+                pending.reset();
+            }
+            if (listed(deferOutput, cycle))
+            {
+                pending = std::make_unique<HostBuffer>(host);
+            }
+            else if (!listed(dropOutput, cycle))
+            {
+                output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), kToken, rv.get()));
+            }
+            at += n;
+        }
+        return out;
     }
 };
 
@@ -387,14 +436,15 @@ TEST_CASE("引擎 L3-07 Output 每块先查 isWriter：写权不是自己的不�
     CHECK(output.conflictCount() == 1u);
     CHECK(LoopRing::writeHead(*ring) == 0u);
 
-    // 冲突持续很多块也只记一条事件（状态变了才记），不会把队列灌满。
+    // 冲突持续很多块也只记一条事件（状态变了才记），不会把队列灌满。码是「写权冲突」，不是「没有对端」。
     for (int i = 0; i < 300; ++i)
     {
         output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get()));
     }
-    int events = 0;
-    output.drainEvents([&](const rinne::diag::Event&) { ++events; });
-    CHECK(events == 1);
+    std::vector<std::uint16_t> codes;
+    output.drainEvents([&](const rinne::diag::Event& e) { codes.push_back(e.code); });
+    REQUIRE(codes.size() == 1u);
+    CHECK(codes[0] == static_cast<std::uint16_t>(EngineEventCode::kWriteConflict));
     CHECK(output.conflictCount() == 301u);
 }
 
@@ -416,13 +466,22 @@ TEST_CASE("引擎 L3-08 块长超限（n > 32768）：只出干声并给 kUnsupp
     // 写头没动：不写环。
     CHECK(LoopRing::writeHead(*ring) == 0u);
 
-    // 提示码落在引擎段（0x0400–0x04FF），不碰安全链段。
-    std::vector<std::uint16_t> codes;
-    output.drainEvents([&](const rinne::diag::Event& e) { codes.push_back(e.code); });
-    REQUIRE(codes.size() == 1u);
-    CHECK(codes[0] == static_cast<std::uint16_t>(EngineEventCode::kUnsupportedBlock));
-    CHECK(codes[0] >= 0x0400u);
-    CHECK(codes[0] <= 0x04FFu);
+    // 超限持续很多块也只记一条事件（进入超限时），不把队列灌满。
+    for (int i = 0; i < 300; ++i)
+    {
+        output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get()));
+    }
+    CHECK(output.unsupportedCount() == 301u);
+
+    // 提示码落在引擎段（0x0400–0x04FF），不碰安全链段。载荷：a = 块长 ÷256（32769 → 129），b = 支持的上限 ÷256（128）。
+    std::vector<rinne::diag::Event> events;
+    output.drainEvents([&](const rinne::diag::Event& e) { events.push_back(e); });
+    REQUIRE(events.size() == 1u);
+    CHECK(events[0].code == static_cast<std::uint16_t>(EngineEventCode::kUnsupportedBlock));
+    CHECK(events[0].code >= 0x0400u);
+    CHECK(events[0].code <= 0x04FFu);
+    CHECK(events[0].a == 129u);
+    CHECK(events[0].b == 128u);
 
     // Input 侧同样只出干声。
     InputEngine input;
@@ -713,6 +772,128 @@ TEST_CASE("引擎 写方死在一段中间：新写方 ≥ 1 s 之后回收，�
     CHECK(written > 0u);
 }
 
+namespace
+{
+// 一个「写到一半死掉的写方」留下的环：公告了 [0, 4096) 却没有发布。现任写方的写权是 token。
+std::unique_ptr<RingSegment> stuckRing(std::uint64_t token)
+{
+    auto ring = makeRing();
+    ring->header.write_head.store(0u);
+    ring->header.write_intent.store(4096u);
+    LoopRing::publishWriter(*ring, token, static_cast<std::uint32_t>(kSr), 2);
+    return ring;
+}
+} // namespace
+
+TEST_CASE("引擎 写方回收：宿主块长 32768 时被挡满约 1 s 就回收（一块里每一段都算），不拖到约 4 s", "[engine]")
+{
+    // ⛔ 删除式验证点：分段循环遇 kInFlight 就停（每块只数第一段的 8192 帧）→ 第 2 块之后还没回收，本用例变红。
+    auto ring = stuckRing(kToken);
+    OutputEngine output;
+    output.prepare(kSr, 32768);
+    HostBuffer host(32768);
+    std::fill(host.left.begin(), host.left.end(), 0.1f);
+    std::fill(host.right.begin(), host.right.end(), 0.1f);
+    EngineParams params;
+
+    // 第 1 块：32768 帧（约 0.68 s）全被挡住，不到 1 s：不回收，什么都没写。
+    CHECK_FALSE(output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get())));
+    CHECK(output.reclaimCount() == 0u);
+    CHECK(LoopRing::writeHead(*ring) == 0u);
+
+    // 第 2 块：挡到第 2 段时累计 49152 帧（约 1.02 s）≥ 1 s → 回收；余下两段照常写进去。
+    CHECK(output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get())));
+    CHECK(output.reclaimCount() == 1u);
+    CHECK(LoopRing::writeHead(*ring) == 4096u + 2u * 8192u);
+    CHECK(output.writtenFrames() == 2u * 8192u);
+}
+
+TEST_CASE("引擎 写方回收：换写方（token 变了）起一个新任期，上一任期被挡住的帧数不带过来", "[engine]")
+{
+    // ⛔ 删除式验证点：token 变了不 reset 写方助手 → 新任期挡了不到 1 s 就回收，本用例变红。
+    auto ring = stuckRing(1u);
+    OutputEngine output;
+    output.prepare(kSr, 1024);
+    HostBuffer host(1024);
+    EngineParams params;
+
+    // 任期 1（token 1）：被挡住 28 块 × 1024 = 28672 帧（约 0.6 s）。
+    for (int block = 0; block < 28; ++block)
+    {
+        output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), 1u));
+    }
+    CHECK(output.reclaimCount() == 0u);
+
+    // 写权换成 token 2（同一个引擎重新认领，例如工程重载之后）：新任期从 0 起数。
+    LoopRing::publishWriter(*ring, 2u, static_cast<std::uint32_t>(kSr), 2);
+    for (int block = 0; block < 28; ++block)
+    {
+        output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), 2u));
+    }
+    // 两个任期合计 1.2 s，但新任期只挡了约 0.6 s：不回收。
+    CHECK(output.reclaimCount() == 0u);
+
+    // 新任期挡满 1 s（再 20 块：28672 + 20480 = 49152 ≥ 48000）→ 回收。
+    for (int block = 0; block < 20; ++block)
+    {
+        output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), 2u));
+    }
+    CHECK(output.reclaimCount() == 1u);
+}
+
+TEST_CASE("引擎 写方回收：换段按映射代号判，同一个地址上的重新映射也起一个新任期", "[engine]")
+{
+    // ⛔ 删除式验证点：按段的地址判换段 → 同一地址上换了映射（代号变了）却不 reset，新映射挡了不到 1 s
+    // 就回收，本用例变红。
+    auto ring = stuckRing(kToken);
+    OutputEngine output;
+    output.prepare(kSr, 1024);
+    HostBuffer host(1024);
+    EngineParams params;
+
+    // 映射 1：被挡住约 0.6 s。
+    for (int block = 0; block < 28; ++block)
+    {
+        output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), kToken, nullptr, 1u));
+    }
+    // 段被解映射又重新映射，恰好落在同一个地址上（这里就是同一个对象）：代号变成 2。
+    for (int block = 0; block < 28; ++block)
+    {
+        output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), kToken, nullptr, 2u));
+    }
+    CHECK(output.reclaimCount() == 0u);
+    for (int block = 0; block < 20; ++block)
+    {
+        output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), kToken, nullptr, 2u));
+    }
+    CHECK(output.reclaimCount() == 1u);
+}
+
+TEST_CASE("引擎 写头 CAS 失败次数：消息线程读的是音频线程在租约之内拷进引擎的那一份，从不碰段", "[engine]")
+{
+    // ⛔ 删除式验证点：消息线程去读音频线程留下的段（段指针）→ 断开之后那块内存被别人用了（这里直接改它的计数模拟），
+    //    读到的是别人的值；真实情形下段已解映射，读就是访问已释放的内存。本用例变红。
+    auto ring = makeRing();
+    LoopRing::publishWriter(*ring, kToken, static_cast<std::uint32_t>(kSr), 2);
+    ring->header.w_cas_fail.store(7u);
+    OutputEngine output;
+    output.prepare(kSr, 256);
+    HostBuffer host(64);
+    EngineParams params;
+
+    REQUIRE(output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get())));
+    CHECK(output.wCasFailCount() == 7u);
+
+    // 断开（换组、对端消失）：之后的块不给段。那块内存之后被别的映射复用。
+    output.process(host.view(), params, TransportInfo{}, false, outputCtx(nullptr));
+    ring->header.w_cas_fail.store(99u);
+    CHECK(output.wCasFailCount() == 7u); // 仍是最后一块在租约之内拷进来的值
+
+    // 再给段：音频线程在租约之内拷新的值。
+    output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get(), kToken, nullptr, 2u));
+    CHECK(output.wCasFailCount() == 99u);
+}
+
 TEST_CASE("引擎 Output 旁路：写进环的数据 10 ms 线性淡到 0，写头照常推进；解除旁路 10 ms 淡回", "[engine]")
 {
     // ⛔ 删除式验证点：旁路时直接写 0（阶跃）→ 本用例变红。
@@ -760,7 +941,7 @@ TEST_CASE("引擎 Output 旁路：写进环的数据 10 ms 线性淡到 0，写�
     CHECK(left[1023] == 0.5f);
 }
 
-TEST_CASE("引擎 mono：Output 两格写同一个值；Input 的回送取两格的平均", "[engine]")
+TEST_CASE("引擎 mono：Output 两格写同一个值", "[engine]")
 {
     auto ring = makeRing();
     LoopRing::publishWriter(*ring, kToken, static_cast<std::uint32_t>(kSr), 2);
@@ -787,6 +968,44 @@ TEST_CASE("引擎 mono：Output 两格写同一个值；Input 的回送取两格
     {
         CHECK(left[i] == mono[static_cast<std::size_t>(i)]);
         CHECK(right[i] == mono[static_cast<std::size_t>(i)]);
+    }
+}
+
+TEST_CASE("引擎 mono：Input 的回送取环里两格的平均 0.5·(L + R)，不只取左声道、也不把两格相加", "[engine]")
+{
+    // ⛔ 删除式验证点：mono 时回送只取左声道，或取 L + R（把环路增益放大一倍）→ 本用例变红。
+    // 环里左右两格不同（另一端是立体声的写方）：L = 0.6、R = 0.2。mono 的 Input 回送应为 0.5·(0.6 + 0.2) = 0.4。
+    auto ring = makeRing();
+    LoopRing::publishWriter(*ring, kToken, static_cast<std::uint32_t>(kSr), 2);
+    InputEngine input;
+    input.prepare(kSr, 256);
+
+    EngineParams params = unityLoopParams(10.0f); // D = 480，回送增益 1（30 ms 平滑走完之后）
+    std::vector<float> mono(256, 0.0f);
+    float* channels[1] = {mono.data()};
+    AudioView view;
+    view.channels = channels;
+    view.numChannels = 1;
+    view.length = 256;
+
+    constexpr float kLeft = 0.6f;
+    constexpr float kRight = 0.2f;
+    // Input 在前：每块 Input 先读环，写方再写 256 帧（左右不同的常数）。跑够 D + onset（20 ms）+ 增益平滑（30 ms）。
+    for (int block = 0; block < 40; ++block)
+    {
+        std::fill(mono.begin(), mono.end(), 0.0f); // 干声为 0：输出就是回送
+        input.process(view, params, TransportInfo{}, false, inputCtx(ring.get()));
+        const RingWriteResult result =
+            LoopRing::write(*ring, 256, [&](std::uint32_t, std::uint64_t, float& l, float& r) {
+                l = kLeft;
+                r = kRight;
+            });
+        REQUIRE(result == RingWriteResult::kOk);
+    }
+    const float expected = 0.5f * (kLeft + kRight);
+    for (int i = 0; i < 256; ++i)
+    {
+        CHECK(std::fabs(mono[static_cast<std::size_t>(i)] - expected) < 1.0e-6f);
     }
 }
 
@@ -850,6 +1069,70 @@ TEST_CASE("引擎 闭环 L1-05：参数恒定时同一段输入按不同块长�
     REQUIRE(a.size() == c.size());
     CHECK(sameBits(a.data(), b.data(), a.size()));
     CHECK(sameBits(a.data(), c.data(), a.size()));
+}
+
+TEST_CASE(
+    "引擎 闭环 严格模式：同一次运行里块长 512 / 480 交替、Output 晚到一块再补上，都不重同步，输出与恒定块长逐位相同",
+    "[engine][loop]")
+{
+    // ⛔ 删除式验证点：严格模式的判据改回「写头每块的增量与上一块比」→ 块长一变或 Output 晚到一块就重同步、
+    //    回送空掉约 D，本用例变红（安全不变量 7：参数恒定时输出与宿主怎么切块逐位无关）。
+    auto source = [](int t) {
+        const float ramp = static_cast<float>((t * 11) % 977) * 0.0003f - 0.14f;
+        return (t % 1499 == 0 ? 0.2f : 0.0f) + ramp;
+    };
+    EngineParams params = unityLoopParams(100.0f); // D = 4800（默认）
+    params.feedbackPercent = 50.0f; // 回送增益 0.5：环路收敛，信号绕很多圈
+    constexpr int kTotal = 2 * 48000;
+
+    struct Run
+    {
+        std::vector<float> out;
+        rinne::loop::LoopStatusFields status;
+    };
+    auto runWith = [&](const std::vector<int>& lengths, const std::vector<int>& defer) {
+        Loop loop(512);
+        Run run;
+        run.out = loop.runScript(params, lengths, kTotal, source, defer);
+        run.status = loop.input.loopStatus();
+        return run;
+    };
+
+    const Run steady = runWith({512}, {});
+    const Run alternating = runWith({512, 480}, {});
+    const Run late = runWith({512}, {20, 61, 62, 130}); // 61、62 连着两块晚到
+    const Run both = runWith({512, 480}, {33, 97});
+
+    for (const Run* run : {&steady, &alternating, &late, &both})
+    {
+        CHECK(run->status.resyncCount == 0u);
+        CHECK(run->status.stalled == 0u);
+        CHECK(run->status.overrun == 0u);
+        REQUIRE(run->out.size() == steady.out.size());
+    }
+    // 回送确实绕了很多圈：输出不只是干声。
+    CHECK(std::any_of(steady.out.begin(), steady.out.end(), [&](float v) { return std::fabs(v) > 0.25f; }));
+    CHECK(sameBits(steady.out.data(), alternating.out.data(), steady.out.size()));
+    CHECK(sameBits(steady.out.data(), late.out.data(), steady.out.size()));
+    CHECK(sameBits(steady.out.data(), both.out.data(), steady.out.size()));
+    // 晚到的那几块：写头冻住过（诊断看得见），但没有被当成对齐问题。
+    CHECK(late.status.frozenMax >= 1u);
+}
+
+TEST_CASE("引擎 闭环 严格模式：真错位（Output 丢了一块，m 从此不为 0）两次检查之后确实重同步一次", "[engine][loop]")
+{
+    // ⛔ 删除式验证点：去掉严格模式的判据（m 不为 0 只吸收、从不重同步）→ 本用例变红。
+    auto source = [](int t) { return static_cast<float>((t * 7) % 613) * 0.0002f - 0.06f; };
+    EngineParams params = unityLoopParams(100.0f);
+    params.feedbackPercent = 50.0f;
+
+    Loop loop(512);
+    loop.runScript(params, {512}, 48000, source, {}, {40}); // 第 40 周期 Output 没被调用，那一块的数据丢了
+    const auto status = loop.input.loopStatus();
+    CHECK(status.resyncCount == 1u);
+    CHECK(status.resyncByReason[static_cast<std::size_t>(rinne::loop::SyncReason::kShift)] == 1u);
+    CHECK(status.drift == 0); // 重新锚定之后 m 回到 0
+    CHECK(status.tolerant == 0u);
 }
 
 TEST_CASE("引擎 闭环：起播复位按样本定位，从 s0 起与宿主怎么切块无关", "[engine][loop]")
@@ -957,11 +1240,29 @@ TEST_CASE("引擎 诊断：环路层的事件进引擎的队列；诊断安全�
         loop.input.process(host.view(), params, TransportInfo{}, false, inputCtx(loop.ring.get(), loop.rv.get()));
     }
     std::vector<std::uint16_t> codes;
-    loop.input.drainEvents([&](const rinne::diag::Event& e) { codes.push_back(e.code); });
+    std::vector<rinne::diag::Event> events;
+    loop.input.drainEvents([&](const rinne::diag::Event& e) {
+        codes.push_back(e.code);
+        events.push_back(e);
+    });
     const auto has = [&](rinne::loop::LoopEventCode code) {
         return std::find(codes.begin(), codes.end(), static_cast<std::uint16_t>(code)) != codes.end();
     };
     CHECK(has(rinne::loop::LoopEventCode::kHostViolation));
+    // 载荷按码表：kHostViolation 的 a:b 是块长 n 的 16 位值（512 = 0x0200），不是把 n 强转成一个字节（那会是 0）。
+    // kDMinRaised 的 a 是 D_min ÷256（向上取整），b 是原因。
+    for (const rinne::diag::Event& e : events)
+    {
+        if (e.code == static_cast<std::uint16_t>(rinne::loop::LoopEventCode::kHostViolation))
+        {
+            CHECK(((static_cast<int>(e.a) << 8) | static_cast<int>(e.b)) == 512);
+        }
+        if (e.code == static_cast<std::uint16_t>(rinne::loop::LoopEventCode::kDMinRaised))
+        {
+            CHECK(e.a == 2u); // 512 ÷ 256
+            CHECK(e.b == static_cast<std::uint8_t>(rinne::loop::DelayMinReason::kHostViolation));
+        }
+    }
     const auto status = loop.input.loopStatus();
     CHECK(status.maxBlockSeen == 512);
     CHECK(status.delayMin == 512);

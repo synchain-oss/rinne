@@ -29,6 +29,12 @@ struct EngineContext
     std::uint32_t group = 0;
     // 自己的写权 token（Output 用；0 = 没有写权）。Input 侧不用。
     std::uint64_t token = 0;
+    // 段的映射代号：壳在块首从绑定快照取（LoopBinding::seq，每次换段、换组、换写方、重新映射都发布一份新快照，
+    // 序号随之变）。同一块映射的整个寿命里不变；换了映射就换代号，哪怕新映射恰好落在同一个地址上。
+    // Output 据此判「换段」并复位写方助手（不看地址）；Input 据此（连同地址）判「换段」并重建读头，
+    // 旧读头只读旧段已拉进来的数据。只比地址会漏掉同一地址上的重新映射。壳必须给；0 = 没给，
+    // 那时 Output 判不出换段（只按写权与采样率起任期），Input 只能按地址判。
+    std::uint64_t ringGeneration = 0;
 };
 
 } // namespace rinne::engine

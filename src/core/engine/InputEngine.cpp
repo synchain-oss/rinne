@@ -262,6 +262,7 @@ bool InputEngine::process(const AudioView& buffer, const EngineParams& params, c
     // 环路层：参数与走带整体下传。
     loop::BlockContext ctx(params, transport);
     ctx.ring = context.ring;
+    ctx.ringGeneration = context.ringGeneration;
     ctx.rendezvous = context.rendezvous;
     ctx.group = context.group;
     ctx.role = ipc::Role::kInput;

@@ -15,7 +15,7 @@
 // 命令序号（panicSeq / recoverSeq / presetSeq / stateSeq）：
 //   引擎自己记基线、自己比对。基线在构造后、prepare 前给一次（setCommandBaseline）。
 //   之后每块在块首比对「与上一块不同就执行一次」：
-//     panicSeq 变了   → 紧急切断（安全链接上之后由安全链执行）
+//     panicSeq 变了   → 紧急切断（安全链接上之后由安全链执行；接上之前只记基线、不生效）
 //     recoverSeq 变了 → 恢复回送（同上）
 //     presetSeq 变了  → 请求淡入，原因 FadeReason::Preset（载入工厂预设）
 //     stateSeq 变了   → 请求淡入，原因 FadeReason::SetState（宿主设置工程状态）
@@ -54,6 +54,9 @@
 namespace rinne::engine
 {
 
+// 诊断安全段的计数：音频线程写、消息线程读，必须无锁。
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "诊断计数必须是无锁的原子量");
+
 // 请求淡入的入口：本引擎只「请求」，不实现淡入本身。安全链接上之后由它执行；没接上时请求不发生。
 // 函数指针加 context（不用 std::function）：音频线程上调用，不能有分配或异常；接入方也不必改本引擎的头文件。
 using FadeInRequest = void (*)(void* context, FadeReason reason) noexcept;
@@ -85,7 +88,9 @@ public:
     InputEngine() noexcept;
 
     // 非实时线程：构造后、prepare 前调一次，告诉引擎当前四个命令序号是基线。
-    // 之后的变化（包括首块之前按下的紧急切断）在首块生效；重建后不重放旧命令。
+    // 之后每块在块首比对，基线之外的变化才算新命令；重建后不重放旧命令。
+    // 安全链接上之前，panicSeq / recoverSeq 的变化只记进基线、不生效（切断与恢复由安全链执行，本引擎不实现它们）；
+    // presetSeq / stateSeq 的变化在接了请求淡入入口（setSafetyChain）时送出请求。
     void setCommandBaseline(const CommandBaseline& baseline) noexcept;
 
     // 非实时线程：接安全链的请求淡入入口。接上之后，presetSeq / stateSeq 的变化会请求淡入（各自的原因）。
@@ -111,6 +116,12 @@ public:
     // 消息线程：环路层的状态快照（诊断与界面要的量都在这里）。
     // 之后往 LoopStatusFields 里加字段，引擎的代码不用变。
     loop::LoopStatusFields loopStatus() const noexcept { return loop_.statusFields(); }
+
+    // 两端同被宿主挂起 > 250 ms 之后清空本地延迟线（防停用止啸后原样复燃）：**本引擎还没有这个入口**。
+    // 本引擎只处理得了「Input 照常被调用、环上没有写方」那一种停用（环路层自己计时清空）。宿主把两端一起挂起时
+    // 音频线程根本不被调用，停了多久只有壳在消息线程上判得出来：flush 入口由壳在消息线程判定停用超过 250 ms 后
+    // 触发（置一个请求，音频线程在恢复后的第一块块首执行环路层的 flushLocalDelayLine —— 它改的是音频线程独占的
+    // 状态，只改两个整数），接线在后续接上壳的那一步，不在这里，本引擎也不声称已经做到。
 
     // 消息线程：诊断报告安全段的六个量。
     SafetyDiag safetyDiag() const noexcept;

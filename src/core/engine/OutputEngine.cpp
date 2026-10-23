@@ -19,6 +19,7 @@
 
 #include "dsp/Sanitize.h"
 #include "ipc/LoopBinding.h"
+#include "loop/LoopEvents.h"
 
 namespace rinne::engine
 {
@@ -40,34 +41,47 @@ void OutputEngine::prepare(double sampleRate, int maxBlock) noexcept
 
     if (changed)
     {
-        // 换采样率：写方助手的回收门槛要重算（它按帧计 1 s）。
+        // 换采样率：写方助手的回收门槛要重算（它按帧计 1 s）。下一块写环之前按新的采样率重新起一个任期。
         writer_.reset(static_cast<std::uint32_t>(sr));
-        lastSampleRate_.store(static_cast<std::uint32_t>(sr), std::memory_order_relaxed);
+        writerArmed_ = false;
     }
 
     // 旁路斜坡的长度按采样率算（10 ms）。不旁路时增益是 1；当前值不动（同采样率重新 prepare 不跳）。
     bypassRamp_.reset(sampleRate_, kBypassRampSeconds);
 }
 
-void OutputEngine::publishState(WriteState state) noexcept
+void OutputEngine::publishState(WriteState state, std::uint32_t n) noexcept
 {
     const auto previous = state_.exchange(static_cast<std::uint8_t>(state), std::memory_order_relaxed);
     if (previous == static_cast<std::uint8_t>(state))
     {
         return;
     }
-    // 状态变了才记一条：冲突与块长超限给界面提示码（引擎段 0x04xx）。
+    // 状态变了才记一条：冲突与块长超限给界面提示码（引擎段 0x04xx）。这两种状态会连续很多块，每块一条会把队列灌满。
     if (state == WriteState::kConflict)
     {
-        events_.push(diag::Event{static_cast<std::uint16_t>(EngineEventCode::kNoPair), 1, 0, 0});
+        events_.push(diag::Event{static_cast<std::uint16_t>(EngineEventCode::kWriteConflict), 1, 0, 0});
+    }
+    else if (state == WriteState::kUnsupportedBlock)
+    {
+        events_.push(diag::Event{static_cast<std::uint16_t>(EngineEventCode::kUnsupportedBlock),
+                                 loop::eventUnits256(static_cast<std::int64_t>(n)),
+                                 loop::eventUnits256(static_cast<std::int64_t>(ipc::kMaxSupportedBlock)), 0});
     }
 }
 
-std::uint32_t OutputEngine::wCasFailCount() const noexcept
+void OutputEngine::armWriter(const EngineContext& context, std::uint32_t sampleRate) noexcept
 {
-    // 环头里的计数由写方写（LoopRing::write 在 CAS 失败时自增）。
-    const auto* seg = lastSeg_.load(std::memory_order_relaxed);
-    return seg == nullptr ? 0u : seg->header.w_cas_fail.load(std::memory_order_relaxed);
+    if (writerArmed_ && writerToken_ == context.token && writerGeneration_ == context.ringGeneration &&
+        writerRate_ == sampleRate)
+    {
+        return;
+    }
+    writer_.reset(sampleRate);
+    writerArmed_ = true;
+    writerToken_ = context.token;
+    writerGeneration_ = context.ringGeneration;
+    writerRate_ = sampleRate;
 }
 
 ipc::RingWriteResult OutputEngine::writeChunk(ipc::RingSegment& seg, const AudioView& buffer, std::uint32_t offset,
@@ -170,17 +184,19 @@ bool OutputEngine::process(const AudioView& buffer, const EngineParams& params, 
     // 没有段或没有写权：什么都不写。
     if (seg == nullptr || token == 0)
     {
-        publishState(WriteState::kIdle);
+        publishState(WriteState::kIdle, n);
         publishToSlot(context, transport, bypassed, WriteState::kIdle, n);
         return false;
     }
 
-    // 块长超过支持的上限：不写环、只出干声，并给红字提示码。写头不动，Input 侧按断档处理。
+    // 段在这一块之内有效（块首租约）：环头里要转给消息线程的计数就在这里拷进本引擎，消息线程从不碰段。
+    wCasFail_.store(seg->header.w_cas_fail.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+    // 块长超过支持的上限：不写环、只出干声，并给红字提示码（只在进入超限时一条）。写头不动，Input 侧按断档处理。
     if (n > ipc::kMaxSupportedBlock)
     {
         unsupported_.fetch_add(1, std::memory_order_relaxed);
-        publishState(WriteState::kUnsupportedBlock);
-        events_.push(diag::Event{static_cast<std::uint16_t>(EngineEventCode::kUnsupportedBlock), 255, 0, 0});
+        publishState(WriteState::kUnsupportedBlock, n);
         publishToSlot(context, transport, bypassed, WriteState::kUnsupportedBlock, n);
         return false;
     }
@@ -189,39 +205,39 @@ bool OutputEngine::process(const AudioView& buffer, const EngineParams& params, 
     if (!ipc::LoopRing::isWriter(*seg, token))
     {
         conflicts_.fetch_add(1, std::memory_order_relaxed);
-        publishState(WriteState::kConflict);
+        publishState(WriteState::kConflict, n);
         publishToSlot(context, transport, bypassed, WriteState::kConflict, n);
         return false;
     }
 
-    // 换段或换采样率：写方助手要 reset（它按采样率算回收门槛）。
-    const auto segPtr = static_cast<const ipc::RingSegment*>(seg);
-    const auto sr = static_cast<std::uint32_t>(sampleRate_ > 0.0 ? sampleRate_ : 48000.0);
-    if (lastSeg_.load(std::memory_order_relaxed) != segPtr || lastSampleRate_.load(std::memory_order_relaxed) != sr)
-    {
-        writer_.reset(sr);
-        lastSeg_.store(segPtr, std::memory_order_relaxed);
-        lastSampleRate_.store(sr, std::memory_order_relaxed);
-    }
+    // 换写方、换段或换采样率：写方助手起一个新任期（reset）。它按采样率算回收门槛，按任期数「被挡住的帧数」。
+    armWriter(context, static_cast<std::uint32_t>(sampleRate_ > 0.0 ? sampleRate_ : 48000.0));
 
     // 旁路的斜坡：目标是 0（旁路）或 1（不旁路）。斜坡按样本推进，在写块里逐样本取。
     bypassRamp_.setTargetValue(bypassed ? 0.0f : 1.0f);
 
     // 分段写：每段不超过 kMaxWriteChunk 帧。宿主给 32768 帧 → 4 段 8192。
     // 每段各自公告与发布（写头 CAS 用的是这一段自己的起点，共用块首的快照会让第 2 段的 CAS 失败）。
+    //   kInFlight 别人公告了一段还没发布：这一段没写（写头没有推进），下一段照样交给 RingWriter ——
+    //             它按被挡住的帧数计回收门槛，一块里的每一段都要算进去，门槛才按实际经过的音频走满 1 s。
+    //             回收在某一段里发生之后，余下的段照常写进去。
+    //   kCasLost  写头 CAS 失败：这一段被回收推过了（环头里自增 w_cas_fail），本块到此为止。
     std::uint32_t written = 0;
-    while (written < n)
+    std::uint32_t offset = 0;
+    while (offset < n)
     {
-        const std::uint32_t chunk = std::min<std::uint32_t>(ipc::kMaxWriteChunk, n - written);
-        const ipc::RingWriteResult result = writeChunk(*seg, buffer, written, chunk);
-        if (result != ipc::RingWriteResult::kOk)
+        const std::uint32_t chunk = std::min<std::uint32_t>(ipc::kMaxWriteChunk, n - offset);
+        const ipc::RingWriteResult result = writeChunk(*seg, buffer, offset, chunk);
+        offset += chunk;
+        if (result == ipc::RingWriteResult::kOk)
         {
-            // 这一段没写进去：写头没有推进（协议要求），本块到此为止。
-            //   kInFlight 别人公告了一段还没发布：这一组暂时静默。回收由 RingWriter 按帧计 1 s 后做。
-            //   kCasLost 写头 CAS 失败：这一段被回收推过了（环头里自增 w_cas_fail）。
+            written += chunk;
+            continue;
+        }
+        if (result != ipc::RingWriteResult::kInFlight)
+        {
             break;
         }
-        written += chunk;
     }
 
     WriteState state = WriteState::kIdle;
@@ -230,11 +246,12 @@ bool OutputEngine::process(const AudioView& buffer, const EngineParams& params, 
         writtenFrames_.fetch_add(written, std::memory_order_relaxed);
         state = bypassed ? WriteState::kBypassedZeros : WriteState::kActive;
     }
-    publishState(state);
+    publishState(state, n);
     publishToSlot(context, transport, bypassed, state, n);
 
-    // 回收计数（写方助手自己记的：真正推过写头的回收次数）。
+    // 回收计数（写方助手自己记的：真正推过写头的回收次数）与写头 CAS 失败次数（本块写完之后的值）。
     reclaims_.store(writer_.reclaims(), std::memory_order_relaxed);
+    wCasFail_.store(seg->header.w_cas_fail.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
     return written > 0;
 }
