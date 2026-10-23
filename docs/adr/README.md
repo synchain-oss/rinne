@@ -19,7 +19,7 @@ under 4 KB. Records marked "planned" are not written yet.
 | [0001](0001-two-binaries.md) | 两个独立的插件二进制，经命名共享内存会合 | accepted |
 | 0002 | 环路时序：固定环路延迟 D、流相对寻址、向宿主报 0 延迟 | planned |
 | 0003 | 安全模型：安全状态机、限幅、淡变与锁存 | planned |
-| 0004 | 配对：组 A–H、智能默认与对端轨道名核验 | planned |
+| [0004](0004-pairing.md) | 配对：组 A–H、智能默认与对端轨道名核验 | accepted |
 | [0005](0005-platform-toolchain.md) | 平台、格式与工具链；macOS 不签名不公证 | accepted |
 | 0006 | 冻结面与版本策略 | planned |
 | [0007](0007-licensing.md) | 许可与合规口径 | accepted |

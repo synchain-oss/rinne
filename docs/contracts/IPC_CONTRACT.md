@@ -10,7 +10,7 @@ status: draft
 - **Lifetime**: backends and handles may be destroyed in either order; handle control blocks are kept until process exit, so handles are created on load and regroup only, never per tick.
 - **Truth**: `src/core/ipc/SegmentLayout.h` mirrors this document; `tests/golden/ipc-layout.json` is checked against it twice (compiled in `rinne_core_tests`, uncompiled by `contract-static-ipc`). Any layout change bumps `kIpcAbi`.
 - **Memory order**: the data plane is specified here: the ring (the write intent is advanced from at most the write head, so a second writer stays out while a chunk is announced but not yet published, and a chunk abandoned by a dead writer is zero-filled and published after one second of blocked audio, which is why writers must go through `RingWriter`; release fence, samples, release CAS on the write head; readers discard every frame older than one lap before the intent they load after an acquire fence), the label seqlock and the binding snapshot the audio thread reads. Two mutation builds (no read fence, no write intent) must turn the native arm64 stress red, and each stress case whose mechanism a mutation removes must first prove that mechanism was hit at least 20 times, otherwise the run ends without a test summary and does not count as caught. The one residual window (a writer suspended mid-chunk while its chunk is reclaimed and lapped) is the only exception to never reading aliased data. Labels are untrusted cross-process data.
-- **Ownership**: every endpoint-slot transition is a whole-word CAS on `ctl` that bumps `gen`. A slot is taken over only on evidence the observer has watched for long enough: a stuck claim after 1 s, a slot of another process after 5 s of stillness with a dead pid, a slot of our own process after 30 s, a dormant slot after 2 s but only for a project restore or a confirmed user choice (a restore keeps that intent for 2.25 s from the observer's first sample of the slot, a confirmation for 2.25 s from the moment it is given, so the evidence can build up; the deadline never moves, and a clock going backwards ends it early, never late); a provisional (smart-default) claim yields to a project restore, including one won by a conflict retry. Apart from those two intent-driven cases, a slot held by a live process is never taken over. Owners heartbeat every 250 ms, rewrite their identity fields and re-read their label each heartbeat; an Output owner also re-publishes its write token when a late write from the previous owner replaced it. A peer is lost when its heartbeat is older than 2 s and its block counter has been still for 2 s, never during an offline export. The last instance to be destroyed reaps the remaining mappings immediately.
+- **Ownership**: every endpoint-slot transition is a whole-word CAS on `ctl` that bumps `gen`. A slot is taken over only on evidence the observer has watched for long enough: a stuck claim after 1 s, a slot of another process after 5 s of stillness with a dead pid, a slot of our own process after 30 s, a dormant slot after 2 s but only for a project restore or a confirmed user choice (a restore keeps that intent for 2.25 s from the observer's first sample of the slot, a confirmation for 2.25 s from the moment it is given, so the evidence can build up; the deadline never moves, and a clock going backwards ends it early, never late; if the hold was evaluated at least once, the first tick after the deadline makes one catch-up check, judged on the evidence as of the deadline, so a starved message thread does not miss the slot); a provisional (smart-default) claim yields to a project restore, including one won by a conflict retry. Apart from those two intent-driven cases, a slot held by a live process is never taken over. Owners heartbeat every 250 ms, rewrite their identity fields and re-read their label each heartbeat; an Output owner also re-publishes its write token when a late write from the previous owner replaced it. A peer is lost when its heartbeat is older than 2 s and its block counter has been still for 2 s, never during an offline export. The last instance to be destroyed reaps the remaining mappings immediately.
 - **Status**: draft until the probe week.
 
 ## 范围
@@ -185,13 +185,14 @@ status: draft
 
 | 常数 | 值 | 用途 |
 |---|---|---|
-| `kHeartbeatMs` | 250 | 属主写 `heartbeat_ms`、重写身份字段、核对标签；观察者也按它扫描 |
+| `kHeartbeatMs` | 250 | 属主写 `heartbeat_ms`、重写身份字段、核对标签 |
+| `SlotObserver::kScanIntervalMs` | 250 | 观察者的扫描间隔（数值与 `kHeartbeatMs` 相同，是两个独立的常数） |
 | `kGhostMs` | 1000 | 认领中卡住（幽灵认领） |
 | `kDeadMs` | 5000 | 外进程的槽：静止够久且 pid 已死才接管 |
 | `kOrphanMs` | 30000 | 本进程的槽：同一个消息线程 30 s 没动过，那个实例已经不在了 |
 | `kDormantMs` | 2000 | 休眠槽可以被工程恢复或用户确认拿走 |
 | `kConflictRetryMs` | 1000 | 冲突与 abi 不兼容时的重试间隔 |
-| `kIntentHoldMs` | 2250 | 工程恢复与用户确认的原意图有效期，也是它的上界：`kDormantMs` 再加一个扫描间隔 |
+| `kIntentHoldMs` | 2250 | 工程恢复与用户确认的原意图有效期：`kDormantMs` 再加一个扫描间隔（`SlotObserver::kScanIntervalMs`）。期内评估过的，到期后的第一拍再按原意图补评一次休眠档，所以它不是调用的硬上界 |
 | `kLostHeartbeatMs`、`kLostStillMs` | 2000、2000 | 对端失联：心跳陈旧且 `block_seq` 静止 |
 
 **每一拍的顺序**
@@ -215,7 +216,7 @@ status: draft
 | 活跃 + provisional | 认领中 | 意图为工程恢复（`kRestore`）的认领方 | 不看 pid 与年龄；工程恢复进了冲突重试之后仍保留这一档（只这一档，休眠槽照旧不拿）。工程恢复认领到的槽不带 provisional，两个工程恢复争同一个槽时后到的只会进冲突，不会来回抢 |
 | 活跃或休眠，外进程 | 认领中 | 认领方 | `heartbeat_ms` 的年龄、`block_seq` 与 `ctl` 的静止都 ≥ 5 s，且 pid 已死（探活放在最后，拿不准一律按活） |
 | 活跃或休眠，本进程 | 认领中 | 认领方 | 同上三项都 ≥ 30 s |
-| 休眠 | 认领中 | 意图为 `kRestore` 或用户确认（`kManualConfirmed`）的认领方 | `dormant_ms` 的年龄与 `ctl` 的静止都 ≥ 2 s。原意图有效期各 `kIntentHoldMs`：工程恢复从观察者对这个槽的第一个样本算起（不从 `setGroup` 算：宿主可能先给 state、过几秒才让消息线程跑第一拍），用户确认从确认的那一刻算起。期内的冲突重试每一拍多看一次休眠档，证据一攒够就拿到；只放宽这一档，其余各档照旧每 1 s 按 `kConflictRetry` 判。过了有效期就完全退化成 `kConflictRetry`（工程恢复仍保留抢占 provisional 那一档）。截止时刻定下之后不动：期内 `ctl` 变了、静止从头计，也按原定时刻到期，不顺延；时钟倒退之后离截止超过 `kIntentHoldMs`，或者比期内上一次看到的时钟还早，都当已经到期；认领成功就清掉。工程加载时会合段刚打开、`ctl` 的静止从 0 计，没有这条就永远拿不到 |
+| 休眠 | 认领中 | 意图为 `kRestore` 或用户确认（`kManualConfirmed`）的认领方 | `dormant_ms` 的年龄与 `ctl` 的静止都 ≥ 2 s。原意图有效期各 `kIntentHoldMs`：工程恢复从观察者对这个槽的第一个样本算起（不从 `setGroup` 算：宿主可能先给 state、过几秒才让消息线程跑第一拍），用户确认从确认的那一刻算起。期内的冲突重试每一拍多看一次休眠档，证据一攒够就拿到；只放宽这一档，其余各档照旧每 1 s 按 `kConflictRetry` 判。期内至少评估过一次的，到期之后的第一拍（时钟没有倒退）按原意图补评一次休眠档，只这一次，不设迟到上界：证据按截止时刻判，截止之前已攒满、且到这一拍整字（`ctl`）未变才拿，认领 CAS 仍对观察到的整字；补评之后，或期内一次都没评估过的，完全退化成 `kConflictRetry`（工程恢复仍保留抢占 provisional 那一档）。截止时刻定下之后不动：期内 `ctl` 变了、静止从头计，也按原定时刻到期，不顺延；时钟倒退之后离截止超过 `kIntentHoldMs`，或者比期内上一次看到的时钟还早，都当已经到期；认领成功就清掉。工程加载时会合段刚打开、`ctl` 的静止从 0 计，没有这条就永远拿不到 |
 | 活跃 | 休眠 | 属主（`releaseResources`） | 写 `dormant_ms`，重新发布绑定；provisional 位保留 |
 | 休眠 | 活跃 | 属主（`prepare`） | `claim_ms` 不变，重写格式字段，Output 重新发布写权，重新发布绑定；provisional 位保留，恢复之后照样可被工程恢复抢占 |
 | 活跃 + provisional | 活跃 | 属主（`confirmClaim`） | 重新发布绑定 |
@@ -223,7 +224,7 @@ status: draft
 
 - 活着的外进程持有（活跃或休眠）的槽只在两种情形下被拿走：provisional 被工程恢复抢占，休眠槽被工程恢复或用户确认拿走；无论看起来多陈旧，都不会被自动接管。已知限制：死进程的 pid 被别的进程复用之后，探活一直返回活，那个槽同样不会被自动接管；用户确认只对休眠槽生效，目前没有拿走这种活跃槽的手动出口。
 - 判定之外的情形一律进冲突（`kConflict`）：每 1 s 用 `kConflictRetry` 重试一次（时钟倒退得比一个间隔还多时立刻重试），它永远不拿休眠槽；工程恢复与用户确认在原意图有效期内除外，见转移表「休眠」一行；工程恢复的重试另外保留抢占 provisional 那一档。同一组再调 `setGroup`、给出 `kConflictRetry` 以外的意图（例如工程恢复、用户确认）时不等这 1 s，下一拍就按新意图试。
-- 输了认领 CAS，或自己的认领中被别人判成幽灵（换活跃的 CAS 失败）：什么都不写，进冲突。
+- 输了认领 CAS，或自己的认领中被别人判成幽灵（换活跃的 CAS 失败）：什么都不写，进冲突。只有按常规重试的那一拍才把下一次重试排到 1 s 之后；有效期内多看休眠档的拍子，不论没判出档位还是 CAS 输了，都不推迟它。
 
 **属主的每一拍**
 

@@ -54,8 +54,9 @@ struct RendezvousTiming
     static constexpr u64 kOrphanMs = 30000;
     static constexpr u64 kDormantMs = 2000;
     static constexpr u64 kConflictRetryMs = 1000;
-    // 工程恢复与用户确认的原意图有效期，也是它的上界：拿休眠槽的证据攒够 2 s，再给一个扫描间隔
-    static constexpr u64 kIntentHoldMs = kDormantMs + kHeartbeatMs;
+    // 工程恢复与用户确认的原意图有效期：拿休眠槽的证据攒够 2 s，再给一个扫描间隔。期内评估过的，过期后的第一拍
+    // 还会按截止时刻的证据补评一次休眠档，所以不是调用的硬上界（见 Rendezvous::intentHeld）
+    static constexpr u64 kIntentHoldMs = kDormantMs + SlotObserver::kScanIntervalMs;
     static constexpr u64 kLostHeartbeatMs = 2000;
     static constexpr u64 kLostStillMs = 2000;
 };
@@ -171,8 +172,9 @@ private:
     void writeIdentity(RoleSlot& slot) noexcept;
     void upkeepLabel(RoleSlot& slot, u64 nowMs, bool heartbeatDue) noexcept;
     void upkeepWriter() noexcept;
+    void enterConflict(u64 nowMs, bool retryDue) noexcept;
     void armIntentHold(u64 nowMs) noexcept;
-    bool intentHeld(u64 nowMs) noexcept;
+    bool intentHeld(u64 nowMs, u64& evalMs) noexcept;
     void lostOwnership(u64 nowMs);
     void letGo(u64 nowMs);
     void writeFormat(RoleSlot& slot) noexcept;
@@ -202,6 +204,7 @@ private:
     u64 firstSampleMs_ = 0; // 观察者重置之后第一次扫描的时刻
     u64 intentUntilMs_ = 0; // 原意图有效期的截止时刻（不含），定下之后不动；0 = 没有有效期
     u64 intentSeenMs_ = 0; // 有效期内上一次看到的时钟：比它早就是时钟倒退了
+    bool intentEvaluated_ = false; // 有效期内至少评估过一次：到期那一拍据此补评
     RendezvousState state_ = RendezvousState::kUnassigned;
     LabelPayload label_;
     bool labelDirty_ = false;
