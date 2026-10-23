@@ -40,7 +40,7 @@
 // 两条放行规则，任一命中即放过：
 //   1. 命中片段在引号里（「」 “” ‘’ ""）——引用禁用词本身的句子；
 //   2. 命中片段所在的分句里、紧挨它之前出现登记过的否定或免责短语（不能保证、no software can、do not……），
-//      或它的紧后面直接跟着「is not」「是不可能的」这类否定。分句以逗号、冒号、分号、顿号、破折号、括号为界。
+//      或它的紧后面直接跟着「is not」「是不可能的」这类否定。分句以逗号、冒号、分号、顿号、破折号、括号、带空格的连字符与 -- 为界。
 //      故意不认同一句里远处的单字「不」「无」「no」：「永不啸叫，不用担心」「works with Logic, no extra setup」
 //      这类肯定式强断言，随手一个「不用」「no」不能把它放过。
 // 排除清单里的文件不扫（它们合法地引用禁用词本身）。
@@ -327,8 +327,8 @@ export function quotedSpans(sentence) {
     return out;
 }
 
-/** 分句界：逗号、冒号、分号、顿号、破折号、括号与带空格的连字符。否定只认同一分句里命中片段之前的那一段。 */
-const CLAUSE_BREAK = /[,，;；:：、—–()（）[\]]|\s-\s/g;
+/** 分句界：逗号、冒号、分号、顿号、破折号、括号、带空格的连字符与 --（claims 的分句界同样收这两种）。否定只认同一分句里命中片段之前的那一段。 */
+const CLAUSE_BREAK = /[,，;；:：、—–()（）[\]]|\s-\s|--/g;
 /** 命中片段之前最多看多少个字符。 */
 const WINDOW = 40;
 
@@ -678,6 +678,8 @@ export async function selfTest() {
         ["本插件支持所有 DAW，无论什么宿主。", "all-daw-zh"],
         ["Rinne is zero latency, no kidding.", "zero-latency"],
         ["Rinne is not a toy, it supports all DAWs.", "absolute-support"],
+        ["Rinne is not a toy - it supports all DAWs.", "absolute-support"],
+        ["Rinne is not a toy -- it supports all DAWs.", "absolute-support"],
         [
             "Rinne does not do many things in this section of the manual and then it supports all DAWs.",
             "absolute-support",

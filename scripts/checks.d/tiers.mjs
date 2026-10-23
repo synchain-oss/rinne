@@ -40,7 +40,15 @@ import { ROOT, caseResult, readText } from "../lib/check-kit.mjs";
 import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
 import { CHECK_FIELDS, STATUS_VALUES, TIER_VALUES, selfTestCases as dawTiersCases } from "../gen-docs.d/daw-tiers.mjs";
 import { selfTestCases as platformBadgeCases } from "../gen-docs.d/platform-badge.mjs";
-import { ciJobs, evidenceState, recordNameTail, recordOsSuffixes, repoPathProblem } from "./claims.mjs";
+import {
+    ciJobs,
+    dropDirLink,
+    evidenceState,
+    recordNameTail,
+    recordOsSuffixes,
+    repoPathProblem,
+    tryMakeDirLink,
+} from "./claims.mjs";
 
 export { STATUS_VALUES, TIER_VALUES };
 export const TIERS_FILE = "docs/daw-tiers.json";
@@ -121,7 +129,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * 一条 validation 记录能不能给这一行作证；返回不能的原因，能则返回 null。
  * 记录文件名的形态是本检查约定的 <YYYY-MM-DD>-<宿主 slug>[-版本]-<系统后缀>.md：
  *   路径：只准是仓内的规范相对路径（repoPathProblem，与 claims 的 validation 证据同一个函数）：
- *         拒绝 .. 段、绝对路径、反斜杠、盘符，规范化后必须仍在仓根之内，不去读仓外的文件；
+ *         拒绝 .. 段、绝对路径、反斜杠、盘符，规范化后、符号链接与 junction 解开后必须仍在仓根之内，不去读仓外的文件；
  *   宿主：slug 要是整个宿主名（cubase-pro，不是 cubase；fl-studio，不是 studio），后面直接是版本或系统，不许多出别的词；
  *   版本：这一行写了具体版本时，文件名里的版本要对得上（15 对 15 与 15.0.30，不对 14）；
  *         文件名没写版本时，记录正文里要出现「宿主名 版本」；版本写 any 的行不核对；
@@ -415,6 +423,7 @@ export async function selfTest(root = ROOT) {
     // 临时目录的建与删都走 scripts/lib/safe-rm.mjs
     const tmp = makeTempDir("rinne-tiers-");
     const outside = makeTempDir("rinne-tiers-out-");
+    let linkInRepo = null; // 自测里建的链接：收尾时先摘链接，再删临时目录
     let cases;
     try {
         fs.mkdirSync(path.join(tmp, "docs", "validation"), { recursive: true });
@@ -424,6 +433,11 @@ export async function selfTest(root = ROOT) {
         const escapeRepo = path.join(outside, "repo");
         fs.mkdirSync(path.join(escapeRepo, "docs", "validation"), { recursive: true });
         fs.writeFileSync(path.join(outside, "2026-11-02-cubase-pro-15-win.md"), "Cubase Pro 15.0.30 on Windows 11\n");
+        // 仓内的 junction（或符号链接）指向仓外：docs/validation/ext/… 词法上在仓内，真实路径在仓外，
+        // 指向的目录里有一份文件名完全合规的记录（outside 目录里的那份）
+        const extLink = path.join(tmp, "docs", "validation", "ext");
+        const extLinked = tryMakeDirLink(outside, extLink);
+        if (extLinked) linkInRepo = extLink;
         const run = (data, opts = {}) =>
             tierProblems({ data: data ?? good, root: tmp, jobs, formats: ["VST3", "AU"], macMajor: 11, ...opts });
         cases = [
@@ -652,6 +666,20 @@ export async function selfTest(root = ROOT) {
                 withHosts(partial2({ evidence: ["validation:docs/../../2026-11-02-cubase-pro-15-win.md"] })),
                 { root: escapeRepo },
             ],
+            // 仓内的 junction 指到仓外的真实记录：词法上在仓内，按真实路径判在仓外（需要本机能建 junction 或符号链接）
+            ...(extLinked
+                ? [
+                      [
+                          "validation 证据经仓内 junction 指到仓外的真实记录（文件名完全合规）：不当证据（需要能建 junction）",
+                          ["tier-evidence"],
+                          withHosts(
+                              partial2({
+                                  evidence: ["validation:docs/validation/ext/2026-11-02-cubase-pro-15-win.md"],
+                              }),
+                          ),
+                      ],
+                  ]
+                : []),
             ...[
                 ["validation:docs/../../x", "docs/../../x"],
                 ["validation:/etc/x", "/etc/x"],
@@ -784,12 +812,25 @@ export async function selfTest(root = ROOT) {
                 expect: [],
             });
         cases.push({
+            label: extLinked
+                ? "recordProblem 直接拒绝「经仓内 junction 指到仓外的真实记录」（需要能建 junction）"
+                : "recordProblem 直接拒绝「经仓内 junction 指到仓外的真实记录」（条件：本机能建 junction 或符号链接；这次建不了，已跳过）",
+            bad: true,
+            passed:
+                !extLinked ||
+                String(
+                    recordProblem(cubase(), "validation:docs/validation/ext/2026-11-02-cubase-pro-15-win.md", tmp),
+                ).startsWith("路径"),
+            expect: [],
+        });
+        cases.push({
             label: "recordProblem：仓内规范路径、文件名与这一行对得上：放行",
             bad: false,
             passed: recordProblem(cubase(), cubaseRecord, tmp) === null,
             expect: [],
         });
     } finally {
+        if (linkInRepo) dropDirLink(linkInRepo);
         cleanupTempDir(tmp);
         cleanupTempDir(outside);
     }

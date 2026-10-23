@@ -17,7 +17,7 @@
 //   evidence-kind       每条 evidence / pending 的类型是 validation: / issue: / ci: / golden: 之一，形态可解析；
 //                       validation 的文件名通配（*）只允许写在 pending 里（记录的日期要等上机才知道）；
 //                       validation 的路径必须是仓内的规范相对路径（repoPathProblem：拒绝 .. 段、绝对路径、反斜杠、盘符，
-//                       规范化后仍在仓根之内），文件名必须以 -win.md / -macos.md / -linux.md 之一结尾
+//                       规范化后、符号链接与 junction 解开后仍在仓根之内），文件名必须以 -win.md / -macos.md / -linux.md 之一结尾
 //                       （recordNameTail：tiers 检查核对记录文件名的系统后缀用的是同一个函数）
 //   evidence-satisfied  evidence 里的每一条都成立：validation 文件存在；issue 是 https URL；ci 是仓内存在的 job 名；
 //                       golden 的谓词为真（目标文件不存在时按 pending 处理，不在这里判红）
@@ -41,6 +41,11 @@
 // golden 的两种形状都认：映射形（顶层键就是参数 id）与数组形（{"params":[{"id":…}]}）。
 // 同一条谓词路径（如 feedback.default）在两种形状下必须取到同一个值，否则参数真源换个形状，
 // 同一条强声明就会无端判红。params-table 块模块认的是同一套形状。
+//
+// 分句规则的已知限制：分句靠标点与转折连词机械地切，不做语法分析，下面几种写法不切，免责语会和 strong 算在同一个分句里而放行：
+//   `/`；作连词的 yet（「works in LUNA yet not tested elsewhere」）；so；except；括号里给别的主语的免责
+//   （「works in LUNA (but Pro Tools is not yet tested)」：括号里的内容算括号所在分句的一部分）。
+// 这几种写法靠文案评审挡，机检不承诺；要机检拦下，就把对应的标点或连词加进 CLAUSE_BREAK_SOURCES 并补坏样例。
 //
 // 句子切分、否定与免责、引号放行、扫描范围都和 wording 检查共用同一份实现（从 wording.mjs 引入），不各抄一份。
 // 参数表块模块（gen-docs.d/params-table.mjs）的自测也在这里跑：它认的参数形状就是上面谓词路径认的形状。
@@ -131,16 +136,65 @@ export function recordNameTail(osName = "any") {
     return suffixes.length ? `-(?:${suffixes.join("|")})\\.md` : null;
 }
 
-/** rel 按 root 解析、规范化之后是否落在仓根之外（或就是仓根本身）。纯函数，供 repoPathProblem 与自测用。 */
+/**
+ * 自测用：在 link 处建一个指向目录 target 的链接。Windows 上建 junction（不需要特权），别处是普通符号链接。
+ * 建成返回 true；建不了（没有权限、文件系统不支持）返回 false，由调用方在用例名里写明跳过的条件。
+ */
+export function tryMakeDirLink(target, link) {
+    try {
+        fs.symlinkSync(target, link, "junction");
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** 自测收尾：只摘掉链接本身，不碰它指向的目录；链接已经不在或摘不掉都不抛。 */
+export function dropDirLink(link) {
+    try {
+        fs.unlinkSync(link);
+    } catch {
+        try {
+            fs.rmdirSync(link);
+        } catch {
+            // 摘不掉就留给临时目录的收尾；那一步按真实路径核对，递归删除不会进链接
+        }
+    }
+}
+
+/** target 相对 base 是否在 base 之外（或就是 base 本身）；纯词法，两个参数都要是已解析的绝对路径。 */
+function lexicallyOutside(base, target) {
+    const back = path.relative(base, target);
+    return back === "" || back === ".." || back.startsWith(`..${path.sep}`) || path.isAbsolute(back);
+}
+
+/** 真实路径（符号链接、junction 都解开）；路径不存在或读不出来返回 null。 */
+function realPathOrNull(p) {
+    try {
+        return fs.realpathSync.native(p);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * rel 按 root 解析、规范化之后是否落在仓根之外（或就是仓根本身）。词法判断先行；词法上在仓内、而且文件存在时，
+ * 再按真实路径判一次（仓根也取真实路径）：仓内若有指向仓外的符号链接或 junction（如 docs/validation/ext → 仓外），
+ * 经它读到的文件不算仓内文件。文件不存在时只有词法判断（读不到，也就谈不上被它当成证据）。
+ */
 export function escapesRoot(root, rel) {
     const base = path.resolve(root);
-    const back = path.relative(base, path.resolve(base, rel));
-    return back === "" || back === ".." || back.startsWith(`..${path.sep}`) || path.isAbsolute(back);
+    const target = path.resolve(base, rel);
+    if (lexicallyOutside(base, target)) return true;
+    const realTarget = realPathOrNull(target);
+    if (realTarget === null) return false;
+    return lexicallyOutside(realPathOrNull(base) ?? base, realTarget);
 }
 
 /**
  * 仓内相对路径的问题；没问题返回 null。validation 证据的路径只准是仓内的规范相对路径：
- * 不许反斜杠、盘符、绝对路径、空段与 . 段、.. 段；给了仓根时，规范化之后还要落在仓根之内（escapesRoot）。
+ * 不许反斜杠、盘符、绝对路径、空段与 . 段、.. 段；给了仓根时，规范化之后还要落在仓根之内（escapesRoot），
+ * 文件存在时按真实路径判（仓内指向仓外的符号链接或 junction 不算仓内）。
  * claims 的 parseEvidence / validationExists 与 tiers 的 recordProblem 都用这一个函数。
  */
 export function repoPathProblem(rel, root) {
@@ -152,7 +206,7 @@ export function repoPathProblem(rel, root) {
     const segments = rel.split("/");
     if (segments.includes("..")) return "含上级目录段 ..";
     if (segments.some((s) => s === "" || s === ".")) return "含空段或 . 段，路径要写成规范形式";
-    if (root !== undefined && escapesRoot(root, rel)) return "规范化后落在仓根之外";
+    if (root !== undefined && escapesRoot(root, rel)) return "规范化后（符号链接与 junction 解开后）落在仓根之外";
     return null;
 }
 
@@ -185,17 +239,21 @@ const CLOSE_BRACKETS = ")）]】";
 
 /**
  * 分句界（在括号之外）：
- *   标点  英文逗号与冒号（数字之间的千分位逗号、时间的冒号不算）、中文 ，：（；已经是句子界）、破折号 —、带空格的 –
+ *   标点  英文逗号与冒号（只有两侧都是数字的才不切：千分位 10,000、时刻 12:30；LUNA 3, not yet tested 里逗号左边是数字，
+ *         右边是空格，照切）、中文 ，：（；已经是句子界）、破折号 —、带空格的 –、带空格的连字符 ` - ` 与 `--`
+ *         （wording 的分句规则也把 ` - ` 当分句界）
  *   转折连词  while / whereas / but / however / although / though；但（含但是）/ 不过 / 可是 / 而（含然而；而已、而且除外）
  * 不切：and / 和 / 与 / 以及 / 而且 这类并列，以及 not yet 里的 yet（并列留在同一分句里）。
  * 所以「works in LUNA, while Pro Tools is not yet tested」「在 LUNA 可用，而 Cubase 尚未测试」的免责语在另一个分句里，
  * 不算 LUNA 那一句的 hedge；要写成「works in LUNA (host testing pending)」或把 hedge 放进同一个分句。
  */
 const CLAUSE_BREAK_SOURCES = {
-    comma: "(?<!\\d),(?!\\d)",
-    colon: "(?<!\\d):(?!\\d)",
+    // 两侧都是数字才不切（千分位、时刻）；左边是数字、右边不是（LUNA 3, / LUNA 3:），或反过来，都要切
+    comma: "(?<!\\d),|,(?!\\d)",
+    colon: "(?<!\\d):|:(?!\\d)",
     "zh-punct": "[，：]",
     dash: "—|\\s–\\s",
+    hyphen: "\\s-\\s|--",
     while: "\\bwhile\\b",
     whereas: "\\bwhereas\\b",
     but: "\\bbut\\b",
@@ -489,7 +547,7 @@ export function evidenceShapeProblem(item, { glob = false } = {}) {
 
 /**
  * validation 记录是否存在；带 * 的按最后一段的文件名通配。
- * 路径先过 repoPathProblem（带仓根，规范化后必须仍在仓根之内），不合格就当不存在，不去碰仓外的文件。
+ * 路径先过 repoPathProblem（带仓根，规范化后、符号链接与 junction 解开后必须仍在仓根之内），不合格就当不存在，不去碰仓外的文件。
  */
 export function validationExists(root, body, glob) {
     if (repoPathProblem(body, root)) return false;
@@ -502,8 +560,13 @@ export function validationExists(root, body, glob) {
             .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
             .join("[^/]*")}$`,
     );
+    const dir = body.slice(0, slash);
     try {
-        return fs.readdirSync(path.join(root, body.slice(0, slash))).some((f) => re.test(f));
+        // 目录本身与匹配到的每一项都过一遍 repoPathProblem：目录是指向仓外的链接、或匹配项是指向仓外的链接，都不算
+        return (
+            !repoPathProblem(dir, root) &&
+            fs.readdirSync(path.join(root, dir)).some((f) => re.test(f) && !repoPathProblem(`${dir}/${f}`, root))
+        );
     } catch {
         return false;
     }
@@ -900,6 +963,13 @@ export async function selfTest(root = ROOT) {
         temps.push(d);
         return d;
     };
+    // 自测里建的链接：收尾时先摘链接，再删临时目录，删除不会经链接碰到链接指向的目录
+    const links = [];
+    const mkLink = (target, link) => {
+        const ok = tryMakeDirLink(target, link);
+        if (ok) links.push(link);
+        return ok;
+    };
     /**
      * 一个带 golden 的临时目录：golden 里的 feedback.default 可改。
      * shape 是 "map"（顶层键就是参数 id）或 "list"（{"params":[{"id":…}]}）——
@@ -987,6 +1057,18 @@ export async function selfTest(root = ROOT) {
         fs.writeFileSync(path.join(escapeBase, "2026-11-03-luna-macos.md"), "x\n");
         fs.writeFileSync(path.join(escapeBase, "outside.json"), JSON.stringify({ a: 1 }));
         const escapedRecord = "validation:docs/../../2026-11-03-luna-macos.md";
+        // 仓内的 junction（或符号链接）指向仓外：词法上 docs/validation/ext/… 在仓内，真实路径在仓外
+        const linkOutside = mkTemp();
+        fs.writeFileSync(path.join(linkOutside, "2026-11-03-luna-macos.md"), "x\n");
+        fs.writeFileSync(path.join(linkOutside, "outside.json"), JSON.stringify({ a: 1 }));
+        const outsideLink = path.join(escapeRepo, "docs", "validation", "ext");
+        const outsideLinked = mkLink(linkOutside, outsideLink);
+        // 仓内的链接指向仓内的另一个目录：真实路径仍在仓内，照常放行
+        const insideLink = path.join(withLuna, "docs", "alias");
+        const insideLinked = mkLink(path.join(withLuna, "docs", "validation"), insideLink);
+        // 仓根本身是经链接到达的（工作树放在 junction 下）：仓根也取真实路径，仓内的文件不能因此被当成越界
+        const rootLink = path.join(escapeBase, "repo-link");
+        const rootLinked = mkLink(withLuna, rootLink);
         // state-schema 形状的 golden（cfgs.keys 是数组）：guard_on 的默认值可改，顺序可换，另有一份缺 guard_on 的
         const withCfgs = (guardDefault, { swap = false, noGuard = false } = {}) => {
             const dir = mkTemp();
@@ -1034,9 +1116,21 @@ export async function selfTest(root = ROOT) {
         fs.writeFileSync(path.join(withMacRecord, "docs", "validation", "2026-11-03-luna-mac.md"), "x\n");
         // 每个分句界一个坏样例：strong 在界之前，免责语在界之后的另一个分句里
         const CLAUSE_BREAK_SAMPLES = [
-            ...[",", ":", " —", " –", ";", " while", " whereas", " but", " however", " although", " though"].map(
-                (b) => [`英文「${b.trim()}」`, `Rinne works in LUNA${b} Pro Tools is not yet tested.\n`],
-            ),
+            ...[
+                ",",
+                ":",
+                " —",
+                " –",
+                " -",
+                " --",
+                ";",
+                " while",
+                " whereas",
+                " but",
+                " however",
+                " although",
+                " though",
+            ].map((b) => [`英文「${b.trim()}」`, `Rinne works in LUNA${b} Pro Tools is not yet tested.\n`]),
             ...["，", "：", "但是", "但", "然而", "不过", "可是", "而"].map((b) => [
                 `中文「${b}」`,
                 `Rinne 在 LUNA 可用${b}Cubase 尚未测试。\n`,
@@ -1596,6 +1690,124 @@ export async function selfTest(root = ROOT) {
                     files: { "README.md": text },
                 }),
             ]),
+            // 逗号与冒号：只有两侧都是数字（千分位、时刻）才不切；一侧是数字照切
+            [
+                "min-macos：「tested on macOS 14, not yet tested on macOS 11」逗号左边是数字也切，第一处 strong 的分句没有 hedge，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withMinMacos(),
+                    files: { "README.md": "Rinne is tested on macOS 14, not yet tested on macOS 11.\n" },
+                }),
+            ],
+            [
+                "「works in LUNA 3, not yet tested on Pro Tools」：数字后的逗号照切，免责语在另一个分句，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["host testing pending", "not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA 3, not yet tested on Pro Tools.\n" },
+                }),
+            ],
+            [
+                "「works in LUNA 3: not yet tested on Pro Tools」：数字后的冒号照切，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["host testing pending", "not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA 3: not yet tested on Pro Tools.\n" },
+                }),
+            ],
+            [
+                "「works in LUNA 3.1, host testing pending for the rest」：版本号后的逗号照切，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost(),
+                    files: { "README.md": "Rinne works in LUNA 3.1, host testing pending for the rest.\n" },
+                }),
+            ],
+            [
+                "数字之间的逗号不切：「works in LUNA with 10,000 tracks not yet tested」hedge 仍在同一分句，放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA with 10,000 tracks not yet tested.\n" },
+                }),
+            ],
+            [
+                "数字之间的冒号不切：「works in LUNA at 12:30 and is not yet tested」hedge 仍在同一分句，放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA at 12:30 and is not yet tested.\n" },
+                }),
+            ],
+            // 带空格的连字符与 -- 是分句界（wording 也把带空格的连字符当分句界）；词内的连字符不是
+            [
+                "「works in LUNA - not yet tested on Pro Tools」：带空格的连字符是分句界，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["host testing pending", "not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA - not yet tested on Pro Tools.\n" },
+                }),
+            ],
+            [
+                "「works in LUNA -- not yet tested on Pro Tools」：-- 是分句界，判红",
+                ["strong-needs-hedge"],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["host testing pending", "not yet tested"] }),
+                    files: { "README.md": "Rinne works in LUNA -- not yet tested on Pro Tools.\n" },
+                }),
+            ],
+            [
+                "词内的连字符不切：「works in LUNA with pre-release testing pending」放行",
+                [],
+                run({
+                    root: goldenMissing,
+                    data: withHost({ hedge: ["pre-release testing pending"] }),
+                    files: { "README.md": "Rinne works in LUNA with pre-release testing pending.\n" },
+                }),
+            ],
+            // 仓内的 junction / 符号链接指向仓外：词法上在仓内、真实路径在仓外的证据不算（需要本机能建 junction 或符号链接）
+            ...(outsideLinked
+                ? [
+                      [
+                          "validation 证据经仓内的 junction 指到仓外的真实文件（词法上在仓内）：不当证据（需要能建 junction）",
+                          ["evidence-satisfied"],
+                          run({
+                              root: escapeRepo,
+                              data: withHost({
+                                  ...exempt,
+                                  evidence: ["validation:docs/validation/ext/2026-11-03-luna-macos.md"],
+                                  pending: [],
+                              }),
+                              files: { "README.md": "Rinne works in LUNA.\n" },
+                          }),
+                      ],
+                  ]
+                : []),
+            ...(insideLinked
+                ? [
+                      [
+                          "validation 证据经仓内的链接指到仓内另一个目录里的真实文件：照常成立（需要能建 junction）",
+                          [],
+                          run({
+                              root: withLuna,
+                              data: withHost({
+                                  ...exempt,
+                                  evidence: ["validation:docs/alias/2026-11-03-luna-macos.md"],
+                                  pending: [],
+                              }),
+                              files: { "README.md": "Rinne works in LUNA.\n" },
+                          }),
+                      ],
+                  ]
+                : []),
             [
                 "同一句里 strong 出现两处，只有第一处所在的分句带 hedge：第二处判红",
                 ["strong-needs-hedge"],
@@ -2193,7 +2405,51 @@ export async function selfTest(root = ROOT) {
                 !escapesRoot(escapeRepo, "docs/..x/y"),
             expect: [],
         });
+        // 真实路径：仓内的 junction / 符号链接指向仓外（建不了链接的机器上这几条跳过，用例名里写明）
+        if (outsideLinked && insideLinked) {
+            cases.push({
+                label: "escapesRoot：文件存在时按真实路径判，经仓内 junction 指到仓外的文件越界，不存在的路径与仓内链接照旧（需要能建 junction）",
+                bad: true,
+                passed:
+                    escapesRoot(escapeRepo, "docs/validation/ext/2026-11-03-luna-macos.md") &&
+                    escapesRoot(escapeRepo, "docs/validation/ext") &&
+                    !escapesRoot(escapeRepo, "docs/validation/ext/not-there.md") &&
+                    !escapesRoot(withLuna, "docs/alias/2026-11-03-luna-macos.md") &&
+                    repoPathProblem("docs/validation/ext/2026-11-03-luna-macos.md", escapeRepo) !== null &&
+                    repoPathProblem("docs/alias/2026-11-03-luna-macos.md", withLuna) === null,
+                expect: [],
+            });
+            cases.push({
+                label: "validationExists / evalGolden 不经 junction 读仓外的文件，通配也不进指向仓外的目录；仓内的链接照常（需要能建 junction）",
+                bad: true,
+                passed:
+                    validationExists(escapeRepo, "docs/validation/ext/2026-11-03-luna-macos.md", false) === false &&
+                    validationExists(escapeRepo, "docs/validation/ext/*-luna-macos.md", true) === false &&
+                    evalGolden(escapeRepo, "docs/validation/ext/outside.json#a == 1") === null &&
+                    validationExists(withLuna, "docs/alias/2026-11-03-luna-macos.md", false) === true &&
+                    validationExists(withLuna, "docs/alias/*-luna-macos.md", true) === true,
+                expect: [],
+            });
+            if (rootLinked)
+                cases.push({
+                    label: "仓根经链接到达时，仓根与目标都取真实路径再比：仓内的文件不越界、仍然成立（需要能建 junction）",
+                    bad: false,
+                    passed:
+                        !escapesRoot(rootLink, "docs/validation/2026-11-03-luna-macos.md") &&
+                        repoPathProblem("docs/validation/2026-11-03-luna-macos.md", rootLink) === null &&
+                        validationExists(rootLink, "docs/validation/2026-11-03-luna-macos.md", false) === true,
+                    expect: [],
+                });
+        } else {
+            cases.push({
+                label: "仓内 junction 指向仓外的证据判红（条件：本机能建 junction 或符号链接；这次建不了，已跳过）",
+                bad: true,
+                passed: true,
+                expect: [],
+            });
+        }
     } finally {
+        for (const l of links) dropDirLink(l);
         for (const d of temps) cleanupTempDir(d);
     }
     const unnamed = Object.keys(RULES).filter((r) => !cases.some((c) => c.expect.includes(r)));
