@@ -5,7 +5,8 @@
 //   - 引擎：Input 端一个 InputEngine，Output 端一个 OutputEngine；块首经绑定快照租一块（BoundBlock），
 //     只有租约成立且槽仍是自己的才把会合段交给引擎；
 //   - 会合：手动组（面板或探针 state 给），25 Hz 的 tick 驱动心跳、认领、重试；验证宿主下 IPC 整体关闭；
-//   - 日志：默认目录（文档目录下的 Rinne Probe Logs），tok4 自动分配；验证宿主下不开；
+//   - 日志：默认目录（文档目录下的 Rinne Probe Logs），tok4 自动分配；验证宿主下不开；宿主第一次真用这个实例时才开，
+//     只构造一下就析构的场合（插件扫描、构建时生成 VST3 模块信息的工具）不留文件；
 //   - 每次回调对会合段头的 probe_call_seq 做 fetch_add（布局里已有这一格，正式版恒为 0），取不到就不写 B 行；
 //   - Ping 只在 Input 端：注入在引擎输出之后、读回取引擎的原始读头（安全链之前），回送的 500 ms 淡入借引擎的
 //     「载入预设」命令（presetSeq）触发，不改 core；
@@ -146,6 +147,7 @@ private:
     void applyGroup(int group, ipc::ClaimIntent intent, std::uint64_t ms);
     ProbeStatus statusLocked() const;
     void logEvent(diag::ProbeEventCode code, const diag::ProbeEventArgs& args = {});
+    void openLogLocked();
 
     juce::AudioProcessor& processor_;
     ProbeHostConfig config_;
@@ -157,7 +159,7 @@ private:
     mutable std::mutex mutex_;
     std::unique_ptr<ipc::ISegmentBackend> ownBackend_;
     std::unique_ptr<ipc::Rendezvous> rendezvous_;
-    std::unique_ptr<diag::ProbeLog> log_;
+    std::unique_ptr<diag::ProbeLog> log_; // 第一次 prepare / 设状态 / 送轨道信息时才建（见 openLogLocked）
     engine::InputEngine input_;
     engine::OutputEngine output_;
     std::unique_ptr<ProbePing> ping_; // Input 端，prepare 时按采样率建

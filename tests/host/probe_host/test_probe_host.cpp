@@ -825,6 +825,40 @@ TEST_CASE("a validation host opens no segment, logs nothing and passes the dry s
     backend.unmap(view);
 }
 
+TEST_CASE("an instance that is only constructed and destroyed leaves no log file", "[probe_host]")
+{
+    Rig rig;
+    // 插件扫描、构建时生成 VST3 模块信息的工具：构造一下就析构
+    {
+        TestProcessor scanned(rig.config(ipc::Role::kInput));
+        CHECK(scanned.host.log() == nullptr);
+        CHECK_FALSE(scanned.host.probeStatus().logOpen);
+    }
+    CHECK(rig.logFiles() == 0);
+
+    // 宿主第一次真用它才开日志：存状态不算，设状态算，set_state 记在里面
+    {
+        TestProcessor used(rig.config(ipc::Role::kOutput));
+        juce::MemoryBlock state;
+        used.getStateInformation(state);
+        CHECK(rig.logFiles() == 0);
+        used.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+        CHECK(used.host.probeStatus().logOpen);
+    }
+    REQUIRE(rig.logFiles() == 1);
+    CHECK(eventsNamed(rig.read('O'), "set_state").size() == 1);
+
+    // 送轨道信息也算
+    {
+        TestProcessor named(rig.config(ipc::Role::kInput));
+        juce::AudioProcessor::TrackProperties props;
+        props.name = juce::String("Bus");
+        named.updateTrackProperties(props);
+        CHECK(named.host.probeStatus().logOpen);
+    }
+    CHECK(rig.logFiles() == 2);
+}
+
 TEST_CASE("probe state round-trips and a release build's bytes are kept and written back verbatim", "[probe_host]")
 {
     Rig rig;

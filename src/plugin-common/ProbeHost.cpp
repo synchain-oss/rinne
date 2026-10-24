@@ -177,21 +177,7 @@ ProbeHost::ProbeHost(juce::AudioProcessor& processor, ProbeHostConfig config)
     rendezvous_ = std::make_unique<ipc::Rendezvous>(rc);
 
     if (!config_.validationHost)
-    {
         logDir_ = config_.logDirectory.empty() ? resolveLogDir() : ProbeLogDir{config_.logDirectory};
-        if (!logDir_.path.empty())
-        {
-            diag::ProbeLogOptions options;
-            options.directory = logDir_.path;
-            options.header = diag::makeProbeHeader(isInput() ? diag::ProbeRole::kInput : diag::ProbeRole::kOutput,
-                                                   isAu(processor_) ? diag::ProbeFormat::kAu : diag::ProbeFormat::kVst3,
-                                                   hostKind(), buildHash());
-            options.startThread = config_.startLogThread;
-            options.clock = config_.clock;
-            options.clockContext = config_.clockContext;
-            log_ = std::make_unique<diag::ProbeLog>(std::move(options));
-        }
-    }
     if (config_.startTimer)
         startTimerHz(kTickHz);
 }
@@ -223,12 +209,31 @@ void ProbeHost::logEvent(diag::ProbeEventCode code, const diag::ProbeEventArgs& 
         log_->logEvent(code, args);
 }
 
+// 日志文件到宿主第一次真用这个实例（prepare、设状态、送轨道信息）才开：插件扫描与构建时生成 VST3 模块信息的工具
+// 只构造一下就析构，不该在文档目录里留下只有析构事件的文件。持锁调用；建好之前音频回调还没开始（prepare 在 ready_
+// 发布之前调它，另两处只可能在第一次 prepare 之前真的建），音频线程读 log_ 不需要别的同步
+void ProbeHost::openLogLocked()
+{
+    if (log_ != nullptr || logDir_.path.empty()) // 验证宿主下 logDir_ 是空的
+        return;
+    diag::ProbeLogOptions options;
+    options.directory = logDir_.path;
+    options.header = diag::makeProbeHeader(isInput() ? diag::ProbeRole::kInput : diag::ProbeRole::kOutput,
+                                           isAu(processor_) ? diag::ProbeFormat::kAu : diag::ProbeFormat::kVst3,
+                                           hostKind(), buildHash());
+    options.startThread = config_.startLogThread;
+    options.clock = config_.clock;
+    options.clockContext = config_.clockContext;
+    log_ = std::make_unique<diag::ProbeLog>(std::move(options));
+}
+
 // ---- 处理器转发 ----
 
 void ProbeHost::prepare(double sampleRate, int maxBlock)
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     ready_.store(false, std::memory_order_release);
+    openLogLocked();
     // 宿主挂起再恢复（release 再 prepare）正是要判的「两端一起停了多久」：同采样率时上一块的账留着
     if (sampleRate != sampleRate_)
     {
@@ -599,6 +604,7 @@ void ProbeHost::getState(juce::MemoryBlock& dest)
 void ProbeHost::setState(const void* data, int size)
 {
     const std::lock_guard<std::mutex> lock(mutex_);
+    openLogLocked();
     ProbeStateData next = stateData_;
     const StateStatus status =
         keeper_.load(static_cast<const std::uint8_t*>(data), size > 0 ? static_cast<std::size_t>(size) : 0u, next);
@@ -619,6 +625,7 @@ void ProbeHost::setState(const void* data, int size)
 void ProbeHost::trackProperties(const juce::AudioProcessor::TrackProperties& properties)
 {
     const std::lock_guard<std::mutex> lock(mutex_);
+    openLogLocked();
     const std::string name = properties.name.has_value() ? properties.name->toStdString() : std::string();
     std::uint64_t colourArg = 0;
     std::uint32_t argb = 0;
