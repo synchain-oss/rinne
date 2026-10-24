@@ -63,6 +63,8 @@ bool LoopSession::prepare(double sampleRate) noexcept
         // 换采样率：延迟线重新分配，域状态重来
         line_.allocate(sampleRate_);
         taps_.clear();
+        hold_ = ReturnHold{};
+        lastReturnAt_ = -1;
         offset_ = 0;
         delayTarget_ = 0;
         delayInUse_ = 0;
@@ -190,6 +192,53 @@ void LoopSession::flushLocalDelayLine() noexcept
     // 起点锚在已拉到的位置：之后从那里往后拉，比它早的帧一律读不出来。
     line_.resetTo(line_.pulled());
     taps_.clear();
+    hold_ = ReturnHold{};
+}
+
+// 两端停用超过 250 ms 之后的清空（块首、本块的 process 之前）：清线、作废读头，上一块最后一个回送样本按末值保持
+// 衰减 5 ms（见 holdLastReturn）。
+void LoopSession::flushAfterSuspend() noexcept
+{
+    flushLocalDelayLine();
+    holdLastReturn();
+    sink_.emit(LoopEventCode::kLineCleared, 2);
+}
+
+// 读头整体作废时（两端停用之后的清空、写头倒退）：上一块最后一个回送样本按末值保持衰减 5 ms，回送不从它直接落到 0。
+// 保持的是上一块实际送出的那一个值（含正在进行的保持），所以先清掉旧的保持再起新的，不重复计入。
+// 上一个输出样本不在 R − 1 上（还没出过回送、或超长块打断了读位）时没有可保持的。
+void LoopSession::holdLastReturn() noexcept
+{
+    const bool adjacent = lastReturnAt_ >= 0 && lastReturnAt_ == sync_.processed() - 1;
+    hold_ = ReturnHold{};
+    if (adjacent)
+    {
+        hold_.start(lastReturnLeft_, lastReturnRight_, sync_.fadeOutSamples());
+    }
+}
+
+// 本块的第一个样本就读不到数据、而上一个输出样本还在出声的读头：写头恰好在块边界落后（补 0、断档、失去对端的淡出
+// 恰好从块边界开始），块内没有样本可淡。它在上一个样本上的贡献并进末值保持（5 ms 线性衰减，跨块延续），
+// 回送不从上一块的末值直接落到 0。上一个样本不是它读的（lastAt 不相邻）或者贡献是 0 时没有可保持的。
+void LoopSession::holdStrandedTaps(i64 blockStart) noexcept
+{
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        Tap& tap = taps_.at(slot);
+        if (!tap.active || tap.lastAt != blockStart - 1 || (tap.lastLeft == 0.0f && tap.lastRight == 0.0f))
+        {
+            continue;
+        }
+        const i64 p = blockStart + tap.offset - tap.delay;
+        float l = 0.0f;
+        float r = 0.0f;
+        if (p >= tap.validFrom && p < tap.validTo && (line_.readTail(p, l, r) || line_.read(p, l, r)))
+        {
+            continue; // 块首还读得到：它自己的淡出接得上
+        }
+        hold_.start(tap.lastLeft, tap.lastRight, sync_.fadeOutSamples());
+        tap.lastAt = -1;
+    }
 }
 
 // 建一个新的读头：validFrom 是环上「从哪一帧起才有数据」，包络走 onset。
@@ -310,11 +359,14 @@ std::int64_t LoopSession::fadeOutUnsupportedBlock(const BlockContext& ctx) noexc
     // 淡出的长度：名义 5 ms；主读头（没在淡出的那个）从块首起只剩不到 5 ms 的数据时，缩短到恰好在数据用完时走到 0。
     // 在淡出的读头自己的淡出恰好在它的数据用完时走到 0，再乘上这一段淡出照样连续，不必算进来。
     // 没有读头时回送本来就是 0。
-    if (taps_.count() == 0)
+    // 读头从块首起一个可读的样本都没有（写头恰好在块边界落后）时，它在上一个样本上的贡献交给末值保持，
+    // 与正在进行的保持一起在这一块里走完（保持名义 5 ms，超长块总比它长）。
+    const i64 R0 = sync_.processed();
+    holdStrandedTaps(R0);
+    if (taps_.count() == 0 && !hold_.active())
     {
         return 0;
     }
-    const i64 R0 = sync_.processed();
     i64 length = sync_.fadeOutSamples();
     for (int slot = 0; slot < kMaxTaps; ++slot)
     {
@@ -332,6 +384,7 @@ std::int64_t LoopSession::fadeOutUnsupportedBlock(const BlockContext& ctx) noexc
         }
         break;
     }
+    const i64 total = std::max(length, hold_.remaining());
     mixTaps(taps_, line_, R0, ctx.returnLeft, ctx.returnRight, length, ctx.returnValid);
     for (i64 i = 0; i < length; ++i)
     {
@@ -339,7 +392,23 @@ std::int64_t LoopSession::fadeOutUnsupportedBlock(const BlockContext& ctx) noexc
         ctx.returnLeft[i] *= g;
         ctx.returnRight[i] *= g;
     }
-    return length;
+    for (i64 i = length; i < total; ++i)
+    {
+        ctx.returnLeft[i] = 0.0f;
+        ctx.returnRight[i] = 0.0f;
+        if (ctx.returnValid != nullptr)
+        {
+            ctx.returnValid[i] = 0;
+        }
+    }
+    hold_.addInto(ctx.returnLeft, ctx.returnRight, total);
+    // 这一块不推进读位：读头记下的「最后一个样本」与上一块的末样本都不再与下一块相邻
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        taps_.at(slot).lastAt = -1;
+    }
+    lastReturnAt_ = -1;
+    return total;
 }
 
 // 拉环：把 [pulled, W) 的帧搬进本地延迟线。
@@ -423,6 +492,9 @@ std::int64_t LoopSession::mainTapOverrun(i64 blockStart, i64 n) const noexcept
 // 主读头本块会读到还没写到的位置：让它在还读得到的样本里线性淡到 0（读上界收到已拉到的位置）。
 // 剩下的样本数就是淡出的长度（至少一步），淡出在数据用完的那一点恰好走到 0，之后补的 0 与它相接，没有阶跃。
 // 淡出的长度不超过本块的块长，本块末这个读头就释放了。
+//
+// 写头落后恰好从块边界开始（本块一个可读的样本都没有）时，块内没有样本可淡：读头本块不出声、块末释放，
+// 它在上一块最后一个样本上的贡献由 holdStrandedTaps 交给末值保持（混音之前统一做）。
 void LoopSession::fadeMainTapAtUnderrun(i64 blockStart) noexcept
 {
     for (int slot = 0; slot < kMaxTaps; ++slot)
@@ -544,6 +616,8 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         result.delayEffective = delayInUse_;
         result.delayMin = delayMin_;
         result.estimatorDelay = largestTapDelay(taps_);
+        result.paired = havePeer_;
+        result.stalledState = sync_.state() == SyncState::kStalled;
         return result;
     }
     lastUnsupported_ = false;
@@ -601,7 +675,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     const i64 R0 = sync_.processed();
 
     // 域锚定：第一次配上时本地延迟线从当前写头起算（W 可能早已很大，从 0 起拉永远追不上）；
-    // 写头倒退（换段遗漏一类）时整个域重来，读头作废，判据重新锚定偏移。
+    // 写头倒退（换段遗漏一类）时整个域重来，读头作废（上一块的末值保持衰减，旧数据一样不读），判据重新锚定偏移。
     bool domainReset = false;
     if (paired)
     {
@@ -611,6 +685,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         }
         else if (writeHead < line_.pulled())
         {
+            holdLastReturn();
             line_.resetTo(writeHead);
             taps_.clear();
             domainReset = true;
@@ -715,10 +790,25 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     }
 
     // 混音：读头按包络混成一路，并标出逐样本的有效位。位置用本块的读位起点 R0。
+    // 块首就读不到数据的读头先把末值交给保持；保持叠在读头之上（有效位不置：保持的值不是环里的新数据），按样本推进。
+    holdStrandedTaps(R0);
     std::uint64_t nonZero = 0;
     if (ctx.returnLeft != nullptr && ctx.returnRight != nullptr)
     {
         nonZero = mixTaps(taps_, line_, R0, ctx.returnLeft, ctx.returnRight, n, ctx.returnValid);
+        if (hold_.active())
+        {
+            hold_.addInto(ctx.returnLeft, ctx.returnRight, n);
+            nonZero = countNonZero(ctx.returnLeft, ctx.returnRight, n);
+        }
+        lastReturnLeft_ = ctx.returnLeft[n - 1];
+        lastReturnRight_ = ctx.returnRight[n - 1];
+        lastReturnAt_ = R0 + n - 1;
+    }
+    else
+    {
+        hold_.addInto(nullptr, nullptr, n);
+        lastReturnAt_ = -1;
     }
 
     result.returnLeft = ctx.returnLeft;
@@ -735,14 +825,17 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     result.nonZeroReturn = nonZero;
     result.overrun = static_cast<std::uint64_t>(overrun);
     result.hostViolation = outcome.hostViolation;
+    result.paired = paired;
+    result.stalledState = sync_.state() == SyncState::kStalled;
     result.resynced = outcome.resynced;
+    result.resyncReason = outcome.reason;
     result.resetDsp = outcome.resetDsp;
     result.resetAtSample = outcome.resetAtSample;
     result.blockStart = R0;
     result.lineCleared = outcome.lineCleared;
     result.stalled = outcome.stalled;
     result.enteredTolerant = outcome.enteredTolerant;
-    result.tapSettledSilent = tapsSettledSilent(taps_) && nonZero == 0;
+    result.tapSettledSilent = tapsSettledSilent(taps_) && !hold_.active() && nonZero == 0;
 
     if (overrun > 0)
     {

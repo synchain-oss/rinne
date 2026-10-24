@@ -42,7 +42,7 @@ enum class LoopEventCode : std::uint16_t
     kDMinRaised = 0x0305, // a = 新的 D_min ÷256，b = 原因（DelayMinReason）；准确值见状态快照的 delayMin
     kHostViolation = 0x0306, // a:b = 宿主送来的块长 n 的 16 位值（a 高字节、b 低字节；这条路径上 n ≤ 32768）
     kUnsupportedBlock = 0x0307, // a = 块长 n ÷256，b = 支持的上限 ÷256（32768 → 128）；只在进入超限时发一条
-    kLineCleared = 0x0308, // a = 1（本地延迟线被清空）
+    kLineCleared = 0x0308, // 本地延迟线被清空：a = 1 环上没有写方超过 250 ms；a = 2 两端一起被挂起超过 250 ms（壳请求）
     kOverflow = 0x0309, // a = 被环覆盖而丢掉的帧数（钳 255）
     kTorn = 0x030A, // a = 撕裂的帧数（钳 255）
     kOverrun = 0x030B, // a = 补 0 的样本数（钳 255）

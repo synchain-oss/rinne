@@ -74,7 +74,7 @@ static_assert(kMaxTaps == 3, "读头槽数是 3，改它是接口事件");
 // 1 = 至少有一个活跃读头读到了这一帧；0 = 这一格是补出来的 0。引擎据此区分两者。
 //
 // 返回值：本块里读到的非零样本个数（快速路径的判据之一）。
-std::uint64_t mixTaps(const TapSet& taps, const LocalLine& line, i64 position, float* outLeft, float* outRight,
+std::uint64_t mixTaps(TapSet& taps, const LocalLine& line, i64 position, float* outLeft, float* outRight,
                       std::int64_t count, std::uint8_t* valid) noexcept
 {
     if (outLeft == nullptr || outRight == nullptr || count <= 0)
@@ -90,14 +90,17 @@ std::uint64_t mixTaps(const TapSet& taps, const LocalLine& line, i64 position, f
             valid[i] = 0;
         }
     }
-    std::uint64_t nonZero = 0;
     for (int slot = 0; slot < kMaxTaps; ++slot)
     {
-        const Tap& tap = taps.at(slot);
+        Tap& tap = taps.at(slot);
         if (!tap.active)
         {
             continue;
         }
+        // 最后一个样本上的贡献：先记成 0，读到了再改（读不到、淡出走完、还没到有效区间都是 0）
+        tap.lastLeft = 0.0f;
+        tap.lastRight = 0.0f;
+        tap.lastAt = position + count - 1;
         if (fadeOutAt(tap, 0) <= 0.0f)
         {
             continue; // 淡出已经走完：这个读头不贡献任何东西
@@ -128,16 +131,64 @@ std::uint64_t mixTaps(const TapSet& taps, const LocalLine& line, i64 position, f
             {
                 valid[i] = 1; // 这一格是环里的真数据（不是补出来的 0）
             }
+            if (i == count - 1)
+            {
+                tap.lastLeft = l * env;
+                tap.lastRight = r * env;
+            }
         }
     }
+    return countNonZero(outLeft, outRight, count);
+}
+
+std::uint64_t countNonZero(const float* left, const float* right, std::int64_t count) noexcept
+{
+    std::uint64_t nonZero = 0;
     for (std::int64_t i = 0; i < count; ++i)
     {
-        if (std::fabs(outLeft[i]) > kDenormalFloor || std::fabs(outRight[i]) > kDenormalFloor)
+        if (std::fabs(left[i]) > kDenormalFloor || std::fabs(right[i]) > kDenormalFloor)
         {
             ++nonZero;
         }
     }
     return nonZero;
+}
+
+void ReturnHold::start(float l, float r, std::int64_t length) noexcept
+{
+    // 要并进来的是 0：正在进行的保持照它自己的进度走完（重新起算会把它拉长）
+    if (l == 0.0f && r == 0.0f)
+    {
+        return;
+    }
+    if (active())
+    {
+        const float g = static_cast<float>(steps - step) / static_cast<float>(steps);
+        l += left * g;
+        r += right * g;
+    }
+    left = l;
+    right = r;
+    step = 0;
+    steps = std::max<std::int64_t>(length, 1);
+}
+
+void ReturnHold::addInto(float* outLeft, float* outRight, std::int64_t count) noexcept
+{
+    for (std::int64_t i = 0; i < count && step < steps; ++i, ++step)
+    {
+        if (outLeft == nullptr || outRight == nullptr)
+        {
+            continue;
+        }
+        const float g = static_cast<float>(steps - step) / static_cast<float>(steps);
+        outLeft[i] += left * g;
+        outRight[i] += right * g;
+    }
+    if (step >= steps)
+    {
+        *this = ReturnHold{};
+    }
 }
 
 // 推进全部读头的淡出 n 个样本。淡出走完的读头被释放。淡入按位置算，不在这里推进（见 settleOnsets）。
