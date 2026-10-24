@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ProbeTestKit.h"
@@ -208,7 +209,8 @@ TEST_CASE("case validation compares whole words and handles absurd input without
     CHECK_FALSE(isValidProbeCase(huge, "steady"));
     CHECK_FALSE(isValidProbeCase("CB-01", huge));
     CHECK_FALSE(isValidProbeCase(huge, huge));
-    static_assert(noexcept(isValidProbeCase("CB-01", "steady")), "声明为 noexcept");
+    // 实参直接给 string_view：libc++ 里从字面量构造 string_view 不是 noexcept，那样测到的是构造而不是这个函数
+    static_assert(noexcept(isValidProbeCase(std::string_view(), std::string_view())), "声明为 noexcept");
 }
 
 TEST_CASE("the documented limits are the limits the writer clamps to", "[probe][contract]")

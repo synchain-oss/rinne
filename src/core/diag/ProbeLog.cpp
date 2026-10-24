@@ -720,7 +720,9 @@ void ProbeLog::onBlock(const BlockFields& fields) noexcept
         return;
     }
     // 块在 beginCase 之前就开始了（beginCase 落在这块中途）：它的 mono_ns 早于 C.t_ns，记进来会成孤块或被算到上一格。
-    // 当窗口外处理：不占 seq，不计丢弃。caseStartNs_ 在 recording_ 之前写、release 发布，读到 recording_ 就一定看得到
+    // 当窗口外处理：不占 seq，不计丢弃。recording_ 由假变真时，caseStartNs_ 在它之前写、release 发布，上面 acquire
+    // 读到真就一定看得到新起点。不经 endCase 连开两格时 recording_ 一直为真，这里可能还读到旧起点，落在两个 C 行之间
+    // 开始的块会被记下；它的 mono_ns 不早于上一个 C 行，分析器按时间戳把它归进上一格，不违反格式契约
     if (fields.monoNs < caseStartNs_.load(std::memory_order_relaxed))
     {
         return;
