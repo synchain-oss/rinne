@@ -413,9 +413,8 @@ TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]"
     // 把 Ping 当作一个已知延迟的环：回读 = 注入序列延迟 delay 个样本再乘增益，加一点确定性的噪声。
     // 注入从两个增益降到 0 之后才开始（rampSamples 个样本之后），回读由「应该注入什么」算出，不看 process
     // 实际写了什么， 注入内容另行核对。
-    const auto run = [](std::size_t delay, float gain, float noise, const std::vector<std::size_t>& blocks,
-                        std::vector<float>* injected) {
-        ProbePing ping(kMaxDelay, kRate);
+    const auto runOn = [](ProbePing& ping, std::size_t delay, float gain, float noise,
+                          const std::vector<std::size_t>& blocks, std::vector<float>* injected) {
         const std::size_t lead = ping.rampSamples();
         REQUIRE(ping.start());
         std::uint32_t lcg = 12345u;
@@ -447,6 +446,11 @@ TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]"
         }
         return ping.finish();
     };
+    const auto run = [&runOn](std::size_t delay, float gain, float noise, const std::vector<std::size_t>& blocks,
+                              std::vector<float>* injected) {
+        ProbePing ping(kMaxDelay, kRate);
+        return runOn(ping, delay, gain, noise, blocks, injected);
+    };
 
     SECTION("the delay comes back exactly, whatever the block sizes")
     {
@@ -463,6 +467,39 @@ TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]"
                 CHECK(r.peak > 12.0);
             }
         }
+    }
+
+    SECTION("every ping on the same state machine starts its window from the beginning")
+    {
+        ProbePing ping(kMaxDelay, kRate);
+        const PingResult first = runOn(ping, 300, 1.0f, 0.0f, {64}, nullptr);
+        const PingResult second = runOn(ping, 1200, 1.0f, 0.0f, {64}, nullptr);
+        CHECK(first.ok);
+        CHECK(first.delaySamples == 300);
+        CHECK(second.ok);
+        CHECK(second.delaySamples == 1200);
+
+        // 取消在注入中途：残留的回读不能混进下一次
+        std::vector<float> inject(64);
+        std::vector<float> dry(64);
+        std::vector<float> ret(64);
+        const std::vector<float> loud(64, 0.5f);
+        REQUIRE(ping.start());
+        for (int block = 0; block < 20; ++block)
+        {
+            REQUIRE(ping.process(inject.data(), loud.data(), dry.data(), ret.data(), 64));
+            (void)ping.takeFadeInRequest();
+        }
+        ping.cancel();
+        for (int block = 0; block < 2000 && ping.active(); ++block)
+        {
+            REQUIRE(ping.process(inject.data(), loud.data(), dry.data(), ret.data(), 64));
+            (void)ping.takeFadeInRequest();
+        }
+        REQUIRE(ping.state() == ProbePing::State::kIdle);
+        const PingResult third = runOn(ping, 700, 1.0f, 0.0f, {64}, nullptr);
+        CHECK(third.ok);
+        CHECK(third.delaySamples == 700);
     }
 
     SECTION("an attenuated, noisy readback still gives the right delay")
