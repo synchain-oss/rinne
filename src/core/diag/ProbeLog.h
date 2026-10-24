@@ -31,6 +31,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "diag/ProbeEvents.h"
@@ -49,6 +50,9 @@ inline constexpr std::size_t kProbeNameBytes = 200; // 轨道名编码前的字�
 
 // 单调纳秒，所有 t_ns 与 mono_ns 都读它
 std::uint64_t probeMonoNs() noexcept;
+
+// 计数器刻度换纳秒（Windows 的 QueryPerformanceCounter 用）。freq 为 0 返回 0，不除零；先除后乘，不会随运行时间溢出
+std::uint64_t probeTicksToNs(std::uint64_t ticks, std::uint64_t freq) noexcept;
 
 // ---- 实例头 ----
 enum class ProbeRole : std::uint8_t
@@ -147,6 +151,7 @@ struct BlockSlot
     BlockSnapshot snapshot;
 };
 static_assert(sizeof(BlockSlot) == 64, "环槽 64 字节");
+static_assert(std::is_trivially_copyable<BlockSlot>::value, "入环只做定长拷贝：不分配、不抛异常");
 
 // 音频线程交进来的一块：自然类型的字段。超出契约上界的值在打包时钳到上界（m、off 钳到 ±(2^40 - 1)），
 // 保证写出来的文件永远能被分析器读进去；rs 钳到 255。
@@ -187,8 +192,10 @@ void appendProbeBlockRow(std::string& out, ProbeRole role, const BlockSlot& slot
 
 struct ProbeCounters
 {
-    std::uint64_t blocks = 0; // 累计记录块数（进了环的 B 行）
-    std::uint64_t dropped = 0; // 累计丢弃数
+    std::uint64_t blocks = 0; // 累计记录块数（进了环、且没有被落盘一侧丢掉的 B 行）
+    // 累计丢弃数：块（环满、文件到上限）、音频事件（事件环满）、排队的行（队列满）一起算，任何丢记录的路径都要计。
+    // 所以 blocks + dropped 等于试图记录的块数，只在没有事件和排队行被丢时才成立；块的缺口以 seq 为准
+    std::uint64_t dropped = 0;
     std::uint64_t maxN = 0; // 见过的最大块长
     std::uint64_t resync = 0; // 累计重同步
     std::uint64_t trips = 0; // 累计安全跳闸（Panic 除外）
@@ -216,6 +223,12 @@ std::string deriveProbeTok4(std::uint32_t pid, std::uint64_t monoMs, std::uint32
 // 本进程内分配一个没用过的 tok4：实例计数自增、混出候选，候选已被用过就顺延到下一个空位，所以同进程的两个实例一定不同。
 // 65536 个全用完之后重新开始（一个进程里不会有这么多探针实例）。
 std::string allocateProbeTok4(std::uint32_t pid, std::uint64_t monoMs);
+
+// 为自动分配 tok4 的实例挑一个目录里还不存在的文件：最多向 source 要 attempts 个候选，第一个不存在的就是结果。
+// 全部撞上已有文件（别的进程留下的）返回 false，tok4 与 path 不改；调用方因此不会去覆盖别人的日志。
+using ProbeTok4Source = std::string (*)(void* context);
+bool findFreeProbeLogPath(const std::string& directoryUtf8, ProbeRole role, std::uint32_t pid, int attempts,
+                          ProbeTok4Source source, void* sourceContext, std::string& tok4, std::string& pathUtf8);
 
 // ---- 定长单生产者单消费者环 ----
 // 容量取 2 的幂；生产者只写 head_，消费者只写 tail_，下标 64 位单调递增再取掩码，所以满和空不会混淆，整个容量都能用。
@@ -252,6 +265,12 @@ public:
         slots_[static_cast<std::size_t>(head) & mask_] = value;
         head_.store(head + 1, std::memory_order_release);
         return true;
+    }
+
+    // 生产者线程：现在是否已满。只有消费者会腾出空位，所以返回假之后紧接着的 tryPush 一定成功
+    bool full() const noexcept
+    {
+        return head_.load(std::memory_order_relaxed) - tail_.load(std::memory_order_acquire) >= capacity();
     }
 
     // 消费者线程
@@ -320,7 +339,10 @@ public:
     const std::string& filePath() const noexcept { return path_; }
 
     // ---- 音频线程（同一时刻只能有一个调用者） ----
-    // 每个回调调一次。窗口外只更新 S 要用的计数；窗口内把记录推进环
+    // 每个回调调一次。窗口外只更新 S 要用的计数；窗口内把记录推进环。
+    // fields.monoNs 是本块开始时读的单调纳秒，必须与 options.clock（缺省 probeMonoNs）同一个时钟：开始时刻早于当前
+    // C 行 t_ns 的块（beginCase 落在这块的中途）算窗口外，不写、不占 seq、不计丢弃，保证每个 B 的 mono_ns 都不早于 C 的
+    // t_ns。 这条规则的代价是：正好跨在两格交界上的那一块不记。
     void onBlock(const BlockFields& fields) noexcept;
     // 音频线程自己发的事件（first_block、first_paired_block、process_mode）。monoNs 由调用方读时钟传入
     void onAudioEvent(ProbeEventCode code, std::uint64_t a, std::uint64_t b, std::uint64_t monoNs) noexcept;
@@ -329,7 +351,7 @@ public:
 
     // ---- 其他线程 ----
     // 开始一个测试格：先取时间戳、写 C 行、补写状态快照，最后才打开块记录，保证 C.t_ns 不晚于该窗口第一块的 mono_ns。
-    // 取值不合契约或已关闭时返回 false，什么都不改。
+    // 取值不合契约、已关闭、或排队的行放不下 C 行加全部快照时返回 false，什么都不改（调用方可以稍后重试）。
     bool beginCase(const ProbeCase& c);
     // 关掉块记录。窗口里剩下的块照常排空
     void endCase();
@@ -366,6 +388,7 @@ private:
         std::uint64_t code = 0;
     };
     static_assert(sizeof(AudioEventSlot) == 32, "音频事件槽 32 字节");
+    static_assert(std::is_trivially_copyable<AudioEventSlot>::value, "入环只做定长拷贝：不分配、不抛异常");
 
     std::uint64_t now() const noexcept;
     void enqueueLocked(std::string&& line);
@@ -392,8 +415,18 @@ private:
     std::atomic<std::uint64_t> maxN_{0};
     std::atomic<std::uint64_t> resync_{0};
     std::atomic<std::uint64_t> trips_{0};
+    std::atomic<std::uint64_t> caseStartNs_{0}; // 当前窗口的 C.t_ns；beginCase 在打开 recording_ 之前写
     std::atomic<bool> recording_{false};
     std::atomic<bool> closed_{false};
+    // 以上都是音频线程每块要碰的原子量，必须 lock-free（decltype 跟着成员走，改了成员类型断言仍然管着它）
+    static_assert(decltype(blocksPushed_)::is_always_lock_free, "音频线程每块都加 blocksPushed_");
+    static_assert(decltype(dropped_)::is_always_lock_free, "音频线程丢块时加 dropped_");
+    static_assert(decltype(maxN_)::is_always_lock_free, "音频线程每块都读写 maxN_");
+    static_assert(decltype(resync_)::is_always_lock_free, "音频线程每块都加 resync_");
+    static_assert(decltype(trips_)::is_always_lock_free, "安全跳闸时加 trips_");
+    static_assert(decltype(caseStartNs_)::is_always_lock_free, "音频线程每块都读 caseStartNs_");
+    static_assert(decltype(recording_)::is_always_lock_free, "音频线程每块都读 recording_");
+    static_assert(decltype(closed_)::is_always_lock_free, "音频线程每块都读 closed_");
 
     // 非实时线程共享，mutex_ 保护
     std::mutex mutex_;

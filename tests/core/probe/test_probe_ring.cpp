@@ -44,6 +44,23 @@ TEST_CASE("the ring is first in first out and refuses new entries when full", "[
     CHECK(ring.size() == 0);
 }
 
+TEST_CASE("full tells the producer whether the next push will be refused", "[probe][ring]")
+{
+    SpscRing<int> ring(4);
+    int out = -1;
+    for (int i = 0; i < 4; ++i)
+    {
+        CHECK_FALSE(ring.full());
+        REQUIRE(ring.tryPush(i));
+    }
+    CHECK(ring.full());
+    CHECK_FALSE(ring.tryPush(9));
+    REQUIRE(ring.tryPop(out));
+    CHECK_FALSE(ring.full()); // 腾出一个位置，下一次推送一定成功
+    CHECK(ring.tryPush(9));
+    CHECK(ring.full());
+}
+
 TEST_CASE("the ring keeps order across index wrap-around", "[probe][ring]")
 {
     SpscRing<std::uint64_t> ring(8);

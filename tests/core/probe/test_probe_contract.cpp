@@ -160,7 +160,7 @@ TEST_CASE("the case and variant table equals the contract rule table", "[probe][
     const std::set<std::string> fromCode = codeCaseKeys();
     REQUIRE_FALSE(fromDoc.empty());
     CHECK(fromCode == fromDoc);
-    // 首尾各有一个空格：isValidProbeCase 靠整词查找
+    // 首尾各有一个空格：键表是以空格分隔的整词
     const std::string_view keys = probeCaseKeys();
     REQUIRE(keys.size() > 2);
     CHECK(keys.front() == ' ');
@@ -179,6 +179,36 @@ TEST_CASE("only contract combinations pass case validation", "[probe][contract]"
     CHECK_FALSE(isValidProbeCase("CB-01:steady CB-02", "toggle")); // 拼出整串也不行
     CHECK_FALSE(isValidProbeCase("CB-01", "steady CB-02:toggle"));
     CHECK_FALSE(isValidProbeCase("cb-01", "steady"));
+}
+
+TEST_CASE("case validation compares whole words and handles absurd input without allocating", "[probe][contract]")
+{
+    // 键表里每一项都得原样通过（含第一项、最后一项）；只差一个字符、只是前缀或后缀的都不行
+    const std::set<std::string> keys = codeCaseKeys();
+    REQUIRE(keys.size() == 45);
+    for (const std::string& key : keys)
+    {
+        const std::size_t colon = key.find(':');
+        REQUIRE(colon != std::string::npos);
+        const std::string caseId = key.substr(0, colon);
+        const std::string variant = key.substr(colon + 1);
+        INFO(key);
+        CHECK(isValidProbeCase(caseId, variant));
+        CHECK_FALSE(isValidProbeCase(caseId.substr(0, caseId.size() - 1), variant)); // case 少一个字符
+        CHECK_FALSE(isValidProbeCase(caseId + "x", variant));
+        CHECK_FALSE(isValidProbeCase(caseId, variant.substr(0, variant.size() - 1))); // variant 少一个字符
+        CHECK_FALSE(isValidProbeCase(caseId, variant + "x"));
+    }
+    CHECK_FALSE(isValidProbeCase("CB-0", "1:steady")); // 把冒号藏进去拼出另一项
+    CHECK_FALSE(isValidProbeCase("CB-01:", "steady"));
+    CHECK_FALSE(isValidProbeCase("CB-01", ":steady"));
+    CHECK_FALSE(isValidProbeCase("B-01", "steady"));
+    // 超长输入：不崩、不误判（不分配，也就不会 bad_alloc）
+    const std::string huge(1 << 20, 'a');
+    CHECK_FALSE(isValidProbeCase(huge, "steady"));
+    CHECK_FALSE(isValidProbeCase("CB-01", huge));
+    CHECK_FALSE(isValidProbeCase(huge, huge));
+    static_assert(noexcept(isValidProbeCase("CB-01", "steady")), "声明为 noexcept");
 }
 
 TEST_CASE("the documented limits are the limits the writer clamps to", "[probe][contract]")
