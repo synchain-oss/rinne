@@ -119,7 +119,33 @@ try {
     $during.Called = $false
     $hang = Invoke-ReaperScenario -Ctx $hangCtx -Scenario ([pscustomobject]@{ id = 'hang-lockbusy'; kind = 'hang'; timeoutSec = 2; killAfterSec = 0 })
     Write-Case '反例场景 hang 在 gui 锁等不到时：INCOMPLETE，原因写锁而不是「场景抛错」，REAPER 没有启动' $true ($hang.Status -eq 'INCOMPLETE' -and $hang.Detail -like '*gui 锁等不到*' -and $hang.Detail -notlike '*场景抛错*' -and -not $during.Called -and $hangCtx.Launches -eq 0)
-} finally { if (-not $holder.HasExited) { $holder.Kill() } }
+    # 同一个情形走真正的反例这一行（真实的 scenarios.json）：结局同样是 INCOMPLETE，但看门狗没有跑过，这一行不能判 PASS
+    $realConfig = Get-ReaperSmokeConfig (Join-Path $RepoRoot 'tests/reaper/scenarios.json')
+    $negTimeout = @($realConfig.negative | Where-Object { $_.id -eq 'neg-timeout' })[0]
+    $negKilled = @($realConfig.negative | Where-Object { $_.id -eq 'neg-killed' })[0]
+    $guardParams = @{ Unused = 1 } # 只有守卫类反例才用得上参数，这里是 hang 类，凑齐即可
+    $during.Called = $false
+    $rowTimeout = Invoke-ReaperNegativeRow -Context $hangCtx -Scenario $negTimeout -GuardParams $guardParams -TempRoot $Work
+    $rowKilled = Invoke-ReaperNegativeRow -Context $hangCtx -Scenario $negKilled -GuardParams $guardParams -TempRoot $Work
+    Write-Case '看门狗反例 neg-timeout 在 gui 锁等不到时：整行 INCOMPLETE（不是 PASS），写明没能验证，REAPER 没有启动' $true ($rowTimeout.observed -eq 'INCOMPLETE' -and $rowTimeout.status -eq 'INCOMPLETE' -and $rowTimeout.detail -like '*没能验证*' -and -not $during.Called -and $hangCtx.Launches -eq 0)
+    Write-Case '看门狗反例 neg-killed 在 gui 锁等不到时：整行 INCOMPLETE（不是 PASS）' $true ($rowKilled.observed -eq 'INCOMPLETE' -and $rowKilled.status -eq 'INCOMPLETE' -and $rowKilled.detail -like '*没能验证*')
+} finally { if (-not $holder.HasExited) { $holder.Kill(); $holder.WaitForExit() } }
+
+# 看门狗反例正常触发时仍是 PASS：替身睡觉，真的靠超时与到点被杀结束（真实的 scenarios.json 里的两条，只把时限缩短）。
+# 这里用的锁是自测专用名下的 gui 锁；Invoke-HangScenario 事后另起进程核对的是正式名下的 gui 锁，别人在跑 REAPER 时它会等不到。
+$sleeper = New-StandIn 'Start-Sleep -Seconds 60' @{}
+$genConfig = [pscustomobject]@{ limits = [pscustomobject]@{ luaTimeoutSec = 30 }; signal = [pscustomobject]@{ seconds = 4; kind = 'x' } }
+$genCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $genConfig -LockWaitSec 10
+$genCtx.Signals['48000-2-0'] = Join-Path $Work 'sig.wav'
+$genCtx.Launcher = $sleeper
+$quickTimeout = $negTimeout | ConvertTo-Json | ConvertFrom-Json; $quickTimeout.timeoutSec = 2
+$quickKilled = $negKilled | ConvertTo-Json | ConvertFrom-Json; $quickKilled.killAfterSec = 1.5
+$genTimeout = Invoke-ReaperNegativeRow -Context $genCtx -Scenario $quickTimeout -GuardParams $guardParams -TempRoot $Work
+$launchedOnce = $genCtx.Launches
+$genKilled = Invoke-ReaperNegativeRow -Context $genCtx -Scenario $quickKilled -GuardParams $guardParams -TempRoot $Work
+Write-Case '看门狗反例 neg-timeout 正常触发（超时被结束、进程没了、锁放开）仍是 PASS' $false ($genTimeout.status -eq 'PASS' -and $genTimeout.observed -eq 'INCOMPLETE' -and $genTimeout.detail -like '超时（*' -and $launchedOnce -eq 1)
+Write-Case '看门狗反例 neg-killed 正常触发（到点被结束）仍是 PASS' $false ($genKilled.status -eq 'PASS' -and $genKilled.observed -eq 'INCOMPLETE' -and $genKilled.detail -like '到点被结束（*' -and $genCtx.Launches -eq 2)
+
 
 # ---- 入口护栏 ----
 $scenarioFile = Join-Path $RepoRoot 'tests/reaper/scenarios.json'
@@ -147,6 +173,15 @@ $usageLogs = Join-Path $Work 'usage-logs'
 $u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'run.ps1'), '-CfgDir', $CfgA, '-BuildDir', (Join-Path $Work 'no-build'),
     '-LogDir', $usageLogs, '-UserTestingMarker', $marker, '-Only', '^no-such-scenario$')
 Write-Case '入口脚本：-Only 一个场景都没选中退出码 64，不写结果文件' $true ($u.Exit -eq 64 -and $u.Out -match 'USAGE:' -and -not (Test-Path -LiteralPath $usageLogs))
+
+# 守卫反例 neg-user-testing 的参数：调用方给的 $Params 里本来就带着 UserTestingMarker，带不带都要用守卫自己新建的标记
+$withKey = $smoke.Clone(); $withKey.UserTestingMarker = Join-Path $Work 'caller-marker-that-is-not-there'
+$guardRun = { param($callerParams) try { $g = Invoke-GuardNegative -Params $callerParams -Guard 'user-testing' -TempRoot $Work; $g.Observed -ceq 'SKIPPED' -and $g.Detail -like 'launches=0；USER_TESTING 标记存在*' } catch { $false } }
+Write-Case '守卫反例 neg-user-testing：调用方的参数里没带标记时，照样用自己新建的标记，SKIPPED 且一次 REAPER 都没启动' $true (& $guardRun $smoke)
+Write-Case '守卫反例 neg-user-testing：调用方的参数里已带着别的（不存在的）标记时，仍用自己新建的标记，不重复绑定也不被覆盖' $true (& $guardRun $withKey)
+$negUser = @($realConfig.negative | Where-Object { $_.id -eq 'neg-user-testing' })[0]
+$rowUser = Invoke-ReaperNegativeRow -Context $genCtx -Scenario $negUser -GuardParams $withKey -TempRoot $Work
+Write-Case '守卫反例 neg-user-testing 走完整的反例这一行（真实的 scenarios.json）：PASS' $true ($rowUser.status -eq 'PASS' -and $rowUser.observed -eq 'SKIPPED')
 
 # ---- 插件复制 ----
 $bundles = foreach ($name in 'Rinne Input', 'Rinne Output') {

@@ -5,7 +5,8 @@
 #   Get-ReaperPreflight                                 缺什么就 SKIPPED，写明原因（doctor 同用）
 #   Install-ReaperPlugins                               只复制本机构建（flavor 为 dev）的两个 VST3 到 <CfgDir>\plugins
 #   Invoke-ReaperSmoke                                  整套；返回结果对象，Write-ReaperSmokeResult 写 json
-# 结局词汇：PASS / FAIL / SKIPPED / INCOMPLETE。INCOMPLETE 不当 PASS。反例的 status 是「观察到的结局等于期望」才是 PASS。
+# 结局词汇：PASS / FAIL / SKIPPED / INCOMPLETE。INCOMPLETE 不当 PASS。反例的 status 要同时满足两条才是 PASS：观察到的结局等于期望，
+# 并且原因对得上（Detail 匹配 scenarios.json 里这条反例的 expectDetail）；没启动、没执行凑出来的同名结局不算（Get-NegativeVerdict）。
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -25,7 +26,7 @@ function Get-ReaperSmokeConfig([Parameter(Mandatory)][string]$Path) { Get-Conten
 # 属性不在返回 $null。按名字取属性对象：空对象（没有任何属性）上读 .Name 在 StrictMode 下会抛错。
 function Get-Prop($Object, [string]$Name) { $prop = $null -eq $Object ? $null : $Object.PSObject.Properties[$Name]; $null -eq $prop ? $null : $prop.Value }
 
-# 纯函数：scenarios.json 的结构问题。id 唯一；kind 认识；每种 kind 的必填字段在；反例有认识的 expect。
+# 纯函数：scenarios.json 的结构问题。id 唯一；kind 认识；每种 kind 的必填字段在；反例有认识的 expect，还有一条合法正则的 expectDetail。
 function Test-ReaperScenarioConfig {
     param([Parameter(Mandatory)]$Config, [string[]]$Kinds = (Get-ReaperScenarioKinds))
     $p = [Collections.Generic.List[string]]::new()
@@ -43,6 +44,12 @@ function Test-ReaperScenarioConfig {
             if ($kind -notin ($Kinds + 'guard')) { $p.Add("${id}：不认识的 kind $kind"); continue }
             foreach ($f in $need[$kind]) { if ($null -eq (Get-Prop $s $f)) { $p.Add("${id}：缺字段 $f") } }
             if ($group -eq 'negative' -and (Get-Prop $s expect) -notin $script:Expectable) { $p.Add("${id}：expect 不是 $($script:Expectable -join '/')") }
+            if ($group -eq 'negative') {
+                # 只比结局会被「没启动、没执行」空过（gui 锁等不到时看门狗反例也是 INCOMPLETE），所以每条反例都要写明结局里必须出现的原因
+                $why = [string](Get-Prop $s expectDetail)
+                if (-not $why) { $p.Add("${id}：缺 expectDetail（结局里必须出现的原因，正则）") }
+                else { try { $null = [regex]::new($why) } catch { $p.Add("${id}：expectDetail 不是合法的正则") } }
+            }
             if ($group -eq 'scenarios' -and $kind -in 'hang', 'guard') { $p.Add("${id}：$kind 只能做反例") }
         }
     }
@@ -151,7 +158,10 @@ function Invoke-GuardNegative {
             'user-testing' {
                 $marker = Join-Path $TempRoot "marker-$tag"
                 Set-Content -LiteralPath $marker -Value x; $made.Add($marker)
-                $r = Invoke-ReaperSmoke @Params -UserTestingMarker $marker -Only '^null-offline-48000-512$' -NoNegative -Repeat 1
+                # $Params 里本来就带着调用方的 UserTestingMarker：克隆后覆盖成这里新建的标记再展开一次，
+                # 不指望「显式实参盖过展开出来的同名键」这条绑定规则（与下面另两个守卫的写法一致）
+                $p2 = $Params.Clone(); $p2.UserTestingMarker = $marker
+                $r = Invoke-ReaperSmoke @p2 -Only '^null-offline-48000-512$' -NoNegative -Repeat 1
                 if ($r.launches -ne 0) { return [pscustomobject]@{ Observed = 'FAIL'; Detail = "标记存在却启动了 $($r.launches) 次 REAPER" } }
                 return [pscustomobject]@{ Observed = $r.verdict; Detail = "launches=$($r.launches)；$($r.skipReasons -join '；')" }
             }
@@ -175,6 +185,40 @@ function Invoke-GuardNegative {
     } finally {
         # 只删上面刚建的临时文件，再删空目录（不递归）
         foreach ($m in ($made | Sort-Object Length -Descending)) { if (Test-Path -LiteralPath $m) { Remove-Item -LiteralPath $m -ErrorAction SilentlyContinue } }
+    }
+}
+
+# 纯函数：反例这一行的结局。只比结局不够：有的结局「没启动、没执行」也凑得出来（gui 锁等不到时 REAPER 没有启动，看门狗反例照样是 INCOMPLETE，
+# 但看门狗根本没跑过）。所以要同时满足：观察到的结局等于期望，并且 Detail 里有这条反例要求的原因（expectDetail，区分大小写的正则）。
+#   结局等于期望、原因对得上                 PASS
+#   结局等于期望、原因对不上                 INCOMPLETE：反例没能验证（空过的就是这一种）
+#   观察到 INCOMPLETE（没能执行）、期望不是它  INCOMPLETE：同样是没能验证，不判 FAIL
+#   别的结局                                 FAIL
+function Get-NegativeVerdict {
+    param([Parameter(Mandatory)][string]$Expect, [Parameter(Mandatory)][string]$ExpectDetail, [Parameter(Mandatory)][string]$Observed, [string]$Detail = '')
+    if ($Observed -ne $Expect) {
+        if ($Observed -eq 'INCOMPLETE') { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "反例没能执行，没能验证（期望 $Expect）：$Detail" } }
+        return [pscustomobject]@{ Status = 'FAIL'; Detail = $Detail }
+    }
+    if ($Detail -cnotmatch $ExpectDetail) { return [pscustomobject]@{ Status = 'INCOMPLETE'; Detail = "结局是 $Observed，但原因对不上（要求匹配 $ExpectDetail），反例没能验证：$Detail" } }
+    [pscustomobject]@{ Status = 'PASS'; Detail = $Detail }
+}
+
+# 跑一个反例并给出结果里的这一行。守卫类在进程内重走真正的入口；其余走和正例相同的场景处理器。
+function Invoke-ReaperNegativeRow {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)]$Scenario, [Parameter(Mandatory)][hashtable]$GuardParams, [Parameter(Mandatory)][string]$TempRoot)
+    $t0 = [Diagnostics.Stopwatch]::StartNew()
+    if ($Scenario.kind -eq 'guard') {
+        $g = Invoke-GuardNegative -Params $GuardParams -Guard $Scenario.guard -TempRoot $TempRoot
+        $seen = $g.Observed; $note = $g.Detail
+    } else {
+        $o = Invoke-ReaperScenario -Ctx $Context -Scenario $Scenario
+        $seen = $o.Status; $note = $o.Detail
+    }
+    $v = Get-NegativeVerdict -Expect $Scenario.expect -ExpectDetail $Scenario.expectDetail -Observed $seen -Detail $note
+    [ordered]@{
+        id = $Scenario.id; kind = $Scenario.kind; negative = $true; expected = $Scenario.expect; observed = $seen; status = $v.Status
+        seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-LocalPaths $v.Detail)
     }
 }
 
@@ -229,19 +273,11 @@ function Invoke-ReaperSmoke {
             $rows.Add([ordered]@{ id = $s.id; kind = $s.kind; status = $o.Status; seconds = $o.Seconds; detail = (Hide-LocalPaths $o.Detail) })
             Write-Host ("  [{0}] {1}  {2} s  {3}" -f $o.Status, $s.id, $o.Seconds, (Hide-LocalPaths $o.Detail))
         }
+        $guardSet = @{ CfgDir = $CfgDir; ReaperExe = $ReaperExe; BuildDir = $BuildDir; NullTest = $NullTest; LogDir = $LogDir; UserTestingMarker = $UserTestingMarker; ScenarioFile = $ScenarioFile }
         foreach ($s in $negative) {
-            $t0 = [Diagnostics.Stopwatch]::StartNew()
-            if ($s.kind -eq 'guard') {
-                $p = @{ CfgDir = $CfgDir; ReaperExe = $ReaperExe; BuildDir = $BuildDir; NullTest = $NullTest; LogDir = $LogDir; UserTestingMarker = $UserTestingMarker; ScenarioFile = $ScenarioFile }
-                $g = Invoke-GuardNegative -Params $p -Guard $s.guard -TempRoot $work
-                $observed = $g.Observed; $detail = $g.Detail
-            } else {
-                $o = Invoke-ReaperScenario -Ctx $ctx -Scenario $s
-                $observed = $o.Status; $detail = $o.Detail
-            }
-            $status = $observed -eq $s.expect ? 'PASS' : 'FAIL'
-            $rows.Add([ordered]@{ id = $s.id; kind = $s.kind; negative = $true; expected = $s.expect; observed = $observed; status = $status; seconds = [math]::Round($t0.Elapsed.TotalSeconds, 1); detail = (Hide-LocalPaths $detail) })
-            Write-Host ("  [{0}] {1}  期望 {2}，观察到 {3}  {4}" -f $status, $s.id, $s.expect, $observed, (Hide-LocalPaths $detail))
+            $row = Invoke-ReaperNegativeRow -Context $ctx -Scenario $s -GuardParams $guardSet -TempRoot $work
+            $rows.Add($row)
+            Write-Host ("  [{0}] {1}  期望 {2}，观察到 {3}  {4}" -f $row.status, $row.id, $row.expected, $row.observed, $row.detail)
         }
         $launches += $ctx.Launches
         # 全绿就删掉这一轮的临时文件（逐个删，不递归）；有红的留着供查
@@ -278,4 +314,4 @@ function Write-ReaperSmokeResult {
 }
 
 Export-ModuleMember -Function Get-ReaperSmokeConfig, Test-ReaperScenarioConfig, Test-ReaperPluginClassIds, Get-ReaperPreflight, Install-ReaperPlugins, Hide-LocalPaths, Select-ReaperScenarios,
-    Get-WorstStatus, Get-RunVerdict, Invoke-ReaperSmoke, Write-ReaperSmokeResult
+    Get-WorstStatus, Get-RunVerdict, Get-NegativeVerdict, Invoke-GuardNegative, Invoke-ReaperNegativeRow, Invoke-ReaperSmoke, Write-ReaperSmokeResult

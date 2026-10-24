@@ -26,6 +26,35 @@ function Test-Usage([scriptblock]$Action, [string]$Like = '*') {
 
 function Write-Bytes([string]$Path, [byte[]]$Bytes) { [IO.File]::WriteAllBytes($Path, $Bytes) }
 
+$script:ScratchPrefix = 'rinne-reaper-selftest-' # 自测 scratch 目录的前缀（New-RinneTempDir 在它后面接 32 位随机十六进制）
+$script:SubstLetters = 'Z', 'Y', 'X', 'W', 'V', 'U' # 自测借来做 subst 的盘符（从前往后取第一个空闲的），开头清残留也只看这几个
+
+# subst 映射对整个登录会话可见：自测被硬结束（Ctrl+C 两次、看门狗、关终端）时 finally 里的 subst /d 不会跑，盘符就一直指向已被清掉的
+# 临时目录，下次自测还会把这个字母当成已占用。所以自测开头先清。只清同时满足两条的：盘符在 Z…U 里；目标路径是 -Prefix 后面紧跟 32 位
+# 十六进制（自测 scratch 目录的命名）的目录或它之下。别的映射（用户自己的）一个不碰。返回处理过的映射（字母、去向、是否清掉），
+# 由调用方打印——去向只进本机日志。
+function Get-SelfTestStalePrefix { [IO.Path]::Join([IO.Path]::GetTempPath(), $script:ScratchPrefix) } # 自测 scratch 目录路径的前缀，后面接 32 位十六进制
+
+function Clear-ReaperSelftestSubst {
+    param([string]$Prefix = (Get-SelfTestStalePrefix), [string[]]$Letters = $script:SubstLetters)
+    $done = [Collections.Generic.List[object]]::new()
+    $listing = try { (& subst.exe 2>&1 | Out-String) } catch { '' }
+    $prefixFull = [IO.Path]::GetFullPath($Prefix)
+    $owned = '^' + [regex]::Escape($prefixFull) + '[0-9a-f]{32}(\\|$)'
+    foreach ($line in ($listing -split "`r?`n")) {
+        $m = [regex]::Match($line, '^([A-Za-z]):\\: => (.+)$')
+        if (-not $m.Success) { continue }
+        $driveLetter = $m.Groups[1].Value.ToUpperInvariant()
+        if ($driveLetter -notin $Letters) { continue }
+        $target = $m.Groups[2].Value.Trim()
+        $full = try { [IO.Path]::GetFullPath($target) } catch { '' }
+        if (-not $full -or $full -inotmatch $owned) { continue }
+        & subst.exe "${driveLetter}:" /d 2>&1 | Out-Null
+        $done.Add([pscustomobject]@{ Letter = $driveLetter; Target = $target; Cleared = ($LASTEXITCODE -eq 0) })
+    }
+    $done.ToArray() # 逐项输出（不加逗号包一层）：调用方用 @() 接，没有残留时就是空数组
+}
+
 function Get-GuardCases([string]$Tmp) {
     $cases = [Collections.Generic.List[object]]::new()
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
@@ -65,7 +94,7 @@ function Get-GuardCases([string]$Tmp) {
     & $add '尾部的点与空格不改变结论（Win32 会把它们吃掉）' $true ((Test-Refused { Assert-ReaperCfgDir ($defaultDir + '.') } $byString) -and (Test-Refused { Assert-ReaperCfgDir ($defaultDir + ' ') } $byString))
     # subst 盘符：字符串里看不出它就是 APPDATA，只有认文件身份才拦得住。要一直查到盘符根，根目录本身就是 APPDATA。
     $used = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() })
-    $letter = @('Z', 'Y', 'X', 'W', 'V', 'U') | Where-Object { $_ -notin $used } | Select-Object -First 1
+    $letter = @($script:SubstLetters) | Where-Object { $_ -notin $used } | Select-Object -First 1
     $substOk = $false
     if ($letter) { & subst.exe "${letter}:" $roam 2>&1 | Out-Null; $substOk = ($LASTEXITCODE -eq 0) }
     if ($substOk) {
@@ -97,6 +126,51 @@ function Get-GuardCases([string]$Tmp) {
     & $add '正常初始化的配置目录通过校验' $false ($made.Ini -like '*good\reaper.ini' -and (Assert-ReaperCfgDir $good).Dir -eq $made.Dir)
     Remove-Item -LiteralPath (Join-Path $good 'reaper.ini')
     & $add '哨兵在、ini 没了被拒绝' $true (Test-Refused { Assert-ReaperCfgDir $good } '*reaper.ini*')
+    $cases
+}
+
+# 自测开头清 subst 残留（Clear-ReaperSelftestSubst）：用真的 subst 造映射，清完看它还在不在。这台机器上 Z…U 里往往只剩一个空闲盘符，
+# 所以一次只用一个字母，四种映射轮流造、轮流撤；造的映射和目录自己收拾，不碰别的。
+function Get-SubstResidueCases([string]$Tmp) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    # 开头清理用的前缀必须就是自测真正建 scratch 目录的命名（$Tmp 正是这一次自测的 scratch 目录），否则真的残留认不出来
+    $fullPrefix = [IO.Path]::GetFullPath((Get-SelfTestStalePrefix))
+    & $add 'subst 残留：开头清理用的前缀就是自测 scratch 目录的命名（前缀加 32 位十六进制）' $false ([IO.Path]::GetFullPath($Tmp) -imatch ('^' + [regex]::Escape($fullPrefix) + '[0-9a-f]{32}$'))
+    $used = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() })
+    $slot = @($script:SubstLetters | Where-Object { $_ -notin $used }) | Select-Object -First 1
+    if (-not $slot) {
+        & $add '（Z…U 里没有空闲盘符：subst 残留清理没能真跑）' $false $true
+        return $cases
+    }
+    $hex = { [guid]::NewGuid().ToString('N') }
+    $stalePrefix = Join-Path $Tmp 'stale-'
+    $listed = { (& subst.exe 2>&1 | Out-String) }
+    # 把 $slot 指到 $Place（要先建），可选地再删掉 $Place（目标没了、映射还在：和自测被硬结束之后的样子一样），然后清一遍，返回清理的报告和映射还在不在
+    $attempt = {
+        param([string]$Place, [bool]$Dangling, [string[]]$Scope)
+        $null = New-Item -ItemType Directory -Path $Place
+        try {
+            & subst.exe "${slot}:" $Place 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { return $null }
+            if ($Dangling) { Remove-Item -LiteralPath $Place }
+            $report = @(Clear-ReaperSelftestSubst -Prefix $stalePrefix -Letters $Scope)
+            [pscustomobject]@{ Report = $report; Still = [bool]((& $listed) -match ('(?m)^' + $slot + ':\\: =>')) }
+        } finally {
+            & subst.exe "${slot}:" /d 2>&1 | Out-Null # 只撤销这里自己造的
+            if (Test-Path -LiteralPath $Place) { Remove-Item -LiteralPath $Place } # 空目录，不递归
+        }
+    }
+    $r = & $attempt "$stalePrefix$(& $hex)" $true $script:SubstLetters
+    & $add 'subst 残留：Z…U 里指向自测 scratch 目录（前缀加 32 位十六进制）的残留映射被清掉，并报出字母和去向' $false ($r -and -not $r.Still -and $r.Report.Count -eq 1 -and $r.Report[0].Letter -ceq $slot -and $r.Report[0].Cleared -and $r.Report[0].Target -like "*$stalePrefix*")
+    $r = & $attempt (Join-Path $Tmp "keep-$(& $hex)") $false $script:SubstLetters
+    & $add 'subst 残留：指向别处的映射（用户自己的）不碰' $true ($r -and $r.Still -and $r.Report.Count -eq 0)
+    $r = & $attempt "${stalePrefix}notes" $false $script:SubstLetters
+    & $add 'subst 残留：前缀之后不是 32 位十六进制的不碰' $true ($r -and $r.Still -and $r.Report.Count -eq 0)
+    $r = & $attempt "$stalePrefix$(& $hex)" $false @('Q') # 清理的盘符范围里没有这个字母（范围默认是 Z…U）
+    & $add 'subst 残留：不在清理范围内的盘符不碰（哪怕指向自测 scratch 目录）' $true ($r -and $r.Still -and $r.Report.Count -eq 0)
+    & $add 'subst 残留：清理范围就是 Z…U' $false (($script:SubstLetters -join '') -ceq 'ZYXWVU')
+    & $add 'subst 残留：没有残留时什么都不做' $false (@(Clear-ReaperSelftestSubst -Prefix $stalePrefix).Count -eq 0)
     $cases
 }
 
@@ -231,6 +305,35 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '校验：缺必填字段判红' $true ((& $mutated { param($c) $c.scenarios[0].PSObject.Properties.Remove('sr') }) -match '缺字段')
     & $add '校验：反例的 expect 不认识判红' $true ((& $mutated { param($c) $c.negative[0].expect = 'MAYBE' }) -match 'expect')
     & $add '校验：hang 放进正例判红' $true ((& $mutated { param($c) $c.scenarios[0].kind = 'hang' }) -match '只能做反例')
+    & $add '校验：反例缺 expectDetail 判红' $true ((& $mutated { param($c) $c.negative[0].PSObject.Properties.Remove('expectDetail') }) -match '缺 expectDetail')
+    & $add '校验：反例的 expectDetail 不是合法的正则判红' $true ((& $mutated { param($c) $c.negative[0].expectDetail = '(' }) -match 'expectDetail 不是合法')
+    # 反例要同时对上结局和原因。只比结局会被「没启动、没执行」空过：gui 锁等不到时 REAPER 没有启动，看门狗反例照样是 INCOMPLETE，却没验证到看门狗
+    $negs = @{}
+    foreach ($n in $config.negative) { $negs[$n.id] = $n }
+    $verdict = { param($id, $observed, $detail) Get-NegativeVerdict -Expect $negs[$id].expect -ExpectDetail $negs[$id].expectDetail -Observed $observed -Detail $detail }
+    $hang = { param($state, $exitCode = 0) $w = Get-HostFailure ([pscustomobject]@{ Status = $state; Seconds = 8.2; ExitCode = $exitCode; Modal = 'license-nag'; Windows = @('About REAPER') }); "$w；进程已结束，gui 锁已放开" } # 与 Invoke-HangScenario 拼出来的原因同一个样子
+    & $add '反例判定（真实的 scenarios.json）：看门狗超时的反例，超时被结束才是 PASS' $false ((& $verdict 'neg-timeout' 'INCOMPLETE' (& $hang 'Timeout')).Status -eq 'PASS')
+    & $add '反例判定（真实的 scenarios.json）：到点被杀的反例，到点被结束才是 PASS' $false ((& $verdict 'neg-killed' 'INCOMPLETE' (& $hang 'Killed')).Status -eq 'PASS')
+    $busy = & $verdict 'neg-timeout' 'INCOMPLETE' 'gui 锁等不到；REAPER 没有启动，看门狗没能验证'
+    & $add '反例判定：gui 锁等不到（REAPER 没有启动）也是 INCOMPLETE，但不能让看门狗反例判 PASS，整行 INCOMPLETE 并写明没能验证' $true ($busy.Status -eq 'INCOMPLETE' -and $busy.Detail -match '没能验证')
+    & $add '反例判定：到点被杀的反例同样不能被 gui 锁等不到空过' $true ((& $verdict 'neg-killed' 'INCOMPLETE' (& $hang 'LockBusy')).Status -eq 'INCOMPLETE')
+    & $add '反例判定：看门狗反例被对话框卡住、或 REAPER 自己崩溃退出（INCOMPLETE 但不是看门狗按时限处理）也不算验证过' $true (((& $verdict 'neg-timeout' 'INCOMPLETE' (& $hang 'Modal')).Status -eq 'INCOMPLETE') -and ((& $verdict 'neg-timeout' 'INCOMPLETE' (& $hang 'Exited' 3)).Status -eq 'INCOMPLETE') -and ((& $verdict 'neg-killed' 'INCOMPLETE' (& $hang 'Modal')).Status -eq 'INCOMPLETE'))
+    & $add '反例判定：超时与到点被杀不能互相冒充' $true (((& $verdict 'neg-timeout' 'INCOMPLETE' (& $hang 'Killed')).Status -eq 'INCOMPLETE') -and ((& $verdict 'neg-killed' 'INCOMPLETE' (& $hang 'Timeout')).Status -eq 'INCOMPLETE'))
+    & $add '反例判定：偏 1 个样本的反例要看到 lag=1' $false ((& $verdict 'neg-offset-1-sample' 'FAIL' (Get-CompareVerdict 0 (& $nt '否' '1' '-inf')).Detail).Status -eq 'PASS')
+    & $add '反例判定：偏 1 个样本的反例，对拍报告读不出来（也是 FAIL，但没有 lag）不算验证过' $true ((& $verdict 'neg-offset-1-sample' 'FAIL' (Get-CompareVerdict 0 '').Detail).Status -eq 'INCOMPLETE')
+    & $add '反例判定：轨道 -6 dB 的反例要看到 lag=0 加前 2 s 峰值约 -6.9' $false ((& $verdict 'neg-track-minus-6db' 'FAIL' (Get-CompareVerdict 0 (& $nt '否' '0' '-6.94')).Detail).Status -eq 'PASS')
+    & $add '反例判定：轨道 -6 dB 的反例，换成 lag=1 的 FAIL 不能冒充' $true ((& $verdict 'neg-track-minus-6db' 'FAIL' (Get-CompareVerdict 0 (& $nt '否' '1' '-inf')).Detail).Status -eq 'INCOMPLETE')
+    & $add '反例判定：观察到 INCOMPLETE（反例没能执行，例如参照渲染没成）而期望是 FAIL，整行 INCOMPLETE，不判 FAIL' $true ((& $verdict 'neg-offset-1-sample' 'INCOMPLETE' '参照渲染没成：超时').Status -eq 'INCOMPLETE')
+    & $add '反例判定：该变红的没有变红（观察到 PASS，期望 FAIL）仍是 FAIL' $true ((& $verdict 'neg-offset-1-sample' 'PASS' '逐位相同=是 lag=0 前2s峰值=-inf').Status -eq 'FAIL')
+    $refusal = { param($block) try { $null = & $block; 'NOTHROW' } catch { $_.Exception.Message -replace '\s+', ' ' } } # 与 Invoke-GuardNegative 记下的原因同一个样子
+    $msgDefault = & $refusal { Assert-ReaperCfgDir (Get-ReaperDefaultCfgDir) }
+    $bareDir = Join-Path $Tmp 'neg-bare'
+    $null = New-Item -ItemType Directory -Path $bareDir
+    Set-Content -LiteralPath (Join-Path $bareDir 'reaper.ini') -Value '[REAPER]'
+    $msgBare = & $refusal { Assert-ReaperCfgDir $bareDir }
+    Remove-Item -LiteralPath (Join-Path $bareDir 'reaper.ini'); Remove-Item -LiteralPath $bareDir
+    & $add '反例判定（真实的 scenarios.json）：缺哨兵的守卫反例，拒绝的原因是哨兵才是 PASS；默认资源目录的拒绝理由冒充不了' $true (((& $verdict 'neg-sentinel-missing' 'REFUSED' $msgBare).Status -eq 'PASS') -and ((& $verdict 'neg-sentinel-missing' 'REFUSED' $msgDefault).Status -eq 'INCOMPLETE'))
+    & $add '反例判定（真实的 scenarios.json）：默认资源目录的守卫反例，拒绝的原因是「永不碰」才是 PASS；缺哨兵的拒绝理由冒充不了' $true (((& $verdict 'neg-default-dir' 'REFUSED' $msgDefault).Status -eq 'PASS') -and ((& $verdict 'neg-default-dir' 'REFUSED' $msgBare).Status -eq 'INCOMPLETE'))
     # 选择场景：-Only 写错、什么都没选中是用法错误，不能落成零个场景的 PASS
     $picked = Select-ReaperScenarios -Config $config
     & $add '选择：不给 -Only 时正例与反例都选' $false ($picked.Positive.Count -eq $config.scenarios.Count -and $picked.Negative.Count -eq $config.negative.Count)
@@ -283,7 +386,23 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     Set-Content -LiteralPath $marker -Value x
     $withMarker = Get-ReaperPreflight -ReaperExe (Join-Path $Tmp 'no.exe') -BuildDir (Join-Path $Tmp 'nobuild') -UserTestingMarker $marker
     & $add 'USER_TESTING 标记存在时预检只给这一条原因（整套 SKIPPED）' $true ($withMarker.Reasons.Count -eq 1 -and $withMarker.Reasons[0] -match 'USER_TESTING')
+    & $add '反例判定（真实的 scenarios.json）：USER_TESTING 的守卫反例要看到标记这条原因；因为别的缺项（没有 reaper.exe 等）凑出来的 SKIPPED 不算' $true (
+        ((& $verdict 'neg-user-testing' 'SKIPPED' "launches=0；$($withMarker.Reasons -join '；')").Status -eq 'PASS') -and
+        ((& $verdict 'neg-user-testing' 'SKIPPED' 'launches=0；找不到 reaper.exe；构建目录里没有 rinne-build.json（先用 gates 构建）').Status -eq 'INCOMPLETE'))
     Remove-Item -LiteralPath $marker
+    # 接线：看语法树里的命令调用，不比文本。入口里反例这一行必须经 Invoke-ReaperNegativeRow（结局加原因一起比）；自测入口要在建 scratch 目录之前先清 subst 残留
+    $callsIn = {
+        param($file, $functionName)
+        $parsed = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+        $fn = $parsed.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName }, $true)
+        @($fn.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { [pscustomobject]@{ Name = $_.GetCommandName(); At = $_.Extent.StartOffset } })
+    }
+    $smokeCalls = (& $callsIn (Join-Path $script:Scripts 'Suite.psm1') 'Invoke-ReaperSmoke').Name
+    & $add '接线：入口 Invoke-ReaperSmoke 的反例这一行经 Invoke-ReaperNegativeRow 判定，不在入口里自己跑守卫、自己比结局' $false (('Invoke-ReaperNegativeRow' -in $smokeCalls) -and ('Invoke-GuardNegative' -notin $smokeCalls))
+    $selfCalls = & $callsIn (Join-Path $PSScriptRoot 'SelfTest.psm1') 'Invoke-ReaperSelfTest'
+    $clearAt = @($selfCalls | Where-Object { $_.Name -eq 'Clear-ReaperSelftestSubst' } | ForEach-Object { $_.At })
+    $makeAt = @($selfCalls | Where-Object { $_.Name -eq 'New-RinneTempDir' } | ForEach-Object { $_.At })
+    & $add '接线：自测入口在建 scratch 目录之前先清 subst 残留' $false ($clearAt.Count -eq 1 -and $makeAt.Count -eq 1 -and $clearAt[0] -lt $makeAt[0])
     $cases
 }
 
@@ -306,14 +425,18 @@ function Invoke-ReaperSelfTest {
     param([Parameter(Mandatory)][string]$RepoRoot, [string]$CollisionSample = '')
     $realDefault = Get-ReaperDefaultCfgDir
     $before = Get-ReaperDefaultCfgSnapshot
-    $scratch = New-RinneTempDir -Prefix 'rinne-reaper-selftest-'
+    # 上一次自测若被硬结束，会留下指向已清掉的临时目录的 subst 盘符：先清（只清指向自测 scratch 目录的，别的映射不碰），清了什么写进本机日志
+    foreach ($stale in (Clear-ReaperSelftestSubst)) {
+        Write-Host ('  开头清理上次自测残留的 subst 映射 {0}: -> {1}{2}' -f $stale.Letter, $stale.Target, ($stale.Cleared ? '' : '（没能清掉）'))
+    }
+    $scratch = New-RinneTempDir -Prefix $script:ScratchPrefix
     $savedRoaming = $env:APPDATA
     $cases = [Collections.Generic.List[object]]::new()
     try {
         $fakeRoam = Join-Path $scratch 'Roaming-Fake-AppData'
         $null = New-Item -ItemType Directory -Path (Join-Path $fakeRoam 'REAPER')
         $env:APPDATA = $fakeRoam # 之后所有「默认资源目录」都指向这个假的；子进程继承
-        foreach ($group in @{ Fn = { Get-GuardCases $scratch } }, @{ Fn = { Get-IniCases } }, @{ Fn = { Get-SnapshotCases $scratch } },
+        foreach ($group in @{ Fn = { Get-GuardCases $scratch } }, @{ Fn = { Get-SubstResidueCases $scratch } }, @{ Fn = { Get-IniCases } }, @{ Fn = { Get-SnapshotCases $scratch } },
                            @{ Fn = { Get-LintCases $scratch $RepoRoot $CollisionSample } }, @{ Fn = { Get-PureCases $scratch $RepoRoot } }, @{ Fn = { Get-ChildCases $scratch $RepoRoot } }) {
             foreach ($c in (& $group.Fn)) { $cases.Add($c) }
         }

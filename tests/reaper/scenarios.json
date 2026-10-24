@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "notes": "第一段：Input 在首、Output 在末的空壳直通。第二段（回声间隔、探针录音）以后只往 scenarios 里加条目：新种类在 Scenarios.psm1 的登记表里加一项，环境变量放进条目的 env。",
+  "notes": "第一段：Input 在首、Output 在末的空壳直通。第二段（回声间隔、探针录音）以后只往 scenarios 里加条目：新种类在 Scenarios.psm1 的登记表里加一项，环境变量放进条目的 env。反例除 expect（结局）外还要写 expectDetail（结局里必须出现的原因，正则）：没启动、没执行凑出来的同名结局不算验证过。",
   "signal": { "kind": "impulse-noise", "seconds": 4 },
   "limits": {
     "renderTimeoutSec": 90,
@@ -48,7 +48,8 @@
       "sr": 48000,
       "block": 512,
       "mutate": { "sourceOffsetSamples": 1 },
-      "expect": "FAIL"
+      "expect": "FAIL",
+      "expectDetail": "^逐位相同=否 lag=1 "
     },
     {
       "id": "neg-track-minus-6db",
@@ -57,12 +58,31 @@
       "sr": 48000,
       "block": 512,
       "mutate": { "trackVolume": 0.5 },
-      "expect": "FAIL"
+      "expect": "FAIL",
+      "expectDetail": "^逐位相同=否 lag=0 前2s峰值=-6\\."
     },
-    { "id": "neg-timeout", "kind": "hang", "timeoutSec": 8, "expect": "INCOMPLETE" },
-    { "id": "neg-killed", "kind": "hang", "killAfterSec": 4, "expect": "INCOMPLETE" },
-    { "id": "neg-user-testing", "kind": "guard", "guard": "user-testing", "expect": "SKIPPED" },
-    { "id": "neg-sentinel-missing", "kind": "guard", "guard": "sentinel-missing", "expect": "REFUSED" },
-    { "id": "neg-default-dir", "kind": "guard", "guard": "default-dir", "expect": "REFUSED" }
+    { "id": "neg-timeout", "kind": "hang", "timeoutSec": 8, "expect": "INCOMPLETE", "expectDetail": "^超时（" },
+    { "id": "neg-killed", "kind": "hang", "killAfterSec": 4, "expect": "INCOMPLETE", "expectDetail": "^到点被结束（" },
+    {
+      "id": "neg-user-testing",
+      "kind": "guard",
+      "guard": "user-testing",
+      "expect": "SKIPPED",
+      "expectDetail": "launches=0；USER_TESTING 标记存在"
+    },
+    {
+      "id": "neg-sentinel-missing",
+      "kind": "guard",
+      "guard": "sentinel-missing",
+      "expect": "REFUSED",
+      "expectDetail": "^REFUSED: .*哨兵"
+    },
+    {
+      "id": "neg-default-dir",
+      "kind": "guard",
+      "guard": "default-dir",
+      "expect": "REFUSED",
+      "expectDetail": "^REFUSED: .*永不碰"
+    }
   ]
 }

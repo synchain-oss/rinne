@@ -26,14 +26,14 @@
 |---|---|
 | `neg-offset-1-sample`：渲染结果偏 1 个样本 | FAIL |
 | `neg-track-minus-6db`：轨道推子 −6 dB | FAIL |
-| `neg-timeout` / `neg-killed`：驱动卡住，超时或到点被结束 | INCOMPLETE，进程已结束，gui 锁已释放 |
+| `neg-timeout` / `neg-killed`：驱动卡住，超时或到点被结束 | INCOMPLETE，原因分别是超时、到点被结束，进程已结束，gui 锁已释放（gui 锁等不到、卡对话框、REAPER 自己退出都不算验证过） |
 | `neg-user-testing`：放上 `USER_TESTING` 标记 | SKIPPED，一次 REAPER 都不启动 |
 | `neg-sentinel-missing`：配置目录缺哨兵文件 | 拒绝启动 |
 | `neg-default-dir`：配置目录指向 REAPER 的默认资源目录 | 拒绝启动 |
 
 ## 结局词汇
 
-每个场景一个结局：`PASS`、`FAIL`、`SKIPPED`、`INCOMPLETE`。**INCOMPLETE 不当 PASS**：超时、被结束、卡在对话框、没产出文件、等不到 gui 锁，都是「没有得出结论」。反例的 `status` 是「观察到的结局等于期望」才是 PASS，原始结局写在 `observed`。整套的结局取最差的一个。退出码：0 全 PASS、1 有 FAIL、2 有 INCOMPLETE、3 整套 SKIPPED、64 被护栏拒绝或用法错误。
+每个场景一个结局：`PASS`、`FAIL`、`SKIPPED`、`INCOMPLETE`。**INCOMPLETE 不当 PASS**：超时、被结束、卡在对话框、没产出文件、等不到 gui 锁，都是「没有得出结论」。反例的 `status` 要同时满足两条才是 PASS：观察到的结局等于期望，并且原因对得上（说明里匹配 `scenarios.json` 里这条反例的 `expectDetail`），原始结局写在 `observed`。只比结局会被「没启动、没执行」空过：gui 锁等不到时 REAPER 根本没有启动，看门狗反例照样是 INCOMPLETE，却没验证到看门狗。所以结局对、原因不对，以及反例没能执行（观察到 INCOMPLETE 而期望不是它），这一行都是 INCOMPLETE（反例没能验证），不是 PASS 也不是 FAIL。每条反例必须写 `expectDetail`，缺了或不是合法正则，自测判红。整套的结局取最差的一个。退出码：0 全 PASS、1 有 FAIL、2 有 INCOMPLETE、3 整套 SKIPPED、64 被护栏拒绝或用法错误。
 
 ## 怎么跑
 
@@ -64,6 +64,7 @@ REAPER 对不存在的 `-cfgfile` 路径不报错，而是悄悄改用默认资�
 6. 每轮前后各取一次默认资源目录的清单（文件的大小与修改时间），变了就判红并停止后续轮次。
 7. 只复制本机 `dev` 构建的两个 VST3 进私有目录；构建清单不是 `dev` 风味就 SKIPPED。预检还会校验 `rinne-build.json`：它得是合法的 JSON 对象，`sha` 得是 7 到 40 位的十六进制（它会拼进结果文件名，也证明测的是哪次构建），否则整套 SKIPPED 并写明原因。工程模板里插件的类 ID 是写死的，预检读两个插件包里的 `Contents/Resources/moduleinfo.json`，与模板比对；对不上（插件身份变了，链上会是「效果不可用」的空槽，渲染照样逐位相同）就整套 SKIPPED，先去更新 `tests/reaper/Rpp.psm1`。
 8. `-Only` 写错、一个场景都没选中（或只选中了反例又给了 `-NoNegative`）是用法错误：退出码 64，不启动 REAPER，也不写结果文件；零个场景的一轮不会落成 PASS。
+9. 自测里用到 subst 盘符（验证文件身份层认得出指向 AppData 的盘符）：映射对整个登录会话可见，自测被硬结束时清理不会跑。所以自测开头先清上一次留下的残留，只清同时满足两条的：盘符在 Z 到 U 之间；目标是自测临时目录（固定前缀加 32 位十六进制）。别的映射一个不碰，清了哪个字母、指向哪里只写在本机的自测输出里。
 
 ## 第二段（探针接好后再做）
 
