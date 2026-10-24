@@ -5,7 +5,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -414,12 +416,13 @@ TEST_CASE("record counts are conserved when the audio thread outruns the log thr
     REQUIRE(log.beginCase(standardCase()));
 
     constexpr std::uint64_t kTotal = 150000;
+    const std::uint64_t base = probeMonoNs(); // 用的是真时钟：块的开始时刻必须不早于 beginCase 取的 C.t_ns
     std::thread audio([&] {
         for (std::uint64_t i = 0; i < kTotal; ++i)
         {
             BlockFields f;
             f.callSeq = i + 1;
-            f.monoNs = 3000000000u + i;
+            f.monoNs = base + i;
             f.n = 128;
             f.nDecl = 128;
             f.w = i * 128;
@@ -505,6 +508,87 @@ TEST_CASE("two instances of one process get different tok4 values and different 
     CHECK(fs::u8path(a.filePath()).filename().string() == "probe-I-4100-" + a.tok4() + ".csv");
 }
 
+namespace
+{
+
+// 按顺序吐出预设的 tok4 候选
+struct FixedTok4s
+{
+    explicit FixedTok4s(std::vector<std::string> list) : names(std::move(list)) {}
+    std::vector<std::string> names;
+    std::size_t next = 0;
+    static std::string take(void* context)
+    {
+        auto* self = static_cast<FixedTok4s*>(context);
+        return self->names[self->next++ % self->names.size()];
+    }
+};
+
+void writeMarker(const fs::path& path, const std::string& text)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << text;
+}
+
+} // namespace
+
+TEST_CASE("a free log name skips files that already exist and never touches them", "[probe][log]")
+{
+    TempDir dir;
+    writeMarker(dir.path() / "probe-I-4100-aaaa.csv", "someone else's log");
+    writeMarker(dir.path() / "probe-I-4100-bbbb.csv", "another one");
+
+    FixedTok4s source({"aaaa", "bbbb", "cccc"});
+    std::string tok4;
+    std::string pathUtf8;
+    REQUIRE(findFreeProbeLogPath(dir.utf8(), ProbeRole::kInput, 4100, 256, &FixedTok4s::take, &source, tok4, pathUtf8));
+    CHECK(tok4 == "cccc");
+    CHECK(fs::u8path(pathUtf8).filename().string() == "probe-I-4100-cccc.csv");
+    CHECK(source.next == 3);
+    CHECK(readFile(dir.path() / "probe-I-4100-aaaa.csv") == "someone else's log");
+    CHECK(readFile(dir.path() / "probe-I-4100-bbbb.csv") == "another one");
+}
+
+TEST_CASE("no free log name is found when every candidate is taken, and nothing is overwritten", "[probe][log]")
+{
+    TempDir dir;
+    writeMarker(dir.path() / "probe-O-4100-aaaa.csv", "first");
+    writeMarker(dir.path() / "probe-O-4100-bbbb.csv", "second");
+
+    FixedTok4s source({"aaaa", "bbbb"});
+    std::string tok4 = "keep";
+    std::string pathUtf8 = "keep";
+    CHECK_FALSE(
+        findFreeProbeLogPath(dir.utf8(), ProbeRole::kOutput, 4100, 256, &FixedTok4s::take, &source, tok4, pathUtf8));
+    CHECK(source.next == 256); // 试满了才放弃
+    CHECK(tok4 == "keep"); // 失败时出参不动，调用方不会拿着一个已存在的路径去打开
+    CHECK(pathUtf8 == "keep");
+    CHECK(readFile(dir.path() / "probe-O-4100-aaaa.csv") == "first");
+    CHECK(readFile(dir.path() / "probe-O-4100-bbbb.csv") == "second");
+
+    // 尝试次数是上限，不是下限
+    FixedTok4s again({"aaaa", "bbbb"});
+    CHECK_FALSE(
+        findFreeProbeLogPath(dir.utf8(), ProbeRole::kOutput, 4100, 3, &FixedTok4s::take, &again, tok4, pathUtf8));
+    CHECK(again.next == 3);
+    CHECK_FALSE(
+        findFreeProbeLogPath(dir.utf8(), ProbeRole::kOutput, 4100, 0, &FixedTok4s::take, &again, tok4, pathUtf8));
+    CHECK_FALSE(findFreeProbeLogPath(dir.utf8(), ProbeRole::kOutput, 4100, 5, nullptr, nullptr, tok4, pathUtf8));
+}
+
+TEST_CASE("ticks convert to nanoseconds without dividing by a zero frequency", "[probe][log]")
+{
+    CHECK(probeTicksToNs(12345, 0) == 0); // 静态初始化阶段频率还没取到
+    CHECK(probeTicksToNs(0, 10000000) == 0);
+    CHECK(probeTicksToNs(10000000, 10000000) == 1000000000u); // 10 MHz 的计数器，一秒
+    CHECK(probeTicksToNs(5, 10000000) == 500u);
+    CHECK(probeTicksToNs(48000, 48000) == 1000000000u);
+    CHECK(probeTicksToNs(1, 3) == 333333333u); // 余数那一段不丢
+    // 开机几年的刻度数也不溢出（先除后乘）
+    const std::uint64_t years = std::uint64_t{10000000} * 3600 * 24 * 365 * 5;
+    CHECK(probeTicksToNs(years, 10000000) == std::uint64_t{3600} * 24 * 365 * 5 * 1000000000u);
+}
+
 TEST_CASE("a missing directory is created and an empty one leaves the log closed but safe", "[probe][log]")
 {
     TempDir dir;
@@ -550,6 +634,21 @@ TEST_CASE("the header helper fills in the process and platform", "[probe][log]")
 #else
     CHECK(header.os == ProbeOs::kMac);
 #endif
+}
+
+namespace
+{
+
+// 静态初始化阶段读时钟。Windows 上计数器频率是 rinne_core 里的全局常量，别的翻译单元的全局对象先构造时它还是 0：
+// 读数仍要有意义，不能除以零，也不能返回 0
+const std::uint64_t gClockReadDuringStaticInit = probeMonoNs();
+
+} // namespace
+
+TEST_CASE("the monotonic clock can be read during static initialization", "[probe][log]")
+{
+    CHECK(gClockReadDuringStaticInit != 0);
+    CHECK(gClockReadDuringStaticInit <= probeMonoNs());
 }
 
 TEST_CASE("the monotonic clock never goes backwards", "[probe][log]")

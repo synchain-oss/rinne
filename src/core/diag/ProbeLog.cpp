@@ -195,6 +195,18 @@ std::int64_t queryCounterFrequency() noexcept
 const std::int64_t gCounterFrequency = queryCounterFrequency();
 #endif
 
+// 自动分配 tok4 时 findFreeProbeLogPath 向它要候选
+struct Tok4Request
+{
+    std::uint32_t pid;
+    std::uint64_t monoMs;
+};
+std::string nextTok4(void* context)
+{
+    const auto* request = static_cast<const Tok4Request*>(context);
+    return allocateProbeTok4(request->pid, request->monoMs);
+}
+
 // tok4 的进程级登记：同一进程里发出去的 tok4 不重复
 std::mutex gTok4Mutex;
 std::bitset<65536> gTok4Used;
@@ -205,6 +217,15 @@ constexpr std::uint64_t kBatchFlushBytes = std::uint64_t{1} << 20;
 } // namespace
 
 // ---- 时钟 ----
+std::uint64_t probeTicksToNs(std::uint64_t ticks, std::uint64_t freq) noexcept
+{
+    if (freq == 0)
+    {
+        return 0;
+    }
+    return (ticks / freq) * 1000000000u + (ticks % freq) * 1000000000u / freq;
+}
+
 std::uint64_t probeMonoNs() noexcept
 {
 #if defined(_WIN32)
@@ -213,9 +234,9 @@ std::uint64_t probeMonoNs() noexcept
     {
         return 0;
     }
-    const std::uint64_t ticks = static_cast<std::uint64_t>(counter.QuadPart);
-    const std::uint64_t freq = static_cast<std::uint64_t>(gCounterFrequency);
-    return (ticks / freq) * 1000000000u + (ticks % freq) * 1000000000u / freq;
+    // 静态初始化阶段（别的翻译单元的全局对象构造时）gCounterFrequency 还是 0：现查一次，不除零
+    const std::int64_t freq = gCounterFrequency > 0 ? gCounterFrequency : queryCounterFrequency();
+    return probeTicksToNs(static_cast<std::uint64_t>(counter.QuadPart), static_cast<std::uint64_t>(freq));
 #elif defined(CLOCK_MONOTONIC_RAW)
     timespec ts{};
     if (::clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0)
@@ -265,14 +286,26 @@ bool isValidProbeCase(std::string_view caseId, std::string_view variant) noexcep
     {
         return false;
     }
-    std::string token;
-    token.reserve(caseId.size() + variant.size() + 3);
-    token.push_back(' ');
-    token.append(caseId);
-    token.push_back(':');
-    token.append(variant);
-    token.push_back(' ');
-    return probeCaseKeys().find(token) != std::string_view::npos;
+    // 在键表里逐个比对 "<case>:<variant>"。不拼字符串：这个函数 noexcept，不能因为 bad_alloc 把宿主带崩
+    const std::string_view keys = probeCaseKeys();
+    std::size_t pos = 0;
+    while (pos < keys.size())
+    {
+        if (keys[pos] == ' ')
+        {
+            ++pos;
+            continue;
+        }
+        const std::size_t end = keys.find(' ', pos);
+        const std::string_view token = keys.substr(pos, end == std::string_view::npos ? keys.size() - pos : end - pos);
+        if (token.size() == caseId.size() + 1 + variant.size() && token.substr(0, caseId.size()) == caseId &&
+            token[caseId.size()] == ':' && token.substr(caseId.size() + 1) == variant)
+        {
+            return true;
+        }
+        pos = end == std::string_view::npos ? keys.size() : end;
+    }
+    return false;
 }
 
 // ---- 逐块记录的打包 ----
@@ -563,6 +596,30 @@ std::string allocateProbeTok4(std::uint32_t pid, std::uint64_t monoMs)
     return out;
 }
 
+bool findFreeProbeLogPath(const std::string& directoryUtf8, ProbeRole role, std::uint32_t pid, int attempts,
+                          ProbeTok4Source source, void* sourceContext, std::string& tok4, std::string& pathUtf8)
+{
+    namespace fs = std::filesystem;
+    if (source == nullptr)
+    {
+        return false;
+    }
+    const fs::path dir = fs::u8path(directoryUtf8);
+    for (int attempt = 0; attempt < attempts; ++attempt)
+    {
+        std::string candidate = source(sourceContext);
+        const fs::path path = dir / fs::u8path(probeLogFileName(role, pid, candidate));
+        std::error_code ec;
+        if (!fs::exists(path, ec) && !ec)
+        {
+            tok4 = std::move(candidate);
+            pathUtf8 = path.u8string();
+            return true;
+        }
+    }
+    return false;
+}
+
 // ---- ProbeLog ----
 ProbeLog::ProbeLog(ProbeLogOptions options)
     : options_(std::move(options)), role_(options_.header.role), blocks_(options_.blockRingSlots),
@@ -609,16 +666,18 @@ void ProbeLog::openFile()
     }
     else
     {
-        // 自动分配：已有同名文件（别的进程留下的同 pid 同 tok4）就换下一个，最多试 256 次
-        for (int attempt = 0; attempt < 256; ++attempt)
+        // 自动分配：已有同名文件（别的进程留下的同 pid 同 tok4）就换下一个，最多试 256 次。
+        // 256 个全被占了就不开日志（open_ 保持假）：绝不拿 trunc 去冲别人的文件
+        Tok4Request request{header.pid, now() / 1000000u};
+        std::string tok4;
+        std::string pathUtf8;
+        if (!findFreeProbeLogPath(options_.directory, header.role, header.pid, 256, &nextTok4, &request, tok4,
+                                  pathUtf8))
         {
-            header.tok4 = allocateProbeTok4(header.pid, static_cast<std::uint64_t>(now() / 1000000u));
-            path = dir / fs::u8path(probeLogFileName(header.role, header.pid, header.tok4));
-            if (!fs::exists(path, ec))
-            {
-                break;
-            }
+            return;
         }
+        header.tok4 = std::move(tok4);
+        path = fs::u8path(pathUtf8);
     }
     // 二进制模式：Windows 的文本模式会把 LF 写成 CRLF，格式只许 LF
     file_.open(path, std::ios::binary | std::ios::out | std::ios::trunc);
@@ -646,10 +705,11 @@ void ProbeLog::onBlock(const BlockFields& fields) noexcept
     {
         return;
     }
-    // 单写者：读后写不会丢更新
-    if (fields.n > maxN_.load(std::memory_order_relaxed))
+    // 单写者：读后写不会丢更新。与 B 行的 n 同一个上界，S 行的 max_n 因此永远在契约范围内
+    const std::uint64_t n = std::min<std::uint64_t>(fields.n, kProbeMaxBlock);
+    if (n > maxN_.load(std::memory_order_relaxed))
     {
-        maxN_.store(fields.n, std::memory_order_relaxed);
+        maxN_.store(n, std::memory_order_relaxed);
     }
     if (fields.rs != 0)
     {
@@ -659,13 +719,28 @@ void ProbeLog::onBlock(const BlockFields& fields) noexcept
     {
         return;
     }
+    // 块在 beginCase 之前就开始了（beginCase 落在这块中途）：它的 mono_ns 早于 C.t_ns，记进来会成孤块或被算到上一格。
+    // 当窗口外处理：不占 seq，不计丢弃。recording_ 由假变真时，caseStartNs_ 在它之前写、release 发布，上面 acquire
+    // 读到真就一定看得到新起点。不经 endCase 连开两格时 recording_ 一直为真，这里可能还读到旧起点，落在两个 C 行之间
+    // 开始的块会被记下；它的 mono_ns 不早于上一个 C 行，分析器按时间戳把它归进上一格，不违反格式契约
+    if (fields.monoNs < caseStartNs_.load(std::memory_order_relaxed))
+    {
+        return;
+    }
     const std::uint64_t seq = nextSeq_++; // 丢了也占一个序号：文件里的缺口就是丢弃的位置
-    if (!blocks_.tryPush(packBlock(seq, fields)))
+    if (blocks_.full())
     {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    // 先加后推：落盘线程弹出之后的 fetch_sub（dropBlock）一定排在这次加之后，blocksPushed_ 不会下溢。
+    // 生产者只有这一个线程、环刚才没满，tryPush 不会失败；万一失败就把计数还回去
     blocksPushed_.fetch_add(1, std::memory_order_relaxed);
+    if (!blocks_.tryPush(packBlock(seq, fields)))
+    {
+        blocksPushed_.fetch_sub(1, std::memory_order_relaxed);
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 void ProbeLog::onAudioEvent(ProbeEventCode code, std::uint64_t a, std::uint64_t b, std::uint64_t monoNs) noexcept
@@ -731,7 +806,9 @@ bool ProbeLog::beginCase(const ProbeCase& c)
     {
         return false;
     }
-    enqueueLocked(std::move(row));
+    std::vector<std::string> rows;
+    rows.reserve(1 + kSnapshotKinds);
+    rows.push_back(std::move(row));
 
     // 状态快照：配对、后端、状态恢复这类事件往往发生在选 case 之前，补写一遍让每一格自含。
     // 原事件在发生时已经写过，这里是额外的一份，t_ns 是补写的时间
@@ -749,9 +826,19 @@ bool ProbeLog::beginCase(const ProbeCase& c)
         std::string line;
         if (appendProbeEventRow(line, now(), kOrder[i], ProbeEventArgs{stored.a, stored.b, stored.text}))
         {
-            enqueueLocked(std::move(line));
+            rows.push_back(std::move(line));
         }
     }
+    // C 行加全部快照要整体放得下：丢了 C 行还照常开窗口，这一格的块就会被分析器归进上一格。放不下什么都不改
+    if (pending_.size() + rows.size() > options_.pendingLimit)
+    {
+        return false;
+    }
+    for (std::string& line : rows)
+    {
+        pending_.push_back(std::move(line));
+    }
+    caseStartNs_.store(t0, std::memory_order_release);
     recording_.store(true, std::memory_order_release);
     return true;
 }
