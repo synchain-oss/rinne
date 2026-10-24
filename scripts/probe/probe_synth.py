@@ -133,6 +133,61 @@ def multi_pair(cells, *, pid, tok=("e1f2", "e3f4"), fmt=("vst3", "vst3"), host_k
     return li, lo
 
 
+def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024):
+    """像 multi_pair，但每格单独指定块数与记录方式，用来造「现场误记了一格」的日志。
+    cells = [(case, variant, buf, guard, 块数, 方式)]，方式：
+      ok       正常写出；
+      unbound  窗口里拿不到绑定：块不写 B 行，却占 seq、计丢弃（探针对没取到绑定的块就是这么记的）；
+      gap:K    In 端第 K 块丢掉（序号缺口，同时计丢弃）；
+      taildrop 正常写完之后，窗口末尾又有 3 块没写出（占 seq、计丢弃，但之后没有任何块可以让缺口露出来）。
+    S 行与 Z 行带累计丢弃数。"""
+    li = Log("I", "vst3", "cubase", "win", pid=pid, tok=tok[0])
+    lo = Log("O", "vst3", "cubase", "win", pid=pid, tok=tok[1])
+    span = 1_000_000_000
+    dropped = {"I": 0, "O": 0}
+    for lg in (li, lo):
+        lg.event(T_START - 500, "prepare", sr, prepare_max)
+        lg.summary(T_START)
+    g = 0
+    for c, (case, variant, buf, guard, count, mode) in enumerate(cells):
+        base = T_START + c * span
+        for lg in (li, lo):
+            lg.case(base - 100, case, variant, buf, guard, sr)
+            lg.summary(base + span // 2, dropped=dropped[lg.role])
+        for k in range(count):
+            host = HOST0 + c * span + k * PERIOD
+            drop_in = mode == "unbound" or mode == f"gap:{k}"
+            drop_out = mode == "unbound"
+            li.block(2 * g, base + k * PERIOD, host_ns=host, rs=1 if g == 0 else 0, drop=drop_in)
+            lo.block(2 * g + 1, base + k * PERIOD + 1000, host_ns=host, drop=drop_out)
+            dropped["I"] += drop_in
+            dropped["O"] += drop_out
+            g += 1
+        if mode == "taildrop":
+            for lg in (li, lo):
+                for _ in range(3):
+                    lg.block(0, 0, drop=True)
+                dropped[lg.role] += 3
+    end = T_START + len(cells) * span
+    for lg in (li, lo):
+        lg.summary(end, dropped=dropped[lg.role])
+        lg.close(end + 100_000_000, dropped=dropped[lg.role])
+    return li, lo
+
+
+def clone(role="I", pid=4990, tok="f0f0", span_ns=300_000_000, close=True):
+    """Render in Place / Freeze 的临时克隆实例：拿到 setState 就开了日志，没有 C 行，活不到第一条 1 Hz 摘要。
+    close=False 是它被强杀：没有 Z 行。"""
+    lg = Log(role, pid=pid, tok=tok)
+    lg.event(T_START, "prepare", 48000, 256)
+    lg.event(T_START + 50_000_000, "set_state", "A")
+    if close:
+        lg.close(T_START + span_ns)
+    else:
+        lg.event(T_START + span_ns, "destruct")
+    return lg
+
+
 def files_of(*logs, extra=None):
     out = {lg.name: lg.text() for lg in logs}
     out.update(extra or {})
@@ -176,6 +231,36 @@ def scen_a2(state, pid=4100):
     li, lo = pair("CB-02", "toggle", 256, "low", count=120, hook=hook, pid=pid)
     for i, k in enumerate(ks):
         li.event(T_START + k * PERIOD, "monitor_toggle", i % 2)
+    return files_of(li, lo)
+
+
+THREADS = ("1a2b3c4d", "5e6f7a8b")
+
+
+def scen_a2_thread(state, pid=4100, switches=10, explicit=False):
+    """宿主不通知监听键，日志里没有 monitor_toggle：切换点只能从 In 端 B 行 thread 的变化推断。
+    state：pass；fail（第 3 次切换后重同步两次）；incomplete（thread 一直不变，只有块长 n 来回抖，抖动不算切换）；
+    flap（thread 每 3 块换一次，一共几十次，每个窗口都不足 8 块）。
+    explicit=True 另外写出显式事件，与 thread 变化落在同一块上：同一次切换不能数两遍。"""
+    ks = [5 + 10 * i for i in range(switches)]
+
+    def hook(r, k, row):
+        if r != "I":
+            return
+        if state == "incomplete":
+            row["n"] = 128 if k % 2 else 256
+            return
+        if state == "flap":  # 线程池里每 3 块换一次线程：窗口都太短，不能当成十几次像样的切换去判通过
+            row["thread"] = THREADS[(k // 3) % 2]
+            return
+        row["thread"] = THREADS[sum(1 for x in ks if x <= k) % 2]
+        if k in ks:
+            row["rs"] = 2 if (state == "fail" and k == ks[2]) else 1
+
+    li, lo = pair("CB-02", "toggle", 256, "low", count=120, hook=hook, pid=pid)
+    if explicit:
+        for i, k in enumerate(ks):
+            li.event(T_START + k * PERIOD, "monitor_toggle", i % 2)
     return files_of(li, lo)
 
 
@@ -352,6 +437,14 @@ def obs_fixtures():
     return {"obs-normal": (normal, {}), "obs-abnormal": (abnormal, {})}
 
 
+def short_with_c(pid):
+    """有 C 行、活不到 2 秒、也没有 1 Hz 摘要的 Out 实例：克隆豁免只给没有 C 行的实例，这个仍是数据不全。"""
+    li, lo = pair("CB-11", "constrain", 256, "low", pid=pid, blocks=False)
+    lo.lines = [ln for ln in lo.lines if not ln.startswith(("S,", "Z,"))]
+    lo.lines.append(f"Z,{T_START + 500_000_000},0,0")
+    return li, lo
+
+
 def extra_cells():
     """补充的边界夹具：{目录名: (文件, {判据: 期望})}。"""
 
@@ -440,7 +533,66 @@ def extra_cells():
     ]
     for lg in one_cell_missing[:2]:
         lg.event(T_START + 5, "track_props", "Track%201", "ff8800")
+
+    def cb05_stop(variant, name, a="", pid=4940, pre=False):
+        """CB-05 停用格：Out 端在本段里（或段之前，pre=True）记一个停用相关的事件。"""
+        a_, b_ = pair("CB-05", variant, pid=pid, tok=("c0a1", "c0a2"))
+        b_.event(T_START - 400 if pre else T_START + 10, name, a)
+        return files_of(a_, b_)
+
+    pre_ping = pair("CB-06", "smart", pid=4950)
+    pre_ping[0].event(T_START - 400, "ping", 9600)  # 第一个 C 行之前的 Ping（第 0 步留下的）
+    pre_ping[0].event(T_START + 1000, "ping", 9600)  # 本段里只有这一条
+    good = ("CB-01", "steady", 64, "off", 40, "ok")
+    good2 = ("CB-01", "steady", 256, "low", 40, "ok")
+    good3 = ("CB-01", "steady", 1024, "high", 40, "ok")
+    stray = ("CB-01", "steady", "-", "na", 5, "ok")  # 面板默认 Case 误记的一格：只有几块
+    stray_unbound = ("CB-01", "steady", "-", "na", 40, "unbound")
     return {
+        "a2-pass-thread-inferred": (scen_a2_thread("pass", pid=5000), {"A2": "PASS"}),
+        "a2-fail-thread-inferred": (scen_a2_thread("fail", pid=5001), {"A2": "FAIL"}),
+        "a2-incomplete-thread-constant": (scen_a2_thread("incomplete", pid=5002), {"A2": "INCOMPLETE"}),
+        "a2-incomplete-thread-few": (scen_a2_thread("pass", pid=5003, switches=3), {"A2": "INCOMPLETE"}),
+        "a2-incomplete-thread-flap": (scen_a2_thread("flap", pid=5005), {"A2": "INCOMPLETE"}),
+        "a2-incomplete-one-cell-no-switch": (  # 一格有 10 次切换，另一格一次都没有：后者不能被前者的次数盖住
+            {**scen_a2_thread("pass", pid=5006), **files_of(*pair("CB-02", "toggle", 64, "low", count=120, pid=5007))},
+            {"A2": "INCOMPLETE"},
+        ),
+        "a2-pass-explicit-and-thread": (scen_a2_thread("pass", pid=5004, explicit=True), {"A2": "PASS"}),
+        "cb05-deactivate-reset-only": (cb05_stop("deactivate", "reset"), {"OBS": "PASS"}),
+        "cb05-deactivate-release-only": (cb05_stop("deactivate", "release"), {"OBS": "PASS"}),
+        "cb05-disable-track-reset-only": (cb05_stop("disable-track", "reset"), {"OBS": "PASS"}),
+        "cb05-deactivate-set-processing-on": (cb05_stop("deactivate", "set_processing", 1), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-pre-release": (cb05_stop("deactivate", "release", pre=True), {"OBS": "INCOMPLETE"}),
+        "cb06-smart-pre-ping": (files_of(*pre_ping), {"OBS": "INCOMPLETE"}),
+        "a8-pass-short-clones": (
+            files_of(*pair("CB-11", "constrain", 256, "low", pid=5010), clone("I", 5011, "f0f1"), clone("O", 5011, "f0f2", 120_000_000)),
+            {"A8": "PASS"},
+        ),
+        "a8-incomplete-long-no-c": (
+            files_of(*pair("CB-11", "constrain", 256, "low", pid=5012), clone("I", 5013, "f0f3", 2_500_000_000)),
+            {"A8": "INCOMPLETE"},
+        ),
+        "a8-fail-short-clone-crash": (
+            files_of(*pair("CB-11", "constrain", 256, "low", pid=5014), clone("I", 5015, "f0f4", close=False)),
+            {"A8": "FAIL"},
+        ),
+        "a8-incomplete-short-with-c": (files_of(*short_with_c(pid=5016)), {"A8": "INCOMPLETE"}),
+        "a1-incomplete-misrecorded-mid": (files_of(*multi_cells([good, stray, good3], pid=5020)), {"A1": "INCOMPLETE"}),
+        "a1-incomplete-misrecorded-unbound": (files_of(*multi_cells([good, stray_unbound, good2], pid=5021)), {"A1": "INCOMPLETE"}),
+        "a1-incomplete-misrecorded-tail": (
+            files_of(*multi_cells([good, ("CB-01", "steady", "-", "na", 5, "taildrop"), good3], pid=5025)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-misrecorded-trailing": (files_of(*multi_cells([good, good2, stray_unbound], pid=5022)), {"A1": "INCOMPLETE"}),
+        "a1-incomplete-gap-beside-excluded": (
+            files_of(*multi_cells([good, stray, ("CB-01", "steady", 1024, "high", 40, "gap:15")], pid=5023)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-unlocated-drop": (
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5024)),
+            {"A1": "INCOMPLETE"},
+        ),
         "a7-incomplete-cat2-full": (files_of(*cat2_full), {"A7": "INCOMPLETE"}),
         "a4-incomplete-cat2-gap": (files_of(*gap_a), {"A4": "INCOMPLETE"}),
         "a6-incomplete-one-cell-missing": (files_of(*one_cell_missing), {"A6": "INCOMPLETE"}),

@@ -1,0 +1,5 @@
+rinne-probe-log,1
+H,O,vst3,cubase,win,x64,5016,900,c3d4,0123abcd
+E,999999500,prepare,48000,256
+C,999999900,CB-11,constrain,256,low,48000
+Z,1500000000,0,0

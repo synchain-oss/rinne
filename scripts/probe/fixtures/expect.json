@@ -14,13 +14,34 @@
   "a1-incomplete-dup": {
     "A1": "INCOMPLETE"
   },
+  "a1-incomplete-gap-beside-excluded": {
+    "A1": "INCOMPLETE"
+  },
   "a1-incomplete-in-only": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-misrecorded-mid": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-misrecorded-tail": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-misrecorded-trailing": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-misrecorded-unbound": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-unlocated-drop": {
     "A1": "INCOMPLETE"
   },
   "a1-pass": {
     "A1": "PASS"
   },
   "a2-fail": {
+    "A2": "FAIL"
+  },
+  "a2-fail-thread-inferred": {
     "A2": "FAIL"
   },
   "a2-incomplete": {
@@ -32,7 +53,25 @@
   "a2-incomplete-noblocks": {
     "A2": "INCOMPLETE"
   },
+  "a2-incomplete-one-cell-no-switch": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-thread-constant": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-thread-few": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-thread-flap": {
+    "A2": "INCOMPLETE"
+  },
   "a2-pass": {
+    "A2": "PASS"
+  },
+  "a2-pass-explicit-and-thread": {
+    "A2": "PASS"
+  },
+  "a2-pass-thread-inferred": {
     "A2": "PASS"
   },
   "a3-fail": {
@@ -132,10 +171,22 @@
   "a8-fail-broken-file": {
     "A8": "FAIL"
   },
+  "a8-fail-short-clone-crash": {
+    "A8": "FAIL"
+  },
   "a8-incomplete": {
     "A8": "INCOMPLETE"
   },
+  "a8-incomplete-long-no-c": {
+    "A8": "INCOMPLETE"
+  },
+  "a8-incomplete-short-with-c": {
+    "A8": "INCOMPLETE"
+  },
   "a8-pass": {
+    "A8": "PASS"
+  },
+  "a8-pass-short-clones": {
     "A8": "PASS"
   },
   "a9-fail": {
@@ -156,8 +207,26 @@
   "cb05-deactivate-no-event": {
     "OBS": "INCOMPLETE"
   },
+  "cb05-deactivate-pre-release": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-deactivate-release-only": {
+    "OBS": "PASS"
+  },
+  "cb05-deactivate-reset-only": {
+    "OBS": "PASS"
+  },
+  "cb05-deactivate-set-processing-on": {
+    "OBS": "INCOMPLETE"
+  },
   "cb05-deactivate-single-end": {
     "OBS": "PASS"
+  },
+  "cb05-disable-track-reset-only": {
+    "OBS": "PASS"
+  },
+  "cb06-smart-pre-ping": {
+    "OBS": "INCOMPLETE"
   },
   "cb07-dup-one-bad": {
     "OBS": "INCOMPLETE"
