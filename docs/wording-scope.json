@@ -27,7 +27,7 @@
     },
     {
       "reason": "给开发者与维护者看的构建与职责说明，不是面向用户的文字",
-      "paths": ["docs/BUILDING.md", "docs/MAINTAINERS.md"]
+      "paths": ["docs/BUILDING.md", "docs/MAINTAINERS.md", "docs/testing/"]
     },
     {
       "reason": "声明登记表与范围表自己：strong 短语栏与理由栏列的就是被管控的强断言与禁用词本身",
