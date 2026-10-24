@@ -368,12 +368,19 @@ TEST_CASE("the S row is written by the log's own thread without any message thre
     const fs::path path = fs::u8path(log.filePath());
     REQUIRE(log.isOpen());
 
-    // 这段时间里调用方不碰日志：不调 pump，也不记事件。摘要只能由日志自己的线程写
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    // 这段时间里调用方不碰日志：不调 pump，也不记事件。摘要只能由日志自己的线程写。
+    // 不靠睡定长再数行：CI 机上线程睡眠会被拉长（计时器合并），固定睡眠时间内写出的行数不稳。按截止时间轮询，
+    // 够 5 行就停；日志线程根本没起时等满截止时间才判失败，不会挂住。
+    constexpr std::size_t kWantedSummaries = 5;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline && rowsOfKind(readFile(path), "S").size() < kWantedSummaries)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
     log.close();
     const std::string text = readFile(path);
     const auto summaries = rowsOfKind(text, "S");
-    CHECK(summaries.size() >= 5);
+    CHECK(summaries.size() >= kWantedSummaries);
     CHECK(structureProblem(text).empty());
     // 摘要的时间戳单调递增
     for (std::size_t i = 1; i < summaries.size(); ++i)
