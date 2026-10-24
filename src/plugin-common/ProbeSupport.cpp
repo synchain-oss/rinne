@@ -62,40 +62,9 @@ const CaseTable& caseTable()
     return table;
 }
 
-std::string trimmed(const std::string& text)
-{
-    const auto isSpace = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-    std::size_t begin = 0;
-    std::size_t end = text.size();
-    while (begin < end && isSpace(text[begin]))
-    {
-        ++begin;
-    }
-    while (end > begin && isSpace(text[end - 1]))
-    {
-        --end;
-    }
-    return text.substr(begin, end - begin);
-}
-
 bool isSeparator(char c) noexcept
 {
     return c == '/' || c == '\\';
-}
-
-// 不经文件系统库：判断只看文本，Windows 与 mac 上结果一样，测试不依赖平台
-bool isAbsolutePath(std::string_view path) noexcept
-{
-    if (path.empty())
-    {
-        return false;
-    }
-    if (path[0] == '/' || (path[0] == '\\' && path.size() > 1 && path[1] == '\\'))
-    {
-        return true;
-    }
-    const bool letter = (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z');
-    return letter && path.size() >= 3 && path[1] == ':' && isSeparator(path[2]);
 }
 
 // ---- state 的小端读写 ----
@@ -276,19 +245,9 @@ AutoRequest parseAutoParams(int autoCase, int autoVariant, int autoRecordSeconds
 }
 
 // ---- 日志目录 ----
-ProbeLogDir resolveLogDir(const EnvReader& readEnv, std::string_view documentsDir)
+ProbeLogDir resolveLogDir(std::string_view documentsDir)
 {
     ProbeLogDir dir;
-    if (readEnv)
-    {
-        const std::string value = trimmed(readEnv(kLogDirEnv));
-        if (isAbsolutePath(value))
-        {
-            dir.path = value;
-            dir.fromEnvironment = true;
-            return dir;
-        }
-    }
     if (!documentsDir.empty())
     {
         std::string base(documentsDir);
@@ -302,32 +261,15 @@ ProbeLogDir resolveLogDir(const EnvReader& readEnv, std::string_view documentsDi
     return dir;
 }
 
-ProbeLogDir resolveLogDir(const EnvReader& readEnv)
+ProbeLogDir resolveLogDir()
 {
-    const std::string documents =
-        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getFullPathName().toStdString();
-    return resolveLogDir(readEnv, documents);
+    return resolveLogDir(
+        juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getFullPathName().toStdString());
 }
 
 std::string logDirLabel(const ProbeLogDir& dir)
 {
-    if (dir.path.empty())
-    {
-        return "none";
-    }
-    if (!dir.fromEnvironment)
-    {
-        return "default";
-    }
-    std::string path = dir.path;
-    while (!path.empty() && isSeparator(path.back()))
-    {
-        path.pop_back();
-    }
-    const std::size_t cut = path.find_last_of("/\\");
-    const std::string leaf = cut == std::string::npos ? path : path.substr(cut + 1);
-    const std::string clean = diag::sanitizeText(leaf, 24);
-    return clean.empty() ? "custom" : clean;
+    return dir.path.empty() ? "none" : "default";
 }
 
 // ---- 冷却与按钮规则 ----
@@ -406,9 +348,31 @@ std::string countersText(const ProbeStatus& status)
 }
 
 // ---- Ping ----
-ProbePing::ProbePing(std::size_t maxDelaySamples)
+namespace
+{
+// 向目标挪一格（0 或 ramp），每个样本最多一格：增益只走斜坡，从不阶跃
+std::size_t stepToward(std::size_t pos, bool up, std::size_t ramp) noexcept
+{
+    if (up)
+    {
+        return pos < ramp ? pos + 1 : pos;
+    }
+    return pos > 0 ? pos - 1 : pos;
+}
+
+float gainAt(std::size_t pos, std::size_t ramp) noexcept
+{
+    return pos >= ramp ? 1.0f : static_cast<float>(pos) / static_cast<float>(ramp);
+}
+} // namespace
+
+ProbePing::ProbePing(std::size_t maxDelaySamples, double sampleRate)
     : capture_(static_cast<std::size_t>(util::kMlsLength) + maxDelaySamples, 0.0f)
 {
+    if (std::isfinite(sampleRate) && sampleRate > 0.0)
+    {
+        ramp_ = std::max<std::size_t>(1, static_cast<std::size_t>(std::llround(kPingRampSeconds * sampleRate)));
+    }
 }
 
 bool ProbePing::start() noexcept
@@ -417,48 +381,148 @@ bool ProbePing::start() noexcept
     {
         return false;
     }
+    cancel_.store(false, std::memory_order_release);
     state_.store(State::kArmed, std::memory_order_release);
     return true;
 }
 
 void ProbePing::cancel() noexcept
 {
+    State s = state_.load(std::memory_order_acquire);
+    if (s == State::kArmed || s == State::kRunning)
+    {
+        cancel_.store(true, std::memory_order_release);
+    }
+    else if (s == State::kDone)
+    {
+        state_.compare_exchange_strong(s, State::kIdle, std::memory_order_acq_rel);
+    }
+}
+
+void ProbePing::reset() noexcept
+{
+    cancel_.store(false, std::memory_order_release);
+    phase_ = Phase::kOff;
+    dryPos_ = returnPos_ = ramp_;
+    dryUp_ = returnUp_ = true;
     state_.store(State::kIdle, std::memory_order_release);
 }
 
-bool ProbePing::process(float* injection, const float* readback, std::size_t n) noexcept
+void ProbePing::beginRun() noexcept
+{
+    phase_ = Phase::kRampDown;
+    dryPos_ = returnPos_ = ramp_;
+    dryUp_ = returnUp_ = false;
+    position_ = 0;
+    cancelled_ = false;
+    fadeInRequested_ = false;
+    fadeInTaken_ = false;
+    holdLeft_ = 0;
+}
+
+void ProbePing::startRestore() noexcept
+{
+    phase_ = Phase::kRestore;
+    dryUp_ = true;
+    returnUp_ = false; // 回送不自己恢复，等淡入请求被取走
+    fadeInRequested_ = true;
+}
+
+bool ProbePing::takeFadeInRequest() noexcept
+{
+    if (!fadeInRequested_ || fadeInTaken_)
+    {
+        return false;
+    }
+    fadeInTaken_ = true;
+    holdLeft_ = ramp_;
+    return true;
+}
+
+bool ProbePing::process(float* injection, const float* readback, float* dryScale, float* returnScale,
+                        std::size_t n) noexcept
 {
     State s = state_.load(std::memory_order_acquire);
     if (s == State::kArmed)
     {
-        position_ = 0;
-        if (!state_.compare_exchange_strong(s, State::kRunning, std::memory_order_acq_rel))
+        if (cancel_.exchange(false, std::memory_order_acq_rel))
         {
+            state_.store(State::kIdle, std::memory_order_release);
             return false;
         }
+        beginRun();
+        state_.store(State::kRunning, std::memory_order_release);
     }
-    else if (s != State::kRunning)
+    else if (s == State::kRunning)
+    {
+        if (cancel_.exchange(false, std::memory_order_acq_rel))
+        {
+            cancelled_ = true;
+            if (phase_ == Phase::kRampDown || phase_ == Phase::kInject)
+            {
+                startRestore();
+            }
+        }
+    }
+    else
     {
         return false;
     }
+
     const std::size_t capacity = capture_.size();
     for (std::size_t i = 0; i < n; ++i)
     {
-        const std::size_t p = position_ + i;
-        if (injection != nullptr)
+        // 阶段的转换都在样本开头按上一个样本结束时的系数判，这样注入的每个样本写出的系数都已经是 0
+        if (phase_ == Phase::kInject && position_ >= capacity)
         {
-            injection[i] = p < kPingBuffer.size() ? kPingBuffer[p] : 0.0f;
+            startRestore();
         }
-        if (p < capacity)
+        if (phase_ == Phase::kRampDown && dryPos_ == 0 && returnPos_ == 0)
         {
+            phase_ = Phase::kInject;
+        }
+        float inject = 0.0f;
+        if (phase_ == Phase::kInject)
+        {
+            const std::size_t p = position_++;
+            inject = p < kPingBuffer.size() ? kPingBuffer[p] : 0.0f;
             capture_[p] = readback != nullptr ? readback[i] : 0.0f;
         }
-    }
-    position_ = std::min(position_ + n, capacity);
-    if (position_ >= capacity)
-    {
-        State expected = State::kRunning;
-        state_.compare_exchange_strong(expected, State::kDone, std::memory_order_release);
+        if (phase_ == Phase::kRestore && dryPos_ >= ramp_)
+        {
+            phase_ = Phase::kHold;
+        }
+        if ((phase_ == Phase::kRestore || phase_ == Phase::kHold) && fadeInTaken_ && returnPos_ == 0)
+        {
+            // 回送已经是 0 且请求已取走：等安全链的下行淡出走完，再放回送
+            if (holdLeft_ > 0)
+            {
+                --holdLeft_;
+            }
+            else
+            {
+                returnUp_ = true;
+            }
+        }
+        dryPos_ = stepToward(dryPos_, dryUp_, ramp_);
+        returnPos_ = stepToward(returnPos_, returnUp_, ramp_);
+        if (phase_ == Phase::kHold && returnUp_ && returnPos_ >= ramp_ && dryPos_ >= ramp_)
+        {
+            phase_ = Phase::kOff;
+            state_.store(cancelled_ ? State::kIdle : State::kDone, std::memory_order_release);
+        }
+        if (injection != nullptr)
+        {
+            injection[i] = inject;
+        }
+        if (dryScale != nullptr)
+        {
+            dryScale[i] = gainAt(dryPos_, ramp_);
+        }
+        if (returnScale != nullptr)
+        {
+            returnScale[i] = gainAt(returnPos_, ramp_);
+        }
     }
     return true;
 }
@@ -498,7 +562,7 @@ std::vector<std::uint8_t> encodeState(const ProbeStateData& data, state::Role ro
     return out;
 }
 
-StateStatus decodeState(const std::uint8_t* data, std::size_t size, ProbeStateData& out) noexcept
+StateStatus decodeState(const std::uint8_t* data, std::size_t size, state::Role role, ProbeStateData& out) noexcept
 {
     if (size == 0)
     {
@@ -508,6 +572,11 @@ StateStatus decodeState(const std::uint8_t* data, std::size_t size, ProbeStateDa
     if (data == nullptr || !state::parseHeader(data, size, header) || header.magic != state::kMagic)
     {
         return StateStatus::kCorrupt;
+    }
+    if (header.role != static_cast<std::uint32_t>(role))
+    {
+        return state::isKnownRole(static_cast<state::Role>(header.role)) ? StateStatus::kOtherRole
+                                                                         : StateStatus::kCorrupt;
     }
     if (header.abi != state::kProbeAbi)
     {
@@ -532,6 +601,25 @@ StateStatus decodeState(const std::uint8_t* data, std::size_t size, ProbeStateDa
     out.delayMs = clampDelayMs(delay);
     out.ceilingDb = clampCeilingDb(ceiling);
     return StateStatus::kOk;
+}
+
+StateStatus ProbeStateKeeper::load(const std::uint8_t* data, std::size_t size, ProbeStateData& inOut)
+{
+    const StateStatus status = decodeState(data, size, role_, inOut);
+    if (status == StateStatus::kOk)
+    {
+        held_.clear();
+    }
+    else if (status == StateStatus::kNotProbe)
+    {
+        held_.assign(data, data + size);
+    }
+    return status;
+}
+
+std::vector<std::uint8_t> ProbeStateKeeper::save(const ProbeStateData& current) const
+{
+    return held_.empty() ? encodeState(current, role_) : held_;
 }
 
 // ---- 复制诊断 ----

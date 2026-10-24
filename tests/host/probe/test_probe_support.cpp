@@ -159,60 +159,40 @@ TEST_CASE("hidden parameters resolve to a case, a variant and a record time", "[
     }
 }
 
-TEST_CASE("the log directory comes from the environment first, then the documents folder", "[host][probe][logdir]")
+TEST_CASE("the log directory has one source, the Rinne Probe Logs folder under the documents folder",
+          "[host][probe][logdir]")
 {
-    std::string asked;
-    const auto env = [&asked](std::string value) {
-        return EnvReader([&asked, value](const char* name) {
-            asked = name;
-            return value;
-        });
-    };
-
-    SECTION("an absolute path in the environment wins")
+    SECTION("the folder is joined to the documents folder with the separator that folder uses")
     {
-        const ProbeLogDir dir = resolveLogDir(env("C:\\runs\\p0"), "D:\\accounts\\someone\\Documents");
-        CHECK(asked == "RINNE_PROBE_LOG_DIR");
-        CHECK(dir.path == "C:\\runs\\p0");
-        CHECK(dir.fromEnvironment);
-        CHECK(resolveLogDir(env("/var/probe"), "/srv/someone/Documents").path == "/var/probe");
-        CHECK(resolveLogDir(env("  D:/logs  "), "C:\\docs").path == "D:/logs");
+        CHECK(resolveLogDir("D:\\accounts\\someone\\Documents").path ==
+              "D:\\accounts\\someone\\Documents\\Rinne Probe Logs");
+        CHECK(resolveLogDir("D:\\accounts\\someone\\Documents\\").path ==
+              "D:\\accounts\\someone\\Documents\\Rinne Probe Logs");
+        CHECK(resolveLogDir("/srv/someone/Documents").path == "/srv/someone/Documents/Rinne Probe Logs");
+        CHECK(resolveLogDir("/srv/someone/Documents//").path == "/srv/someone/Documents/Rinne Probe Logs");
+        CHECK(std::string(kDefaultLogDirName) == "Rinne Probe Logs");
     }
 
-    SECTION("nothing usable in the environment falls back to the documents folder")
+    SECTION("no documents folder leaves the path empty and the label none")
     {
-        for (const char* value : {"", "   ", "relative/dir", "logs", "~/logs"})
-        {
-            const ProbeLogDir dir = resolveLogDir(env(value), "D:\\accounts\\someone\\Documents\\");
-            CHECK(dir.path == "D:\\accounts\\someone\\Documents\\Rinne Probe Logs");
-            CHECK_FALSE(dir.fromEnvironment);
-        }
-        CHECK(resolveLogDir(EnvReader{}, "/srv/someone/Documents").path == "/srv/someone/Documents/Rinne Probe Logs");
-    }
-
-    SECTION("no environment and no documents folder leaves the path empty")
-    {
-        const ProbeLogDir dir = resolveLogDir(env(""), "");
+        const ProbeLogDir dir = resolveLogDir("");
         CHECK(dir.path.empty());
         CHECK(logDirLabel(dir) == "none");
     }
 
-    SECTION("the label is default or the last folder name, never the whole path")
+    SECTION("the label is default or none, never a piece of the path")
     {
-        CHECK(logDirLabel(resolveLogDir(env(""), "D:\\accounts\\someone\\Documents")) == "default");
-        CHECK(logDirLabel(resolveLogDir(env("D:\\accounts\\someone\\runs\\ProbeRun7\\"), "")) == "ProbeRun7");
-        CHECK(logDirLabel(resolveLogDir(env("/Volumes/data/probe-2"), "")) == "probe-2");
+        CHECK(logDirLabel(resolveLogDir("D:\\accounts\\someone\\Documents")) == "default");
+        CHECK(logDirLabel(resolveLogDir("/srv/someone/Documents")) == "default");
+        CHECK(logDirLabel(ProbeLogDir{}) == "none");
     }
 
-    SECTION("the real documents folder is wired, the environment only through the reader handed in")
+    SECTION("the real documents folder is wired")
     {
-        const ProbeLogDir fallback = resolveLogDir(EnvReader{});
-        CHECK_FALSE(fallback.path.empty());
-        CHECK_FALSE(fallback.fromEnvironment);
-        CHECK(fallback.path.size() > std::string(kDefaultLogDirName).size());
-        CHECK(fallback.path.substr(fallback.path.size() - std::string(kDefaultLogDirName).size()) ==
-              kDefaultLogDirName);
-        CHECK(resolveLogDir(env("D:/elsewhere")).path == "D:/elsewhere");
+        const ProbeLogDir real = resolveLogDir();
+        const std::string name = kDefaultLogDirName;
+        REQUIRE(real.path.size() > name.size());
+        CHECK(real.path.substr(real.path.size() - name.size()) == name);
     }
 }
 
@@ -364,31 +344,98 @@ TEST_CASE("the panel selection becomes the fields of the C row", "[host][probe][
     CHECK(line.empty());
 }
 
+namespace
+{
+
+constexpr double kRate = 48000.0;
+constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
+
+// 一次 Ping 的逐样本记录：注入、两个缩放系数，以及淡入请求在哪个样本之后被取走
+struct PingTrace
+{
+    std::vector<float> injection;
+    std::vector<float> dry;
+    std::vector<float> ret;
+    std::size_t requests = 0;
+    std::size_t takenAfter = kNoIndex; // 取走请求时已经走过的样本数
+};
+
+// 按 blockSize 一块一块驱动 ping，回读全 0；每块之后取一次淡入请求。cancelAfter 不是 kNoIndex 时，走过这么多样本之后
+// 的第一块开头请求取消。直到状态不再是 Armed / Running（Done 或取消后的 Idle）为止。
+PingTrace drive(ProbePing& ping, std::size_t blockSize, std::size_t cancelAfter = kNoIndex)
+{
+    PingTrace trace;
+    bool cancelled = false;
+    std::vector<float> inject(blockSize);
+    std::vector<float> dry(blockSize);
+    std::vector<float> ret(blockSize);
+    const std::vector<float> readback(blockSize, 0.0f);
+    for (int guard = 0; guard < 100000 && (ping.active() || trace.dry.empty()); ++guard)
+    {
+        if (!cancelled && cancelAfter != kNoIndex && trace.dry.size() >= cancelAfter)
+        {
+            ping.cancel();
+            cancelled = true;
+        }
+        REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), blockSize));
+        trace.injection.insert(trace.injection.end(), inject.begin(), inject.end());
+        trace.dry.insert(trace.dry.end(), dry.begin(), dry.end());
+        trace.ret.insert(trace.ret.end(), ret.begin(), ret.end());
+        if (ping.takeFadeInRequest())
+        {
+            ++trace.requests;
+            trace.takenAfter = trace.dry.size();
+        }
+    }
+    return trace;
+}
+
+// 相邻样本之间（含进入前的 1.0）变化量的最大值
+float largestStep(const std::vector<float>& gain)
+{
+    float largest = 0.0f;
+    float previous = 1.0f;
+    for (const float g : gain)
+    {
+        largest = std::max(largest, std::fabs(g - previous));
+        previous = g;
+    }
+    return largest;
+}
+
+} // namespace
+
 TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]")
 {
     // 把 Ping 当作一个已知延迟的环：回读 = 注入序列延迟 delay 个样本再乘增益，加一点确定性的噪声。
-    // 回读由「应该注入什么」算出，不看 process 实际写了什么，注入内容另行核对。
+    // 注入从两个增益降到 0 之后才开始（rampSamples 个样本之后），回读由「应该注入什么」算出，不看 process
+    // 实际写了什么， 注入内容另行核对。
     const auto run = [](std::size_t delay, float gain, float noise, const std::vector<std::size_t>& blocks,
                         std::vector<float>* injected) {
-        ProbePing ping(kMaxDelay);
+        ProbePing ping(kMaxDelay, kRate);
+        const std::size_t lead = ping.rampSamples();
         REQUIRE(ping.start());
         std::uint32_t lcg = 12345u;
         std::size_t position = 0;
         std::size_t blockIndex = 0;
         while (ping.state() != ProbePing::State::kDone)
         {
+            REQUIRE(blockIndex < 100000);
             const std::size_t n = blocks[blockIndex++ % blocks.size()];
             std::vector<float> inject(n);
             std::vector<float> readback(n);
+            std::vector<float> dry(n);
+            std::vector<float> ret(n);
             for (std::size_t i = 0; i < n; ++i)
             {
                 const std::size_t p = position + i;
                 lcg = lcg * 1664525u + 1013904223u;
                 const float jitter = (static_cast<float>(lcg >> 8) / 8388608.0f - 1.0f) * noise;
-                const bool inSequence = p >= delay && p - delay < kPingBuffer.size();
-                readback[i] = (inSequence ? gain * kPingBuffer[p - delay] : 0.0f) + jitter;
+                const bool inSequence = p >= lead + delay && p - lead - delay < kPingBuffer.size();
+                readback[i] = (inSequence ? gain * kPingBuffer[p - lead - delay] : 0.0f) + jitter;
             }
-            REQUIRE(ping.process(inject.data(), readback.data(), n));
+            REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), n));
+            (void)ping.takeFadeInRequest();
             if (injected != nullptr)
             {
                 injected->insert(injected->end(), inject.begin(), inject.end());
@@ -428,65 +475,244 @@ TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]"
         CHECK_FALSE(run(100, 0.0f, 0.05f, {256}, nullptr).ok);
     }
 
-    SECTION("the injection is the 127 point sequence at minus 20 dBFS, then silence")
+    SECTION("the injection starts after the ramp, is the 127 point sequence at minus 20 dBFS, then silence")
     {
         std::vector<float> injected;
         (void)run(10, 1.0f, 0.0f, {50}, &injected);
-        REQUIRE(injected.size() >= kPingBuffer.size() + 1);
+        const std::size_t lead = ProbePing(kMaxDelay, kRate).rampSamples();
+        REQUIRE(injected.size() >= lead + kPingBuffer.size() + 1);
+        for (std::size_t i = 0; i < lead; ++i)
+        {
+            CHECK(injected[i] == 0.0f);
+        }
         float peak = 0.0f;
         for (std::size_t i = 0; i < kPingBuffer.size(); ++i)
         {
-            CHECK(injected[i] == kPingBuffer[i]);
-            peak = std::max(peak, std::fabs(injected[i]));
+            CHECK(injected[lead + i] == kPingBuffer[i]);
+            peak = std::max(peak, std::fabs(injected[lead + i]));
         }
         CHECK(20.0 * std::log10(static_cast<double>(peak)) == Catch::Approx(-20.0).margin(1e-4));
-        for (std::size_t i = kPingBuffer.size(); i < injected.size(); ++i)
+        for (std::size_t i = lead + kPingBuffer.size(); i < injected.size(); ++i)
         {
             CHECK(injected[i] == 0.0f);
         }
     }
 }
 
-TEST_CASE("the ping state machine runs once at a time and mutes the loop while it runs", "[host][probe][ping]")
+TEST_CASE("the ping state machine runs once at a time", "[host][probe][ping]")
 {
-    ProbePing ping(200);
+    ProbePing ping(200, kRate);
     std::vector<float> inject(64, 5.0f);
+    std::vector<float> dry(64, 7.0f);
+    std::vector<float> ret(64, 9.0f);
     const std::vector<float> readback(64, 0.0f);
 
     CHECK(ping.state() == ProbePing::State::kIdle);
     CHECK_FALSE(ping.active());
-    CHECK_FALSE(ping.process(inject.data(), readback.data(), 64));
-    CHECK(inject[0] == 5.0f); // 没在跑，注入缓冲不动
-    CHECK(ping.returnGain(0.6f) == 0.6f);
-    CHECK(ping.dryGain(1.0f) == 1.0f);
+    CHECK_FALSE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), 64));
+    CHECK(inject[0] == 5.0f); // 没在跑，三个缓冲都不动：调用方当系数为 1
+    CHECK(dry[0] == 7.0f);
+    CHECK(ret[0] == 9.0f);
+    CHECK_FALSE(ping.takeFadeInRequest());
     CHECK_FALSE(ping.finish().ok);
 
-    REQUIRE(ping.start());
-    CHECK_FALSE(ping.start());
-    CHECK(ping.active());
-    CHECK(ping.returnGain(0.6f) == 0.0f);
-    CHECK(ping.dryGain(1.0f) == 0.0f);
-
-    REQUIRE(ping.process(inject.data(), readback.data(), 64));
-    CHECK(ping.state() == ProbePing::State::kRunning);
-    CHECK(ping.returnGain(0.6f) == 0.0f);
-
-    ping.cancel();
-    CHECK(ping.state() == ProbePing::State::kIdle);
-    CHECK(ping.returnGain(0.6f) == 0.6f);
-
-    // 取消之后可以重新开始，窗口从头算
-    REQUIRE(ping.start());
-    std::size_t blocks = 0;
-    while (ping.state() != ProbePing::State::kDone && blocks < 100)
+    SECTION("start is refused while a ping is under way, and the audio thread takes over on the next block")
     {
-        REQUIRE(ping.process(inject.data(), readback.data(), 64));
-        ++blocks;
+        REQUIRE(ping.start());
+        CHECK_FALSE(ping.start());
+        CHECK(ping.active());
+        CHECK(ping.state() == ProbePing::State::kArmed);
+        REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), 64));
+        CHECK(ping.state() == ProbePing::State::kRunning);
+        CHECK_FALSE(ping.start());
+        CHECK(dry[0] < 1.0f); // 第一个样本就已经在降
+        CHECK(ret[0] < 1.0f);
     }
-    CHECK(blocks == 6); // 127 + 200 = 327 个样本，64 一块要 6 块
-    CHECK(ping.returnGain(0.6f) == 0.6f); // 攒满之后回送恢复
-    CHECK_FALSE(ping.finish().ok); // 全 0 的回读
-    CHECK(ping.state() == ProbePing::State::kIdle);
+
+    SECTION("a cancel before the audio thread picked it up leaves the audio alone")
+    {
+        REQUIRE(ping.start());
+        ping.cancel();
+        CHECK_FALSE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), 64));
+        CHECK(ping.state() == ProbePing::State::kIdle);
+        CHECK(dry[0] == 7.0f);
+        CHECK_FALSE(ping.takeFadeInRequest());
+        REQUIRE(ping.start()); // 取消过的状态机可以重新开始，不带旧的取消
+        const PingTrace trace = drive(ping, 64);
+        CHECK(ping.state() == ProbePing::State::kDone);
+        CHECK(trace.requests == 1);
+    }
+
+    SECTION("a run to the end ends in Done, hands out one fade-in request, and finish returns to Idle")
+    {
+        REQUIRE(ping.start());
+        const PingTrace trace = drive(ping, 64);
+        CHECK(ping.state() == ProbePing::State::kDone);
+        CHECK(trace.requests == 1);
+        CHECK_FALSE(ping.takeFadeInRequest()); // 请求只有一次
+        CHECK_FALSE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), 64)); // 结束后不再碰音频
+        CHECK_FALSE(ping.finish().ok); // 全 0 的回读
+        CHECK(ping.state() == ProbePing::State::kIdle);
+
+        REQUIRE(ping.start()); // 再来一次，窗口从头算，请求再出现一次
+        CHECK(drive(ping, 64).requests == 1);
+    }
+
+    SECTION("cancel after the run is Done throws the result away")
+    {
+        REQUIRE(ping.start());
+        (void)drive(ping, 64);
+        REQUIRE(ping.state() == ProbePing::State::kDone);
+        ping.cancel();
+        CHECK(ping.state() == ProbePing::State::kIdle);
+        CHECK_FALSE(ping.finish().ok);
+    }
+
+    SECTION("reset brings back an idle state machine whatever it was doing")
+    {
+        REQUIRE(ping.start());
+        REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), 64));
+        ping.reset();
+        CHECK(ping.state() == ProbePing::State::kIdle);
+        REQUIRE(ping.start());
+        CHECK(drive(ping, 64).requests == 1);
+    }
+
+    SECTION("the ramp is ten milliseconds of the sample rate, at least one sample")
+    {
+        CHECK(ProbePing(10, 48000.0).rampSamples() == 480);
+        CHECK(ProbePing(10, 44100.0).rampSamples() == 441);
+        CHECK(ProbePing(10, 96000.0).rampSamples() == 960);
+        CHECK(ProbePing(10, 0.0).rampSamples() == 1);
+        CHECK(ProbePing(10, std::nan("")).rampSamples() == 1);
+        CHECK(ProbePing(10, 10.0).rampSamples() == 1);
+    }
+}
+
+TEST_CASE("the dry and return gains never step while a ping starts, runs and ends", "[host][probe][ping][ramp]")
+{
+    const std::size_t ramp = ProbePing(kMaxDelay, kRate).rampSamples();
+    const float bound = 1.0f / static_cast<float>(ramp) * 1.001f;
+
+    SECTION("both gains ramp down over the ramp length, then the sequence is injected")
+    {
+        for (const std::size_t blockSize :
+             {std::size_t{1}, std::size_t{7}, std::size_t{64}, std::size_t{480}, std::size_t{1000}})
+        {
+            INFO("block " << blockSize);
+            ProbePing ping(kMaxDelay, kRate);
+            REQUIRE(ping.start());
+            const PingTrace trace = drive(ping, blockSize);
+            REQUIRE(trace.dry.size() >= ramp + kPingBuffer.size());
+
+            CHECK(largestStep(trace.dry) <= bound);
+            CHECK(largestStep(trace.ret) <= bound);
+            CHECK(trace.dry.front() == Catch::Approx(1.0f - 1.0f / static_cast<float>(ramp)).margin(1e-6));
+            CHECK(trace.dry[ramp - 1] == 0.0f);
+            CHECK(trace.ret[ramp - 1] == 0.0f);
+            // 降的过程中不注入；注入只发生在两个增益都是 0 的时候
+            for (std::size_t i = 0; i < trace.injection.size(); ++i)
+            {
+                if (trace.injection[i] != 0.0f)
+                {
+                    INFO("sample " << i);
+                    CHECK(i >= ramp);
+                    CHECK(trace.dry[i] == 0.0f);
+                    CHECK(trace.ret[i] == 0.0f);
+                }
+            }
+            // 注入的整个窗口里两个增益都保持 0
+            for (std::size_t i = ramp - 1; i < ramp + kMaxDelay + kPingBuffer.size(); ++i)
+            {
+                CHECK(trace.dry[i] == 0.0f);
+                CHECK(trace.ret[i] == 0.0f);
+            }
+        }
+    }
+
+    SECTION("at the end the dry gain climbs back over the ramp, the return waits for the fade-in")
+    {
+        for (const std::size_t blockSize :
+             {std::size_t{1}, std::size_t{7}, std::size_t{64}, std::size_t{480}, std::size_t{1000}})
+        {
+            INFO("block " << blockSize);
+            ProbePing ping(kMaxDelay, kRate);
+            REQUIRE(ping.start());
+            const PingTrace trace = drive(ping, blockSize);
+            REQUIRE(ping.state() == ProbePing::State::kDone);
+            REQUIRE(trace.requests == 1);
+            REQUIRE(trace.takenAfter != kNoIndex);
+
+            const std::size_t windowEnd = ramp + kMaxDelay + kPingBuffer.size(); // 最后一个注入窗口样本之后
+            // 干声：窗口结束后用一个斜坡长度回到 1，中途不跳
+            CHECK(trace.dry[windowEnd - 1] == 0.0f);
+            CHECK(trace.dry[windowEnd + ramp - 1] == 1.0f);
+            CHECK(trace.dry.back() == 1.0f);
+            for (std::size_t i = windowEnd; i < trace.dry.size(); ++i)
+            {
+                CHECK(trace.dry[i] >= trace.dry[i - 1]);
+            }
+            // 回送：降到 0 之后，请求被取走、再过一个斜坡长度之前一直是 0，然后用一个斜坡长度回到 1
+            for (std::size_t i = ramp - 1; i < trace.takenAfter + ramp && i < trace.ret.size(); ++i)
+            {
+                INFO("sample " << i);
+                CHECK(trace.ret[i] == 0.0f);
+            }
+            CHECK(trace.ret.back() == 1.0f);
+            CHECK(trace.ret[trace.takenAfter + ramp] > 0.0f);
+            CHECK(trace.ret[trace.takenAfter + 2 * ramp - 1] == 1.0f);
+            CHECK(largestStep(trace.dry) <= bound);
+            CHECK(largestStep(trace.ret) <= bound);
+        }
+    }
+
+    SECTION("the fade-in request appears once, in the callback that finished the capture")
+    {
+        ProbePing ping(kMaxDelay, kRate);
+        REQUIRE(ping.start());
+        const std::size_t windowEnd = ramp + kMaxDelay + kPingBuffer.size();
+        const PingTrace trace = drive(ping, 64);
+        CHECK(trace.requests == 1);
+        CHECK(trace.takenAfter >= windowEnd);
+        CHECK(trace.takenAfter <= windowEnd + 64);
+    }
+
+    SECTION("a cancel in the middle of the ramp down, the injection or the restore still never steps")
+    {
+        const std::size_t windowEnd = ramp + kMaxDelay + kPingBuffer.size();
+        // 降的中途、降完刚开始注入、注入中途、注入刚结束（干声刚开始回升）、回升中途、回升刚结束（回送等待中）、
+        // 回送放回的中途
+        for (const std::size_t cancelAfter : {ramp / 3, ramp, ramp + 100, windowEnd - 1, windowEnd + ramp / 2,
+                                              windowEnd + ramp + 10, windowEnd + ramp + ramp / 2})
+        {
+            for (const std::size_t blockSize : {std::size_t{1}, std::size_t{64}, std::size_t{97}})
+            {
+                INFO("cancel after " << cancelAfter << " block " << blockSize);
+                ProbePing ping(kMaxDelay, kRate);
+                REQUIRE(ping.start());
+                const PingTrace trace = drive(ping, blockSize, cancelAfter);
+
+                CHECK(largestStep(trace.dry) <= bound);
+                CHECK(largestStep(trace.ret) <= bound);
+                CHECK(trace.dry.back() == 1.0f);
+                CHECK(trace.ret.back() == 1.0f);
+                CHECK(trace.requests == 1);
+                CHECK(ping.state() == ProbePing::State::kIdle); // 取消了，没有结果
+                CHECK_FALSE(ping.finish().ok);
+                if (cancelAfter < windowEnd - 1)
+                {
+                    // 取消得早，回读没攒满：窗口没跑完就开始恢复
+                    CHECK(trace.dry.size() < windowEnd + 3 * ramp);
+                }
+                // 回送从来不在请求被取走之前回升，回升也不早于取走后的一个斜坡长度
+                for (std::size_t i = 1; i < trace.ret.size() && i < trace.takenAfter + ramp; ++i)
+                {
+                    INFO("sample " << i);
+                    CHECK(trace.ret[i] <= trace.ret[i - 1]);
+                }
+            }
+        }
+    }
 }
 
 TEST_CASE("the probe state is an abi 0 header plus one probe chunk", "[host][probe][state]")
@@ -538,7 +764,7 @@ TEST_CASE("the probe state is an abi 0 header plus one probe chunk", "[host][pro
     SECTION("group, feedback, delay and ceiling round trip")
     {
         ProbeStateData back;
-        REQUIRE(decodeState(bytes.data(), bytes.size(), back) == StateStatus::kOk);
+        REQUIRE(decodeState(bytes.data(), bytes.size(), state::Role::Input, back) == StateStatus::kOk);
         CHECK(back.group == 3);
         CHECK(back.feedbackPercent == 40.0f);
         CHECK(back.delayMs == 250.0f);
@@ -547,7 +773,7 @@ TEST_CASE("the probe state is an abi 0 header plus one probe chunk", "[host][pro
         ProbeStateData unset;
         unset.group = -1;
         const std::vector<std::uint8_t> unsetBytes = encodeState(unset, state::Role::Output);
-        REQUIRE(decodeState(unsetBytes.data(), unsetBytes.size(), back) == StateStatus::kOk);
+        REQUIRE(decodeState(unsetBytes.data(), unsetBytes.size(), state::Role::Output, back) == StateStatus::kOk);
         CHECK(back.group == -1);
         CHECK(back.feedbackPercent == 0.0f);
         CHECK(back.ceilingDb == -18.0f);
@@ -562,17 +788,17 @@ TEST_CASE("the probe state is an abi 0 header plus one probe chunk", "[host][pro
         {
             ProbeStateData out = untouched;
             INFO("size " << size);
-            CHECK(decodeState(bytes.data(), size, out) == StateStatus::kCorrupt);
+            CHECK(decodeState(bytes.data(), size, state::Role::Input, out) == StateStatus::kCorrupt);
             CHECK(out.group == 6);
             CHECK(out.feedbackPercent == 12.0f);
         }
         ProbeStateData out;
-        CHECK(decodeState(bytes.data(), 0, out) == StateStatus::kEmpty);
-        CHECK(decodeState(nullptr, 0, out) == StateStatus::kEmpty);
+        CHECK(decodeState(bytes.data(), 0, state::Role::Input, out) == StateStatus::kEmpty);
+        CHECK(decodeState(nullptr, 0, state::Role::Input, out) == StateStatus::kEmpty);
 
         std::vector<std::uint8_t> longer = bytes;
         longer.push_back(0);
-        CHECK(decodeState(longer.data(), longer.size(), out) == StateStatus::kCorrupt);
+        CHECK(decodeState(longer.data(), longer.size(), state::Role::Input, out) == StateStatus::kCorrupt);
     }
 
     SECTION("bytes a formal build wrote are not taken over")
@@ -582,7 +808,31 @@ TEST_CASE("the probe state is an abi 0 header plus one probe chunk", "[host][pro
         std::vector<std::uint8_t> formal;
         REQUIRE(state::encodeContainer(container, formal));
         ProbeStateData out;
-        CHECK(decodeState(formal.data(), formal.size(), out) == StateStatus::kNotProbe);
+        CHECK(decodeState(formal.data(), formal.size(), state::Role::Input, out) == StateStatus::kNotProbe);
+    }
+
+    SECTION("bytes the other plugin saved are refused, probe bytes and formal bytes alike")
+    {
+        ProbeStateData untouched;
+        untouched.group = 5;
+        untouched.feedbackPercent = 33.0f;
+        ProbeStateData out = untouched;
+
+        CHECK(decodeState(bytes.data(), bytes.size(), state::Role::Output, out) == StateStatus::kOtherRole);
+
+        state::Container container;
+        container.role = state::Role::Output;
+        std::vector<std::uint8_t> formalOutput;
+        REQUIRE(state::encodeContainer(container, formalOutput));
+        CHECK(decodeState(formalOutput.data(), formalOutput.size(), state::Role::Input, out) ==
+              StateStatus::kOtherRole);
+
+        std::vector<std::uint8_t> unknownRole = bytes;
+        unknownRole[8] = 9; // 头里偏移 8 是 role（u32 小端）
+        CHECK(decodeState(unknownRole.data(), unknownRole.size(), state::Role::Input, out) == StateStatus::kCorrupt);
+
+        CHECK(out.group == 5);
+        CHECK(out.feedbackPercent == 33.0f);
     }
 
     SECTION("damaged fields are refused, out of range numbers are pulled in")
@@ -591,28 +841,101 @@ TEST_CASE("the probe state is an abi 0 header plus one probe chunk", "[host][pro
 
         std::vector<std::uint8_t> badMagic = bytes;
         badMagic[0] = 'X';
-        CHECK(decodeState(badMagic.data(), badMagic.size(), out) == StateStatus::kCorrupt);
+        CHECK(decodeState(badMagic.data(), badMagic.size(), state::Role::Input, out) == StateStatus::kCorrupt);
 
         std::vector<std::uint8_t> badChunk = bytes;
         badChunk[16] = 'Q';
-        CHECK(decodeState(badChunk.data(), badChunk.size(), out) == StateStatus::kCorrupt);
+        CHECK(decodeState(badChunk.data(), badChunk.size(), state::Role::Input, out) == StateStatus::kCorrupt);
 
         std::vector<std::uint8_t> badGroup = bytes;
         badGroup[24] = 9;
-        CHECK(decodeState(badGroup.data(), badGroup.size(), out) == StateStatus::kCorrupt);
+        CHECK(decodeState(badGroup.data(), badGroup.size(), state::Role::Input, out) == StateStatus::kCorrupt);
 
         std::vector<std::uint8_t> nan = bytes;
         patchFloat(nan, 28, std::nanf(""));
-        CHECK(decodeState(nan.data(), nan.size(), out) == StateStatus::kCorrupt);
+        CHECK(decodeState(nan.data(), nan.size(), state::Role::Input, out) == StateStatus::kCorrupt);
 
         std::vector<std::uint8_t> loud = bytes;
         patchFloat(loud, 28, 120.0f);
         patchFloat(loud, 32, 90000.0f);
         patchFloat(loud, 36, 5.0f);
-        REQUIRE(decodeState(loud.data(), loud.size(), out) == StateStatus::kOk);
+        REQUIRE(decodeState(loud.data(), loud.size(), state::Role::Input, out) == StateStatus::kOk);
         CHECK(out.feedbackPercent == 80.0f);
         CHECK(out.delayMs == 4000.0f);
         CHECK(out.ceilingDb == 0.0f);
+    }
+}
+
+TEST_CASE("formal state bytes are kept as they came and written back unchanged", "[host][probe][state]")
+{
+    // 正式版存的字节：块的内容不重要，要紧的是整份逐字节不变
+    state::Container container;
+    container.role = state::Role::Input;
+    container.set(state::makeFourCc('F', 'A', 'K', 'E'), {1, 2, 3, 4, 5, 6, 7});
+    container.set(state::makeFourCc('M', 'O', 'R', 'E'), {9, 9});
+    std::vector<std::uint8_t> formal;
+    REQUIRE(state::encodeContainer(container, formal));
+
+    ProbeStateData panel;
+    panel.group = 4;
+    panel.feedbackPercent = 25.0f;
+    panel.delayMs = 120.0f;
+
+    ProbeStateKeeper keeper(state::Role::Input);
+    CHECK_FALSE(keeper.holding());
+    CHECK(keeper.save(panel) == encodeState(panel, state::Role::Input)); // 什么都没读进来：存探针自己的
+
+    SECTION("a formal state comes in, the panel settings stay put, the same bytes go out")
+    {
+        ProbeStateData loaded = panel;
+        REQUIRE(keeper.load(formal.data(), formal.size(), loaded) == StateStatus::kNotProbe);
+        CHECK(loaded.group == 4); // 探针不解析正式字节
+        CHECK(loaded.feedbackPercent == 25.0f);
+        CHECK(keeper.holding());
+        CHECK(keeper.save(panel) == formal); // 逐字节相同
+        panel.group = 1; // 留住期间面板上的改动不进 state
+        CHECK(keeper.save(panel) == formal);
+    }
+
+    SECTION("a later probe state of its own lets go of the formal bytes")
+    {
+        ProbeStateData loaded;
+        REQUIRE(keeper.load(formal.data(), formal.size(), loaded) == StateStatus::kNotProbe);
+        const std::vector<std::uint8_t> own = encodeState(panel, state::Role::Input);
+        REQUIRE(keeper.load(own.data(), own.size(), loaded) == StateStatus::kOk);
+        CHECK_FALSE(keeper.holding());
+        CHECK(keeper.save(loaded) == own);
+    }
+
+    SECTION("an empty, damaged or other-role state changes nothing")
+    {
+        ProbeStateData loaded;
+        REQUIRE(keeper.load(formal.data(), formal.size(), loaded) == StateStatus::kNotProbe);
+
+        CHECK(keeper.load(nullptr, 0, loaded) == StateStatus::kEmpty);
+        std::vector<std::uint8_t> damaged = formal;
+        damaged[0] = 'X';
+        CHECK(keeper.load(damaged.data(), damaged.size(), loaded) == StateStatus::kCorrupt);
+        const std::vector<std::uint8_t> theirs = encodeState(panel, state::Role::Output);
+        CHECK(keeper.load(theirs.data(), theirs.size(), loaded) == StateStatus::kOtherRole);
+        CHECK(keeper.holding());
+        CHECK(keeper.save(panel) == formal);
+
+        ProbeStateKeeper fresh(state::Role::Input);
+        CHECK(fresh.load(damaged.data(), damaged.size(), loaded) == StateStatus::kCorrupt);
+        CHECK(fresh.load(theirs.data(), theirs.size(), loaded) == StateStatus::kOtherRole);
+        CHECK_FALSE(fresh.holding());
+    }
+
+    SECTION("formal bytes of the other plugin are not kept")
+    {
+        state::Container other;
+        other.role = state::Role::Output;
+        std::vector<std::uint8_t> formalOutput;
+        REQUIRE(state::encodeContainer(other, formalOutput));
+        ProbeStateData loaded;
+        CHECK(keeper.load(formalOutput.data(), formalOutput.size(), loaded) == StateStatus::kOtherRole);
+        CHECK_FALSE(keeper.holding());
     }
 }
 
@@ -638,13 +961,11 @@ TEST_CASE("copied diagnostics add the probe lines and carry no path, user or hos
     selection.buf = 256;
     selection.guard = diag::ProbeGuard::kLow;
 
-    const auto envDir = [](const std::string& value) {
-        return resolveLogDir(EnvReader([value](const char*) { return value; }), "D:\\accounts\\alice\\Documents");
-    };
+    const ProbeLogDir logDir = resolveLogDir("D:\\accounts\\alice\\Documents");
 
     SECTION("the base report comes first, then the probe lines")
     {
-        const std::string text = buildDiagText(base, status, envDir(""), selection);
+        const std::string text = buildDiagText(base, status, logDir, selection);
         CHECK(text.rfind("rinne-diag v1\n", 0) == 0);
         CHECK(contains(text, "probe: log_dir=default log_open=1 recording=1 feedback_cap=80 ceiling_db=-18.0\n"));
         CHECK(contains(text, "probe_case: case=CB-01 variant=steady buf=256 guard=low\n"));
@@ -654,39 +975,42 @@ TEST_CASE("copied diagnostics add the probe lines and carry no path, user or hos
         CHECK(text.back() == '\n');
     }
 
-    SECTION("a custom folder shows only its last name")
+    SECTION("the log folder shows as default, with no piece of its path in the text")
     {
-        const std::string text = buildDiagText(base, status, envDir("D:\\accounts\\alice\\runs\\ProbeRun7"), selection);
-        CHECK(contains(text, "log_dir=ProbeRun7 "));
-        for (const char* leak : {"alice", "accounts", "runs", "C:", "\\", "Documents", "Rinne Probe Logs"})
+        const std::string text = buildDiagText(base, status, logDir, selection);
+        CHECK(contains(text, "probe: log_dir=default "));
+        for (const char* leak : {"alice", "accounts", "D:", "\\", "Documents", "Rinne Probe Logs"})
         {
             INFO("leaked " << leak);
             CHECK_FALSE(contains(text, leak));
+        }
+
+        const std::string unixText = buildDiagText(base, status, resolveLogDir("/srv/bob/Documents"), selection);
+        CHECK(contains(unixText, "probe: log_dir=default "));
+        for (const char* leak : {"bob", "srv", "/", "Documents", "Rinne Probe Logs"})
+        {
+            INFO("leaked " << leak);
+            CHECK_FALSE(contains(unixText, leak));
         }
     }
 
-    SECTION("the default folder shows as default, not as the documents path")
+    SECTION("no documents folder reads as none")
     {
-        const std::string text = buildDiagText(base, status, envDir(""), selection);
-        for (const char* leak : {"alice", "accounts", "C:", "\\", "Documents", "Rinne Probe Logs"})
-        {
-            INFO("leaked " << leak);
-            CHECK_FALSE(contains(text, leak));
-        }
+        CHECK(contains(buildDiagText(base, status, resolveLogDir(""), selection), "probe: log_dir=none "));
     }
 
     SECTION("a log that never opened is reported")
     {
         status.logOpen = false;
         status.recording = false;
-        CHECK(contains(buildDiagText(base, status, envDir(""), selection),
-                       "probe: log_dir=default log_open=0 recording=0 "));
+        CHECK(
+            contains(buildDiagText(base, status, logDir, selection), "probe: log_dir=default log_open=0 recording=0 "));
     }
 
     SECTION("no ping yet reads as none")
     {
         status.lastPingSamples = -1;
-        CHECK(contains(buildDiagText(base, status, envDir(""), selection), "probe_ping: samples=none\n"));
+        CHECK(contains(buildDiagText(base, status, logDir, selection), "probe_ping: samples=none\n"));
     }
 }
 

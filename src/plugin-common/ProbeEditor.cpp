@@ -254,6 +254,7 @@ void ProbeEditor::doRecover()
         return;
     }
     host_.probeRecover();
+    refresh();
 }
 
 void ProbeEditor::doPing()

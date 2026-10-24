@@ -53,7 +53,11 @@ public:
         return out;
     }
     void probePanic() override { ++panics; }
-    void probeRecover() override { ++recovers; }
+    void probeRecover() override
+    {
+        ++recovers;
+        status.tripped = false; // 恢复成功：处理器马上不再报跳闸
+    }
     void probePing() override { ++pings; }
     bool probeStartRecording(const ProbeSelection& selection, std::uint32_t seconds) override
     {
@@ -272,6 +276,29 @@ TEST_CASE("recover is blocked for 1.5 s after panic", "[host][probe][editor]")
     panel.editor.refresh();
     CHECK_FALSE(panel.c().recover.isEnabled());
     CHECK(panel.host.panics == 2);
+}
+
+TEST_CASE("recover refreshes the panel right away, like panic and record do", "[host][probe][editor]")
+{
+    Panel panel;
+    auto& c = panel.c();
+    panel.host.status.tripped = true;
+    panel.editor.refresh();
+    REQUIRE(c.status.getText().contains("safety: tripped"));
+
+    // 不等定时器：doRecover 自己刷新一次，状态文本马上跟上
+    panel.editor.doRecover();
+    CHECK(panel.host.recovers == 1);
+    CHECK(c.status.getText().contains("safety: ok"));
+
+    // 冷却没到时什么都不做，也不刷新
+    panel.host.status.tripped = true;
+    panel.editor.doPanic();
+    panel.editor.refresh();
+    panel.host.status.tripped = false;
+    panel.editor.doRecover();
+    CHECK(panel.host.recovers == 1);
+    CHECK(c.status.getText().contains("safety: tripped"));
 }
 
 TEST_CASE("the four selectors go to the C row when recording starts", "[host][probe][editor]")
