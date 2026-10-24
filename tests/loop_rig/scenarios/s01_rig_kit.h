@@ -66,6 +66,29 @@ struct Verdict
         }                           \
     } while (false)
 
+// 当前正在跑的场景与本次运行里记到的空转次数：周期没有处理任何样本时点名用
+struct RunState
+{
+    const char* scenario = "(none)";
+    int stalls = 0;
+};
+
+inline RunState& runState()
+{
+    static RunState state;
+    return state;
+}
+
+// 一个周期没有处理任何样本（没 prepare、块脚本跳过或给了 0 样本、只有 Output 一端）：当场记一次失败并点名场景与周期号，
+// 不让上层的「跑满 N 个样本」循环一直空转到超时
+inline void reportStall(std::size_t cycleIndex, int samples)
+{
+    ++runState().stalls;
+    FAIL_CHECK("scenario " << runState().scenario << ": cycle " << cycleIndex << " handled " << samples
+                           << " samples, the run cannot advance (host not prepared, a skip or zero-length block in the "
+                              "script, or only the output side ran)");
+}
+
 // ---- 信号 ----
 
 inline float cosine(std::uint64_t t, double hz, float amplitude)
@@ -212,7 +235,8 @@ public:
         reference.setCommandBaseline(baseline);
     }
 
-    // 跑一个周期并记录；返回 Input 这一周期的样本数
+    // 跑一个周期并记录；返回 Input 这一周期的样本数。本组场景的脚本里每个周期都有样本，
+    // 一个周期没处理任何样本就是场景搭错了，当场记失败（见 reportStall）
     int cycle(std::size_t index, const engine::EngineParams& params)
     {
         ParamsScript script;
@@ -222,6 +246,7 @@ public:
         const int n = host_.runCycle(index);
         if (n <= 0)
         {
+            reportStall(index, n);
             return n;
         }
         const auto count = static_cast<std::size_t>(n);
@@ -247,12 +272,18 @@ public:
         return n;
     }
 
-    // 恒定参数、恒定块长地跑 samples 个样本（周期编号接着上一次的）
+    // 恒定参数、恒定块长地跑 samples 个样本（周期编号接着上一次的）。
+    // 周期没处理样本时 cycle 已经报了失败，这里立刻停下，不空转到超时
     void run(const engine::EngineParams& params, std::int64_t samples)
     {
         for (std::int64_t done = 0; done < samples;)
         {
-            done += cycle(cycles_++, params);
+            const int n = cycle(cycles_++, params);
+            if (n <= 0)
+            {
+                return;
+            }
+            done += n;
         }
     }
 
@@ -295,7 +326,9 @@ inline bool runRegisteredScenario(const char* id)
     }
     const std::unique_ptr<Scenario> scenario(entry->factory());
     ScenarioContext context;
-    return scenario->run(context);
+    runState() = RunState{id, 0};
+    const bool passed = scenario->run(context);
+    return passed && runState().stalls == 0;
 }
 
 } // namespace rinne::rig::scn

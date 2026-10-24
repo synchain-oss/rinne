@@ -73,11 +73,17 @@ public:
         params = loopParams(50.0f, 50.0f, delayMs);
     }
 
+    // 周期没处理样本时 Recorder::cycle 已经报了失败，这里立刻停下，不空转到超时
     void run(std::int64_t samples)
     {
         for (std::int64_t done = 0; done < samples;)
         {
-            done += step();
+            const int n = step();
+            if (n <= 0)
+            {
+                return;
+            }
+            done += n;
         }
     }
 
