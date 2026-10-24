@@ -206,6 +206,80 @@ TEST_CASE("blocks outside a recording window only feed the summary counters", "[
     CHECK(rowsOfKind(readFile(path), "C").size() == 2);
 }
 
+TEST_CASE("a block the caller cannot write is dropped inside the window and leaves no trace outside it", "[probe][log]")
+{
+    TempDir dir;
+    FakeClock clock;
+    ProbeLog log(manualOptions(dir, ProbeRole::kInput, clock, "a1b2"));
+    const fs::path path = fs::u8path(log.filePath());
+
+    // 窗口外：只更新 S 要用的计数，不占 seq、不计丢弃
+    BlockFields outside = plainBlock(0);
+    outside.n = 999;
+    outside.rs = 2;
+    log.onBlock(outside, false);
+    CHECK(log.counters().blocks == 0);
+    CHECK(log.counters().dropped == 0);
+    CHECK(log.counters().maxN == 999);
+    CHECK(log.counters().resync == 2);
+
+    clock.value.store(5000000000u);
+    REQUIRE(log.beginCase(standardCase()));
+    log.pump(); // C 行写出，读出它的 t_ns
+    const auto cases = rowsOfKind(readFile(path), "C");
+    REQUIRE(cases.size() == 1);
+    const std::uint64_t cTime = asNumber(cases[0][1]);
+
+    // 在 C 行之前就开始的块（beginCase 落在它中途）同样算窗口外
+    BlockFields early = plainBlock(1);
+    early.monoNs = cTime - 1;
+    log.onBlock(early, false);
+    CHECK(log.counters().dropped == 0);
+
+    // 窗口内：写得出的照写；写不出的占一个 seq、计一次丢弃，与环满同一套账，S 要用的计数照常更新
+    std::uint64_t call = 10;
+    const auto inWindow = [&](bool writable) {
+        BlockFields f = plainBlock(call);
+        f.monoNs = cTime + call;
+        f.rs = 1;
+        ++call;
+        log.onBlock(f, writable);
+    };
+    inWindow(true);
+    inWindow(true);
+    inWindow(false);
+    inWindow(false);
+    inWindow(false);
+    inWindow(true);
+    CHECK(log.counters().blocks == 3);
+    CHECK(log.counters().dropped == 3);
+    CHECK(log.counters().resync == 8);
+
+    clock.value.fetch_add(1000000000); // 到点写 S
+    log.pump();
+    log.close();
+
+    const std::string text = readFile(path);
+    std::vector<std::string> seqs;
+    std::vector<std::string> calls;
+    for (const auto& row : rowsOfKind(text, "B"))
+    {
+        seqs.push_back(row[1]);
+        calls.push_back(row[2]);
+    }
+    // 写不出的三块是 seq 2、3、4：文件里的缺口就落在那里，两侧的 call_seq 照原样
+    CHECK(seqs == std::vector<std::string>{"0", "1", "5"});
+    CHECK(calls == std::vector<std::string>{"10", "11", "15"});
+    const auto summaries = rowsOfKind(text, "S");
+    REQUIRE(!summaries.empty());
+    CHECK(summaries.back()[2] == "3"); // blocks
+    CHECK(summaries.back()[3] == "3"); // dropped
+    const auto z = rowsOfKind(text, "Z");
+    REQUIRE(z.size() == 1);
+    CHECK(z[0][2] == "3");
+    CHECK(z[0][3] == "3");
+}
+
 TEST_CASE("a case with values the analyzer would reject is refused and starts no window", "[probe][log]")
 {
     TempDir dir;

@@ -427,11 +427,16 @@ void ProbeHost::process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcep
         modeSeen_ = true;
         lastModeNonrt_ = transport.nonrealtime;
     }
-    // call_seq 必须全文件严格递增：没拿到、或比上一次的不大（会合段换过），这一块就不写 B 行
-    if (log_ != nullptr && callSeq > lastCallSeq_)
+    // call_seq 必须全文件严格递增。块首没拿到绑定就够不到会合段头、取不到 call_seq（还没配对、离组、冲突、被接管、
+    // 租约拿不到），这一块写不出合格的 B 行，交给日志按丢弃计：窗口内占一个 seq、S 与 Z 的 dropped 加一，不静默丢。
+    // 会合段映射在实例一辈子里只开一次（Rendezvous 只在没有映射时打开，之后不换），计数器不会回退；「不比上一次大」
+    // 只是兜底，同样按丢弃计
+    if (log_ != nullptr)
     {
-        lastCallSeq_ = callSeq;
-        log_->onBlock(fields);
+        const bool writable = callSeq > lastCallSeq_;
+        if (writable)
+            lastCallSeq_ = callSeq;
+        log_->onBlock(fields, writable);
     }
 }
 

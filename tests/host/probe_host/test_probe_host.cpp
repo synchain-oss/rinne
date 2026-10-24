@@ -1454,6 +1454,103 @@ TEST_CASE("a ring change during the gap is not compared across rings, and the ne
     CHECK(rig.input->host.counts().suspendFlushes == 1);
 }
 
+TEST_CASE("blocks that get no call_seq inside a window are counted as dropped, and the rows go on after",
+          "[probe_host]")
+{
+    // Input 在记录窗口中途退出组再回来：这期间的块没有绑定，够不到会合段头，取不到 call_seq，写不出合格的 B 行。
+    // 它们不能无声消失：每一块占一个 seq、计一次丢弃（S 与 Z 的 dropped），回来之后 B 行照写、call_seq 接着严格递增
+    Rig rig;
+    rig.open(0);
+    rig.source = &sine;
+    rig.playHead.playing = true;
+    REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+    rig.cycles(50);
+
+    REQUIRE(rig.input->host.probeStartRecording(cell(), 5));
+    constexpr int kBefore = 30;
+    constexpr int kAway = 25;
+    constexpr int kAfter = 150;
+    rig.cycles(kBefore);
+    rig.input->host.probeSetGroup(-1);
+    rig.cycles(kAway);
+    rig.input->host.probeSetGroup(0);
+    int rejoin = 0; // 回到组里、重新配上对之前的块
+    for (; rejoin < 200 && !rig.input->host.inputEngine().lastBlockResult().paired; ++rejoin)
+        rig.cycle();
+    REQUIRE(rig.input->host.inputEngine().lastBlockResult().paired);
+    rig.cycles(kAfter); // 留够 1 s 以上，让最后一条 S 行落在最后一次丢弃之后
+    const std::vector<Row> rows = rig.closeAndRead('I');
+
+    const std::uint64_t total = kBefore + kAway + static_cast<std::uint64_t>(rejoin) + kAfter;
+    const std::vector<Row> blocks = rowsOf(rows, "B");
+    const std::vector<Row> z = rowsOf(rows, "Z");
+    const std::vector<Row> s = rowsOf(rows, "S");
+    REQUIRE(z.size() == 1);
+    REQUIRE(!s.empty());
+    const std::uint64_t dropped = num(z[0][3]);
+    CHECK(dropped >= kAway);
+    CHECK(num(z[0][2]) == blocks.size());
+    CHECK(blocks.size() + dropped == total);
+    CHECK(num(s.back()[3]) == dropped);
+
+    // seq 从 0 数到 total − 1，恰有一处缺口，缺的个数就是丢弃数；call_seq 全文件严格递增
+    REQUIRE(blocks.size() > kBefore);
+    std::uint64_t gaps = 0;
+    std::uint64_t missing = 0;
+    for (std::size_t i = 0; i < blocks.size(); ++i)
+    {
+        const std::uint64_t expected = i == 0 ? 0 : num(blocks[i - 1][1]) + 1;
+        if (num(blocks[i][1]) != expected)
+        {
+            ++gaps;
+            missing += num(blocks[i][1]) - expected;
+        }
+        if (i > 0)
+            CHECK(num(blocks[i][2]) > num(blocks[i - 1][2]));
+    }
+    CHECK(num(blocks.front()[1]) == 0);
+    CHECK(num(blocks.back()[1]) == total - 1);
+    CHECK(gaps == 1);
+    CHECK(missing == dropped);
+    CHECK(num(blocks[kBefore][1]) == kBefore + dropped); // 缺口就落在离组的那一段
+    CHECK(blocks.size() - kBefore >= kAfter);
+}
+
+TEST_CASE("a call_seq that went backwards is never written, and every block it costs is counted as dropped",
+          "[probe_host]")
+{
+    // 实例一辈子只映射一次会合段，计数器本来不会回退；这里由测试直接改写段头里的计数器，模拟回退，看兜底
+    Rig rig;
+    rig.open(0);
+    rig.source = &sine;
+    rig.playHead.playing = true;
+    REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+    rig.cycles(50);
+
+    REQUIRE(rig.input->host.probeStartRecording(cell(), 5));
+    rig.cycles(20);
+    {
+        const RvPeek peek(rig.scope());
+        const std::uint64_t now = peek.rv().header.probe_call_seq.load();
+        REQUIRE(now > 40);
+        peek.rv().header.probe_call_seq.store(now - 40); // 两端每个周期各加一：退回 20 个周期
+    }
+    rig.cycles(60);
+    const std::vector<Row> rows = rig.closeAndRead('I');
+
+    // Input 接下来 20 块拿到的都不比上一次写出的大：一块都不写，每块计一次丢弃，之后接着写
+    const std::vector<Row> blocks = rowsOf(rows, "B");
+    const std::vector<Row> z = rowsOf(rows, "Z");
+    REQUIRE(z.size() == 1);
+    CHECK(num(z[0][3]) == 20);
+    REQUIRE(blocks.size() == 60);
+    for (std::size_t i = 1; i < blocks.size(); ++i)
+    {
+        CHECK(num(blocks[i][2]) > num(blocks[i - 1][2]));
+        CHECK(num(blocks[i][1]) == num(blocks[i - 1][1]) + (i == 20 ? 21 : 1));
+    }
+}
+
 TEST_CASE("the backend error sink is swapped in one step and never forwards to itself", "[probe_host]")
 {
     const SinkRestore restore;
