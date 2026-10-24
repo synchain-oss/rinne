@@ -5,7 +5,7 @@
 #   pwsh scripts/reaper/run.ps1 -CfgDir <私有配置目录> -BuildDir build-wf -LogDir <结果目录> -UserTestingMarker <标记文件路径> [-Repeat 5] [-Only <id 正则>] [-NoNegative]
 #   pwsh scripts/reaper/run.ps1 -SelfTest [-CollisionSample <一份含大小写碰撞变量的 .ps1>]   不启动 REAPER 的自测
 # -CfgDir 只接受显式的绝对路径，必须有 doctor.ps1 -Init 写的哨兵文件；永不碰 %APPDATA%\REAPER。
-# 退出码：0 全 PASS、1 有 FAIL、2 有 INCOMPLETE（没得出结论，不当 PASS）、3 整套 SKIPPED、64 被护栏拒绝或用法错误。
+# 退出码：0 全 PASS、1 有 FAIL、2 有 INCOMPLETE（没得出结论，不当 PASS）、3 整套 SKIPPED、64 被护栏拒绝或用法错误（含 -Only 一个场景都没选中）。
 [CmdletBinding()]
 param(
     [string]$CfgDir = '',
@@ -45,7 +45,7 @@ $params = @{
 try {
     $outcome = Invoke-ReaperSmoke @params
 } catch {
-    if ($_.Exception.Message -like 'REFUSED:*') { Write-Host $_.Exception.Message; exit 64 }
+    if ($_.Exception.Message -like 'REFUSED:*' -or $_.Exception.Message -like 'USAGE:*') { Write-Host $_.Exception.Message; exit 64 }
     throw
 }
 $resultFile = Write-ReaperSmokeResult -Data $outcome -LogDir $LogDir

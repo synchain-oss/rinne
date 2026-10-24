@@ -56,13 +56,14 @@ pwsh scripts/reaper/run.ps1 -SelfTest
 
 REAPER 对不存在的 `-cfgfile` 路径不报错，而是悄悄改用默认资源目录并写它，这会改掉使用者自己的配置。所以：
 
-1. 永不碰默认资源目录。`run.ps1` 只接受显式的 `-CfgDir`；启动前断言：路径是绝对路径；解析 junction 与符号链接之后仍不在 AppData 之下；目录存在；有 `doctor.ps1 -Init` 写的哨兵文件；`reaper.ini` 存在。任何一条不满足就拒绝启动。`-cfgfile` 的实参只由一个只读常量产生，每次启动前再校验一遍。
-2. 变量名不得只靠大小写区分（PowerShell 变量名不分大小写，`$c` 会盖掉 `$C`，当初就是这样让配置路径变空的）。自测会扫描 `scripts/reaper` 与 `tests/reaper` 下所有脚本：大小写碰撞、缺 `Set-StrictMode -Version Latest`、配置参数的字面量不是恰好一处且在 `Host.psm1` 里、除 `Guard.psm1` 与自测外提到 AppData，都判红。
+1. 永不碰默认资源目录。`run.ps1` 只接受显式的 `-CfgDir`；启动前断言：路径是盘符开头的绝对路径（`\\?\` 前缀、`\\.\` 设备路径、UNC 与指回本机的 `\\localhost\C$\` 管理共享写法一律不收）；展开 `..`、解析 junction 与符号链接之后，字符串上不在 AppData 之下；再按文件身份（卷序列号加文件 ID，取自打开的目录句柄）比一遍：配置目录自己和它的每一级上级（一直查到盘符根），只要有一个与 AppData 是同一个目录就拒绝，这样 8.3 短名、大小写、尾部分隔符、subst 盘符这些字符串认不出的写法也过不去；存在却取不到文件身份（拒绝访问等）同样拒绝，证明不了就不放行；目录存在；有 `doctor.ps1 -Init` 写的哨兵文件；`reaper.ini` 存在。任何一条不满足就拒绝启动。`-cfgfile` 的实参只由一个只读常量产生，每次启动前再校验一遍。
+2. 变量名不得只靠大小写区分（PowerShell 变量名不分大小写，`$c` 会盖掉 `$C`，当初就是这样让配置路径变空的）。自测会扫描 `scripts/reaper` 与 `tests/reaper` 下所有脚本：大小写碰撞、缺 `Set-StrictMode -Version Latest`、配置参数的字面量不是恰好一处且在 `Host.psm1` 里、除 `Guard.psm1` 与自测外提到 AppData，都判红。`.ps1`、`.psm1`、`.lua`、`.json` 里还不许夹不可见的控制字符（不在行尾的 CR 和 TAB、LF 以外的 C0 控制字符）：它们在编辑器和 diff 里看不见，一旦被吞掉，正则或字符串的意思就变了。
 3. 看门狗只按自己启动的 PID 结束进程；对话框只处理属于这个 PID 的窗口，用户自己的 REAPER 即使开着也不会被碰。本机已有别的 `reaper.exe` 在运行时整套 SKIPPED。
 4. 音频一律走 Dummy 设备，不播放到真实声卡；启动参数固定带 `-newinst -nosplash`。
 5. 模态框：「REAPER Query」（存盘提示）点「否」；渲染、插件扫描、峰值文件的进度窗放行；其余可见对话框（未选音频设备、Project Load Warning、REAPER Error、录音结束保存框、Lua 报错、评估许可的 About REAPER 提示窗等）持续半秒以上就判卡死，关窗并结束进程，场景为 INCOMPLETE。许可提示窗不会被自动点掉：评估期满后应购买许可证。
 6. 每轮前后各取一次默认资源目录的清单（文件的大小与修改时间），变了就判红并停止后续轮次。
-7. 只复制本机 `dev` 构建的两个 VST3 进私有目录；构建清单不是 `dev` 风味就 SKIPPED。
+7. 只复制本机 `dev` 构建的两个 VST3 进私有目录；构建清单不是 `dev` 风味就 SKIPPED。预检还会校验 `rinne-build.json`：它得是合法的 JSON 对象，`sha` 得是 7 到 40 位的十六进制（它会拼进结果文件名，也证明测的是哪次构建），否则整套 SKIPPED 并写明原因。工程模板里插件的类 ID 是写死的，预检读两个插件包里的 `Contents/Resources/moduleinfo.json`，与模板比对；对不上（插件身份变了，链上会是「效果不可用」的空槽，渲染照样逐位相同）就整套 SKIPPED，先去更新 `tests/reaper/Rpp.psm1`。
+8. `-Only` 写错、一个场景都没选中（或只选中了反例又给了 `-NoNegative`）是用法错误：退出码 64，不启动 REAPER，也不写结果文件；零个场景的一轮不会落成 PASS。
 
 ## 第二段（探针接好后再做）
 

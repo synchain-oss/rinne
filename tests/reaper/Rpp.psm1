@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # REAPER 工程文本与 Lua 任务文件的生成器。工程是手写的最小 .rpp：一条轨道、一个测试信号 item、按顺序排好的插件。
-# 插件块里的状态是 REAPER 自己存出的默认状态（缺了它 REAPER 报「效果不可用」）；插件的类标识来自构建产物的 VST3 清单。
+# 插件块里的状态是 REAPER 自己存出的默认状态（缺了它 REAPER 报「效果不可用」）。块头里的类标识、显示名和默认状态都是写死的
+# 值：插件身份或 state 头变了要在这里手动更新。类标识在预检里与构建产物的 VST3 清单（moduleinfo.json）比对，对不上整套 SKIPPED。
 #   New-ReaperProjectText   工程文本
 #   ConvertTo-ReaperLuaTable 把哈希表写成 Lua 的 return { … }，Lua 驱动用 dofile 读
 #   Write-ReaperText        无 BOM 的 UTF-8 写文件
+#   Get-ReaperPluginIdentities / Get-ReaperAudioClassId   工程模板里写的插件包名与类 ID；从 moduleinfo.json 文本取 Audio Module Class 的类 ID
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -24,6 +26,26 @@ $script:StateTail = @(
     'PAAAAAEAAAAAAAAAAAAAAEpVQ0VQcml2YXRlRGF0YQABAUJ5cGFzcwABAQMAHQAAAAAAAABKVUNFUHJpdmF0ZURhdGEAAAAAAAAAAA==',
     'AAAAAAAA'
 )
+
+# 工程模板里写的两个插件：@{ Role; Bundle（VST3 包名）; ClassId（32 位大写十六进制） }，从上面的块头里取，不另存一份。
+function Get-ReaperPluginIdentities {
+    foreach ($role in 'input', 'output') {
+        $head = $script:Plugins[$role].Head
+        [pscustomobject]@{
+            Role = $role
+            Bundle = [regex]::Match($head, '"([^"]+\.vst3)"').Groups[1].Value
+            ClassId = [regex]::Match($head, '\{([0-9A-Fa-f]{32})\}').Groups[1].Value.ToUpperInvariant()
+        }
+    }
+}
+
+# 纯函数：构建产物的 moduleinfo.json 文本里 Audio Module Class 那一条的类 ID（32 位大写十六进制），读不到返回 $null。
+# 这个文件允许尾逗号，不是严格 JSON，所以不用 JSON 解析器；顺序不对或格式变了就读不到，由调用方判整套 SKIPPED，不会放过。
+function Get-ReaperAudioClassId {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$ModuleInfoText)
+    $m = [regex]::Match($ModuleInfoText, '"CID"\s*:\s*"([0-9A-Fa-f]{32})"\s*,\s*"Category"\s*:\s*"Audio Module Class"')
+    $m.Success ? $m.Groups[1].Value.ToUpperInvariant() : $null
+}
 
 function New-ReaperProjectText {
     param(
@@ -105,4 +127,4 @@ function ConvertTo-ReaperLuaTable([Parameter(Mandatory)][System.Collections.IDic
     'return ' + (ConvertTo-ReaperLuaValue $Job) + "`n"
 }
 
-Export-ModuleMember -Function New-ReaperProjectText, Write-ReaperText, ConvertTo-ReaperLuaTable
+Export-ModuleMember -Function New-ReaperProjectText, Write-ReaperText, ConvertTo-ReaperLuaTable, Get-ReaperPluginIdentities, Get-ReaperAudioClassId

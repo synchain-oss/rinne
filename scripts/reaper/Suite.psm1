@@ -13,12 +13,17 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Guard.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Host.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Scenarios.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot '../../tests/reaper/Rpp.psm1') -ErrorAction Stop
 
 $script:Expectable = 'PASS', 'FAIL', 'SKIPPED', 'INCOMPLETE', 'REFUSED'
 
+# 用法错误（-Only 写错、没选中任何场景等）：和护栏的 REFUSED 一样不启动 REAPER、不写结果文件，入口按退出码 64 处理。
+function Stop-Usage([string]$Reason) { throw [System.InvalidOperationException]::new("USAGE: $Reason") }
+
 function Get-ReaperSmokeConfig([Parameter(Mandatory)][string]$Path) { Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
 
-function Get-Prop($Object, [string]$Name) { $Object.PSObject.Properties.Name -contains $Name ? $Object.$Name : $null }
+# 属性不在返回 $null。按名字取属性对象：空对象（没有任何属性）上读 .Name 在 StrictMode 下会抛错。
+function Get-Prop($Object, [string]$Name) { $prop = $null -eq $Object ? $null : $Object.PSObject.Properties[$Name]; $null -eq $prop ? $null : $prop.Value }
 
 # 纯函数：scenarios.json 的结构问题。id 唯一；kind 认识；每种 kind 的必填字段在；反例有认识的 expect。
 function Test-ReaperScenarioConfig {
@@ -44,6 +49,25 @@ function Test-ReaperScenarioConfig {
     , $p.ToArray()
 }
 
+# 构建产物里的 VST3 清单（<包>/Contents/Resources/moduleinfo.json）是插件类 ID 的真源。工程模板（Rpp.psm1）里的类 ID 是写死的：
+# 两边对不上，链上就会是「效果不可用」的空槽，渲染照样逐位相同，会误判 PASS。所以预检读清单比对，不一致就给出原因（整套 SKIPPED）。
+# 包目录本身不在的由调用方另报，这里不重复。
+function Test-ReaperPluginClassIds {
+    param([string[]]$Bundles = @())
+    $why = [Collections.Generic.List[string]]::new()
+    foreach ($e in (Get-ReaperPluginIdentities)) {
+        $dir = @($Bundles | Where-Object { (Split-Path -Leaf $_) -ieq $e.Bundle }) | Select-Object -First 1
+        if (-not $dir) { $why.Add("构建清单里没有 $($e.Bundle)，没法核对它的类 ID"); continue }
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        $manifest = Join-Path $dir 'Contents/Resources/moduleinfo.json'
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { $why.Add("$($e.Bundle) 里没有 moduleinfo.json，读不到类 ID"); continue }
+        $cid = Get-ReaperAudioClassId -ModuleInfoText ([IO.File]::ReadAllText($manifest))
+        if (-not $cid) { $why.Add("读不出 $($e.Bundle) 清单里 Audio Module Class 的类 ID") }
+        elseif ($cid -cne $e.ClassId) { $why.Add("$($e.Bundle) 的类 ID 是 $cid，工程模板里写的是 $($e.ClassId)：插件身份变了，先更新 tests/reaper/Rpp.psm1") }
+    }
+    , $why.ToArray()
+}
+
 # 缺什么就列出来；有原因就整套 SKIPPED，不启动 REAPER。USER_TESTING 标记在时不再看别的。
 function Get-ReaperPreflight {
     param([Parameter(Mandatory)][string]$ReaperExe, [Parameter(Mandatory)][string]$BuildDir, [string]$NullTest = '', [Parameter(Mandatory)][string]$UserTestingMarker)
@@ -53,12 +77,18 @@ function Get-ReaperPreflight {
     if (Test-Path -LiteralPath $ReaperExe -PathType Leaf) { $out.ReaperVersion = (Get-Item -LiteralPath $ReaperExe).VersionInfo.ProductVersion } else { $why.Add('找不到 reaper.exe') }
     $info = Join-Path $BuildDir 'rinne-build.json'
     if (Test-Path -LiteralPath $info -PathType Leaf) {
-        $b = Get-Content -LiteralPath $info -Raw | ConvertFrom-Json
-        $out.Sha7 = ([string]$b.sha).Substring(0, 7); $out.Flavor = [string]$b.flavor
-        if ($b.flavor -ne 'dev') { $why.Add("构建的 flavor 是 $($b.flavor)，只测 dev（D 前缀）构建") }
-        $out.Bundles = @($b.bundles | ForEach-Object { [string]$_ })
+        $b = try { Get-Content -LiteralPath $info -Raw | ConvertFrom-Json } catch { $null }
+        if ($null -eq $b -or $b -isnot [pscustomobject]) { $why.Add('rinne-build.json 不是合法的 JSON 对象（重新用 gates 构建）'); $b = [pscustomobject]@{} }
+        # sha 要先校验：它会拼进结果文件名，也用来证明测的是哪次构建。缺失、太短或不是十六进制，都不能默默往下走
+        $sha = [string](Get-Prop $b sha)
+        if ($sha -match '^[0-9a-fA-F]{7,40}$') { $out.Sha7 = $sha.Substring(0, 7).ToLowerInvariant() } else { $why.Add('rinne-build.json 里的 sha 缺失，或不是 7 到 40 位的十六进制（重新用 gates 构建）') }
+        $flavor = [string](Get-Prop $b flavor)
+        $out.Flavor = $flavor
+        if ($flavor -ne 'dev') { $why.Add("构建的 flavor 是 $flavor，只测 dev（D 前缀）构建") }
+        $out.Bundles = @((Get-Prop $b bundles) | Where-Object { $_ } | ForEach-Object { [string]$_ })
         if ($out.Bundles.Count -ne 2) { $why.Add("构建清单里的 VST3 应为 2 个，实际 $($out.Bundles.Count) 个") }
         foreach ($d in $out.Bundles) { if (-not (Test-Path -LiteralPath $d -PathType Container)) { $why.Add("构建产物不在：$(Split-Path -Leaf $d)") } }
+        foreach ($r in (Test-ReaperPluginClassIds -Bundles $out.Bundles)) { $why.Add($r) }
     } else { $why.Add('构建目录里没有 rinne-build.json（先用 gates 构建）') }
     if (-not $NullTest) { $out.NullTest = Join-Path $BuildDir 'tools-bin/Release/rinne_nulltest.exe' }
     if (-not (Test-Path -LiteralPath $out.NullTest -PathType Leaf)) { $why.Add('找不到 rinne_nulltest.exe') }
@@ -74,7 +104,7 @@ function Install-ReaperPlugins {
     $null = New-Item -ItemType Directory -Force -Path $dest
     # 私有 VST3 目录要排在 vstpath64 的最前（REAPER 自己会补上系统目录）
     $iniText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes((Join-Path $CfgDir 'reaper.ini')))
-    if ($iniText -notmatch ('(?m)^vstpath64=' + [regex]::Escape($dest) + '(;|?$)')) { $null = Set-ReaperIniValue -Section REAPER -Key vstpath64 -Value $dest }
+    if ($iniText -notmatch ('(?m)^vstpath64=' + [regex]::Escape($dest) + '(;|\r?$)')) { $null = Set-ReaperIniValue -Section REAPER -Key vstpath64 -Value $dest }
     $report = [Collections.Generic.List[object]]::new()
     foreach ($bundle in $Bundles) {
         $root = [IO.Path]::GetFullPath($bundle).TrimEnd('\') + '\'
@@ -95,7 +125,9 @@ function Install-ReaperPlugins {
 # 路径一律打码：结果 json 要能过隐私检查。
 function Hide-LocalPaths([string]$Text) { $Text -replace '[A-Za-z]:[\\/][^\s"''；，。]*', '<path>' -replace '\\\\[^\s"'']*', '<path>' }
 
+# 一组结局里最差的。空列表是「什么都没跑」，没有结论，不能当 PASS。
 function Get-WorstStatus([string[]]$StatusList) {
+    if ($null -eq $StatusList -or $StatusList.Count -eq 0) { return 'INCOMPLETE' }
     foreach ($s in 'FAIL', 'INCOMPLETE') { if ($s -in $StatusList) { return $s } }
     if ($StatusList.Count -gt 0 -and @($StatusList | Where-Object { $_ -ne 'SKIPPED' }).Count -eq 0) { return 'SKIPPED' }
     if ('SKIPPED' -in $StatusList) { return 'INCOMPLETE' }
@@ -146,6 +178,19 @@ function Invoke-GuardNegative {
     }
 }
 
+# 纯函数：按 -Only（匹配场景 id 的正则）与 -NoNegative 选出这次要跑的正例与反例。-Only 不是合法正则、或者什么场景都没选中，
+# 都是用法错误（Stop-Usage）：零个场景的一轮没有任何结论，不能落成 PASS。
+function Select-ReaperScenarios {
+    param([Parameter(Mandatory)]$Config, [string]$Only = '', [switch]$NoNegative)
+    if ($Only) { try { $null = [regex]::new($Only) } catch { Stop-Usage "-Only 不是合法的正则：$($_.Exception.Message)" } }
+    $positive = @($Config.scenarios | Where-Object { -not $Only -or $_.id -match $Only })
+    $negative = $NoNegative ? @() : @($Config.negative | Where-Object { -not $Only -or $_.id -match $Only })
+    if ($positive.Count + $negative.Count -eq 0) {
+        Stop-Usage ("-Only '{0}' 没有选中任何场景{1}（场景 id 见 tests/reaper/scenarios.json）" -f $Only, ($NoNegative ? '（-NoNegative 时反例不跑）' : ''))
+    }
+    [pscustomobject]@{ Positive = $positive; Negative = $negative }
+}
+
 function Invoke-ReaperSmoke {
     param(
         [string]$CfgDir = '', [Parameter(Mandatory)][string]$ReaperExe, [Parameter(Mandatory)][string]$BuildDir, [string]$NullTest = '',
@@ -156,6 +201,8 @@ function Invoke-ReaperSmoke {
     $scenarioConfig = Get-ReaperSmokeConfig $ScenarioFile
     $bad = Test-ReaperScenarioConfig $scenarioConfig
     if ($bad.Count) { throw "scenarios.json 有问题：$($bad -join '；')" }
+    if ($Repeat -lt 1) { Stop-Usage '-Repeat 至少是 1' }
+    $picked = Select-ReaperScenarios -Config $scenarioConfig -Only $Only -NoNegative:$NoNegative # 选不出场景就是用法错误：什么都还没启动
     $pre = Get-ReaperPreflight -ReaperExe $ReaperExe -BuildDir $BuildDir -NullTest $NullTest -UserTestingMarker $UserTestingMarker
     $result = [ordered]@{
         schema = 1; startedUtc = [DateTime]::UtcNow.ToString('o'); build = [ordered]@{ sha7 = $pre.Sha7; flavor = $pre.Flavor }
@@ -166,8 +213,8 @@ function Invoke-ReaperSmoke {
 
     $result.plugins = Install-ReaperPlugins -CfgDir $cfg.Dir -Bundles $pre.Bundles
     $stamp = [DateTime]::Now.ToString('yyyyMMdd-HHmmss')
-    $positive = @($scenarioConfig.scenarios | Where-Object { -not $Only -or $_.id -match $Only })
-    $negative = $NoNegative ? @() : @($scenarioConfig.negative | Where-Object { -not $Only -or $_.id -match $Only })
+    $positive = $picked.Positive
+    $negative = $picked.Negative
     $driver = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tests/reaper/lua/driver.lua'))
     $launches = 0
     for ($k = 1; $k -le $Repeat; $k++) {
@@ -230,5 +277,5 @@ function Write-ReaperSmokeResult {
     $jsonPath
 }
 
-Export-ModuleMember -Function Get-ReaperSmokeConfig, Test-ReaperScenarioConfig, Get-ReaperPreflight, Install-ReaperPlugins, Hide-LocalPaths,
+Export-ModuleMember -Function Get-ReaperSmokeConfig, Test-ReaperScenarioConfig, Test-ReaperPluginClassIds, Get-ReaperPreflight, Install-ReaperPlugins, Hide-LocalPaths, Select-ReaperScenarios,
     Get-WorstStatus, Get-RunVerdict, Invoke-ReaperSmoke, Write-ReaperSmokeResult

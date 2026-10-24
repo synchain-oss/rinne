@@ -9,11 +9,43 @@
 #   Set-ReaperIniValue         只改私有 ini 里的一个键（字节原样往返，不改别的行）
 #   Get-ReaperDefaultCfgSnapshot / Compare-ReaperDefaultCfgSnapshot
 #                              只读地取 %APPDATA%\REAPER 下全部条目的大小与修改时间，前后比较
-#   Find-ReaperVariableCaseCollisions / Test-ReaperScriptLint
-#                              变量名不得只靠大小写区分（PowerShell 变量名不分大小写，$c 会盖掉 $C）
+#   Get-ReaperFileIdentity     目录的文件身份（卷序列号 + 文件 ID）：路径写法再怎么绕，指到同一个目录身份就相同
+#   Find-ReaperVariableCaseCollisions / Find-ReaperControlChars / Test-ReaperScriptLint
+#                              变量名不得只靠大小写区分（PowerShell 变量名不分大小写，$c 会盖掉 $C）；脚本里不得夹不可见的控制字符
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# 文件身份取自打开的句柄（FILE_ID_INFO），所以 8.3 短名、大小写、尾部分隔符、subst 盘符、junction 与符号链接的写法都归一到同一个值；
+# 比按字符串比前缀可靠。不带 OPEN_REPARSE_POINT，链接会被跟到目标上。
+if (-not ('RinneReaperFileId' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RinneReaperFileId {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(IntPtr handle, int infoClass, byte[] buffer, uint size);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    public static string Get(string path) {
+        // FILE_READ_ATTRIBUTES、共享全开、OPEN_EXISTING、FILE_FLAG_BACKUP_SEMANTICS（目录要它）
+        IntPtr h = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (h == new IntPtr(-1)) {
+            int err = Marshal.GetLastWin32Error();
+            // 2、3：路径不存在，正常（还没建的配置目录）；别的错误取不到身份，不能当作「不是同一个」
+            return (err == 2 || err == 3) ? null : "ERROR:" + err;
+        }
+        try {
+            byte[] b = new byte[24]; // FILE_ID_INFO：8 字节卷序列号 + 16 字节文件 ID
+            if (!GetFileInformationByHandleEx(h, 18, b, (uint)b.Length)) return "ERROR:" + Marshal.GetLastWin32Error();
+            return BitConverter.ToString(b);
+        } finally { CloseHandle(h); }
+    }
+}
+'@
+}
 
 $script:SentinelName = '.rinne-reaper-cfg'
 $script:SentinelMagic = 'rinne-reaper-private-cfg v1'
@@ -21,6 +53,9 @@ $script:SentinelMagic = 'rinne-reaper-private-cfg v1'
 function Get-ReaperSentinel { [pscustomobject]@{ Name = $script:SentinelName; Magic = $script:SentinelMagic } }
 
 function Stop-Refuse([string]$Why) { throw [System.InvalidOperationException]::new("REFUSED: $Why") }
+
+# 路径指到的目录（或文件）的文件身份字符串；路径不存在返回 $null；存在却打不开返回 'ERROR:<错误码>'（调用方要当作「证明不了」处理）。
+function Get-ReaperFileIdentity([string]$Path) { [RinneReaperFileId]::Get($Path) }
 
 # 逐级解析 junction 与符号链接，返回真实路径；路径不存在的部分照字面接上。
 function Resolve-ReaperRealPath([string]$Path, [int]$Depth = 0) {
@@ -48,9 +83,16 @@ function Test-ReaperUnder([string]$Path, [string]$Root) {
 }
 
 # 路径本身的检查，不看里面有什么：显式的绝对路径，不在（也不指向）AppData 之下。返回真实路径。
+# 三道，缺一不可：
+#   1. 只收盘符开头的绝对路径。\\?\ 前缀、\\.\ 设备路径、\\server\share（包括指回本机的 \\localhost\C$\ 管理共享）写的是同一个目录，
+#      却躲得过按字符串的比较，所以一律不收；
+#   2. 字符串比较：展开 .. 与 junction / 符号链接之后，不在 AppData 的字符串前缀之下；
+#   3. 文件身份比较：配置目录自己和它的每一级上级（直到盘符根），只要有一个与 AppData 是同一个目录（8.3 短名、subst 盘符等字符串认不出的写法），
+#      就拒绝；存在却取不到身份（拒绝访问等）也拒绝，证明不了就不放行。路径还不存在的部分（取到 $null）正常跳过。
 function Assert-ReaperOutsideDefaultDir([string]$CfgDir) {
     if ([string]::IsNullOrWhiteSpace($CfgDir)) { Stop-Refuse '没有给 -CfgDir（只接受显式的绝对路径）' }
     if (-not [IO.Path]::IsPathFullyQualified($CfgDir)) { Stop-Refuse '-CfgDir 必须是绝对路径' }
+    if ($CfgDir -notmatch '^[A-Za-z]:[\\/]') { Stop-Refuse '-CfgDir 只接受本机盘符开头的绝对路径（C:\…）：\\?\ 前缀、\\.\ 设备路径、UNC 与 \\localhost\C$\ 这类管理共享写法一律不收' }
     $appData = $env:APPDATA
     if ([string]::IsNullOrWhiteSpace($appData)) { Stop-Refuse 'APPDATA 没有设置，无法证明配置目录在它之外' }
     $full = [IO.Path]::GetFullPath($CfgDir).TrimEnd('\', '/')
@@ -59,6 +101,16 @@ function Assert-ReaperOutsideDefaultDir([string]$CfgDir) {
     foreach ($candidate in @($full, $real)) {
         foreach ($base in $bases) {
             if (Test-ReaperUnder $candidate $base) { Stop-Refuse '配置目录在 AppData 之下（或指向那里）：永不碰 %APPDATA%\REAPER' }
+        }
+    }
+    $baseId = Get-ReaperFileIdentity $appData
+    if (-not $baseId -or $baseId.StartsWith('ERROR:')) { Stop-Refuse 'AppData 目录打不开，取不到它的文件身份，无法证明配置目录在它之外' }
+    foreach ($start in @($full, $real)) {
+        # 一直查到盘符根：subst 盘符可以让根目录本身就是 AppData
+        for ($p = $start; $p; $p = [IO.Path]::GetDirectoryName($p)) {
+            $id = Get-ReaperFileIdentity $p
+            if ($id -and $id.StartsWith('ERROR:')) { Stop-Refuse "配置目录或它的某一级上级取不到文件身份（$id），无法证明它不是 AppData" }
+            if ($id -ceq $baseId) { Stop-Refuse '配置目录在 AppData 之下（或指向那里；按文件身份认出的）：永不碰 %APPDATA%\REAPER' }
         }
     }
     $real
@@ -198,8 +250,23 @@ function Find-ReaperVariableCaseCollisions {
     , $out.ToArray()
 }
 
+# 文本里夹的不可见控制字符，每处一条描述（第几行第几列、码位）。TAB、LF 和紧挨在 LF 前的 CR（Windows 换行）不算；
+# 其余 C0 控制字符、DEL，以及不在行尾的 CR 都算。这类字符在编辑器和 diff 里看不见，一旦被吞掉，正则或字符串的意思就变了。
+function Find-ReaperControlChars {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $out = [Collections.Generic.List[string]]::new()
+    foreach ($m in [regex]::Matches($Text, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]|\r(?!\n)')) {
+        $leading = $Text.Substring(0, $m.Index)
+        $line = ($leading.Length - $leading.Replace("`n", '').Length) + 1
+        $col = $m.Index - $leading.LastIndexOf("`n")
+        $out.Add(('第 {0} 行第 {1} 列：U+{2:X4}' -f $line, $col, [int][char]$m.Value))
+    }
+    , $out.ToArray()
+}
+
 # 扫一组目录里的 .ps1 / .psm1。除了变量大小写碰撞，还要：每个文件都 Set-StrictMode -Version Latest；-cfgfile 字面量全局恰好
 # 一处且在 Host.psm1 里；APPDATA 只许在 Guard 与自测里出现（别的文件连读都不该读）。注释不算。
+# 另外 .ps1 / .psm1 / .lua / .json 都不许夹不可见的控制字符。
 function Test-ReaperScriptLint {
     param([Parameter(Mandatory)][string[]]$Dirs)
     $problems = [Collections.Generic.List[string]]::new()
@@ -214,8 +281,12 @@ function Test-ReaperScriptLint {
     }.GetNewClosure()
     foreach ($dir in $Dirs) {
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) { $problems.Add("目录不存在：$(Split-Path -Leaf $dir)"); continue }
+        foreach ($f in Get-ChildItem -LiteralPath $dir -Recurse -File | Where-Object { $_.Extension -in '.lua', '.json' }) {
+            foreach ($c in (Find-ReaperControlChars -Text ([IO.File]::ReadAllText($f.FullName)))) { $problems.Add("$($f.Name)：夹着不可见的控制字符（$c）") }
+        }
         foreach ($f in Get-ChildItem -LiteralPath $dir -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' }) {
             $source = [IO.File]::ReadAllText($f.FullName)
+            foreach ($c in (Find-ReaperControlChars -Text $source)) { $problems.Add("$($f.Name)：夹着不可见的控制字符（$c）") }
             foreach ($c in (Find-ReaperVariableCaseCollisions -Text $source)) { $problems.Add("$($f.Name)：$c") }
             $tokens = $null; $parseErrors = $null
             $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
@@ -232,6 +303,6 @@ function Test-ReaperScriptLint {
     , $problems.ToArray()
 }
 
-Export-ModuleMember -Function Get-ReaperSentinel, Resolve-ReaperRealPath, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
+Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Resolve-ReaperRealPath, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
     Get-ReaperCfgArgument, Set-ReaperIniText, Set-ReaperIniValue, Get-ReaperDefaultCfgDir, Get-ReaperDefaultCfgSnapshot, Compare-ReaperDefaultCfgSnapshot,
-    Find-ReaperVariableCaseCollisions, Test-ReaperScriptLint
+    Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint

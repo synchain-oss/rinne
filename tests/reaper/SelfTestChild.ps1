@@ -111,6 +111,14 @@ try {
     $during.Called = $false; $ctx.LockWaitSec = 1; $before = $ctx.Launches
     $run = Invoke-ReaperLaunch -Ctx $ctx -HostArgs @{ TimeoutSec = 5 }
     Write-Case 'gui 锁：别人占着时等不到，状态 LockBusy，不无锁硬跑' $true ($run.Status -eq 'LockBusy' -and -not $during.Called -and $ctx.Launches -eq $before -and (Get-HostFailure $run) -eq 'gui 锁等不到')
+    # 反例场景（hang）在锁等不到时：REAPER 没启动，Run 里没有进程号。原因要写准，不能落成「场景抛错」
+    $hangConfig = [pscustomobject]@{ limits = [pscustomobject]@{ luaTimeoutSec = 30 }; signal = [pscustomobject]@{ seconds = 4; kind = 'x' } }
+    $hangCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $hangConfig -LockWaitSec 1
+    $hangCtx.Signals['48000-2-0'] = Join-Path $Work 'sig.wav' # 信号已“造好”，用不着 nulltest
+    $hangCtx.Launcher = New-StandIn 'exit 0' $during
+    $during.Called = $false
+    $hang = Invoke-ReaperScenario -Ctx $hangCtx -Scenario ([pscustomobject]@{ id = 'hang-lockbusy'; kind = 'hang'; timeoutSec = 2; killAfterSec = 0 })
+    Write-Case '反例场景 hang 在 gui 锁等不到时：INCOMPLETE，原因写锁而不是「场景抛错」，REAPER 没有启动' $true ($hang.Status -eq 'INCOMPLETE' -and $hang.Detail -like '*gui 锁等不到*' -and $hang.Detail -notlike '*场景抛错*' -and -not $during.Called -and $hangCtx.Launches -eq 0)
 } finally { if (-not $holder.HasExited) { $holder.Kill() } }
 
 # ---- 入口护栏 ----
@@ -132,6 +140,13 @@ Write-Case '入口：哨兵缺失的配置目录被拒绝' $true (Test-Throws { 
 $other = $smoke.Clone(); $other.CfgDir = Get-ReaperDefaultCfgDir
 Write-Case '入口：默认资源目录当配置目录被拒绝' $true (Test-Throws { $null = Invoke-ReaperSmoke @other -UserTestingMarker $marker } 'REFUSED:*永不碰*')
 Remove-Item -LiteralPath (Join-Path $noSentinel 'reaper.ini'); Remove-Item -LiteralPath $noSentinel
+# 用法错误：选不出任何场景时不能落成零个场景的 PASS，也不能默默 SKIPPED
+Write-Case '入口：-Only 一个场景都没选中是用法错误' $true (Test-Throws { $null = Invoke-ReaperSmoke @smoke -UserTestingMarker $marker -Only '^no-such-scenario$' } 'USAGE:*没有选中任何场景*')
+Write-Case '入口：-Repeat 0 是用法错误' $true (Test-Throws { $null = Invoke-ReaperSmoke @smoke -UserTestingMarker $marker -Repeat 0 } 'USAGE:*-Repeat*')
+$usageLogs = Join-Path $Work 'usage-logs'
+$u = Invoke-Native -Exe $pwshExe -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'run.ps1'), '-CfgDir', $CfgA, '-BuildDir', (Join-Path $Work 'no-build'),
+    '-LogDir', $usageLogs, '-UserTestingMarker', $marker, '-Only', '^no-such-scenario$')
+Write-Case '入口脚本：-Only 一个场景都没选中退出码 64，不写结果文件' $true ($u.Exit -eq 64 -and $u.Out -match 'USAGE:' -and -not (Test-Path -LiteralPath $usageLogs))
 
 # ---- 插件复制 ----
 $bundles = foreach ($name in 'Rinne Input', 'Rinne Output') {
@@ -141,9 +156,20 @@ $bundles = foreach ($name in 'Rinne Input', 'Rinne Output') {
     $dir
 }
 $first = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
+$iniFirst = [IO.File]::ReadAllText($pinned.Ini)
 $second = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
 Set-Content -LiteralPath (Join-Path $bundles[0] 'Contents/x86_64-win/Rinne Input.vst3') -Value 'bits-new'
 $third = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
 $iniNow = [IO.File]::ReadAllText($pinned.Ini)
+# vstpath64 已经含私有目录时不再改写 ini：LF 行尾、CRLF 行尾、后面还跟别的目录（分号）三种写法都要认
+Write-Case '插件复制：重复安装不改写 ini（vstpath64 已含私有目录，LF 行尾）' $false ($iniNow -ceq $iniFirst)
+$pluginsDir = Join-Path $pinned.Dir 'plugins'
+$iniRaw = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($pinned.Ini)) # 前面的用例往 ini 里写过非 UTF-8 的字节，按 Latin-1 读才能原样往返
+foreach ($variant in @(@('CRLF 行尾', "`r`n", ''), @('后面跟着别的目录', "`n", ';' + (Join-Path $Work 'elsewhere')), @('CRLF 行尾且后面跟着别的目录', "`r`n", ';' + (Join-Path $Work 'elsewhere')))) {
+    $text = (($iniRaw -replace "`r?`n", "`n") -replace '(?m)^vstpath64=.*$', ('vstpath64=' + $pluginsDir + $variant[2])) -replace "`n", $variant[1]
+    [IO.File]::WriteAllBytes($pinned.Ini, [Text.Encoding]::Latin1.GetBytes($text))
+    $null = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
+    Write-Case "插件复制：重复安装不改写 ini（$($variant[0])）" $false ([Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($pinned.Ini)) -ceq $text)
+}
 Write-Case '插件复制：第一次全复制，内容相同第二次不动，改了的再复制' $false (@($first | Where-Object { $_.copied }).Count -eq 2 -and @($second | Where-Object { $_.copied }).Count -eq 0 -and @($third | Where-Object { $_.copied }).Count -eq 1)
 Write-Case '插件复制：私有 VST3 目录排在 vstpath64 最前，目标里只有这次的构建' $false ($iniNow.Contains('vstpath64=' + (Join-Path $pinned.Dir 'plugins')) -and (Get-Content -LiteralPath (Join-Path $pinned.Dir 'plugins/Rinne Input.vst3/Contents/x86_64-win/Rinne Input.vst3') -Raw).Trim() -eq 'bits-new')

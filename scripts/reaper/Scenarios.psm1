@@ -264,6 +264,8 @@ function Invoke-HangScenario($Ctx, $S) {
     $r = New-ReaperRun -Ctx $Ctx -Name $S.id -Sr 48000 -Block 512 -Mode offline -Channels 2 -Chain @('input', 'output')
     $lua = Invoke-LuaStep -Ctx $Ctx -Name $S.id -Step hang -Job @{ project = $r.Project } -TimeoutSec ([double](Get-Field $S timeoutSec 0)) -KillAfterSec ([double](Get-Field $S killAfterSec 0))
     if (-not $lua.Why) { return New-Outcome PASS '本该卡住的驱动正常结束了（反例没有生效）' }
+    # gui 锁没等到时 REAPER 根本没启动，Run 里没有进程号可查；原因照实写，别落成「场景抛错」
+    if ($lua.Run.Status -eq 'LockBusy') { return New-Outcome INCOMPLETE "$($lua.Why)；REAPER 没有启动，看门狗没能验证" }
     if (Get-Process -Id $lua.Run.Pid -ErrorAction SilentlyContinue) { return New-Outcome FAIL "进程 $($lua.Run.Pid) 还活着" }
     $lock = $null
     $deadline = (Get-Date).AddSeconds(20)
