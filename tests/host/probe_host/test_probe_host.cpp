@@ -1089,7 +1089,7 @@ TEST_CASE("probe defaults are conservative and the panel limits hold", "[probe_h
     CHECK_FALSE(rig.input->host.probeStartRecording(bad, 1));
     CHECK_FALSE(rig.input->host.probeStatus().recording);
 
-    // 还没设组、没有会合段就取不到 call_seq：窗口开着也不写 B 行
+    // 还没设组、没有会合段就取不到 call_seq：窗口开着也不写 B 行，20 块都按丢弃计
     REQUIRE(rig.input->host.probeStartRecording(cell(), 1));
     // 诊断里的格是面板交来的当前选择，不是开始记录时用的那个
     CHECK(rig.input->host.probeDiagnosticsText(cell(512, diag::ProbeGuard::kLow))
@@ -1098,6 +1098,9 @@ TEST_CASE("probe defaults are conservative and the panel limits hold", "[probe_h
     const std::vector<Row> rows = rig.closeAndRead('I');
     CHECK(rowsOf(rows, "C").size() == 1);
     CHECK(rowsOf(rows, "B").empty());
+    const std::vector<Row> z = rowsOf(rows, "Z");
+    REQUIRE(z.size() == 1);
+    CHECK(z[0][3] == "20");
 }
 
 TEST_CASE("the loop switch reaches the engine and stays out of the probe state", "[probe_host]")
