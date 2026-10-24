@@ -20,6 +20,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/engine/EngineTestKit.h"
 #include "diag/EventQueue.h"
 #include "dsp/Sanitize.h"
 #include "engine/EngineContext.h"
@@ -136,6 +137,8 @@ struct Loop
     InputEngine input;
     OutputEngine output;
     bool outputFirst = false;
+    // 可选的参照（见 EngineTestKit.h）：设了就在 run 里每块喂它 Input 的干声与 lastBlockResult()
+    rinne::test::InputReference* reference = nullptr;
 
     Loop(int maxBlock)
     {
@@ -161,14 +164,23 @@ struct Loop
                 host.right[static_cast<std::size_t>(i)] = source(at + i);
             }
             const TransportInfo transport = transportAt(at);
+            const HostBuffer dry(host);
+            const auto feedReference = [&] {
+                if (reference != nullptr)
+                {
+                    reference->block(params, input.lastBlockResult(), false, dry.left.data(), dry.right.data(), n);
+                }
+            };
             if (outputFirst)
             {
                 output.process(host.view(), params, transport, false, outputCtx(ring.get(), kToken, rv.get()));
                 input.process(host.view(), params, transport, false, inputCtx(ring.get(), rv.get()));
+                feedReference();
             }
             else
             {
                 input.process(host.view(), params, transport, false, inputCtx(ring.get(), rv.get()));
+                feedReference();
                 output.process(host.view(), params, transport, false, outputCtx(ring.get(), kToken, rv.get()));
             }
             out.insert(out.end(), host.left.begin(), host.left.end());
@@ -1028,11 +1040,16 @@ TEST_CASE("引擎 mono：Input 的回送取环里两格的平均 0.5·(L + R)，
 
     constexpr float kLeft = 0.6f;
     constexpr float kRight = 0.2f;
+    rinne::test::InputReference reference(kSr);
+    std::vector<float> out;
     // Input 在前：每块 Input 先读环，写方再写 256 帧（左右不同的常数）。跑够 D + onset（20 ms）+ 增益平滑（30 ms）。
     for (int block = 0; block < 40; ++block)
     {
         std::fill(mono.begin(), mono.end(), 0.0f); // 干声为 0：输出就是回送
+        const std::vector<float> dry = mono;
         input.process(view, params, TransportInfo{}, false, inputCtx(ring.get()));
+        reference.block(params, input.lastBlockResult(), false, dry.data(), nullptr, 256);
+        out.insert(out.end(), mono.begin(), mono.end());
         const RingWriteResult result =
             LoopRing::write(*ring, 256, [&](std::uint32_t, std::uint64_t, float& l, float& r) {
                 l = kLeft;
@@ -1040,11 +1057,13 @@ TEST_CASE("引擎 mono：Input 的回送取环里两格的平均 0.5·(L + R)，
             });
         REQUIRE(result == RingWriteResult::kOk);
     }
-    const float expected = 0.5f * (kLeft + kRight);
-    for (int i = 0; i < 256; ++i)
-    {
-        CHECK(std::fabs(mono[static_cast<std::size_t>(i)] - expected) < 1.0e-6f);
-    }
+    // 回送经过安全链（DC 阻断、500 ms 淡入），输出不再是常数 0.4：读头上左右两格各是原值，
+    // 输出与「两格取平均之后过安全链」的参照逐位相同（只取左声道或两格相加都对不上）。
+    REQUIRE(reference.tapLeft.size() == out.size());
+    CHECK(reference.tapLeft.back() == kLeft);
+    CHECK(reference.tapRight.back() == kRight);
+    CHECK(out.back() != 0.0f);
+    CHECK(rinne::test::firstBitDiff(out, reference.wantLeft) == -1);
 }
 
 TEST_CASE("引擎 闭环：一个冲激恰在 D 个样本之后回到读头，增益为 1 时逐位是原值", "[engine][loop]")
@@ -1053,14 +1072,30 @@ TEST_CASE("引擎 闭环：一个冲激恰在 D 个样本之后回到读头，�
     constexpr int kD = 480; // 10 ms
     constexpr int kAt = 2000;
     Loop loop(256);
+    rinne::test::InputReference reference(kSr);
+    loop.reference = &reference;
     const EngineParams params = unityLoopParams(10.0f);
     const auto out = loop.run(params, 256, 4096, [=](int t) { return t == kAt ? 0.5f : 0.0f; });
 
+    // 回送经过安全链（DC 阻断、从首个有效读样本起 500 ms 淡入）：输出里的回声不再等于原值。冲激的位置在读头上逐位断言，
+    // 输出与参照安全链逐位比较。
+    const auto& tap = reference.tapLeft;
+    REQUIRE(tap.size() == out.size());
     CHECK(out[kAt] == 0.5f); // 干声
     CHECK(out[kAt + kD - 1] == 0.0f);
-    CHECK(out[kAt + kD] == 0.5f); // 第一次回来：恰好 D 个样本之后
-    CHECK(out[kAt + kD + 1] == 0.0f);
-    CHECK(out[kAt + 2 * kD] == 0.5f); // 第二次（反馈 100 %）
+    CHECK(tap[kAt + kD - 1] == 0.0f);
+    CHECK(tap[kAt + kD] == 0.5f); // 第一次回来：恰好 D 个样本之后，读头上逐位是原值
+    CHECK(tap[kAt + kD + 1] == 0.0f);
+    CHECK(out[kAt + kD] != 0.0f);
+    // 第二次（反馈 100 %）：读头逐位就是 Input 在 D 个样本之前的输出（环路延迟恰为 D）
+    std::size_t delayed = 0;
+    for (std::size_t t = kD; t < out.size(); ++t)
+    {
+        delayed += tap[t] == out[t - kD] ? 0u : 1u;
+    }
+    CHECK(delayed == 0u);
+    CHECK(tap[kAt + 2 * kD] != 0.0f);
+    CHECK(rinne::test::firstBitDiff(out, reference.wantLeft) == -1);
     CHECK(loop.input.loopStatus().delayEffective == kD);
     CHECK(loop.input.loopStatus().resyncCount == 0u);
 }
@@ -1079,8 +1114,14 @@ TEST_CASE("引擎 闭环：Output 先于 Input 配上、写头早已很大时，
     REQUIRE(LoopRing::writeHead(*loop.ring) == static_cast<std::uint64_t>((48000 / 256) * 256));
 
     constexpr int kAt = 3000;
+    rinne::test::InputReference reference(kSr);
+    loop.reference = &reference;
     const auto out = loop.run(params, 256, 6000, [=](int t) { return t == kAt ? 0.25f : 0.0f; });
-    CHECK(out[kAt + 480] == 0.25f);
+    // 回送经过安全链：冲激在读头上逐位断言，输出与参照安全链逐位比较。
+    REQUIRE(reference.tapLeft.size() == out.size());
+    CHECK(reference.tapLeft[kAt + 480] == 0.25f);
+    CHECK(out[kAt + 480] != 0.0f);
+    CHECK(rinne::test::firstBitDiff(out, reference.wantLeft) == -1);
     const auto status = loop.input.loopStatus();
     CHECK(status.overflow == 0u); // 配对时锚在写头，不是「丢了一圈」
     CHECK(status.drift == 0);
@@ -1348,15 +1389,21 @@ float maxAdjacentStep(const std::vector<float>& trace, std::size_t from)
 }
 
 // Input 在前、写方在后跑一块：干声左右各是一个常数，Input 处理完把左右声道接在轨迹后面，写方再直接写 n 帧。
+// 给了参照（见 EngineTestKit.h）就把这一块的干声与 lastBlockResult() 喂给它。
 template<typename Frame>
 void runInputBlock(InputEngine& input, RingSegment& ring, const EngineParams& params, int n, float dryLeft,
                    float dryRight, std::vector<float>& outLeft, std::vector<float>& outRight, Frame&& frame,
-                   bool write = true)
+                   bool write = true, rinne::test::InputReference* reference = nullptr)
 {
     HostBuffer host(n);
     std::fill(host.left.begin(), host.left.end(), dryLeft);
     std::fill(host.right.begin(), host.right.end(), dryRight);
+    const HostBuffer dry(host);
     input.process(host.view(), params, TransportInfo{}, false, inputCtx(&ring));
+    if (reference != nullptr)
+    {
+        reference->block(params, input.lastBlockResult(), false, dry.left.data(), dry.right.data(), n);
+    }
     outLeft.insert(outLeft.end(), host.left.begin(), host.left.end());
     outRight.insert(outRight.end(), host.right.begin(), host.right.end());
     if (write)
@@ -1391,9 +1438,10 @@ TEST_CASE("引擎 Input 读环后清洗：环里直接写进 NaN / ±Inf（绕�
 
     std::vector<float> outLeft;
     std::vector<float> outRight;
+    rinne::test::InputReference reference(kSr);
     for (int block = 0; block < 40; ++block)
     {
-        runInputBlock(input, *ring, params, 256, kDryLeft, kDryRight, outLeft, outRight, frame);
+        runInputBlock(input, *ring, params, 256, kDryLeft, kDryRight, outLeft, outRight, frame, true, &reference);
     }
 
     // 逐样本有限（含 onset 与增益平滑的那一段）。
@@ -1405,19 +1453,24 @@ TEST_CASE("引擎 Input 读环后清洗：环里直接写进 NaN / ±Inf（绕�
     CHECK(nonFinite == 0u);
 
     // D + onset + 增益平滑（480 + 960 + 1440）之后：输出下标 t 读环位置 t − 480（配对时 W = 0、R = 0）。
-    // 坏的那一格回送是 0、只剩干声；同一帧另一个声道照常。
+    // 回送经过安全链（清洗是它的第一级，之后是 DC 阻断与 500 ms 淡入），输出不再是「干声 + 常数」：
+    // 读头上坏的恰是那一格（另一个声道照常是原值），输出与「逐声道清洗之后过安全链」的参照逐位相同。
     std::size_t wrong = 0;
     std::size_t badSeen = 0;
     for (std::size_t t = 3000; t < outLeft.size(); ++t)
     {
         const std::uint64_t p = static_cast<std::uint64_t>(t) - 480u;
-        const float wantLeft = badLeft(p) ? kDryLeft : kDryLeft + kRetLeft;
-        const float wantRight = badRight(p) ? kDryRight : kDryRight + kRetRight;
-        wrong += outLeft[t] == wantLeft && outRight[t] == wantRight ? 0u : 1u;
+        const float tapLeft = reference.tapLeft[t];
+        const float tapRight = reference.tapRight[t];
+        const bool leftOk = badLeft(p) ? !rinne::dsp::isFiniteSample(tapLeft) : tapLeft == kRetLeft;
+        const bool rightOk = badRight(p) ? !rinne::dsp::isFiniteSample(tapRight) : tapRight == kRetRight;
+        wrong += leftOk && rightOk ? 0u : 1u;
         badSeen += badLeft(p) || badRight(p) ? 1u : 0u;
     }
     CHECK(wrong == 0u);
     CHECK(badSeen > 1000u);
+    CHECK(rinne::test::firstBitDiff(outLeft, reference.wantLeft) == -1);
+    CHECK(rinne::test::firstBitDiff(outRight, reference.wantRight) == -1);
     // 置 0 的帧计进了 returnNonFinite；读头峰值是有限的 dBFS。
     CHECK(input.meters().returnNonFinite.load() > 0u);
     const SafetyDiag diag = input.safetyDiag();
@@ -1441,19 +1494,31 @@ TEST_CASE("引擎 mono：环里一个声道是 NaN 时只清掉那一格，回�
     view.channels = channels;
     view.numChannels = 1;
     view.length = 256;
+    rinne::test::InputReference reference(kSr);
+    std::vector<float> out;
     for (int block = 0; block < 40; ++block)
     {
         std::fill(mono.begin(), mono.end(), 0.0f); // 干声为 0：输出就是回送
+        const std::vector<float> dry = mono;
         input.process(view, params, TransportInfo{}, false, inputCtx(ring.get()));
+        reference.block(params, input.lastBlockResult(), false, dry.data(), nullptr, 256);
+        out.insert(out.end(), mono.begin(), mono.end());
         writeRaw(*ring, 256, [](std::uint64_t, float& l, float& r) {
             l = std::numeric_limits<float>::quiet_NaN();
             r = 0.4f;
         });
     }
+    // 回送经过安全链（DC 阻断、500 ms 淡入），输出不再是常数 0.2：读头上左格是 NaN、右格是 0.4，
+    // 输出有限、不为 0（整个样本作废时是 0），并与「逐声道清洗、再取平均、过安全链」的参照逐位相同。
+    REQUIRE(reference.tapLeft.size() == out.size());
+    CHECK(!rinne::dsp::isFiniteSample(reference.tapLeft.back()));
+    CHECK(reference.tapRight.back() == 0.4f);
     for (int i = 0; i < 256; ++i)
     {
-        CHECK(std::fabs(mono[static_cast<std::size_t>(i)] - 0.2f) < 1.0e-6f);
+        CHECK(rinne::dsp::isFiniteSample(mono[static_cast<std::size_t>(i)]));
     }
+    CHECK(out.back() != 0.0f);
+    CHECK(rinne::test::firstBitDiff(out, reference.wantLeft) == -1);
 }
 
 TEST_CASE("引擎 回送直流均值：左右各自按 300 ms 平均，发布绝对值较大的那个声道", "[engine]")
@@ -1529,28 +1594,35 @@ TEST_CASE("引擎 超长块：正在响的回送在块首起淡到 0，回到支
     };
     std::vector<float> outLeft;
     std::vector<float> outRight;
+    // 回送经过安全链（DC 阻断、500 ms 淡入）：常数回送在输出里不再是 0.5。读头（安全链的输入）上的值与淡变逐样本断言，
+    // 输出与参照安全链逐位比较；参照把超长块按旁路处理（环路门 10 ms 关上、回到支持的块长再 10 ms 打开）。
+    rinne::test::InputReference reference(kSr);
+    const auto& tap = reference.tapLeft;
     for (int block = 0; block < 40; ++block)
     {
-        runInputBlock(input, *ring, params, 256, 0.0f, 0.0f, outLeft, outRight, constant);
+        runInputBlock(input, *ring, params, 256, 0.0f, 0.0f, outLeft, outRight, constant, true, &reference);
     }
-    REQUIRE(outLeft.back() == 0.5f);
+    REQUIRE(tap.back() == 0.5f);
     const std::size_t mark = outLeft.size();
 
     // 超长块：写方那一端同样不写环（这里不写）。干声为 0，输出就是回送。
-    runInputBlock(input, *ring, params, 40000, 0.0f, 0.0f, outLeft, outRight, constant, false);
+    runInputBlock(input, *ring, params, 40000, 0.0f, 0.0f, outLeft, outRight, constant, false, &reference);
     CHECK(input.lastBlockResult().unsupportedBlock);
-    CHECK(outLeft[mark] > 0.49f); // 块首接着上一块的值，不是 0
-    CHECK(outLeft[mark + 240] == 0.0f); // 5 ms 之内淡完
+    CHECK(tap[mark] > 0.49f); // 块首接着上一块的值，不是 0
+    CHECK(tap[mark + 240] == 0.0f); // 5 ms 之内淡完
+    CHECK(outLeft[mark + 480] == 0.0f); // 环路门 10 ms 关上之后回送逐位是 0
     CHECK(outLeft.back() == 0.0f);
-    // 回到支持的块长：增益从 0 起 30 ms 淡回，回送回到 0.5。
+    // 回到支持的块长：读头接着读（环路层不再淡入），回送靠安全链的环路门从 0 起 10 ms 打开。
     for (int block = 0; block < 20; ++block)
     {
-        runInputBlock(input, *ring, params, 256, 0.0f, 0.0f, outLeft, outRight, constant);
+        runInputBlock(input, *ring, params, 256, 0.0f, 0.0f, outLeft, outRight, constant, true, &reference);
     }
     CHECK(outLeft[mark + 40000] < 0.01f);
-    CHECK(outLeft.back() == 0.5f);
-    // 整段没有阶跃：最大的一步不超过「5 ms 淡出 + 30 ms 增益平滑」两条斜坡各一步之和。
+    CHECK(tap.back() == 0.5f);
+    CHECK(rinne::test::firstBitDiff(outLeft, reference.wantLeft) == -1);
+    // 整段没有阶跃：最大的一步不超过「5 ms 淡出 + 30 ms 增益平滑」两条斜坡各一步之和。读头上进超长块那一头同样。
     CHECK(maxAdjacentStep(outLeft, mark - 1) <= 0.5f / 240.0f + 0.5f / 1440.0f + 1.0e-6f);
+    CHECK(rinne::test::maxStep(tap, mark - 1, mark + 40000) <= 0.5f / 240.0f + 1.0e-6f);
 }
 
 TEST_CASE("引擎 Output 旁路斜坡只随发布进环的帧推进：某一段写头 CAS 失败（被回收推过）时斜坡不前进", "[engine]")

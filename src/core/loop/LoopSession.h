@@ -122,8 +122,14 @@ struct BlockResult
     // 块长超过支持上限（32768）
     bool unsupportedBlock = false;
 
+    // 配对与断档（本块的状态，不是边沿）：有对端且能读环；写头不动已判成断档。安全链每块的控制量要这两个
+    bool paired = false;
+    bool stalledState = false;
+
     // 事件
     bool resynced = false;
+    // 重同步的原因（resynced 为真时有效）。换写方、换绑定之后引擎要从首个有效读样本起重新淡入
+    SyncReason resyncReason = SyncReason::kOffset;
     // DSP 的复位点落在本块里：引擎（与它后面的 DSP）在 resetAtSample 那个样本上复位。
     // 本地延迟线已由环路层在起播沿上复位过，引擎不必、也不该再清它（再清会把新读头一起作废）。
     bool resetDsp = false;
@@ -154,8 +160,13 @@ public:
     // 不分配、不加锁、不读墙钟、不抛异常。
     BlockResult process(const BlockContext& ctx) noexcept;
 
-    // 音频线程：清空本地延迟线（跳闸淡出后、停用复燃前）。只改两个整数，不 memset。
+    // 音频线程：清空本地延迟线（跳闸淡出之后）。只改两个整数，不 memset。读头与末值保持一并作废。
     void flushLocalDelayLine() noexcept;
+
+    // 音频线程，块首、process 之前：两端停用（宿主挂起）超过 250 ms 之后清空本地延迟线，防停用止啸后原样复燃。
+    // 与 flushLocalDelayLine 的区别：上一块的最后一个回送样本不直接落到 0，而是保持它、5 ms 线性衰减（末值保持，
+    // 不读任何旧数据）。之后从写头起重建读头，新数据照常 20 ms onset。
+    void flushAfterSuspend() noexcept;
 
     // 音频线程：状态快照（诊断与界面读）
     const LoopStatus& status() const noexcept { return status_; }
@@ -185,6 +196,9 @@ private:
     std::int64_t mainTapOverrun(i64 blockStart, i64 n) const noexcept;
     // 主读头本块要读到还没写到的位置时：在它还读得到的样本里淡到 0，补 0 之前不留阶跃。
     void fadeMainTapAtUnderrun(i64 blockStart) noexcept;
+    // 块首就读不到数据、上一个样本还在出声的读头（写头恰好在块边界落后：补 0、断档、失去对端）：
+    // 它在上一个样本上的贡献并进末值保持，5 ms 线性衰减，回送不从末值直接落到 0。
+    void holdStrandedTaps(i64 blockStart) noexcept;
     // 建一个新读头（onset 走 20 ms）。槽满时丢包络最小的那个，返回槽下标；没有槽时返回 -1。
     int newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept;
     // 改 D 的过渡：旧读头 5 ms 淡出、新读头按新的 D 建起来 20 ms onset（读位置不跳变）。一次只走一个过渡：
@@ -199,6 +213,7 @@ private:
 
     LocalLine line_;
     TapSet taps_;
+    ReturnHold hold_;
     StreamSync sync_;
     LoopStatus status_;
     LoopEventSink sink_;
@@ -210,6 +225,11 @@ private:
 
     // 上一块是不是超长块：超限的提示码只在进入超限时发一条
     bool lastUnsupported_ = false;
+
+    // 上一块最后一个回送样本（混好的，含末值保持）与它的输出下标（R 坐标；-1 = 没有）：停用后清空时保持它
+    float lastReturnLeft_ = 0.0f;
+    float lastReturnRight_ = 0.0f;
+    std::int64_t lastReturnAt_ = -1;
 
     // 上一块读的是哪一个段（地址与映射代号）：只用来判「是不是同一个段」，从不经它去读（段只在块内有效）。
     const ipc::RingSegment* lastRing_ = nullptr;

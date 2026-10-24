@@ -3,32 +3,35 @@
 // InputEngine：Rinne Input 的 core 侧引擎。宿主壳只做映射（参数 → EngineParams，宿主播放头 → TransportInfo，
 // 宿主缓冲 → AudioView，块首租约 → EngineContext），然后调这里。
 //
-// 引擎负责：把参数与走带整体下传给环路层、把环路层混好的回送乘上增益加到干声上、
+// 引擎负责：把参数与走带整体下传给环路层、把环路层混好的回送送进安全链、把安全链的输出加到干声上、
 // 把测量量、诊断事件与本端的端点槽发布出去。
 //
-// 最小实现与安全链的分工：
-//   - 本引擎的回送路径是「读头 → 清洗（非有限 → 0、钳 ±16，逐声道）→ 增益（feedback × g_ret，30 ms 线性平滑）
-//     → 硬钳 |ret| < 1.0 → 加到干声上」。清洗与硬钳是安全链接入之前的兜底（读环后清洗、回送有硬上界这两条不能等）；
-//     反馈默认 0，所以默认就没有回送。
-//   - 安全链（清洗、DC 阻断、限制器、软削波、失控保护、500 ms 淡入与锁存）接入之后，回送路径换成安全链处理过的那一路，
-//     淡入、上界与锁存都由安全链负责；本引擎不削弱它们。
+// 回送链（每个样本，固定顺序；安全链见 SafetyMachine.h）：
+//   环路层的读头 → ① 清洗 → ② DC 阻断（SafetyChain::processFront）
+//   → ③ 低切 → ④ 高切 → ⑤ 极性（音色级，还没有接入：这里是空位，接入方夹在前后两段之间）
+//   → ⑥ ×g → 超大值检测 → ⑦ 限制器 → ⑧ 软削波 → ⑨ 有限性检查（SafetyChain::processBack）
+//   → out = g_dry·干声 + 回送。
+// 回送为 ±0 且 g_dry 恰为 1 的样本，宿主缓冲一位不碰（−0.0 与 NaN 载荷都原样留着）：加 +0.0 会把 −0.0 变成 +0.0，
+// 任何算术都会改 NaN 的载荷，所以只能不写。g_dry 不为 1 时只乘干声，回送为 ±0 照样不加。
+// 淡入（新配对、换写方、预设、宿主设状态、恢复）、上界、跳闸与锁存全由安全链负责；本引擎只把事实与命令交给它。
 //
 // 命令序号（panicSeq / recoverSeq / presetSeq / stateSeq）：
-//   引擎自己记基线、自己比对。基线在构造后、prepare 前给一次（setCommandBaseline）。
-//   之后每块在块首比对「与上一块不同就执行一次」：
-//     panicSeq 变了   → 紧急切断（安全链接上之后由安全链执行；接上之前只记基线、不生效）
-//     recoverSeq 变了 → 恢复回送（同上）
-//     presetSeq 变了  → 请求淡入，原因 FadeReason::Preset（载入工厂预设）
-//     stateSeq 变了   → 请求淡入，原因 FadeReason::SetState（宿主设置工程状态）
-//   四个序号各自记基线，基线之外的变化才算「新命令」：重建后不重放旧命令。
-//   安全链自己的 setCommandBaseline 只收 panic 与 recover 两个序号，本引擎不改它的签名：
-//   引擎侧留一个可选的请求淡入入口（setSafetyChain），把 presetSeq / stateSeq 的判定结果按各自的原因送进去。
+//   引擎记基线：构造时四个基线都是 0，并把 panic / recover 的基线交给安全链。之后的变化（包括首个音频块之前的）
+//   在首块生效：首块之前按下的紧急切断不会被当成基线吞掉。新建引擎时计数器已经不是 0 的（重建引擎、重载工程），
+//   壳在构造后、prepare 前用当时的计数调 setCommandBaseline，旧命令就不会重放。
+//     panicSeq / recoverSeq 变了 → 原样交给安全链的块首控制量，由它执行（切断 / 恢复）
+//     presetSeq 变了  → 安全链淡入，原因 FadeReason::Preset（载入工厂预设）
+//     stateSeq 变了   → 安全链淡入，原因 FadeReason::SetState（宿主设置工程状态）
+//   环路层报出换写方 → FadeReason::NewWriter；换绑定（换段、换组、写头倒退）→ FadeReason::FirstPair；
+//   失去配对之后重新配上由安全链自己按配对位判（FirstPair）。淡入都从首个有效读样本起 500 ms，从运行中进入时先 10 ms
+//   降到 0。
 //
 // 线程：
 //   - setCommandBaseline / setSafetyChain（非实时线程）：构造后、prepare 前调。
 //   - prepare（非实时线程）：分配本地延迟线与暂存、重算全部按样本计的时长。换采样率才重新分配本地延迟线；
-//     同采样率重新 prepare 不动读头与延迟线（流保持连续）。可以分配。
-//   - process（音频线程）：拉环、读回送、加干声、发布端点槽。不加锁、不分配、不做 I/O、不读墙钟、不抛异常。
+//     同采样率重新 prepare 不动读头、延迟线与安全链（流保持连续）。可以分配。
+//   - process（音频线程）：拉环、读回送、过安全链、加干声、发布端点槽。不加锁、不分配、不做 I/O、不读墙钟、不抛异常。
+//   - requestFlushAfterSuspend（任意线程）：置一个原子标志，下一块块首执行。
 //   - 0 样本调用：立刻返回，不推进任何计数。
 //
 // 分层：core 不 include JUCE。
@@ -40,13 +43,13 @@
 #include <vector>
 
 #include "diag/EventQueue.h"
-#include "dsp/LinearSmoother.h"
 #include "engine/AudioView.h"
 #include "engine/EngineContext.h"
 #include "engine/EngineEvents.h"
 #include "engine/EngineParams.h"
 #include "engine/Meters.h"
 #include "engine/SafetyEvents.h"
+#include "engine/SafetyMachine.h"
 #include "engine/TransportInfo.h"
 #include "ipc/LoopRing.h"
 #include "loop/LoopSession.h"
@@ -55,21 +58,24 @@
 namespace rinne::engine
 {
 
-// 诊断安全段的计数：音频线程写、消息线程读，必须无锁。
+// 诊断安全段的计数与标志：音频线程写、消息线程读，必须无锁。
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "诊断计数必须是无锁的原子量");
+static_assert(std::atomic<bool>::is_always_lock_free, "停用清空的请求标志必须是无锁的原子量");
 
-// 请求淡入的入口：本引擎只「请求」，不实现淡入本身。安全链接上之后由它执行；没接上时请求不发生。
-// 函数指针加 context（不用 std::function）：音频线程上调用，不能有分配或异常；接入方也不必改本引擎的头文件。
+// 淡入请求的观察者：引擎每向自带的安全链请求一次淡入，就把原因原样通知它一次（诊断与场景用；不接也照常淡入）。
+// 函数指针加 context（不用 std::function）：音频线程上调用，不能有分配或异常。
 using FadeInRequest = void (*)(void* context, FadeReason reason) noexcept;
 
-// 诊断报告安全段（DiagSafety）的六个量。消息线程读的纯值快照。
+// 诊断报告安全段（DiagSafety）的六个量，外加环内 NaN 的琥珀灯位。消息线程读的纯值快照。
 //
 // 来源：
 //   state / trips      安全状态与累计跳闸次数：读 Meters::safety（安全链写），引擎数状态进入 Tripped 的次数。
 //   tailPeakMaxDb      读头输出（未经安全链）的峰值，本会话最大，dBFS。没有回送时是 kSilentDb。
-//   limiterGrMaxDb     限制器增益缩减的最大值，dB（≥ 0）。安全链接入之前恒为 0。
+//   limiterGrMaxDb     限制器增益缩减的最大值，dB（≥ 0）。
 //   nonfiniteRing      写方写环前清洗掉的非有限样本数（环头计数，Output 写）。
 //   clampRing          写方写环前钳到 ±16 的样本数（环头计数，Output 写）。
+//   loopNanLamp        环内插件产生过 NaN：当前写方的清洗计数最后一次增加之后 5 s 之内为真（按样本计）。
+//                      只点灯、只计数，不跳闸（环内的 NaN 由 Output 清洗）；灯的显示归界面。
 struct SafetyDiag
 {
     static constexpr float kSilentDb = -200.0f;
@@ -80,7 +86,11 @@ struct SafetyDiag
     float limiterGrMaxDb = 0.0f;
     std::uint32_t nonfiniteRing = 0;
     std::uint32_t clampRing = 0;
+    bool loopNanLamp = false;
 };
+
+// 琥珀灯在环内 NaN 最后一次计数之后亮多久（秒）
+inline constexpr double kLoopNanLampSeconds = 5.0;
 
 // InputEngine。
 class InputEngine
@@ -88,25 +98,32 @@ class InputEngine
 public:
     InputEngine() noexcept;
 
-    // 非实时线程：构造后、prepare 前调一次，告诉引擎当前四个命令序号是基线。
-    // 之后每块在块首比对，基线之外的变化才算新命令；重建后不重放旧命令。
-    // 安全链接上之前，panicSeq / recoverSeq 的变化只记进基线、不生效（切断与恢复由安全链执行，本引擎不实现它们）；
-    // presetSeq / stateSeq 的变化在接了请求淡入入口（setSafetyChain）时送出请求。
+    // 非实时线程：构造后、prepare 前调一次，告诉引擎当前四个命令序号是基线（panic / recover 的基线同时交给安全链）。
+    // 之后每块在块首比对，基线之外的变化才算新命令；重建后不重放旧命令。不调时基线是 0：
+    // 新实例的计数从 0 起，首个音频块之前按下的紧急切断在首块生效，不会被吞掉。
     void setCommandBaseline(const CommandBaseline& baseline) noexcept;
 
-    // 非实时线程：接安全链的请求淡入入口。接上之后，presetSeq / stateSeq 的变化会请求淡入（各自的原因）。
-    void setSafetyChain(void* chain, FadeInRequest request) noexcept;
+    // 非实时线程：接淡入请求的观察者（可空，见 FadeInRequest）。名字沿用安全链还没接进引擎时的入口：
+    // 现在安全链在引擎里，这里只观察、不执行。
+    void setSafetyChain(void* observer, FadeInRequest request) noexcept;
 
     // 非实时线程：准备。sampleRate 与 maxBlock 是宿主声明的值。
     void prepare(double sampleRate, int maxBlock) noexcept;
 
     // 音频线程：处理一块（就地：干声进、干声 + 回送出）。bypassed 为真表示宿主旁路了这一端：
-    // 照常拉环、推进读位，回送增益滑到 0，干声逐位直通。
+    // 照常拉环、推进读位，回送 10 ms 淡到 0（不跳闸、不清空），之后干声逐位直通。
     // 返回 true 表示这一块被处理了；false 表示 0 样本调用。
     bool process(const AudioView& buffer, const EngineParams& params, const TransportInfo& transport, bool bypassed,
                  const EngineContext& context) noexcept;
 
-    // 消息线程：排空诊断事件。事件码来自环路层（0x03xx）与引擎层（0x04xx）两段。
+    // 任意线程：两端被宿主一起挂起超过 250 ms 之后，请求清空本地延迟线（防停用止啸后原样复燃）。
+    // 宿主把两端一起挂起时音频线程根本不被调用，停了多久只有壳判得出来（它看得见 prepare / release 与处理回调的
+    // 间隔）：壳判定之后调这里，引擎在恢复后的第一块块首执行（只改几个整数，不 memset）。回送不从挂起前的末值直接
+    // 落到 0，而是保持它 5 ms 线性衰减；之后从写头起重建读头，新数据照常 onset。
+    // 「Input 照常被调用、环上没有写方」那一种停用由环路层自己计时清空，不经这里。
+    void requestFlushAfterSuspend() noexcept { flushRequest_.store(true, std::memory_order_release); }
+
+    // 消息线程：排空诊断事件。事件码来自安全链（0x02xx）、环路层（0x03xx）与引擎层（0x04xx）三段。
     // 队列归引擎所有：音频线程往里推，消息线程经这里取走。
     template<typename Sink>
     int drainEvents(Sink&& sink) noexcept
@@ -118,23 +135,19 @@ public:
     // 之后往 LoopStatusFields 里加字段，引擎的代码不用变。
     loop::LoopStatusFields loopStatus() const noexcept { return loop_.statusFields(); }
 
-    // 两端同被宿主挂起 > 250 ms 之后清空本地延迟线（防停用止啸后原样复燃）：**本引擎还没有这个入口**。
-    // 本引擎只处理得了「Input 照常被调用、环上没有写方」那一种停用（环路层自己计时清空）。宿主把两端一起挂起时
-    // 音频线程根本不被调用，停了多久只有壳在消息线程上判得出来：flush 入口由壳在消息线程判定停用超过 250 ms 后
-    // 触发（置一个请求，音频线程在恢复后的第一块块首执行环路层的 flushLocalDelayLine —— 它改的是音频线程独占的
-    // 状态，只改两个整数），接线在后续接上壳的那一步，不在这里，本引擎也不声称已经做到。
-
-    // 消息线程：诊断报告安全段的六个量。
+    // 消息线程：诊断报告安全段的六个量与琥珀灯位。
     SafetyDiag safetyDiag() const noexcept;
 
-    // 测量量（回送 DC 均值、贴近满幅时长、限制器增益缩减、安全状态）。
-    // 安全链接上之后由安全链填；本引擎的最小实现填自己知道的部分。
+    // 测量量（回送 DC 均值、贴近满幅时长、限制器增益缩减、失控保护、安全状态、读环后清洗的计数）：安全链每块末填。
     const Meters& meters() const noexcept { return meters_; }
     Meters& meters() noexcept { return meters_; }
 
     // 音频线程（同一线程、块之间）：上一块环路层的结果。DSP 复位点（resetDsp / resetAtSample）、
-    // 补 0 的个数、逐样本有效位都在里面；试验台据此在复位点上复位中间链。
+    // 补 0 的个数、逐样本有效位与混好的回送（安全链的输入）都在里面；试验台据此在复位点上复位中间链。
     const loop::BlockResult& lastBlockResult() const noexcept { return lastResult_; }
+
+    // 音频线程（同一线程、块之间）：安全链本身（状态、锁存、跳闸原因、本块的安全事件，诊断与场景用，只读）。
+    const SafetyChain& safetyChain() const noexcept { return chain_; }
 
     // 命令序号的基线（诊断与场景用）：引擎当前认为的基线值
     CommandBaseline commandBaseline() const noexcept;
@@ -147,14 +160,26 @@ public:
 
     // 干声的增益（线性律：m = mixPercent / 100，g_dry = min(1, 2(1−m))）。
     float dryGain() const noexcept { return dryGain_; }
-    // 回送增益的目标值（feedback × g_ret；旁路或环路关时为 0）。实际增益按 30 ms 线性平滑滑过去。
+    // 回送增益的目标值（feedback × g_ret；旁路或环路关时为 0）。安全链按 30 ms（反馈与 g_ret）与 10 ms（环路开关
+    // 与旁路）线性平滑滑过去，再乘它自己的 g_safety 与 g_guard。
     float returnGain() const noexcept { return returnGain_; }
 
 private:
     void noteBlockLength(int n) noexcept;
     // 块首的命令序号比对：变了就执行一次（不重放旧命令）。
     void checkCommands(const EngineParams& params) noexcept;
-    // 发布到本端（Input）的会合槽：块序号、宿主时间戳、实际环路延迟、实时标志、本会话最大块长、回送峰值。
+    // 向安全链请求一次淡入，并通知观察者。
+    void requestFadeIn(FadeReason reason) noexcept;
+    // 安全链每块的控制量：参数映射加上环路层报的配对、断档与 D。
+    SafetyControls makeControls(const EngineParams& params, const loop::BlockResult& result,
+                                bool bypassed) const noexcept;
+    // 整块逐样本过安全链并加到干声上；blockPeak 收读头（清洗后、安全链之前）的峰值。
+    void renderBlock(const AudioView& buffer, const loop::BlockResult& result, float& blockPeak) noexcept;
+    // 安全链本块的事件转进诊断队列（安全链每块开头清空它们），顺带数跳闸次数。
+    void drainSafetyEvents() noexcept;
+    // 环内 NaN 的琥珀灯：当前写方的清洗计数增加了就亮 5 s。换写方、换绑定、换段时重取基线，不把别人的历史算进来。
+    void updateLoopNanLamp(const EngineContext& context, const loop::BlockResult& result, int n) noexcept;
+    // 发布到本端（Input）的会合槽：块序号、宿主时间戳、实际环路延迟、实时标志、本会话最大块长、回送峰值、安全状态。
     void publishToSlot(const EngineContext& context, const TransportInfo& transport, bool bypassed,
                        const loop::BlockResult& result, float blockPeak) noexcept;
     // 环路层的事件出口：推进本引擎的诊断队列（音频线程上调用）。
@@ -167,6 +192,7 @@ private:
     bool prepared_ = false;
 
     loop::LoopSession loop_;
+    SafetyChain chain_;
     diag::EventQueue<256> events_;
     loop::BlockResult lastResult_;
 
@@ -181,22 +207,26 @@ private:
     CommandBaseline baseline_;
     CommandBaseline seen_;
 
-    // 安全链的接入口（可空）
-    void* safetyChain_ = nullptr;
-    FadeInRequest safetyRequest_ = nullptr;
+    // 淡入请求的观察者（可空）
+    void* fadeObserver_ = nullptr;
+    FadeInRequest fadeObserverFn_ = nullptr;
 
-    // 回送增益：feedback × g_ret 的 30 ms 线性平滑（增益变化不得出现阶跃）
-    dsp::LinearSmoother returnSmoother_{0.0f};
+    // 两端停用之后的清空请求（任意线程置位，音频线程块首取走）
+    std::atomic<bool> flushRequest_{false};
+
     float returnGain_ = 0.0f;
     float dryGain_ = 1.0f;
 
     // 离线渲染的进入沿（只发一次事件）
     bool lastNonrealtime_ = false;
 
-    // 回送直流均值（清洗之后、乘增益之前）：左右各一个一阶平均，时间常数 300 ms（与安全链的同一个量相同）
-    double dcMeanLeft_ = 0.0;
-    double dcMeanRight_ = 0.0;
-    double dcCoeff_ = 0.0;
+    // 环内 NaN 的琥珀灯：基线所在的段与它的清洗计数、还要亮多少个样本、亮灯的时长（样本）
+    const ipc::RingSegment* lampRing_ = nullptr;
+    std::uint64_t lampGeneration_ = 0;
+    std::uint32_t lampBase_ = 0;
+    std::int64_t lampLeft_ = 0;
+    std::int64_t lampSamples_ = 0;
+    std::atomic<bool> lampOn_{false};
 
     // 诊断安全段的账：读头峰值（线性，本会话最大）、跳闸次数、环头的清洗计数
     AtomicFloat tailPeakMax_;
@@ -204,7 +234,6 @@ private:
     std::atomic<std::uint32_t> trips_{0};
     std::atomic<std::uint32_t> ringNonFinite_{0};
     std::atomic<std::uint32_t> ringClamp_{0};
-    std::uint8_t lastSafetyState_ = 0;
 };
 
 } // namespace rinne::engine

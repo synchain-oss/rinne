@@ -62,6 +62,33 @@ struct Tap
     i64 validFrom = 0;
     i64 validTo = 0; // +∞ = 没有上界
     TapEnvelope env;
+    // 最近一次混音里，这个读头在最后一个样本上的贡献（已乘包络）与那个样本的输出下标（R 坐标；-1 = 没有）。
+    // 写头恰好在块边界落后时，环路层靠它「保持末值」：回送不从上一块的末值直接落到 0。
+    float lastLeft = 0.0f;
+    float lastRight = 0.0f;
+    i64 lastAt = -1;
+};
+
+// 末值保持：回送要落到 0、而本块一个可读的样本都没有时（写头恰好在块边界落后、两端停用后清空），
+// 不在块首从上一个样本的值直接落到 0，而是从那个值起线性衰减（名义 5 ms，跨块延续）。
+// 从开始保持的那个样本起数，第 i 个样本是 value·(L − i)/L：第一个样本等于上一个样本的值（相邻差为 0），
+// 之后每个样本降 value/L，第 L 个样本起为 0。只保持一个值、不读延迟线：清空之后不会再回放任何旧数据。
+// 按样本推进，与块长无关。
+struct ReturnHold
+{
+    float left = 0.0f;
+    float right = 0.0f;
+    std::int64_t steps = 0; // 0 = 不在保持
+    std::int64_t step = 0;
+
+    bool active() const noexcept { return steps > 0; }
+    // 还要出多少个样本才走完
+    std::int64_t remaining() const noexcept { return active() ? steps - step : 0; }
+    // 从 (l, r) 起保持 length 个样本。正在保持时，先把它在下一个样本上的余值并进来：两段叠在一起也不阶跃。
+    // (l, r) 是 0 时什么都不做（正在进行的保持照旧走完）。
+    void start(float l, float r, std::int64_t length) noexcept;
+    // 叠加进 out（count 个样本）并推进；out 为空时只推进
+    void addInto(float* outLeft, float* outRight, std::int64_t count) noexcept;
 };
 
 // 读头集合：最多 kMaxTaps 个。
@@ -164,9 +191,12 @@ private:
 //   valid（可空，长度不小于 count）：逐样本写「这个样本是不是环里的真数据」。
 //   1 = 至少有一个活跃读头读到了这一帧（且它在有效区间内）；0 = 这一格是补出来的 0。
 //   引擎据此区分「补出来的 0」与「真的是 0」——两者的听感完全不同。
+//   每个活跃读头记下自己在最后一个样本上的贡献（Tap::lastLeft / lastRight / lastAt），包络与读位都不动。
 //   返回本块读到的非零样本个数。
-std::uint64_t mixTaps(const TapSet& taps, const LocalLine& line, i64 position, float* outLeft, float* outRight,
+std::uint64_t mixTaps(TapSet& taps, const LocalLine& line, i64 position, float* outLeft, float* outRight,
                       std::int64_t count, std::uint8_t* valid = nullptr) noexcept;
+// countNonZero：count 个样本里左右任一声道不为 0（高于 denormal 下限）的个数。
+std::uint64_t countNonZero(const float* left, const float* right, std::int64_t count) noexcept;
 // advanceTaps：推进全部读头的淡出 n 个样本。淡出走完的读头被释放。
 void advanceTaps(TapSet& taps, std::int64_t n) noexcept;
 // settleOnsets：记下每个淡入中的读头在本块末走到了第几步（按位置：本块最后一个读位置 − validFrom + 1）。
