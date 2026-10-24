@@ -422,15 +422,20 @@ float largestStep(const std::vector<float>& samples, std::size_t from, float pre
 }
 
 // 打不开段的后端：建、开都被拒（同宿主沙盒拒绝）。error 不为 0 时先在调用线程上经 IpcDiag 报一条带它的诊断，
-// 和真后端在失败点报的一样
+// 和真后端在失败点报的一样。transient 次之前的「建」只是暂时失败（下一拍重试），什么都不报
 class DeniedBackend final : public ipc::ISegmentBackend
 {
 public:
-    explicit DeniedBackend(int error) : error_(error) {}
+    explicit DeniedBackend(int error, int transient = 0) : error_(error), transient_(transient) {}
     ~DeniedBackend() override { forgetRetired(); }
 
     ipc::InitResult createOrOpen(const std::string& name, std::size_t, ipc::SegmentView&) override
     {
+        if (transient_ > 0)
+        {
+            --transient_;
+            return ipc::InitResult::kFailed;
+        }
         if (error_ != 0)
         {
             ipc::IpcDiagEvent e;
@@ -448,6 +453,7 @@ public:
 
 private:
     int error_;
+    int transient_;
 };
 
 // 诊断出口的用例：一个只数次数的出口，和一个「再装一次」的钩子（模拟另一个线程恰在这时也在装）
@@ -1404,6 +1410,24 @@ TEST_CASE("a long gap during an offline render or while unpaired is not taken fo
         rig.cycles(20);
         CHECK(rig.input->host.counts().suspendFlushes == 0);
     }
+
+    SECTION("paired during the gap: the first block with a ring has no earlier write head to compare with")
+    {
+        // 宿主插入 Output 时把音频停了 1 s：Input 之前的块都没有环，停的期间两端配上对，之后第一块就拿到环
+        Rig rig;
+        rig.open(-1);
+        rig.source = &sine;
+        rig.playHead.playing = true;
+        rig.cycles(50, true, false);
+        REQUIRE_FALSE(rig.input->host.probeStatus().paired);
+        for (TestProcessor* p : {rig.input.get(), rig.output.get()})
+            p->host.probeSetGroup(0);
+        rig.advance(1'000'000'000);
+        rig.cycle();
+        REQUIRE(rig.input->host.inputEngine().lastBlockResult().paired); // 停之后的第一块就拿到了环
+        rig.cycles(20);
+        CHECK(rig.input->host.counts().suspendFlushes == 0);
+    }
 }
 
 TEST_CASE("the backend error sink is swapped in one step and never forwards to itself", "[probe_host]")
@@ -1512,4 +1536,29 @@ TEST_CASE("the backend event carries this instance's own error code, not another
     CHECK(outBackend[0][4] == "0");
     CHECK(eventsNamed(in, "shm_denied").size() == 1);
     CHECK(eventsNamed(out, "shm_denied").size() == 1);
+}
+
+TEST_CASE("an error code reported between two ticks belongs to no instance", "[probe_host]")
+{
+    // 第一拍后端暂时失败、什么都没报，第二拍被拒、也没报；两拍之间同一线程上报的错误码不是这个实例的会合报的
+    Rig rig;
+    DeniedBackend late(0, 1);
+    ProbeHostConfig config = rig.config(ipc::Role::kInput);
+    config.backend = &late;
+    {
+        TestProcessor a(config);
+        a.prepareToPlay(kRate, kBlock);
+        a.host.probeSetGroup(0);
+        a.host.tick();
+        REQUIRE(a.host.rendezvousState() == ipc::RendezvousState::kOpening);
+        ipc::IpcDiagEvent stray;
+        stray.error = 7;
+        stray.detail = "reported outside any tick";
+        ipc::reportIpcDiag(stray);
+        a.host.tick();
+        REQUIRE(a.host.rendezvousState() == ipc::RendezvousState::kIpcUnavailable);
+    }
+    const auto backend = eventsNamed(rig.read('I'), "backend");
+    REQUIRE(backend.size() == 1);
+    CHECK(backend[0][4] == "0");
 }

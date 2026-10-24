@@ -413,14 +413,11 @@ void ProbePing::abort() noexcept
     {
         return;
     }
-    cancel_.store(false, std::memory_order_release);
-    if (s == State::kRunning && !fadeInTaken_)
+    if (s == State::kRunning)
     {
-        fadeInRequested_ = true; // 回送被压过：交给安全链的淡入，同跑完与取消
+        fadeInRequested_ = true; // 回送被压过：交给安全链的淡入，同跑完与取消（已经交过的不会再交）
     }
-    phase_ = Phase::kOff;
-    dryPos_ = returnPos_ = ramp_;
-    dryUp_ = returnUp_ = true;
+    // 阶段、系数与取消标记不用复位：Idle 时 process 不读它们，下一次 start 之后 beginRun 全部重设
     state_.store(State::kIdle, std::memory_order_release);
 }
 
