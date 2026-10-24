@@ -120,18 +120,30 @@ function Assert-ReaperCfgDir {
     param([string]$CfgDir)
     $real = Assert-ReaperOutsideDefaultDir $CfgDir
     if (-not (Test-Path -LiteralPath $real -PathType Container)) { Stop-Refuse '配置目录不存在' }
-    $sentinel = Join-Path $real $script:SentinelName
-    $first = (Test-Path -LiteralPath $sentinel -PathType Leaf) ? "$(Get-Content -LiteralPath $sentinel -TotalCount 1)".Trim() : ''
-    if ($first -cne $script:SentinelMagic) { Stop-Refuse '配置目录里没有哨兵文件（先用 doctor.ps1 -Init 初始化）' }
+    if (-not (Test-ReaperSentinel $real)) { Stop-Refuse '配置目录里没有哨兵文件（先用 doctor.ps1 -Init 初始化）' }
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini -PathType Leaf)) { Stop-Refuse '配置目录里没有 reaper.ini' }
     [pscustomobject]@{ Dir = $real; Ini = $ini }
 }
 
-# doctor.ps1 -Init 用：路径检查通过后建目录、私有插件目录、最小的 reaper.ini（Dummy 设备）和哨兵文件。已有的 ini 不动。
+# 目录里的哨兵是不是 doctor.ps1 -Init 写的那一份（首行恰好是魔数）。
+function Test-ReaperSentinel([string]$Folder) {
+    $sentinel = Join-Path $Folder $script:SentinelName
+    (Test-Path -LiteralPath $sentinel -PathType Leaf) -and ("$(Get-Content -LiteralPath $sentinel -TotalCount 1)".Trim() -ceq $script:SentinelMagic)
+}
+
+# doctor.ps1 -Init 用：路径检查通过后建目录、私有插件目录、最小的 reaper.ini（Dummy 设备）和哨兵文件。
+# 只接管三种目录：还不存在的、空的、已有哨兵的（以前 -Init 过的，已有的 ini 不动）。已有内容又没有哨兵的一律拒绝，什么都不写，
+# 也没有绕过的开关：那多半是一份真实的 REAPER 配置（例如便携版的目录），冒烟会改它的 reaper.ini、往它的 plugins 里复制插件。
 function New-ReaperCfgDir {
     param([string]$CfgDir)
     $real = Assert-ReaperOutsideDefaultDir $CfgDir
+    if (Test-Path -LiteralPath $real) {
+        if (-not (Test-Path -LiteralPath $real -PathType Container)) { Stop-Refuse '-CfgDir 指向的是一个文件，不是目录' }
+        if (-not (Test-ReaperSentinel $real) -and @(Get-ChildItem -LiteralPath $real -Force).Count -gt 0) {
+            Stop-Refuse '-CfgDir 已有内容却没有哨兵文件：只接管不存在的目录、空目录或以前 -Init 过的目录，什么都没写'
+        }
+    }
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $real 'plugins')
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini)) {

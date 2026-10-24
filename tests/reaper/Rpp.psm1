@@ -7,6 +7,9 @@
 #   ConvertTo-ReaperLuaTable 把哈希表写成 Lua 的 return { … }，Lua 驱动用 dofile 读
 #   Write-ReaperText        无 BOM 的 UTF-8 写文件
 #   Get-ReaperPluginIdentities / Get-ReaperAudioClassId   工程模板里写的插件包名与类 ID；从 moduleinfo.json 文本取 Audio Module Class 的类 ID
+#   Get-ReaperProbeStateLines  探针插件的 VST 块状态：REAPER 自己存出的默认状态里把探针 state 的组字节换成指定的组
+#   Get-ReaperProbeAutoIndex   隐藏参数 auto_case / auto_variant 的编号（按探针规则表的首现顺序）与两个参数的上限
+# 正式（dev）与探针是两套插件身份：两套块头、两套默认状态，工程按 -Probe 选一套，预检按构建的 flavor 选一套比对类 ID，不能混用。
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -27,10 +30,82 @@ $script:StateTail = @(
     'AAAAAAAA'
 )
 
-# 工程模板里写的两个插件：@{ Role; Bundle（VST3 包名）; ClassId（32 位大写十六进制） }，从上面的块头里取，不另存一份。
+# 探针构建的两个插件（PLUGIN_CODE 不同，类 ID、包名、显示名都不同）。块头与状态取自 REAPER 自己存出的工程：第一行是 REAPER 的
+# 插件头（含后面状态的总长），其后是状态（长度 4 字节、一个 1、JUCE 包装的组件状态、8 个 0），最后一行与正式版相同。组件状态的开头
+# 就是探针 state：'RNST'、abi 0、role、1 块、'PRBE'、16，然后是组（0xFF 未设）、3 字节 0、feedback、D（ms）、ceiling（dB）各一个 f32。
+# 这里存的是组未设、feedback 0、D 100 ms、ceiling -18 dB 的默认值；Get-ReaperProbeStateLines 只换组字节，别的一个字节都不动。
+$script:ProbePlugins = @{
+    input  = @{
+        Head   = '<VST "VST3: Rinne Probe Input (Synchain)" "Rinne Probe Input.vst3" 0 "" 2103380264{ABCDEF019182FAEB536E6368526E7069} ""'
+        Header = 'KAlffe5e7f4CAAAAAQAAAAAAAAACAAAAAAAAAAIAAAABAAAAAAAAAAIAAAAAAAAAdAAAAAEAAAD//wAA'
+        State  = 'ZAAAAAEAAABSTlNUAAAAAAEAAAABAAAAUFJCRRAAAAD/AAAAAAAAAAAAyEIAAJDBAAAAAAAAAABKVUNFUHJpdmF0ZURhdGEAAQFCeXBhc3MAAQEDAB0AAAAAAAAASlVDRVByaXZhdGVEYXRhAAAAAAAAAAA='
+        Role   = 1
+    }
+    output = @{
+        Head   = '<VST "VST3: Rinne Probe Output (Synchain)" "Rinne Probe Output.vst3" 0 "" 56562330{ABCDEF019182FAEB536E6368526E706F} ""'
+        Header = 'mhJfA+5e7f4CAAAAAQAAAAAAAAACAAAAAAAAAAIAAAABAAAAAAAAAAIAAAAAAAAAdAAAAAEAAAD//wAA'
+        State  = 'ZAAAAAEAAABSTlNUAAAAAAIAAAABAAAAUFJCRRAAAAD/AAAAAAAAAAAAyEIAAJDBAAAAAAAAAABKVUNFUHJpdmF0ZURhdGEAAQFCeXBhc3MAAQEDAB0AAAAAAAAASlVDRVByaXZhdGVEYXRhAAAAAAAAAAA='
+        Role   = 2
+    }
+}
+$script:ProbeStateAt = 8 # 状态里探针 state 的起点（长度 4 字节与那个 1 之后）
+
+# 探针插件块里的状态行：组（-1 未设，0..7 即 A..H）写进探针 state 的组字节，其余原样；按 REAPER 的写法每行 128 个 base64 字符。
+# 模板对不上探针 state 的布局（魔数、abi、role、块头、feedback 不是 0）就抛错，不凑合着写。
+function Get-ReaperProbeStateLines {
+    param([Parameter(Mandatory)][ValidateSet('input', 'output')][string]$Role, [ValidateRange(-1, 7)][int]$Group = -1)
+    $p = $script:ProbePlugins[$Role]
+    $bytes = [Convert]::FromBase64String($p.State)
+    $at = $script:ProbeStateAt
+    $u32 = { param($o) [BitConverter]::ToUInt32($bytes, $at + $o) }
+    $magicOk = [Text.Encoding]::ASCII.GetString($bytes, $at, 4) -ceq 'RNST' -and [Text.Encoding]::ASCII.GetString($bytes, $at + 16, 4) -ceq 'PRBE'
+    if (-not $magicOk -or (& $u32 4) -ne 0 -or (& $u32 8) -ne $p.Role -or (& $u32 12) -ne 1 -or (& $u32 20) -ne 16) {
+        throw "探针 $Role 的状态模板不是 abi 0 的探针 state，先按 REAPER 存出的工程更新 tests/reaper/Rpp.psm1"
+    }
+    if ([BitConverter]::ToSingle($bytes, $at + 28) -ne 0.0) { throw "探针 $Role 的状态模板里 feedback 不是 0：烟测一律用探针默认的 0" }
+    $bytes[$at + 24] = ($Group -lt 0) ? [byte]0xFF : [byte]$Group
+    $text = [Convert]::ToBase64String($bytes)
+    $lines = for ($i = 0; $i -lt $text.Length; $i += 128) { $text.Substring($i, [Math]::Min(128, $text.Length - $i)) }
+    @($p.Header) + @($lines) + @($script:StateTail[1])
+}
+
+# 探针的 case / variant 规则表，与 src/core/diag/ProbeLog.cpp 里的 kCaseKeys 逐字相同（自测比对）。隐藏参数按它的首现顺序编号：
+# auto_case 的 k（1 起）是第 k 个 case；auto_variant 的 0 是 -，k（1 起）是第 k 个不是 - 的 variant。两个参数的上限就是两种的个数。
+$script:ProbeCaseKeys = ' CB-01:steady CB-02:toggle CB-03:guard-both CB-03:guard-in CB-03:guard-out' +
+    ' CB-04:dop CB-04:export-offline CB-04:export-rt CB-04:freeze CB-04:rip' +
+    ' CB-05:bypass-in CB-05:bypass-out CB-05:deactivate CB-05:disable-track CB-06:smart' +
+    ' CB-07:dup CB-07:fxchain CB-07:preset CB-07:rename CB-07:reopen CB-07:undo' +
+    ' CB-08:misplaced-order CB-08:misplaced-post CB-08:misplaced-track CB-09:mono CB-10:bufchange' +
+    ' CB-11:constrain CB-12:twoproj LU-01:- LU-02:au-au LU-02:au-vst3 LU-02:vst3-vst3' +
+    ' LU-03:steady LU-03:toggle LU-04:bounce LU-04:export-offline LU-04:export-rt LU-04:freeze' +
+    ' LU-05:bypass-in LU-05:bypass-out LU-05:deactivate LU-06:rename LU-07:coreaudio LU-08:- LU-09:reopen '
+
+function Get-ReaperProbeCaseKeys { $script:ProbeCaseKeys }
+
+function Get-ReaperProbeAutoIndex {
+    param([Parameter(Mandatory)][string]$Case, [Parameter(Mandatory)][string]$Variant, [string]$Keys = $script:ProbeCaseKeys)
+    $cases = [Collections.Generic.List[string]]::new()
+    $variants = [Collections.Generic.List[string]]::new()
+    $pairs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($token in @($Keys -split ' ' | Where-Object { $_ })) {
+        $pair = $token -split ':', 2
+        if (-not $cases.Contains($pair[0])) { $cases.Add($pair[0]) }
+        if ($pair[1] -cne '-' -and -not $variants.Contains($pair[1])) { $variants.Add($pair[1]) }
+        $null = $pairs.Add($token)
+    }
+    if (-not $pairs.Contains("${Case}:$Variant")) { throw "($Case, $Variant) 不在探针的规则表里" }
+    [pscustomobject]@{
+        Case = $cases.IndexOf($Case) + 1; Variant = ($Variant -ceq '-' ? 0 : $variants.IndexOf($Variant) + 1)
+        CaseMax = $cases.Count; VariantMax = $variants.Count
+    }
+}
+
+# 工程模板里写的两个插件：@{ Role; Bundle（VST3 包名）; ClassId（32 位大写十六进制） }，从上面的块头里取，不另存一份。-Probe 给探针那一套。
 function Get-ReaperPluginIdentities {
+    param([switch]$Probe)
+    $table = $Probe ? $script:ProbePlugins : $script:Plugins
     foreach ($role in 'input', 'output') {
-        $head = $script:Plugins[$role].Head
+        $head = $table[$role].Head
         [pscustomobject]@{
             Role = $role
             Bundle = [regex]::Match($head, '"([^"]+\.vst3)"').Groups[1].Value
@@ -58,15 +133,22 @@ function New-ReaperProjectText {
         [string[]]$Chain = @('input', 'output'),
         [string[]]$Bypass = @(),
         [double]$TrackVolume = 1.0,
-        [double]$ItemSeconds = 4.0
+        [double]$ItemSeconds = 4.0,
+        [switch]$Probe, # 链上用探针构建的两个插件
+        [int]$ProbeGroup = -1 # 探针 state 里的组：-1 未设，0..7 即 A..H；两端同组才会配对
     )
     foreach ($c in $Chain) { if (-not $script:Plugins.ContainsKey($c)) { throw "不认识的链节点：$c" } }
     $fx = [Collections.Generic.List[string]]::new()
     foreach ($c in $Chain) {
         if ($c -in $Bypass) { $fx.Add('      BYPASS 1 0 0') }
-        $fx.Add('      ' + $script:Plugins[$c].Head)
-        $fx.Add('        ' + $script:Plugins[$c].State)
-        foreach ($t in $script:StateTail) { $fx.Add('        ' + $t) }
+        if ($Probe) {
+            $fx.Add('      ' + $script:ProbePlugins[$c].Head)
+            foreach ($t in (Get-ReaperProbeStateLines -Role $c -Group $ProbeGroup)) { $fx.Add('        ' + $t) }
+        } else {
+            $fx.Add('      ' + $script:Plugins[$c].Head)
+            $fx.Add('        ' + $script:Plugins[$c].State)
+            foreach ($t in $script:StateTail) { $fx.Add('        ' + $t) }
+        }
         $fx.Add('      >')
     }
     $chainText = $fx.Count -gt 0 ? ("    <FXCHAIN`n" + ($fx -join "`n") + "`n    >`n") : ''
@@ -127,4 +209,5 @@ function ConvertTo-ReaperLuaTable([Parameter(Mandatory)][System.Collections.IDic
     'return ' + (ConvertTo-ReaperLuaValue $Job) + "`n"
 }
 
-Export-ModuleMember -Function New-ReaperProjectText, Write-ReaperText, ConvertTo-ReaperLuaTable, Get-ReaperPluginIdentities, Get-ReaperAudioClassId
+Export-ModuleMember -Function New-ReaperProjectText, Write-ReaperText, ConvertTo-ReaperLuaTable, Get-ReaperPluginIdentities, Get-ReaperAudioClassId,
+    Get-ReaperProbeStateLines, Get-ReaperProbeCaseKeys, Get-ReaperProbeAutoIndex

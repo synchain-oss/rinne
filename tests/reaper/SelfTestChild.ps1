@@ -60,6 +60,18 @@ try {
 } finally { if (-not $bystander.HasExited) { Stop-Process -Id $bystander.Id -Force } }
 $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
 Write-Case '看门狗：到点被结束，状态 Killed，没有等到超时' $true ($run.Status -eq 'Killed' -and $run.Seconds -lt 8 -and (& $gone $run.Pid))
+# 标记文件出现时进程已经退出（替身启动后先等它退出、再写标记文件，确定地造出「来不及取样」）：记作 SampleLost，原因照实写
+$quickMark = Join-Path $Work 'mark-after-exit.txt'
+$quickLauncher = { param($psi) $psi.FileName = $pwshExe; $psi.Arguments = '-NoProfile -Command exit 0'; $p = [Diagnostics.Process]::Start($psi); $p.WaitForExit(); Set-Content -LiteralPath $quickMark -Value x; $p }.GetNewClosure()
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -WatchFiles @{ loop = $quickMark } -Launcher $quickLauncher
+Write-Case '采样：标记文件出现时进程已退出，记作 SampleLost，原因是「进程在采样前退出」而不是「没取到」' $true ($run.Status -eq 'Exited' -and @($run.SampleLost) -contains 'loop' -and -not $run.Marks.Contains('loop') -and
+    (Get-ReaperMarkProblem -Samples $run.Marks -LostAt @($run.SampleLost) -Need 'loop') -like '进程在采样前退出*')
+# 轮询里取样时进程已经退出（取样替身直接给出 Exited）：记作 SampleLost，不把空的计数当成取到了
+$preMark = Join-Path $Work 'mark-present.txt'
+Set-Content -LiteralPath $preMark -Value x
+$exitedSampler = { param($p) [pscustomobject]@{ Exited = $true; Handles = $null; PrivateMB = $null; WorkingMB = $null } }
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 -WatchFiles @{ warm = $preMark } -Sampler $exitedSampler -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '采样：轮询里取样时进程已退出，记作 SampleLost，不当成取到了计数' $true ($run.Status -eq 'Killed' -and @($run.SampleLost) -contains 'warm' -and -not $run.Marks.Contains('warm') -and (& $gone $run.Pid))
 $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -Launcher (New-StandIn 'exit 3' @{})
 Write-Case '自己退出的进程：状态 Exited，退出码照实记' $false ($run.Status -eq 'Exited' -and $run.ExitCode -eq 3)
 $seenB = @{ Called = $false }
@@ -90,6 +102,8 @@ Invoke-WithRinneLock -Name gui -TimeoutSeconds 600 {
 
 # ---- gui 锁（换成自测专用的锁名前缀，与真在跑的 gates 互不等待）----
 & (Get-Module Locks) { $script:Scope = "Rinne-selftest-reaper-$PID" }
+# 起 REAPER 持的锁与看门狗反例事后核对的锁都从上下文取（默认 gui），按本进程的锁名前缀解析：自测查的是自测专用名下的那把，不依赖正式的锁空闲
+Write-Case '锁名：按本进程当前的锁名前缀解析（自测专用），子进程核对的就是这个确切的名字' $false ((Get-ReaperLockMutexName gui) -ceq ('Local\Rinne-selftest-reaper-{0}-gui' -f $PID))
 $lockChild = { param($Command) & (Get-Module Locks) { param($c) Start-LockChild $c } $Command }
 $probe = 'if (Enter-RinneLock gui -TimeoutSeconds 0 -Quiet) { exit 0 } else { exit 1 }'
 $probeExit = { $p = & $lockChild $probe; $p.WaitForExit(); $p.ExitCode }.GetNewClosure()
@@ -129,10 +143,18 @@ try {
     $rowKilled = Invoke-ReaperNegativeRow -Context $hangCtx -Scenario $negKilled -GuardParams $guardParams -TempRoot $Work
     Write-Case '看门狗反例 neg-timeout 在 gui 锁等不到时：整行 INCOMPLETE（不是 PASS），写明没能验证，REAPER 没有启动' $true ($rowTimeout.observed -eq 'INCOMPLETE' -and $rowTimeout.status -eq 'INCOMPLETE' -and $rowTimeout.detail -like '*没能验证*' -and -not $during.Called -and $hangCtx.Launches -eq 0)
     Write-Case '看门狗反例 neg-killed 在 gui 锁等不到时：整行 INCOMPLETE（不是 PASS）' $true ($rowKilled.observed -eq 'INCOMPLETE' -and $rowKilled.status -eq 'INCOMPLETE' -and $rowKilled.detail -like '*没能验证*')
+    Write-Case '锁核对：自测专用名下的 gui 锁被别人占着时，另起进程查得出取不到' $true (-not (Test-RinneLockFree gui))
+    # 上下文给了别的锁名：起 REAPER 与事后核对都用它，所以 gui 被别人占着也不影响看门狗反例照常 PASS（改回写死的 gui 就会等不到）
+    $injCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $hangConfig -LockWaitSec 5 -GuiLock 'ipc-tests'
+    $injCtx.Signals['48000-2-0'] = Join-Path $Work 'sig.wav'
+    $injCtx.Launcher = New-StandIn 'Start-Sleep -Seconds 60' @{}
+    $injTimeout = $negTimeout | ConvertTo-Json | ConvertFrom-Json; $injTimeout.timeoutSec = 2
+    $rowInj = Invoke-ReaperNegativeRow -Context $injCtx -Scenario $injTimeout -GuardParams $guardParams -TempRoot $Work
+    Write-Case '看门狗反例：上下文给了锁名时起 REAPER 与事后核对都用它，gui 被别人占着也照常 PASS' $false ($rowInj.status -eq 'PASS' -and $rowInj.detail -like '超时（*' -and $injCtx.Launches -eq 1)
 } finally { if (-not $holder.HasExited) { $holder.Kill(); $holder.WaitForExit() } }
 
 # 看门狗反例正常触发时仍是 PASS：替身睡觉，真的靠超时与到点被杀结束（真实的 scenarios.json 里的两条，只把时限缩短）。
-# 这里用的锁是自测专用名下的 gui 锁；Invoke-HangScenario 事后另起进程核对的是正式名下的 gui 锁，别人在跑 REAPER 时它会等不到。
+# 起 REAPER 与事后核对用的都是上下文里的锁名（这里是默认的 gui），按自测专用的锁名前缀解析，与正式的 gui 锁互不等待。
 $sleeper = New-StandIn 'Start-Sleep -Seconds 60' @{}
 $genConfig = [pscustomobject]@{ limits = [pscustomobject]@{ luaTimeoutSec = 30 }; signal = [pscustomobject]@{ seconds = 4; kind = 'x' } }
 $genCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $genConfig -LockWaitSec 10
@@ -155,6 +177,8 @@ Set-Content -LiteralPath $marker -Value x
 try {
     $r = Invoke-ReaperSmoke @smoke -UserTestingMarker $marker
     Write-Case '入口：USER_TESTING 标记在时整套 SKIPPED，一次 REAPER 都没启动' $true ($r.verdict -eq 'SKIPPED' -and $r.launches -eq 0 -and $r.skipReasons.Count -eq 1)
+    $r = Invoke-ReaperSmoke @smoke -UserTestingMarker $marker -Probe
+    Write-Case '入口（第二段）：USER_TESTING 标记在时整套 SKIPPED，一次 REAPER 都没启动，结果标为第二段' $true ($r.verdict -eq 'SKIPPED' -and $r.launches -eq 0 -and $r.phase -eq 2 -and $r.skipReasons.Count -eq 1)
 } finally { Remove-Item -LiteralPath $marker }
 $r = Invoke-ReaperSmoke @smoke -UserTestingMarker $marker
 Write-Case '入口：没有 REAPER 和构建产物时 SKIPPED 并写明原因，不当 PASS' $true ($r.verdict -eq 'SKIPPED' -and $r.launches -eq 0 -and $r.skipReasons.Count -ge 2)

@@ -93,18 +93,37 @@ function ConvertTo-ReaperSafeTitle([string]$Title) {
     $t.Length -gt 40 ? $t.Substring(0, 40) : $t
 }
 
+# 进程的句柄数与内存。进程刚退出时只认这一种情况，返回 Exited = $true（调用方照实写「进程在采样前退出」）：
+# 计数用 get_ 方法读：进程已退出时 .NET 抛 InvalidOperationException（PowerShell 包成 MethodInvocationException），在这里捕获。
+# 不用属性读：属性的 getter 抛错会被 PowerShell 吞成空值（句柄数 $null、内存 0），差值就成了「没增长」。
+# 只有异常（或它的内层）是 InvalidOperationException、并且进程确实已退出，才算这一种；别的异常照常抛出。
 function Get-ReaperProcessSample([System.Diagnostics.Process]$Process) {
-    $Process.Refresh()
-    [pscustomobject]@{
-        Handles    = $Process.HandleCount
-        PrivateMB  = [math]::Round($Process.PrivateMemorySize64 / 1MB, 1)
-        WorkingMB  = [math]::Round($Process.WorkingSet64 / 1MB, 1)
+    try {
+        $Process.Refresh()
+        $h = $Process.get_HandleCount(); $pm = $Process.get_PrivateMemorySize64(); $ws = $Process.get_WorkingSet64()
+    } catch {
+        $ex = $_.Exception
+        $exitedNow = ($ex -is [InvalidOperationException] -or $ex.InnerException -is [InvalidOperationException]) -and ($Process.HasExited -eq $true)
+        if (-not $exitedNow) { throw }
+        return [pscustomobject]@{ Exited = $true; Handles = $null; PrivateMB = $null; WorkingMB = $null }
     }
+    [pscustomobject]@{ Exited = $false; Handles = $h; PrivateMB = [math]::Round($pm / 1MB, 1); WorkingMB = [math]::Round($ws / 1MB, 1) }
+}
+
+# 纯函数：几处标记的进程计数齐不齐。齐了返回 $null；有标记因为进程在采样前退出而没取到，原因照实写；别的缺失另写。
+function Get-ReaperMarkProblem {
+    param($Samples, [string[]]$LostAt = @(), [Parameter(Mandatory)][string[]]$Need)
+    $missing = @($Need | Where-Object { -not ($Samples -and $Samples.Contains($_)) })
+    if (-not $missing.Count) { return $null }
+    $lostHere = @($missing | Where-Object { $_ -in $LostAt })
+    if ($lostHere.Count) { return "进程在采样前退出（$($lostHere -join '、') 处的句柄与内存没取到）" }
+    "没取到 $($missing -join '、') 处的进程计数"
 }
 
 # 起 REAPER 并等它退出。Status：Exited / Timeout（到 TimeoutSec）/ Killed（到 KillAfterSec，反例用）/ Modal（卡死的对话框）。
+# Pid 与 StartedUtc（启动前一刻）给第二段收探针日志用；SampleLost 是想取进程计数时进程已经退出的那些标记。
 # WatchFiles：标签 → 路径，文件一出现就记一次进程的句柄与内存（Lua 用它标出循环的开头与结尾）。
-# Launcher 只给自测注入：收到准备好的 ProcessStartInfo，返回已启动的 Process。
+# Launcher 只给自测注入：收到准备好的 ProcessStartInfo，返回已启动的 Process。Sampler 也只给自测注入：代替 Get-ReaperProcessSample。
 function Invoke-ReaperHost {
     param(
         [Parameter(Mandatory)][string]$ReaperExe,
@@ -114,7 +133,8 @@ function Invoke-ReaperHost {
         [double]$TimeoutSec = 90,
         [double]$KillAfterSec = 0,
         [hashtable]$WatchFiles = @{},
-        [scriptblock]$Launcher = $null
+        [scriptblock]$Launcher = $null,
+        [scriptblock]$Sampler = $null
     )
     $cfgArgs = @('-nosplash', '-newinst', '-cfgfile', (Get-ReaperCfgArgument))
     $psi = [Diagnostics.ProcessStartInfo]::new($ReaperExe)
@@ -122,6 +142,7 @@ function Invoke-ReaperHost {
     $psi.UseShellExecute = $false
     if ($WorkDir) { $psi.WorkingDirectory = $WorkDir }
     foreach ($k in $Environment.Keys) { $psi.Environment[[string]$k] = [string]$Environment[$k] }
+    $startedUtc = [DateTime]::UtcNow # 启动之前取：这次启动的进程写下的文件，修改时间都不早于它
     $proc = $Launcher ? (& $Launcher $psi) : [Diagnostics.Process]::Start($psi)
     $ownPid = $proc.Id
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -130,6 +151,7 @@ function Invoke-ReaperHost {
     $dismissed = [Collections.Generic.List[string]]::new()
     $titles = [Collections.Generic.SortedSet[string]]::new()
     $marks = [ordered]@{}
+    $lost = [Collections.Generic.List[string]]::new()
     $firstSeen = @{}
     while (-not $proc.HasExited) {
         Start-Sleep -Milliseconds 250
@@ -151,7 +173,15 @@ function Invoke-ReaperHost {
         }
         if ($status) { break }
         foreach ($label in @($WatchFiles.Keys)) {
-            if (-not $marks.Contains($label) -and (Test-Path -LiteralPath $WatchFiles[$label])) { $marks[$label] = Get-ReaperProcessSample $proc }
+            if ($marks.Contains($label) -or $label -in $lost -or -not (Test-Path -LiteralPath $WatchFiles[$label])) { continue }
+            $sample = $Sampler ? (& $Sampler $proc) : (Get-ReaperProcessSample $proc)
+            if ($sample.Exited) { $lost.Add($label) } else { $marks[$label] = $sample }
+        }
+    }
+    if (-not $status) {
+        # 进程退出得比下一次轮询还快：标记文件已经出现、却没来得及取样，同样是「进程在采样前退出」，不混进「没取到」
+        foreach ($label in @($WatchFiles.Keys)) {
+            if (-not $marks.Contains($label) -and $label -notin $lost -and (Test-Path -LiteralPath $WatchFiles[$label])) { $lost.Add($label) }
         }
     }
     if ($status) {
@@ -161,12 +191,12 @@ function Invoke-ReaperHost {
     }
     $exit = ($proc.HasExited -and -not $status) ? $proc.ExitCode : $null
     [pscustomobject]@{
-        Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid
-        Modal = $modal; Dismissed = $dismissed.ToArray(); Windows = @($titles); Marks = $marks
+        Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid; StartedUtc = $startedUtc
+        Modal = $modal; Dismissed = $dismissed.ToArray(); Windows = @($titles); Marks = $marks; SampleLost = $lost.ToArray()
     }
 }
 
 # 本机现有的 reaper.exe 进程数（启动前后各取一次：有别人的 REAPER 在跑就不跑；跑完不该留下自己的）。
 function Get-ReaperProcessIds { Get-Process -Name reaper -ErrorAction SilentlyContinue | ForEach-Object { $_.Id } }
 
-Export-ModuleMember -Function Get-ReaperModalVerdict, ConvertTo-ReaperSafeTitle, Invoke-ReaperHost, Get-ReaperProcessIds
+Export-ModuleMember -Function Get-ReaperModalVerdict, ConvertTo-ReaperSafeTitle, Invoke-ReaperHost, Get-ReaperProcessIds, Get-ReaperProcessSample, Get-ReaperMarkProblem
