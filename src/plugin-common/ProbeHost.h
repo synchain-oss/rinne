@@ -134,7 +134,7 @@ private:
 
     void processInput(const engine::AudioView& view, const engine::EngineParams& params,
                       const engine::TransportInfo& transport, bool bypassed, const engine::EngineContext& context,
-                      std::uint64_t startNs, diag::BlockFields& fields) noexcept;
+                      const ipc::SegmentHandle* ring, std::uint64_t startNs, diag::BlockFields& fields) noexcept;
     void processOutput(const engine::AudioView& view, const engine::EngineParams& params,
                        const engine::TransportInfo& transport, bool bypassed, const engine::EngineContext& context,
                        const ipc::BoundBlock& block, bool haveTimeline, std::int64_t timeline,
@@ -226,7 +226,7 @@ private:
     std::uint64_t lastStartNs_ = 0;
     std::uint64_t lastBlockNs_ = 0;
     std::uint64_t lastHead_ = 0;
-    bool haveLastHead_ = false; // 上一块拿到了环（lastHead_ 有效）
+    const ipc::SegmentHandle* lastRing_ = nullptr; // 上一块用的环（只比地址）；空 = 没拿到环，lastHead_ 无效
     bool haveOutputW_ = false;
     std::uint64_t lastOutputW_ = 0;
     std::uint32_t lastOutputN_ = 0;

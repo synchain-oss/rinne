@@ -381,6 +381,7 @@ void ProbeHost::process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcep
     // 块首租约：会合段在就取 call_seq；槽仍是自己的才把段交给引擎
     const ipc::BoundBlock block(rendezvous_->bindings().current());
     engine::EngineContext context;
+    const ipc::SegmentHandle* ring = nullptr; // 交给引擎的环是哪一个映射（只比地址，不经它读写）
     std::uint64_t callSeq = 0;
     if (block.ok())
     {
@@ -392,6 +393,7 @@ void ProbeHost::process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcep
             context.group = block.binding().group;
             context.token = block.binding().writerToken;
             context.ringGeneration = block.binding().seq;
+            ring = block.binding().ring;
         }
     }
 
@@ -408,7 +410,7 @@ void ProbeHost::process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcep
     fields.bypassed = bypassed;
 
     if (isInput())
-        processInput(view, params, transport, bypassed, context, startNs, fields);
+        processInput(view, params, transport, bypassed, context, ring, startNs, fields);
     else
         processOutput(view, params, transport, bypassed, context, block, haveTimeline, timeline, fields);
 
@@ -435,16 +437,19 @@ void ProbeHost::process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcep
 
 void ProbeHost::processInput(const engine::AudioView& view, const engine::EngineParams& params,
                              const engine::TransportInfo& transport, bool bypassed,
-                             const engine::EngineContext& context, std::uint64_t startNs,
-                             diag::BlockFields& fields) noexcept
+                             const engine::EngineContext& context, const ipc::SegmentHandle* ring,
+                             std::uint64_t startNs, diag::BlockFields& fields) noexcept
 {
     const int n = view.length;
     // 两端一起被挂起：两次回调隔了 250 ms 以上，而这段时间里环的写头几乎没走（Output 照常跑时它会走过差不多同样多的
-    // 样本）。写头是唯一的证据：这一块与上一块都拿到环才判，没配对时的长间隔不算挂起、不计数。
+    // 样本）。写头是唯一的证据：这一块与上一块拿到的是同一个环才判，没配对时的长间隔不算挂起、不计数。
+    // 停的期间换过环（换组：旧环退休、新环另开）时两个写头互不相干，不能相减，这一块当成「上一块没拿到环」。认环用绑定
+    // 里环的句柄地址：HandleKeeper 把放掉的句柄留到析构，地址不会给别的映射复用。绑定序号不行：同一个环在 release →
+    // prepare（休眠、激活各重发一次绑定）时它也会变，那正是要判的一格。换写方不换环，写头照常连续，照判。
     // 离线渲染不判：回调间隔不代表时间，比实时慢的导出每两块之间都可能隔 250 ms 以上，而写头同样只走一块（Output 每块
     // 照常写），从回调上分不出它和挂起；这一条只决定按墙钟的判据启不启用，不改引擎的处理
-    const bool haveHead = context.ring != nullptr;
-    if (haveLastBlock_ && haveHead && haveLastHead_ && !transport.nonrealtime && startNs > lastStartNs_ &&
+    const bool sameRing = ring != nullptr && ring == lastRing_;
+    if (haveLastBlock_ && sameRing && !transport.nonrealtime && startNs > lastStartNs_ &&
         startNs - lastStartNs_ > kSuspendFlushNs + lastBlockNs_)
     {
         const double gapSamples = static_cast<double>(startNs - lastStartNs_) * sampleRate_ / 1.0e9;
@@ -494,8 +499,8 @@ void ProbeHost::processInput(const engine::AudioView& view, const engine::Engine
     haveLastBlock_ = true;
     lastStartNs_ = startNs;
     lastBlockNs_ = static_cast<std::uint64_t>(static_cast<double>(n) * 1.0e9 / sampleRate_);
-    haveLastHead_ = haveHead;
-    if (haveHead)
+    lastRing_ = ring;
+    if (ring != nullptr)
         lastHead_ = ipc::LoopRing::writeHead(*context.ring);
 }
 

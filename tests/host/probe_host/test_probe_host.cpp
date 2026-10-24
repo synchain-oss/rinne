@@ -1430,6 +1430,30 @@ TEST_CASE("a long gap during an offline render or while unpaired is not taken fo
     }
 }
 
+TEST_CASE("a ring change during the gap is not compared across rings, and the new ring is judged again", "[probe_host]")
+{
+    // 只停 Input 300 ms，这期间两端换到组 2：旧环退休、新环另开，Output 照常往新环里写，不是两端一起挂起。
+    // 新环的写头从 0 数起，比旧环上一块的写头小，拿来相减就会当成「写头没走」
+    Rig rig;
+    rig.open(0);
+    rig.source = &sine;
+    rig.playHead.playing = true;
+    REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+    rig.cycles(200);
+    for (TestProcessor* p : {rig.input.get(), rig.output.get()})
+        p->host.probeSetGroup(2);
+    rig.cycles(30, false, true);
+    rig.cycle();
+    REQUIRE(rig.input->host.inputEngine().lastBlockResult().paired); // 停之后的第一块已在新环上
+    rig.cycles(20);
+    CHECK(rig.input->host.counts().suspendFlushes == 0);
+
+    // 对照：之后在新环上两端一起停 300 ms，照样清一次
+    rig.advance(300'000'000);
+    rig.cycles(20);
+    CHECK(rig.input->host.counts().suspendFlushes == 1);
+}
+
 TEST_CASE("the backend error sink is swapped in one step and never forwards to itself", "[probe_host]")
 {
     const SinkRestore restore;
