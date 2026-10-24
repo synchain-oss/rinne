@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "core/engine/EngineTestKit.h"
 #include "engine/EngineParams.h"
 #include "engine/TransportInfo.h"
 #include "ipc/LoopBinding.h"
@@ -226,18 +227,6 @@ ParamsScript paramsOf(const rinne::engine::EngineParams& params)
     return script;
 }
 
-// 跑 cycles 个周期，把每周期 Input 处理之后的轨道输出接成一整段。
-std::vector<float> runAndCollect(EngineHost& host, std::size_t cycles, int blockLength)
-{
-    std::vector<float> out;
-    for (std::size_t i = 0; i < cycles; ++i)
-    {
-        host.runCycle(i);
-        out.insert(out.end(), host.inputOutputLeft().begin(), host.inputOutputLeft().begin() + blockLength);
-    }
-    return out;
-}
-
 // 本文件也注册一个场景：证明多个翻译单元各自注册场景时链接不撞名（占位场景在另一个文件里）。
 class FrameworkScenario final : public Scenario
 {
@@ -285,12 +274,38 @@ TEST_CASE("rig L5-01 框架自检：冲激经真实共享内存的闭环，恰�
     host.setSource(impulseSource(2000, 0.5f));
     host.setParamsScript(paramsOf(unityLoop(10.0f))); // D = 480
 
-    const std::vector<float> out = runAndCollect(host, 16, 256);
+    // 回送经过安全链（DC 阻断、从首个有效读样本起 500 ms 淡入），输出里的回声不再等于原值：冲激的位置在读头
+    // （Input 的 lastBlockResult，安全链的输入）上逐位断言，输出与参照安全链逐位比较。
+    rinne::test::InputReference reference(48000.0);
+    std::vector<float> out;
+    for (std::size_t i = 0; i < 16; ++i)
+    {
+        host.runCycle(i);
+        std::vector<float> dry(256, 0.0f);
+        for (std::size_t k = 0; k < dry.size(); ++k)
+        {
+            dry[k] = i * 256 + k == 2000 ? 0.5f : 0.0f;
+        }
+        reference.block(unityLoop(10.0f), host.inputLastBlock(), false, dry.data(), dry.data(), 256);
+        out.insert(out.end(), host.inputOutputLeft().begin(), host.inputOutputLeft().begin() + 256);
+    }
+    const auto& tap = reference.tapLeft;
+    REQUIRE(tap.size() == out.size());
     CHECK(out[2000] == 0.5f); // 干声
     CHECK(out[2479] == 0.0f);
-    CHECK(out[2480] == 0.5f); // 第一次回来：恰好 D 个样本之后
-    CHECK(out[2481] == 0.0f);
-    CHECK(out[2960] == 0.5f); // 第二次：回送经中间链又进了环（环路闭合）
+    CHECK(tap[2479] == 0.0f);
+    CHECK(tap[2480] == 0.5f); // 第一次回来：恰好 D 个样本之后，读头上逐位是原值
+    CHECK(tap[2481] == 0.0f);
+    CHECK(out[2480] != 0.0f);
+    // 第二次：回送经中间链又进了环（环路闭合）——读头逐位就是 Input 在 D 个样本之前的输出
+    std::size_t delayed = 0;
+    for (std::size_t t = 480; t < out.size(); ++t)
+    {
+        delayed += tap[t] == out[t - 480] ? 0u : 1u;
+    }
+    CHECK(delayed == 0u);
+    CHECK(tap[2960] != 0.0f);
+    CHECK(rinne::test::firstBitDiff(out, reference.wantLeft) == -1);
 
     const auto& status = host.inputStatus();
     CHECK(status.delayEffective == 480);
