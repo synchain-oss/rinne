@@ -370,7 +370,10 @@ PingTrace drive(ProbePing& ping, std::size_t blockSize, std::size_t cancelAfter 
     std::vector<float> dry(blockSize);
     std::vector<float> ret(blockSize);
     const std::vector<float> readback(blockSize, 0.0f);
-    for (int guard = 0; guard < 100000 && (ping.active() || trace.dry.empty()); ++guard)
+    // 总样本数封顶：状态机被改坏而永远不结束时，这里按样本数截断，让断言去红，不去吃内存和时间
+    // （正常的一次 Ping 连带取消都在 1 万个样本内走完）
+    constexpr std::size_t kTraceCap = 60000;
+    while ((ping.active() || trace.dry.empty()) && trace.dry.size() < kTraceCap)
     {
         if (!cancelled && cancelAfter != kNoIndex && trace.dry.size() >= cancelAfter)
         {
@@ -420,7 +423,7 @@ TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]"
         std::size_t blockIndex = 0;
         while (ping.state() != ProbePing::State::kDone)
         {
-            REQUIRE(blockIndex < 100000);
+            REQUIRE(position < 60000); // 状态机被改坏而不结束时，按样本数截断，让断言去红
             const std::size_t n = blocks[blockIndex++ % blocks.size()];
             std::vector<float> inject(n);
             std::vector<float> readback(n);
@@ -895,6 +898,17 @@ TEST_CASE("formal state bytes are kept as they came and written back unchanged",
         CHECK(keeper.save(panel) == formal); // 逐字节相同
         panel.group = 1; // 留住期间面板上的改动不进 state
         CHECK(keeper.save(panel) == formal);
+    }
+
+    SECTION("a higher abi of this plugin's own role is kept the same way")
+    {
+        std::vector<std::uint8_t> newer = formal;
+        newer[4] = 2; // 头里偏移 4 是 abi（u32 小端）
+        ProbeStateData loaded = panel;
+        REQUIRE(keeper.load(newer.data(), newer.size(), loaded) == StateStatus::kNotProbe);
+        CHECK(loaded.group == 4);
+        CHECK(keeper.holding());
+        CHECK(keeper.save(panel) == newer);
     }
 
     SECTION("a later probe state of its own lets go of the formal bytes")
