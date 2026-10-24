@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "notes": "第一段：Input 在首、Output 在末的空壳直通。第二段（回声间隔、探针录音）以后只往 scenarios 里加条目：新种类在 Scenarios.psm1 的登记表里加一项，环境变量放进条目的 env。",
+  "signal": { "kind": "impulse-noise", "seconds": 4 },
+  "limits": {
+    "renderTimeoutSec": 90,
+    "luaTimeoutSec": 120,
+    "instances": { "cycles": 25, "warmup": 5, "play": false, "maxHandleGrowth": 150, "maxPrivateGrowthMB": 150 }
+  },
+  "scenarios": [
+    { "id": "null-offline-44100-64", "kind": "render", "mode": "offline", "sr": 44100, "block": 64 },
+    { "id": "null-offline-44100-512", "kind": "render", "mode": "offline", "sr": 44100, "block": 512 },
+    { "id": "null-offline-44100-1024", "kind": "render", "mode": "offline", "sr": 44100, "block": 1024 },
+    { "id": "null-offline-48000-64", "kind": "render", "mode": "offline", "sr": 48000, "block": 64 },
+    { "id": "null-offline-48000-512", "kind": "render", "mode": "offline", "sr": 48000, "block": 512 },
+    { "id": "null-offline-48000-1024", "kind": "render", "mode": "offline", "sr": 48000, "block": 1024 },
+    { "id": "null-1x-44100-64", "kind": "render", "mode": "1x", "sr": 44100, "block": 64 },
+    { "id": "null-1x-44100-512", "kind": "render", "mode": "1x", "sr": 44100, "block": 512 },
+    { "id": "null-1x-44100-1024", "kind": "render", "mode": "1x", "sr": 44100, "block": 1024 },
+    { "id": "null-1x-48000-64", "kind": "render", "mode": "1x", "sr": 48000, "block": 64 },
+    { "id": "null-1x-48000-512", "kind": "render", "mode": "1x", "sr": 48000, "block": 512 },
+    { "id": "null-1x-48000-1024", "kind": "render", "mode": "1x", "sr": 48000, "block": 1024 },
+    { "id": "device-44100-64", "kind": "probe", "sr": 44100, "block": 64 },
+    { "id": "device-44100-512", "kind": "probe", "sr": 44100, "block": 512 },
+    { "id": "device-44100-1024", "kind": "probe", "sr": 44100, "block": 1024 },
+    { "id": "device-48000-64", "kind": "probe", "sr": 48000, "block": 64 },
+    { "id": "device-48000-512", "kind": "probe", "sr": 48000, "block": 512 },
+    { "id": "device-48000-1024", "kind": "probe", "sr": 48000, "block": 1024 },
+    { "id": "mono-offline", "kind": "render", "mode": "offline", "sr": 48000, "block": 512, "mono": true },
+    { "id": "bypass-input", "kind": "render", "mode": "offline", "sr": 48000, "block": 512, "bypass": ["input"] },
+    { "id": "bypass-output", "kind": "render", "mode": "offline", "sr": 48000, "block": 512, "bypass": ["output"] },
+    {
+      "id": "bypass-both",
+      "kind": "render",
+      "mode": "offline",
+      "sr": 48000,
+      "block": 512,
+      "bypass": ["input", "output"]
+    },
+    { "id": "save-reopen", "kind": "savereopen", "bypass": ["output"] },
+    { "id": "instances-25", "kind": "instances" }
+  ],
+  "negative": [
+    {
+      "id": "neg-offset-1-sample",
+      "kind": "render",
+      "mode": "offline",
+      "sr": 48000,
+      "block": 512,
+      "mutate": { "sourceOffsetSamples": 1 },
+      "expect": "FAIL"
+    },
+    {
+      "id": "neg-track-minus-6db",
+      "kind": "render",
+      "mode": "offline",
+      "sr": 48000,
+      "block": 512,
+      "mutate": { "trackVolume": 0.5 },
+      "expect": "FAIL"
+    },
+    { "id": "neg-timeout", "kind": "hang", "timeoutSec": 8, "expect": "INCOMPLETE" },
+    { "id": "neg-killed", "kind": "hang", "killAfterSec": 4, "expect": "INCOMPLETE" },
+    { "id": "neg-user-testing", "kind": "guard", "guard": "user-testing", "expect": "SKIPPED" },
+    { "id": "neg-sentinel-missing", "kind": "guard", "guard": "sentinel-missing", "expect": "REFUSED" },
+    { "id": "neg-default-dir", "kind": "guard", "guard": "default-dir", "expect": "REFUSED" }
+  ]
+}
