@@ -5,6 +5,7 @@
 //   loop_on 关与 Input 旁路 ≤ 1 块 + 10 ms 归零、不清空（打开之后旧内容照常回来）；
 //   Output 旁路：读头在 D + 10 ms 之内逐位为 0，回送按 DC 阻断的尾巴衰减，安全链照常运行；
 //   写头恰好在块边界落后：回送保持末值 5 ms 线性衰减，不从上一块的末值直接落到 0；
+//   写头倒退（读头整体作废）：同样保持末值 5 ms 衰减；
 //   两端停用超过 250 ms 之后的清空：保持末值 5 ms 衰减，停用之前的内容不回来；
 //   新配对、换写方：从首个有效读样本起 500 ms 淡入（从运行中进入时先 10 ms 降到 0），逐样本无阶跃。
 //
@@ -282,6 +283,64 @@ TEST_CASE("Input 写头恰好在块边界落后：回送保持末值 5 ms 线性
     }
 }
 
+TEST_CASE("Input 写头倒退：读头整体作废时回送保持末值 5 ms 线性衰减，不从上一块的末值直接落到 0",
+          "[engine][input][stop]")
+{
+    // ⛔ 删除式验证点：写头倒退时不做末值保持（直接清读头）→ 回送从末值一步落到 0，本用例变红。
+    // 同一个段、同一个映射代号上写头回到 0（换段遗漏一类）：环路层整个域重来、读头作废，按换绑定请求淡入。
+    constexpr int kN = 240;
+    static constexpr double kHz = 100.0;
+    static constexpr float kA = 0.3f;
+    const auto rewind = [](ClosedLoop& loop) {
+        loop.ring->header.write_intent.store(0u);
+        loop.ring->header.write_head.store(0u);
+    };
+    SECTION("读头（安全链的输入）")
+    {
+        ClosedLoop loop(kSr, kN);
+        loop.source = [](std::int64_t t, int) { return cosine(t, kHz, kA); };
+        const EngineParams p = loopParams(0.0f, 50.0f, 10.0f); // 反馈 0：读头就是 D 之前的干声
+        loop.run(p, kN, 100 * kN);
+        rewind(loop);
+        loop.run(p, kN, 20 * kN);
+        const auto cut = static_cast<std::size_t>(100 * kN);
+        const auto& tap = loop.reference.tapLeft;
+        REQUIRE(std::fabs(tap[cut - 1]) > 0.2f); // 末值不小：硬切换会是一个大阶跃
+        CHECK(loop.input.loopStatus().resyncByReason[static_cast<int>(rinne::loop::SyncReason::kBindSwitch)] == 1u);
+        CHECK(tap[cut] == tap[cut - 1]); // 保持的第一个样本就是末值
+        for (std::size_t i = 0; i < static_cast<std::size_t>(kFadeOut); ++i)
+        {
+            const float want = tap[cut - 1] * static_cast<float>(kFadeOut - static_cast<std::int64_t>(i)) /
+                               static_cast<float>(kFadeOut);
+            CHECK(std::fabs(tap[cut + i] - want) <= 1.0e-6f);
+        }
+        CHECK(allZero(tap, cut + kFadeOut, cut + 480)); // 倒退之前的数据不读；新数据 D 之后才到
+        CHECK(peak(tap, cut + 480 + 960, tap.size()) > 0.2f); // 之后照常读新数据
+        const float bound = slope(kHz, kA) + kA / static_cast<float>(kFadeOut) + 1.0e-6f;
+        CHECK(maxStep(tap, cut - kN, cut + 2 * kFadeOut) <= bound);
+        CHECK(maxStep(hardCut(tap, cut), cut - kN, cut + 2 * kFadeOut) > bound); // 反例：判据对阶跃会红
+    }
+    SECTION("回送（安全链的输出）")
+    {
+        ClosedLoop loop(kSr, kN);
+        loop.source = [](std::int64_t t, int) { return cosine(t, kHz, kA); };
+        const EngineParams p = loopParams(50.0f, 50.0f, 10.0f);
+        loop.run(p, kN, 400 * kN);
+        rewind(loop);
+        loop.run(p, kN, 20 * kN);
+        const auto cut = static_cast<std::size_t>(400 * kN);
+        const auto& ret = loop.reference.retLeft;
+        const float level = peak(ret, cut - 4800, cut);
+        REQUIRE(std::fabs(ret[cut - 1]) > 0.25f * level);
+        // 阶跃界：稳态里最大的一步，加上末值保持的一步与安全链 10 ms 降到 0 的一步（换绑定请求淡入，从运行中进入）
+        const float steady = maxStep(ret, cut - 4800, cut);
+        const float bound = steady + level / static_cast<float>(kFadeOut) + level / static_cast<float>(kGate) + 1.0e-6f;
+        CHECK(maxStep(ret, cut - 1, cut + 2 * kFadeOut) <= bound);
+        CHECK(maxStep(hardCut(ret, cut), cut - 1, cut + 2 * kFadeOut) > bound);
+        CHECK(firstBitDiff(loop.outLeft, loop.reference.wantLeft) == -1);
+    }
+}
+
 TEST_CASE("Input 两端停用超过 250 ms 之后的清空：保持末值 5 ms 衰减，停用之前的内容不回来", "[engine][input][stop]")
 {
     // ⛔ 删除式验证点：不理会清空请求 → 恢复之后读头接着读停用之前的内容，本用例变红；
@@ -363,7 +422,7 @@ TEST_CASE("Input 换写方：先 10 ms 降到 0，再从首个有效读样本起
     constexpr int kN = 128;
     ClosedLoop loop(kSr, kN);
     FadeLog log;
-    loop.input.setSafetyChain(&log, &FadeLog::record);
+    loop.input.setFadeObserver(&log, &FadeLog::record);
     loop.source = [](std::int64_t t, int channel) { return cosine(t, channel == 0 ? 100.0 : 80.0, 0.2f); };
     const EngineParams p = loopParams(50.0f, 50.0f, 50.0f);
     loop.run(p, kN, 48000 + 64 * kN);

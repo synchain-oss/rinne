@@ -27,7 +27,7 @@
 //   降到 0。
 //
 // 线程：
-//   - setCommandBaseline / setSafetyChain（非实时线程）：构造后、prepare 前调。
+//   - setCommandBaseline / setFadeObserver（非实时线程）：构造后、prepare 前调。
 //   - prepare（非实时线程）：分配本地延迟线与暂存、重算全部按样本计的时长。换采样率才重新分配本地延迟线；
 //     同采样率重新 prepare 不动读头、延迟线与安全链（流保持连续）。可以分配。
 //   - process（音频线程）：拉环、读回送、过安全链、加干声、发布端点槽。不加锁、不分配、不做 I/O、不读墙钟、不抛异常。
@@ -64,7 +64,7 @@ static_assert(std::atomic<bool>::is_always_lock_free, "停用清空的请求标�
 
 // 淡入请求的观察者：引擎每向自带的安全链请求一次淡入，就把原因原样通知它一次（诊断与场景用；不接也照常淡入）。
 // 函数指针加 context（不用 std::function）：音频线程上调用，不能有分配或异常。
-using FadeInRequest = void (*)(void* context, FadeReason reason) noexcept;
+using FadeObserver = void (*)(void* context, FadeReason reason) noexcept;
 
 // 诊断报告安全段（DiagSafety）的六个量，外加环内 NaN 的琥珀灯位。消息线程读的纯值快照。
 //
@@ -103,9 +103,8 @@ public:
     // 新实例的计数从 0 起，首个音频块之前按下的紧急切断在首块生效，不会被吞掉。
     void setCommandBaseline(const CommandBaseline& baseline) noexcept;
 
-    // 非实时线程：接淡入请求的观察者（可空，见 FadeInRequest）。名字沿用安全链还没接进引擎时的入口：
-    // 现在安全链在引擎里，这里只观察、不执行。
-    void setSafetyChain(void* observer, FadeInRequest request) noexcept;
+    // 非实时线程：接淡入请求的观察者（可空，见 FadeObserver）。只观察、不执行：安全链在引擎里，不接也照常淡入。
+    void setFadeObserver(void* context, FadeObserver observer) noexcept;
 
     // 非实时线程：准备。sampleRate 与 maxBlock 是宿主声明的值。
     void prepare(double sampleRate, int maxBlock) noexcept;
@@ -209,7 +208,7 @@ private:
 
     // 淡入请求的观察者（可空）
     void* fadeObserver_ = nullptr;
-    FadeInRequest fadeObserverFn_ = nullptr;
+    FadeObserver fadeObserverFn_ = nullptr;
 
     // 两端停用之后的清空请求（任意线程置位，音频线程块首取走）
     std::atomic<bool> flushRequest_{false};

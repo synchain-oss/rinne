@@ -104,10 +104,10 @@ void InputEngine::setCommandBaseline(const CommandBaseline& baseline) noexcept
     chain_.setCommandBaseline(baseline.panicSeq, baseline.recoverSeq);
 }
 
-void InputEngine::setSafetyChain(void* observer, FadeInRequest request) noexcept
+void InputEngine::setFadeObserver(void* context, FadeObserver observer) noexcept
 {
-    fadeObserver_ = observer;
-    fadeObserverFn_ = request;
+    fadeObserver_ = context;
+    fadeObserverFn_ = observer;
 }
 
 void InputEngine::prepare(double sampleRate, int maxBlock) noexcept

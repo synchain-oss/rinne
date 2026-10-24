@@ -108,6 +108,15 @@ public:
         {
             resetAt = static_cast<int>(std::clamp<std::int64_t>(r.resetAtSample - r.blockStart, 0, n - 1));
         }
+        // 应有的输出先整段照抄干声（内存拷贝，不经浮点运算），只在引擎会写的样本上覆盖（见 overwrite）。
+        // 不能逐样本存「unity ? x : x * g」：编译器可以把这个选择折成 x * g（LLVM 认为 x * 1.0 与 x 等价，
+        // Linux 上的 clang 18 就这样生成），signaling NaN 会被改成 quiet NaN，参照在引擎恰好不写的样本上就对不上了。
+        const std::size_t base = wantLeft.size();
+        wantLeft.insert(wantLeft.end(), inLeft, inLeft + n);
+        if (inRight != nullptr)
+        {
+            wantRight.insert(wantRight.end(), inRight, inRight + n);
+        }
         for (int i = 0; i < n; ++i)
         {
             if (i == resetAt)
@@ -125,23 +134,40 @@ public:
             const float xr = inRight != nullptr ? inRight[i] : xl;
             const float dl = unity ? xl : xl * gDry;
             const float dr = unity ? xr : xr * gDry;
+            const std::size_t at = base + static_cast<std::size_t>(i);
             if (inRight == nullptr)
             {
                 float m = 0.5f * (l + rr);
                 float same = m;
                 chain_.processBack(m, same, dl, dl);
-                wantLeft.push_back(m != 0.0f ? dl + m : dl);
+                overwrite(wantLeft[at], dl, m, unity);
                 retLeft.push_back(m);
                 continue;
             }
             chain_.processBack(l, rr, dl, dr);
-            wantLeft.push_back(l != 0.0f ? dl + l : dl);
-            wantRight.push_back(rr != 0.0f ? dr + rr : dr);
+            overwrite(wantLeft[at], dl, l, unity);
+            overwrite(wantRight[at], dr, rr, unity);
             retLeft.push_back(l);
             retRight.push_back(rr);
         }
         chain_.publish(meters_);
         chain_.takeFlushRequest();
+    }
+
+    // 引擎会写的样本（InputEngine.h 写明的规则）：回送不为 ±0 时是干声 + 回送；回送为 ±0 而 g_dry 不为 1
+    // 时是乘过的干声； 其余（回送为 ±0 且 g_dry 恰为
+    // 1）一位不碰，保持照抄的干声。要写的两种情形下写进去的值都经过一次浮点运算 （+ ret 或 × g），x 与 x * 1.0
+    // 经过它之后位型相同，编译器把 unity ? x : x * g 折成 x * g 也不改变结果。
+    static void overwrite(float& want, float dry, float ret, bool unity) noexcept
+    {
+        if (ret != 0.0f)
+        {
+            want = dry + ret;
+        }
+        else if (!unity)
+        {
+            want = dry;
+        }
     }
 
     const engine::SafetyChain& chain() const noexcept { return chain_; }

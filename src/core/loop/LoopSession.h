@@ -199,6 +199,8 @@ private:
     // 块首就读不到数据、上一个样本还在出声的读头（写头恰好在块边界落后：补 0、断档、失去对端）：
     // 它在上一个样本上的贡献并进末值保持，5 ms 线性衰减，回送不从末值直接落到 0。
     void holdStrandedTaps(i64 blockStart) noexcept;
+    // 读头整体作废时（两端停用之后的清空、写头倒退）：上一块最后一个回送样本按末值保持 5 ms 线性衰减。
+    void holdLastReturn() noexcept;
     // 建一个新读头（onset 走 20 ms）。槽满时丢包络最小的那个，返回槽下标；没有槽时返回 -1。
     int newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept;
     // 改 D 的过渡：旧读头 5 ms 淡出、新读头按新的 D 建起来 20 ms onset（读位置不跳变）。一次只走一个过渡：

@@ -699,7 +699,7 @@ TEST_CASE("引擎 命令序号：基线之外的变化才执行，基线本身�
     baseline.presetSeq = 2;
     baseline.stateSeq = 5;
     input.setCommandBaseline(baseline);
-    input.setSafetyChain(&requests, &Requests::request);
+    input.setFadeObserver(&requests, &Requests::request);
     input.prepare(kSr, 64);
     CHECK(input.commandBaseline().panicSeq == 7u);
 

@@ -48,7 +48,9 @@ float special(std::int64_t t, int channel)
     case 1:
         return rinne::test::fromBits(0x7fc12345u); // quiet NaN，载荷 0x412345
     case 2:
-        return rinne::test::fromBits(0x7f800001u); // signaling NaN
+        // signaling NaN，载荷随 t 变：位型在运行时才定。写成常量的话 MSVC 会在编译期把它折成 quiet NaN，
+        // 这一格就从没以 signaling NaN 喂进过引擎（下面的用例断言它确实是 signaling NaN）。
+        return rinne::test::fromBits(0x7f800000u | (1u + (static_cast<std::uint32_t>(t) & 0xffu)));
     case 3:
         return rinne::test::fromBits(0xffc00abcu); // 负号 NaN
     case 4:
@@ -81,6 +83,14 @@ bool sameBitsFrom(const std::vector<float>& a, const std::vector<float>& b, std:
     return std::memcmp(a.data() + from, b.data() + from, (a.size() - from) * sizeof(float)) == 0;
 }
 
+// 位型是 signaling NaN（指数全 1、quiet 位为 0、尾数不为 0）
+bool isSignalingNan(float x)
+{
+    std::uint32_t b = 0;
+    std::memcpy(&b, &x, sizeof b);
+    return (b & 0x7fc00000u) == 0x7f800000u && (b & 0x003fffffu) != 0u;
+}
+
 // 淡入请求的观察者：记下每一次的原因
 struct FadeLog
 {
@@ -104,9 +114,12 @@ TEST_CASE("Input 逐位直通：反馈 0、mix 0、没有对端、loop_on 关与
         ClosedLoop loop(kSr, 256);
         loop.source = special;
         loop.run(loopParams(0.0f, 25.0f, 10.0f), 256, 48000);
+        REQUIRE(isSignalingNan(loop.dryLeft[2])); // signaling NaN 确实喂进去了
+        CHECK(isSignalingNan(loop.outLeft[2]));
         CHECK(firstBitDiff(loop.outLeft, loop.dryLeft) == -1);
         CHECK(firstBitDiff(loop.outRight, loop.dryRight) == -1);
         CHECK(firstBitDiff(loop.outLeft, loop.reference.wantLeft) == -1);
+        CHECK(firstBitDiff(loop.outRight, loop.reference.wantRight) == -1);
     }
     SECTION("mix 0：g_ret = 0、g_dry = 1")
     {
@@ -169,7 +182,14 @@ TEST_CASE("Input 逐位直通：反馈 0、mix 0、没有对端、loop_on 关与
             const auto from = static_cast<std::size_t>(kSwitch + 256 + 480);
             CHECK(sameBitsFrom(loop.outLeft, loop.dryLeft, from));
             CHECK(sameBitsFrom(loop.outRight, loop.dryRight, from));
+            std::size_t signaling = 0; // signaling NaN 原样留在输出里（不是被改成 quiet NaN 之后两边恰好一样）
+            for (std::size_t t = from; t < loop.outLeft.size(); ++t)
+            {
+                signaling += isSignalingNan(loop.outLeft[t]) ? 1u : 0u;
+            }
+            CHECK(signaling > 0u);
             CHECK(firstBitDiff(loop.outLeft, loop.reference.wantLeft) == -1);
+            CHECK(firstBitDiff(loop.outRight, loop.reference.wantRight) == -1);
         }
     }
 }
@@ -240,7 +260,7 @@ TEST_CASE("Input 命令序号：首块之前按下的紧急切断在首块生效
         loop.input.setCommandBaseline(baseline);
         loop.reference.setCommandBaseline(baseline);
         FadeLog log;
-        loop.input.setSafetyChain(&log, &FadeLog::record);
+        loop.input.setFadeObserver(&log, &FadeLog::record);
         loop.source = [](std::int64_t t, int) { return cosine(t, 100.0, 0.3f); };
         EngineParams p = loopParams(100.0f, 50.0f, 10.0f);
         p.presetSeq = 3;

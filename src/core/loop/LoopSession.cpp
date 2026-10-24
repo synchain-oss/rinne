@@ -196,16 +196,25 @@ void LoopSession::flushLocalDelayLine() noexcept
 }
 
 // 两端停用超过 250 ms 之后的清空（块首、本块的 process 之前）：清线、作废读头，上一块最后一个回送样本按末值保持
-// 衰减 5 ms。保持的是上一块实际送出的那一个值（含正在进行的保持），所以先清掉旧的保持再起新的，不重复计入。
-// 上一个输出样本不在 R − 1 上（还没出过回送、或超长块打断了读位）时没有可保持的，直接清。
+// 衰减 5 ms（见 holdLastReturn）。
 void LoopSession::flushAfterSuspend() noexcept
 {
-    const bool adjacent = lastReturnAt_ >= 0 && lastReturnAt_ == sync_.processed() - 1;
-    const float left = adjacent ? lastReturnLeft_ : 0.0f;
-    const float right = adjacent ? lastReturnRight_ : 0.0f;
     flushLocalDelayLine();
-    hold_.start(left, right, sync_.fadeOutSamples());
+    holdLastReturn();
     sink_.emit(LoopEventCode::kLineCleared, 2);
+}
+
+// 读头整体作废时（两端停用之后的清空、写头倒退）：上一块最后一个回送样本按末值保持衰减 5 ms，回送不从它直接落到 0。
+// 保持的是上一块实际送出的那一个值（含正在进行的保持），所以先清掉旧的保持再起新的，不重复计入。
+// 上一个输出样本不在 R − 1 上（还没出过回送、或超长块打断了读位）时没有可保持的。
+void LoopSession::holdLastReturn() noexcept
+{
+    const bool adjacent = lastReturnAt_ >= 0 && lastReturnAt_ == sync_.processed() - 1;
+    hold_ = ReturnHold{};
+    if (adjacent)
+    {
+        hold_.start(lastReturnLeft_, lastReturnRight_, sync_.fadeOutSamples());
+    }
 }
 
 // 本块的第一个样本就读不到数据、而上一个输出样本还在出声的读头：写头恰好在块边界落后（补 0、断档、失去对端的淡出
@@ -666,7 +675,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     const i64 R0 = sync_.processed();
 
     // 域锚定：第一次配上时本地延迟线从当前写头起算（W 可能早已很大，从 0 起拉永远追不上）；
-    // 写头倒退（换段遗漏一类）时整个域重来，读头作废，判据重新锚定偏移。
+    // 写头倒退（换段遗漏一类）时整个域重来，读头作废（上一块的末值保持衰减，旧数据一样不读），判据重新锚定偏移。
     bool domainReset = false;
     if (paired)
     {
@@ -676,6 +685,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         }
         else if (writeHead < line_.pulled())
         {
+            holdLastReturn();
             line_.resetTo(writeHead);
             taps_.clear();
             domainReset = true;
