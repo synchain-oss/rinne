@@ -29,7 +29,8 @@ public:
     virtual void probePanic() = 0;
     virtual void probeRecover() = 0;
     virtual void probePing() = 0;
-    // 开始一个测试格的记录窗口，到时由处理器停止；起不来（选择不合规则、已在记录）返回 false
+    // 开始一个测试格的记录窗口，到时由处理器停止；起不来（选择不合规则、已在记录、日志没开、日志排队满了）返回 false。
+    // 返回 false 时处理器什么都没改，面板在状态文本里写明、用户可稍后再点
     virtual bool probeStartRecording(const ProbeSelection& selection, std::uint32_t seconds) = 0;
     virtual void probeSetGroup(int group) = 0; // -1 = 未设，0..7 = A..H
     virtual void probeSetFeedbackPercent(float percent) = 0; // 面板已钳到 [0, 80]
@@ -81,6 +82,7 @@ private:
     ProbeEditorHost& host_;
     ProbeEditorOptions options_;
     RecoverCooldown cooldown_;
+    bool recordRejected_ = false; // 上一次点记录被处理器拒了；记录开始或下一次成功后清掉
     Controls c_;
     juce::OwnedArray<juce::Label> captions_;
     std::string statusShown_;

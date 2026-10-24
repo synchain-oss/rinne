@@ -269,6 +269,7 @@ TEST_CASE("ping is only allowed with the transport stopped or the dry signal sil
 TEST_CASE("recording needs an idle recorder and a selection from the rule table", "[host][probe][buttons]")
 {
     ProbeStatus status;
+    status.logOpen = true;
     ProbeSelection good;
     CHECK(recordAllowed(status, good));
 
@@ -277,6 +278,18 @@ TEST_CASE("recording needs an idle recorder and a selection from the rule table"
     CHECK_FALSE(recordAllowed(status, bad));
 
     status.recording = true;
+    CHECK_FALSE(recordAllowed(status, good));
+}
+
+TEST_CASE("recording is off while the log file is not open", "[host][probe][buttons]")
+{
+    ProbeStatus status;
+    CHECK_FALSE(status.logOpen); // 没填就当没开：数据会全丢，面板不能让人白录一场
+    const ProbeSelection good;
+    CHECK_FALSE(recordAllowed(status, good));
+    status.logOpen = true;
+    CHECK(recordAllowed(status, good));
+    status.logOpen = false;
     CHECK_FALSE(recordAllowed(status, good));
 }
 
@@ -614,6 +627,7 @@ TEST_CASE("copied diagnostics add the probe lines and carry no path, user or hos
     base.arch = "x64";
 
     ProbeStatus status;
+    status.logOpen = true;
     status.recording = true;
     status.lastPingSamples = 4800;
     status.counters.blocks = 1234;
@@ -632,7 +646,7 @@ TEST_CASE("copied diagnostics add the probe lines and carry no path, user or hos
     {
         const std::string text = buildDiagText(base, status, envDir(""), selection);
         CHECK(text.rfind("rinne-diag v1\n", 0) == 0);
-        CHECK(contains(text, "probe: log_dir=default recording=1 feedback_cap=80 ceiling_db=-18.0\n"));
+        CHECK(contains(text, "probe: log_dir=default log_open=1 recording=1 feedback_cap=80 ceiling_db=-18.0\n"));
         CHECK(contains(text, "probe_case: case=CB-01 variant=steady buf=256 guard=low\n"));
         CHECK(contains(text, "probe_ping: samples=4800\n"));
         CHECK(contains(text, "probe_log: blocks=1234 dropped=2 max_n=0 resync=0 trips=0\n"));
@@ -659,6 +673,14 @@ TEST_CASE("copied diagnostics add the probe lines and carry no path, user or hos
             INFO("leaked " << leak);
             CHECK_FALSE(contains(text, leak));
         }
+    }
+
+    SECTION("a log that never opened is reported")
+    {
+        status.logOpen = false;
+        status.recording = false;
+        CHECK(contains(buildDiagText(base, status, envDir(""), selection),
+                       "probe: log_dir=default log_open=0 recording=0 "));
     }
 
     SECTION("no ping yet reads as none")
@@ -690,8 +712,22 @@ TEST_CASE("status and counter text describe the host state", "[host][probe][text
     CHECK(contains(countersText(status), "feedback 15.0 %"));
 
     ProbeStatus idle;
+    idle.logOpen = true;
     CHECK(contains(statusText(idle), "link: not paired (group -)"));
+    CHECK(contains(statusText(idle), "record: idle\n"));
     CHECK(contains(statusText(idle), "ping: idle"));
+
+    // 记录行的优先级：正在记录 > 日志没开 > 上次被拒 > 空闲
+    CHECK(contains(statusText(idle, true), "record: idle, last start was refused (try again)\n"));
+    ProbeStatus closed;
+    CHECK(contains(statusText(closed), "record: unavailable, log file not open\n"));
+    CHECK(contains(statusText(closed, true), "record: unavailable, log file not open\n"));
+    ProbeStatus busy = idle;
+    busy.recording = true;
+    busy.recordRemainingSeconds = 7;
+    CHECK(contains(statusText(busy, true), "record: recording, 7 s left\n"));
+    busy.logOpen = false;
+    CHECK(contains(statusText(busy), "record: recording, 7 s left\n"));
     idle.pingRunning = true;
     idle.tripped = true;
     CHECK(contains(statusText(idle), "ping: running"));

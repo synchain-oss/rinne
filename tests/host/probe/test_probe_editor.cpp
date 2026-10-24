@@ -5,23 +5,33 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "InputProcessor.h"
 #include "ProbeEditor.h"
+#include "ipc/ProcessInfo.h"
 
 namespace
 {
 
 using namespace rinne::probe;
 namespace diag = rinne::diag;
+namespace fs = std::filesystem;
 
+// 假处理器。log 不为空时，日志是否开着、是否在记录、开始记录能不能成，都由这个真的 ProbeLog 说了算
 class FakeHost final : public ProbeEditorHost
 {
 public:
+    FakeHost() { status.logOpen = true; }
+
     ProbeStatus status;
+    diag::ProbeLog* log = nullptr;
+    bool startResult = true;
     int panics = 0;
     int recovers = 0;
     int pings = 0;
@@ -32,7 +42,16 @@ public:
     std::vector<float> delays;
     std::string diagnostics = "diagnostic text";
 
-    ProbeStatus probeStatus() const override { return status; }
+    ProbeStatus probeStatus() const override
+    {
+        ProbeStatus out = status;
+        if (log != nullptr)
+        {
+            out.logOpen = log->isOpen();
+            out.recording = log->isRecording();
+        }
+        return out;
+    }
     void probePanic() override { ++panics; }
     void probeRecover() override { ++recovers; }
     void probePing() override { ++pings; }
@@ -40,7 +59,7 @@ public:
     {
         recordings.push_back(selection);
         recordingSeconds.push_back(seconds);
-        return true;
+        return log != nullptr ? log->beginCase(toProbeCase(selection, 48000)) : startResult;
     }
     void probeSetGroup(int group) override
     {
@@ -81,6 +100,66 @@ struct Panel
 
     ProbeEditor::Controls& c() { return editor.controls(); }
 };
+
+// 系统临时目录下本进程独占的一个目录；用完只删里面的普通文件和这个空目录，不做递归删除
+class ScratchDir
+{
+public:
+    ScratchDir()
+    {
+        static std::atomic<unsigned> counter{0};
+        std::error_code ec;
+        const fs::path base = fs::temp_directory_path(ec);
+        for (int attempt = 0; attempt < 100 && path_.empty(); ++attempt)
+        {
+            const fs::path candidate =
+                base / ("rinne-probe-panel-" + std::to_string(rinne::ipc::currentProcessId()) + "-" +
+                        std::to_string(counter.fetch_add(1)) + "-" + std::to_string(diag::probeMonoNs() % 1000000007u));
+            if (fs::create_directory(candidate, ec))
+            {
+                path_ = candidate;
+            }
+        }
+    }
+    ~ScratchDir()
+    {
+        if (path_.empty())
+        {
+            return;
+        }
+        std::error_code ec;
+        std::vector<fs::path> files;
+        for (fs::directory_iterator it(path_, ec), end; !ec && it != end; it.increment(ec))
+        {
+            files.push_back(it->path());
+        }
+        for (const fs::path& file : files)
+        {
+            fs::remove(file, ec);
+        }
+        fs::remove(path_, ec);
+    }
+    ScratchDir(const ScratchDir&) = delete;
+    ScratchDir& operator=(const ScratchDir&) = delete;
+
+    std::string utf8() const { return path_.u8string(); }
+
+private:
+    fs::path path_;
+};
+
+// 手动 pump 的探针日志，directory 为空就是打不开的日志
+diag::ProbeLogOptions manualLogOptions(const std::string& directory, std::size_t pendingLimit = 4096)
+{
+    diag::ProbeLogOptions options;
+    options.directory = directory;
+    options.header =
+        diag::makeProbeHeader(diag::ProbeRole::kInput, diag::ProbeFormat::kVst3, diag::ProbeHost::kCubase, "89abcdef");
+    options.blockRingSlots = 64;
+    options.pendingLimit = pendingLimit;
+    options.startThread = false;
+    return options;
+}
 
 int idOf(juce::ComboBox& box, const juce::String& text)
 {
@@ -314,4 +393,110 @@ TEST_CASE("the status and counter labels follow the host", "[host][probe][editor
     panel.editor.refresh();
     CHECK(panel.c().status.getText().contains("link: paired (group A)"));
     CHECK(panel.c().counters.getText().contains("blocks 777"));
+}
+
+TEST_CASE("a refused start is written in the status text and forgotten once a window opens", "[host][probe][editor]")
+{
+    Panel panel;
+    auto& c = panel.c();
+    panel.host.startResult = false;
+    panel.editor.refresh();
+    REQUIRE(c.record.isEnabled());
+
+    c.record.onClick();
+    REQUIRE(panel.host.recordings.size() == 1);
+    CHECK(c.status.getText().contains("record: idle, last start was refused (try again)"));
+    CHECK(c.record.isEnabled()); // 稍后可以再点
+
+    // 再点一次成功：提示立刻消失，不用等处理器报告「正在记录」
+    panel.host.startResult = true;
+    c.record.onClick();
+    REQUIRE(panel.host.recordings.size() == 2);
+    CHECK_FALSE(c.status.getText().contains("refused"));
+
+    // 被拒之后窗口由别处开起来：记录行显示正在记录，窗口结束后旧的拒绝提示不会回来
+    panel.host.startResult = false;
+    c.record.onClick();
+    CHECK(c.status.getText().contains("last start was refused"));
+    panel.host.status.recording = true;
+    panel.host.status.recordRemainingSeconds = 30;
+    panel.editor.refresh();
+    CHECK(c.status.getText().contains("record: recording, 30 s left"));
+    panel.host.status.recording = false;
+    panel.editor.refresh();
+    CHECK(c.status.getText().contains("record: idle"));
+    CHECK_FALSE(c.status.getText().contains("refused"));
+}
+
+TEST_CASE("without an open log file the record button is off and the panel says why", "[host][probe][editor]")
+{
+    Panel panel;
+    auto& c = panel.c();
+    panel.host.status.logOpen = false;
+    panel.editor.refresh();
+
+    CHECK_FALSE(c.record.isEnabled());
+    CHECK(c.status.getText().contains("record: unavailable, log file not open"));
+    c.record.onClick(); // 按钮灰着也不会把请求交给处理器
+    panel.editor.doRecord();
+    CHECK(panel.host.recordings.empty());
+    CHECK(c.status.getText().contains("record: unavailable, log file not open"));
+
+    // 其余按钮不受影响
+    CHECK(c.panic.isEnabled());
+    CHECK(c.copyDiagnostics.isEnabled());
+    c.panic.onClick();
+    CHECK(panel.host.panics == 1);
+
+    panel.host.status.logOpen = true;
+    panel.editor.refresh();
+    CHECK(c.record.isEnabled());
+    CHECK(c.status.getText().contains("record: idle"));
+}
+
+TEST_CASE("with a real log: one that never opened keeps the panel from recording", "[host][probe][editor]")
+{
+    diag::ProbeLog log(manualLogOptions(""));
+    REQUIRE_FALSE(log.isOpen());
+    Panel panel;
+    panel.host.log = &log;
+    panel.editor.refresh();
+
+    CHECK_FALSE(panel.c().record.isEnabled());
+    CHECK(panel.c().status.getText().contains("record: unavailable, log file not open"));
+    panel.c().record.onClick();
+    panel.editor.doRecord();
+    CHECK(panel.host.recordings.empty());
+    CHECK_FALSE(log.isRecording());
+    CHECK(log.counters().blocks == 0);
+}
+
+TEST_CASE("with a real log: a full queue refuses the start, the panel says so, and a retry works",
+          "[host][probe][editor]")
+{
+    ScratchDir dir;
+    diag::ProbeLog log(manualLogOptions(dir.utf8(), 3));
+    REQUIRE(log.isOpen());
+    Panel panel;
+    panel.host.log = &log;
+    panel.editor.refresh();
+    REQUIRE(panel.c().record.isEnabled());
+
+    // 排队 2 行，C 行加 track_props 快照还要 2 行，超过上限 3
+    log.logEvent(diag::ProbeEventCode::kReset);
+    log.logEvent(diag::ProbeEventCode::kReset);
+    panel.c().record.onClick();
+    REQUIRE(panel.host.recordings.size() == 1);
+    CHECK_FALSE(log.isRecording());
+    CHECK(panel.c().status.getText().contains("record: idle, last start was refused (try again)"));
+    CHECK(panel.c().record.isEnabled());
+
+    log.pump(); // 腾空队列后再点
+    panel.c().record.onClick();
+    REQUIRE(panel.host.recordings.size() == 2);
+    CHECK(log.isRecording());
+    CHECK_FALSE(panel.c().status.getText().contains("refused"));
+    panel.editor.refresh();
+    CHECK_FALSE(panel.c().record.isEnabled()); // 窗口开着，记录按钮灰掉
+    log.close();
 }

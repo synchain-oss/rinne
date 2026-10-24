@@ -203,6 +203,10 @@ void ProbeEditor::resized()
 void ProbeEditor::refresh()
 {
     const ProbeStatus status = host_.probeStatus();
+    if (status.recording)
+    {
+        recordRejected_ = false;
+    }
     c_.ping.setEnabled(pingAllowed(status));
     c_.record.setEnabled(recordAllowed(status, selection()));
     c_.recover.setEnabled(cooldown_.ready(options_.nowMs()));
@@ -222,7 +226,7 @@ void ProbeEditor::refresh()
     }
 
     // 文本没变就不动：重设同样的文本也会触发重绘
-    const std::string statusNow = statusText(status);
+    const std::string statusNow = statusText(status, recordRejected_);
     if (statusNow != statusShown_)
     {
         statusShown_ = statusNow;
@@ -265,7 +269,8 @@ void ProbeEditor::doRecord()
     const ProbeSelection sel = selection();
     if (recordAllowed(host_.probeStatus(), sel))
     {
-        host_.probeStartRecording(sel, kRecordSeconds);
+        recordRejected_ = !host_.probeStartRecording(sel, kRecordSeconds);
+        refresh();
     }
 }
 

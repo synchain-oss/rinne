@@ -349,7 +349,7 @@ bool pingAllowed(const ProbeStatus& status) noexcept
 
 bool recordAllowed(const ProbeStatus& status, const ProbeSelection& selection) noexcept
 {
-    return !status.recording && isValidSelection(selection);
+    return status.logOpen && !status.recording && isValidSelection(selection);
 }
 
 bool autoPingTrigger(bool wasPlaying, bool isPlaying) noexcept
@@ -357,7 +357,7 @@ bool autoPingTrigger(bool wasPlaying, bool isPlaying) noexcept
     return wasPlaying && !isPlaying;
 }
 
-std::string statusText(const ProbeStatus& status)
+std::string statusText(const ProbeStatus& status, bool recordRejected)
 {
     std::string out = "link: ";
     out += status.paired ? "paired" : "not paired";
@@ -368,7 +368,18 @@ std::string statusText(const ProbeStatus& status)
     out += ", dry: ";
     out += status.drySilent ? "silent" : "active";
     out += "\nrecord: ";
-    out += status.recording ? "recording, " + std::to_string(status.recordRemainingSeconds) + " s left" : "idle";
+    if (status.recording)
+    {
+        out += "recording, " + std::to_string(status.recordRemainingSeconds) + " s left";
+    }
+    else if (!status.logOpen)
+    {
+        out += "unavailable, log file not open";
+    }
+    else
+    {
+        out += recordRejected ? "idle, last start was refused (try again)" : "idle";
+    }
     out += "\nping: ";
     if (status.pingRunning)
     {
@@ -528,7 +539,8 @@ std::string buildDiagText(const diag::DiagInputs& base, const ProbeStatus& statu
                           const ProbeSelection& selection)
 {
     std::string out = diag::buildDiagReport(base);
-    out += "probe: log_dir=" + logDirLabel(logDir) + " recording=" + (status.recording ? "1" : "0") +
+    out += "probe: log_dir=" + logDirLabel(logDir) + " log_open=" + (status.logOpen ? "1" : "0") +
+           " recording=" + (status.recording ? "1" : "0") +
            " feedback_cap=" + diag::formatFixed(kFeedbackMaxPercent, 0) +
            " ceiling_db=" + diag::formatFixed(status.ceilingDb, 1) + "\n";
     const std::string buf = selection.buf == 0 ? std::string("-") : std::to_string(selection.buf);

@@ -134,6 +134,8 @@ struct ProbeStatus
     bool transportPlaying = false;
     bool drySilent = false;
     bool paired = false;
+    // 日志文件是否真的开了（ProbeLog::isOpen）。没开时数据全丢，所以默认假：处理器忘了填，面板会明说记录不可用
+    bool logOpen = false;
     bool recording = false;
     bool pingRunning = false;
     bool tripped = false;
@@ -149,12 +151,13 @@ struct ProbeStatus
 
 // Ping 只在停走带或干声静音时可点，且同一时刻只跑一次
 bool pingAllowed(const ProbeStatus& status) noexcept;
-// 记录按钮：没在记录，且选择在规则表里
+// 记录按钮：日志开着、没在记录，且选择在规则表里
 bool recordAllowed(const ProbeStatus& status, const ProbeSelection& selection) noexcept;
 // 走带从播放变停止时自动 Ping 一次
 bool autoPingTrigger(bool wasPlaying, bool isPlaying) noexcept;
 
-std::string statusText(const ProbeStatus& status);
+// recordRejected：上一次点记录时处理器没有开窗口（日志排队满了等，稍后重试即可），由面板记着、成功后清掉
+std::string statusText(const ProbeStatus& status, bool recordRejected = false);
 std::string countersText(const ProbeStatus& status);
 
 // ---- Ping ----
