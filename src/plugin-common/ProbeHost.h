@@ -85,6 +85,7 @@ public:
 
     // ---- ProbeEditorHost ----
     ProbeStatus probeStatus() const override;
+    bool probeHasReturn() const override { return isInput(); }
     void probePanic() override;
     void probeRecover() override;
     void probePing() override;
@@ -92,10 +93,8 @@ public:
     void probeSetGroup(int group) override;
     void probeSetFeedbackPercent(float percent) override;
     void probeSetDelayMs(float ms) override;
-    std::string probeDiagnosticsText() override;
-
-    // 环路开关（面板接口里没有这一项，这里先留入口）
-    void setLoopOn(bool on) noexcept { loopOn_.store(on, std::memory_order_relaxed); }
+    void probeSetLoopOn(bool on) override { loopOn_.store(on, std::memory_order_relaxed); }
+    std::string probeDiagnosticsText(const ProbeSelection& selection) override;
 
     // ---- 读出（诊断与测试） ----
     struct Counts
@@ -130,9 +129,6 @@ private:
                        const ipc::BoundBlock& block, bool haveTimeline, std::int64_t timeline,
                        diag::BlockFields& fields) noexcept;
     void applyPing(const engine::AudioView& view, int n) noexcept;
-    void restoreSettle() noexcept;
-    void resetSettle() noexcept;
-    bool pingBusy() const noexcept;
     void audioEvent(diag::ProbeEventCode code, std::uint64_t a, std::uint64_t startNs) noexcept;
     static void onFade(void* context, engine::FadeReason reason) noexcept;
 
@@ -142,6 +138,8 @@ private:
     void notePeer();
     void drainEngine();
     void tickPing();
+    void collectPing();
+    std::size_t pingSettleSamples() const;
     void tickAutoRecording(std::uint64_t ns);
     bool beginRecording(const diag::ProbeCase& c, std::uint32_t seconds, std::uint64_t ns);
     void applyGroup(int group, ipc::ClaimIntent intent, std::uint64_t ms);
@@ -166,7 +164,6 @@ private:
     ProbeStateKeeper keeper_;
     ProbeStateData stateData_;
     ProbeLogDir logDir_;
-    ProbeSelection lastSelection_;
 
     // ---- 非实时线程的账（锁内）；采样率与最大块长在 ready_ 发布之前写好，音频线程也读 ----
     double sampleRate_ = 0.0;
@@ -201,9 +198,6 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<bool> drySilent_{true};
     std::atomic<bool> outputPeerActive_{false};
-    std::atomic<bool> pingRequest_{false}; // 非实时线程置位，音频线程取走：开始 Ping 的静音段
-    std::atomic<bool> pingCancel_{false};
-    std::atomic<bool> settling_{false}; // 静音段进行中（音频线程发布）
     static_assert(std::atomic<float>::is_always_lock_free);
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
     static_assert(std::atomic<bool>::is_always_lock_free);
@@ -224,18 +218,6 @@ private:
     std::uint64_t lastOutputW_ = 0;
     std::uint32_t lastOutputN_ = 0;
     std::uint64_t localSamples_ = 0; // Output：宿主没给时间线时的替身
-    // Ping 之前的静音段（见 applyPing）
-    enum class Settle : std::uint8_t
-    {
-        kOff,
-        kDown,
-        kHold,
-        kHandOver,
-        kUp,
-    };
-    Settle settle_ = Settle::kOff;
-    std::size_t settlePos_ = 1; // 增益 = settlePos_ / 斜坡长度
-    std::int64_t settleLeft_ = 0;
     std::vector<float> dry_[2];
     std::vector<float> inject_;
     std::vector<float> dryScale_;

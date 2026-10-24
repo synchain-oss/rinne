@@ -15,7 +15,7 @@ namespace
 {
 
 constexpr int kWidth = 520;
-constexpr int kHeight = 420;
+constexpr int kHeight = 440;
 constexpr int kRefreshMs = 100;
 
 juce::String text(const std::string& s)
@@ -49,6 +49,7 @@ ProbeEditor::ProbeEditor(juce::AudioProcessor& processor, ProbeEditorHost& host,
     {
         options_.copyToClipboard = [](const std::string& s) { juce::SystemClipboard::copyTextToClipboard(text(s)); };
     }
+    hasReturn_ = host_.probeHasReturn();
 
     // 选择器：id 都是下标加一
     c_.group.addItem("-", 1);
@@ -98,6 +99,9 @@ ProbeEditor::ProbeEditor(juce::AudioProcessor& processor, ProbeEditorHost& host,
     c_.delay.setTextValueSuffix(" ms");
     c_.delay.setValue(static_cast<double>(clampDelayMs(status.delayMs)), juce::dontSendNotification);
     c_.delay.onValueChange = [this] { host_.probeSetDelayMs(clampDelayMs(static_cast<float>(c_.delay.getValue()))); };
+    c_.loop.setButtonText("Loop on");
+    c_.loop.setToggleState(status.loopOn, juce::dontSendNotification);
+    c_.loop.onClick = [this] { host_.probeSetLoopOn(c_.loop.getToggleState()); };
 
     c_.panic.setButtonText("Panic");
     c_.recover.setButtonText("Recover");
@@ -121,10 +125,15 @@ ProbeEditor::ProbeEditor(juce::AudioProcessor& processor, ProbeEditorHost& host,
     addCaption("Feedback", c_.feedback);
     addCaption("Delay D", c_.delay);
     for (juce::Component* child : std::initializer_list<juce::Component*>{
-             &c_.group, &c_.caseId, &c_.variant, &c_.buffer, &c_.guard, &c_.feedback, &c_.delay, &c_.panic, &c_.recover,
-             &c_.ping, &c_.record, &c_.copyDiagnostics, &c_.status, &c_.counters})
+             &c_.group, &c_.caseId, &c_.variant, &c_.buffer, &c_.guard, &c_.feedback, &c_.delay, &c_.loop, &c_.panic,
+             &c_.recover, &c_.ping, &c_.record, &c_.copyDiagnostics, &c_.status, &c_.counters})
     {
         addAndMakeVisible(child);
+    }
+    // 没有回送的一端：这几样一直灰着（Recover 与 Ping 由 refresh 按同一条件管）
+    for (juce::Component* child : std::initializer_list<juce::Component*>{&c_.panic, &c_.feedback, &c_.delay, &c_.loop})
+    {
+        child->setEnabled(hasReturn_);
     }
 
     setResizable(false, false);
@@ -188,7 +197,10 @@ void ProbeEditor::resized()
     const auto second = splitColumns(row(20, 26), 2);
     c_.buffer.setBounds(second[0]);
     c_.guard.setBounds(second[1]);
-    c_.feedback.setBounds(row(20, 24));
+    auto feedbackRow = row(20, 24);
+    c_.loop.setBounds(feedbackRow.removeFromRight(96));
+    feedbackRow.removeFromRight(8);
+    c_.feedback.setBounds(feedbackRow);
     c_.delay.setBounds(row(20, 24));
     const auto buttons = splitColumns(row(0, 32), 5);
     c_.panic.setBounds(buttons[0]);
@@ -196,7 +208,7 @@ void ProbeEditor::resized()
     c_.ping.setBounds(buttons[2]);
     c_.record.setBounds(buttons[3]);
     c_.copyDiagnostics.setBounds(buttons[4]);
-    c_.status.setBounds(area.removeFromTop(104));
+    c_.status.setBounds(area.removeFromTop(124));
     c_.counters.setBounds(area);
 }
 
@@ -207,9 +219,13 @@ void ProbeEditor::refresh()
     {
         recordRejected_ = false;
     }
-    c_.ping.setEnabled(pingAllowed(status));
+    c_.ping.setEnabled(hasReturn_ && pingAllowed(status));
     c_.record.setEnabled(recordAllowed(status, selection()));
-    c_.recover.setEnabled(cooldown_.ready(options_.nowMs()));
+    c_.recover.setEnabled(hasReturn_ && cooldown_.ready(options_.nowMs()));
+    if (c_.loop.getToggleState() != status.loopOn)
+    {
+        c_.loop.setToggleState(status.loopOn, juce::dontSendNotification);
+    }
 
     if (c_.group.getSelectedId() != status.group + 2)
     {
@@ -242,6 +258,10 @@ void ProbeEditor::refresh()
 
 void ProbeEditor::doPanic()
 {
+    if (!hasReturn_)
+    {
+        return;
+    }
     cooldown_.onPanic(options_.nowMs());
     host_.probePanic();
     refresh();
@@ -249,7 +269,7 @@ void ProbeEditor::doPanic()
 
 void ProbeEditor::doRecover()
 {
-    if (!cooldown_.ready(options_.nowMs()))
+    if (!hasReturn_ || !cooldown_.ready(options_.nowMs()))
     {
         return;
     }
@@ -259,9 +279,10 @@ void ProbeEditor::doRecover()
 
 void ProbeEditor::doPing()
 {
-    if (pingAllowed(host_.probeStatus()))
+    if (hasReturn_ && pingAllowed(host_.probeStatus()))
     {
         host_.probePing();
+        refresh(); // 按钮马上灰掉，不等定时器
     }
 }
 
@@ -277,7 +298,7 @@ void ProbeEditor::doRecord()
 
 void ProbeEditor::doCopyDiagnostics()
 {
-    options_.copyToClipboard(host_.probeDiagnosticsText());
+    options_.copyToClipboard(host_.probeDiagnosticsText(selection()));
 }
 
 } // namespace rinne::probe

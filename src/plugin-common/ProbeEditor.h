@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 探针面板（JUCE 原生，没有 WebView）：组 A-H、feedback 与 D 两个滑杆、状态文本与计数，按钮 Panic、Recover、Ping、
-// 记录 60 s、复制诊断，再加 case / variant / 缓冲 / guard 四个选择器（上机清单要在面板上选好格再开始记录；开始记录时
-// 这四项原样交给 C 行）。
+// 探针面板（JUCE 原生，没有 WebView）：组 A-H、feedback 与 D 两个滑杆、环路开关、状态文本与计数，按钮 Panic、Recover、
+// Ping、记录 60 s、复制诊断，再加 case / variant / 缓冲 / guard 四个选择器（上机清单要在面板上选好格再开始记录；开始
+// 记录时这四项原样交给 C 行，复制诊断时也带上当前的这四项）。
 // 面板只经 ProbeEditorHost 和处理器说话，处理器（探针构建里）去实现它，测试用假实现。
 // 规则都在 ProbeSupport.h 里：feedback 上限 80 %、Ping 只在停走带或干声静音时可点、Panic 之后恢复冷却 1.5 s。
+// 回送与安全链只在 Input：处理器报告没有回送（Output）时，Panic、Recover、Ping、两个滑杆与环路开关一直灰着。
 // Panic 只是界面动作，不对应任何参数。窗口尺寸固定，不用会自己改尺寸的控件（pluginval 严格度 5 会查）。
 // 线程：全部在消息线程。
 #pragma once
@@ -26,6 +27,8 @@ public:
     virtual ~ProbeEditorHost() = default;
 
     virtual ProbeStatus probeStatus() const = 0;
+    // 这一端有没有回送（Input 有，Output 没有）。实例的一生里不变，面板构造时读一次
+    virtual bool probeHasReturn() const = 0;
     virtual void probePanic() = 0;
     virtual void probeRecover() = 0;
     virtual void probePing() = 0;
@@ -35,7 +38,9 @@ public:
     virtual void probeSetGroup(int group) = 0; // -1 = 未设，0..7 = A..H
     virtual void probeSetFeedbackPercent(float percent) = 0; // 面板已钳到 [0, 80]
     virtual void probeSetDelayMs(float ms) = 0;
-    virtual std::string probeDiagnosticsText() = 0;
+    virtual void probeSetLoopOn(bool on) = 0; // 不进探针 state
+    // selection 是面板上当前选中的格，写进诊断的 probe_case 行
+    virtual std::string probeDiagnosticsText(const ProbeSelection& selection) = 0;
 };
 
 struct ProbeEditorOptions
@@ -53,7 +58,7 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
 
-    // 读一次处理器的状态：刷新文本、按钮可用性与滑杆。定时器每 100 ms 调一次
+    // 读一次处理器的状态：刷新文本、按钮可用性、滑杆与环路开关。定时器每 100 ms 调一次
     void refresh();
 
     // 按钮的动作；按钮点击与测试都走这里，规则不满足时什么都不做
@@ -69,6 +74,7 @@ public:
     {
         juce::ComboBox group, caseId, variant, buffer, guard;
         juce::Slider feedback, delay;
+        juce::ToggleButton loop;
         juce::Label status, counters;
         juce::TextButton panic, recover, ping, record, copyDiagnostics;
     };
@@ -81,6 +87,7 @@ private:
 
     ProbeEditorHost& host_;
     ProbeEditorOptions options_;
+    bool hasReturn_ = true;
     RecoverCooldown cooldown_;
     bool recordRejected_ = false; // 上一次点记录被处理器拒了；记录开始或下一次成功后清掉
     Controls c_;

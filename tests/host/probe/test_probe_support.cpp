@@ -371,7 +371,7 @@ PingTrace drive(ProbePing& ping, std::size_t blockSize, std::size_t cancelAfter 
     std::vector<float> ret(blockSize);
     const std::vector<float> readback(blockSize, 0.0f);
     // 总样本数封顶：状态机被改坏而永远不结束时，这里按样本数截断，让断言去红，不去吃内存和时间
-    // （正常的一次 Ping 连带取消都在 1 万个样本内走完）
+    // （正常的一次 Ping 连带静音段与取消都在 2 万个样本内走完）
     constexpr std::size_t kTraceCap = 60000;
     while ((ping.active() || trace.dry.empty()) && trace.dry.size() < kTraceCap)
     {
@@ -411,12 +411,13 @@ float largestStep(const std::vector<float>& gain)
 TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]")
 {
     // 把 Ping 当作一个已知延迟的环：回读 = 注入序列延迟 delay 个样本再乘增益，加一点确定性的噪声。
-    // 注入从两个增益降到 0 之后才开始（rampSamples 个样本之后），回读由「应该注入什么」算出，不看 process
-    // 实际写了什么， 注入内容另行核对。
+    // 注入从两个增益降到 0、再静音 settle 个样本之后才开始（rampSamples + settle 个样本之后），回读由「应该注入什么」
+    // 算出，不看 process 实际写了什么， 注入内容另行核对。
     const auto runOn = [](ProbePing& ping, std::size_t delay, float gain, float noise,
-                          const std::vector<std::size_t>& blocks, std::vector<float>* injected) {
-        const std::size_t lead = ping.rampSamples();
-        REQUIRE(ping.start());
+                          const std::vector<std::size_t>& blocks, std::vector<float>* injected,
+                          std::size_t settle = 0) {
+        const std::size_t lead = ping.rampSamples() + settle;
+        REQUIRE(ping.start(settle));
         std::uint32_t lcg = 12345u;
         std::size_t position = 0;
         std::size_t blockIndex = 0;
@@ -447,9 +448,9 @@ TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]"
         return ping.finish();
     };
     const auto run = [&runOn](std::size_t delay, float gain, float noise, const std::vector<std::size_t>& blocks,
-                              std::vector<float>* injected) {
+                              std::vector<float>* injected, std::size_t settle = 0) {
         ProbePing ping(kMaxDelay, kRate);
-        return runOn(ping, delay, gain, noise, blocks, injected);
+        return runOn(ping, delay, gain, noise, blocks, injected, settle);
     };
 
     SECTION("the delay comes back exactly, whatever the block sizes")
@@ -500,6 +501,28 @@ TEST_CASE("ping finds the loop delay in the raw readback", "[host][probe][ping]"
         const PingResult third = runOn(ping, 700, 1.0f, 0.0f, {64}, nullptr);
         CHECK(third.ok);
         CHECK(third.delaySamples == 700);
+    }
+
+    SECTION("with a settle the injection starts that much later and the delay still comes back exactly")
+    {
+        for (const std::size_t settle : {std::size_t{1}, std::size_t{480}, std::size_t{8160}})
+        {
+            for (const std::vector<std::size_t>& blocks :
+                 {std::vector<std::size_t>{64}, std::vector<std::size_t>{7, 1000, 33}})
+            {
+                INFO("settle " << settle << " first block " << blocks.front());
+                std::vector<float> injected;
+                const PingResult r = run(4800, 1.0f, 0.0f, blocks, &injected, settle);
+                CHECK(r.ok);
+                CHECK(r.delaySamples == 4800);
+                const std::size_t lead = ProbePing(kMaxDelay, kRate).rampSamples() + settle;
+                REQUIRE(injected.size() > lead + kPingBuffer.size());
+                CHECK(std::all_of(injected.begin(), injected.begin() + static_cast<std::ptrdiff_t>(lead),
+                                  [](float v) { return v == 0.0f; }));
+                CHECK(injected[lead] == kPingBuffer[0]);
+                CHECK(injected[lead + kPingBuffer.size() - 1] == kPingBuffer.back());
+            }
+        }
     }
 
     SECTION("an attenuated, noisy readback still gives the right delay")
@@ -706,6 +729,67 @@ TEST_CASE("the dry and return gains never step while a ping starts, runs and end
         }
     }
 
+    SECTION("a settle keeps both gains at 0 from the end of the ramp down to the end of the injection window")
+    {
+        constexpr std::size_t kSettle = 3000;
+        for (const std::size_t blockSize : {std::size_t{1}, std::size_t{64}, std::size_t{1000}})
+        {
+            INFO("block " << blockSize);
+            ProbePing ping(kMaxDelay, kRate);
+            REQUIRE(ping.start(kSettle));
+            const PingTrace trace = drive(ping, blockSize);
+            REQUIRE(ping.state() == ProbePing::State::kDone);
+            CHECK(trace.requests == 1);
+            const std::size_t injectStart = ramp + kSettle;
+            const std::size_t windowEnd = injectStart + kMaxDelay + kPingBuffer.size();
+            REQUIRE(trace.dry.size() > windowEnd + ramp);
+            for (std::size_t i = ramp - 1; i < windowEnd; ++i)
+            {
+                INFO("sample " << i);
+                CHECK(trace.dry[i] == 0.0f);
+                CHECK(trace.ret[i] == 0.0f);
+            }
+            for (std::size_t i = 0; i < trace.injection.size(); ++i)
+            {
+                if (trace.injection[i] != 0.0f)
+                {
+                    INFO("sample " << i);
+                    CHECK(i >= injectStart);
+                }
+            }
+            CHECK(trace.injection[injectStart] == kPingBuffer[0]);
+            CHECK(trace.dry[windowEnd + ramp - 1] == 1.0f);
+            CHECK(trace.takenAfter >= windowEnd);
+            CHECK(largestStep(trace.dry) <= bound);
+            CHECK(largestStep(trace.ret) <= bound);
+        }
+    }
+
+    SECTION("a cancel during the settle restores over the ramps, injects nothing and leaves no result")
+    {
+        constexpr std::size_t kSettle = 3000;
+        for (const std::size_t cancelAfter : {ramp + 10, ramp + kSettle / 2, ramp + kSettle - 200})
+        {
+            for (const std::size_t blockSize : {std::size_t{1}, std::size_t{64}, std::size_t{97}})
+            {
+                INFO("cancel after " << cancelAfter << " block " << blockSize);
+                ProbePing ping(kMaxDelay, kRate);
+                REQUIRE(ping.start(kSettle));
+                const PingTrace trace = drive(ping, blockSize, cancelAfter);
+                CHECK(ping.state() == ProbePing::State::kIdle);
+                CHECK_FALSE(ping.finish().ok);
+                CHECK(trace.requests == 1);
+                CHECK(trace.dry.back() == 1.0f);
+                CHECK(trace.ret.back() == 1.0f);
+                CHECK(largestStep(trace.dry) <= bound);
+                CHECK(largestStep(trace.ret) <= bound);
+                CHECK(std::all_of(trace.injection.begin(), trace.injection.end(), [](float v) { return v == 0.0f; }));
+                // 静音段没走完就开始恢复：整个过程比静音段加三个斜坡短
+                CHECK(trace.dry.size() < ramp + kSettle + 3 * ramp + blockSize);
+            }
+        }
+    }
+
     SECTION("the fade-in request appears once, in the callback that finished the capture")
     {
         ProbePing ping(kMaxDelay, kRate);
@@ -751,6 +835,86 @@ TEST_CASE("the dry and return gains never step while a ping starts, runs and end
                     CHECK(trace.ret[i] <= trace.ret[i - 1]);
                 }
             }
+        }
+    }
+}
+
+TEST_CASE("a zero-sample callback moves the ping state machine nowhere", "[host][probe][ping]")
+{
+    // 0 样本的回调：返回 false、状态不变，也不交出淡入请求
+    const auto empty = [](ProbePing& ping) {
+        const ProbePing::State before = ping.state();
+        float sink = 3.0f;
+        CHECK_FALSE(ping.process(&sink, &sink, &sink, &sink, 0));
+        CHECK_FALSE(ping.takeFadeInRequest());
+        CHECK(ping.state() == before);
+    };
+
+    SECTION("armed: the start is not taken over and a pending cancel stays pending")
+    {
+        ProbePing ping(200, kRate);
+        REQUIRE(ping.start(100));
+        empty(ping);
+        CHECK(ping.state() == ProbePing::State::kArmed);
+        ping.cancel();
+        empty(ping);
+        CHECK(ping.state() == ProbePing::State::kArmed);
+        std::vector<float> buffer(64, 0.0f);
+        CHECK_FALSE(ping.process(buffer.data(), buffer.data(), buffer.data(), buffer.data(), 64));
+        CHECK(ping.state() == ProbePing::State::kIdle); // 下一个真块才取走取消
+    }
+
+    SECTION("running, settling or with a cancel pending: sample for sample the same run as without the empty calls")
+    {
+        const std::size_t ramp = ProbePing(kMaxDelay, kRate).rampSamples();
+        constexpr std::size_t kSettle = 300;
+        constexpr std::size_t kBlockSize = 64;
+        // drive 的翻版：每个真块之前先来一次 0 样本的回调；请求取消之后紧跟一次
+        const auto driveWithEmpty = [&](ProbePing& ping, std::size_t cancelAfter) {
+            PingTrace trace;
+            bool cancelled = false;
+            std::vector<float> inject(kBlockSize);
+            std::vector<float> dry(kBlockSize);
+            std::vector<float> ret(kBlockSize);
+            const std::vector<float> readback(kBlockSize, 0.0f);
+            empty(ping);
+            while ((ping.active() || trace.dry.empty()) && trace.dry.size() < 60000)
+            {
+                if (!cancelled && cancelAfter != kNoIndex && trace.dry.size() >= cancelAfter)
+                {
+                    ping.cancel();
+                    cancelled = true;
+                    empty(ping);
+                }
+                empty(ping);
+                REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), kBlockSize));
+                trace.injection.insert(trace.injection.end(), inject.begin(), inject.end());
+                trace.dry.insert(trace.dry.end(), dry.begin(), dry.end());
+                trace.ret.insert(trace.ret.end(), ret.begin(), ret.end());
+                if (ping.takeFadeInRequest())
+                {
+                    ++trace.requests;
+                    trace.takenAfter = trace.dry.size();
+                }
+            }
+            return trace;
+        };
+        // 不取消、降的中途、静音段中途、注入中途
+        for (const std::size_t cancelAfter : {kNoIndex, ramp / 2, ramp + kSettle / 2, ramp + kSettle + 1000})
+        {
+            INFO("cancel after " << cancelAfter);
+            ProbePing plain(kMaxDelay, kRate);
+            ProbePing withEmpty(kMaxDelay, kRate);
+            REQUIRE(plain.start(kSettle));
+            REQUIRE(withEmpty.start(kSettle));
+            const PingTrace expected = drive(plain, kBlockSize, cancelAfter);
+            const PingTrace actual = driveWithEmpty(withEmpty, cancelAfter);
+            CHECK(actual.injection == expected.injection);
+            CHECK(actual.dry == expected.dry);
+            CHECK(actual.ret == expected.ret);
+            CHECK(actual.requests == expected.requests);
+            CHECK(actual.takenAfter == expected.takenAfter);
+            CHECK(withEmpty.state() == plain.state());
         }
     }
 }
@@ -1083,6 +1247,7 @@ TEST_CASE("status and counter text describe the host state", "[host][probe][text
     CHECK(contains(text, "record: recording, 42 s left"));
     CHECK(contains(text, "ping: 4800 samples"));
     CHECK(contains(text, "safety: ok"));
+    CHECK(contains(text, "state: saved with the project"));
     CHECK(contains(countersText(status), "blocks 99"));
     CHECK(contains(countersText(status), "feedback 15.0 %"));
 
@@ -1107,4 +1272,10 @@ TEST_CASE("status and counter text describe the host state", "[host][probe][text
     idle.tripped = true;
     CHECK(contains(statusText(idle), "ping: running"));
     CHECK(contains(statusText(idle), "safety: tripped"));
+
+    // 正式版的字节留着：面板上的改动不会随工程保存，状态文本要明说
+    ProbeStatus held;
+    held.stateHeld = true;
+    CHECK(contains(statusText(held), "\nstate: release-build state kept, panel changes are not saved"));
+    CHECK_FALSE(contains(statusText(held), "saved with the project"));
 }

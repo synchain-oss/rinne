@@ -256,7 +256,6 @@ void ProbeHost::prepare(double sampleRate, int maxBlock)
         inject_.assign(frames, 0.0f);
         dryScale_.assign(frames, 1.0f);
         returnScale_.assign(frames, 1.0f);
-        resetSettle();
     }
     else
     {
@@ -277,10 +276,7 @@ void ProbeHost::release()
     ready_.store(false, std::memory_order_release);
     rendezvous_->releaseResources(nowMs());
     if (ping_ != nullptr)
-    {
         ping_->reset();
-        resetSettle();
-    }
     logEvent(diag::ProbeEventCode::kRelease);
 }
 
@@ -418,9 +414,9 @@ void ProbeHost::processInput(const engine::AudioView& view, const engine::Engine
         }
     }
 
-    // Ping 是否跑这一块在块首定一次：中途被点开的从下一块起
-    const bool pingBlock = ping_ != nullptr && n <= kScratchFrames &&
-                           (ping_->active() || settle_ != Settle::kOff || pingRequest_.load(std::memory_order_relaxed));
+    // Ping 是否跑这一块在块首定一次：中途被点开的从下一块起（只有音频线程能让 active 变假，这里为真到 applyPing
+    // 也为真）
+    const bool pingBlock = ping_ != nullptr && n <= kScratchFrames && ping_->active();
     if (pingBlock)
         for (int c = 0; c < view.numChannels; ++c)
             std::copy(view.channels[c], view.channels[c] + n, dry_[c].begin());
@@ -448,102 +444,37 @@ void ProbeHost::processInput(const engine::AudioView& view, const engine::Engine
         lastHead_ = ipc::LoopRing::writeHead(*context.ring);
 }
 
-// Ping 分两段。先是这里的静音段：干声与回送一起用 10 ms 线性降到 0，再静音「当前 D + 两块 + 50 ms」，让读头将要
-// 读到的环里的旧内容都换成静音（否则注入窗口的前 D 个样本读回的是 Ping 之前的信号，互相关的次峰会盖过真峰）；然后才
-// 交给 ProbePing。它自己的 10 ms 下行乘在 0 上，听不见；它的两个系数都到 0（开始注入）的那个样本上，静音段的增益直接
-// 回到 1（乘在 0 上，没有阶跃），之后的注入、读回与恢复都归它。
-// 合成：out = 静音段增益 ·（干声系数·g_dry·干声 + 回送系数·（引擎输出 − g_dry·干声））+ 注入。系数为 0 的项不乘
-// （干声或回送里的 NaN 乘 0 还是 NaN）。读回是安全链之前的原始读头
+// 合成：out = 干声系数·g_dry·干声 + 回送系数·（引擎输出 − g_dry·干声）+ 注入。系数为 0 的项不乘（干声或回送里的 NaN
+// 乘 0 还是 NaN）。读回是安全链之前的原始读头。Ping 前的静音段由 ProbePing 自己走（长度见 pingSettleSamples）
 void ProbeHost::applyPing(const engine::AudioView& view, int n) noexcept
 {
     const loop::BlockResult& result = input_.lastBlockResult();
     const auto count = static_cast<std::size_t>(n);
-    const std::size_t ramp = ping_->rampSamples();
-    if (pingCancel_.exchange(false, std::memory_order_acq_rel) &&
-        (settle_ == Settle::kDown || settle_ == Settle::kHold))
-        restoreSettle();
-    if (settle_ == Settle::kOff && !ping_->active() && pingRequest_.exchange(false, std::memory_order_acq_rel))
-        settle_ = Settle::kDown;
-    // ProbePing 在接手之前就被取消了：等不到交接，静音段自己升回去
-    if (settle_ == Settle::kHandOver && !ping_->active())
-        restoreSettle();
-
     const float* readback = result.returnLength >= n ? result.returnLeft : nullptr;
-    const bool running = ping_->process(inject_.data(), readback, dryScale_.data(), returnScale_.data(), count);
-    if (!running)
+    if (ping_->process(inject_.data(), readback, dryScale_.data(), returnScale_.data(), count))
     {
-        std::fill_n(inject_.begin(), count, 0.0f);
-        std::fill_n(dryScale_.begin(), count, 1.0f);
-        std::fill_n(returnScale_.begin(), count, 1.0f);
-    }
-    for (std::size_t i = 0; i < count; ++i)
-    {
-        switch (settle_)
+        const float dryGain = input_.dryGain();
+        for (int c = 0; c < view.numChannels; ++c)
         {
-        case Settle::kDown:
-            settlePos_ = settlePos_ > 0 ? settlePos_ - 1 : 0;
-            if (settlePos_ == 0)
+            float* out = view.channels[c];
+            const float* dry = dry_[c].data();
+            for (std::size_t i = 0; i < count; ++i)
             {
-                settle_ = Settle::kHold;
-                settleLeft_ = std::max<std::int64_t>(result.delayEffective, 0) + 2 * maxBlock_ +
-                              static_cast<std::int64_t>(std::llround(kPingMarginSeconds * sampleRate_));
+                if (dryScale_[i] == 1.0f && returnScale_[i] == 1.0f && inject_[i] == 0.0f)
+                    continue; // 原样
+                const float scaledDry = dry[i] * dryGain;
+                float v = inject_[i];
+                if (dryScale_[i] != 0.0f)
+                    v += dryScale_[i] * scaledDry;
+                if (returnScale_[i] != 0.0f)
+                    v += returnScale_[i] * (out[i] - scaledDry);
+                out[i] = v;
             }
-            break;
-        case Settle::kHold:
-            if (settleLeft_ > 0)
-                --settleLeft_;
-            else
-                settle_ = ping_->start() ? Settle::kHandOver : Settle::kUp; // 下一块起由 ProbePing 接手
-            break;
-        case Settle::kHandOver:
-            if (running && dryScale_[i] == 0.0f && returnScale_[i] == 0.0f)
-            {
-                settlePos_ = ramp;
-                settle_ = Settle::kOff;
-            }
-            break;
-        case Settle::kUp:
-            settlePos_ = std::min(settlePos_ + 1, ramp);
-            if (settlePos_ == ramp)
-                settle_ = Settle::kOff;
-            break;
-        case Settle::kOff:
-            break;
-        }
-        const float gain = static_cast<float>(settlePos_) / static_cast<float>(ramp);
-        dryScale_[i] *= gain;
-        returnScale_[i] *= gain;
-    }
-    settling_.store(settle_ != Settle::kOff, std::memory_order_relaxed);
-
-    const float dryGain = input_.dryGain();
-    for (int c = 0; c < view.numChannels; ++c)
-    {
-        float* out = view.channels[c];
-        const float* dry = dry_[c].data();
-        for (std::size_t i = 0; i < count; ++i)
-        {
-            if (dryScale_[i] == 1.0f && returnScale_[i] == 1.0f && inject_[i] == 0.0f)
-                continue; // 原样
-            const float scaledDry = dry[i] * dryGain;
-            float v = inject_[i];
-            if (dryScale_[i] != 0.0f)
-                v += dryScale_[i] * scaledDry;
-            if (returnScale_[i] != 0.0f)
-                v += returnScale_[i] * (out[i] - scaledDry);
-            out[i] = v;
         }
     }
-    // 回读攒满后回送要走安全链的 500 ms 淡入：借「载入预设」的命令序号，下一块块首生效
+    // 回读攒满（或取消）后回送要走安全链的 500 ms 淡入：借「载入预设」的命令序号，下一块块首生效
     if (ping_->takeFadeInRequest())
         ++presetSeq_;
-}
-
-// 静音段在交给 ProbePing 之前结束（取消、或 ProbePing 没接手）：增益用 10 ms 升回 1，回送另走一次预设淡入
-void ProbeHost::restoreSettle() noexcept
-{
-    settle_ = Settle::kUp;
-    ++presetSeq_;
 }
 
 void ProbeHost::processOutput(const engine::AudioView& view, const engine::EngineParams& params,
@@ -758,44 +689,36 @@ void ProbeHost::tickPing()
 {
     if (ping_ == nullptr)
         return;
-    if (ping_->state() == ProbePing::State::kDone)
-    {
-        const PingResult result = ping_->finish();
-        havePing_ = result.ok;
-        if (result.ok)
-        {
-            lastPingSamples_ = result.delaySamples;
-            logEvent(diag::ProbeEventCode::kPing, {result.delaySamples});
-        }
-    }
+    collectPing();
     const bool playing = playing_.load(std::memory_order_relaxed);
-    if (pingBusy() && playing && !drySilent_.load(std::memory_order_relaxed))
-    {
-        pingRequest_.store(false, std::memory_order_relaxed);
-        pingCancel_.store(true, std::memory_order_release);
+    if (ping_->active() && playing && !drySilent_.load(std::memory_order_relaxed))
         ping_->cancel();
-    }
-    else if (autoPingTrigger(wasPlaying_, playing) && !pingBusy())
-    {
-        pingRequest_.store(true, std::memory_order_release);
-    }
+    else if (autoPingTrigger(wasPlaying_, playing))
+        (void)ping_->start(pingSettleSamples()); // 正在跑就不再开
     wasPlaying_ = playing;
 }
 
-bool ProbeHost::pingBusy() const noexcept
+// 跑完的 Ping 由 tick 收结果；面板点 Ping 时也先收一次：上一次刚跑完、tick 还没来得及收时，start 会把结果丢掉
+void ProbeHost::collectPing()
 {
-    return ping_->active() || settling_.load(std::memory_order_relaxed) || pingRequest_.load(std::memory_order_relaxed);
+    if (ping_->state() != ProbePing::State::kDone)
+        return;
+    const PingResult result = ping_->finish();
+    havePing_ = result.ok;
+    if (result.ok)
+    {
+        lastPingSamples_ = result.delaySamples;
+        logEvent(diag::ProbeEventCode::kPing, {result.delaySamples});
+    }
 }
 
-// 只在音频没有在跑的时候（prepare / release）
-void ProbeHost::resetSettle() noexcept
+// Ping 前的静音段：当前 D 加两块（读回与注入各差至多一块）再加 50 ms。静音期间写进环的是 0，读头开始读注入窗口时，
+// 环里 Ping 之前的旧内容都已换成静音。loopStatus 是原子快照，非实时线程可以读
+std::size_t ProbeHost::pingSettleSamples() const
 {
-    settle_ = Settle::kOff;
-    settlePos_ = ping_->rampSamples();
-    settleLeft_ = 0;
-    settling_.store(false, std::memory_order_relaxed);
-    pingRequest_.store(false, std::memory_order_relaxed);
-    pingCancel_.store(false, std::memory_order_relaxed);
+    const std::int64_t d = std::max<std::int64_t>(input_.loopStatus().delayEffective, 0);
+    return static_cast<std::size_t>(d + 2 * static_cast<std::int64_t>(maxBlock_) +
+                                    std::llround(kPingMarginSeconds * sampleRate_));
 }
 
 // 隐藏参数：三项合规且与上一次自动开窗的不同、日志开着且没在记录，就开一个窗口；auto_record_s 回到 0 才忘掉上一次
@@ -857,8 +780,10 @@ ProbeStatus ProbeHost::statusLocked() const
     status.paired = isInput() ? input_.loopStatus().paired != 0 : outputPeerActive_.load(std::memory_order_relaxed);
     status.logOpen = log_ != nullptr && log_->isOpen();
     status.recording = log_ != nullptr && log_->isRecording();
-    status.pingRunning = ping_ != nullptr && pingBusy();
+    status.pingRunning = ping_ != nullptr && ping_->active();
     status.tripped = isInput() && input_.safetyDiag().state == static_cast<std::uint8_t>(engine::SafetyState::Tripped);
+    status.loopOn = loopOn_.load(std::memory_order_relaxed);
+    status.stateHeld = keeper_.holding();
     status.group = stateData_.group;
     status.lastPingSamples = havePing_ ? static_cast<int>(lastPingSamples_) : -1;
     if (status.recording && recordDeadlineNs_ != 0)
@@ -892,20 +817,20 @@ void ProbeHost::probeRecover()
 void ProbeHost::probePing()
 {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (ping_ != nullptr && pingAllowed(statusLocked()))
-        pingRequest_.store(true, std::memory_order_release);
+    if (ping_ == nullptr)
+        return;
+    collectPing();
+    if (pingAllowed(statusLocked()))
+        (void)ping_->start(pingSettleSamples());
 }
 
 bool ProbeHost::probeStartRecording(const ProbeSelection& selection, std::uint32_t seconds)
 {
     const std::lock_guard<std::mutex> lock(mutex_);
-    // 日志写 C 行时也会再查一遍格；这里先挡掉，被拒的选择也不进诊断
-    if (!isValidSelection(selection) || sampleRate_ <= 0.0 ||
-        !beginRecording(toProbeCase(selection, static_cast<std::uint32_t>(std::llround(sampleRate_))), seconds,
-                        nowNs()))
-        return false;
-    lastSelection_ = selection;
-    return true;
+    // 日志写 C 行时也会再查一遍格；这里先挡掉
+    return isValidSelection(selection) && sampleRate_ > 0.0 &&
+           beginRecording(toProbeCase(selection, static_cast<std::uint32_t>(std::llround(sampleRate_))), seconds,
+                          nowNs());
 }
 
 void ProbeHost::probeSetGroup(int group)
@@ -928,7 +853,7 @@ void ProbeHost::probeSetDelayMs(float ms)
     delayMs_.store(stateData_.delayMs, std::memory_order_relaxed);
 }
 
-std::string ProbeHost::probeDiagnosticsText()
+std::string ProbeHost::probeDiagnosticsText(const ProbeSelection& selection)
 {
     const std::lock_guard<std::mutex> lock(mutex_);
     const ProbeStatus status = statusLocked();
@@ -1006,7 +931,7 @@ std::string ProbeHost::probeDiagnosticsText()
         in.safety.nonfiniteRing = safety.nonfiniteRing;
         in.safety.clampRing = safety.clampRing;
     }
-    return buildDiagText(in, status, logDir_, lastSelection_);
+    return buildDiagText(in, status, logDir_, selection);
 }
 
 // ---- 读出 ----

@@ -221,7 +221,8 @@ public:
             if (sinceTick_ >= 4 * kBlockNs)
             {
                 sinceTick_ = 0;
-                tick();
+                if (ticking)
+                    tick();
             }
         }
     }
@@ -287,6 +288,7 @@ public:
     std::unique_ptr<TestProcessor> output;
     bool record = false;
     std::vector<float> recorded; // record 为真时 Input 处理之后的左声道
+    bool ticking = true; // 假 = 时间照走、不 tick（要停在两次 tick 之间看的用例）
 
 private:
     ipc::NameScope scope_;
@@ -678,6 +680,36 @@ TEST_CASE("ping is refused while playing with a live dry signal and cancelled wh
     CHECK(rig.input->host.probeStatus().lastPingSamples == kDelaySamples);
 }
 
+TEST_CASE("clicking ping right after one finished, before the tick, keeps the finished result", "[probe_host]")
+{
+    Rig rig;
+    rig.open(0);
+    rig.input->host.probeSetFeedbackPercent(50.0f);
+    rig.playHead.playing = true;
+    REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+    rig.cycles(50);
+    rig.playHead.playing = false; // 停走带：自动 Ping
+    rig.cycles(4);
+    REQUIRE(rig.input->host.probeStatus().pingRunning);
+
+    // tick 不来：跑完的 Ping 结果还留在状态机里没收
+    rig.ticking = false;
+    REQUIRE(rig.runUntil([&] { return !rig.input->host.probeStatus().pingRunning; }, 600));
+    CHECK(rig.input->host.probeStatus().lastPingSamples == -1);
+
+    // 这时在面板上点 Ping（停着走带，可以点）：先收下上一次的结果，再开下一次
+    rig.input->host.probePing();
+    CHECK(rig.input->host.probeStatus().lastPingSamples == kDelaySamples);
+    CHECK(rig.input->host.probeStatus().pingRunning);
+    rig.ticking = true;
+    rig.cycles(8);
+
+    const std::vector<Row> rows = rig.closeAndRead('I');
+    const auto pings = eventsNamed(rows, "ping");
+    REQUIRE(pings.size() == 1);
+    CHECK(pings[0][3] == std::to_string(kDelaySamples));
+}
+
 TEST_CASE("after a ping the dry signal is back at full level before the return is released", "[probe_host]")
 {
     Rig rig;
@@ -733,7 +765,9 @@ TEST_CASE("panic and recover each execute exactly once", "[probe_host]")
     // Panic 不算安全跳闸
     CHECK(rig.input->host.log()->counters().trips == 0);
 
-    // Output 端这三个按钮什么都不做
+    // Output 端这三个按钮什么都不做；它告诉面板自己没有回送，面板把它们灰掉
+    CHECK(rig.input->host.probeHasReturn());
+    CHECK_FALSE(rig.output->host.probeHasReturn());
     rig.output->host.probePanic();
     rig.output->host.probeRecover();
     rig.output->host.probePing();
@@ -894,12 +928,21 @@ TEST_CASE("probe state round-trips and a release build's bytes are kept and writ
     putU32(release, 0u);
     for (std::uint8_t b = 0; b < 24; ++b)
         release.push_back(static_cast<std::uint8_t>(0xA0u + b));
+    CHECK_FALSE(restored.host.probeStatus().stateHeld);
     restored.setStateInformation(release.data(), static_cast<int>(release.size()));
     CHECK(restored.host.probeStatus().group == 2);
+    // 留着正式字节期间，面板的状态里有这一项（面板据此提示改动不会保存），改了也照样交回原字节
+    CHECK(restored.host.probeStatus().stateHeld);
+    restored.host.probeSetFeedbackPercent(10.0f);
     juce::MemoryBlock back;
     restored.getStateInformation(back);
     REQUIRE(back.getSize() == release.size());
     CHECK(std::memcmp(back.getData(), release.data(), release.size()) == 0);
+
+    // 再读到探针自己的字节就放掉留住的正式字节
+    restored.setStateInformation(saved.getData(), static_cast<int>(saved.getSize()));
+    CHECK_FALSE(restored.host.probeStatus().stateHeld);
+    CHECK(restored.host.probeStatus().feedbackPercent == 30.0f);
 
     // 设状态之后的第一块，引擎从 0 淡入（原因 SetState）；set_state 事件带着组
     restored.setPlayHead(&rig.playHead);
@@ -929,23 +972,68 @@ TEST_CASE("probe defaults are conservative and the panel limits hold", "[probe_h
     CHECK(rig.input->host.probeStatus().delayMs == engine::kMaxDelayMs);
     CHECK(rig.input->host.rendezvousState() == ipc::RendezvousState::kUnassigned);
 
-    const std::string text = rig.input->host.probeDiagnosticsText();
+    const std::string text = rig.input->host.probeDiagnosticsText(cell());
     CHECK(text.find("default") != std::string::npos);
     CHECK(text.find(fs::temp_directory_path().string()) == std::string::npos);
+    CHECK(text.find("probe_case: case=CB-01 variant=steady buf=256 guard=normal\n") != std::string::npos);
 
     // 表外的格不开窗
     ProbeSelection bad = cell();
     bad.caseId = "ZZ-99";
     CHECK_FALSE(rig.input->host.probeStartRecording(bad, 1));
     CHECK_FALSE(rig.input->host.probeStatus().recording);
-    CHECK(rig.input->host.probeDiagnosticsText().find("ZZ-99") == std::string::npos);
 
     // 还没设组、没有会合段就取不到 call_seq：窗口开着也不写 B 行
     REQUIRE(rig.input->host.probeStartRecording(cell(), 1));
+    // 诊断里的格是面板交来的当前选择，不是开始记录时用的那个
+    CHECK(rig.input->host.probeDiagnosticsText(cell(512, diag::ProbeGuard::kLow))
+              .find("probe_case: case=CB-01 variant=steady buf=512 guard=low\n") != std::string::npos);
     rig.cycles(20);
     const std::vector<Row> rows = rig.closeAndRead('I');
     CHECK(rowsOf(rows, "C").size() == 1);
     CHECK(rowsOf(rows, "B").empty());
+}
+
+TEST_CASE("the loop switch reaches the engine and stays out of the probe state", "[probe_host]")
+{
+    Rig rig;
+    rig.open(0);
+    rig.input->host.probeSetFeedbackPercent(50.0f);
+    rig.playHead.playing = true;
+    REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+    // 正弦送 1 s，停掉干声，量停掉之后 100 到 400 ms 里 Input 输出的峰值：干声已是 0，剩下的只有回送
+    const auto echoPeak = [&rig] {
+        rig.source = &sine;
+        rig.cycles(100);
+        rig.source = nullptr;
+        rig.cycles(10);
+        rig.recorded.clear();
+        rig.record = true;
+        rig.cycles(30);
+        rig.record = false;
+        float peak = 0.0f;
+        for (const float v : rig.recorded)
+            peak = std::max(peak, std::abs(v));
+        return peak;
+    };
+    CHECK(rig.input->host.probeStatus().loopOn); // 默认开
+    CHECK(echoPeak() > 0.01f);
+
+    juce::MemoryBlock withLoop;
+    rig.input->getStateInformation(withLoop);
+    rig.input->host.probeSetLoopOn(false);
+    CHECK_FALSE(rig.input->host.probeStatus().loopOn);
+    CHECK(echoPeak() < 1.0e-6f);
+
+    // 环路开关不进探针 state：存下的字节不变，载入也不改它
+    juce::MemoryBlock withoutLoop;
+    rig.input->getStateInformation(withoutLoop);
+    CHECK(withoutLoop == withLoop);
+    rig.input->setStateInformation(withLoop.getData(), static_cast<int>(withLoop.getSize()));
+    CHECK_FALSE(rig.input->host.probeStatus().loopOn);
+
+    rig.input->host.probeSetLoopOn(true);
+    CHECK(echoPeak() > 0.01f);
 }
 
 TEST_CASE("a block whose slot owner word was changed by someone else hands the engine no segment", "[probe_host]")

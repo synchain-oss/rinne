@@ -135,6 +135,9 @@ struct ProbeStatus
     bool recording = false;
     bool pingRunning = false;
     bool tripped = false;
+    bool loopOn = true; // 环路开关，不进探针 state
+    // ProbeStateKeeper 正留着正式版写的字节：保存时交回那份字节，面板上的改动不进 state
+    bool stateHeld = false;
     int group = -1; // -1 = 未设，0..7 = A..H
     int lastPingSamples = -1; // -1 = 还没有结果
     std::uint32_t recordRemainingSeconds = 0;
@@ -182,13 +185,15 @@ struct PingResult
 
 // 一次 Ping 的状态机。音频线程上每个样本给出干声与回送两个缩放系数（0..1，乘在调用方自己的增益上），系数只走线性斜坡，
 // 逐样本的变化量不超过 1 / rampSamples()，所以 Ping 进出时增益不会阶跃：
-//   1. 进入：干声与回送从 1 用 10 ms（kPingRampSeconds，同安全链的下行淡出）线性降到 0，两个都到 0 之后才开始注入；
-//      注入与回读窗口从这一刻起算，窗口长 127 + maxDelaySamples，求出来的延迟在 [0, maxDelaySamples]；
+//   1. 进入：干声与回送从 1 用 10 ms（kPingRampSeconds，同安全链的下行淡出）线性降到 0；两个都到 0 之后先静音
+//      settleSamples 个样本（start 的参数），再开始注入。静音期间调用方的输出是 0，读头将要读到的环里的旧内容都换成
+//      静音：长度要不短于当前 D 加两块，否则注入窗口的前 D 个样本读回的是 Ping 之前的信号，互相关的次峰会盖过真峰；
+//      注入与回读窗口从注入的第一个样本起算，窗口长 127 + maxDelaySamples，求出来的延迟在 [0, maxDelaySamples]；
 //   2. 回读攒满（或取消）：干声用 10 ms 线性回到 1；回送不自己恢复，状态机发出一次「需要 500 ms 淡入」的请求
 //      （takeFadeInRequest），调用方在同一个回调里把它转交给安全链的淡入。请求被取走后再等一个斜坡长度（安全链的
 //      下行淡出走完、增益到 0），回送系数才用 10 ms 线性回到 1；此后回送的音量完全由安全链的 500 ms 淡入决定；
 //   3. 干声、回送都回到 1 之后状态才变成 Done（取消则回到 Idle）。调用方必须取走淡入请求，否则回送系数一直是 0。
-// 取消发生在降、注入、恢复任何一个阶段中途都一样走斜坡：系数从当前值出发，不跳。
+// 取消发生在降、静音、注入、恢复任何一个阶段中途都一样走斜坡：系数从当前值出发，不跳。
 // start / cancel / reset / finish 在非实时线程；process 与 takeFadeInRequest 在音频线程，定长循环，不分配、不加锁。
 class ProbePing
 {
@@ -203,7 +208,8 @@ public:
 
     ProbePing(std::size_t maxDelaySamples, double sampleRate);
 
-    bool start() noexcept; // 空闲或上一次已结束时开始；正在跑返回 false
+    // 空闲或上一次已结束时开始，两个系数降到 0 之后先静音 settleSamples 个样本再注入；正在跑返回 false
+    bool start(std::size_t settleSamples = 0) noexcept;
     // 请求取消。音频线程在下一个回调接手，系数走斜坡恢复；结果丢弃，状态回到 Idle。空闲时什么都不做，已 Done 就丢结果
     void cancel() noexcept;
     // 无条件回到空闲。只在音频没有在跑的时候用（prepare / release），音频线程不会再来接手 cancel
@@ -218,6 +224,7 @@ public:
 
     // 每个回调调一次（n 为本块样本数）。injection 取得本块要注入的样本（序列放完之后是 0），readback 是读头的原始回读，
     // dryScale / returnScale 取得逐样本的缩放系数（可以为空）。没在跑返回 false，四个缓冲都不动，调用方当系数为 1。
+    // n 为 0 时立即返回 false，什么都不推进：不接手 start、不取走取消请求
     bool process(float* injection, const float* readback, float* dryScale, float* returnScale, std::size_t n) noexcept;
     // 音频线程，每个回调在 process 之后调一次：回读攒满或取消之后的第一次返回 true，此后到下一次 Ping 之前都是 false。
     // 返回 true 的那个回调里，调用方对安全链发一次 500 ms 淡入的请求
@@ -234,6 +241,7 @@ private:
     {
         kOff,
         kRampDown, // 干声与回送降到 0，不注入
+        kSettle, // 两个系数都是 0，等环里的旧内容换成静音，不注入
         kInject, // 注入并累积回读
         kRestore, // 干声回升，回送保持 0
         kHold, // 干声已恢复，等淡入请求被取走并过一个斜坡长度，再放回送
@@ -244,6 +252,8 @@ private:
 
     std::vector<float> capture_;
     std::size_t ramp_ = 1;
+    // start 在发布 kArmed 之前写，音频线程在接手（读到 kArmed）时读；不在跑的时候音频线程不读它
+    std::size_t settleRequest_ = 0;
     std::size_t position_ = 0;
     // 以下只在音频线程动。系数是整数位置 / ramp_（0 = 静音，ramp_ = 原样），每个样本最多挪一格：
     // 不累加浮点，所以斜坡的两头恰好落在 0 和 1 上
@@ -255,6 +265,7 @@ private:
     bool cancelled_ = false;
     bool fadeInRequested_ = false;
     bool fadeInTaken_ = false;
+    std::size_t settleLeft_ = 0;
     std::size_t holdLeft_ = 0;
     std::atomic<State> state_{State::kIdle};
     std::atomic<bool> cancel_{false};
@@ -290,7 +301,8 @@ StateStatus decodeState(const std::uint8_t* data, std::size_t size, state::Role 
 
 // 工程里的 state 与探针的往返。读到正式版写的字节（kNotProbe）时，探针一个字节也不解析，把整份原字节留住；保存时原样
 // 交回这份字节，不用探针自己的 abi 0 state 去覆盖工程里的正式配置（与正式版「高 abi 拒载并原样回写」同一条规则）。
-// 留住期间面板上的改动不进 state，保存时会丢。之后读到探针自己的合格字节（kOk）就放掉留住的字节。
+// 留住期间面板上的改动不进 state，保存时会丢（面板的状态文本有一行写明，见 ProbeStatus::stateHeld）。
+// 之后读到探针自己的合格字节（kOk）就放掉留住的字节。
 // kEmpty、kCorrupt、kOtherRole：什么都没读进来，保持原状。线程：处理器的 state 回调所在的线程，自身不做同步。
 class ProbeStateKeeper
 {
