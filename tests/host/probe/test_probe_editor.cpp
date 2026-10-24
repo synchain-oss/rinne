@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 探针面板：用假的处理器接口驱动，不开窗口、不起消息循环。按钮的可用规则、恢复冷却、选择器写进 C 行的字段、
-// feedback 上限、复制诊断。
+// feedback 上限、环路开关、没有回送的一端、留着正式 state 的提示、复制诊断。
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <initializer_list>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -27,8 +28,9 @@ namespace fs = std::filesystem;
 class FakeHost final : public ProbeEditorHost
 {
 public:
-    FakeHost() { status.logOpen = true; }
+    explicit FakeHost(bool withReturn) : hasReturn(withReturn) { status.logOpen = true; }
 
+    const bool hasReturn;
     ProbeStatus status;
     diag::ProbeLog* log = nullptr;
     bool startResult = true;
@@ -40,6 +42,8 @@ public:
     std::vector<int> groups;
     std::vector<float> feedbacks;
     std::vector<float> delays;
+    std::vector<bool> loops;
+    std::vector<ProbeSelection> diagnosticsSelections;
     std::string diagnostics = "diagnostic text";
 
     ProbeStatus probeStatus() const override
@@ -52,13 +56,18 @@ public:
         }
         return out;
     }
+    bool probeHasReturn() const override { return hasReturn; }
     void probePanic() override { ++panics; }
     void probeRecover() override
     {
         ++recovers;
         status.tripped = false; // 恢复成功：处理器马上不再报跳闸
     }
-    void probePing() override { ++pings; }
+    void probePing() override
+    {
+        ++pings;
+        status.pingRunning = true; // 处理器马上报正在跑
+    }
     bool probeStartRecording(const ProbeSelection& selection, std::uint32_t seconds) override
     {
         recordings.push_back(selection);
@@ -80,7 +89,16 @@ public:
         delays.push_back(ms);
         status.delayMs = ms;
     }
-    std::string probeDiagnosticsText() override { return diagnostics; }
+    void probeSetLoopOn(bool on) override
+    {
+        loops.push_back(on);
+        status.loopOn = on;
+    }
+    std::string probeDiagnosticsText(const ProbeSelection& selection) override
+    {
+        diagnosticsSelections.push_back(selection);
+        return diagnostics;
+    }
 };
 
 struct Panel
@@ -92,13 +110,14 @@ struct Panel
     int clipboardWrites = 0;
     ProbeEditor editor;
 
-    Panel()
-        : editor(processor, host,
-                 ProbeEditorOptions{[this] { return nowMs; },
-                                    [this](const std::string& text) {
-                                        clipboard = text;
-                                        ++clipboardWrites;
-                                    }})
+    // withReturn 为假：处理器是没有回送的一端（Output）
+    explicit Panel(bool withReturn = true)
+        : host(withReturn), editor(processor, host,
+                                   ProbeEditorOptions{[this] { return nowMs; },
+                                                      [this](const std::string& text) {
+                                                          clipboard = text;
+                                                          ++clipboardWrites;
+                                                      }})
     {
     }
 
@@ -243,6 +262,94 @@ TEST_CASE("ping can be clicked only with the transport stopped or the dry signal
         panel.editor.doPing();
         CHECK(panel.host.pings == 0);
     }
+
+    SECTION("stopped but bypassed: the bypassed blocks must pass the dry signal untouched")
+    {
+        panel.host.status.transportPlaying = false;
+        panel.host.status.bypassed = true;
+        panel.editor.refresh();
+        CHECK_FALSE(panel.c().ping.isEnabled());
+        panel.editor.doPing();
+        CHECK(panel.host.pings == 0);
+        CHECK(panel.c().status.getText().contains("bypassed"));
+    }
+}
+
+TEST_CASE("ping refreshes the panel right away, like recover does", "[host][probe][editor]")
+{
+    Panel panel;
+    auto& c = panel.c();
+    panel.editor.refresh();
+    REQUIRE(c.ping.isEnabled());
+    REQUIRE(c.status.getText().contains("ping: idle"));
+
+    // 不等定时器：doPing 自己刷新一次，按钮马上灰掉，状态文本马上跟上
+    panel.editor.doPing();
+    CHECK(panel.host.pings == 1);
+    CHECK_FALSE(c.ping.isEnabled());
+    CHECK(c.status.getText().contains("ping: running"));
+    panel.editor.doPing(); // 灰着再点也不会第二次交给处理器
+    CHECK(panel.host.pings == 1);
+
+    // 规则不允许时什么都不做，也不刷新
+    panel.host.status.pingRunning = false;
+    panel.host.status.transportPlaying = true;
+    panel.host.status.drySilent = false;
+    panel.editor.refresh();
+    panel.host.status.tripped = true;
+    panel.editor.doPing();
+    CHECK(panel.host.pings == 1);
+    CHECK(c.status.getText().contains("safety: ok"));
+}
+
+TEST_CASE("on the end without a return, panic, recover, ping, both sliders and the loop switch stay off",
+          "[host][probe][editor]")
+{
+    // 对照：有回送的一端这几样都可用
+    {
+        Panel input;
+        input.editor.refresh();
+        auto& c = input.c();
+        for (juce::Component* control :
+             std::initializer_list<juce::Component*>{&c.panic, &c.recover, &c.ping, &c.feedback, &c.delay, &c.loop})
+        {
+            CHECK(control->isEnabled());
+        }
+    }
+
+    Panel panel(false);
+    auto& c = panel.c();
+    panel.editor.refresh();
+    for (juce::Component* control :
+         std::initializer_list<juce::Component*>{&c.panic, &c.recover, &c.ping, &c.feedback, &c.delay, &c.loop})
+    {
+        CHECK_FALSE(control->isEnabled());
+    }
+    // 组、四个选择器、记录与复制诊断照常
+    for (juce::Component* control : std::initializer_list<juce::Component*>{&c.group, &c.caseId, &c.variant, &c.buffer,
+                                                                            &c.guard, &c.record, &c.copyDiagnostics})
+    {
+        CHECK(control->isEnabled());
+    }
+
+    // 按钮的动作也不交给处理器；过了冷却时间、停着走带也一样
+    c.panic.onClick();
+    c.recover.onClick();
+    c.ping.onClick();
+    panel.nowMs += 5000;
+    panel.editor.refresh();
+    CHECK_FALSE(c.recover.isEnabled());
+    CHECK_FALSE(c.ping.isEnabled());
+    panel.editor.doPanic();
+    panel.editor.doRecover();
+    panel.editor.doPing();
+    CHECK(panel.host.panics == 0);
+    CHECK(panel.host.recovers == 0);
+    CHECK(panel.host.pings == 0);
+
+    c.group.setSelectedId(3, juce::sendNotificationSync);
+    REQUIRE_FALSE(panel.host.groups.empty());
+    CHECK(panel.host.groups.back() == 1);
 }
 
 TEST_CASE("recover is blocked for 1.5 s after panic", "[host][probe][editor]")
@@ -409,6 +516,69 @@ TEST_CASE("copy diagnostics puts the host text on the clipboard", "[host][probe]
     panel.c().copyDiagnostics.onClick();
     CHECK(panel.clipboardWrites == 1);
     CHECK(panel.clipboard == "rinne-diag v1\nprobe: log_dir=default\n");
+}
+
+TEST_CASE("copy diagnostics hands the host the cell selected on the panel right now", "[host][probe][editor]")
+{
+    Panel panel;
+    auto& c = panel.c();
+    c.caseId.setSelectedId(idOf(c.caseId, "CB-04"), juce::sendNotificationSync);
+    c.variant.setSelectedId(idOf(c.variant, "rip"), juce::sendNotificationSync);
+    c.buffer.setSelectedId(idOf(c.buffer, "512"), juce::sendNotificationSync);
+    c.guard.setSelectedId(idOf(c.guard, "high"), juce::sendNotificationSync);
+    panel.editor.doCopyDiagnostics();
+
+    REQUIRE(panel.host.diagnosticsSelections.size() == 1);
+    const ProbeSelection& sent = panel.host.diagnosticsSelections[0];
+    CHECK(sent.caseId == "CB-04");
+    CHECK(sent.variant == "rip");
+    CHECK(sent.buf == 512);
+    CHECK(sent.guard == diag::ProbeGuard::kHigh);
+    CHECK(panel.host.recordings.empty()); // 不必先开始记录
+
+    // 换了格再复制，交的就是新的格
+    c.buffer.setSelectedId(idOf(c.buffer, "-"), juce::sendNotificationSync);
+    panel.c().copyDiagnostics.onClick();
+    REQUIRE(panel.host.diagnosticsSelections.size() == 2);
+    CHECK(panel.host.diagnosticsSelections[1].buf == 0);
+}
+
+TEST_CASE("the loop switch reaches the host and follows it", "[host][probe][editor]")
+{
+    Panel panel;
+    auto& c = panel.c();
+    CHECK(c.loop.getToggleState()); // 默认开
+    CHECK(c.loop.getButtonText() == "Loop on");
+
+    c.loop.setToggleState(false, juce::sendNotificationSync);
+    REQUIRE(panel.host.loops.size() == 1);
+    CHECK_FALSE(panel.host.loops.back());
+    c.loop.setToggleState(true, juce::sendNotificationSync);
+    REQUIRE(panel.host.loops.size() == 2);
+    CHECK(panel.host.loops.back());
+
+    // 处理器报的值变了，面板跟着变，但不把值又发回去
+    panel.host.status.loopOn = false;
+    panel.editor.refresh();
+    CHECK_FALSE(c.loop.getToggleState());
+    CHECK(panel.host.loops.size() == 2);
+}
+
+TEST_CASE("the status text says when the release-build state is kept and panel changes will not be saved",
+          "[host][probe][editor]")
+{
+    Panel panel;
+    auto& c = panel.c();
+    panel.editor.refresh();
+    CHECK(c.status.getText().contains("state: saved with the project"));
+
+    panel.host.status.stateHeld = true;
+    panel.editor.refresh();
+    CHECK(c.status.getText().contains("state: release-build state kept, panel changes are not saved"));
+
+    panel.host.status.stateHeld = false;
+    panel.editor.refresh();
+    CHECK(c.status.getText().contains("state: saved with the project"));
 }
 
 TEST_CASE("the status and counter labels follow the host", "[host][probe][editor]")

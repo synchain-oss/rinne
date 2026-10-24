@@ -286,7 +286,7 @@ std::uint64_t RecoverCooldown::remainingMs(std::uint64_t nowMs) const noexcept
 
 bool pingAllowed(const ProbeStatus& status) noexcept
 {
-    return !status.pingRunning && (!status.transportPlaying || status.drySilent);
+    return !status.pingRunning && !status.bypassed && (!status.transportPlaying || status.drySilent);
 }
 
 bool recordAllowed(const ProbeStatus& status, const ProbeSelection& selection) noexcept
@@ -309,6 +309,10 @@ std::string statusText(const ProbeStatus& status, bool recordRejected)
     out += status.transportPlaying ? "playing" : "stopped";
     out += ", dry: ";
     out += status.drySilent ? "silent" : "active";
+    if (status.bypassed)
+    {
+        out += ", bypassed";
+    }
     out += "\nrecord: ";
     if (status.recording)
     {
@@ -333,6 +337,8 @@ std::string statusText(const ProbeStatus& status, bool recordRejected)
     }
     out += "\nsafety: ";
     out += status.tripped ? "tripped" : "ok";
+    out += "\nstate: ";
+    out += status.stateHeld ? "release-build state kept, panel changes are not saved" : "saved with the project";
     return out;
 }
 
@@ -375,12 +381,13 @@ ProbePing::ProbePing(std::size_t maxDelaySamples, double sampleRate)
     }
 }
 
-bool ProbePing::start() noexcept
+bool ProbePing::start(std::size_t settleSamples) noexcept
 {
     if (active())
     {
         return false;
     }
+    settleRequest_ = settleSamples;
     cancel_.store(false, std::memory_order_release);
     state_.store(State::kArmed, std::memory_order_release);
     return true;
@@ -397,6 +404,21 @@ void ProbePing::cancel() noexcept
     {
         state_.compare_exchange_strong(s, State::kIdle, std::memory_order_acq_rel);
     }
+}
+
+void ProbePing::abort() noexcept
+{
+    const State s = state_.load(std::memory_order_acquire);
+    if (s != State::kArmed && s != State::kRunning)
+    {
+        return;
+    }
+    if (s == State::kRunning)
+    {
+        fadeInRequested_ = true; // 回送被压过：交给安全链的淡入，同跑完与取消（已经交过的不会再交）
+    }
+    // 阶段、系数与取消标记不用复位：Idle 时 process 不读它们，下一次 start 之后 beginRun 全部重设
+    state_.store(State::kIdle, std::memory_order_release);
 }
 
 void ProbePing::reset() noexcept
@@ -417,6 +439,7 @@ void ProbePing::beginRun() noexcept
     cancelled_ = false;
     fadeInRequested_ = false;
     fadeInTaken_ = false;
+    settleLeft_ = settleRequest_;
     holdLeft_ = 0;
 }
 
@@ -442,6 +465,10 @@ bool ProbePing::takeFadeInRequest() noexcept
 bool ProbePing::process(float* injection, const float* readback, float* dryScale, float* returnScale,
                         std::size_t n) noexcept
 {
+    if (n == 0)
+    {
+        return false; // 0 样本的回调什么都不推进
+    }
     State s = state_.load(std::memory_order_acquire);
     if (s == State::kArmed)
     {
@@ -458,7 +485,7 @@ bool ProbePing::process(float* injection, const float* readback, float* dryScale
         if (cancel_.exchange(false, std::memory_order_acq_rel))
         {
             cancelled_ = true;
-            if (phase_ == Phase::kRampDown || phase_ == Phase::kInject)
+            if (phase_ == Phase::kRampDown || phase_ == Phase::kSettle || phase_ == Phase::kInject)
             {
                 startRestore();
             }
@@ -477,9 +504,17 @@ bool ProbePing::process(float* injection, const float* readback, float* dryScale
         {
             startRestore();
         }
-        if (phase_ == Phase::kRampDown && dryPos_ == 0 && returnPos_ == 0)
+        if (phase_ == Phase::kSettle && settleLeft_ == 0)
         {
             phase_ = Phase::kInject;
+        }
+        if (phase_ == Phase::kRampDown && dryPos_ == 0 && returnPos_ == 0)
+        {
+            phase_ = settleLeft_ > 0 ? Phase::kSettle : Phase::kInject;
+        }
+        if (phase_ == Phase::kSettle)
+        {
+            --settleLeft_; // 进入时不为 0；减到 0 之后的那个样本开始注入：恰好静音 settleSamples 个样本
         }
         float inject = 0.0f;
         if (phase_ == Phase::kInject)

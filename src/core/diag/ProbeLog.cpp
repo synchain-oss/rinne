@@ -699,7 +699,7 @@ void ProbeLog::openFile()
     open_ = true;
 }
 
-void ProbeLog::onBlock(const BlockFields& fields) noexcept
+void ProbeLog::onBlock(const BlockFields& fields, bool writable) noexcept
 {
     if (closed_.load(std::memory_order_relaxed))
     {
@@ -728,7 +728,7 @@ void ProbeLog::onBlock(const BlockFields& fields) noexcept
         return;
     }
     const std::uint64_t seq = nextSeq_++; // 丢了也占一个序号：文件里的缺口就是丢弃的位置
-    if (blocks_.full())
+    if (!writable || blocks_.full())
     {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return;

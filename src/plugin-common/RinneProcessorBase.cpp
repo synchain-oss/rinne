@@ -3,6 +3,10 @@
 #include "RinneProcessorBase.h"
 
 #include <limits>
+#include <utility>
+
+#include "ProbeHost.h"
+#include "util/RinneVersion.h"
 
 namespace rinne
 {
@@ -22,9 +26,49 @@ bool RinneProcessorBase::detectValidationHost()
     return host.isPluginval() || host.isAUVal() || host.isAppleInfoHelper() || host.isVBVSTScanner();
 }
 
-void RinneProcessorBase::prepareToPlay(double, int) {}
+void RinneProcessorBase::prepareToPlay(double sampleRate, int maximumExpectedSamplesPerBlock)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+            probe_->prepare(sampleRate, maximumExpectedSamplesPerBlock);
+    }
+    else
+    {
+        juce::ignoreUnused(sampleRate, maximumExpectedSamplesPerBlock);
+    }
+}
 
-void RinneProcessorBase::releaseResources() {}
+void RinneProcessorBase::releaseResources()
+{
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+            probe_->release();
+    }
+}
+
+void RinneProcessorBase::reset()
+{
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+            probe_->reset();
+    }
+}
+
+void RinneProcessorBase::updateTrackProperties(const TrackProperties& properties)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+            probe_->trackProperties(properties);
+    }
+    else
+    {
+        juce::ignoreUnused(properties);
+    }
+}
 
 bool RinneProcessorBase::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
@@ -64,13 +108,32 @@ const juce::String RinneProcessorBase::getName() const
     return JucePlugin_Name;
 }
 
-// 外壳阶段没有任何状态要存；state 容器接上之前，存出空块、读入时忽略
+// 外壳阶段没有任何状态要存；state 容器接上之前，存出空块、读入时忽略（探针构建里存取的是探针 state）
 void RinneProcessorBase::getStateInformation(juce::MemoryBlock& destData)
 {
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+        {
+            probe_->getState(destData);
+            return;
+        }
+    }
     destData.reset();
 }
 
-void RinneProcessorBase::setStateInformation(const void*, int) {}
+void RinneProcessorBase::setStateInformation(const void* data, int sizeInBytes)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+            probe_->setState(data, sizeInBytes);
+    }
+    else
+    {
+        juce::ignoreUnused(data, sizeInBytes);
+    }
+}
 
 std::int64_t RinneProcessorBase::getProcessedSamples() const noexcept
 {
@@ -84,6 +147,52 @@ bool RinneProcessorBase::beginBlock(int numSamples) noexcept
     // 只有音频线程写，读一次再写回就够了，不必用读改写
     processedSamples_.store(processedSamples_.load(std::memory_order_relaxed) + numSamples, std::memory_order_relaxed);
     return true;
+}
+
+void RinneProcessorBase::attachProbe(Side side)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        probe::ProbeHostConfig config;
+        config.role = side == Side::Input ? ipc::Role::kInput : ipc::Role::kOutput;
+        config.validationHost = validationHost_;
+        probe_.reset(new probe::ProbeHost(*this, std::move(config)));
+    }
+    else
+    {
+        juce::ignoreUnused(side);
+    }
+}
+
+void RinneProcessorBase::processProbe(juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
+{
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+            probe_->process(buffer, bypassed);
+    }
+    else
+    {
+        juce::ignoreUnused(buffer, bypassed);
+    }
+}
+
+juce::AudioProcessorEditor* RinneProcessorBase::createProbeEditor()
+{
+    if constexpr (build::kProbeBuild)
+    {
+        if (probe_ != nullptr)
+            return probe_->createEditor();
+    }
+    return nullptr;
+}
+
+void RinneProcessorBase::destroyProbe(probe::ProbeHost* host) noexcept
+{
+    if constexpr (build::kProbeBuild)
+        delete host;
+    else
+        juce::ignoreUnused(host);
 }
 
 } // namespace rinne

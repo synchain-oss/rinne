@@ -69,7 +69,7 @@
 | `first_paired_block` | | | 配对后的第一次回调 |
 | `paired` | 对端 pid | 组 `A`-`H` | 配对成功 |
 | `track_props` | 轨道名（百分号编码，可空） | 颜色（`RRGGBB` 或 `RRGGBBAA`，可空） | 宿主送来轨道信息，另见「快照」 |
-| `backend` | `win32` 或 `posix` | errno，成功写 `0` | 打开共享内存后 |
+| `backend` | `win32` 或 `posix` | 本实例打开共享内存时后端报的错误码（errno 或 GetLastError；同进程别的实例的不算），成功或没报错误码写 `0` | 打开共享内存后 |
 | `shm_denied` | | | 共享内存被拒 |
 | `monitor_toggle` | 切换后的状态 bool | | 监听开关 |
 | `arm_toggle` | 切换后的状态 bool | | 录音使能开关 |

@@ -6,6 +6,7 @@
 // 线程分工：
 //   音频线程  只做 onBlock / onAudioEvent / noteTrip：把定长记录推进无锁 SPSC 环，不分配、不加锁、不做 I/O、
 //             不抛异常；环满就丢掉新来的这一条并计数（seq 在文件里留下缺口，S 与 Z 的 dropped 同步增加）。
+//             调用方写不出合格 B 行的块（onBlock 的 writable 为假）在窗口内按同一套账计丢弃。
 //   [P] 线程  本类自带的落盘线程（不靠宿主的消息线程）：排空两条环与排队的行，格式化，写文件，每秒写一条 S，
 //             收到 close() 之后写 Z 并关文件。宿主在导出、载入工程、扫描插件时可能很久不跑消息线程，S
 //             因此不能挂在它上面。
@@ -343,7 +344,10 @@ public:
     // fields.monoNs 是本块开始时读的单调纳秒，必须与 options.clock（缺省 probeMonoNs）同一个时钟：开始时刻早于当前
     // C 行 t_ns 的块（beginCase 落在这块的中途）算窗口外，不写、不占 seq、不计丢弃，保证每个 B 的 mono_ns 都不早于 C 的
     // t_ns。 这条规则的代价是：正好跨在两格交界上的那一块不记。
-    void onBlock(const BlockFields& fields) noexcept;
+    // writable 为假：这一块写不出合格的 B 行（例如调用方没拿到 call_seq，写出去就破坏 call_seq 的严格递增），只当丢弃。
+    // S 要用的计数（max_n、resync）照常更新；窗口内（同上，开始时刻不早于 C 行 t_ns）占一个 seq、dropped 加一，与环满
+    // 走同一套账，文件里的缺口就是它的位置；窗口外什么都不占、不计
+    void onBlock(const BlockFields& fields, bool writable = true) noexcept;
     // 音频线程自己发的事件（first_block、first_paired_block、process_mode）。monoNs 由调用方读时钟传入
     void onAudioEvent(ProbeEventCode code, std::uint64_t a, std::uint64_t b, std::uint64_t monoNs) noexcept;
     // 一次安全跳闸（Panic 除外）；任意线程
