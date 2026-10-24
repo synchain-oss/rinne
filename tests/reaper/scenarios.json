@@ -130,7 +130,7 @@
         "sr": 48000,
         "block": 512,
         "case": "CB-04",
-        "recordSeconds": 16,
+        "recordSeconds": 19,
         "analyzerMustPass": ["A3", "A8"]
       },
       {
