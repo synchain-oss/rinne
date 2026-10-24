@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -17,12 +18,14 @@
 #include <set>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include "../shell/AllocationCounter.h"
 #include "../shell/ShellTestKit.h"
 #include "ProbeHost.h"
 #include "RinneProcessorBase.h"
+#include "ipc/IpcDiag.h"
 #include "ipc/LabelSeqlock.h"
 #include "ipc/LoopBinding.h"
 #include "ipc/Naming.h"
@@ -136,8 +139,9 @@ public:
         std::random_device seed;
         dir_ = fs::temp_directory_path() / ("rinne-probe-host-" + std::to_string(seed()) + std::to_string(seed()));
         fs::create_directories(dir_);
-        left_.assign(32768, 0.0f);
-        right_.assign(32768, 0.0f);
+        left_.assign(kLongestBlock, 0.0f);
+        right_.assign(kLongestBlock, 0.0f);
+        dry_.assign(kLongestBlock, 0.0f);
     }
 
     ~Rig()
@@ -178,29 +182,47 @@ public:
     }
 
     // 一个周期：信号源填缓冲 → Input → Output（Output 在推子前的最后一格，看到的是 Input 的输出）。
-    // 时钟与时间线前进一块，每 4 块（40 ms）tick 一次两端
-    void cycle(bool runInput = true, bool runOutput = true)
+    // 时钟与时间线前进一块，每 4 块（40 ms）tick 一次两端。bypassInput 为真时 Input 走旁路回调，并逐位核对输出与输入
+    void cycle(bool runInput = true, bool runOutput = true, int frames = kBlock)
     {
-        for (int i = 0; i < kBlock; ++i)
+        REQUIRE(frames > 0);
+        REQUIRE(frames <= kLongestBlock);
+        const auto count = static_cast<std::size_t>(frames);
+        for (std::size_t i = 0; i < count; ++i)
         {
-            const float v = source ? source(position_ + static_cast<std::uint64_t>(i)) : 0.0f;
-            left_[static_cast<std::size_t>(i)] = v;
-            right_[static_cast<std::size_t>(i)] = v;
+            const float v = source ? source(position_ + i) : 0.0f;
+            left_[i] = v;
+            right_[i] = v;
+            dry_[i] = v;
         }
         float* channels[2] = {left_.data(), right_.data()};
-        juce::AudioBuffer<float> buffer(channels, 2, kBlock);
+        juce::AudioBuffer<float> buffer(channels, 2, frames);
         juce::MidiBuffer midi;
         playHead.hostNs = clock.ns;
         if (runInput && input != nullptr)
-            input->processBlock(buffer, midi);
+        {
+            if (bypassInput)
+            {
+                input->processBlockBypassed(buffer, midi);
+                bypassedSamples += count;
+                for (std::size_t i = 0; i < count; ++i)
+                    if (std::memcmp(&left_[i], &dry_[i], sizeof(float)) != 0 ||
+                        std::memcmp(&right_[i], &dry_[i], sizeof(float)) != 0)
+                        ++bypassInexact;
+            }
+            else
+            {
+                input->processBlock(buffer, midi);
+            }
+        }
         if (record)
-            recorded.insert(recorded.end(), left_.begin(), left_.begin() + kBlock);
+            recorded.insert(recorded.end(), left_.begin(), left_.begin() + frames);
         if (runOutput && output != nullptr)
             output->processBlock(buffer, midi);
-        advance(kBlockNs);
-        position_ += kBlock;
+        advance(static_cast<std::uint64_t>(std::llround(static_cast<double>(frames) * 1.0e9 / kRate)));
+        position_ += count;
         if (playHead.playing)
-            playHead.samples += kBlock;
+            playHead.samples += frames;
     }
 
     void cycles(int count, bool runInput = true, bool runOutput = true)
@@ -289,12 +311,18 @@ public:
     bool record = false;
     std::vector<float> recorded; // record 为真时 Input 处理之后的左声道
     bool ticking = true; // 假 = 时间照走、不 tick（要停在两次 tick 之间看的用例）
+    bool bypassInput = false;
+    std::size_t bypassedSamples = 0; // Input 走旁路回调的样本数
+    std::size_t bypassInexact = 0; // 其中输出与输入不逐位相同的样本数（任一声道）
+
+    static constexpr int kLongestBlock = 40960;
 
 private:
     ipc::NameScope scope_;
     fs::path dir_;
     std::vector<float> left_;
     std::vector<float> right_;
+    std::vector<float> dry_;
     std::uint64_t position_ = 0;
     std::uint64_t sinceTick_ = 0;
 };
@@ -380,6 +408,78 @@ void putU32(std::vector<std::uint8_t>& out, std::uint32_t v)
     for (int i = 0; i < 4; ++i)
         out.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
 }
+
+// 相邻样本之差的最大值，从 previous 起算
+float largestStep(const std::vector<float>& samples, std::size_t from, float previous)
+{
+    float largest = 0.0f;
+    for (std::size_t i = from; i < samples.size(); ++i)
+    {
+        largest = std::max(largest, std::abs(samples[i] - previous));
+        previous = samples[i];
+    }
+    return largest;
+}
+
+// 打不开段的后端：建、开都被拒（同宿主沙盒拒绝）。error 不为 0 时先在调用线程上经 IpcDiag 报一条带它的诊断，
+// 和真后端在失败点报的一样
+class DeniedBackend final : public ipc::ISegmentBackend
+{
+public:
+    explicit DeniedBackend(int error) : error_(error) {}
+    ~DeniedBackend() override { forgetRetired(); }
+
+    ipc::InitResult createOrOpen(const std::string& name, std::size_t, ipc::SegmentView&) override
+    {
+        if (error_ != 0)
+        {
+            ipc::IpcDiagEvent e;
+            e.op = ipc::IpcDiagOp::kOpen;
+            e.code = ipc::IpcDiagCode::kShmDenied;
+            e.error = error_;
+            e.segment = name.c_str();
+            e.detail = "denied by the test backend";
+            ipc::reportIpcDiag(e);
+        }
+        return ipc::InitResult::kFailedDenied;
+    }
+    ipc::InitResult openExisting(const std::string&, ipc::SegmentView&) override { return ipc::InitResult::kFailed; }
+    void unmap(ipc::SegmentView& view) noexcept override { view = ipc::SegmentView(); }
+
+private:
+    int error_;
+};
+
+// 诊断出口的用例：一个只数次数的出口，和一个「再装一次」的钩子（模拟另一个线程恰在这时也在装）
+std::atomic<int> gForwarded{0};
+
+void countingSink(const ipc::IpcDiagEvent&) noexcept
+{
+    gForwarded.fetch_add(1);
+}
+
+void installAgain() noexcept
+{
+    ProbeHost::installIpcDiagSink();
+}
+
+// 用例结束后把槽还给转发出口、转发目标还原成用例开始时的那个
+class SinkRestore
+{
+public:
+    SinkRestore() : forward_(ProbeHost::ipcDiagForwardTarget()) {}
+    ~SinkRestore()
+    {
+        ProbeHost::setIpcDiagInstallHook(nullptr);
+        ipc::setIpcDiagSink(forward_);
+        ProbeHost::installIpcDiagSink();
+    }
+    SinkRestore(const SinkRestore&) = delete;
+    SinkRestore& operator=(const SinkRestore&) = delete;
+
+private:
+    ipc::IpcDiagSink forward_;
+};
 
 } // namespace
 
@@ -1097,4 +1197,319 @@ TEST_CASE("the probe audio callback neither allocates nor frees while recording 
     CHECK(allocations == 0);
     CHECK(frees == 0);
     CHECK(rig.input->host.probeStatus().pingRunning);
+}
+
+TEST_CASE("a bypassed input passes the dry signal bit for bit and starts no ping when the transport stops",
+          "[probe_host]")
+{
+    Rig rig;
+    rig.open(0);
+    rig.source = &sine;
+    rig.input->host.probeSetFeedbackPercent(50.0f);
+    rig.playHead.playing = true;
+    REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+    rig.cycles(300); // 3 s：回送在环里转起来
+
+    // 旁路开始的 10 ms 里回送照引擎的规矩淡到 0（不归探针管）；之后每一块都必须逐位直通
+    rig.bypassInput = true;
+    rig.cycles(5);
+    rig.bypassedSamples = 0;
+    rig.bypassInexact = 0;
+    const auto preset = static_cast<std::size_t>(engine::FadeReason::Preset);
+    const auto before = rig.input->host.counts();
+
+    // 面板：旁路着不许点，点了也不开
+    const probe::ProbeStatus status = rig.input->host.probeStatus();
+    CHECK(status.bypassed);
+    CHECK_FALSE(probe::pingAllowed(status));
+    rig.input->host.probePing();
+    CHECK_FALSE(rig.input->host.probeStatus().pingRunning);
+
+    // 停走带：自动 Ping 的条件成立，tick 把旁路当作不许 Ping。手动 tick，停在两次音频回调之间看
+    rig.ticking = false;
+    rig.playHead.playing = false;
+    rig.cycle();
+    rig.input->host.tick();
+    CHECK_FALSE(rig.input->host.probeStatus().pingRunning);
+    rig.ticking = true;
+    rig.cycles(300); // 3 s
+
+    CHECK(rig.bypassedSamples == 301u * kBlock);
+    CHECK(rig.bypassInexact == 0);
+    CHECK(rig.input->host.counts().fadeIns[preset] == before.fadeIns[preset]);
+
+    // 旁路结束：又可以点了
+    rig.bypassInput = false;
+    rig.cycles(4);
+    CHECK_FALSE(rig.input->host.probeStatus().bypassed);
+    CHECK(probe::pingAllowed(rig.input->host.probeStatus()));
+
+    const std::vector<Row> rows = rig.closeAndRead('I');
+    CHECK(eventsNamed(rows, "ping").empty());
+}
+
+TEST_CASE("a ping under way ends when the input is bypassed: bypassed blocks are bit exact and nothing steps after",
+          "[probe_host]")
+{
+    // 静音段中途、注入中途（序列已放完，正在攒回读）进入旁路。反馈 0 时引擎的回送恒为 0，旁路的第一块就必须逐位直通；
+    // 反馈 50 % 时引擎自己的回送要 10 ms 淡到 0（不归探针管），从旁路的第二块起逐位直通
+    for (const float feedback : {0.0f, 50.0f})
+    {
+        for (const int intoPing : {8, 25})
+        {
+            INFO("feedback " << feedback << ", blocks into the ping " << intoPing);
+            Rig rig;
+            rig.open(0);
+            rig.source = [](std::uint64_t) { return 0.2f; };
+            rig.input->host.probeSetFeedbackPercent(feedback);
+            rig.playHead.playing = true;
+            REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+            rig.cycles(100);
+
+            rig.ticking = false;
+            rig.playHead.playing = false;
+            rig.cycle();
+            rig.input->host.tick(); // 停走带：自动 Ping
+            rig.cycles(intoPing);
+            REQUIRE(rig.input->host.probeStatus().pingRunning);
+            rig.ticking = true;
+
+            const auto preset = static_cast<std::size_t>(engine::FadeReason::Preset);
+            const auto before = rig.input->host.counts();
+            rig.bypassInput = true;
+            if (feedback > 0.0f)
+            {
+                rig.cycle();
+                rig.bypassedSamples = 0;
+                rig.bypassInexact = 0;
+            }
+            rig.cycles(50);
+            CHECK(rig.bypassedSamples == 50u * kBlock);
+            CHECK(rig.bypassInexact == 0);
+            CHECK_FALSE(rig.input->host.probeStatus().pingRunning);
+
+            // 旁路结束：干声本来就在满幅，回送照安全链淡入回来，都不跳（斜坡每个样本最多挪 1/480）
+            rig.bypassInput = false;
+            rig.record = true;
+            rig.cycles(100);
+            rig.record = false;
+            CHECK(largestStep(rig.recorded, 0, 0.2f) <= 0.002f);
+            CHECK(rig.input->host.counts().fadeIns[preset] - before.fadeIns[preset] == 1);
+            CHECK(rig.input->host.probeStatus().lastPingSamples == -1);
+        }
+    }
+}
+
+TEST_CASE("a block longer than the scratch in the settle or in the injection cancels the ping without a gain step",
+          "[probe_host]")
+{
+    // 直流干声、反馈 0：输出只有干声乘系数加注入，相邻样本差看得清系数有没有跳。40000 帧的块超过暂存（32768）
+    for (const int intoPing : {8, 25}) // 静音段中途、注入中途（序列已放完，正在攒回读）
+    {
+        INFO("blocks into the ping " << intoPing);
+        Rig rig;
+        rig.open(0);
+        rig.source = [](std::uint64_t) { return 0.2f; };
+        rig.playHead.playing = true;
+        REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+        rig.cycles(50);
+
+        rig.record = true;
+        rig.ticking = false;
+        rig.playHead.playing = false;
+        rig.cycle();
+        rig.input->host.tick(); // 停走带：自动 Ping
+        rig.cycles(intoPing);
+        REQUIRE(rig.input->host.probeStatus().pingRunning);
+        rig.ticking = true;
+
+        const auto preset = static_cast<std::size_t>(engine::FadeReason::Preset);
+        const auto before = rig.input->host.counts();
+        const std::size_t longStart = rig.recorded.size();
+        rig.cycle(true, true, 40000);
+        rig.cycles(100);
+        rig.record = false;
+
+        CHECK_FALSE(rig.input->host.probeStatus().pingRunning);
+        CHECK(rig.input->host.probeStatus().lastPingSamples == -1);
+        CHECK(rig.input->host.counts().fadeIns[preset] - before.fadeIns[preset] == 1);
+
+        // 超过斜坡（每个样本 0.2 / 480）的相邻差只能是注入的序列本身（±0.1，127 个样本），而且在超长块之前
+        const float bound = 0.2f / 480.0f * 1.01f + 1.0e-6f;
+        std::vector<std::size_t> steps;
+        for (std::size_t i = 1; i < rig.recorded.size(); ++i)
+            if (std::abs(rig.recorded[i] - rig.recorded[i - 1]) > bound)
+                steps.push_back(i);
+        if (intoPing == 8)
+            CHECK(steps.empty());
+        if (!steps.empty())
+        {
+            CHECK(steps.back() < longStart);
+            CHECK(steps.back() - steps.front() <= 128);
+        }
+        // 超长块里干声在开头一段就回到满幅，块尾与之后都是原样的干声
+        CHECK(rig.recorded[longStart] < 0.01f);
+        CHECK(rig.recorded[longStart + 1000] == 0.2f);
+        CHECK(rig.recorded[longStart + 39999] == 0.2f);
+        CHECK(rig.recorded.back() == 0.2f);
+    }
+}
+
+TEST_CASE("a long gap during an offline render or while unpaired is not taken for a suspend", "[probe_host]")
+{
+    SECTION("offline: a render slower than real time looks like a suspend at every block, so the gap is not judged")
+    {
+        Rig rig;
+        rig.open(0);
+        rig.source = &sine;
+        rig.playHead.playing = true;
+        REQUIRE(rig.runUntil([&] { return paired(rig); }, 200));
+        rig.cycles(50);
+
+        rig.input->setNonRealtime(true);
+        rig.output->setNonRealtime(true);
+        rig.cycles(4);
+        for (int i = 0; i < 5; ++i)
+        {
+            rig.advance(300'000'000);
+            rig.cycle();
+        }
+        rig.cycles(20);
+        CHECK(rig.input->host.counts().suspendFlushes == 0);
+        CHECK(rig.input->host.counts().suspendClears == 0);
+
+        // 对照：回到实时，同样的间隔就是两端一起挂起
+        rig.input->setNonRealtime(false);
+        rig.output->setNonRealtime(false);
+        rig.cycles(20);
+        rig.advance(300'000'000);
+        rig.cycles(20);
+        CHECK(rig.input->host.counts().suspendFlushes == 1);
+    }
+
+    SECTION("unpaired: no ring and no write head to look at, so nothing is judged or counted")
+    {
+        Rig rig;
+        rig.input = std::make_unique<TestProcessor>(rig.config(ipc::Role::kInput));
+        rig.input->setPlayHead(&rig.playHead);
+        rig.input->prepareToPlay(kRate, kBlock);
+        rig.input->host.tick();
+        rig.source = &sine;
+        rig.playHead.playing = true;
+        rig.cycles(50);
+        REQUIRE_FALSE(rig.input->host.probeStatus().paired);
+        rig.advance(300'000'000);
+        rig.cycles(20);
+        rig.advance(1'000'000'000);
+        rig.cycles(20);
+        CHECK(rig.input->host.counts().suspendFlushes == 0);
+    }
+}
+
+TEST_CASE("the backend error sink is swapped in one step and never forwards to itself", "[probe_host]")
+{
+    const SinkRestore restore;
+    ipc::IpcDiagEvent event;
+    event.error = 5;
+    event.detail = "test report";
+
+    SECTION("installed twice in a row: it forwards to the sink that was there, one report arrives once")
+    {
+        ipc::setIpcDiagSink(&countingSink);
+        ProbeHost::installIpcDiagSink();
+        ProbeHost::installIpcDiagSink();
+        CHECK(ipc::ipcDiagSink() == ProbeHost::ipcDiagRecorder());
+        REQUIRE(ProbeHost::ipcDiagForwardTarget() == &countingSink);
+        gForwarded = 0;
+        ipc::reportIpcDiag(event);
+        CHECK(gForwarded == 1);
+    }
+
+    SECTION("two hosts constructed one after the other: the same")
+    {
+        ipc::setIpcDiagSink(&countingSink);
+        Rig rig;
+        TestProcessor a(rig.config(ipc::Role::kInput));
+        TestProcessor b(rig.config(ipc::Role::kOutput));
+        CHECK(ipc::ipcDiagSink() == ProbeHost::ipcDiagRecorder());
+        REQUIRE(ProbeHost::ipcDiagForwardTarget() == &countingSink);
+        gForwarded = 0;
+        ipc::reportIpcDiag(event);
+        CHECK(gForwarded == 1);
+    }
+
+    SECTION("another install landing between this one's look and its swap still leaves the target alone")
+    {
+        ipc::setIpcDiagSink(&countingSink);
+        ProbeHost::setIpcDiagInstallHook(&installAgain);
+        ProbeHost::installIpcDiagSink();
+        CHECK(ipc::ipcDiagSink() == ProbeHost::ipcDiagRecorder());
+        REQUIRE(ProbeHost::ipcDiagForwardTarget() == &countingSink);
+        gForwarded = 0;
+        ipc::reportIpcDiag(event);
+        CHECK(gForwarded == 1);
+    }
+
+    SECTION("two threads installing at the same moment, many times over")
+    {
+        int bad = 0;
+        for (int round = 0; round < 2000; ++round)
+        {
+            ipc::setIpcDiagSink(&countingSink);
+            std::atomic<int> ready{0};
+            const auto worker = [&ready] {
+                ready.fetch_add(1);
+                while (ready.load() < 2)
+                {
+                }
+                ProbeHost::installIpcDiagSink();
+            };
+            std::thread first(worker);
+            std::thread second(worker);
+            first.join();
+            second.join();
+            if (ipc::ipcDiagSink() != ProbeHost::ipcDiagRecorder() ||
+                ProbeHost::ipcDiagForwardTarget() != &countingSink)
+                ++bad;
+        }
+        REQUIRE(bad == 0);
+        gForwarded = 0;
+        ipc::reportIpcDiag(event);
+        CHECK(gForwarded == 1);
+    }
+}
+
+TEST_CASE("the backend event carries this instance's own error code, not another instance's", "[probe_host]")
+{
+    // 同一进程里两个实例的段都被拒：先 tick 的那个的后端报了错误码 13，后 tick 的那个的后端什么都没报
+    Rig rig;
+    DeniedBackend reporting(13);
+    DeniedBackend silent(0);
+    ProbeHostConfig first = rig.config(ipc::Role::kInput);
+    first.backend = &reporting;
+    ProbeHostConfig second = rig.config(ipc::Role::kOutput);
+    second.backend = &silent;
+    {
+        TestProcessor a(first);
+        TestProcessor b(second);
+        for (TestProcessor* p : {&a, &b})
+        {
+            p->prepareToPlay(kRate, kBlock);
+            p->host.probeSetGroup(0);
+        }
+        a.host.tick();
+        b.host.tick();
+        CHECK(a.host.rendezvousState() == ipc::RendezvousState::kIpcUnavailable);
+        CHECK(b.host.rendezvousState() == ipc::RendezvousState::kIpcUnavailable);
+    }
+    const std::vector<Row> in = rig.read('I');
+    const std::vector<Row> out = rig.read('O');
+    const auto inBackend = eventsNamed(in, "backend");
+    const auto outBackend = eventsNamed(out, "backend");
+    REQUIRE(inBackend.size() == 1);
+    REQUIRE(outBackend.size() == 1);
+    CHECK(inBackend[0][4] == "13");
+    CHECK(outBackend[0][4] == "0");
+    CHECK(eventsNamed(in, "shm_denied").size() == 1);
+    CHECK(eventsNamed(out, "shm_denied").size() == 1);
 }

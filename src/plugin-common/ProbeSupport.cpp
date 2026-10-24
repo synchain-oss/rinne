@@ -286,7 +286,7 @@ std::uint64_t RecoverCooldown::remainingMs(std::uint64_t nowMs) const noexcept
 
 bool pingAllowed(const ProbeStatus& status) noexcept
 {
-    return !status.pingRunning && (!status.transportPlaying || status.drySilent);
+    return !status.pingRunning && !status.bypassed && (!status.transportPlaying || status.drySilent);
 }
 
 bool recordAllowed(const ProbeStatus& status, const ProbeSelection& selection) noexcept
@@ -309,6 +309,10 @@ std::string statusText(const ProbeStatus& status, bool recordRejected)
     out += status.transportPlaying ? "playing" : "stopped";
     out += ", dry: ";
     out += status.drySilent ? "silent" : "active";
+    if (status.bypassed)
+    {
+        out += ", bypassed";
+    }
     out += "\nrecord: ";
     if (status.recording)
     {
@@ -400,6 +404,24 @@ void ProbePing::cancel() noexcept
     {
         state_.compare_exchange_strong(s, State::kIdle, std::memory_order_acq_rel);
     }
+}
+
+void ProbePing::abort() noexcept
+{
+    const State s = state_.load(std::memory_order_acquire);
+    if (s != State::kArmed && s != State::kRunning)
+    {
+        return;
+    }
+    cancel_.store(false, std::memory_order_release);
+    if (s == State::kRunning && !fadeInTaken_)
+    {
+        fadeInRequested_ = true; // 回送被压过：交给安全链的淡入，同跑完与取消
+    }
+    phase_ = Phase::kOff;
+    dryPos_ = returnPos_ = ramp_;
+    dryUp_ = returnUp_ = true;
+    state_.store(State::kIdle, std::memory_order_release);
 }
 
 void ProbePing::reset() noexcept

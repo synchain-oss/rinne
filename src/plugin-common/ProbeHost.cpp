@@ -36,23 +36,36 @@ constexpr std::uint64_t kBackendKind = 1; // posix
 
 constexpr std::uint64_t kGroupUnsetArg = 0xFF; // kGroup 参数：0..7 以外写 -
 
-// 后端失败的错误码只经全局的诊断出口给出：装一个转发出口，记下最后一个非零的错误码，再交给原来的出口
-std::atomic<int> gLastIpcError{0};
+// 后端失败的错误码只经全局的诊断出口给出（IpcDiag 只有一个槽）：装一个转发出口，把错误码记给正在调会合的那个实例，
+// 再交给装它之前的那个出口。全进程一份，不随实例卸：出口本身不带实例状态；卸要从链中间把自己摘掉，做不成原子的，
+// 反而会把别人后来装的出口冲掉
 std::atomic<ipc::IpcDiagSink> gPreviousSink{nullptr};
+std::atomic<ProbeHost::InstallHook> gInstallHook{nullptr};
+
+// 每个线程一份：本线程正替哪个实例调会合（指向它的 ipcError_）。后端在调用线程上同步报告，所以记进去的只有该实例
+// 这一拍里报出的错误码，同进程的别的实例在别的线程或别的拍里出的错记不进来
+thread_local int* tIpcErrorTarget = nullptr;
 
 void recordIpcDiag(const ipc::IpcDiagEvent& event) noexcept
 {
-    if (event.error != 0)
-        gLastIpcError.store(event.error, std::memory_order_relaxed);
+    if (event.error != 0 && tIpcErrorTarget != nullptr)
+        *tIpcErrorTarget = event.error;
     if (const ipc::IpcDiagSink previous = gPreviousSink.load(std::memory_order_acquire))
         previous(event);
 }
 
-void installIpcDiagSink() noexcept
+// 作用域内本线程报出的后端错误码记到 target
+class IpcErrorCapture
 {
-    if (ipc::ipcDiagSink() != &recordIpcDiag)
-        gPreviousSink.store(ipc::setIpcDiagSink(&recordIpcDiag), std::memory_order_release);
-}
+public:
+    explicit IpcErrorCapture(int& target) noexcept : saved_(tIpcErrorTarget) { tIpcErrorTarget = &target; }
+    ~IpcErrorCapture() { tIpcErrorTarget = saved_; }
+    IpcErrorCapture(const IpcErrorCapture&) = delete;
+    IpcErrorCapture& operator=(const IpcErrorCapture&) = delete;
+
+private:
+    int* saved_;
+};
 
 bool isAu(const juce::AudioProcessor& processor) noexcept
 {
@@ -133,6 +146,32 @@ std::uint32_t toU32(std::uint64_t v) noexcept
 }
 
 } // namespace
+
+// 一步换槽：两个实例在不同线程上同时构造时，后换的那个拿回来的是转发出口自己，不记，转发目标就不会指向自己
+// （先查再装的写法里两边都可能看到「还没装」，后装的把自己记成转发目标，第一次报错就无限递归）
+void ProbeHost::installIpcDiagSink() noexcept
+{
+    if (const InstallHook hook = gInstallHook.exchange(nullptr, std::memory_order_acq_rel))
+        hook();
+    const ipc::IpcDiagSink previous = ipc::setIpcDiagSink(&recordIpcDiag);
+    if (previous != &recordIpcDiag)
+        gPreviousSink.store(previous, std::memory_order_release);
+}
+
+ipc::IpcDiagSink ProbeHost::ipcDiagRecorder() noexcept
+{
+    return &recordIpcDiag;
+}
+
+ipc::IpcDiagSink ProbeHost::ipcDiagForwardTarget() noexcept
+{
+    return gPreviousSink.load(std::memory_order_acquire);
+}
+
+void ProbeHost::setIpcDiagInstallHook(InstallHook hook) noexcept
+{
+    gInstallHook.store(hook, std::memory_order_release);
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout ProbeHost::createParameterLayout()
 {
@@ -266,7 +305,7 @@ void ProbeHost::prepare(double sampleRate, int maxBlock)
         {static_cast<std::uint32_t>(std::llround(sampleRate)), static_cast<std::uint32_t>(maxBlock_), channels},
         nowMs());
     logEvent(diag::ProbeEventCode::kPrepare,
-             {static_cast<std::uint64_t>(std::llround(sampleRate)), static_cast<std::uint64_t>(maxBlock_)});
+             {static_cast<std::uint64_t>(std::llround(sampleRate)), static_cast<std::uint64_t>(maxBlock_), {}});
     ready_.store(true, std::memory_order_release);
 }
 
@@ -317,6 +356,7 @@ void ProbeHost::process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcep
     }
     transport.nonrealtime = processor_.isNonRealtime();
     playing_.store(transport.isPlaying, std::memory_order_relaxed);
+    bypassed_.store(bypassed, std::memory_order_relaxed);
 
     engine::AudioView view;
     view.channels = buffer.getArrayOfWritePointers();
@@ -400,13 +440,15 @@ void ProbeHost::processInput(const engine::AudioView& view, const engine::Engine
 {
     const int n = view.length;
     // 两端一起被挂起：两次回调隔了 250 ms 以上，而这段时间里环的写头几乎没走（Output 照常跑时它会走过差不多同样多的
-    // 样本）。离线渲染时回调间隔不代表时间，不判
-    if (haveLastBlock_ && !transport.nonrealtime && startNs > lastStartNs_ &&
+    // 样本）。写头是唯一的证据：这一块与上一块都拿到环才判，没配对时的长间隔不算挂起、不计数。
+    // 离线渲染不判：回调间隔不代表时间，比实时慢的导出每两块之间都可能隔 250 ms 以上，而写头同样只走一块（Output 每块
+    // 照常写），从回调上分不出它和挂起；这一条只决定按墙钟的判据启不启用，不改引擎的处理
+    const bool haveHead = context.ring != nullptr;
+    if (haveLastBlock_ && haveHead && haveLastHead_ && !transport.nonrealtime && startNs > lastStartNs_ &&
         startNs - lastStartNs_ > kSuspendFlushNs + lastBlockNs_)
     {
         const double gapSamples = static_cast<double>(startNs - lastStartNs_) * sampleRate_ / 1.0e9;
-        const std::uint64_t head = context.ring != nullptr ? ipc::LoopRing::writeHead(*context.ring) : lastHead_;
-        const std::int64_t moved = ipc::frameDiff(head, lastHead_);
+        const std::int64_t moved = ipc::frameDiff(ipc::LoopRing::writeHead(*context.ring), lastHead_);
         if (static_cast<double>(std::max<std::int64_t>(moved, 0)) * 2.0 < gapSamples)
         {
             input_.requestFlushAfterSuspend();
@@ -414,17 +456,29 @@ void ProbeHost::processInput(const engine::AudioView& view, const engine::Engine
         }
     }
 
+    // 超过暂存长度的块（环路这一块不走，读回没有意义）：取消正在跑的 Ping，系数照常走斜坡（见 applyPing）
+    if (ping_ != nullptr && n > kScratchFrames && ping_->active())
+        ping_->cancel();
     // Ping 是否跑这一块在块首定一次：中途被点开的从下一块起（只有音频线程能让 active 变假，这里为真到 applyPing
-    // 也为真）
-    const bool pingBlock = ping_ != nullptr && n <= kScratchFrames && ping_->active();
+    // 也为真）。旁路块不跑：输出必须与输入逐位相同
+    const bool pingBlock = ping_ != nullptr && !bypassed && ping_->active();
+    const int pingFrames = std::min(n, kScratchFrames);
     if (pingBlock)
         for (int c = 0; c < view.numChannels; ++c)
-            std::copy(view.channels[c], view.channels[c] + n, dry_[c].begin());
+            std::copy(view.channels[c], view.channels[c] + pingFrames, dry_[c].begin());
 
     input_.process(view, params, transport, bypassed, context);
     const loop::BlockResult& result = input_.lastBlockResult();
     if (pingBlock)
-        applyPing(view, n);
+        applyPing(view, pingFrames);
+    // 旁路：还没接手的请求丢掉，正在跑的（含静音段）当场结束，这一块的输出就是引擎的输出（干声逐位直通）。
+    // 回送交给安全链：压过的话发一次 500 ms 淡入；旁路结束后干声本来就在 1，回送照安全链淡入，都不跳
+    if (ping_ != nullptr && bypassed)
+    {
+        ping_->abort();
+        if (ping_->takeFadeInRequest())
+            ++presetSeq_;
+    }
 
     const loop::LoopStatusFields status = input_.loopStatus();
     fields.m = status.drift;
@@ -440,17 +494,22 @@ void ProbeHost::processInput(const engine::AudioView& view, const engine::Engine
     haveLastBlock_ = true;
     lastStartNs_ = startNs;
     lastBlockNs_ = static_cast<std::uint64_t>(static_cast<double>(n) * 1.0e9 / sampleRate_);
-    if (context.ring != nullptr)
+    haveLastHead_ = haveHead;
+    if (haveHead)
         lastHead_ = ipc::LoopRing::writeHead(*context.ring);
 }
 
 // 合成：out = 干声系数·g_dry·干声 + 回送系数·（引擎输出 − g_dry·干声）+ 注入。系数为 0 的项不乘（干声或回送里的 NaN
-// 乘 0 还是 NaN）。读回是安全链之前的原始读头。Ping 前的静音段由 ProbePing 自己走（长度见 pingSettleSamples）
-void ProbeHost::applyPing(const engine::AudioView& view, int n) noexcept
+// 乘 0 还是 NaN）。读回是安全链之前的原始读头。Ping 前的静音段由 ProbePing 自己走（长度见 pingSettleSamples）。
+// frames 是暂存了干声的样本数，平常等于块长。超长块（块首已取消）只合成、只推进开头 kScratchFrames 个样本，其余原样：
+// 取消之后干声系数 10 ms 回到 1，回送系数降到 0 停住，等淡入请求在这一块之后被取走，开头一段里状态机就停在这里，后面的
+// 样本推进与否都一样；引擎在超长块里的回送也只在开头一段（淡出 5 ms，环路门 10 ms 落到 0），之后恰好是 0，所以后面的
+// 样本上合成的结果就是引擎输出本身
+void ProbeHost::applyPing(const engine::AudioView& view, int frames) noexcept
 {
     const loop::BlockResult& result = input_.lastBlockResult();
-    const auto count = static_cast<std::size_t>(n);
-    const float* readback = result.returnLength >= n ? result.returnLeft : nullptr;
+    const auto count = static_cast<std::size_t>(frames);
+    const float* readback = result.returnLength >= view.length ? result.returnLeft : nullptr;
     if (ping_->process(inject_.data(), readback, dryScale_.data(), returnScale_.data(), count))
     {
         const float dryGain = input_.dryGain();
@@ -549,7 +608,7 @@ void ProbeHost::setState(const void* data, int size)
     }
     // 宿主设了工程状态：不论读进来什么，回送都从 0 淡入（原因 SetState）
     stateSeq_.fetch_add(1, std::memory_order_relaxed);
-    logEvent(diag::ProbeEventCode::kSetState, {groupArg(stateData_.group)});
+    logEvent(diag::ProbeEventCode::kSetState, {groupArg(stateData_.group), 0, {}});
 }
 
 // JUCE 8.0.8 的公开接口只给轨道名与颜色两项
@@ -593,7 +652,11 @@ void ProbeHost::tickLocked(std::uint64_t ns, std::uint64_t ms)
         lastNonrealtime_ = nonrealtime;
         nonrealtimeSeen_ = nonrealtimeSeen_ || nonrealtime;
     }
-    rendezvous_->tick(ms);
+    {
+        // 打开段只发生在会合的 tick 里；这一拍里后端在本线程上报出的错误码记给本实例
+        const IpcErrorCapture capture(ipcError_);
+        rendezvous_->tick(ms);
+    }
     noteRendezvous();
     notePeer();
     drainEngine();
@@ -612,7 +675,8 @@ void ProbeHost::tickLocked(std::uint64_t ns, std::uint64_t ms)
         log_->pump();
 }
 
-// backend 事件写一次：段打开（成功写 0），或后端不可用（写错误码，被拒再写 shm_denied）
+// backend 事件写一次：段打开（成功写 0），或后端不可用（写本实例的 tick 里后端报的最后一个错误码，没报过写 0；
+// 被拒再写 shm_denied）
 void ProbeHost::noteRendezvous()
 {
     if (backendLogged_)
@@ -620,9 +684,8 @@ void ProbeHost::noteRendezvous()
     switch (rendezvous_->state())
     {
     case ipc::RendezvousState::kIpcUnavailable:
-        logEvent(
-            diag::ProbeEventCode::kBackend,
-            {kBackendKind, static_cast<std::uint64_t>(std::max(gLastIpcError.load(std::memory_order_relaxed), 0))});
+        logEvent(diag::ProbeEventCode::kBackend,
+                 {kBackendKind, static_cast<std::uint64_t>(std::max(ipcError_, 0)), {}});
         if (rendezvous_->lastResult() == ipc::InitResult::kFailedDenied)
             logEvent(diag::ProbeEventCode::kShmDenied);
         backendLogged_ = true;
@@ -631,7 +694,7 @@ void ProbeHost::noteRendezvous()
     case ipc::RendezvousState::kConflict:
     case ipc::RendezvousState::kDormant:
     case ipc::RendezvousState::kAbiMismatch:
-        logEvent(diag::ProbeEventCode::kBackend, {kBackendKind, 0});
+        logEvent(diag::ProbeEventCode::kBackend, {kBackendKind, 0, {}});
         backendLogged_ = true;
         break;
     default:
@@ -653,7 +716,7 @@ void ProbeHost::notePeer()
         pid = peer.pid;
     }
     if (active && !peerActive_)
-        logEvent(diag::ProbeEventCode::kPaired, {pid, group - 1});
+        logEvent(diag::ProbeEventCode::kPaired, {pid, group - 1, {}});
     peerActive_ = active;
 }
 
@@ -693,8 +756,8 @@ void ProbeHost::tickPing()
     const bool playing = playing_.load(std::memory_order_relaxed);
     if (ping_->active() && playing && !drySilent_.load(std::memory_order_relaxed))
         ping_->cancel();
-    else if (autoPingTrigger(wasPlaying_, playing))
-        (void)ping_->start(pingSettleSamples()); // 正在跑就不再开
+    else if (autoPingTrigger(wasPlaying_, playing) && pingAllowed(statusLocked())) // 旁路着、正在跑都不开
+        (void)ping_->start(pingSettleSamples());
     wasPlaying_ = playing;
 }
 
@@ -708,7 +771,7 @@ void ProbeHost::collectPing()
     if (result.ok)
     {
         lastPingSamples_ = result.delaySamples;
-        logEvent(diag::ProbeEventCode::kPing, {result.delaySamples});
+        logEvent(diag::ProbeEventCode::kPing, {result.delaySamples, 0, {}});
     }
 }
 
@@ -784,6 +847,7 @@ ProbeStatus ProbeHost::statusLocked() const
     status.tripped = isInput() && input_.safetyDiag().state == static_cast<std::uint8_t>(engine::SafetyState::Tripped);
     status.loopOn = loopOn_.load(std::memory_order_relaxed);
     status.stateHeld = keeper_.holding();
+    status.bypassed = bypassed_.load(std::memory_order_relaxed);
     status.group = stateData_.group;
     status.lastPingSamples = havePing_ ? static_cast<int>(lastPingSamples_) : -1;
     if (status.recording && recordDeadlineNs_ != 0)

@@ -262,6 +262,17 @@ TEST_CASE("ping can be clicked only with the transport stopped or the dry signal
         panel.editor.doPing();
         CHECK(panel.host.pings == 0);
     }
+
+    SECTION("stopped but bypassed: the bypassed blocks must pass the dry signal untouched")
+    {
+        panel.host.status.transportPlaying = false;
+        panel.host.status.bypassed = true;
+        panel.editor.refresh();
+        CHECK_FALSE(panel.c().ping.isEnabled());
+        panel.editor.doPing();
+        CHECK(panel.host.pings == 0);
+        CHECK(panel.c().status.getText().contains("bypassed"));
+    }
 }
 
 TEST_CASE("ping refreshes the panel right away, like recover does", "[host][probe][editor]")

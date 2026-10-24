@@ -9,7 +9,7 @@
 //   - 探针 state：abi 0 的 RNST 头加一个自定块（group、feedback、D、ceiling）。abi 0 时正式版的加载方只读头、不解块，
 //     所以这份字节在正式版里被整份忽略；
 //   - 复制诊断：在 DiagReport 的文本后面追加探针几行，日志目录只写 default 或 none，不出现路径的任何片段。
-// 线程：除 ProbePing::process 外都只在非实时线程调用。
+// 线程：除 ProbePing 的音频线程接口（见 ProbePing 的说明）外都只在非实时线程调用。
 #pragma once
 
 #include <array>
@@ -138,6 +138,7 @@ struct ProbeStatus
     bool loopOn = true; // 环路开关，不进探针 state
     // ProbeStateKeeper 正留着正式版写的字节：保存时交回那份字节，面板上的改动不进 state
     bool stateHeld = false;
+    bool bypassed = false; // 宿主正旁路这一端：旁路块的输出必须与输入逐位相同，Ping 不许点
     int group = -1; // -1 = 未设，0..7 = A..H
     int lastPingSamples = -1; // -1 = 还没有结果
     std::uint32_t recordRemainingSeconds = 0;
@@ -148,7 +149,7 @@ struct ProbeStatus
     diag::ProbeCounters counters;
 };
 
-// Ping 只在停走带或干声静音时可点，且同一时刻只跑一次
+// Ping 只在停走带或干声静音、且没被旁路时可点，同一时刻只跑一次
 bool pingAllowed(const ProbeStatus& status) noexcept;
 // 记录按钮：日志开着、没在记录，且选择在规则表里
 bool recordAllowed(const ProbeStatus& status, const ProbeSelection& selection) noexcept;
@@ -194,7 +195,10 @@ struct PingResult
 //      下行淡出走完、增益到 0），回送系数才用 10 ms 线性回到 1；此后回送的音量完全由安全链的 500 ms 淡入决定；
 //   3. 干声、回送都回到 1 之后状态才变成 Done（取消则回到 Idle）。调用方必须取走淡入请求，否则回送系数一直是 0。
 // 取消发生在降、静音、注入、恢复任何一个阶段中途都一样走斜坡：系数从当前值出发，不跳。
-// start / cancel / reset / finish 在非实时线程；process 与 takeFadeInRequest 在音频线程，定长循环，不分配、不加锁。
+// 提前结束（取消、abort）与跑完走同一条恢复路径：只要系数已经离开过 1、淡入请求还没交出去，就交出恰好一次；
+// 音频线程还没接手（Armed）时结束，系数从没动过，不交请求。
+// start / reset / finish 在非实时线程；cancel 只置原子标志，哪个线程都能调；process、takeFadeInRequest 与 abort 在
+// 音频线程，定长循环，不分配、不加锁。
 class ProbePing
 {
 public:
@@ -210,8 +214,13 @@ public:
 
     // 空闲或上一次已结束时开始，两个系数降到 0 之后先静音 settleSamples 个样本再注入；正在跑返回 false
     bool start(std::size_t settleSamples = 0) noexcept;
-    // 请求取消。音频线程在下一个回调接手，系数走斜坡恢复；结果丢弃，状态回到 Idle。空闲时什么都不做，已 Done 就丢结果
+    // 请求取消。下一次 process 接手（音频线程在 process 之前自己调的，这一块就接手），系数走斜坡恢复；结果丢弃，
+    // 状态回到 Idle。空闲时什么都不做，已 Done 就丢结果（只在非实时线程上丢：音频线程只在 active() 为真时调它）
     void cancel() noexcept;
+    // 音频线程：立即结束，不走斜坡，系数当场回到 1（调用方这一块不再用它们）；结果丢弃，状态回到 Idle。
+    // 系数已经离开过 1 时随后的 takeFadeInRequest 交出淡入请求（已经交过就不再交）。没在跑（Idle、Done）时什么都不做。
+    // 用在宿主旁路这一端的块上：旁路块必须逐位直通，回送交给安全链的淡入
+    void abort() noexcept;
     // 无条件回到空闲。只在音频没有在跑的时候用（prepare / release），音频线程不会再来接手 cancel
     void reset() noexcept;
     State state() const noexcept { return state_.load(std::memory_order_acquire); }

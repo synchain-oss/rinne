@@ -227,12 +227,17 @@ TEST_CASE("ping is only allowed with the transport stopped or the dry signal sil
         {
             for (const bool running : {false, true})
             {
-                ProbeStatus status;
-                status.transportPlaying = playing;
-                status.drySilent = silent;
-                status.pingRunning = running;
-                INFO("playing " << playing << " silent " << silent << " running " << running);
-                CHECK(pingAllowed(status) == (!running && (!playing || silent)));
+                for (const bool bypassed : {false, true})
+                {
+                    ProbeStatus status;
+                    status.transportPlaying = playing;
+                    status.drySilent = silent;
+                    status.pingRunning = running;
+                    status.bypassed = bypassed;
+                    INFO("playing " << playing << " silent " << silent << " running " << running << " bypassed "
+                                    << bypassed);
+                    CHECK(pingAllowed(status) == (!running && !bypassed && (!playing || silent)));
+                }
             }
         }
     }
@@ -631,6 +636,23 @@ TEST_CASE("the ping state machine runs once at a time", "[host][probe][ping]")
         CHECK_FALSE(ping.finish().ok);
     }
 
+    SECTION("a refused start leaves the run under way alone, and it still hands out exactly one fade-in request")
+    {
+        // 还没接手时再点一次、跑到静音段中途再点一次：都被拒，原来那次照常跑完，请求只有一次
+        REQUIRE(ping.start(300));
+        CHECK_FALSE(ping.start(300));
+        REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), 64));
+        for (int i = 0; i < 10; ++i)
+        {
+            REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), 64));
+            CHECK_FALSE(ping.takeFadeInRequest());
+        }
+        CHECK_FALSE(ping.start(300));
+        const PingTrace trace = drive(ping, 64);
+        CHECK(ping.state() == ProbePing::State::kDone);
+        CHECK(trace.requests == 1);
+    }
+
     SECTION("reset brings back an idle state machine whatever it was doing")
     {
         REQUIRE(ping.start());
@@ -835,6 +857,84 @@ TEST_CASE("the dry and return gains never step while a ping starts, runs and end
                     CHECK(trace.ret[i] <= trace.ret[i - 1]);
                 }
             }
+        }
+    }
+}
+
+TEST_CASE("abort ends a ping at once and hands the return over with one fade-in request", "[host][probe][ping]")
+{
+    const std::size_t ramp = ProbePing(kMaxDelay, kRate).rampSamples();
+    constexpr std::size_t kSettle = 3000;
+    constexpr std::size_t kBlockSize = 64;
+    std::vector<float> inject(kBlockSize, 5.0f);
+    std::vector<float> dry(kBlockSize, 7.0f);
+    std::vector<float> ret(kBlockSize, 9.0f);
+    const std::vector<float> readback(kBlockSize, 0.0f);
+
+    SECTION("armed: nothing was touched, so no request, and a new start runs normally")
+    {
+        ProbePing ping(kMaxDelay, kRate);
+        REQUIRE(ping.start(kSettle));
+        ping.abort();
+        CHECK(ping.state() == ProbePing::State::kIdle);
+        CHECK_FALSE(ping.takeFadeInRequest());
+        CHECK_FALSE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), kBlockSize));
+        CHECK(dry[0] == 7.0f);
+        REQUIRE(ping.start(kSettle));
+        CHECK(drive(ping, kBlockSize).requests == 1);
+    }
+
+    SECTION("idle or done: nothing happens, a finished result stays for finish")
+    {
+        ProbePing ping(kMaxDelay, kRate);
+        ping.abort();
+        CHECK(ping.state() == ProbePing::State::kIdle);
+        REQUIRE(ping.start());
+        CHECK(drive(ping, kBlockSize).requests == 1);
+        REQUIRE(ping.state() == ProbePing::State::kDone);
+        ping.abort();
+        CHECK(ping.state() == ProbePing::State::kDone);
+        CHECK_FALSE(ping.takeFadeInRequest());
+        (void)ping.finish();
+        CHECK(ping.state() == ProbePing::State::kIdle);
+    }
+
+    SECTION("running, in any phase: Idle at once, no result, and over the whole run exactly one request")
+    {
+        const std::size_t windowEnd = ramp + kSettle + kMaxDelay + kPingBuffer.size();
+        // 降的中途、静音段中途、注入中途（这三处请求还没交出，abort 之后交出），干声回升中途、回送等待中、回送放回的
+        // 中途（请求已经交出过，abort 不再交）
+        for (const std::size_t abortAfter : {ramp / 2, ramp + kSettle / 2, ramp + kSettle + 1000, windowEnd + ramp / 2,
+                                             windowEnd + ramp + 10, windowEnd + ramp + ramp / 2})
+        {
+            INFO("abort after " << abortAfter);
+            ProbePing ping(kMaxDelay, kRate);
+            REQUIRE(ping.start(kSettle));
+            std::size_t samples = 0;
+            std::size_t requests = 0;
+            while (samples < abortAfter && ping.active())
+            {
+                REQUIRE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), kBlockSize));
+                samples += kBlockSize;
+                if (ping.takeFadeInRequest())
+                {
+                    ++requests;
+                }
+            }
+            REQUIRE(ping.active());
+            ping.abort();
+            CHECK(ping.state() == ProbePing::State::kIdle);
+            if (ping.takeFadeInRequest())
+            {
+                ++requests;
+            }
+            CHECK(requests == 1);
+            CHECK_FALSE(ping.takeFadeInRequest());
+            CHECK_FALSE(ping.finish().ok);
+            CHECK_FALSE(ping.process(inject.data(), readback.data(), dry.data(), ret.data(), kBlockSize));
+            // 下一次从头来过，请求再出现一次
+            REQUIRE(ping.start());
+            CHECK(drive(ping, kBlockSize).requests == 1);
         }
     }
 }
@@ -1278,4 +1378,10 @@ TEST_CASE("status and counter text describe the host state", "[host][probe][text
     held.stateHeld = true;
     CHECK(contains(statusText(held), "\nstate: release-build state kept, panel changes are not saved"));
     CHECK_FALSE(contains(statusText(held), "saved with the project"));
+
+    // 旁路着：走带行后面注明，Ping 为什么点不了一看就知道
+    ProbeStatus bypassed;
+    bypassed.bypassed = true;
+    CHECK(contains(statusText(bypassed), "transport: stopped, dry: active, bypassed\n"));
+    CHECK_FALSE(contains(statusText(idle), "bypassed"));
 }

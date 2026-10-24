@@ -10,7 +10,8 @@
 //   - 每次回调对会合段头的 probe_call_seq 做 fetch_add（布局里已有这一格，正式版恒为 0），取不到就不写 B 行；
 //   - Ping 只在 Input 端：注入在引擎输出之后、读回取引擎的原始读头（安全链之前），回送的 500 ms 淡入借引擎的
 //     「载入预设」命令（presetSeq）触发，不改 core；
-//   - 两端一起被挂起超过 250 ms（Input 两块之间隔了这么久、环的写头也没走）→ 请求清空本地延迟线。
+//   - 两端一起被挂起超过 250 ms（Input 两块之间隔了这么久、环的写头也没走）→ 请求清空本地延迟线；
+//   - 旁路块不碰 Ping：宿主旁路 Input 时输出与输入逐位相同（引擎照常拉环、回送 10 ms 淡到 0），Ping 当场结束。
 // 线程：process 在音频线程，不分配、不加锁、不做 I/O（时钟只读单调时钟）；reset 可能在任意线程，只记数；
 // 其余（prepare、release、state、轨道信息、tick、面板）在非实时线程，共用一把锁。
 #pragma once
@@ -31,6 +32,7 @@
 #include "engine/InputEngine.h"
 #include "engine/OutputEngine.h"
 #include "ipc/ISegmentBackend.h"
+#include "ipc/IpcDiag.h"
 #include "ipc/Naming.h"
 #include "ipc/Rendezvous.h"
 
@@ -60,7 +62,7 @@ public:
     static constexpr int kTickHz = 25;
     static constexpr std::uint64_t kSuspendFlushNs = 250'000'000; // 两端一起挂起超过它就清空本地延迟线
     static constexpr float kSilentPeak = 1.0e-4f; // 干声块峰值不超过它算静音（-80 dBFS）
-    static constexpr int kScratchFrames = 32768; // Ping 的暂存；更长的块（环路不走的超长块）不跑 Ping
+    static constexpr int kScratchFrames = 32768; // Ping 的暂存；更长的块（环路不走的超长块）上 Ping 取消
     static constexpr double kPingMarginSeconds = 0.05;
 
     ProbeHost(juce::AudioProcessor& processor, ProbeHostConfig config);
@@ -114,6 +116,15 @@ public:
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
+    // ---- 后端错误码的转发出口（全进程一份，见 ProbeHost.cpp）----
+    // 构造时调用：把转发出口装进 IpcDiag 唯一的槽，换下来的出口记为转发目标（换下来的是自己就不记）
+    static void installIpcDiagSink() noexcept;
+    static ipc::IpcDiagSink ipcDiagRecorder() noexcept; // 转发出口本身
+    static ipc::IpcDiagSink ipcDiagForwardTarget() noexcept; // 它转发给谁
+    using InstallHook = void (*)() noexcept;
+    // 测试用：下一次 installIpcDiagSink 在换槽之前调它一次（模拟别的线程恰在这时也在装），调过就清掉
+    static void setIpcDiagInstallHook(InstallHook hook) noexcept;
+
 private:
     void timerCallback() override { tick(); }
 
@@ -128,7 +139,7 @@ private:
                        const engine::TransportInfo& transport, bool bypassed, const engine::EngineContext& context,
                        const ipc::BoundBlock& block, bool haveTimeline, std::int64_t timeline,
                        diag::BlockFields& fields) noexcept;
-    void applyPing(const engine::AudioView& view, int n) noexcept;
+    void applyPing(const engine::AudioView& view, int frames) noexcept;
     void audioEvent(diag::ProbeEventCode code, std::uint64_t a, std::uint64_t startNs) noexcept;
     static void onFade(void* context, engine::FadeReason reason) noexcept;
 
@@ -176,11 +187,11 @@ private:
     bool peerActive_ = false;
     bool wasPlaying_ = false;
     std::uint64_t recordDeadlineNs_ = 0;
-    bool autoTriggered_ = false;
     std::string autoKey_; // 上一次自动开窗的 (case, variant, 秒数)，同一组值不再开第二次
     std::uint32_t resetsLogged_ = 0;
     std::uint32_t lastPingSamples_ = 0;
     bool havePing_ = false;
+    int ipcError_ = 0; // 本实例会合 tick 期间后端报出的最后一个非零错误码（backend 事件的 b）
     Counts counts_;
 
     // ---- 跨线程的原子量 ----
@@ -196,6 +207,7 @@ private:
     std::atomic<std::uint32_t> suspendFlushes_{0};
     std::atomic<std::uint32_t> fadeIns_[6]{};
     std::atomic<bool> playing_{false};
+    std::atomic<bool> bypassed_{false};
     std::atomic<bool> drySilent_{true};
     std::atomic<bool> outputPeerActive_{false};
     static_assert(std::atomic<float>::is_always_lock_free);
@@ -214,6 +226,7 @@ private:
     std::uint64_t lastStartNs_ = 0;
     std::uint64_t lastBlockNs_ = 0;
     std::uint64_t lastHead_ = 0;
+    bool haveLastHead_ = false; // 上一块拿到了环（lastHead_ 有效）
     bool haveOutputW_ = false;
     std::uint64_t lastOutputW_ = 0;
     std::uint32_t lastOutputN_ = 0;
