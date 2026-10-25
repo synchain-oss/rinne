@@ -205,7 +205,11 @@ function steps.probeplay()
     wait(0.3)
 end
 
--- 导出格：开窗口后按工程里的渲染设置渲染（离线或 1x 由工程决定），等窗口到时再退出
+-- 渲染结束也是一次停走带，探针随后自动 Ping，约 4.4 s 才有结果（静音段、注入与回读、恢复、500 ms 淡入）。
+-- 导出格在渲染返回之后至少再等这么久才退出；稳态格停走带之后留的时间由场景表的秒数算出来，也是 6.5 s
+local afterRenderSeconds = 6.5
+
+-- 导出格：开窗口后按工程里的渲染设置渲染（离线或 1x 由工程决定），等窗口到时、且渲染结束后的 Ping 跑完再退出
 function steps.probeexport()
     openAndWait(job.project)
     local track = reaper.GetTrack(0, 0)
@@ -214,9 +218,10 @@ function steps.probeexport()
     wait(job.leadSeconds)
     local t0 = reaper.time_precise()
     reaper.Main_OnCommand(42230, 0) -- File: Render project, using the most recent render settings, auto-close render dialog
-    put("render_seconds", string.format("%.3f", reaper.time_precise() - t0))
+    local renderedAt = reaper.time_precise()
+    put("render_seconds", string.format("%.3f", renderedAt - t0))
     put("rendered", reaper.file_exists(job.wav))
-    waitUntil(armedAt + job.recordSeconds + job.marginSeconds)
+    waitUntil(math.max(armedAt + job.recordSeconds + job.marginSeconds, renderedAt + afterRenderSeconds))
     disarm(track, records)
     wait(0.3)
 end
