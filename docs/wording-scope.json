@@ -30,6 +30,10 @@
       "paths": ["docs/BUILDING.md", "docs/MAINTAINERS.md", "docs/testing/"]
     },
     {
+      "reason": "打包清单：发行 zip 根条目的名字，一行一个，不是写给用户看的文字",
+      "paths": ["packaging/manifest-win64.txt", "packaging/manifest-macos-arm64.txt"]
+    },
+    {
       "reason": "声明登记表与范围表自己：strong 短语栏与理由栏列的就是被管控的强断言与禁用词本身",
       "paths": ["docs/claims.json", "docs/wording-scope.json"]
     },

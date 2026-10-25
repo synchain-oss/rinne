@@ -13,8 +13,8 @@ verify-tag → build → package → notes → publish，最后建一个**草稿
 ## Tag 规则
 
 只接受两种形态：`vX.Y.Z`（正式版）与 `vX.Y.Z-rc.N`（预发布）。X.Y.Z 必须等于 CMake 里的版本；
-rc 不改 CMakeLists。其余一律拒：`-rc`、`-rc.1.2`、`-RC.1`、`-beta.1`、`v0.0.0-test`、无前导 `v`、带空白换行的、空串。**不做演练 tag**：发布路径靠 `check-release-tag.ps1 -SelfTest`、`check-release-ready`
-自测与 `package.ps1 -Preflight` 兜底。
+rc 不改 CMakeLists。其余一律拒（`-beta.1`、`-RC.1`、无前导 `v`、带空白换行的等）。**不做演练 tag**：发布路径靠
+`check-release-tag.ps1 -SelfTest`、`check-release-ready` 自测与 `package.ps1 -Preflight` 兜底。
 
 一个 tag 要同时满足下面五条，任何一条不成立，流水线在 verify-tag 就红：
 
@@ -27,8 +27,7 @@ rc 不改 CMakeLists。其余一律拒：`-rc`、`-rc.1.2`、`-RC.1`、`-beta.1`
    `CMakeLists.txt`、`third_party`、`tests`，外加 `.juce-commit`、`.juce-version`；只差文档、`packaging/`、
    `scripts/` 不算。rc 不受这一条约束。
 
-门禁分纯函数判据与取数层（祖先关系、rc 标签、源码差异）。`-SelfTest` 两层都测：取数层在临时 git 仓里造 prod 与
-非 prod 的提交、各种 tag 和改动，把整个门禁走一遍。
+`-SelfTest` 在临时 git 仓里造 prod 与非 prod 的提交、各种 tag 和改动，把整个门禁（含取数层）走一遍。
 
 ## CHANGELOG 约定
 
@@ -45,7 +44,7 @@ rc 不改 CMakeLists。其余一律拒：`-rc`、`-rc.1.2`、`-RC.1`、`-beta.1`
 - **谁持写权限**：只有 `publish`。**任一红不建草稿**：`notes` 的 `needs` 同时含两个打包 job。
 - **重跑**：*Re-run failed jobs* 与 *Re-run all jobs* 都行：每处 `upload-artifact` 都带 `overwrite: true`，
   不会撞同名 artifact。已有草稿 ⇒ 覆盖上传 6 件、清掉多出来的资产、重置正文；已**发布**的 Release 一律判红。
-  `gh release view` 只有报 `release not found` 才算“没有”，其余失败判红。rc 勾 pre-release。
+  rc 勾 pre-release。
 
 ## Release 的六个资产
 
@@ -58,7 +57,7 @@ rc 不改 CMakeLists。其余一律拒：`-rc`、`-rc.1.2`、`-RC.1`、`-beta.1`
 - `Rinne-v<X.Y.Z>-macos-arm64.zip`：2 个 `.vst3` + 2 个 `.component` + 安装与卸载脚本 + 同上的文件
 - `Rinne-v<X.Y.Z>-macos-arm64.zip.sha256`、`package-summary-macos-arm64.md`：同上
 
-zip 的根条目与 `packaging/manifest-*.txt` 逐项比对（集合相等且数量相等）。kit 包（带 `tools/rinne_nulltest`；
+zip 的根条目与 `packaging/manifest-*.txt` 逐项比对（集合与数量都相等）。kit 包（带 `tools/rinne_nulltest`；
 没有 tag，对应源码链接钉在 commit 上）只进 Actions artifact，**不进 Release**。
 
 ## 发版清单
@@ -68,15 +67,16 @@ zip 的根条目与 `packaging/manifest-*.txt` 逐项比对（集合相等且数
 - [ ] **第 0 步（首次公开发布前做一次）**：商标检索完成（USPTO、CIPO 第 9、41 类）；
       `CLAUDE_CODE_OAUTH_TOKEN` 剩余有效期 > 30 天。
 - [ ] CHANGELOG 切出 `[<版本>]` 小节；改 `CMakeLists.txt` 的版本；改 README 的状态行。
-- [ ] 三语审校：`docs/hard-rules.i18n.json` 的 `frReview.status` 改成 `reviewed`，填上 `reviewedBy`、
-      `reviewedZhSha256`（当前中文的合并哈希）与 `approvalUrl`（确认链接）。
+- [ ] 三语审校（发版前）：AI 以中文（`docs/USER_GUIDE.zh-CN.md`）为准交叉核对 `docs/hard-rules.i18n.json` 的英法译文；
+      维护者抽检后，在发版 PR 留一条确认评论。然后把 `frReview.status` 改成 `reviewed`：`reviewedBy` 填留评论的维护者的
+      GitHub 用户名，`approvalUrl` 填那条评论的链接，`reviewedZhSha256` 填 `node scripts/gen-docs.mjs --print-hashes`
+      的 `combined`。中文一改，记录即过期，要重做。
 - [ ] 强声明有证据：`docs/claims.json` 里每条声明的 evidence 都非空且成立；
       `docs/BUILDING.md` 存在（INSTALL.txt 指向它，缺了发版就红）。
 - [ ] 本地 `pwsh scripts/gates.ps1` 全量；`node scripts/check-release-ready.mjs --version <版本>`；
       NOTICES、`LICENSES/`、钉版复核；`node scripts/check-upstream.mjs --drift` 的输出贴进 PR。
 - [ ] feature→dev 由维护者批准后合；dev→prod 的 PR 跑完整 gate；在 prod 上打 tag 并推 tag（**只有维护者能做**）。
-- [ ] 核对草稿：恰好 6 个资产；两个 `.sha256` 用 INSTALL.txt 里教的命令自验（Windows
-      `Get-FileHash -Algorithm SHA256`，macOS `shasum -a 256 -c`）；zip 根条目逐项对照清单。
+- [ ] 核对草稿：恰好 6 个资产；两个 `.sha256` 用 INSTALL.txt 里教的命令自验；zip 根条目逐项对照清单。
 - [ ] 维护者手动发布；发布后：官网交接、Discussions 公告、更新 `docs/daw-tiers.json`。
 
 ### 发布说明模板
@@ -144,8 +144,7 @@ A published release is never rewritten. If this version is bad, publish a PATCH 
 
 ## 附录 A：维护者依赖与交接
 
-钉版真源（版本从钉版文件读，不写死）：Node、actionlint、clang-format、prettier、gitleaks、pluginval、sccache
-（各自的 `-version` 文件）、JUCE（`.juce-version` + `.juce-commit`）。打包与发版脚本：`scripts/package.ps1`、
+钉版文件清单见 `CLAUDE.md` 的「环境与钉版」一节，版本不在别处写死。打包与发版脚本：`scripts/package.ps1`、
 `scripts/package-macos.sh`、`scripts/check-release-tag.ps1`、`scripts/check-release-ready.mjs`（也渲染正文）、
 `scripts/gen-docs.d/provenance.mjs`（逐文件来源表）、`scripts/gates.d/60-package.ps1`。
 交接三件事：草稿由流水线建、维护者手动发布；tag 只打在 prod 上；改到流水线与合并判据的 PR 不自合。
@@ -159,14 +158,15 @@ A published release is never rewritten. If this version is bad, publish a PATCH 
   `non_fast_forward`、`pull_request`；pull_request 的 `required_approving_review_count` 为 0，
   `required_review_thread_resolution` 为 true。
 - **合并与仓库字段**：`gh api $R --jq '{allow_squash_merge,allow_merge_commit,allow_rebase_merge,squash_merge_commit_title,squash_merge_commit_message,merge_commit_title,merge_commit_message,delete_branch_on_merge,has_discussions}'`
-  ⇒ squash 与 merge 开、rebase 关；四项消息依次是 `PR_TITLE`、`PR_BODY`、`PR_TITLE`、`PR_BODY`；
+  ⇒ squash 与 merge 开、rebase 关；squash 标题 `PR_TITLE`、正文 `COMMIT_MESSAGES`，merge 标题 `PR_TITLE`、正文 `PR_BODY`；
   `delete_branch_on_merge` 为 false；`has_discussions` 为 true。
 - **密钥扫描与 push 保护**：`gh api $R --jq '.security_and_analysis|[.secret_scanning.status,.secret_scanning_push_protection.status]'`
   ⇒ 都是 `enabled`。
 - **Actions 白名单**：`gh api $R/actions/permissions/selected-actions` ⇒ `github_owned_allowed` 为 true，
-  `patterns_allowed` 与 `.github/actions-allowlist.json` 一致；`softprops/action-gh-release@*` 应移除
-  （release.yml 有意不用第三方发布 action）。
-- **钉 SHA**：`gh api $R/actions/permissions --jq .sha_pinning_required` ⇒ `true`（线上现为 `false`，开之前先在评审 bot 上实跑验证）。
+  `patterns_allowed` 含清单里的全部项。多出的 `qodo-ai/pr-agent@*`、`softprops/action-gh-release@*` 登记在清单的
+  `org_inherited_unused`：它们在 org 级放行，仓库级改不了（PUT 返回 409）。release.yml 有意不用第三方发布 action，
+  `workflows` 检查拒绝任何 workflow 引用它们。
+- **钉 SHA**：`gh api $R/actions/permissions --jq .sha_pinning_required` ⇒ `true`（已开启）。
 - **默认 workflow 权限**：`gh api $R/actions/permissions/workflow` ⇒ `default_workflow_permissions` 为 `read`，
   `can_approve_pull_request_reviews` 为 `false`。
 - **tag ruleset**：`gh api $R/rulesets --jq '.[]|select(.target=="tag")|[.id,.name]'` 取 id，再 `gh api $R/rulesets/<id>` ⇒
