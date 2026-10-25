@@ -12,8 +12,10 @@
 #   bash install-macos.sh --dry-run      只打印要做什么，不动任何文件
 #   bash install-macos.sh --self-test    判据自测（用临时目录，绝不碰真实的资源库）
 #
-# 外部命令（ditto / xattr / killall）的名字可以用环境变量换掉（RINNE_DITTO、RINNE_XATTR、
-# RINNE_KILLALL）：那是给自测换桩用的，让自测不依赖某台机器上装没装这些命令。
+# 外部命令（ditto / xattr / killall）：正常运行时一律用写死的系统路径（/usr/bin/ditto、/usr/bin/xattr、
+# /usr/bin/killall），不读任何环境变量——随包发出去的脚本不能被环境里的变量换掉要执行的命令
+# （比如 sudo -E 配 --system 时，那些命令会以 root 身份执行）。只有 --self-test 路径认 RINNE_DITTO、
+# RINNE_XATTR、RINNE_KILLALL：那是给自测换桩用的，让自测不依赖某台机器上装没装这些命令。
 # 命令不存在时脚本只告警、不中断，用户自己用 xattr 补一次也能继续。
 #
 # 删除纪律：升级时会删掉同名旧 bundle。删的目标只有四个写死的名字
@@ -33,11 +35,13 @@ Rinne Output.vst3
 Rinne Input.component
 Rinne Output.component"
 
-# 外部命令：默认用系统自带的；自测用环境变量换成桩。
+# 外部命令：正常路径写死系统自带的绝对路径，不读环境变量；只有自测路径（SELF_TEST_MODE=1，由 self_test 自己置位，
+# 这里无条件先置 0，所以环境里同名的变量改不了它）才认 RINNE_* 覆盖，换成桩。
 # 命令名在调用时现读（不是脚本开头展开的）：自测里换桩之后同一进程里也要生效。
-xattr_cmd() { printf '%s' "${RINNE_XATTR:-xattr}"; }
-killall_cmd() { printf '%s' "${RINNE_KILLALL:-killall}"; }
-ditto_cmd() { printf '%s' "${RINNE_DITTO:-ditto}"; }
+SELF_TEST_MODE=0
+xattr_cmd() { if [ "$SELF_TEST_MODE" = 1 ]; then printf '%s' "${RINNE_XATTR:-/usr/bin/xattr}"; else printf '%s' "/usr/bin/xattr"; fi; }
+killall_cmd() { if [ "$SELF_TEST_MODE" = 1 ]; then printf '%s' "${RINNE_KILLALL:-/usr/bin/killall}"; else printf '%s' "/usr/bin/killall"; fi; }
+ditto_cmd() { if [ "$SELF_TEST_MODE" = 1 ]; then printf '%s' "${RINNE_DITTO:-/usr/bin/ditto}"; else printf '%s' "/usr/bin/ditto"; fi; }
 
 # 临时目录的名字前缀带本进程号：删临时目录时据此确认「这是本进程建的」。
 TEMP_PREFIX="rinne-install-macos.$$"
@@ -135,7 +139,7 @@ install_bundles() { # $1 源目录 $2 VST3 目标目录 $3 Components 目标目�
     fi
     while IFS= read -r name; do
         [ -n "$name" ] || continue
-        [ -d "$src/$name" ] || die "发行包里没有 $name（在 $src 里找不到）"
+        [ -d "$src/$name" ] || die "发行包里没有 ${name}（在 $src 里找不到）"
         case "$name" in
             *.vst3) dest="$vst3" ;;
             *) dest="$comp" ;;
@@ -245,6 +249,7 @@ self_test() {
         return 1
     }
     TEMP_DIR="$work"
+    SELF_TEST_MODE=1
     trap 'cleanup_temp "$TEMP_DIR"' EXIT
 
     # 自测期间 HOME 指到临时目录：后面所有「默认装到 ~/Library」的断言都对着它，
@@ -551,6 +556,47 @@ EOF
         *) say 1 "缺 killall 时给出了告警" ;;
     esac
 
+    # ── 外部命令：正常路径写死系统路径，环境变量改不了；只有自测路径认 RINNE_* 覆盖 ────
+    # 随包发出去的脚本不能被环境里的变量换掉要执行的命令（sudo -E 配 --system 时那是 root 身份执行任意命令）。
+    local marker="$work/injected-ran" inj="$work/inject-cmd" got
+    printf '#!/bin/sh\necho ran >> "%s"\nexit 0\n' "$marker" > "$inj"
+    chmod 0755 "$inj"
+    got="$( SELF_TEST_MODE=0; RINNE_DITTO="$inj"; ditto_cmd )"
+    [ "$got" = "/usr/bin/ditto" ]
+    ok $? "正常路径：ditto 写死 /usr/bin/ditto，环境里的 RINNE_DITTO 不生效"
+    got="$( SELF_TEST_MODE=0; RINNE_XATTR="$inj"; xattr_cmd )"
+    [ "$got" = "/usr/bin/xattr" ]
+    ok $? "正常路径：xattr 写死 /usr/bin/xattr，环境里的 RINNE_XATTR 不生效"
+    got="$( SELF_TEST_MODE=0; RINNE_KILLALL="$inj"; killall_cmd )"
+    [ "$got" = "/usr/bin/killall" ]
+    ok $? "正常路径：killall 写死 /usr/bin/killall，环境里的 RINNE_KILLALL 不生效"
+    got="$( SELF_TEST_MODE=1; RINNE_DITTO="$inj"; RINNE_XATTR="$inj"; RINNE_KILLALL="$inj"; ditto_cmd; xattr_cmd; killall_cmd )"
+    [ "$got" = "$inj$inj$inj" ]
+    ok $? "自测路径：RINNE_DITTO / RINNE_XATTR / RINNE_KILLALL 才生效（上面所有桩调用靠它）"
+    got="$( SELF_TEST_MODE=1; unset RINNE_DITTO RINNE_XATTR RINNE_KILLALL; ditto_cmd; xattr_cmd; killall_cmd )"
+    [ "$got" = "/usr/bin/ditto/usr/bin/xattr/usr/bin/killall" ]
+    ok $? "自测路径没设覆盖变量时回到写死的系统路径"
+    # 反例（整条）：另起一个进程走正常路径，环境里把三个覆盖变量都指到会留痕的假命令，它们一个都不许被执行。
+    # 让这个进程在 ditto 复制完第一个 bundle 之后、还没碰 xattr 与 killall 之前就停下（主程序没有可执行位）：
+    # 自测不能真的去杀这台机器上的 AudioComponentRegistrar。HOME 指到临时目录。
+    local inj_home="$work/inject-home" inj_pkg="$work/pkg-inject" inj_out
+    mkdir -p "$inj_home" "$inj_pkg"
+    cp -R "$src/." "$inj_pkg/"
+    cp "$0" "$inj_pkg/install-macos.sh"
+    chmod -x "$inj_pkg/Rinne Input.vst3/Contents/MacOS/Rinne Input"
+    if [ -x "$inj_pkg/Rinne Input.vst3/Contents/MacOS/Rinne Input" ]; then
+        echo "SKIP  这个文件系统去不掉可执行位：正常路径整条跑一遍的反例跳过（上面的函数用例照常做）"
+    else
+        rm -f "$marker"
+        inj_out="$(HOME="$inj_home" RINNE_DITTO="$inj" RINNE_XATTR="$inj" RINNE_KILLALL="$inj" bash "$inj_pkg/install-macos.sh" 2>&1)"
+        [ ! -e "$marker" ]
+        ok $? "正常路径整条跑一遍：环境里指向假命令的 RINNE_DITTO / RINNE_XATTR / RINNE_KILLALL 一个都没被执行"
+        case "$inj_out" in
+            *"没有可执行位"* | *"复制"*"失败"*) say 0 "正常路径整条跑一遍：确实走到了复制那一步才停（反例不是空转）" ;;
+            *) say 1 "正常路径整条跑一遍：确实走到了复制那一步才停（反例不是空转）" ;;
+        esac
+    fi
+
     # ── 临时目录：删之前要核对真实路径在临时根下一层、名字带本进程前缀 ────
     if temp_dir_is_ours "$work"; then say 0 "本进程建的临时目录认得出"; else say 1 "本进程建的临时目录认得出"; fi
     if temp_dir_is_ours "${TMPDIR:-/tmp}"; then say 1 "临时根目录本身不该被当成可删目录"; else say 0 "临时根目录本身不该被当成可删目录"; fi
@@ -595,7 +641,7 @@ main() {
     vst3="$(target_dirs "$scope" | sed -n 1p)"
     comp="$(target_dirs "$scope" | sed -n 2p)"
 
-    echo "$PROG：把 Rinne 的四个插件 bundle 装到下面两个目录"
+    echo "${PROG}：把 Rinne 的四个插件 bundle 装到下面两个目录"
     echo "  $vst3"
     echo "  $comp"
     if [ "$scope" = system ] && [ "$dry" != yes ] && [ "$(id -u)" != "0" ]; then

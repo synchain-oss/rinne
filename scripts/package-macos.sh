@@ -431,6 +431,23 @@ cleanup_temp() {
     return 0
 }
 
+# 脚本是不是走完了：只有 main（或 --self-test）正常返回之后，文件末尾才把它置 1。
+PKG_FINISHED=0
+
+# 退出时的收尾：清掉本进程建的临时目录，并拦住「没走完却以 0 退出」。
+# macOS 自带的 bash 3.2 在 set -u 下遇到未定义的变量（比如变量名后紧跟全角标点被当成变量名的一部分），会直接结束整个脚本，
+# 而且装了 EXIT trap 时，进入 trap 的 $? 是出事前最后一条命令的状态，常常是 0：脚本半路死了，调用它的 CI 步骤却是绿的，
+# 后面的上传步骤再报「没有文件」。所以到这里 $? 是 0、脚本却没走完，一律按失败处理。
+on_exit() {
+    local rc=$?
+    cleanup_temp "$TEMP_DIR"
+    if [ "$rc" -eq 0 ] && [ "$PKG_FINISHED" -ne 1 ]; then
+        echo "$PROG: 脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理" >&2
+        exit 1
+    fi
+}
+trap on_exit EXIT
+
 # ── 输出目录的删除纪律 ────────────────────────────────────────────────────────
 
 # 输出目录只写不删。删的只有「输出目录里的单个文件」：输出目录不能是盘根、仓根、仓根的上级目录、
@@ -518,7 +535,7 @@ pinned_node() {
     want="$(tr -d '[:space:]' < "$REPO_ROOT/.node-version" | cut -d. -f1)"
     have="$("$node" --version 2>/dev/null | sed -nE 's/^v([0-9]+).*/\1/p')"
     if [ "$have" != "$want" ]; then
-        echo "$PROG: 需要 Node $want（.node-version），得到 '${have:-找不到}'" >&2
+        echo "$PROG: 需要 Node ${want}（.node-version），得到 '${have:-找不到}'" >&2
         return 1
     fi
     printf '%s' "$node"
@@ -587,7 +604,7 @@ install_source_problems() {
     first="$(printf '%s\n' "$text" | awk 'NR > 1 && NF { print; exit }')"
     case "$first" in
         "$head_pat"*) ;;
-        *) echo "INSTALL.txt 标题之后的第一段不是对应源码指引（要以「$head_pat」开头）"; bad=$((bad + 1)) ;;
+        *) echo "INSTALL.txt 标题之后的第一段不是对应源码指引（要以「${head_pat}」开头）"; bad=$((bad + 1)) ;;
     esac
     source_needle_problem "$text" "$read_line" "Rinne  $version: $source_url" "Rinne $version 对应 $source_url" || bad=$((bad + 1))
     source_needle_problem "$text" "$read_line" "(commit $commit)" "源码 commit $commit" || bad=$((bad + 1))
@@ -796,7 +813,7 @@ bundle_arch_problems() {
         macho=$((macho + 1))
         archs="$("$(lipo_cmd)" -archs "$f" 2>&1)" || archs="lipo 读不出：$archs"
         if ! macho_arch_error "$archs" >/dev/null; then
-            echo "$f：架构是 '$(printf '%s' "$archs" | tr -s '[:space:]' ' ')'，本包只出 arm64 单架构"
+            echo "${f}：架构是 '$(printf '%s' "$archs" | tr -s '[:space:]' ' ')'，本包只出 arm64 单架构"
             n=$((n + 1))
         fi
     done 3< <(find "$bundle" -type f -print0)
@@ -927,7 +944,6 @@ main() {
     local work
     work="$(mktemp -d "${TMPDIR:-/tmp}/${TEMP_PREFIX}.XXXXXX")" || die "建不出临时目录"
     TEMP_DIR="$work"
-    trap 'cleanup_temp "$TEMP_DIR"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
@@ -990,14 +1006,14 @@ main() {
 
     if [ "$dry_run" -eq 1 ]; then
         echo "[DryRun] 仓根      : $REPO_ROOT"
-        echo "[DryRun] 版本      : $version（来自 $version_from；package.ps1 读到的 cmakeVersion 是 $mf_cmake）"
+        echo "[DryRun] 版本      : ${version}（来自 ${version_from}；package.ps1 读到的 cmakeVersion 是 ${mf_cmake}）"
         echo "[DryRun] tag       : $tag"
         echo "[DryRun] 构建目录  : $build_dir"
         echo "[DryRun] 输出目录  : $out_dir"
         echo "[DryRun] zip       : $out_dir/$zip_name"
         echo "[DryRun] sha256    : $out_dir/$sha_name"
         echo "[DryRun] summary   : $out_dir/$summary_name"
-        echo "[DryRun] kit       : $(if [ "$kit" -eq 1 ]; then echo "是（$kit_name）"; else echo '否'; fi)"
+        echo "[DryRun] kit       : $(if [ "$kit" -eq 1 ]; then echo "是（${kit_name}）"; else echo '否'; fi)"
         echo "[DryRun] 合规      : $(mf_all "$pf" license | grep -c . || true) 份随包许可文件、$(mf_all "$pf" cited | grep -c . || true) 条被点名的声明路径（都由 package.ps1 -Preflight 核过）"
         echo "[DryRun] 好了 —— 什么都没构建。"
         return 0
@@ -1048,7 +1064,7 @@ main() {
         "$(otool_cmd)" -l "$exe" > "$work/otool.txt" 2>/dev/null || die "'$exe' 的 otool -l 失败"
         minos="$(awk '/LC_BUILD_VERSION/ { f = 1 } f && $1 == "minos" { print $2; exit }' "$work/otool.txt")"
         printf '%s\t%s\n' "$name" "${minos:-?}" >> "$work/minos.txt"
-        echo "bundle 可用：$name（arm64 单架构，minos ${minos:-?}）"
+        echo "bundle 可用：${name}（arm64 单架构，minos ${minos:-?}）"
     done 3<<EOF
 $found
 EOF
@@ -1221,7 +1237,7 @@ EOF
     fi
 
     echo "$PROG: 好了"
-    echo "  zip      $out_real/$zip_name（$size 字节，$n_entries 个文件）"
+    echo "  zip      $out_real/${zip_name}（$size 字节，$n_entries 个文件）"
     echo "  sha256   $hash"
     echo "  summary  $out_real/$summary_name"
     return 0
@@ -1259,7 +1275,7 @@ st_ok() {
 st_red() {
     local d="$1"
     shift
-    if ( "$@" ) >/dev/null 2>&1; then st_fail "$d（本该红却绿了）"; else st_pass "$d"; fi
+    if ( "$@" ) >/dev/null 2>&1; then st_fail "${d}（本该红却绿了）"; else st_pass "$d"; fi
 }
 st_eq() { # 描述 实际 期望
     if [ "$2" = "$3" ]; then st_pass "$1"; else st_fail "$1（期望 '$3'，实际 '$2'）"; fi
@@ -1546,6 +1562,22 @@ st_run_pkg() {
     ) > "$ST_WORK/last.log" 2>&1
 }
 
+# 往假仓库里那份脚本的副本里注入一行（在整行逐字相等的锚点之前或之后）。锚点必须恰好命中一次，否则注入失败、用例本身没意义。
+# 用于「脚本内部出错必须让整个脚本非 0」的反例：被测的是出错之后的退出行为，不是注入点本身。
+st_inject() { # $1 锚点（整行逐字） $2 要插入的行 $3 before|after
+    local f="$ST_WORK/fake/scripts/package-macos.sh" tmp="$ST_WORK/inject.tmp"
+    if awk -v anchor="$1" -v line="$2" -v where="$3" '
+        $0 == anchor { n++; if (where == "before") print line; print; if (where == "after") print line; next }
+        { print }
+        END { exit(n == 1 ? 0 : 3) }' "$f" > "$tmp"; then
+        cp "$tmp" "$f"
+    else
+        return 1
+    fi
+}
+# 把假仓库里的副本恢复成正在跑的这一份。
+st_inject_reset() { cp "$ST_SELF" "$ST_WORK/fake/scripts/package-macos.sh"; }
+
 # 该红的整条流水线用例：跑出非 0，且输出目录里没有 zip（旧的也不许留着冒充）。
 # ST_EXPECT 非空时，日志里还必须有这句话：红得有理由，不能因为别的原因碰巧红了。
 st_red_run() { # 描述 输出目录 zip 名 参数…
@@ -1553,11 +1585,11 @@ st_red_run() { # 描述 输出目录 zip 名 参数…
     ST_EXPECT=""
     shift 3
     if st_run_pkg "$out" "$@"; then
-        st_fail "$d（本该红却绿了）"
+        st_fail "${d}（本该红却绿了）"
     elif [ -e "$out/$zipn" ]; then
-        st_fail "$d（红了，但输出目录里留下了 zip）"
+        st_fail "${d}（红了，但输出目录里留下了 zip）"
     elif [ -n "$want" ] && ! grep -qF -- "$want" "$ST_WORK/last.log"; then
-        st_fail "$d（红了，但不是预期的原因：日志里没有 '$want'）"
+        st_fail "${d}（红了，但不是预期的原因：日志里没有 '$want'）"
         sed 's/^/        | /' "$ST_WORK/last.log"
     else
         st_pass "$d"
@@ -1613,7 +1645,7 @@ PS
         "$real_pwsh" -NoProfile -File "$(native_path "$work/agree.ps1")" \
             -Lib "$(native_path "$REPO_ROOT/scripts/lib/release-version.ps1")" -Dir "$(native_path "$cm")" > "$work/agree.tsv" 2>/dev/null
         for k in ok commented minonly other rinnex myver twopart anyorder multiline indented outside prerelease empty; do
-            st_eq "两个解析器一致（$k）：sh 与 release-version.ps1" \
+            st_eq "两个解析器一致（${k}）：sh 与 release-version.ps1" \
                 "$(read_cmake_version "$cm/$k.txt")" "$(awk -F'\t' -v n="$k" '$1 == n { print $2 }' "$work/agree.tsv")"
         done
     else
@@ -2227,6 +2259,56 @@ st_pipeline() {
     ST_EXPECT="没有 rinne_nulltest"
     st_red_run "kit：构建目录里没有 rinne_nulltest → 红" "$work/okit5" "$kitn.zip" --version 0.9.0 --build-dir "$bk" --kit --kit-name "$kitn"
 
+    # ── 脚本内部出错，整个脚本必须非 0，且输出目录里不留 zip ─────────────────────
+    # macOS 自带的 bash 3.2 在 set -u 下遇到未定义的变量会直接结束整个脚本；装了 EXIT trap 时退出码常常是 0
+    # （CI 里「Package kit」就这样绿着、上传步骤才报没有文件）。往副本里注入一个未定义变量的展开，看整条流水线的退出行为：
+    #   a. 注入在 bundle 检查函数里（经 gate 的命令替换跑，只结束那个子 shell，gate 看到非 0 后判红）；
+    #   b. 注入在 main 的主流程里（CI 里红过的形状：直接结束整个脚本）。b 在 bash 3.2 上靠 EXIT trap 里的「没走完」判据拦住；
+    #      bash 4 以上本来就是 1，所以这条要在 mac（或别的 3.2）上才真起作用，本机 bash 5 上只证明「注入确实让它红了」；
+    #   c. 注入在自测自己里：自测半路出错也必须非 0，不能静默结束还报通过。
+    local injected_line='    : "$rinne_test_unset_var"'
+    nb
+    if st_inject '    local bundle="$1" f archs n=0 macho=0' "$injected_line" after; then
+        ST_EXPECT="架构不合格"
+        st_red_run "出错：bundle 检查函数里变量展开出错 → 整个脚本非 0，不留 zip" "$work/ob$n" "$zip0" --version 0.9.0 --build-dir "$bx"
+    else
+        st_fail "出错：bundle 检查函数里变量展开出错 → 整个脚本非 0（注入点没找到，用例失效）"
+    fi
+    st_inject_reset
+    nb
+    if st_inject '    local stage="$work/stage"' "$injected_line" before; then
+        ST_EXPECT="unbound variable"
+        st_red_run "出错：主流程里变量展开出错 → 整个脚本非 0，不留 zip" "$work/ob$n" "$zip0" --version 0.9.0 --build-dir "$bx"
+    else
+        st_fail "出错：主流程里变量展开出错 → 整个脚本非 0（注入点没找到，用例失效）"
+    fi
+    st_inject_reset
+    # 正例：注入还原之后同一份构建目录照样打得出来；--help 正常返回也是 0（「走完了」的标记不能把正常的提前返回拦成失败）。
+    if st_run_pkg "$work/ob-reset" --version 0.9.0 --build-dir "$b1"; then
+        st_eq "出错：注入还原后恢复正常打包" "$([ -e "$work/ob-reset/$zip0" ] && echo there || echo gone)" there
+    else
+        st_fail "出错：注入还原后恢复正常打包"
+        sed 's/^/        | /' "$work/last.log"
+    fi
+    if st_run_pkg "$work/ob-help" --help; then
+        st_contains "出错：--help 提前返回仍然是 0" "$(cat "$work/last.log")" "用法：package-macos.sh"
+    else
+        st_fail "出错：--help 提前返回仍然是 0"
+        sed 's/^/        | /' "$work/last.log"
+    fi
+    if st_inject 'st_eq() { # 描述 实际 期望' "$injected_line" after; then
+        if (cd -- "$ST_WORK/fake" && bash "$ST_WORK/fake/scripts/package-macos.sh" --self-test units) > "$work/self-inject.log" 2>&1; then
+            st_fail "出错：自测半路变量展开出错 → 自测整体非 0（本该红却绿了）"
+        elif grep -q "package-macos 自测通过" "$work/self-inject.log"; then
+            st_fail "出错：自测半路变量展开出错 → 自测整体非 0（红了，但还打印了「自测通过」）"
+        else
+            st_pass "出错：自测半路变量展开出错 → 自测整体非 0，也没打印「自测通过」"
+        fi
+    else
+        st_fail "出错：自测半路变量展开出错 → 自测整体非 0（注入点没找到，用例失效）"
+    fi
+    st_inject_reset
+
 }
 
 # 第 16 组：对着真的 package.ps1 与文档生成器核一遍（有 pwsh 才做）。
@@ -2279,13 +2361,19 @@ EOF
 # 第 17 组：安装 / 卸载脚本各自的自测（它们自己用临时 HOME，绝不碰真实的资源库）。
 st_subs() {
     # ── 17. 安装 / 卸载脚本各自的自测（临时 HOME，绝不碰真实的资源库） ─────────
-    local sub out
+    # 退出码 0 还不够：bash 3.2 下子脚本半路被变量展开出错结束时退出码可能是 0，所以还要看到它最后打印的「自测通过」。
+    local sub out rc
     for sub in install-macos.sh uninstall-macos.sh; do
         out="$(bash "$REPO_ROOT/packaging/macos/$sub" --self-test 2>&1)"
-        if [ $? -eq 0 ]; then
+        rc=$?
+        case "$out" in
+            *"${sub%.sh} 自测通过"*) ;;
+            *) rc=99 ;;
+        esac
+        if [ "$rc" -eq 0 ]; then
             st_pass "$sub --self-test"
         else
-            st_fail "$sub --self-test"
+            st_fail "$sub --self-test（要退出码 0，并且打印「自测通过」）"
             printf '%s\n' "$out" | sed 's/^/        | /'
         fi
     done
@@ -2306,7 +2394,6 @@ self_test() {
     }
     TEMP_DIR="$work"
     ST_WORK="$work"
-    trap 'cleanup_temp "$TEMP_DIR"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
@@ -2340,8 +2427,11 @@ self_test() {
 case "${1:-}" in
     --self-test)
         shift
-        self_test "$@"
-        exit $?
+        self_test_rc=0
+        self_test "$@" || self_test_rc=$?
+        PKG_FINISHED=1
+        exit "$self_test_rc"
         ;;
 esac
 main "$@"
+PKG_FINISHED=1

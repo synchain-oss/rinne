@@ -7,6 +7,8 @@
 #      紧接着是发版判据的两个自测：scripts/check-release-tag.ps1 -SelfTest（tag 门禁，含临时 git 仓里的取数层）与
 #      node scripts/check-release-ready.mjs --self-test（发版就绪，含临时仓的端到端）。发版没有演练 tag，
 #      这两道门第一次真跑就是真发版，所以每次 Full 档都在这里把它们的判据过一遍。
+#   2c. bash 3.2 兼容扫描：git 跟踪的所有 *.sh 里，「$变量」后面紧跟非 ASCII 字符的写法一律判红（macOS 自带的
+#      bash 3.2 会把它当成变量名的一部分，set -u 下脚本静默结束、退出码可能是 0）。带坏样例与正例自测。
 #   3. 假版本打包：在本进程用 New-RinneTempDir 建的临时目录里造一个假 BuildDir（两个 .vst3，各含
 #      Contents/x86_64-win/<名字>），跑 package.ps1 打一个 0.0.0-local 的假包，再把 zip 的根条目与
 #      packaging/manifest-win64.txt 逐条比对。
@@ -106,6 +108,65 @@ function Invoke-RinneRelSelfTests([string]$Root, [object[]]$Steps, [scriptblock]
     return $null
 }
 
+# ── bash 3.2 兼容扫描 ─────────────────────────────────────────────────────────
+# macOS 自带的 /bin/bash 是 3.2。变量名后紧跟非 ASCII 字符（全角标点、中文）时，3.2 在 UTF-8 下把多字节的首字节
+# 当成变量名的一部分：set -u 下直接 unbound variable，随后整个脚本静默结束，调用它的 CI 步骤退出码可能是 0。
+# Windows 与 Linux 的 bash 上看不出来，所以只能靠扫描：对 git 跟踪的所有 *.sh 逐个扫，命中即红（一律写成 ${name}）。
+# mac CI 的 scripts/ci/mac/selftest.sh 扫同一个模式（那边在真 mac 上、用 BSD grep 跑），这里是本机 Full 档的那一份。
+# 文件按字节读（Latin-1 一一对应），模式与 `LC_ALL=C grep -P` 的 \$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff] 逐字相同。
+# 不是 mac 上跑的脚本（只在 Linux 上跑，bash 4 以上）登记在这里，整条路径逐字匹配，不是前缀、不是后缀、不是通配。
+$script:RinneBash32Pattern = '\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xFF]'
+$script:RinneBash32Exempt = @('tests/sanitizer-canary/run.sh')
+
+# 登记过的 Linux 专用脚本（区分大小写，整条路径相等）。
+function Test-RinneBash32Exempt([string]$RelPath) {
+    $script:RinneBash32Exempt -ccontains $RelPath
+}
+
+# 一段字节里的命中：每个命中一行 "<行号>:<内容>"。匹配按 Latin-1 逐字节做；显示的内容按 UTF-8 还原
+# （UTF-8 的多字节序列里不会出现 0x0A，两种解码切出来的行一一对应）。
+function Get-RinneBash32Hits([byte[]]$Bytes) {
+    $raw = [System.Text.Encoding]::Latin1.GetString($Bytes) -split "`n"
+    $shown = [System.Text.Encoding]::UTF8.GetString($Bytes) -split "`n"
+    $hits = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $raw.Count; $i++) {
+        if ($raw[$i] -cmatch $script:RinneBash32Pattern) { $hits.Add("$($i + 1):$($shown[$i].TrimEnd("`r"))") }
+    }
+    $hits.ToArray()
+}
+
+# 一批文件的问题清单（纯函数）。Items 里每项有 Path（仓内相对路径）与 Bytes。登记过的路径跳过。
+function Get-RinneBash32Problems([object[]]$Items) {
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($it in $Items) {
+        if (Test-RinneBash32Exempt $it.Path) { continue }
+        foreach ($h in (Get-RinneBash32Hits $it.Bytes)) { $out.Add("$($it.Path):$h") }
+    }
+    $out.ToArray()
+}
+
+# git 跟踪的所有 *.sh，连同它们的字节。Root 是仓根（也可以是自测造的临时 git 仓）。
+function Get-RinneBash32Items([string]$Root) {
+    $ErrorActionPreference = 'Continue'
+    $global:LASTEXITCODE = 0
+    $files = @(& git -c core.quotepath=false -C $Root ls-files -- '*.sh' 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) { throw "git ls-files 失败（退出码 $LASTEXITCODE）：$($files -join ' ')" }
+    foreach ($f in $files) {
+        if (-not $f) { continue }
+        [pscustomobject]@{ Path = $f; Bytes = [IO.File]::ReadAllBytes((Join-Path $Root $f)) }
+    }
+}
+
+# gate 里的一步：扫完有命中就返回 FAIL 结论，干净返回 $null。Lines 是调用方的 List，这里往里追加。
+function Invoke-RinneBash32Scan([string]$Root, $Lines) {
+    $items = @(Get-RinneBash32Items $Root)
+    $problems = @(Get-RinneBash32Problems $items)
+    $Lines.Add("--- bash 3.2 兼容扫描：git 跟踪的 *.sh 共 $($items.Count) 个，命中 $($problems.Count) 处")
+    if ($problems.Count -eq 0) { return $null }
+    foreach ($p in $problems) { $Lines.Add($p) }
+    New-RinnePkgResult 'FAIL' "有 $($problems.Count) 处「`$变量」后面紧跟非 ASCII 字符（macOS 自带的 bash 3.2 会把它当成变量名的一部分；改成 `${name}）" $Lines.ToArray()
+}
+
 # Node 用钉版：先找环境变量 RINNE_NODE，再找 git config rinne.node，最后退回 PATH（与 50-web.ps1 同一套口径）。
 function Get-RinnePkgNode($Ctx) {
     $p = & $Ctx.Setting 'RINNE_NODE' 'rinne.node'
@@ -149,6 +210,10 @@ function Invoke-RinnePackageGate($Ctx) {
     $relSteps = Get-RinneRelSelfTestSteps $root (Get-Process -Id $PID).Path (Get-RinnePkgNode $Ctx)
     $relFail = Invoke-RinneRelSelfTests $root $relSteps ${function:Invoke-RinneRelSelfTest} $lines
     if ($relFail) { return $relFail }
+
+    # 2c. bash 3.2 兼容扫描：命中即红，不往下打假包。
+    $b32Fail = Invoke-RinneBash32Scan $root $lines
+    if ($b32Fail) { return $b32Fail }
 
     # 3. 假版本打包 + 清单比对。0.0.0-local 只是本地假版本号：不涉及任何 tag，也不写进任何仓内文件。
     $tmp = New-RinneTempDir -Prefix 'rinne-gate-pkg-'
@@ -247,6 +312,72 @@ function Test-RinneGates([string]$Root) {
         Passed = ($relBad -and $relBad.Status -eq 'FAIL' -and $relBad.Reason -like "*$($relSteps[1].Label)*") }
     [pscustomobject]@{ Label = '发版判据自测编排：红了就停，后面的自测不再跑'; Bad = $true
         Passed = ($relCalls.Count -eq 2) }
+
+    # bash 3.2 兼容扫描：坏样例要被报出来，正例不许误报；登记表只认整条路径；真走 git ls-files 的路径也过一遍。
+    # 样例的字节在这里用 [char] 拼出来：这个文件自己不含「变量名后紧跟非 ASCII」的写法。
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $colon = [string][char]0xFF1A; $rparen = [string][char]0xFF09; $han = [string][char]0x4E2D
+    $b32 = { param([string]$Text) @(Get-RinneBash32Hits $utf8.GetBytes($Text)).Count }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：$name 后紧跟全角冒号要报出来'; Bad = $true; Passed = (& $b32 ('echo "$name' + $colon + 'x"')) -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：单字母变量后紧跟全角括号要报出来'; Bad = $true; Passed = (& $b32 ('echo "($k' + $rparen)) -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：下划线变量名后紧跟非 ASCII 要报出来'; Bad = $true; Passed = (& $b32 ('echo "$_' + $colon + '"')) -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：变量后紧跟汉字要报出来'; Bad = $true; Passed = (& $b32 ('echo "$name' + $han + '"')) -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：不在引号里的 $name 后紧跟非 ASCII 要报出来'; Bad = $true; Passed = (& $b32 ('x=$name' + $colon)) -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：命中在第 3 行时报的行号是 3'; Bad = $true
+        Passed = ((@(Get-RinneBash32Hits $utf8.GetBytes("echo ok`necho ok`ndie `"$han`$name$colon`"`n"))[0]) -like '3:*') }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：${name} 后紧跟非 ASCII 不误报'; Bad = $false; Passed = (& $b32 ('echo "${name}' + $colon + 'x"')) -eq 0 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：特殊参数 $1 $# $? $@ 后紧跟非 ASCII 不误报'; Bad = $false; Passed = (& $b32 ('echo "$1' + $colon + '" "$#' + $colon + '" "$?' + $colon + '" "$@' + $colon + '"')) -eq 0 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：${x:-汉字} 的默认值里有汉字不误报'; Bad = $false; Passed = (& $b32 ('echo "${have:-' + $han + '}"')) -eq 0 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：变量后面先有空格不误报'; Bad = $false; Passed = (& $b32 ('echo "$name x' + $colon + '"')) -eq 0 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：变量在引号里、非 ASCII 在引号外不误报'; Bad = $false; Passed = (& $b32 ('echo "$name"' + $colon)) -eq 0 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：行尾是 CRLF 不误报'; Bad = $false; Passed = (& $b32 "echo `"`$name`"`r`n") -eq 0 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：纯中文行不误报'; Bad = $false; Passed = (& $b32 ('echo ' + $han + $colon)) -eq 0 }
+    # 接线：gate 主体里真的调了这一步（删掉那一行调用，别的用例都还绿，只有这一条会红），而且在假版本打包之前。
+    $gateSrc = (${function:Invoke-RinnePackageGate}).ToString()
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：gate 主体里调用了它，且在假版本打包之前'; Bad = $true
+        Passed = ($gateSrc.IndexOf('Invoke-RinneBash32Scan') -ge 0 -and $gateSrc.IndexOf('Invoke-RinneBash32Scan') -lt $gateSrc.IndexOf('# 3. 假版本打包')) }
+    $badItem = { param([string]$P) [pscustomobject]@{ Path = $P; Bytes = $utf8.GetBytes('echo "$name' + $colon + '"') } }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：登记过的 Linux 专用脚本放行（整条路径相等）'; Bad = $false
+        Passed = @(Get-RinneBash32Problems @(& $badItem 'tests/sanitizer-canary/run.sh')).Count -eq 0 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：登记表不是后缀匹配'; Bad = $true
+        Passed = @(Get-RinneBash32Problems @(& $badItem 'scripts/tests/sanitizer-canary/run.sh')).Count -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：登记表不是前缀匹配'; Bad = $true
+        Passed = @(Get-RinneBash32Problems @(& $badItem 'tests/sanitizer-canary/run.sh.bak')).Count -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：登记表区分大小写'; Bad = $true
+        Passed = @(Get-RinneBash32Problems @(& $badItem 'Tests/sanitizer-canary/run.sh')).Count -eq 1 }
+    [pscustomobject]@{ Label = 'bash 3.2 扫描：打包脚本不在登记表里'; Bad = $true
+        Passed = @(Get-RinneBash32Problems @(& $badItem 'scripts/package-macos.sh')).Count -eq 1 }
+    # 整仓：临时 git 仓里放好文件 → 绿；再放一个坏文件 → 红并点名；登记路径里的坏写法放行；未跟踪的 .sh 与非 .sh 不扫。
+    $b32tmp = New-RinneTempDir -Prefix 'rinne-gate-b32-selftest-'
+    try {
+        $null = & git -C $b32tmp init -q 2>&1
+        $null = & git -C $b32tmp config core.autocrlf false 2>&1
+        $null = New-Item -ItemType Directory -Path (Join-Path $b32tmp 'scripts'), (Join-Path $b32tmp 'tests/sanitizer-canary'), (Join-Path $b32tmp 'other') -Force
+        $wr = { param($rel, $text) [IO.File]::WriteAllBytes((Join-Path $b32tmp $rel), $utf8.GetBytes($text)); $null = & git -C $b32tmp add -- $rel 2>&1 }
+        & $wr 'scripts/good.sh' ('echo "${name}' + $colon + 'x"' + "`n")
+        $scanClean = New-Object System.Collections.Generic.List[string]
+        [pscustomobject]@{ Label = 'bash 3.2 整仓扫描：只有好文件时通过'; Bad = $false; Passed = ($null -eq (Invoke-RinneBash32Scan $b32tmp $scanClean)) }
+        & $wr 'scripts/bad.sh' ('echo "$name' + $colon + 'x"' + "`n")
+        $scanLines = New-Object System.Collections.Generic.List[string]
+        $scanRes = Invoke-RinneBash32Scan $b32tmp $scanLines
+        [pscustomobject]@{ Label = 'bash 3.2 整仓扫描：混进一个坏文件就红，并点名文件与行号'; Bad = $true
+            Passed = ($scanRes -and $scanRes.Status -eq 'FAIL' -and ($scanLines -contains ('scripts/bad.sh:1:echo "$name' + $colon + 'x"'))) }
+        $null = & git -C $b32tmp rm -q -f --cached -- scripts/bad.sh 2>&1
+        & $wr 'tests/sanitizer-canary/run.sh' ('echo "$name' + $colon + 'x"' + "`n")
+        [pscustomobject]@{ Label = 'bash 3.2 整仓扫描：登记过的路径里有坏写法也放行'; Bad = $false
+            Passed = ($null -eq (Invoke-RinneBash32Scan $b32tmp (New-Object System.Collections.Generic.List[string]))) }
+        & $wr 'other/run.sh' ('echo "$name' + $colon + 'x"' + "`n")
+        [pscustomobject]@{ Label = 'bash 3.2 整仓扫描：同名文件在别的目录里不放行'; Bad = $true
+            Passed = ($null -ne (Invoke-RinneBash32Scan $b32tmp (New-Object System.Collections.Generic.List[string]))) }
+        $null = & git -C $b32tmp rm -q -f --cached -- other/run.sh 2>&1
+        [IO.File]::WriteAllBytes((Join-Path $b32tmp 'other/untracked.sh'), $utf8.GetBytes('echo "$name' + $colon + 'x"' + "`n"))
+        & $wr 'other/notes.txt' ('echo "$name' + $colon + 'x"' + "`n")
+        [pscustomobject]@{ Label = 'bash 3.2 整仓扫描：未跟踪的 .sh 与非 .sh 文件不扫'; Bad = $false
+            Passed = ($null -eq (Invoke-RinneBash32Scan $b32tmp (New-Object System.Collections.Generic.List[string]))) }
+    } finally {
+        $b32left = Remove-RinneTempDir -Path $b32tmp -WaitSeconds 5
+        [pscustomobject]@{ Label = 'bash 3.2 整仓扫描自测建的临时目录删掉了'; Bad = $true; Passed = ($null -eq $b32left) }
+    }
 
     # 清单比对的纯函数：一致时没有差异，多一项与少一项都要被报出来。
     $ok = @('Rinne Input.vst3/', 'Rinne Output.vst3/', 'INSTALL.txt', 'LICENSE', 'LICENSES/', 'SHA256SUMS', 'THIRD-PARTY-NOTICES.md', 'third_party/notices/')

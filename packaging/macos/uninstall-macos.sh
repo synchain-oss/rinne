@@ -19,8 +19,9 @@
 # 不在真实路径上试删。
 # 这是维护者批准的例外：本脚本删的是产品自己的安装目标，不是本进程新建的临时目录；守卫就是上面这几条。
 #
-# 外部命令（killall / xattr）的名字可以用环境变量换掉（RINNE_KILLALL、RINNE_XATTR）：
-# 那是给自测换桩用的。命令不存在时脚本只告警、不中断。
+# 外部命令（killall）：正常运行时一律用写死的系统路径 /usr/bin/killall，不读任何环境变量——随包发出去的
+# 脚本不能被环境里的变量换掉要执行的命令（比如 sudo -E 配 --system 时，那会以 root 身份执行）。
+# 只有 --self-test 路径认 RINNE_KILLALL：那是给自测换桩用的。命令不存在时脚本只告警、不中断。
 
 set -uo pipefail
 
@@ -32,10 +33,11 @@ Rinne Output.vst3
 Rinne Input.component
 Rinne Output.component"
 
-# 外部命令：默认用系统自带的；自测用环境变量换成桩。
+# 外部命令：正常路径写死系统自带的绝对路径，不读环境变量；只有自测路径（SELF_TEST_MODE=1，由 self_test 自己置位，
+# 这里无条件先置 0，所以环境里同名的变量改不了它）才认 RINNE_KILLALL 覆盖，换成桩。
 # 命令名在调用时现读（不是脚本开头展开的）：自测里换桩之后同一进程里也要生效。
-killall_cmd() { printf '%s' "${RINNE_KILLALL:-killall}"; }
-xattr_cmd() { printf '%s' "${RINNE_XATTR:-xattr}"; }
+SELF_TEST_MODE=0
+killall_cmd() { if [ "$SELF_TEST_MODE" = 1 ]; then printf '%s' "${RINNE_KILLALL:-/usr/bin/killall}"; else printf '%s' "/usr/bin/killall"; fi; }
 
 # 临时目录的名字前缀带本进程号：删临时目录时据此确认「这是本进程建的」。
 TEMP_PREFIX="rinne-uninstall-macos.$$"
@@ -203,6 +205,7 @@ self_test() {
         return 1
     }
     TEMP_DIR="$work"
+    SELF_TEST_MODE=1
     trap 'cleanup_temp "$TEMP_DIR"' EXIT
 
     saved_home="$HOME"
@@ -452,6 +455,22 @@ EOF
         *) say 1 "缺 killall 时给出了告警" ;;
     esac
 
+    # ── 外部命令：正常路径写死系统路径，环境变量改不了；只有自测路径认 RINNE_KILLALL 覆盖 ────
+    # 随包发出去的脚本不能被环境里的变量换掉要执行的命令（sudo -E 配 --system 时那是 root 身份执行任意命令）。
+    # 这里只做函数级断言：整条走正常路径会真的去杀这台机器上的 AudioComponentRegistrar，自测不做。
+    local inj="$work/inject-cmd" got
+    printf '#!/bin/sh\nexit 0\n' > "$inj"
+    chmod 0755 "$inj"
+    got="$( SELF_TEST_MODE=0; RINNE_KILLALL="$inj"; killall_cmd )"
+    [ "$got" = "/usr/bin/killall" ]
+    ok $? "正常路径：killall 写死 /usr/bin/killall，环境里的 RINNE_KILLALL 不生效"
+    got="$( SELF_TEST_MODE=1; RINNE_KILLALL="$inj"; killall_cmd )"
+    [ "$got" = "$inj" ]
+    ok $? "自测路径：RINNE_KILLALL 才生效（上面所有桩调用靠它）"
+    got="$( SELF_TEST_MODE=1; unset RINNE_KILLALL; killall_cmd )"
+    [ "$got" = "/usr/bin/killall" ]
+    ok $? "自测路径没设覆盖变量时回到写死的系统路径"
+
     # ── 临时目录：删之前要核对真实路径在临时根下一层、名字带本进程前缀 ────
     if temp_dir_is_ours "$work"; then say 0 "本进程建的临时目录认得出"; else say 1 "本进程建的临时目录认得出"; fi
     if temp_dir_is_ours "${TMPDIR:-/tmp}"; then say 1 "临时根目录本身不该被当成可删目录"; else say 0 "临时根目录本身不该被当成可删目录"; fi
@@ -492,7 +511,7 @@ main() {
     vst3="$(target_dirs "$scope" | sed -n 1p)"
     comp="$(target_dirs "$scope" | sed -n 2p)"
 
-    echo "$PROG：从下面两个目录里删掉 Rinne 的四个插件 bundle"
+    echo "${PROG}：从下面两个目录里删掉 Rinne 的四个插件 bundle"
     echo "  $vst3"
     echo "  $comp"
     if [ "$scope" = system ] && [ "$dry" != yes ] && [ "$(id -u)" != "0" ]; then

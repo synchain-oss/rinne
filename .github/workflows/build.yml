@@ -249,6 +249,8 @@ jobs:
 
       # kit 包：只在填了 kit-version 时打。kit 里多一个 tools/rinne_nulltest，其余与发行包同构。
       # kit 只进 Actions artifact，不进 Release（Release 恒为 6 个资产）。
+      # -BuildDir 指向 Stage 出来的 dist 是对的：build.ps1 -Stage 把 tools-bin/<配置>/*.exe 拷进了 dist/tools/，
+      # package.ps1 -Kit 在构建目录的 tools/ 下找 rinne_nulltest.exe（也认 tools-bin/<配置>/），所以包里有 tools/rinne_nulltest.exe。
       - name: Package kit
         if: env.KIT_VERSION != ''
         shell: pwsh
@@ -543,8 +545,10 @@ jobs:
 
       # kit 包：只在填了 kit-version 时打。kit 里多一个 tools/rinne_nulltest，其余与发行包同构。
       # kit 只进 Actions artifact，不进 Release（Release 恒为 6 个资产）。
+      # kit 会发给测试者，也是许可审计要对照的构建：与 release 同口径，stage、auval、pluginval 都过才打、才传（Win 侧走默认的 success()，两边一致）。
       - name: Package kit
-        if: ${{ !cancelled() && env.KIT_VERSION != '' }}
+        id: kit
+        if: ${{ !cancelled() && env.KIT_VERSION != '' && steps.stage.outcome == 'success' && steps.auval.outcome == 'success' && steps.pluginval.outcome == 'success' }}
         shell: bash
         env:
           KIT_VERSION: ${{ inputs.kit-version }}
@@ -556,9 +560,13 @@ jobs:
           bash scripts/package-macos.sh --version "$KIT_VERSION" --build-dir build \
             --out-dir "$RUNNER_TEMP/dist-kit" --source-commit "$BUILT_SHA" \
             --kit --kit-name "$kit_name" --build-run "$BUILD_RUN"
+          # 兜底：脚本退出 0 却没出包，也判红（macOS 自带的 bash 3.2 下，脚本里变量展开出错会静默结束脚本，退出码可能是 0）
+          for f in "$kit_name.zip" "$kit_name.zip.sha256" "package-summary-$kit_name.md"; do
+            [ -s "$RUNNER_TEMP/dist-kit/$f" ] || { echo "::error::package-macos.sh 退出 0，但输出目录里没有 $f"; exit 1; }
+          done
 
       - name: Upload kit package
-        if: ${{ !cancelled() && env.KIT_VERSION != '' }}
+        if: ${{ !cancelled() && steps.kit.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.KIT_ARTIFACT }}
