@@ -23,7 +23,8 @@ concurrency:
 jobs:
   clang-format:
     name: clang-format
-    runs-on: ubuntu-latest
+    # 钉 24.04、不跟 ubuntu-latest：与同一 workflow 里装钉版 Python 工具的 job 用同一个镜像
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +57,8 @@ jobs:
 
   docs-truth:
     name: docs-truth
-    runs-on: ubuntu-latest
+    # 钉 24.04、不跟 ubuntu-latest：换镜像就换了系统 Python，pip 按它挑 wheel；requirements-tools.txt 的哈希按平台登记（brotli 只有 cp312 manylinux 一份），26.04 的 3.14 上对不上
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       # actionlint_<版本>_linux_amd64.tar.gz 的 sha256，取自该版本官方的 checksums.txt；升版本时一起改
