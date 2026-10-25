@@ -199,8 +199,11 @@ function steps.probeplay()
     put("play_state", reaper.GetPlayState())
     put("play_pos", string.format("%.3f", reaper.GetPlayPosition()))
     reaper.OnStopButton()
-    put("stopped_after", string.format("%.3f", reaper.time_precise() - armedAt))
-    waitUntil(armedAt + job.recordSeconds + job.marginSeconds)
+    local stoppedAt = reaper.time_precise()
+    local exitAt = armedAt + job.recordSeconds + job.marginSeconds
+    put("stopped_after", string.format("%.3f", stoppedAt - armedAt))
+    put("stop_to_exit_s", string.format("%.3f", exitAt - stoppedAt)) -- 停走带之后留给自动 Ping 的时间（要 4.4 s 多）
+    waitUntil(exitAt)
     disarm(track, records)
     wait(0.3)
 end
@@ -209,7 +212,7 @@ end
 -- 导出格在渲染返回之后至少再等这么久才退出；稳态格停走带之后留的时间由场景表的秒数算出来，也是 6.5 s
 local afterRenderSeconds = 6.5
 
--- 导出格：开窗口后按工程里的渲染设置渲染（离线或 1x 由工程决定），等窗口到时、且渲染结束后的 Ping 跑完再退出
+-- 导出格：开窗口后按工程里的渲染设置渲染（离线或在线由工程的 RENDER_1X 决定），等窗口到时、且渲染结束后的 Ping 跑完再退出
 function steps.probeexport()
     openAndWait(job.project)
     local track = reaper.GetTrack(0, 0)
@@ -221,7 +224,13 @@ function steps.probeexport()
     local renderedAt = reaper.time_precise()
     put("render_seconds", string.format("%.3f", renderedAt - t0))
     put("rendered", reaper.file_exists(job.wav))
-    waitUntil(math.max(armedAt + job.recordSeconds + job.marginSeconds, renderedAt + afterRenderSeconds))
+    -- 退出时刻由两项里晚的那个定：记录窗口到时（窗口项），或渲染返回后再等 afterRenderSeconds（渲染后项）。
+    -- 哪一项在起作用写进结果：只有渲染后项起作用的那几次，才说明「渲染返回后再等」这一道在管用
+    local windowEnd = armedAt + job.recordSeconds + job.marginSeconds
+    local waitEnd = renderedAt + afterRenderSeconds
+    put("exit_bound", waitEnd > windowEnd and "after_render" or "window")
+    put("render_end_to_exit_s", string.format("%.3f", math.max(windowEnd, waitEnd) - renderedAt))
+    waitUntil(math.max(windowEnd, waitEnd))
     disarm(track, records)
     wait(0.3)
 end

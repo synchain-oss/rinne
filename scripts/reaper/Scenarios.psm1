@@ -12,8 +12,9 @@
 # 第二段（探针构建，-Probe 时才跑；场景在 scenarios.json 的 probe 一节）：
 #   probe-play    一格稳态：经隐藏参数开记录窗口、实时播放、停走带让探针自动 Ping，正常退出后收日志、读出 Ping 与 D、块长、
 #                 配对、丢记录，再交给 analyze-probe.py
-#   probe-export  离线渲染与 1x 渲染各一次（同一段范围），两份渲染用 rinne_nulltest compare 对拍，比对结果写成 compare-*.csv，
-#                 和两次的日志一起交给 analyze-probe.py
+#   probe-export  离线渲染与在线渲染（Online Render，REAPER 按实时速度跑、对插件报实时模式）各一次（同一段范围），两份渲染用
+#                 rinne_nulltest compare 对拍，比对结果写成 compare-*.csv，和两次的日志一起交给 analyze-probe.py。
+#                 REAPER 的 1x Offline 虽然也按实时速度跑，对插件仍报离线模式，不是实时渲染，这里不用它做 export-rt。
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -115,7 +116,7 @@ function New-ReaperRun {
     $wavPath = Join-Path $Ctx.Work "$Name.wav"
     if (Test-Path -LiteralPath $wavPath) { Remove-Item -LiteralPath $wavPath }
     $text = New-ReaperProjectText -SourceWav (Get-Signal $Ctx $Sr $Channels $OffsetSamples) -RenderDir $Ctx.Work -RenderName $Name `
-        -SampleRate $Sr -Channels $Channels -OneX:($Mode -eq '1x') -Chain $Chain -Bypass $Bypass -TrackVolume $Volume -ItemSeconds $Ctx.Signal.seconds @probeArgs
+        -SampleRate $Sr -Channels $Channels -OneX:($Mode -eq '1x') -Online:($Mode -eq 'online') -Chain $Chain -Bypass $Bypass -TrackVolume $Volume -ItemSeconds $Ctx.Signal.seconds @probeArgs
     Write-ReaperText -Path $projectPath -Text $text
     Set-ReaperAudioConfig -Sr $Sr -Block $Block
     $Ctx.Files.Add($projectPath); $Ctx.Files.Add($wavPath)
@@ -148,6 +149,8 @@ function Get-CompareVerdict([int]$Exit, [string]$Out, [string]$Err = '') {
     $lag = [regex]::Match($Out, 'lag）：(-?\d+)')
     $head = [regex]::Match($Out, '开头[^\n]*?峰值 (\S+) dBFS')
     $summary = '逐位相同={0} lag={1} 前2s峰值={2}' -f ($bit ? '是' : '否'), ($lag.Success ? $lag.Groups[1].Value : '?'), ($head.Success ? $head.Groups[1].Value : '?')
+    $reason = [regex]::Match($Out, '原因：([^\r\n]+)') # 对拍工具自己给的拒绝理由（例如 A 里没有声音）：没有比对行时靠它说清为什么
+    if ($reason.Success) { $summary += '；对拍工具说：' + $reason.Groups[1].Value.Trim() }
     $zeroLag = $lag.Success -and $lag.Groups[1].Value -eq '0'
     $silentHead = $head.Success -and $head.Groups[1].Value -eq '-inf'
     if ($Exit -eq 0 -and $bit -and $zeroLag -and $silentHead) { return New-Outcome PASS $summary }
@@ -316,7 +319,8 @@ function Save-ProbeLogs($Ctx, $Run, [string]$CellDir) {
 function Get-SortedText($Values) { (@($Values) | ForEach-Object { "$_" }) -join '/' }
 
 # 纯函数：一次 REAPER 启动留下的两份日志（Read-ReaperProbeLog 的结果）对不对。Expect：Pid、Case、Variant、Sr、Block、MinBlocks、
-# NeedPing（稳态格要有 Ping，且 Ping 求出的延迟恰为块记录里的 D）、OfflineBlocks（导出格的离线那一次：要有 nonrt 为 1 的块）。
+# NeedPing（要有 Ping，且 Ping 求出的延迟恰为块记录里的 D；稳态格与导出格的两次都要）、PlayingNonRt（播放中的块的 nonrt 应恰为这个值：
+# 宿主对插件报实时是 0、离线是 1；给了才查）、Driver（Lua 驱动记下的退出时刻，原样写进事实）。
 # 每格都查：两端各一份、恰好一个测试格、正常收尾、块数够、没丢记录、块长不超过声明、配对、播放中的块长恰为设定的块长、
 # D 恰为探针默认的 100 ms（工程里的探针 state 写的就是它；不是它说明 state 模板与探针对不上）。
 # 返回 @{ Bad（要判 FAIL 的原因）; Facts（读出来的事实，写进结果） }。
@@ -343,17 +347,23 @@ function Test-ReaperProbeCell {
         $decl = @($lg.NDecl)
         if ($decl.Count -and $lg.MaxN -gt ($decl | Measure-Object -Minimum).Minimum) { $bad.Add("$tag 有块长 $($lg.MaxN) 超过声明的最大块长 $(Get-SortedText $decl)") }
         if ($Expect.Pid -notin @($lg.PairedPids)) { $bad.Add("$tag 没有配对（没有对端是本进程的 paired 事件）") }
-        if ($Expect['OfflineBlocks'] -and 1 -notin @($lg.NonRt)) { $bad.Add("$tag 没有离线渲染的块（nonrt 为 1）") }
+        if ($Expect.ContainsKey('PlayingNonRt')) {
+            $seen = @($lg.PlayingNonRt)
+            if ($seen.Count -ne 1 -or $seen[0] -ne $Expect.PlayingNonRt) {
+                $bad.Add("$tag 播放中的块的 nonrt 是 [$(Get-SortedText $seen)]，应恰为 $($Expect.PlayingNonRt)（宿主应按$(($Expect.PlayingNonRt -eq 1) ? '离线' : '实时')模式渲染或播放）")
+            }
+        }
         if ($lg.Unread -gt 0) { $bad.Add("$tag 有 $($lg.Unread) 行读不懂（格式交给分析器判）") }
         $cellFacts[$tag] = [ordered]@{
-            cell = ($cells -join '; '); blocks = $lg.Blocks; playingBlocks = $lg.PlayingBlocks; n = (Get-SortedText $lg.NValues); nDecl = (Get-SortedText $decl)
-            maxN = $lg.MaxN; nonrt = (Get-SortedText $lg.NonRt); dropped = $lg.Dropped; seqGaps = $lg.SeqGaps; paired = ($Expect.Pid -in @($lg.PairedPids))
+            cell = ($cells -join '; '); blocks = $lg.Blocks; playingBlocks = $lg.PlayingBlocks; playingSeconds = [math]::Round($lg.PlayingBlocks * [double]$Expect.Block / [double]$Expect.Sr, 2); n = (Get-SortedText $lg.NValues); nDecl = (Get-SortedText $decl)
+            maxN = $lg.MaxN; nonrt = (Get-SortedText $lg.NonRt); playingNonrt = (Get-SortedText $lg.PlayingNonRt); dropped = $lg.Dropped; seqGaps = $lg.SeqGaps; paired = ($Expect.Pid -in @($lg.PairedPids))
             complete = $lg.Complete; prepare = (@($lg.Prepares) -join ' ')
         }
     }
     # Ping 只在 Input 一端；D 取 Input 块记录里的 d（探针自己记下的当前生效环路延迟）
     $dList = @($ins[0].DValues)
     $pings = @($ins[0].Pings)
+    if ($Expect.ContainsKey('Driver')) { $cellFacts.driver = $Expect.Driver }
     $cellFacts.d = Get-SortedText $dList
     $cellFacts.ping = Get-SortedText $pings
     $cellFacts.dNominal = [long][Math]::Round(0.1 * $Expect.Sr) # 探针默认的 D 是 100 ms
@@ -421,7 +431,8 @@ function Read-ProbeCellLogs([string]$CellDir) {
 function Format-ProbeFacts($Facts) {
     $ping = $Facts.ping ? "Ping $($Facts.ping) 样本 / D $($Facts.d) 样本" : "没有 Ping（D $($Facts.d) 样本）"
     "pid $($Facts.pid)：$ping；块长 n=$($Facts.In.n)（n_decl $($Facts.In.nDecl)）；配对 In=$($Facts.In.paired) Out=$($Facts.Out.paired)；" +
-    "块 In $($Facts.In.blocks)/Out $($Facts.Out.blocks)；丢记录 $($Facts.In.dropped + $Facts.Out.dropped)；nonrt $($Facts.In.nonrt)"
+    "块 In $($Facts.In.blocks)/Out $($Facts.Out.blocks)（播放中 $($Facts.In.playingBlocks)/$($Facts.Out.playingBlocks) 块，约 $($Facts.In.playingSeconds) s）；丢记录 $($Facts.In.dropped + $Facts.Out.dropped)；nonrt $($Facts.In.nonrt)（播放中 $($Facts.In.playingNonrt)）" +
+    ($Facts.Contains('driver') ? "；驱动 $(($Facts.driver.Keys | ForEach-Object { "$_=$($Facts.driver[$_])" }) -join ' ')" : '')
 }
 
 # 收完日志、读出事实、过分析器之后给这一格下结论：收日志出错 FAIL；REAPER 这一趟没正常结束 INCOMPLETE；分析器拒收 INCOMPLETE
@@ -474,8 +485,19 @@ function Invoke-ProbePlayScenario($Ctx, $S) {
     $lua = Invoke-LuaStep -Ctx $Ctx -Name $S.id -Step probeplay -Job $luaJob
     $cell = Join-Path $Ctx.Probe.RoundDir "probe-logs/$($S.id)"
     $moved = Save-ProbeLogs $Ctx $lua.Run $cell
-    $playExpect = @{ Pid = $lua.Run.Pid; Case = $S.case; Variant = $S.variant; Sr = $rate; Block = $blockSize; MinBlocks = [int]$Ctx.Limits.minBlocks; NeedPing = $true }
+    # 实时播放：播放中的块 REAPER 都该按实时模式调用（nonrt 为 0）
+    $playExpect = @{
+        Pid = (Get-RunPid $lua.Run); Case = $S.case; Variant = $S.variant; Sr = $rate; Block = $blockSize; MinBlocks = [int]$Ctx.Limits.minBlocks; NeedPing = $true
+        PlayingNonRt = 0; Driver = (Get-DriverFacts $lua.Result 'stopped_after', 'stop_to_exit_s')
+    }
     Complete-ProbeCell -Ctx $Ctx -Id $S.id -CellDir $cell -Moves @($moved) -Whys @($lua.Why) -Expects @($playExpect) -MustPass @($S.analyzerMustPass)
+}
+
+# Lua 驱动写在结果文件里的几项时间（秒、退出由谁定的），原样记进这一格的事实；驱动没写出来的项不记
+function Get-DriverFacts($Result, [string[]]$Keys) {
+    $d = [ordered]@{}
+    foreach ($k in $Keys) { if ($Result.ContainsKey($k)) { $d[$k] = $Result[$k] } }
+    $d
 }
 
 # 纯函数：rinne_nulltest compare 的报告 → compare-*.csv 的一行（case,variant,bit_exact,residual_dbfs,head_residual_dbfs,lag_samples）。
@@ -499,8 +521,10 @@ function Invoke-ProbeExportScenario($Ctx, $S) {
     $legWhys = [Collections.Generic.List[string]]::new()
     $cellExpects = [Collections.Generic.List[hashtable]]::new()
     $wavs = @{}
-    foreach ($leg in @(@('offline', 'export-offline'), @('1x', 'export-rt'))) {
-        $legMode = $leg[0]; $legVariant = $leg[1]
+    # 两次渲染：离线（全速）与在线（Online Render：按实时速度跑，REAPER 对插件报实时模式）。播放中的块的 nonrt 分别应恰为 1 与 0。
+    # 两次都要有渲染结束后的自动 Ping，且恰为 D：Ping 没出来不能放过去（驱动在渲染返回之后至少再等 afterRenderSeconds 才退出）。
+    foreach ($leg in @(@('offline', 'export-offline', 1), @('online', 'export-rt', 0))) {
+        $legMode = $leg[0]; $legVariant = $leg[1]; $legNonRt = $leg[2]
         $r = New-ReaperRun -Ctx $Ctx -Name "$($S.id)-$legMode" -Sr $rate -Block $blockSize -Mode $legMode -Channels 2 -Chain @('input', 'output') -Probe -ProbeGroup (Get-ProbeGroup $Ctx $S)
         $luaJob = Get-ProbeLuaJob $Ctx $S $legVariant $r.Project
         $luaJob.wav = $r.Wav
@@ -510,24 +534,30 @@ function Invoke-ProbeExportScenario($Ctx, $S) {
         if (-not $why -and -not (Test-Path -LiteralPath $r.Wav)) { $why = "$legMode 渲染没有产出 wav" }
         if ($why) { $legWhys.Add("${legMode}：$why") }
         $wavs[$legMode] = $r.Wav
-        $cellExpects.Add(@{ Pid = $lua.Run.Pid; Case = $S.case; Variant = $legVariant; Sr = $rate; Block = $blockSize; MinBlocks = [int]$Ctx.Limits.minBlocks; NeedPing = $false; OfflineBlocks = ($legMode -eq 'offline') })
+        $cellExpects.Add(@{
+            Pid = (Get-RunPid $lua.Run); Case = $S.case; Variant = $legVariant; Sr = $rate; Block = $blockSize; MinBlocks = [int]$Ctx.Limits.minBlocks; NeedPing = $true
+            PlayingNonRt = $legNonRt; Driver = (Get-DriverFacts $lua.Result 'render_seconds', 'exit_bound', 'render_end_to_exit_s')
+        })
         if ($why) { break }
     }
     $extra = @(); $compareBad = @()
     if (-not $legWhys.Count) {
-        $cmp = Invoke-Native -Exe $Ctx.NullTest -Arguments @('compare', '--a', $wavs['offline'], '--b', $wavs['1x'], '--head-seconds', '2')
+        $cmp = Invoke-Native -Exe $Ctx.NullTest -Arguments @('compare', '--a', $wavs['offline'], '--b', $wavs['online'], '--head-seconds', '2')
         $verdict = Get-CompareVerdict -Exit $cmp.Exit -Out $cmp.Out -Err $cmp.Err
         $row = ConvertTo-ReaperCompareRow -Case $S.case -Variant 'export-offline' -Out $cmp.Out
-        if ($verdict.Status -eq 'INCOMPLETE') { $legWhys.Add("离线与 1x 的对拍没能比：$($verdict.Detail)") }
-        elseif (-not $row) { $compareBad = @("离线对 1x 对拍不通过，报告里读不出比对行：$($verdict.Detail)") } # 采样率或声道不同、没有声音等
+        if ($verdict.Status -eq 'INCOMPLETE') { $legWhys.Add("离线与在线的对拍没能比：$($verdict.Detail)") }
+        elseif (-not $row) { $compareBad = @("离线对在线对拍不通过，报告里读不出比对行：$($verdict.Detail)") } # 采样率或声道不同、没有声音等
         else {
             $null = New-Item -ItemType Directory -Force -Path $cell
             [IO.File]::WriteAllText((Join-Path $cell 'compare-reaper.csv'), "$($script:CompareHead)`n$row`n", [Text.ASCIIEncoding]::new())
-            if ($verdict.Status -eq 'PASS') { $extra = @("离线对 1x：$($verdict.Detail)") } else { $compareBad = @("离线对 1x 对拍不通过：$($verdict.Detail)") }
+            if ($verdict.Status -eq 'PASS') { $extra = @("离线对在线：$($verdict.Detail)") } else { $compareBad = @("离线对在线对拍不通过：$($verdict.Detail)") }
         }
     }
     Complete-ProbeCell -Ctx $Ctx -Id $S.id -CellDir $cell -Moves $legMoves.ToArray() -Whys $legWhys.ToArray() -Expects $cellExpects.ToArray() -MustPass @($S.analyzerMustPass) -Notes $extra -ExtraBad $compareBad
 }
+
+# 这次启动的进程号；没启动（gui 锁等不到）时 Run 里没有这个属性，记 0，原因由 Whys 照实写，不落成「场景抛错」
+function Get-RunPid($Run) { $p = $Run.PSObject.Properties['Pid']; $p ? [int]$p.Value : 0 }
 
 $script:Handlers = @{
     render = ${function:Invoke-RenderScenario}; probe = ${function:Invoke-ProbeScenario}; instances = ${function:Invoke-InstancesScenario}

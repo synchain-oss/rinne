@@ -346,6 +346,10 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '对拍结论：只有退出码是 2 判 FAIL' $true ((Get-CompareVerdict 2 $good).Status -eq 'FAIL')
     & $add '对拍结论：报告读不出来判 FAIL，不当 PASS' $true ((Get-CompareVerdict 0 '').Status -eq 'FAIL')
     & $add '对拍结论：退出码 1（没能比）是 INCOMPLETE，不是 FAIL 也不是 PASS' $true ((Get-CompareVerdict 1 '' '打不开文件').Status -eq 'INCOMPLETE')
+    $weak = "A：a.wav（48000 Hz，2 声道，480000 帧，10.000 秒）`nB：b.wav（48000 Hz，2 声道，480000 帧，10.000 秒）`n结果：FAIL`n原因：信号太弱，无法判定：A 的峰值 -inf dBFS 低于 -60 dBFS，里面没有声音，对拍没有意义`n"
+    $weakVerdict = Get-CompareVerdict 2 $weak
+    & $add '对拍结论：对拍工具给了拒绝理由（A 里没有声音）时判 FAIL，并把理由写进结论（没有比对行也说得清）' $true ($weakVerdict.Status -eq 'FAIL' -and $weakVerdict.Detail -like '*对拍工具说：信号太弱，无法判定：A 的峰值 -inf dBFS*没有声音*')
+    & $add '对拍结论：对拍工具没给理由时，结论里不带「对拍工具说」' $false ((Get-CompareVerdict 0 $good).Detail -notlike '*对拍工具说*' -and (Get-CompareVerdict 0 (& $nt '否' '0' '-6.94')).Detail -notlike '*对拍工具说*')
     & $add '汇总：INCOMPLETE 不当 PASS' $true ((Get-WorstStatus @('PASS', 'INCOMPLETE')) -eq 'INCOMPLETE')
     & $add '汇总：FAIL 压过 INCOMPLETE' $true ((Get-WorstStatus @('INCOMPLETE', 'FAIL', 'PASS')) -eq 'FAIL')
     & $add '汇总：全 SKIPPED 才是 SKIPPED，混着 PASS 算 INCOMPLETE' $false ((Get-WorstStatus @('SKIPPED', 'SKIPPED')) -eq 'SKIPPED' -and (Get-WorstStatus @('PASS', 'SKIPPED')) -eq 'INCOMPLETE')

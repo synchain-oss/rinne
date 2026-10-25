@@ -129,7 +129,8 @@ function New-ReaperProjectText {
         [Parameter(Mandatory)][string]$RenderName,
         [int]$SampleRate = 48000,
         [int]$Channels = 2,
-        [switch]$OneX,
+        [switch]$OneX, # RENDER_1X 1：1x Offline，按实时速度跑，REAPER 对插件仍报离线模式（不是实时渲染）
+        [switch]$Online, # RENDER_1X 2：Online Render，按实时速度跑，REAPER 对插件报实时模式（真实时渲染）
         [string[]]$Chain = @('input', 'output'),
         [string[]]$Bypass = @(),
         [double]$TrackVolume = 1.0,
@@ -138,6 +139,8 @@ function New-ReaperProjectText {
         [int]$ProbeGroup = -1 # 探针 state 里的组：-1 未设，0..7 即 A..H；两端同组才会配对
     )
     foreach ($c in $Chain) { if (-not $script:Plugins.ContainsKey($c)) { throw "不认识的链节点：$c" } }
+    if ($OneX -and $Online) { throw '-OneX 与 -Online 只能选一个' }
+    $renderSpeed = $Online ? 2 : ($OneX ? 1 : 0)
     $fx = [Collections.Generic.List[string]]::new()
     foreach ($c in $Chain) {
         if ($c -in $Bypass) { $fx.Add('      BYPASS 1 0 0') }
@@ -159,7 +162,7 @@ function New-ReaperProjectText {
   RENDER_FILE "$RenderDir"
   RENDER_PATTERN "$RenderName"
   RENDER_FMT 0 $Channels $SampleRate
-  RENDER_1X $($OneX ? 1 : 0)
+  RENDER_1X $renderSpeed
   RENDER_RANGE 1 0 0 0 1000
   RENDER_RESAMPLE 3 0 1
   RENDER_ADDTOPROJ 0

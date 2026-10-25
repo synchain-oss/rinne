@@ -20,6 +20,8 @@ Import-Module (Join-Path $scripts 'Host.psm1') -ErrorAction Stop
 Import-Module (Join-Path $scripts 'Scenarios.psm1') -ErrorAction Stop
 Import-Module (Join-Path $scripts 'Suite.psm1') -ErrorAction Stop
 Import-Module (Join-Path $RepoRoot 'scripts/lib/Locks.psm1') -ErrorAction Stop
+Import-Module (Join-Path $scripts 'ProbeLogs.psm1') -ErrorAction Stop
+Import-Module (Join-Path $RepoRoot 'tests/reaper/SelfTestProbe.psm1') -ErrorAction Stop # 替身（分析器、nulltest、探针构建目录）与假日志文本
 
 function Write-Case([string]$Label, [bool]$Bad, [bool]$Passed) { Write-Output ("RESULT`t{0}`t{1}`t{2}" -f [int]$Bad, [int]$Passed, $Label) }
 function Test-Throws([scriptblock]$Action, [string]$Like = '*') { try { $null = & $Action; $false } catch { $_.Exception.Message -like $Like } }
@@ -232,3 +234,220 @@ foreach ($variant in @(@('CRLF 行尾', "`r`n", ''), @('后面跟着别的目录
 }
 Write-Case '插件复制：第一次全复制，内容相同第二次不动，改了的再复制' $false (@($first | Where-Object { $_.copied }).Count -eq 2 -and @($second | Where-Object { $_.copied }).Count -eq 0 -and @($third | Where-Object { $_.copied }).Count -eq 1)
 Write-Case '插件复制：私有 VST3 目录排在 vstpath64 最前，目标里只有这次的构建' $false ($iniNow.Contains('vstpath64=' + (Join-Path $pinned.Dir 'plugins')) -and (Get-Content -LiteralPath (Join-Path $pinned.Dir 'plugins/Rinne Input.vst3/Contents/x86_64-win/Rinne Input.vst3') -Raw).Trim() -eq 'bits-new')
+
+# ---- 第二段接线：替身 REAPER 走真正的场景处理器、收日志与入口 ----
+# 替身先起一个马上退出的进程，拿它（已退出）的 pid 写两份探针日志、结果文件和导出的 wav，像一次正常结束的 REAPER；
+# 任务文件的路径从启动信息的环境变量取。分析器与 rinne_nulltest 用 .cmd 替身（吐准备好的输出）。
+$wire = Join-Path $Work 'wiring'
+$null = New-Item -ItemType Directory -Force -Path $wire
+$probeSection = (Get-ReaperSmokeConfig $scenarioFile).probe
+$fakePy = New-FakePython -Dir (Join-Path $wire 'fake')
+$fakeNull = New-FakeNullTest -Dir (Join-Path $wire 'fake')
+$newLog = Get-Command New-FakeProbeLogText
+$diffReport = Join-Path $wire 'compare-diff.txt'
+[IO.File]::WriteAllText($diffReport, (Get-FakeCompareText -Bit '否' -Lag '0' -Whole '-96.5' -Head '-101.25'), [Text.UTF8Encoding]::new($false))
+
+# Spec 的键：LogDir（假的文档目录里的日志目录）、Seen（记每次启动）、NoPing / NoWav（哪一趟不写：'offline' / 'online' / 'play'）、PingFor（趟 → Ping 值）、
+# NonRt（趟 → 播放中的块的 nonrt）、Plant（启动中往日志目录放别人的文件的块）、DuringRun（启动中动别人文件的块）
+function New-FakeReaperLauncher([hashtable]$Spec) {
+    {
+        param($psi)
+        $started = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($Spec.Pwsh, '-NoProfile -NonInteractive -Command exit 0'))
+        $started.WaitForExit()
+        $ownPid = $started.Id
+        $job = @{}
+        foreach ($m in [regex]::Matches([IO.File]::ReadAllText($psi.Environment['RINNE_REAPER_JOB']), '\["(\w+)"\]=("(?:[^"\\]|\\.)*"|[^,}]+)')) {
+            $v = $m.Groups[2].Value
+            $job[$m.Groups[1].Value] = $v.StartsWith('"') ? ($v.Substring(1, $v.Length - 2) -replace '\\\\', '\') : $v
+        }
+        $isExport = $job['step'] -eq 'probeexport'
+        $resultName = [IO.Path]::GetFileNameWithoutExtension($job['result'])
+        $leg = $isExport ? ($resultName.EndsWith('-offline') ? 'offline' : 'online') : 'play'
+        $variant = $isExport ? ($leg -eq 'offline' ? 'export-offline' : 'export-rt') : 'steady'
+        $case = $isExport ? 'CB-04' : 'CB-01'
+        $nonRt = $Spec.NonRt.Contains($leg) ? $Spec.NonRt[$leg] : ($leg -eq 'offline' ? 1 : 0)
+        $peer = ($resultName -match 'neg-probe-unpaired') ? 0 : -1
+        $pings = $Spec.NoPing -contains $leg ? @() : @($Spec.PingFor.Contains($leg) ? $Spec.PingFor[$leg] : 4800)
+        $renderSpeed = [regex]::Match([IO.File]::ReadAllText($job['project']), '(?m)^\s*RENDER_1X (\d+)').Groups[1].Value
+        $Spec.Seen.Add([pscustomobject]@{ Pid = $ownPid; Step = $job['step']; Leg = $leg; RenderSpeed = $renderSpeed })
+        $null = New-Item -ItemType Directory -Force -Path $Spec.LogDir
+        [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-I-$ownPid-a1b1.csv"), (& $Spec.NewLog -Role I -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings $pings))
+        [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-O-$ownPid-c2d2.csv"), (& $Spec.NewLog -Role O -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings @()))
+        if ($Spec.Plant) { & $Spec.Plant $ownPid $Spec.LogDir }
+        if ($Spec.DuringRun) { & $Spec.DuringRun $ownPid $Spec.LogDir }
+        if ($isExport -and $Spec.NoWav -notcontains $leg) { [IO.File]::WriteAllBytes($job['wav'], [byte[]]@(0)) }
+        $driver = $isExport ? "render_seconds=10.000`nexit_bound=window`nrender_end_to_exit_s=8.000`n" : "stopped_after=9.100`nstop_to_exit_s=6.500`n"
+        [IO.File]::WriteAllText($job['result'], "${driver}done=1`n")
+        $started
+    }.GetNewClosure()
+}
+
+function New-WireSpec([string]$Id) {
+    $logDir = Join-Path $wire "$Id-docs/Rinne Probe Logs"
+    $null = New-Item -ItemType Directory -Force -Path $logDir
+    @{ Pwsh = $pwshExe; NewLog = $newLog; LogDir = $logDir; Seen = [Collections.Generic.List[object]]::new(); NoPing = @(); NoWav = @(); PingFor = @{}; NonRt = @{}; Plant = $null; DuringRun = $null }
+}
+
+# 一个场景的上下文：假的文档目录、本轮结果目录、替身启动器
+function New-WireContext([string]$Id, [hashtable]$Spec) {
+    $roundDir = Join-Path $wire "$Id-round"; $workDir = Join-Path $wire "$Id-work"
+    $null = New-Item -ItemType Directory -Force -Path $roundDir, $workDir
+    $c = New-ReaperContext -ReaperExe 'stand-in' -NullTest $fakeNull -WorkDir $workDir -Driver 'x' -Config $probeSection -LockWaitSec 20
+    $c.Launcher = New-FakeReaperLauncher $Spec
+    $c.Probe = & (Get-Module Suite) { param($pre, $sec, $dir) New-ReaperProbeRound $pre $sec $dir } ([pscustomobject]@{ ProbeLogDir = $Spec.LogDir; Python = $fakePy.Python; Analyzer = $fakePy.Analyzer }) $probeSection $roundDir
+    $c
+}
+
+$playScenario = @($probeSection.scenarios | Where-Object { $_.id -eq 'probe-steady-48000-512' })[0]
+$exportScenario = @($probeSection.scenarios | Where-Object { $_.id -eq 'probe-export-48000-512' })[0]
+function Invoke-WireScenario([string]$Id, $Scenario, [hashtable]$Spec, [string]$CompareFile = '') {
+    $env:FAKE_COMPARE_FILE = $CompareFile # 空串等于没设
+    $c = New-WireContext $Id $Spec
+    $o = Invoke-ReaperScenario -Ctx $c -Scenario $Scenario
+    $env:FAKE_COMPARE_FILE = ''
+    [pscustomobject]@{ Out = $o; Ctx = $c; Spec = $Spec; Cell = (Join-Path $c.Probe.RoundDir "probe-logs/$($Scenario.id)") }
+}
+# 这一格的结果目录里搬进来的日志名（收日志出错、目录没建起来时是空的，不让用例在这里抛错：要的是一条干净的红）
+function Get-WireCellLogs([string]$Cell) { if (Test-Path -LiteralPath $Cell -PathType Container) { @(Get-ChildItem -LiteralPath $Cell -File -Filter 'probe-*.csv' | ForEach-Object { $_.Name } | Sort-Object) } else { @() } }
+function New-WireSpecWith([string]$Id, [hashtable]$Set) { $s = New-WireSpec $Id; foreach ($k in $Set.Keys) { $s[$k] = $Set[$k] }; $s }
+
+# 稳态格：别人的同名文件不被碰（Save-ProbeLogs 把启动时刻、pid 交给收日志的那一步）
+$plantSpec = New-WireSpec 'play-plant'
+$plantSpec.Plant = {
+    param($ownPid, $dir)
+    $stale = Join-Path $dir "probe-O-$ownPid-5a1e.csv"; [IO.File]::WriteAllText($stale, "stale`n"); (Get-Item -LiteralPath $stale).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-1)
+    $other = Join-Path $dir "probe-I-$($ownPid + 1)-0bad.csv"; [IO.File]::WriteAllText($other, "other-pid`n")
+    $padded = Join-Path $dir "probe-I-0$ownPid-0bad.csv"; [IO.File]::WriteAllText($padded, "padded`n")
+    $future = Join-Path $dir "probe-O-$ownPid-fa57.csv"; [IO.File]::WriteAllText($future, "future`n"); (Get-Item -LiteralPath $future).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(1)
+}
+$w = Invoke-WireScenario 'play-plant' $playScenario $plantSpec
+$ownPid = $plantSpec.Seen[0].Pid
+$left = @(Get-ChildItem -LiteralPath $plantSpec.LogDir -File | ForEach-Object { $_.Name } | Sort-Object)
+$expectLeft = @("probe-O-$ownPid-5a1e.csv", "probe-I-$($ownPid + 1)-0bad.csv", "probe-I-0$ownPid-0bad.csv", "probe-O-$ownPid-fa57.csv") | Sort-Object
+$moved = Get-WireCellLogs $w.Cell
+Write-Case "稳态格走收日志：只搬本次启动的两份（$($moved -join ' ')），启动前就有的同号旧文件、别的 pid、补零 pid、将来时间的文件都留在原处" $true (
+    $w.Out.Status -eq 'PASS' -and ($left -join '|') -ceq ($expectLeft -join '|') -and ($moved -join '|') -ceq (@("probe-I-$ownPid-a1b1.csv", "probe-O-$ownPid-c2d2.csv") -join '|') -and
+    $w.Ctx.Probe.Moved -eq 2 -and $w.Ctx.Probe.Own.Count -eq 2 -and $w.Ctx.Probe.Problems.Count -eq 0)
+Write-Case '稳态格：Ctx.Probe.Own 只有本次启动的两份（轮末前后清单比较时才会只除外这两份）' $true (($w.Ctx.Probe.Own -join '|') -ceq "probe-I-$ownPid-a1b1.csv|probe-O-$ownPid-c2d2.csv")
+Write-Case '稳态格：好路径的结局 PASS，写出 Ping 4800 / D 4800 与驱动记下的停走带后留给 Ping 的时间' $false ($w.Out.Status -eq 'PASS' -and $w.Out.Detail -match 'Ping 4800 样本 / D 4800 样本' -and $w.Out.Detail -match 'stop_to_exit_s=6\.500')
+
+$w = Invoke-WireScenario 'play-noping' $playScenario (New-WireSpecWith 'play-noping' @{ NoPing = @('play') })
+Write-Case '稳态格：Ping 没出来判 FAIL（没有 Ping）' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*没有 Ping*')
+$w = Invoke-WireScenario 'play-offline' $playScenario (New-WireSpecWith 'play-offline' @{ NonRt = @{ play = 1 } })
+Write-Case '稳态格：实时播放时播放中的块 nonrt 为 1（宿主按离线调用）判 FAIL' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*播放中的块的 nonrt 是 [[]1[]]，应恰为 0*')
+
+# 收日志出了问题（日志名其实是别处一个文件的另一个名字）：格判 FAIL，问题记进这一轮的 Problems，别处的那个文件不受影响
+$precious = Join-Path $wire 'precious.txt'
+[IO.File]::WriteAllText($precious, "precious`n")
+$hardSpec = New-WireSpec 'play-hardlink'
+$hardSpec.Plant = { param($ownPid, $dir) [IO.File]::WriteAllText($precious, "precious`n"); $null = New-Item -ItemType HardLink -Path (Join-Path $dir "probe-O-$ownPid-6767.csv") -Value $precious }.GetNewClosure() # 别处的文件此刻重写一遍：它的修改时间落在这次启动的窗口里
+$hardOk = try { $null = New-Item -ItemType HardLink -Path (Join-Path $wire 'hardlink-probe.txt') -Value $precious; $true } catch { $false }
+if ($hardOk) {
+    $w = Invoke-WireScenario 'play-hardlink' $playScenario $hardSpec
+    $hardPid = $hardSpec.Seen[0].Pid
+    Write-Case '稳态格：日志名是别处文件的硬链接（有 2 个名字）：这一格判 FAIL，问题记进这一轮，硬链接和别处的文件都还在' $true (
+        $w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*收日志出错*硬链接*' -and $w.Ctx.Probe.Problems.Count -eq 1 -and $w.Ctx.Probe.Moved -eq 2 -and
+        (Test-Path -LiteralPath (Join-Path $hardSpec.LogDir "probe-O-$hardPid-6767.csv")) -and [IO.File]::ReadAllText($precious) -ceq "precious`n")
+} else {
+    Write-Case '稳态格：硬链接这一组（本机建不了硬链接）没能真跑' $true $true
+}
+
+# 导出格：两趟（离线 0、在线 2）各自要有 Ping、要有对的 nonrt；渲染速度写在工程里，经任务文件里的工程路径读回来核对
+$w = Invoke-WireScenario 'export-good' $exportScenario (New-WireSpec 'export-good')
+$speeds = @($w.Spec.Seen | ForEach-Object { "$($_.Leg)=$($_.RenderSpeed)" }) -join ' '
+Write-Case "导出格：好路径 PASS，两趟都起了，离线那趟工程的渲染速度是 0、在线那趟是 2（$speeds）" $false (
+    $w.Out.Status -eq 'PASS' -and $speeds -ceq 'offline=0 online=2' -and $w.Out.Detail -match 'export-offline' -and $w.Out.Detail -match 'export-rt' -and $w.Out.Detail -match 'exit_bound=window' -and
+    (Test-Path -LiteralPath (Join-Path $w.Cell 'compare-reaper.csv')) -and (Get-WireCellLogs $w.Cell).Count -eq 4 -and $w.Ctx.Probe.Moved -eq 4)
+$w = Invoke-WireScenario 'export-noping-off' $exportScenario (New-WireSpecWith 'export-noping-off' @{ NoPing = @('offline') })
+Write-Case '导出格：离线那趟渲染后的 Ping 没出来判 FAIL（没有 Ping），不再放过去' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*export-offline：没有 Ping*')
+$w = Invoke-WireScenario 'export-noping-on' $exportScenario (New-WireSpecWith 'export-noping-on' @{ NoPing = @('online') })
+Write-Case '导出格：在线那趟渲染后的 Ping 没出来判 FAIL（没有 Ping），不再放过去' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*export-rt：没有 Ping*')
+$w = Invoke-WireScenario 'export-badping' $exportScenario (New-WireSpecWith 'export-badping' @{ PingFor = @{ online = 4799 } })
+Write-Case '导出格：在线那趟 Ping 求出的延迟不等于 D 判 FAIL' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*export-rt：*Ping 求出的延迟是 4799*')
+$w = Invoke-WireScenario 'export-online-offlinemode' $exportScenario (New-WireSpecWith 'export-online-offlinemode' @{ NonRt = @{ online = 1 } })
+Write-Case '导出格：在线那趟播放中的块 nonrt 是 1（宿主仍按离线调用，不是实时渲染）判 FAIL' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*export-rt：*播放中的块的 nonrt 是 [[]1[]]，应恰为 0*')
+$w = Invoke-WireScenario 'export-offline-rtmode' $exportScenario (New-WireSpecWith 'export-offline-rtmode' @{ NonRt = @{ offline = 0 } })
+Write-Case '导出格：离线那趟播放中的块 nonrt 是 0（宿主按实时调用）判 FAIL' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*export-offline：*播放中的块的 nonrt 是 [[]0[]]，应恰为 1*')
+$w = Invoke-WireScenario 'export-nowav-off' $exportScenario (New-WireSpecWith 'export-nowav-off' @{ NoWav = @('offline') })
+Write-Case '导出格：离线那趟没产出 wav 判 INCOMPLETE，不再起在线那趟' $true ($w.Out.Status -eq 'INCOMPLETE' -and $w.Out.Detail -like '*offline：offline 渲染没有产出 wav*' -and $w.Spec.Seen.Count -eq 1)
+$w = Invoke-WireScenario 'export-nowav-on' $exportScenario (New-WireSpecWith 'export-nowav-on' @{ NoWav = @('online') })
+Write-Case '导出格：在线那趟没产出 wav 判 INCOMPLETE' $true ($w.Out.Status -eq 'INCOMPLETE' -and $w.Out.Detail -like '*online：online 渲染没有产出 wav*' -and $w.Spec.Seen.Count -eq 2)
+$w = Invoke-WireScenario 'export-diff' $exportScenario (New-WireSpec 'export-diff') $diffReport
+Write-Case '导出格：离线与在线两份渲染有差异（nulltest 报逐位不同）判 FAIL，比对行照写' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*离线对在线对拍不通过*' -and (Test-Path -LiteralPath (Join-Path $w.Cell 'compare-reaper.csv')))
+
+# gui 锁被别人占着、等不到：REAPER 没启动，Run 里没有进程号。两种场景都判 INCOMPLETE，原因写锁，不落成「场景抛错」，也没有收日志
+$holder2 = & $lockChild 'if (-not (Enter-RinneLock gui -TimeoutSeconds 5 -Quiet)) { exit 2 }; Start-Sleep -Seconds 60'
+try {
+    $until2 = (Get-Date).AddSeconds(10)
+    while ((& $probeExit) -ne 1 -and (Get-Date) -lt $until2) { Start-Sleep -Milliseconds 200 }
+    foreach ($sc in $playScenario, $exportScenario) {
+        $lbSpec = New-WireSpec "lockbusy-$($sc.id)"
+        $lbCtx = New-WireContext "lockbusy-$($sc.id)" $lbSpec
+        $lbCtx.LockWaitSec = 1
+        $lbOut = Invoke-ReaperScenario -Ctx $lbCtx -Scenario $sc
+        Write-Case "$($sc.kind) 场景在 gui 锁等不到时：INCOMPLETE，原因写锁而不是「场景抛错」，REAPER 没有启动、没有收日志" $true (
+            $lbOut.Status -eq 'INCOMPLETE' -and $lbOut.Detail -like '*gui 锁等不到*' -and $lbOut.Detail -notlike '*场景抛错*' -and $lbSpec.Seen.Count -eq 0 -and $lbCtx.Launches -eq 0 -and $lbCtx.Probe.Moved -eq 0)
+    }
+} finally { if (-not $holder2.HasExited) { $holder2.Kill(); $holder2.WaitForExit() } }
+
+# ---- 整轮入口（Invoke-ReaperSmoke -Probe）：文档目录前后清单、停手、反例格不并进整轮分析 ----
+$realReaperRunning = @(Get-ReaperProcessIds).Count -gt 0
+if ($realReaperRunning) {
+    Write-Case '整轮入口（第二段）：本机有 reaper.exe 在跑，预检会 SKIPPED，这一组接线用例没能真跑' $true $true
+} else {
+    $build = New-FakeProbeBuild -Root (Join-Path $wire 'probe-build')
+    $results = Join-Path $wire 'results'
+    function Invoke-WireSmoke([string]$Id, [hashtable]$Spec, [string]$Only, [int]$Repeat = 1, [switch]$NoNegative) {
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $Spec.LogDir 'sub')
+        [IO.File]::WriteAllText((Join-Path $Spec.LogDir 'foreign-a.csv'), "foreign-a`n") # 别人的文件（用户在宿主里写的）
+        [IO.File]::WriteAllText((Join-Path $Spec.LogDir 'notes.txt'), "notes`n")
+        $hooks = @{ ProbeLogDir = $Spec.LogDir; Analyzer = $fakePy.Analyzer; Launcher = (New-FakeReaperLauncher $Spec) }
+        $p = @{ CfgDir = $CfgA; ReaperExe = $pwshExe; BuildDir = $build.Root; NullTest = $fakeNull; LogDir = (Join-Path $results $Id); UserTestingMarker = $marker; ScenarioFile = $scenarioFile
+                Only = $Only; Repeat = $Repeat; Probe = $true; Python = $fakePy.Python; SelfTestHooks = $hooks }
+        if ($NoNegative) { $p.NoNegative = $true }
+        $env:FAKE_COMPARE_FILE = ''
+        $r = Invoke-ReaperSmoke @p 6>$null
+        [pscustomobject]@{ R = $r; Results = (Join-Path $results $Id) }
+    }
+    $smoke1 = Invoke-WireSmoke 'clean' (New-WireSpec 'clean') '^probe-steady-48000-512$' -NoNegative
+    $run1 = $smoke1.R.runs[0]
+    Write-Case "整轮入口（第二段）：干净的一轮 PASS，文档目录除本轮自己的文件外没变，搬走 2 份，没留 reaper 进程（$($smoke1.R.verdict)）" $false (
+        $smoke1.R.verdict -eq 'PASS' -and $run1.probe.docsListing.unchanged -and $run1.probe.moved -eq 2 -and $run1.reaperProcessesLeft -eq 0 -and -not ($run1.PSObject.Properties.Name -contains 'stoppedBecause'))
+
+    # 别人的文件在这一轮里被动了（改、删、增）：场景全绿也判 FAIL，记下停手的原因，-Repeat 2 也只跑一轮
+    $touch = [ordered]@{
+        '改了' = { param($ownPid, $dir) [IO.File]::AppendAllText((Join-Path $dir 'foreign-a.csv'), "more`n") }
+        '删了' = { param($ownPid, $dir) [IO.File]::Delete((Join-Path $dir 'foreign-a.csv')) }
+        '多了一个' = { param($ownPid, $dir) [IO.File]::WriteAllText((Join-Path $dir 'foreign-new.csv'), "new`n") }
+        '子目录没了' = { param($ownPid, $dir) [IO.Directory]::Delete((Join-Path $dir 'sub')) }
+    }
+    $k = 0
+    foreach ($what in $touch.Keys) {
+        $k++
+        $sp = New-WireSpec "touch$k"; $sp.DuringRun = $touch[$what]
+        $sm = Invoke-WireSmoke "touch$k" $sp '^probe-steady-48000-512$' -Repeat 2 -NoNegative
+        $row = $sm.R.runs[0]
+        Write-Case "整轮入口（第二段）：别人的文件在这一轮里$what，场景全绿也判 FAIL，文档目录记为有变，停手，-Repeat 2 只跑了 $(@($sm.R.runs).Count) 轮" $true (
+            $row.scenarios[0].status -eq 'PASS' -and $row.verdict -eq 'FAIL' -and $sm.R.verdict -eq 'FAIL' -and -not $row.probe.docsListing.unchanged -and $row.stoppedBecause -like '*探针日志目录*' -and @($sm.R.runs).Count -eq 1 -and $sm.R.launches -eq 1)
+    }
+
+    # 自己的文件因为收日志出了问题留在了日志目录里：场景判 FAIL，但这不算「别人的文件变了」（本轮自己的新文件才除外），文档目录记为没变
+    if ($hardOk) {
+        $sp = New-WireSpec 'kept-own'
+        $sp.Plant = { param($ownPid, $dir) [IO.File]::WriteAllText($precious, "precious`n"); $null = New-Item -ItemType HardLink -Path (Join-Path $dir "probe-O-$ownPid-6767.csv") -Value $precious }.GetNewClosure() # 别处的文件此刻重写一遍：它的修改时间落在这次启动的窗口里
+        $smokeK = Invoke-WireSmoke 'kept-own' $sp '^probe-steady-48000-512$' -NoNegative
+        $runK = $smokeK.R.runs[0]
+        Write-Case '整轮入口（第二段）：自己的日志因收日志出问题留在目录里：场景判 FAIL，文档目录除本轮自己的文件外没变（不把它当成别人的文件）' $true (
+            $runK.scenarios[0].status -eq 'FAIL' -and $runK.verdict -eq 'FAIL' -and $runK.probe.docsListing.unchanged -and $runK.probe.problems.Count -eq 1 -and -not ($runK.PSObject.Properties.Name -contains 'stoppedBecause'))
+    }
+
+    # 反例格（故意不设组）的日志不并进整轮分析：all-logs 里只有正例那一格的两份日志
+    $smoke5 = Invoke-WireSmoke 'excluded' (New-WireSpec 'excluded') '^(probe-steady-48000-512|neg-probe-unpaired)$'
+    $run5 = $smoke5.R.runs[0]
+    $roundDir5 = Join-Path $smoke5.Results $run5.probe.roundDir
+    $allLogs = @(Get-ChildItem -LiteralPath (Join-Path $roundDir5 'all-logs') -File -Filter 'probe-*.csv' | ForEach-Object { $_.Name })
+    $negCellLogs = @(Get-ChildItem -LiteralPath (Join-Path $roundDir5 'probe-logs/neg-probe-unpaired') -File -Filter 'probe-*.csv' | ForEach-Object { $_.Name })
+    Write-Case "整轮入口（第二段）：反例格 neg-probe-unpaired 自己的两份日志留在它的格子里，不并进 all-logs（all-logs 里 $($allLogs.Count) 份），整轮分析的格与排除的格都照实记" $true (
+        $run5.scenarios.Count -eq 2 -and $smoke5.R.verdict -eq 'PASS' -and $negCellLogs.Count -eq 2 -and $allLogs.Count -eq 2 -and @($allLogs | Where-Object { $_ -in $negCellLogs }).Count -eq 0 -and
+        (@($run5.probe.analyzer.whole.cells) -join ',') -ceq 'probe-steady-48000-512' -and (@($run5.probe.analyzer.whole.excluded) -join ',') -ceq 'neg-probe-unpaired')
+}

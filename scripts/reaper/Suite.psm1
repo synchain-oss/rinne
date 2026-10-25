@@ -328,17 +328,21 @@ function New-ReaperProbeRound($Preflight, $ProbeSection, [string]$ResultDir) {
     @{
         LogDir = $Preflight.ProbeLogDir; RoundDir = $ResultDir; Group = [int]$ProbeSection.group; Python = $Preflight.Python; Analyzer = $Preflight.Analyzer
         Redact = @(@($env:USERNAME, $env:COMPUTERNAME) | Where-Object { $_ }); Own = [Collections.Generic.List[string]]::new(); Moved = 0
+        Excluded = [Collections.Generic.List[string]]::new() # 不并进整轮分析的格（反例：它的丢记录与同键记录会混进整轮的读数）
         Problems = [Collections.Generic.List[string]]::new(); Analyses = [ordered]@{}; Rejected = $false
     }
 }
 
 # 整轮合在一起再过一次分析器：把各格搬来的日志与比对行复制进 all-logs（文件名各不相同：pid 与 tok4 不同），原始输出写 analyze.json。
+# 反例格（Probe.Excluded）不并进来：它故意不设组，丢记录与同键的重复记录会混进整轮的读数。
 # 各格的结局只看各自那一次分析；这一次只作记录（几格同键时分析器会按同键重复处理，见 REAPER.md），唯一例外是拒收（退出码 2）。
 function Invoke-ReaperProbeWhole($Probe) {
     $cells = Join-Path $Probe.RoundDir 'probe-logs'
     $all = Join-Path $Probe.RoundDir 'all-logs'
-    $files = @(if (Test-Path -LiteralPath $cells) { Get-ChildItem -LiteralPath $cells -Recurse -File | Where-Object { $_.Name -like 'probe-*.csv' -or $_.Name -like 'compare-*.csv' } })
-    if (-not $files.Count) { return [ordered]@{ exit = $null; summary = '没有日志可分析' } }
+    $files = @(if (Test-Path -LiteralPath $cells) {
+        Get-ChildItem -LiteralPath $cells -Recurse -File | Where-Object { ($_.Name -like 'probe-*.csv' -or $_.Name -like 'compare-*.csv') -and $_.Directory.Name -notin $Probe.Excluded }
+    })
+    if (-not $files.Count) { return [ordered]@{ exit = $null; summary = '没有日志可分析'; cells = @(); excluded = @($Probe.Excluded) } }
     $null = New-Item -ItemType Directory -Force -Path $all
     foreach ($f in $files) {
         $copyName = $f.Name -like 'compare-*' ? "compare-$($f.Directory.Name)-$($f.Name.Substring(8))" : $f.Name
@@ -348,14 +352,15 @@ function Invoke-ReaperProbeWhole($Probe) {
     [IO.File]::WriteAllText((Join-Path $Probe.RoundDir 'analyze.json'), $a.Out, [Text.UTF8Encoding]::new($false))
     $sum = Get-ReaperAnalyzerSummary $a
     if ($sum.Rejected) { $Probe.Rejected = $true }
-    [ordered]@{ exit = $a.Exit; summary = $sum.Text }
+    [ordered]@{ exit = $a.Exit; summary = $sum.Text; cells = @($files | ForEach-Object { $_.Directory.Name } | Sort-Object -Unique); excluded = @($Probe.Excluded) }
 }
 
 function Invoke-ReaperSmoke {
     param(
         [string]$CfgDir = '', [Parameter(Mandatory)][string]$ReaperExe, [Parameter(Mandatory)][string]$BuildDir, [string]$NullTest = '',
         [Parameter(Mandatory)][string]$LogDir, [Parameter(Mandatory)][string]$UserTestingMarker, [Parameter(Mandatory)][string]$ScenarioFile,
-        [string]$Only = '', [int]$Repeat = 1, [switch]$NoNegative, [switch]$Probe, [string]$Python = ''
+        [string]$Only = '', [int]$Repeat = 1, [switch]$NoNegative, [switch]$Probe, [string]$Python = '',
+        [hashtable]$SelfTestHooks = @{} # 只给自测注入：ProbeLogDir（假的文档目录里的日志目录）、Analyzer（分析器路径）、Launcher（代替 REAPER 的替身）
     )
     $cfg = Initialize-ReaperCfg $CfgDir # 不满足就抛 REFUSED，什么都还没动
     $scenarioConfig = Get-ReaperSmokeConfig $ScenarioFile
@@ -368,7 +373,8 @@ function Invoke-ReaperSmoke {
         if ($null -eq $section) { Stop-Usage 'scenarios.json 里没有 probe 一节，-Probe 没有场景可跑' }
     }
     $picked = Select-ReaperScenarios -Config $section -Only $Only -NoNegative:$NoNegative # 选不出场景就是用法错误：什么都还没启动
-    $pre = Get-ReaperPreflight -ReaperExe $ReaperExe -BuildDir $BuildDir -NullTest $NullTest -UserTestingMarker $UserTestingMarker -Flavor ($Probe ? 'probe' : 'dev') -Python $Python
+    $pre = Get-ReaperPreflight -ReaperExe $ReaperExe -BuildDir $BuildDir -NullTest $NullTest -UserTestingMarker $UserTestingMarker -Flavor ($Probe ? 'probe' : 'dev') -Python $Python `
+        -ProbeLogDir $SelfTestHooks['ProbeLogDir'] -Analyzer ([string]$SelfTestHooks['Analyzer'])
     $result = [ordered]@{
         schema = 1; phase = ($Probe ? 2 : 1); startedUtc = [DateTime]::UtcNow.ToString('o'); build = [ordered]@{ sha7 = $pre.Sha7; flavor = $pre.Flavor }
         reaper = $pre.ReaperVersion; verdict = 'SKIPPED'; launches = 0; skipReasons = @($pre.Reasons | ForEach-Object { Hide-LocalPaths $_ })
@@ -388,6 +394,7 @@ function Invoke-ReaperSmoke {
         $null = New-Item -ItemType Directory -Force -Path $work
         $before = Get-ReaperDefaultCfgSnapshot
         $ctx = New-ReaperContext -ReaperExe $ReaperExe -NullTest $pre.NullTest -WorkDir $work -Driver $driver -Config $section
+        if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
         if ($Probe) {
             $roundDir = Join-Path $LogDir "$stamp-probe-run$k"
             $null = New-Item -ItemType Directory -Force -Path $roundDir
@@ -413,6 +420,7 @@ function Invoke-ReaperSmoke {
         $launches += $ctx.Launches
         $docsSame = $true
         if ($Probe) {
+            foreach ($s in $negative) { if ($s.kind -in $script:ProbeKinds) { $ctx.Probe.Excluded.Add([string]$s.id) } } # 反例格不并进整轮分析
             $whole = Invoke-ReaperProbeWhole $ctx.Probe
             $docsAfter = Get-ReaperProbeLogListing -Dir $pre.ProbeLogDir
             Write-ReaperJson (Join-Path $roundDir 'docs-listing-after.json') $docsAfter
