@@ -5,7 +5,28 @@
   "a1-fail-guard-variant": {
     "A1": "FAIL"
   },
+  "a1-fail-in-stall": {
+    "A1": "FAIL"
+  },
   "a1-fail-misrecorded-drift": {
+    "A1": "FAIL"
+  },
+  "a1-fail-misrecorded-drift-main-fail": {
+    "A1": "FAIL"
+  },
+  "a1-fail-out-off-keeps-moving": {
+    "A1": "FAIL"
+  },
+  "a1-fail-out-off-shrinks": {
+    "A1": "FAIL"
+  },
+  "a1-fail-out-stall-too-long": {
+    "A1": "FAIL"
+  },
+  "a1-fail-out-timeline-backward": {
+    "A1": "FAIL"
+  },
+  "a1-fail-out-two-runs-different-off": {
     "A1": "FAIL"
   },
   "a1-fail-spurious-toggle": {
@@ -29,10 +50,16 @@
   "a1-incomplete-in-only": {
     "A1": "INCOMPLETE"
   },
+  "a1-incomplete-misrecorded-headdrop-drift": {
+    "A1": "INCOMPLETE"
+  },
   "a1-incomplete-misrecorded-mid": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-misrecorded-nosummary": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-misrecorded-nosummary-drift": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-misrecorded-tail": {
@@ -62,7 +89,19 @@
   "a1-pass": {
     "A1": "PASS"
   },
+  "a1-pass-out-stall": {
+    "A1": "PASS"
+  },
+  "a1-pass-out-stall-jump-only": {
+    "A1": "PASS"
+  },
+  "a1-pass-out-two-runs": {
+    "A1": "PASS"
+  },
   "a2-fail": {
+    "A2": "FAIL"
+  },
+  "a2-fail-explicit-presync": {
     "A2": "FAIL"
   },
   "a2-fail-mixed-explicit-and-inferred": {
@@ -92,6 +131,21 @@
   "a2-incomplete-one-cell-no-switch": {
     "A2": "INCOMPLETE"
   },
+  "a2-incomplete-pool-rotation-only": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-regime-blip-long": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-regime-blip-short": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-regimes-three-kinds": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-regimes-unconfirmed": {
+    "A2": "INCOMPLETE"
+  },
   "a2-incomplete-thread-constant": {
     "A2": "INCOMPLETE"
   },
@@ -117,6 +171,12 @@
     "A2": "PASS"
   },
   "a2-pass-explicit-skewed-thread": {
+    "A2": "PASS"
+  },
+  "a2-pass-regimes-explicit": {
+    "A2": "PASS"
+  },
+  "a2-pass-unsorted-timestamps": {
     "A2": "PASS"
   },
   "a3-fail": {
@@ -198,6 +258,12 @@
   "a7-fail-misrecorded-hostns": {
     "A7": "FAIL"
   },
+  "a7-fail-steady-hostns-regress-at-event": {
+    "A7": "FAIL"
+  },
+  "a7-fail-toggle-hostns-regress-away": {
+    "A7": "FAIL"
+  },
   "a7-incomplete": {
     "A7": "INCOMPLETE"
   },
@@ -216,10 +282,28 @@
   "a7-pass": {
     "A7": "PASS"
   },
+  "a7-pass-out-first-reported": {
+    "A7": "PASS"
+  },
+  "a7-pass-out-opens-first": {
+    "A7": "PASS"
+  },
+  "a7-pass-toggle-hostns-regress-at-switch": {
+    "A7": "PASS"
+  },
+  "a7-pass-toggle-hostns-regress-explicit": {
+    "A7": "PASS"
+  },
   "a8-fail": {
     "A8": "FAIL"
   },
   "a8-fail-broken-file": {
+    "A8": "FAIL"
+  },
+  "a8-fail-crashed-stall": {
+    "A8": "FAIL"
+  },
+  "a8-fail-crashed-trips": {
     "A8": "FAIL"
   },
   "a8-fail-short-clone-crash": {
@@ -279,6 +363,9 @@
   "cb05-deactivate-release-only": {
     "OBS": "PASS"
   },
+  "cb05-deactivate-replaced-ignored": {
+    "OBS": "INCOMPLETE"
+  },
   "cb05-deactivate-reset-at-play-only": {
     "OBS": "INCOMPLETE"
   },
@@ -307,6 +394,27 @@
     "OBS": "INCOMPLETE"
   },
   "cb05-deactivate-teardown-release-only": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-disable-track-destruct-only": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-disable-track-replaced": {
+    "OBS": "PASS"
+  },
+  "cb05-disable-track-replaced-born-earlier": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-disable-track-replaced-in-only": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-disable-track-replaced-other-pid": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-disable-track-replaced-timeout": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-disable-track-replaced-unpaired": {
     "OBS": "INCOMPLETE"
   },
   "cb05-disable-track-reset-only": {
@@ -339,6 +447,7 @@
   "f1-cb05-bypass-dup": {
     "OBS": "INCOMPLETE"
   },
+  "f1-cb05-disable-track-replaced": {},
   "f1-cb05-no-blocks": {},
   "f1-cb05-reset-at-play-only": {},
   "f1-cb05-teardown-release-only": {},
