@@ -146,6 +146,9 @@
   "a2-incomplete-regimes-unconfirmed": {
     "A2": "INCOMPLETE"
   },
+  "a2-incomplete-stray-between-unconfirmed": {
+    "A2": "INCOMPLETE"
+  },
   "a2-incomplete-thread-constant": {
     "A2": "INCOMPLETE"
   },
@@ -264,6 +267,12 @@
   "a7-fail-toggle-hostns-regress-away": {
     "A7": "FAIL"
   },
+  "a7-fail-toggle-hostns-regress-three-regimes": {
+    "A7": "FAIL"
+  },
+  "a7-fail-toggle-hostns-regress-unconfirmed": {
+    "A7": "FAIL"
+  },
   "a7-incomplete": {
     "A7": "INCOMPLETE"
   },
@@ -286,9 +295,6 @@
     "A7": "PASS"
   },
   "a7-pass-out-opens-first": {
-    "A7": "PASS"
-  },
-  "a7-pass-toggle-hostns-regress-at-switch": {
     "A7": "PASS"
   },
   "a7-pass-toggle-hostns-regress-explicit": {
@@ -440,6 +446,12 @@
   },
   "cb12-twoproj-unpaired": {
     "OBS": "INCOMPLETE"
+  },
+  "exclude-clean-while-others-fail": {
+    "A3": "FAIL",
+    "A5": "FAIL",
+    "A8": "FAIL",
+    "A9": "FAIL"
   },
   "f1-a2-inferred": {},
   "f1-a2-pool3": {},

@@ -912,7 +912,8 @@ def _mode_n(blocks):
 def switch_points(seg):
     """A2 的切换点：显式的监听 / 录音使能事件，加上 In 端处理形态（regimes_of）的变化点。
     VST3 不通知监听键与录音使能键，探针从不写这两个事件；ASIO-Guard 开着时，这类切换会把轨从预取（线程池）挪到实时线程，
-    所以处理形态变了，切换时刻取新形态之前那一种的最后一块之后的第一块的 mono_ns。
+    所以处理形态变了，切换时刻取新形态第一块的 mono_ns，窗口起点取它之前的一块。两种形态之间夹着被迟滞丢弃的杂散段时，
+    之前的一块是杂散段的末块，不是旧形态的末块（杂散段本身不是形态，不当切换点）。
     - 显式事件前后 SLICE_NS 内的形态变化算同一次切换，不重复数。
     - 推断出的切换之后 SLICE_NS 内又出现的形态变化并入这一次（folded），不单独算：宿主线程池调度、或者用户按得比窗口还快，
       都分不出来；并入之后，窗口不会被这类变化截断，一次切换后的两次重同步也就拆不开。
@@ -921,7 +922,7 @@ def switch_points(seg):
     explicit = sorted(e["t_ns"] for e in seg.events if e["name"] in TOGGLES)
     blocks = sorted(seg.blocks, key=lambda b: b["seq"])
     regs = regimes_of(blocks)
-    changes = [(blocks[a1 + 1]["mono_ns"], blocks[a1]["mono_ns"]) for (_, _, a1), _ in zip(regs, regs[1:])]
+    changes = [(blocks[b1]["mono_ns"], blocks[b1 - 1]["mono_ns"]) for _, (_, b1, _) in zip(regs, regs[1:])]  # (新形态首块, 它之前的一块)
     inferred, folded, last = [], 0, None
     for t, t_prev in changes:
         if any(abs(t - e) < SLICE_NS for e in explicit):
@@ -938,11 +939,50 @@ def switch_points(seg):
     }  # fmt: skip
 
 
+def toggle_counts(s):
+    """各 A2 case 的切换点统计 → {case: {explicit, inferred, regimes, folded}}：toggle 格里恰有 1 个 In 端的才数。
+    judge_a2 拿它对账现场次数；judge_a7 拿它判断推断出来的切换点有没有经 A2 确认过（两处必须是同一份数字）。"""
+    out = {}
+    for key, cell in _cells(s):
+        if key[0] not in A2_CASES or key[1] != "toggle" or len(cell["I"]) != 1:
+            continue
+        sw = switch_points(cell["I"][0])
+        got = out.setdefault(key[0], {"explicit": 0, "inferred": 0, "regimes": 0, "folded": 0})
+        got["explicit"] += len(sw["explicit"])
+        got["inferred"] += len(sw["inferred"])
+        got["folded"] += sw["folded"]
+        if sw["inferred"]:
+            got["regimes"] = max(got["regimes"], sw["regimes"])
+    return out
+
+
+def toggle_case_check(case, got, want):
+    """一个 case 的切换次数对账（--toggles 现场次数、形态数上限）→ (状态, 说明)，没有话要说返回 None。
+    状态 INCOMPLETE = 这个 case 的切换没能确认；NOTE = 次数与现场相符。judge_a2 照此出结论，
+    judge_a7 用它判断推断出来的切换点能不能当容忍窗口的依据（只有没有 INCOMPLETE 才行）。"""
+    n = got["explicit"] + got["inferred"]
+    how = f"显式事件 {got['explicit']}、按处理形态切换推断 {got['inferred']}"
+    if 0 < n < MIN_TOGGLES:  # 一次都没有的格已经各自说明过原因
+        folded = f"；另有 {got['folded']} 次形态变化挤在上一次切换后 {SLICE_NS // 1_000_000_000} s 内，并入了那一次" if got["folded"] else ""
+        return "INCOMPLETE", f"{case} 只有 {n} 次切换（{how}{folded}），不足 {MIN_TOGGLES}"
+    if n and want is not None and abs(n - want) > A2_TOGGLE_TOLERANCE:
+        return "INCOMPLETE", f"{case} 数出 {n} 次切换（{how}），与现场记录的 {want} 次相差超过 {A2_TOGGLE_TOLERANCE}，对不上"
+    if got["inferred"] and want is None:
+        return "INCOMPLETE", (f"{case} 的切换点里有 {got['inferred']} 次是按处理形态推断的（{how}），没有给现场按键次数（--toggles {case}:<次数>）可对照，"
+                              "推断不能单独撑出通过：宿主线程池在稳态下也会换线程，和用户的按键分不开")  # fmt: skip
+    if got["inferred"] and got["regimes"] > A2_MAX_REGIMES:
+        return "INCOMPLETE", (f"{case} 的推断切换出现了 {got['regimes']} 种不同的处理形态，多于线程池预取与专用线程实时两种，更像线程池调度而不是监听切换；"
+                              "拿到一份真实的形态分布之前不据此通过")  # fmt: skip
+    if n and want is not None:
+        return "NOTE", f"{case} 数出 {n} 次切换（{how}），与现场记录的 {want} 次相符（相差不超过 {A2_TOGGLE_TOLERANCE}）"
+    return None
+
+
 def judge_a2(s, toggles=None):
     """toggles = {case: 现场实际按键次数}（--toggles）。显式事件是宿主亲口报的切换；按处理形态推断出来的切换
     可能是用户按的，也可能只是线程池调度，所以推断的切换单独撑不出通过：要现场次数对得上、形态只有预取与实时两种。"""
     toggles = toggles or {}
-    parts, cover, per_case = [], [], {}
+    parts, cover, per_case = [], [], toggle_counts(s)
     for key, cell in _cells(s):
         if key[0] not in A2_CASES or key[1] != "toggle":
             continue
@@ -954,12 +994,6 @@ def judge_a2(s, toggles=None):
         seg = cell["I"][0]
         sw = switch_points(seg)
         explicit, inferred = sw["explicit"], sw["inferred"]
-        got = per_case.setdefault(key[0], {"explicit": 0, "inferred": 0, "regimes": 0, "folded": 0})
-        got["explicit"] += len(explicit)
-        got["inferred"] += len(inferred)
-        got["folded"] += sw["folded"]
-        if inferred:
-            got["regimes"] = max(got["regimes"], sw["regimes"])
         how = f"显式事件 {len(explicit)}、按处理形态切换推断 {len(inferred)}"
         bad, why = _usable(seg)
         if bad:
@@ -1003,22 +1037,9 @@ def judge_a2(s, toggles=None):
         else:
             parts.append(("PASS", f"{label} {detail}"))
     for case, got in sorted(per_case.items()):
-        n = got["explicit"] + got["inferred"]
-        want = toggles.get(case)
-        how = f"显式事件 {got['explicit']}、按处理形态切换推断 {got['inferred']}"
-        if 0 < n < MIN_TOGGLES:  # 一次都没有的格已经各自说明过原因
-            folded = f"；另有 {got['folded']} 次形态变化挤在上一次切换后 {SLICE_NS // 1_000_000_000} s 内，并入了那一次" if got["folded"] else ""
-            parts.append(("INCOMPLETE", f"{case} 只有 {n} 次切换（{how}{folded}），不足 {MIN_TOGGLES}"))
-        elif n and want is not None and abs(n - want) > A2_TOGGLE_TOLERANCE:
-            parts.append(("INCOMPLETE", f"{case} 数出 {n} 次切换（{how}），与现场记录的 {want} 次相差超过 {A2_TOGGLE_TOLERANCE}，对不上"))
-        elif got["inferred"] and want is None:
-            parts.append(("INCOMPLETE", f"{case} 的切换点里有 {got['inferred']} 次是按处理形态推断的（{how}），没有给现场按键次数（--toggles {case}:<次数>）可对照，"
-                                        "推断不能单独撑出通过：宿主线程池在稳态下也会换线程，和用户的按键分不开"))  # fmt: skip
-        elif got["inferred"] and got["regimes"] > A2_MAX_REGIMES:
-            parts.append(("INCOMPLETE", f"{case} 的推断切换出现了 {got['regimes']} 种不同的处理形态，多于线程池预取与专用线程实时两种，更像线程池调度而不是监听切换；"
-                                        "拿到一份真实的形态分布之前不据此通过"))  # fmt: skip
-        elif n and want is not None:
-            parts.append(("NOTE", f"{case} 数出 {n} 次切换（{how}），与现场记录的 {want} 次相符（相差不超过 {A2_TOGGLE_TOLERANCE}）"))
+        chk = toggle_case_check(case, got, toggles.get(case))
+        if chk:
+            parts.append(chk)
     return fold("A2", parts, cover)
 
 
@@ -1201,14 +1222,32 @@ def aligned_pairs(i_blocks, o_blocks):
     return sh, [(b, by_cs[b["call_seq"] + sh[0]]) for b in i_blocks if b["call_seq"] + sh[0] in by_cs]
 
 
-def _toggle_zone(seg_in):
-    """toggle 格的切换点（与 A2 同一套：显式事件加推断）→ 排好序的时刻列表。"""
+def _toggle_zone(seg_in, case, counts, toggles):
+    """toggle 格里容忍 hostNs 回退的依据（切换点与 A2 同一套：显式事件加推断）→ (给容忍的切换点, 不给容忍的推断点, 说明)，前两项是排好序的时刻列表。
+    显式事件是宿主亲口报的，一律给容忍。按处理形态推断出来的点只有这个 case 的切换次数已被 A2 确认（toggle_case_check 没判数据不全：
+    次数对上 --toggles、处理形态数不超过 A2_MAX_REGIMES）才给：没确认的点可能只是线程池调度，拿它前后各放宽 A7_TOGGLE_ZONE_NS、
+    回退幅度又没有上限，会把真问题放过；A2 判数据不全的格，A7 也不替它背书。"""
     sw = switch_points(seg_in)
-    return sorted(sw["explicit"] + [t for t, _ in sw["inferred"]])
+    explicit, inferred = sorted(sw["explicit"]), sorted(t for t, _ in sw["inferred"])
+    if not inferred:
+        return explicit, [], ""
+    want = toggles.get(case)
+    chk = toggle_case_check(case, counts[case], want)
+    if chk is not None and chk[0] == "NOTE":  # 次数与现场相符，且没有因形态数、次数不足而数据不全：A2 确认了
+        return sorted(explicit + inferred), [], f"切换点含 {len(inferred)} 个按处理形态推断的，已由 A2 按现场次数（--toggles {case}:{want}）确认"
+    return explicit, inferred, (f"{len(inferred)} 个按处理形态推断的切换点没有经 A2 确认，不给容忍"
+                                f"（给 --toggles {case}:<次数>，次数对上、处理形态不多于 {A2_MAX_REGIMES} 种才确认，见 A2 一行）")  # fmt: skip
 
 
-def judge_a7(s):
-    parts, cover = [], []
+def _near(zone, t):
+    """t 离 zone（排好序的时刻）里最近的一个不超过 A7_TOGGLE_ZONE_NS。"""
+    k = bisect_left(zone, t)
+    return any(0 <= m < len(zone) and abs(zone[m] - t) <= A7_TOGGLE_ZONE_NS for m in (k - 1, k))
+
+
+def judge_a7(s, toggles=None):
+    toggles = toggles or {}
+    parts, cover, counts = [], [], toggle_counts(s)
     for key, cell in _cells(s):
         if not (is_cat1(key) and "A7" in feeds_of(key)) or not any(g.blocks for g in cell["I"] + cell["O"]):
             continue
@@ -1247,23 +1286,26 @@ def judge_a7(s):
         mismatch = sum(1 for a, b in both if a["host_ns"] != b["host_ns"])
         # toggle 格：ASIO-Guard 切换时宿主 hostNs 会回退（现场最大一次 7.3 s，两端值相同）。回退落在切换点前后 A7_TOGGLE_ZONE_NS 内的容忍并计数，
         # 窗口外的照常算非递增；非 toggle 格没有切换点，一律不放宽
-        zone = _toggle_zone(i) if (key[0] in A2_CASES and key[1] == "toggle") else []
-        nonmono = tolerated = worst_back = 0
+        zone, unconfirmed, basis = _toggle_zone(i, key[0], counts, toggles) if (key[0] in A2_CASES and key[1] == "toggle") else ([], [], "")
+        nonmono = tolerated = worst_back = unexplained = 0
         for sg in (i, o):
             seq = [(b["host_ns"], b["mono_ns"]) for b in sorted(sg.blocks, key=lambda b: b["seq"]) if b["playing"] and b["host_ns_valid"]]
             for (x, _), (y, t) in zip(seq, seq[1:]):
                 if y > x:
                     continue
-                k = bisect_left(zone, t)
-                if any(0 <= m < len(zone) and abs(zone[m] - t) <= A7_TOGGLE_ZONE_NS for m in (k - 1, k)):
+                if _near(zone, t):
                     tolerated += 1
                     worst_back = max(worst_back, x - y)
                 else:
                     nonmono += 1
+                    unexplained += _near(unconfirmed, t)
         ok = mismatch / len(both) <= HOSTNS_MISMATCH_RATIO and nonmono == 0
         order = "In 先于 Out" if shift > 0 else "Out 先于 In（错放）"
-        back = f"（另有 {tolerated} 次落在切换点前后 {A7_TOGGLE_ZONE_NS // 1_000_000} ms 内，已容忍，最大回退 {worst_back // 1_000_000} ms）" if tolerated else ""
-        msg = f"{key_label(key)} 按 call_seq 对齐（Out = In {shift:+d}，{order}）配对 {len(both)}，两端不等 {mismatch}，非递增 {nonmono}{back}"
+        zone_ms = A7_TOGGLE_ZONE_NS // 1_000_000
+        back = f"（另有 {tolerated} 次落在切换点前后 {zone_ms} ms 内，已容忍，最大回退 {worst_back // 1_000_000} ms）" if tolerated else ""
+        if unexplained:
+            back += f"（非递增里有 {unexplained} 次落在没经确认的推断切换点前后 {zone_ms} ms 内，没有容忍）"
+        msg = f"{key_label(key)} 按 call_seq 对齐（Out = In {shift:+d}，{order}）配对 {len(both)}，两端不等 {mismatch}，非递增 {nonmono}{back}" + (f"；{basis}" if basis else "")
         parts.append(("PASS" if ok else "FAIL", msg))
     return fold("A7", parts, cover)
 
@@ -1793,10 +1835,16 @@ def mark_crashed(logs, names):
         lg.crashed = True
 
 
+# 不参与「被排除的段若计入」归因的判据。A3 读导出比对行（不属于任何段），A8 读每个实例的收尾行、摘要与跳闸（实例级，记不到某个 C 行的段上）；
+# 影子会话共用同一批 logs / compares，别的实例的失败（未排除实例跳闸、比对不过）会被当成被排除的段「本来就不通过」。
+# 这两项在主会话里本来就读全部输入，排除一个段不会让它们少看任何东西，所以不必再算一遍。其余判据只读段（格）里的块与事件
+SHADOW_SESSION_WIDE = ("A3", "A8")
+
+
 def _judge(sess, iid, fn, salt, toggles):
     if iid == "A6":
         return fn(sess, salt)
-    return fn(sess, toggles) if iid == "A2" else fn(sess)
+    return fn(sess, toggles) if iid in ("A2", "A7") else fn(sess)  # A7 的 toggle 格要知道 A2 有没有确认推断出来的切换点
 
 
 def analyze(path, salt, exclude=(), toggles=None, crashed=()):
@@ -1808,6 +1856,8 @@ def analyze(path, salt, exclude=(), toggles=None, crashed=()):
     if s.hidden:  # --exclude 只许拿掉数据不全的段：被排除的段单独判一遍，本来会不通过的项照样记不通过
         sh = s.shadow()
         for item, (iid, fn) in zip(items, JUDGES):
+            if iid in SHADOW_SESSION_WIDE:
+                continue
             was = _judge(sh, iid, fn, salt, toggles)
             if was["verdict"] == "FAIL":
                 would_fail.append(item["id"])  # 主会话里这一项已经不通过也要记：被排除的段本来就不通过，是单独的一条事实
@@ -2584,9 +2634,9 @@ def _self_test_r1(tmp, check, run_json, said, verdict, a2):
     _, r, _ = run_json("obs-abnormal")
     check("A7 对齐：只有 30/40 对的 call_seq 差一致（众数占比不足）时数据不全", verdict(r, "A7") == "INCOMPLETE" and "只占 30/40" in said(r, "A7"), True)
 
-    # F4：toggle 格切换点前后的 hostNs 回退
-    for d in ("a7-pass-toggle-hostns-regress-at-switch", "a7-pass-toggle-hostns-regress-explicit"):
-        _, r, _ = run_json(d)
+    # F4：toggle 格切换点前后的 hostNs 回退（推断的切换点要 A2 确认过才给容忍：见 _self_test_r2；显式事件不受此限）
+    for d, extra in (("a7-fail-toggle-hostns-regress-unconfirmed", ["--toggles", "CB-02:10"]), ("a7-pass-toggle-hostns-regress-explicit", [])):
+        _, r, _ = run_json(d, *extra)
         txt = said(r, "A7")
         check(f"A7 回退：{d} 回退（最大 7100 ms）落在切换点前后 500 ms 内，容忍并计数，通过",
               verdict(r, "A7") == "PASS" and "非递增 0" in txt and "另有 2 次落在切换点前后 500 ms 内，已容忍，最大回退 7100 ms" in txt, False)  # fmt: skip
@@ -2658,6 +2708,62 @@ def _self_test_r1(tmp, check, run_json, said, verdict, a2):
     c, r = dt_cell("cb05-deactivate-replaced-ignored", "deactivate")
     check("CB-05 替换：只对禁用轨道认实例替换，停用格里同样的析构加新实例不算证据", c["state"] == "INCOMPLETE" and "实例被替换" not in c["note"] and r["observations"]["replaced"] == [], True)
     check("F1：禁用轨道这一格的证据是实例替换时，其余判据都过，F1 满足，退出码 0", _cli([os.path.join(tmp, "f1-cb05-disable-track-replaced")])[0] == 0, False)
+    _self_test_r2(tmp, check, run_json, said, verdict, a2)
+
+
+def _self_test_r2(tmp, check, run_json, said, verdict, a2):
+    """第 2 轮整改：A7 的容忍窗口只认经 A2 确认的推断切换点；A2 的切换时刻取新形态第一块；
+    影子判定不把会话级判据（A3、A8）的失败记到被排除的段名下。夹具的判定已在夹具矩阵里查过，这里查说明文字与现场次数的配合。"""
+
+    # 推断的切换点要 A2 确认过（现场次数对上、形态数合规）才给 A7 的容忍窗口
+    d = "a7-fail-toggle-hostns-regress-unconfirmed"
+    _, r, _ = run_json(d)
+    txt = said(r, "A7")
+    check("A7 确认：推断的切换点没给 --toggles 时不给容忍，回退算非递增，不通过；说明写明有几次本会落在没经确认的点前后、怎样才算确认",
+          verdict(r, "A7") == "FAIL" and "非递增 2" in txt and "已容忍" not in txt and "非递增里有 2 次落在没经确认的推断切换点前后 500 ms 内，没有容忍" in txt
+          and "10 个按处理形态推断的切换点没有经 A2 确认，不给容忍" in txt and "--toggles CB-02:<次数>" in txt, True)  # fmt: skip
+    _, r, _ = run_json(d, "--toggles", "CB-02:10")
+    txt = said(r, "A7")
+    check("A7 确认：给了 --toggles CB-02:10、A2 数出 10 次对上，推断的切换点给容忍，通过；说明写明已由 A2 确认",
+          verdict(r, "A2") == "PASS" and verdict(r, "A7") == "PASS" and "非递增 0" in txt and "另有 2 次落在切换点前后 500 ms 内，已容忍，最大回退 7100 ms" in txt
+          and "切换点含 10 个按处理形态推断的，已由 A2 按现场次数（--toggles CB-02:10）确认" in txt, False)  # fmt: skip
+    _, r, _ = run_json(d, "--toggles", "CB-02:10", "--toggles", "LU-03:99")
+    check("A7 确认：别的 case 的现场次数不影响这个 case 的确认", verdict(r, "A7") == "PASS", False)
+    _, r, _ = run_json(d, "--toggles", "CB-02:5")
+    check("A7 确认：现场次数 5 与数出的 10 次对不上，A2 数据不全，A7 也不给容忍", verdict(r, "A2") == "INCOMPLETE" and verdict(r, "A7") == "FAIL" and "没有经 A2 确认" in said(r, "A7"), True)
+    _, r, _ = run_json("a7-fail-toggle-hostns-regress-three-regimes", "--toggles", "CB-02:12")
+    check("A7 确认：次数对得上、但出现 3 种处理形态，A2 不确认，A7 也不给容忍",
+          verdict(r, "A2") == "INCOMPLETE" and "出现了 3 种不同的处理形态" in said(r, "A2") and verdict(r, "A7") == "FAIL" and "没有经 A2 确认" in said(r, "A7"), True)  # fmt: skip
+    _, r, _ = run_json("a7-pass-toggle-hostns-regress-explicit", "--toggles", "CB-02:5")
+    check("A7 确认：显式事件是宿主亲口报的，不受 A2 确认的约束：现场次数对不上、A2 数据不全时，A7 仍容忍显式切换点处的回退，说明里没有推断点的话",
+          verdict(r, "A2") == "INCOMPLETE" and verdict(r, "A7") == "PASS" and "已容忍" in said(r, "A7") and "推断" not in said(r, "A7"), False)  # fmt: skip
+    _, r, _ = run_json("a7-fail-toggle-hostns-regress-away", "--toggles", "CB-02:10")
+    check("A7 确认：窗口外的回退即使推断的切换点已确认也照常算非递增", verdict(r, "A7") == "FAIL" and "非递增 2" in said(r, "A7") and "没经确认" not in said(r, "A7"), True)
+
+    # A2 的切换时刻：新形态第一块，窗口从它之前的一块算起；夹在两个专用线程形态之间的杂散段不当切换点
+    d = "a2-incomplete-stray-between-unconfirmed"
+    _, v, txt = a2(d)
+    check("A2 切换时刻：夹着杂散段的两个专用线程形态，不给现场次数时推断的 10 次撑不出通过", v == "INCOMPLETE" and "没有给现场按键次数" in txt, True)
+    _, v, txt = a2(d, 10)
+    check("A2 切换时刻：杂散段第一块上的重同步不算进这次切换（切换时刻取新形态第一块，窗口从杂散段末块算起），每次切换后最多 1 次，通过",
+          v == "PASS" and "按处理形态切换推断 10" in txt and "处理形态 2 种" in txt, False)  # fmt: skip
+    ps = _synth()
+    logs, compares, broken = load_dir(os.path.join(tmp, d))
+    seg = next(g for g in Session(logs, compares, broken).segments if g.role == "I")
+    got = switch_points(seg)["inferred"]
+    want = [(ps.T_START + s * ps.LONG, ps.T_START + (s - 1) * ps.LONG) for s in ps.switch_blocks(10)]
+    check("A2 切换时刻：switch_points 给出的是 (新形态首块的 mono_ns, 它之前一块的 mono_ns)，不是杂散段的第一块", got == want, False)
+    check("A2 切换时刻：夹着的杂散段不是形态，不数成两次切换", len(got) == 10 and switch_points(seg)["regimes"] == 2, False)
+
+    # 影子判定只算由被排除的段本身导致的失败：A3（导出比对行）与 A8（实例级的收尾、摘要、跳闸）读的是整场的数据，不记到被排除的段名下
+    d = "exclude-clean-while-others-fail"
+    both = ["--exclude", "probe-I-5120-e1f2.csv:2", "--exclude", "probe-O-5120-e3f4.csv:2"]
+    code, r, _ = run_json(d, *both)
+    check("--exclude 影子：被排除的一格干净，别的实例让 A3 A5 A8 A9 各自不通过，这些失败不记到被排除的段名下：excluded_fail 为空",
+          [verdict(r, i) for i in ("A3", "A5", "A8", "A9")] == ["FAIL"] * 4 and r["excluded_fail"] == [] and len(r["excluded"]) == 2, True)  # fmt: skip
+    check("--exclude 影子：A8 的不通过说明是别的实例的跳闸，没有被改写成「被排除的段若计入」", "跳闸 2 次" in said(r, "A8") and "被排除的段若计入" not in said(r, "A8"), True)
+    code, so, _ = _cli([os.path.join(tmp, d), "--hash-salt", "s", *both])
+    check("--exclude 影子：文本输出不说「被排除的段里本来就不通过」", "照样记不通过" not in so and "已排除的段" in so, True)
 
 
 def mutation_check():

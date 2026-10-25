@@ -387,14 +387,16 @@ def regime_blocks(phases, *, tail=5, cadence=LONG):
     return out
 
 
-def scen_a2_regimes(pid, phases, *, tail=5, explicit=False):
+def scen_a2_regimes(pid, phases, *, tail=5, explicit=False, host_back=None):
     """CB-02 toggle 格：处理形态在线程池预取与专用线程实时之间来回（按键切换监听时 ASIO-Guard 把轨在两者之间挪）。
-    每次切换的第一块记一次重同步。explicit=True 另外在每次切换处写显式事件。"""
+    每次切换的第一块记一次重同步。explicit=True 另外在每次切换处写显式事件。
+    host_back = (相对 T_START 的偏移 ns, 回退量 ns)：从这一偏移起两端的 hostNs 整体回退这么多（ASIO-Guard 切换时的现场现象）。"""
     sched = regime_blocks(phases, tail=tail)
 
     def hook(r, k, row):
         b = sched[k]
-        row.update(mono_ns=T_START + b["t"] + (1000 if r == "O" else 0), host_ns=HOST0 + b["t"], n=b["n"], n_decl=b["n"])
+        back = host_back[1] if host_back and b["t"] >= host_back[0] else 0
+        row.update(mono_ns=T_START + b["t"] + (1000 if r == "O" else 0), host_ns=HOST0 + b["t"] - back, n=b["n"], n_decl=b["n"])
         if r == "I":
             row.update(thread=b["thread"], rs=1 if b.get("first") or k == 0 else 0)
 
@@ -407,6 +409,20 @@ def scen_a2_regimes(pid, phases, *, tail=5, explicit=False):
 
 
 REAL_LIKE = [(kind, 3.0) for kind in ("pool", "rt") * 6 + ("pool",)]  # 13 段 = 12 次切换
+THREE_KINDS = [(kind, 3.0) for kind in ("rt", "duo", "rt", "pool") * 3 + ("rt",)]  # 专用线程、两线程轮换、线程池三种形态，13 段 = 12 次切换
+
+
+def scen_a2_stray_between(pid):
+    """两个专用线程轮着来（每 3 s 换一次，10 次切换），每次切换处新旧形态之间夹着 2 块跑在第三个线程上的杂散段（0.2 s，短于迟滞，被丢弃）。
+    第 3 次切换的杂散段第一块上有一次重同步，新形态第一块（切换块）上又有一次。切换时刻取新形态第一块、窗口从它之前的一块（杂散段末块）算起，
+    杂散段第一块上的那次落在窗口之外，这次切换后只有 1 次；若把杂散段第一块当切换时刻，窗口把两次都装进去，会判成 2 次。"""
+    sw = switch_blocks(10)
+    base = alternating(sw)
+
+    def thread_of(k):
+        return STRAY_THREAD if any(s - 2 <= k < s for s in sw) else base(k)
+
+    return files_of(*a2_long(pid, thread_of, count=sw[-1] + 20, rs_of=lambda k: 1 if k in sw or k == sw[2] - 2 else 0))
 
 
 def scen_a2_blip(pid, blocks):
@@ -533,6 +549,30 @@ def scen_a8_crashed(pid, what):
         f[6] = "2"
     lo.lines[sums[-1]] = ",".join(f)
     return files_of(li, lo)
+
+
+def scen_a8_trips_elsewhere(pid):
+    """CB-11 的一对实例，Out 端最后一条摘要里记了跳闸 2 次（A8 不通过）。别的段、别的实例的失败不能记到被排除的段名下。"""
+    li, lo = pair("CB-11", "constrain", 256, "low", pid=pid)
+    sums = [k for k, ln in enumerate(lo.lines) if ln.startswith("S,")]
+    f = lo.lines[sums[-1]].split(",")
+    f[6] = "2"
+    lo.lines[sums[-1]] = ",".join(f)
+    return files_of(li, lo)
+
+
+def others_fail_excluded_clean(pid):
+    """一对实例连续记三格，中间一格（面板默认 Case 误记，只有 5 块）是干净的，用来被 --exclude 排除；
+    此外有别的实例让 A3（导出比对不过）、A5（两端不在同一进程）、A8（摘要里记了跳闸）、A9（重开后没有配对）各自不通过。
+    这些失败都不属于被排除的段：excluded_fail 里一项都不该有。"""
+    good, stray, good3 = ("CB-01", "steady", 64, "off", 40, "ok"), ("CB-01", "steady", "-", "na", 5, "ok"), ("CB-01", "steady", 1024, "high", 40, "ok")
+    return {
+        **files_of(*multi_cells([good, stray, good3], pid=pid)),
+        **scen_a3("fail"),
+        **scen_a5("fail", pid=pid + 10),
+        **scen_a8_trips_elsewhere(pid + 1),
+        **scen_a9("fail", pid=pid + 20),
+    }
 
 
 def disable_track_replaced(pid, *, variant="disable-track", new_pid=None, set_state_after=7_500_000_000, pair_after=300_000_000,
@@ -905,7 +945,7 @@ def extra_cells():
         "a2-incomplete-regimes-unconfirmed": (scen_a2_regimes(5070, REAL_LIKE), {"A2": "INCOMPLETE"}),  # 预取 / 实时来回 13 段：给 --toggles CB-02:12 才通过
         "a2-pass-regimes-explicit": (scen_a2_regimes(5071, REAL_LIKE, explicit=True), {"A2": "PASS"}),
         "a2-incomplete-regimes-three-kinds": (  # 专用线程、两线程轮换、线程池三种形态隔着专用线程轮着来：次数对得上也多于两种
-            scen_a2_regimes(5075, [(kind, 3.0) for kind in ("rt", "duo", "rt", "pool") * 3 + ("rt",)]),
+            scen_a2_regimes(5075, THREE_KINDS),
             {"A2": "INCOMPLETE"},
         ),
         "a2-incomplete-pool-rotation-only": (scen_a2_regimes(5072, [("pool", 40.0)]), {"A2": "INCOMPLETE"}),
@@ -939,10 +979,19 @@ def extra_cells():
             files_of(*pair("CB-01", "steady", 256, "low", pid=5081, hook=lambda r, k, row: row.update(_cs=2 * k + 1 if r == "I" else 2 * k))),
             {"A7": "PASS"},
         ),
-        "a7-pass-toggle-hostns-regress-at-switch": (scen_a7_toggle_regress(5090, "at-switch"), {"A7": "PASS"}),
+        "a7-fail-toggle-hostns-regress-unconfirmed": (scen_a7_toggle_regress(5090, "at-switch"), {"A7": "FAIL"}),  # 推断的切换点，没给 --toggles：不给容忍；给 CB-02:10 对上才容忍
         "a7-pass-toggle-hostns-regress-explicit": (scen_a7_toggle_regress(5091, "explicit"), {"A7": "PASS"}),
         "a7-fail-toggle-hostns-regress-away": (scen_a7_toggle_regress(5092, "away"), {"A7": "FAIL"}),
         "a7-fail-steady-hostns-regress-at-event": (scen_a7_steady_regress(5093), {"A7": "FAIL"}),
+        "a7-fail-toggle-hostns-regress-three-regimes": (  # 三种形态、12 次，次数对得上也不确认：回退在第 4 次切换处，不给容忍
+            scen_a2_regimes(5094, THREE_KINDS, host_back=(9_000_000_000, 7_300_000_000)),
+            {"A7": "FAIL"},
+        ),
+        "a2-incomplete-stray-between-unconfirmed": (scen_a2_stray_between(5076), {"A2": "INCOMPLETE"}),  # 给 --toggles CB-02:10 才通过
+        "exclude-clean-while-others-fail": (  # 被排除的一格干净；别的实例让 A3 A5 A8 A9 各自不通过
+            others_fail_excluded_clean(5120),
+            {"A3": "FAIL", "A5": "FAIL", "A8": "FAIL", "A9": "FAIL"},
+        ),
         "a8-fail-crashed-stall": (scen_a8_crashed(5100, "stall"), {"A8": "FAIL"}),
         "a8-fail-crashed-trips": (scen_a8_crashed(5101, "trips"), {"A8": "FAIL"}),
         "cb05-disable-track-replaced": (disable_track_replaced(5110), {"OBS": "PASS"}),
