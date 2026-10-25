@@ -255,6 +255,10 @@
   "a6-pass-longname": {
     "A6": "PASS"
   },
+  "a7-exclude-toggle-beside-main": {
+    "A2": "INCOMPLETE",
+    "A7": "INCOMPLETE"
+  },
   "a7-fail": {
     "A7": "FAIL"
   },
@@ -310,6 +314,15 @@
     "A8": "FAIL"
   },
   "a8-fail-crashed-trips": {
+    "A8": "FAIL"
+  },
+  "a8-fail-partial-tail-block": {
+    "A8": "FAIL"
+  },
+  "a8-fail-partial-tail-nonl": {
+    "A8": "FAIL"
+  },
+  "a8-fail-partial-tail-summary": {
     "A8": "FAIL"
   },
   "a8-fail-short-clone-crash": {

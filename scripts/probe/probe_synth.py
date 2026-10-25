@@ -511,17 +511,18 @@ def scen_a7_out_opens_first(pid, extra=5, count=40):
     return files_of(*pair("CB-01", "steady", 256, "low", count=count + extra, hook=_drop_at_range(0, extra), pid=pid))
 
 
-def scen_a7_toggle_regress(pid, where):
-    """CB-02 toggle 格（0.2 s 一块，线程每 3 s 换一次）。hostNs 在第 4 次切换处（at-switch）或切换之后 1.6 s 处（away）整体回退 7.3 s，
-    两端同样回退。explicit：线程不变，切换点来自显式事件，回退在第 4 次切换处。"""
-    sw = switch_blocks(10)
-    k0 = sw[3] + (8 if where == "away" else 0)
+def scen_a7_toggle_regress(pid, where, switches=10, at=3, double_resync=False):
+    """CB-02 toggle 格（0.2 s 一块，线程每 3 s 换一次）。hostNs 在第 at + 1 次切换处（at-switch）或切换之后 1.6 s 处（away）整体回退 7.3 s，
+    两端同样回退。explicit：线程不变，切换点来自显式事件，回退在第 at + 1 次切换处。switches 是切换次数，默认 10，at 默认 3（第 4 次）。
+    double_resync：第 at + 1 次切换块上重同步 2 次（A2 不通过）。"""
+    sw = switch_blocks(switches)
+    k0 = sw[at] + (8 if where == "away" else 0)
 
     def host_of(k):
         return HOST0 + k * LONG - (7_300_000_000 if k >= k0 else 0)
 
     thread = (lambda k: THREADS[0]) if where == "explicit" else alternating(sw)
-    return files_of(*a2_long(pid, thread, count=sw[-1] + 20, rs_of=lambda k: 1 if k in sw else 0,
+    return files_of(*a2_long(pid, thread, count=sw[-1] + 20, rs_of=lambda k: (2 if double_resync and k == sw[at] else 1) if k in sw else 0,
                              explicit_at=sw if where == "explicit" else (), host_of=host_of))  # fmt: skip
 
 
@@ -551,6 +552,20 @@ def scen_a8_crashed(pid, what):
     return files_of(li, lo)
 
 
+def scen_a8_partial_tail(pid, tail):
+    """CB-11 的一对实例，Out 端没有收尾，文件末尾是整机崩溃时一次写盘只落下前半截留下的一行（探针一批行一次 write，不是逐行落盘），没有换行结尾。
+    tail：summary = 最后一条 S 行写到一半；block = 最后一个 B 行写到一半（摘要都排在它前面，所以摘要行数够判卡死）；
+    nonl = 最后一行整行都写完了，只缺末尾的换行（也算残缺：分不清它是不是写完了）。"""
+    li, lo = pair("CB-11", "constrain", 256, "low", pid=pid)
+    lo.lines = [ln for ln in lo.lines if not ln.startswith("Z,")]
+    if tail == "block":
+        k = max(i for i, ln in enumerate(lo.lines) if ln.startswith("B,"))
+        lo.lines = lo.lines[:k] + [ln for ln in lo.lines[k + 1 :] if ln.startswith("S,")] + [lo.lines[k][:23]]
+    elif tail == "summary":
+        lo.lines[-1] = lo.lines[-1][:14]
+    return {**files_of(li), lo.name: "\n".join(lo.lines)}  # 末尾不补换行
+
+
 def scen_a8_trips_elsewhere(pid):
     """CB-11 的一对实例，Out 端最后一条摘要里记了跳闸 2 次（A8 不通过）。别的段、别的实例的失败不能记到被排除的段名下。"""
     li, lo = pair("CB-11", "constrain", 256, "low", pid=pid)
@@ -573,6 +588,15 @@ def others_fail_excluded_clean(pid):
         **scen_a8_trips_elsewhere(pid + 1),
         **scen_a9("fail", pid=pid + 20),
     }
+
+
+def toggle_excluded_beside_main(pid, double_resync=False):
+    """CB-02 toggle 格录了两遍（同一个键）：第一遍（pid）10 次切换、hostNs 没有回退，是要留下的；第二遍（pid + 1）是误记的一遍，
+    只有 3 次切换，第 2 次切换处两端的 hostNs 整体回退 7.3 s（ASIO-Guard 的现场现象），要被 --exclude 排除。
+    --toggles CB-02:10 是整个 case 的现场按键次数，对得上留下的那一遍；被排除的那一遍自己只数出 3 次，对不上这个次数（也不足 10 次）。
+    被排除的段单独判时，A7 的容忍要沿用主会话的确认，不能拿它自己的 3 次去对整场的 10 次。
+    double_resync：被排除的那一遍第 2 次切换块上重同步 2 次，A2 若计入就不通过（逐格的判定，与现场次数无关）。"""
+    return {**scen_a2_thread("pass", pid=pid), **scen_a7_toggle_regress(pid + 1, "at-switch", switches=3, at=1, double_resync=double_resync)}
 
 
 def disable_track_replaced(pid, *, variant="disable-track", new_pid=None, set_state_after=7_500_000_000, pair_after=300_000_000,
@@ -991,6 +1015,13 @@ def extra_cells():
         "exclude-clean-while-others-fail": (  # 被排除的一格干净；别的实例让 A3 A5 A8 A9 各自不通过
             others_fail_excluded_clean(5120),
             {"A3": "FAIL", "A5": "FAIL", "A8": "FAIL", "A9": "FAIL"},
+        ),
+        "a8-fail-partial-tail-summary": (scen_a8_partial_tail(5102, "summary"), {"A8": "FAIL"}),  # 末行写到一半：解析时丢掉，--crashed 照样能标注
+        "a8-fail-partial-tail-block": (scen_a8_partial_tail(5103, "block"), {"A8": "FAIL"}),
+        "a8-fail-partial-tail-nonl": (scen_a8_partial_tail(5104, "nonl"), {"A8": "FAIL"}),
+        "a7-exclude-toggle-beside-main": (  # 不带 --exclude 时同键两遍：留下的与误记的各占一格，同键重复记录；带 --exclude 的判定见自测
+            toggle_excluded_beside_main(5150),
+            {"A2": "INCOMPLETE", "A7": "INCOMPLETE"},
         ),
         "a8-fail-crashed-stall": (scen_a8_crashed(5100, "stall"), {"A8": "FAIL"}),
         "a8-fail-crashed-trips": (scen_a8_crashed(5101, "trips"), {"A8": "FAIL"}),

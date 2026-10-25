@@ -20,10 +20,11 @@ In 与 Out 各有一份文件，一格误记要在两个文件里各排除一次
 `--toggles <case>:<N>` 告诉分析器现场实际按了多少次监听 / 录音使能键（case 取 CB-02 或 LU-03，可重复）。探针看不到这类按键，
 切换点只能从处理形态的变化推断（线程池预取与专用线程实时是两种形态，线程池内部的轮换不算切换，见 `regimes_of`）；推断出来的切换点要和
 这个次数对得上（差不超过 A2_TOGGLE_TOLERANCE）、而且这一格里形态不超过 A2_MAX_REGIMES 种，A2 才能通过，否则判数据不全：
-宿主线程池在稳态下换线程，和用户的按键分不开。
+宿主线程池在稳态下换线程，和用户的按键分不开。次数的对账是整个 case 的性质，主会话算一次（`toggle_reviews`），`--exclude` 的影子判定沿用，不拿只含被排除的段的计数去对。
 
 `--crashed <文件名>`（可重复）由人工标注「这个实例的日志因整机崩溃中断」：没有收尾行不再计为插件崩溃，A8 写一条说明，报告开头醒目提示
 请人工确认是否确属整机崩溃；摘要间隔、跳闸照常判。标注了的实例却有收尾行，或文件不存在，按参数错处理（退出码 5）。输出里不写文件名。
+末行写到一半（没有换行结尾）的文件照常解析，残行丢掉，A8 的说明写明丢了几字节；文件头都没写完的文件没有可分析的内容，不认（退出码 5）。
 
 输出会被公开粘贴，所以只由枚举、整数、case 编号和 8 位散列拼成：不含路径、用户名、主机名，
 轨道名只给 same / different / unknown 和一个 8 位散列。格式出错时的消息只带文件序号、行号和固定的列名，
@@ -432,7 +433,8 @@ class Log:
         self.events = []
         self.summaries = []
         self.closing = None
-        self.truncated = False
+        self.truncated = False  # 最后一行没有换行结尾（写到一半被截断）：这一行已丢掉
+        self.partial_bytes = 0  # 丢掉的残缺末行的字节数
         self.pre_events = []  # 第一个 C 行之前的事件：实例级
         self.orphans = 0  # 早于第一个 C 行、没法归入任何格的块
         self.name = None  # 日志目录里的文件名：只用于匹配 --exclude 与 --crashed，不进任何输出
@@ -490,8 +492,8 @@ def parse_log(raw, label):
     lg = Log(label)
     if lines[-1] == "":
         lines.pop()
-    else:  # 最后一行没有换行：写到一半被截断，丢掉它并记下
-        lines.pop()
+    else:  # 最后一行没有换行：写到一半被截断，丢掉它并记下字节数（文件是 ASCII，字符数就是字节数）
+        lg.partial_bytes = len(lines.pop())
         lg.truncated = True
     if not lines:
         raise Incomplete(label, 1, "只有写到一半的首行")
@@ -978,11 +980,32 @@ def toggle_case_check(case, got, want):
     return None
 
 
-def judge_a2(s, toggles=None):
-    """toggles = {case: 现场实际按键次数}（--toggles）。显式事件是宿主亲口报的切换；按处理形态推断出来的切换
-    可能是用户按的，也可能只是线程池调度，所以推断的切换单独撑不出通过：要现场次数对得上、形态只有预取与实时两种。"""
+def toggle_reviews(s, toggles):
+    """各 A2 case 的切换次数对账 → {case: (状态, 说明) 或 None}（None = 没有话要说）：toggle_counts 里有的 case 都在。
+    这是**整个 case 的性质**：`--toggles` 填的是整个 case 的现场按键次数，不是某一段的，所以只在主会话里算一次，
+    A2 拿它出结论，A7 拿它判断推断出来的切换点能不能给容忍（状态是 NOTE 才算确认）；
+    --exclude 的影子会话沿用主会话的结论，不再用只含被排除的段的计数去对整场的现场次数（见 shadow_reviews）。"""
     toggles = toggles or {}
-    parts, cover, per_case = [], [], toggle_counts(s)
+    return {case: toggle_case_check(case, got, toggles.get(case)) for case, got in sorted(toggle_counts(s).items())}
+
+
+def shadow_reviews(reviews, sh, toggles):
+    """影子会话（被排除的段单独成会话）用的对账结论：沿用主会话的 reviews。
+    只含被排除的段的计数必然对不上整个 case 的现场次数，拿它去对会把被排除的 toggle 格的切换点一律当成没经确认，
+    切换造成的 hostNs 回退就被说成「被排除的段本来就不通过」。
+    主会话对这个 case 没有结论可沿用时（一个 toggle 格都没有，整个 case 的切换格都被排除了；或留下的格里一次切换都没数到，
+    toggle_case_check 没有话要说），才用被排除的段自己的计数对账——此时 `--toggles` 说的只可能是这些段里的按键。"""
+    return {**toggle_reviews(sh, toggles), **{case: chk for case, chk in reviews.items() if chk is not None}}
+
+
+def judge_a2(s, toggles=None, reviews=None):
+    """toggles = {case: 现场实际按键次数}（--toggles）。显式事件是宿主亲口报的切换；按处理形态推断出来的切换
+    可能是用户按的，也可能只是线程池调度，所以推断的切换单独撑不出通过：要现场次数对得上、形态只有预取与实时两种。
+    reviews = 各 case 的次数对账（toggle_reviews）：不给就按本会话的格算；影子会话传 {}，不再对账整个 case 的次数
+    （对账只会产出数据不全或相符的说明，不会让逐格的判定变成不通过，只会把整场的现场次数误记到被排除的段名下）。"""
+    toggles = toggles or {}
+    parts, cover = [], []
+    reviews = toggle_reviews(s, toggles) if reviews is None else reviews
     for key, cell in _cells(s):
         if key[0] not in A2_CASES or key[1] != "toggle":
             continue
@@ -1036,8 +1059,7 @@ def judge_a2(s, toggles=None):
             parts.append(("FAIL", f"{label} 每次切换后重同步最多 {worst} 次、D 取值 {len(ds)} 种；{detail}"))
         else:
             parts.append(("PASS", f"{label} {detail}"))
-    for case, got in sorted(per_case.items()):
-        chk = toggle_case_check(case, got, toggles.get(case))
+    for case, chk in sorted(reviews.items()):
         if chk:
             parts.append(chk)
     return fold("A2", parts, cover)
@@ -1222,17 +1244,18 @@ def aligned_pairs(i_blocks, o_blocks):
     return sh, [(b, by_cs[b["call_seq"] + sh[0]]) for b in i_blocks if b["call_seq"] + sh[0] in by_cs]
 
 
-def _toggle_zone(seg_in, case, counts, toggles):
+def _toggle_zone(seg_in, case, reviews, toggles):
     """toggle 格里容忍 hostNs 回退的依据（切换点与 A2 同一套：显式事件加推断）→ (给容忍的切换点, 不给容忍的推断点, 说明)，前两项是排好序的时刻列表。
     显式事件是宿主亲口报的，一律给容忍。按处理形态推断出来的点只有这个 case 的切换次数已被 A2 确认（toggle_case_check 没判数据不全：
     次数对上 --toggles、处理形态数不超过 A2_MAX_REGIMES）才给：没确认的点可能只是线程池调度，拿它前后各放宽 A7_TOGGLE_ZONE_NS、
-    回退幅度又没有上限，会把真问题放过；A2 判数据不全的格，A7 也不替它背书。"""
+    回退幅度又没有上限，会把真问题放过；A2 判数据不全的格，A7 也不替它背书。
+    确认是整个 case 的性质，读 reviews（toggle_reviews：主会话算一次；影子会话沿用，见 shadow_reviews），不在这里按本会话的格重数。"""
     sw = switch_points(seg_in)
     explicit, inferred = sorted(sw["explicit"]), sorted(t for t, _ in sw["inferred"])
     if not inferred:
         return explicit, [], ""
     want = toggles.get(case)
-    chk = toggle_case_check(case, counts[case], want)
+    chk = reviews.get(case)
     if chk is not None and chk[0] == "NOTE":  # 次数与现场相符，且没有因形态数、次数不足而数据不全：A2 确认了
         return sorted(explicit + inferred), [], f"切换点含 {len(inferred)} 个按处理形态推断的，已由 A2 按现场次数（--toggles {case}:{want}）确认"
     return explicit, inferred, (f"{len(inferred)} 个按处理形态推断的切换点没有经 A2 确认，不给容忍"
@@ -1245,9 +1268,10 @@ def _near(zone, t):
     return any(0 <= m < len(zone) and abs(zone[m] - t) <= A7_TOGGLE_ZONE_NS for m in (k - 1, k))
 
 
-def judge_a7(s, toggles=None):
+def judge_a7(s, toggles=None, reviews=None):
     toggles = toggles or {}
-    parts, cover, counts = [], [], toggle_counts(s)
+    parts, cover = [], []
+    reviews = toggle_reviews(s, toggles) if reviews is None else reviews  # 影子会话由 analyze 传主会话的结论，见 shadow_reviews
     for key, cell in _cells(s):
         if not (is_cat1(key) and "A7" in feeds_of(key)) or not any(g.blocks for g in cell["I"] + cell["O"]):
             continue
@@ -1286,7 +1310,7 @@ def judge_a7(s, toggles=None):
         mismatch = sum(1 for a, b in both if a["host_ns"] != b["host_ns"])
         # toggle 格：ASIO-Guard 切换时宿主 hostNs 会回退（现场最大一次 7.3 s，两端值相同）。回退落在切换点前后 A7_TOGGLE_ZONE_NS 内的容忍并计数，
         # 窗口外的照常算非递增；非 toggle 格没有切换点，一律不放宽
-        zone, unconfirmed, basis = _toggle_zone(i, key[0], counts, toggles) if (key[0] in A2_CASES and key[1] == "toggle") else ([], [], "")
+        zone, unconfirmed, basis = _toggle_zone(i, key[0], reviews, toggles) if (key[0] in A2_CASES and key[1] == "toggle") else ([], [], "")
         nonmono = tolerated = worst_back = unexplained = 0
         for sg in (i, o):
             seq = [(b["host_ns"], b["mono_ns"]) for b in sorted(sg.blocks, key=lambda b: b["seq"]) if b["playing"] and b["host_ns_valid"]]
@@ -1352,7 +1376,8 @@ def judge_a8(s):
                               f"（疑似 Render in Place / Freeze 的克隆，来不及写摘要）：{_clone_list(clones)}；"
                               "跳闸只记在摘要行里，它们没有摘要行，跳闸与卡死无从判断（没收尾的仍判不通过）"))  # fmt: skip
     if crashed:
-        who = "、".join(f"实例 {n}（{lg.header['role']}）" for n, lg in crashed)
+        # 整机崩溃时一次写盘（探针一批 B 行一次 write）可能只落下前半截，文件末尾留下写到一半的一行：解析时已丢掉，这里写明丢了几字节
+        who = "、".join(f"实例 {n}（{lg.header['role']}" + (f"，末行没有换行结尾，已丢弃 {lg.partial_bytes} 字节残行" if lg.truncated else "") + "）" for n, lg in crashed)
         parts.append(("NOTE", f"{len(crashed)} 个实例按人工标注（--crashed）因整机崩溃中断，没有收尾不计为插件崩溃：{who}；是否确属整机崩溃请人工确认"
                               "（其余问题，摘要间隔与跳闸，照常判）"))  # fmt: skip
     return fold("A8", parts, [g.case["case"] for g in s.segments])
@@ -1819,14 +1844,17 @@ def parse_crashed(raw):
 
 
 def mark_crashed(logs, names):
-    """--crashed：把这些实例标成「日志因整机崩溃中断」。文件不在目录里（或是不完整的文件）、同一个文件写两次、
+    """--crashed：把这些实例标成「日志因整机崩溃中断」。文件不在目录里、同一个文件写两次、
     被标注的实例其实有收尾行（Z 行：它是正常结束的，不是被崩溃截断的），都按 --exclude 的办法报 ExcludeError（退出码 5）。
-    消息只带参数的序号，不回显文件名。"""
+    消息只带参数的序号，不回显文件名。
+    能标注的是 logs 里的文件，包括末行写到一半的：parse_log 对没有换行结尾的末行丢掉并记下字节数（Log.partial_bytes），其余照常解析，
+    所以整机崩溃留下的残缺末行不挡标注；只有连文件头（魔数行与 H 行）都没写完的文件进不了 logs（load_dir 把它们记成 broken：没有角色、
+    没有 pid，什么都分析不了，也分不清是整机崩溃还是插件刚创建就崩溃），--crashed 不认它们，A8 照样不通过。"""
     seen = {}
     for n, name in enumerate(names, start=1):
         lg = next((g for g in logs if g.name == name), None)
         if lg is None:
-            raise ExcludeError(f"第 {n} 个 --crashed 参数：日志目录里没有这个文件（或它是不完整的文件）")
+            raise ExcludeError(f"第 {n} 个 --crashed 参数：日志目录里没有这个文件（或它在文件头写完之前就被截断了，没有可分析的内容）")
         if id(lg) in seen:
             raise ExcludeError(f"第 {n} 个 --crashed 参数与第 {seen[id(lg)]} 个参数指向同一个文件")
         if lg.closing is not None:
@@ -1837,28 +1865,32 @@ def mark_crashed(logs, names):
 
 # 不参与「被排除的段若计入」归因的判据。A3 读导出比对行（不属于任何段），A8 读每个实例的收尾行、摘要与跳闸（实例级，记不到某个 C 行的段上）；
 # 影子会话共用同一批 logs / compares，别的实例的失败（未排除实例跳闸、比对不过）会被当成被排除的段「本来就不通过」。
-# 这两项在主会话里本来就读全部输入，排除一个段不会让它们少看任何东西，所以不必再算一遍。其余判据只读段（格）里的块与事件
+# 这两项在主会话里本来就读全部输入，排除一个段不会让它们少看任何东西，所以不必再算一遍。其余判据只读段（格）里的块与事件。
+# 唯一读整场口径输入的另一处是 --toggles（整个 case 的现场按键次数）：它是 case 的性质，不是某一段的，影子会话不重数、沿用主会话的对账结论
+# （toggle_reviews / shadow_reviews），所以 A7 在影子里的容忍取决于主会话的确认，A2 在影子里不再对账次数
 SHADOW_SESSION_WIDE = ("A3", "A8")
 
 
-def _judge(sess, iid, fn, salt, toggles):
+def _judge(sess, iid, fn, salt, toggles, reviews=None):
     if iid == "A6":
         return fn(sess, salt)
-    return fn(sess, toggles) if iid in ("A2", "A7") else fn(sess)  # A7 的 toggle 格要知道 A2 有没有确认推断出来的切换点
+    return fn(sess, toggles, reviews) if iid in ("A2", "A7") else fn(sess)  # A7 的 toggle 格要知道 A2 有没有确认推断出来的切换点
 
 
 def analyze(path, salt, exclude=(), toggles=None, crashed=()):
     logs, compares, broken = load_dir(path)
     s = Session(logs, compares, broken, resolve_excludes(logs, exclude))
     mark_crashed(logs, crashed)
-    items = [_judge(s, iid, fn, salt, toggles) for iid, fn in JUDGES]
+    reviews = toggle_reviews(s, toggles)  # 各 case 的切换次数对账：整个 case 的性质，主会话算一次，A2 出结论、A7 判断推断的切换点有没有确认都用它
+    items = [_judge(s, iid, fn, salt, toggles, reviews) for iid, fn in JUDGES]
     would_fail = []
     if s.hidden:  # --exclude 只许拿掉数据不全的段：被排除的段单独判一遍，本来会不通过的项照样记不通过
         sh = s.shadow()
+        inherited = shadow_reviews(reviews, sh, toggles)  # A7 沿用主会话的确认；A2 在影子里不对账次数（传 {}）
         for item, (iid, fn) in zip(items, JUDGES):
             if iid in SHADOW_SESSION_WIDE:
                 continue
-            was = _judge(sh, iid, fn, salt, toggles)
+            was = _judge(sh, iid, fn, salt, toggles, {} if iid == "A2" else inherited)
             if was["verdict"] == "FAIL":
                 would_fail.append(item["id"])  # 主会话里这一项已经不通过也要记：被排除的段本来就不通过，是单独的一条事实
                 if item["verdict"] != "FAIL":
@@ -2764,6 +2796,102 @@ def _self_test_r2(tmp, check, run_json, said, verdict, a2):
     check("--exclude 影子：A8 的不通过说明是别的实例的跳闸，没有被改写成「被排除的段若计入」", "跳闸 2 次" in said(r, "A8") and "被排除的段若计入" not in said(r, "A8"), True)
     code, so, _ = _cli([os.path.join(tmp, d), "--hash-salt", "s", *both])
     check("--exclude 影子：文本输出不说「被排除的段里本来就不通过」", "照样记不通过" not in so and "已排除的段" in so, True)
+    _self_test_r3(tmp, check, run_json, said, verdict)
+
+
+def _self_test_r3(tmp, check, run_json, said, verdict):
+    """第 3 轮整改：
+    1. --exclude 的影子会话里，A7 对推断切换点的确认、A2 对现场次数的对账都是整个 case 的性质，由主会话算一次，影子沿用；
+       不再拿只含被排除的段的计数去对整场的 --toggles（那样被排除的 toggle 格必然对不上，hostNs 回退被说成「被排除的段本来就不通过」）；
+    2. --crashed 认整机崩溃留下的残缺末行（没有换行结尾，parse_log 丢掉并记字节数，其余照常解析），文件头都没写完的与中间损坏的仍不认。
+    夹具的判定已在夹具矩阵里查过，这里查带 --exclude / --crashed 的组合、说明文字与退出码。"""
+    ps = _synth()
+
+    def tree(name, files):
+        _write_tree(os.path.join(tmp, name), files)
+        return name
+
+    # ---- 1. 被排除的 toggle 格 ----
+    d = "a7-exclude-toggle-beside-main"  # 同键两遍：pid 5150 留下（10 次切换、没有回退），pid 5151 误记（3 次切换，第 2 次切换处 hostNs 回退 7.3 s）
+    ex = ["--exclude", "probe-I-5151-a1b2.csv:#1", "--exclude", "probe-O-5151-c3d4.csv:#1"]
+    code, r, _ = run_json(d, *ex, "--toggles", "CB-02:10")
+    check("--exclude 影子：被排除的 toggle 格有 hostNs 回退，主会话的 --toggles 对得上：A7 沿用主会话的确认，excluded_fail 为空，A2 A7 都通过",
+          verdict(r, "A2") == "PASS" and verdict(r, "A7") == "PASS" and r["excluded_fail"] == [] and len(r["excluded"]) == 2 and "被排除的段若计入" not in said(r, "A7"), False)  # fmt: skip
+    code, so, _ = _cli([os.path.join(tmp, d), "--hash-salt", "s", *ex, "--toggles", "CB-02:10"])
+    check("--exclude 影子：文本输出不说被排除的 toggle 格「本来就不通过」，退出码不是 1", "照样记不通过" not in so and "已排除的段" in so and code != 1, False)
+    for label, extra in (("现场次数与主会话数出的 10 次对不上", ["--toggles", "CB-02:5"]), ("没给现场次数", [])):
+        code, r, _ = run_json(d, *ex, *extra)
+        check(f"--exclude 影子：{label}，主会话不确认，被排除的段里推断点前后的回退没有容忍，照第 2 轮的口径记 A7 不通过",
+              verdict(r, "A2") == "INCOMPLETE" and verdict(r, "A7") == "FAIL" and r["excluded_fail"] == ["A7"] and "被排除的段若计入" in said(r, "A7") and code == 1, True)  # fmt: skip
+    # 沿用确认不等于放过真问题：被排除的 toggle 格里回退离切换点 1.6 s，窗口外照常算非递增
+    away = tree("a7-exclude-toggle-away", {**ps.scen_a2_thread("pass", pid=5150), **ps.scen_a7_toggle_regress(5151, "away", switches=3, at=1)})
+    _, r, _ = run_json(away, *ex, "--toggles", "CB-02:10")
+    check("--exclude 影子：推断点已确认也不放过窗口外的回退：被排除的段里 A7 本来就不通过，记进 excluded_fail",
+          verdict(r, "A7") == "FAIL" and r["excluded_fail"] == ["A7"] and "非递增 2" in said(r, "A7"), True)  # fmt: skip
+    # A2 在影子里不再对账整场的现场次数：被排除的格 A2 本来就不通过（切换块上重同步 2 次）时，说明里只有这一件事，不夹带「只有 3 次切换」「对不上」
+    dbl = tree("a2-exclude-toggle-double-resync", ps.toggle_excluded_beside_main(5150, double_resync=True))
+    _, r, _ = run_json(dbl, *ex, "--toggles", "CB-02:10")
+    check("--exclude 影子：被排除的 toggle 格 A2 本来就不通过，记进 excluded_fail；A7 不受牵连",
+          verdict(r, "A2") == "FAIL" and r["excluded_fail"] == ["A2"] and verdict(r, "A7") == "PASS" and "每次切换后重同步最多 2 次" in said(r, "A2"), True)  # fmt: skip
+    check("--exclude 影子：A2 不拿被排除的段自己的 3 次去对整场的现场次数，说明里没有「只有 3 次切换」「对不上」", "只有 3 次切换" not in said(r, "A2") and "对不上" not in said(r, "A2"), False)
+    # 整个 case 的 toggle 格都被排除了：主会话没有可沿用的结论，--toggles 说的只可能是这些段里的按键，影子才用自己的计数对账
+    whole = "a7-fail-toggle-hostns-regress-unconfirmed"
+    both = ["--exclude", "probe-I-5090-a1b2.csv:#1", "--exclude", "probe-O-5090-c3d4.csv:#1"]
+    _, r, _ = run_json(whole, *both, "--toggles", "CB-02:10")
+    check("--exclude 影子：整个 case 的 toggle 格都被排除，--toggles 对上被排除的段自己数出的 10 次：推断点确认，A7 不被记不通过，excluded_fail 为空",
+          verdict(r, "A7") == "INCOMPLETE" and r["excluded_fail"] == [] and len(r["excluded"]) == 2, False)  # fmt: skip
+    for label, extra in (("现场次数对不上", ["--toggles", "CB-02:5"]), ("没给现场次数", [])):
+        _, r, _ = run_json(whole, *both, *extra)
+        check(f"--exclude 影子：整个 case 的 toggle 格都被排除、{label}：不确认，被排除的段里的回退没有容忍，记 A7 不通过", verdict(r, "A7") == "FAIL" and r["excluded_fail"] == ["A7"], True)
+    # 留下的 toggle 格里一次切换都没数到（线程一直不变），主会话对这个 case 没有话要说：同样没有结论可沿用，影子用被排除的段自己的计数
+    zero = tree("a7-exclude-toggle-main-without-switch", {**ps.scen_a2_thread("incomplete", pid=5150), **ps.scen_a7_toggle_regress(5151, "at-switch")})
+    _, r, _ = run_json(zero, *ex, "--toggles", "CB-02:10")
+    check("--exclude 影子：留下的 toggle 格一次切换都没数到，--toggles 对上被排除的段自己数出的 10 次：推断点确认，excluded_fail 为空，A7 不被记不通过",
+          verdict(r, "A2") == "INCOMPLETE" and r["excluded_fail"] == [] and len(r["excluded"]) == 2 and verdict(r, "A7") == "PASS", False)  # fmt: skip
+
+    # ---- 2. 整机崩溃留下的残缺末行 ----
+    iname, oname = "probe-I-5200-a1b2.csv", "probe-O-5200-c3d4.csv"
+    base = ps.files_of(*ps.pair("CB-11", "constrain", 256, "low", pid=5200))
+    no_z = "\n".join(ln for ln in base[oname].split("\n") if not ln.startswith("Z,"))  # Out 端没有收尾行，末尾仍有换行
+    # parse_log：没有换行结尾的末行丢掉，记下字节数；整份文件仍可解析，不进 broken
+    check("末行残缺：完整的文件没有残行", parse_log(base[oname].encode(), "日志#1").partial_bytes == 0 and not parse_log(base[oname].encode(), "日志#1").truncated, False)
+    for suffix, label in (("S,300", "写到一半的 S 行"), ("S,300" + "\0" * 10, "写到一半的 S 行后接 10 个零字节（崩溃后文件长度已更新、数据还是零）"), ("\0" * 64, "只有一段零字节")):
+        lg = parse_log((no_z + suffix).encode("ascii"), "日志#1")
+        check(f"末行残缺：{label}，末行丢掉并记下字节数 {len(suffix)}，其余照常解析", lg.truncated and lg.partial_bytes == len(suffix) and lg.closing is None and len(lg.blocks) == 40, False)
+    # 夹具：三种残缺末行（S 行写到一半 / B 行写到一半 / 整行写完只缺换行）
+    for shape, pid in (("summary", 5102), ("block", 5103), ("nonl", 5104)):
+        d = f"a8-fail-partial-tail-{shape}"
+        name = f"probe-O-{pid}-c3d4.csv"
+        with open(os.path.join(tmp, d, name), "rb") as f:
+            n = len(f.read().decode("ascii").rsplit("\n", 1)[1])
+        _, r, _ = run_json(d)
+        check(f"--crashed 残缺末行：{shape} 不带 --crashed 照旧：A8 日志没有收尾，不通过；文件不进 broken", verdict(r, "A8") == "FAIL" and "日志没有收尾" in said(r, "A8") and r["inputs"]["broken"] == 0 and r["crashed"] == [], True)  # fmt: skip
+        code, r, _ = run_json(d, "--crashed", name)
+        txt = said(r, "A8")
+        check(f"--crashed 残缺末行：{shape} 标注后被接受，A8 通过并写 NOTE，写明丢弃了 {n} 字节残行",
+              verdict(r, "A8") == "PASS" and r["crashed"] == [{"instance": 2, "role": "O"}] and f"末行没有换行结尾，已丢弃 {n} 字节残行" in txt and "请人工确认" in txt and code != 5, False)  # fmt: skip
+        code, so, se = _cli([os.path.join(tmp, d), "--hash-salt", "s", "--crashed", name])
+        check(f"--crashed 残缺末行：{shape} 文本输出醒目提示请人工确认，不回显文件名与残行内容", "请人工确认" in so and name not in so + se and "c3d4" not in so + se, False)
+    nulls = tree("a8-partial-tail-zero-fill", {iname: base[iname], oname: no_z + "S,300" + "\0" * 10})
+    _, r, _ = run_json(nulls, "--crashed", oname)
+    check("--crashed 残缺末行：崩溃后补零的末尾（15 字节）同样被接受，写明丢弃 15 字节", verdict(r, "A8") == "PASS" and "已丢弃 15 字节残行" in said(r, "A8"), False)
+    # 只允许「末行没有换行结尾」这一种缺陷：其余位置的损坏仍是格式错（退出码 2），--crashed 不放宽
+    lines = no_z.split("\n")
+    k = [n for n, ln in enumerate(lines) if ln.startswith("B,")][10]
+    mid = tree("a8-partial-tail-middle-damaged", {iname: base[iname], oname: "\n".join(lines[:k] + [",".join(lines[k].split(",")[:-3])] + lines[k + 1 :]) + "S,300"})
+    last = tree("a8-last-line-short-with-newline", {iname: base[iname], oname: no_z + "S,300\n"})
+    for d, label in ((mid, "中间的一行字段残缺（末行也残缺）"), (last, "末行有换行结尾却字段残缺（不是写到一半，是内容损坏）")):
+        for extra in ([], ["--crashed", oname]):
+            code, so, se = _cli([os.path.join(tmp, d), "--hash-salt", "s", *extra])
+            check(f"--crashed 不放宽：{label}，{'带' if extra else '不带'} --crashed 都是格式错，退出码 2，没有分析输出", code == 2 and not so and "S,300" not in se and "c3d4" not in se, True)
+    # 文件头都没写完的进 broken（没有角色、没有 pid，什么都分析不了），--crashed 不认，A8 照样不通过
+    hdr = tree("a8-header-cut", {iname: base[iname], oname: "rinne-probe-log,1\nH,O,vst3,cu"})
+    _, r, _ = run_json(hdr)
+    check("文件头写到一半：进 broken，A8 不通过", r["inputs"]["broken"] == 1 and verdict(r, "A8") == "FAIL" and "只有不完整的内容" in said(r, "A8"), True)
+    for d, nm, label in ((hdr, oname, "文件头写到一半"), ("a8-fail-broken-file", "probe-I-9999-dead.csv", "0 字节")):
+        code, so, se = _cli([os.path.join(tmp, d), "--hash-salt", "s", "--crashed", nm])
+        check(f"--crashed 不认文件头都没写完的文件：{label}，退出码 {EXIT_EXCLUDE}，说明里讲清缘由且不回显文件名",
+              code == EXIT_EXCLUDE and not so and "文件头写完之前就被截断了" in se and nm not in se, True)  # fmt: skip
 
 
 def mutation_check():
