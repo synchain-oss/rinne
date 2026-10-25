@@ -3,7 +3,7 @@
 #
 # REAPER 本机宿主烟测的入口：Cubase 上机前的预检与本机回归，不进 CI，不挂 gates。说明见 docs/testing/REAPER.md。
 #   pwsh scripts/reaper/run.ps1 -CfgDir <私有配置目录> -BuildDir build-wf -LogDir <结果目录> -UserTestingMarker <标记文件路径> [-Repeat 5] [-Only <id 正则>] [-NoNegative]
-#   pwsh scripts/reaper/run.ps1 -CfgDir <私有配置目录> -BuildDir build-probe -LogDir <结果目录> -UserTestingMarker <标记文件路径> -Probe [-Python <解释器>]
+#   pwsh scripts/reaper/run.ps1 -CfgDir <私有配置目录> -BuildDir build-probe -LogDir <结果目录> -UserTestingMarker <标记文件路径> -Probe [-Python <解释器路径或 PATH 上的命令名>]
 #       第二段：探针构建（build.ps1 -Probe）放进真宿主，收探针日志、交给 analyze-probe.py；场景在 scenarios.json 的 probe 一节
 #   pwsh scripts/reaper/run.ps1 -SelfTest [-CollisionSample <一份含大小写碰撞变量的 .ps1>]   不启动 REAPER 的自测
 # -CfgDir 只接受显式的绝对路径，必须有 doctor.ps1 -Init 写的哨兵文件；永不碰 %APPDATA%\REAPER。

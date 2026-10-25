@@ -4,7 +4,10 @@
 # 每个用例是 (标签, 是否反例, 是否按预期)：反例（Bad）是「必须被拦住 / 必须判红」的情形，Passed 表示它确实被拦住了。
 #   收日志：别的 pid、名字不对（含 pid 补零）、时间不对（早于启动或晚于现在）、哈希不对、目录与联接、硬链接、子目录里的、进程还在、
 #           目标已有同名、列目录之后原文件变了、被别的程序占着，一律不删；钉住期间别人追加、覆盖、改名、删除都被拒；删的就是复制出去的那个对象
-#   清单：本轮新出现的自己的文件之外，增、删、改任何一项都判变；开头就在清单里的名字，哪怕是「自己的」也照常比
+#   清单：本轮新出现的自己的文件之外，增、删、改任何一项都判变；开头就在清单里的名字，哪怕是「自己的」也照常比；
+#         值里记重解析点标记与硬链接数（换成同大小同时间的链接也看得出来）；落盘的清单与变化报告不留别人的文件名，只留每轮随机盐的散列
+#   写日志的进程还在不在：只按 pid 查会被 pid 复用骗到，所以再比持有者的开始时间与日志最后一次写入的时刻（不和启动时刻比）
+#   -Python：路径或 PATH 上的命令名；停走带后留给自动 Ping 的时间与 limits.afterRenderSeconds（驱动里同一个值）
 #   一格的判据（Test-ReaperProbeCell，含播放中的块的 nonrt）、分析器结果（Get-ReaperAnalyzerSummary）、比对行（ConvertTo-ReaperCompareRow）
 #   整轮合并分析：反例格不并进去
 #   替身（分析器、nulltest、探针构建目录）也从这里导出，SelfTestChild.ps1 的接线用例用它们
@@ -172,7 +175,7 @@ function Get-CollectCases([string]$Tmp) {
     & $add '清单：开头就在清单里的名字即使算 Own，改了也判变（不除外）' $true (-not (Compare-ReaperProbeLogListing -Before $b1 -After (& $edit1 'mine.csv' '2|21') -Own 'mine.csv').Same)
     & $add '清单：目录不存在是空清单，不报错' $false ((Get-ReaperProbeLogListing -Dir (Join-Path $Tmp 'no-such-logs')).Count -eq 0)
     $subFile = "sub\probe-O-$gone-cafe.csv"
-    & $add '清单：子目录也记一项（dir），子目录里的文件记大小与修改时间' $false ($before['sub'] -ceq 'dir' -and $before[$subFile] -cmatch '^[0-9]+\|[0-9]+$' -and $before["probe-I-$gone-beef.csv"] -ceq 'dir')
+    & $add '清单：子目录也记一项（dir），子目录里的文件记大小、修改时间、重解析点标记与硬链接数' $false ($before['sub'] -ceq 'dir' -and $before[$subFile] -cmatch '^[0-9]+\|[0-9]+\|0\|1$' -and $before["probe-I-$gone-beef.csv"] -ceq 'dir')
     # 哈希不同：复制件被换了内容，原文件不删、判红
     $dirH = Join-Path $Tmp 'logs-hash'; $null = New-Item -ItemType Directory -Path $dirH
     $fH = Join-Path $dirH "probe-I-$gone-1111.csv"; [IO.File]::WriteAllText($fH, "real`n")
@@ -452,7 +455,34 @@ function Get-ProbeConfigCases([string]$RepoRoot, [string]$Tmp) {
     & $add 'probe 一节：limits 缺 minBlocks 判红' $true ((& $mutated { param($c) $c.probe.limits.PSObject.Properties.Remove('minBlocks') }) -match 'probe.limits 缺 minBlocks')
     & $add 'probe 一节：表外的 (case, variant) 判红' $true ((& $mutated { param($c) $c.probe.scenarios[0].variant = 'toggle' }) -match '不在探针的规则表里')
     & $add 'probe 一节：recordSeconds 超出 1..3600 判红' $true (((& $mutated { param($c) $c.probe.scenarios[0].recordSeconds = 0 }) -match 'recordSeconds') -and ((& $mutated { param($c) $c.probe.scenarios[0].recordSeconds = 4000 }) -match 'recordSeconds'))
-    & $add 'probe 一节：播放时长不短于记录窗口判红（Ping 要落在窗口里）' $true ((& $mutated { param($c) $c.probe.scenarios[0].playSeconds = $c.probe.scenarios[0].recordSeconds }) -match 'playSeconds 要短于')
+    $spareMsg = '*停走带之后留给自动 Ping 的时间*'
+    & $add 'probe 一节：播放时长不短于记录窗口判红（停走带之后留给 Ping 的时间不够）' $true ((& $mutated { param($c) $c.probe.scenarios[0].playSeconds = $c.probe.scenarios[0].recordSeconds }) -like $spareMsg)
+    # 停走带之后留给自动 Ping 的时间 = recordSeconds + marginSeconds - leadSeconds - playSeconds，不少于 limits.afterRenderSeconds（驱动在导出格里渲染返回后再等的同一个值）
+    $firstPlay = @($config.probe.scenarios | Where-Object { $_.kind -eq 'probe-play' })[0]
+    $spareNow = [double]$firstPlay.recordSeconds + [double]$config.probe.limits.marginSeconds - [double]$config.probe.limits.leadSeconds - [double]$firstPlay.playSeconds
+    & $add "probe 一节：afterRenderSeconds 是 6.5，现有的稳态格恰好留 $spareNow s，全部过校验" $false (
+        [double]$config.probe.limits.afterRenderSeconds -eq 6.5 -and $spareNow -eq 6.5 -and @($config.probe.scenarios | Where-Object { $_.kind -eq 'probe-play' -and ([double]$_.playSeconds -ne 8 -or [int]$_.recordSeconds -ne 14) }).Count -eq 0)
+    $r9 = & $mutated { param($c) $c.probe.scenarios[0].playSeconds = 9 }
+    & $add 'probe 一节：播放 9 s（停走带后只剩 5.5 s，不够 6.5 s）判红，文案写出实际余量与要求，且不再说「Ping 也要落在记录窗口里」' $true (
+        ($r9 -like $spareMsg) -and ($r9 -like '*只有 5.5 s*') -and ($r9 -like '*afterRenderSeconds 的 6.5 s*') -and -not ($r9 -like '*落在记录窗口*'))
+    & $add 'probe 一节：播放 8.1 s（余量 6.4 s）判红，播放 8 s（余量恰为 6.5 s）不红' $true (
+        ((& $mutated { param($c) $c.probe.scenarios[0].playSeconds = 8.1 }) -like $spareMsg) -and ((& $mutated { param($c) $c.probe.scenarios[0].playSeconds = 8 }).Count -eq 0))
+    & $add 'probe 一节：余量里算上 marginSeconds 与 leadSeconds（播放 12 s 配 margin 6 s 刚好够；lead 加到 3.5 s 就不够）' $true (
+        ((& $mutated { param($c) $c.probe.scenarios[0].playSeconds = 12; $c.probe.limits.marginSeconds = 6 }).Count -eq 0) -and
+        ((& $mutated { param($c) $c.probe.limits.leadSeconds = 3.5 }) -like $spareMsg))
+    & $add 'probe 一节：要的秒数读场景表的 afterRenderSeconds，不是写死的 6.5（改成 7 现有格不够，改成 6 就够）' $true (
+        ((& $mutated { param($c) $c.probe.limits.afterRenderSeconds = 7 }) -like '*afterRenderSeconds 的 7 s*') -and ((& $mutated { param($c) $c.probe.limits.afterRenderSeconds = 6 }).Count -eq 0))
+    & $add 'probe 一节：limits 缺 afterRenderSeconds、或它不是数判红' $true (
+        ((& $mutated { param($c) $c.probe.limits.PSObject.Properties.Remove('afterRenderSeconds') }) -like '*probe.limits 缺 afterRenderSeconds*') -and ((& $mutated { param($c) $c.probe.limits.afterRenderSeconds = 'abc' }) -like '*afterRenderSeconds 应为不小于 0 的数*'))
+    & $add 'probe 一节：playSeconds 不是数判红（不抛错）' $true ((& $mutated { param($c) $c.probe.scenarios[0].playSeconds = 'abc' }) -like '*playSeconds 应为不小于 0 的数*')
+    # 单一真源：任务里的 afterRenderSeconds 就是场景表的那个值；Lua 驱动里不再写字面量，读 job.afterRenderSeconds
+    $jobCtx = New-ReaperContext -ReaperExe x -NullTest x -WorkDir $Tmp -Driver x -Config ([pscustomobject]@{ limits = [pscustomobject]@{ leadSeconds = 1.5; marginSeconds = 2; afterRenderSeconds = 7.25 }; signal = $null })
+    $job = & (Get-Module Scenarios) { param($c, $s) Get-ProbeLuaJob $c $s 'steady' 'x.rpp' } $jobCtx $firstPlay
+    $jobReal = & (Get-Module Scenarios) { param($c, $s) Get-ProbeLuaJob $c $s 'steady' 'x.rpp' } (New-ReaperContext -ReaperExe x -NullTest x -WorkDir $Tmp -Driver x -Config $config.probe) $firstPlay
+    & $add 'Lua 任务：afterRenderSeconds 取自场景表 limits（7.25 进 7.25；现有场景表进 6.5）' $false ($job.afterRenderSeconds -eq 7.25 -and $jobReal.afterRenderSeconds -eq [double]$config.probe.limits.afterRenderSeconds)
+    $lua = [IO.File]::ReadAllText((Join-Path $RepoRoot 'tests/reaper/lua/driver.lua'))
+    & $add 'Lua 驱动：渲染返回后再等的秒数读 job.afterRenderSeconds，脚本里没有写死的数字（没有 afterRenderSeconds = <数>，也没有 6.5）' $true (
+        ($lua -match 'job\.afterRenderSeconds') -and ($lua -notmatch 'afterRenderSeconds\s*=\s*[0-9]') -and ($lua -notmatch '(?<![0-9.])6\.5(?![0-9])'))
     & $add 'probe 一节：场景的 group 不在 -1..7 判红' $true ((& $mutated { param($c) $c.probe.negative[0].group = 9 }) -match 'group 应为 -1')
     & $add 'probe 一节：analyzerMustPass 为空或不是 A1..A9 判红' $true (((& $mutated { param($c) $c.probe.scenarios[0].analyzerMustPass = @() }) -match 'analyzerMustPass') -and ((& $mutated { param($c) $c.probe.scenarios[0].analyzerMustPass = @('B1') }) -match 'analyzerMustPass'))
     & $add 'probe 一节：与第一段重复的 id 判红' $true ((& $mutated { param($c) $c.probe.scenarios[0].id = $c.scenarios[0].id }) -match 'id 重复')
@@ -651,11 +681,214 @@ function Get-WholeCases([string]$Tmp) {
     $cases
 }
 
+# 清单的值与落盘：值里记重解析点标记与硬链接数；落盘的清单与变化报告不留别人的文件名
+function Get-ListingCases([string]$Tmp) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $dir = Join-Path $Tmp 'listing'
+    $null = New-Item -ItemType Directory -Force -Path $dir
+    $stamp = [DateTime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+    $mk = { param($path, $text) [IO.File]::WriteAllText($path, $text); (Get-Item -LiteralPath $path).LastWriteTimeUtc = $stamp }
+    $field = { param($v, $i) @($v -split '\|')[$i] }
+    # 值的写法（纯函数）
+    & $add '清单值：文件写成 大小|修改时间刻度|重解析点(0/1)|硬链接数' $false ((Format-ReaperListingValue -IsDir $false -Length 6 -Ticks 99 -IsReparse $false -Links 1) -ceq '6|99|0|1')
+    & $add '清单值：重解析点写 1，硬链接数取不到写 ?' $false ((Format-ReaperListingValue -IsDir $false -Length 6 -Ticks 99 -IsReparse $true -Links -1) -ceq '6|99|1|?')
+    & $add '清单值：目录写 dir，是重解析点的目录（联接）写 dir|link' $false ((Format-ReaperListingValue -IsDir $true) -ceq 'dir' -and (Format-ReaperListingValue -IsDir $true -IsReparse $true) -ceq 'dir|link')
+    $same = Format-ReaperListingValue -IsDir $false -Length 6 -Ticks 99 -IsReparse $false -Links 1
+    $asLink = Format-ReaperListingValue -IsDir $false -Length 6 -Ticks 99 -IsReparse $true -Links 1
+    $asHard = Format-ReaperListingValue -IsDir $false -Length 6 -Ticks 99 -IsReparse $false -Links 2
+    & $add '清单值：大小与修改时间都相同，只有重解析点标记不同，比较判变' $true (-not (Compare-ReaperProbeLogListing -Before ([ordered]@{ 'x.csv' = $same }) -After ([ordered]@{ 'x.csv' = $asLink })).Same)
+    & $add '清单值：大小与修改时间都相同，只有硬链接数不同，比较判变' $true (-not (Compare-ReaperProbeLogListing -Before ([ordered]@{ 'x.csv' = $same }) -After ([ordered]@{ 'x.csv' = $asHard })).Same)
+    # 真文件：普通文件记 0|1；换成指向同一份内容的硬链接（大小、修改时间都相同）后硬链接数变成 2，比较看得出来
+    $ld = Join-Path $dir 'real'; $null = New-Item -ItemType Directory -Path $ld
+    & $mk (Join-Path $ld 'a.csv') "hello`n"
+    $null = New-Item -ItemType Directory -Path (Join-Path $ld 'sub')
+    $l1 = Get-ReaperProbeLogListing -Dir $ld
+    & $add '清单：普通文件记 大小|刻度|0|1，普通子目录记 dir' $false ($l1['a.csv'] -cmatch '^6\|[0-9]+\|0\|1$' -and $l1['sub'] -ceq 'dir')
+    [IO.File]::Delete((Join-Path $ld 'a.csv'))
+    & $mk (Join-Path $ld 'p.csv') "hello`n"
+    $hardOk = try { $null = New-Item -ItemType HardLink -Path (Join-Path $ld 'a.csv') -Value (Join-Path $ld 'p.csv'); $true } catch { $false }
+    $l2 = Get-ReaperProbeLogListing -Dir $ld
+    $cmpHard = Compare-ReaperProbeLogListing -Before ([ordered]@{ 'a.csv' = $l1['a.csv']; 'sub' = $l1['sub'] }) -After ([ordered]@{ 'a.csv' = $l2['a.csv']; 'sub' = $l2['sub'] })
+    & $add "清单：别人的文件被换成大小、修改时间都相同的硬链接：大小与刻度没变、硬链接数从 1 变 2，比较判变$($hardOk ? '' : '（本机建不了硬链接，这条没能真跑）')" $true (
+        (-not $hardOk) -or ((& $field $l1['a.csv'] 0) -ceq (& $field $l2['a.csv'] 0) -and (& $field $l1['a.csv'] 1) -ceq (& $field $l2['a.csv'] 1) -and (& $field $l2['a.csv'] 3) -ceq '2' -and -not $cmpHard.Same))
+    # 重解析点文件（符号链接的替身）与联接
+    $rd = Join-Path $dir 'reparse'; $null = New-Item -ItemType Directory -Path $rd
+    & $mk (Join-Path $rd 'r.csv') "hello`n"
+    $r1 = Get-ReaperProbeLogListing -Dir $rd
+    [IO.File]::Delete((Join-Path $rd 'r.csv'))
+    $rpOk = New-FakeReparseFile (Join-Path $rd 'r.csv') "hello`n"
+    $r2 = Get-ReaperProbeLogListing -Dir $rd
+    & $add "清单：普通文件被换成同大小的重解析点文件：重解析点标记从 0 变 1，比较判变$($rpOk ? '' : '（本机造不出重解析点文件，这条没能真跑）')" $true (
+        (-not $rpOk) -or ((& $field $r1['r.csv'] 2) -ceq '0' -and (& $field $r2['r.csv'] 2) -ceq '1' -and -not (Compare-ReaperProbeLogListing -Before $r1 -After $r2).Same))
+    $jt = Join-Path $dir 'junction-target'; $null = New-Item -ItemType Directory -Path $jt
+    $jd = Join-Path $dir 'junc'; $null = New-Item -ItemType Directory -Path $jd
+    $null = New-Item -ItemType Directory -Path (Join-Path $jd 'plain')
+    $juncOk = try { $null = New-Item -ItemType Junction -Path (Join-Path $jd 'link') -Value $jt; $true } catch { $false }
+    $j1 = Get-ReaperProbeLogListing -Dir $jd
+    & $add "清单：联接记 dir|link，普通子目录仍记 dir$($juncOk ? '' : '（本机建不了联接，这条没能真跑）')" $false ((-not $juncOk) -or ($j1['link'] -ceq 'dir|link' -and $j1['plain'] -ceq 'dir'))
+    # 落盘的清单：不是探针日志命名的条目只留散列
+    $salt = New-ReaperListingSalt
+    $named = 'probe-I-4242-abcd.csv'
+    $listing = [ordered]@{ 'secret-song.wav' = '5|10|0|1'; 'Cubase Project' = 'dir'; 'Cubase Project\take-1.wav' = '7|11|0|1'; $named = '9|12|0|1'; 'notes.txt' = '3|13|0|1' }
+    $safe = ConvertTo-ReaperSafeListing -Listing $listing -Salt $salt
+    $json = $safe | ConvertTo-Json -Depth 5
+    & $add '落盘清单：别人的文件名、子目录名、子目录里的文件名一个都不出现在写出去的 json 里' $true ($json -notmatch 'secret|song|Cubase|take-1|notes')
+    & $add '落盘清单：探针日志命名的条目原样写，其余都是 other-<8 位十六进制>，条目数不变，大小、时间、链接标记原样' $true (
+        $safe.Count -eq 5 -and $safe.Contains($named) -and $safe[$named] -ceq '9|12|0|1' -and @($safe.Keys | Where-Object { $_ -cmatch '^other-[0-9a-f]{8}$' }).Count -eq 4 -and
+        @($safe.Values | Where-Object { $_ -ceq '5|10|0|1' }).Count -eq 1 -and @($safe.Values | Where-Object { $_ -ceq 'dir' }).Count -eq 1)
+    & $add '落盘清单：同一把盐下同一个名字的散列不变（前后两份能对上），不同的名字不同' $false (
+        (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -ceq (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -and
+        (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -cne (Get-ReaperListingShownName -EntryName 'notes.txt' -Salt $salt))
+    $salt2 = New-ReaperListingSalt
+    & $add '落盘清单：换一把盐（每轮一把随机盐）同一个名字的散列就不同；盐是 32 位十六进制，两次取的不一样' $true (
+        $salt -cmatch '^[0-9a-f]{32}$' -and $salt -cne $salt2 -and (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -cne (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt2))
+    & $add '落盘清单：盐本身不出现在写出去的 json 里' $true ($json -notmatch [regex]::Escape($salt))
+    # 变化报告：别人的文件只写散列与变化类型；探针日志命名的条目照写名字
+    $after = [ordered]@{ 'Cubase Project' = 'dir'; 'Cubase Project\take-1.wav' = '7|11|0|1'; $named = '9|12|0|1'; 'notes.txt' = '4|13|0|1'; 'new-secret.wav' = '1|1|0|1' }
+    $cmp = Compare-ReaperProbeLogListing -Before $listing -After $after -Salt $salt
+    $changedText = $cmp.Changed -join ' ; '
+    & $add "变化报告：别人的文件删了、改了、多了，原因文字里只有 removed/changed/added 加散列，没有文件名（$changedText）" $true (
+        -not $cmp.Same -and $cmp.Changed.Count -eq 3 -and $changedText -notmatch 'secret|song|notes|Cubase' -and
+        $cmp.Changed -ccontains ('removed:' + (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt)) -and
+        $cmp.Changed -ccontains ('changed:' + (Get-ReaperListingShownName -EntryName 'notes.txt' -Salt $salt)) -and
+        $cmp.Changed -ccontains ('added:' + (Get-ReaperListingShownName -EntryName 'new-secret.wav' -Salt $salt)))
+    & $add '变化报告：散列与落盘清单里的名字对得上（同一把盐），能从 json 里找到是哪一项' $false ($safe.Contains((Get-ReaperListingShownName -EntryName 'notes.txt' -Salt $salt)))
+    $cmpNoSalt = Compare-ReaperProbeLogListing -Before $listing -After $after
+    & $add '变化报告：不给盐也照样遮名字（文件名不会因为调用方忘了传盐而漏出去）' $true (-not $cmpNoSalt.Same -and ($cmpNoSalt.Changed -join ' ') -notmatch 'secret|song|notes' -and $cmpNoSalt.Changed.Count -eq 3)
+    $cmpOwnName = Compare-ReaperProbeLogListing -Before ([ordered]@{ $named = '9|12|0|1' }) -After ([ordered]@{ $named = '9|13|0|1' }) -Salt $salt
+    & $add '变化报告：探针日志命名的条目变了照写名字（那是探针自己的名字）' $false ($cmpOwnName.Changed -ccontains "changed:$named")
+    $cases
+}
+
+# 写日志的进程还在不在：pid 可能已被复用。拿「现在持有这个 pid 的进程是什么时候开始的」和「这份日志最后一次写入的时刻」比，
+# 不拿它和「这次启动的时刻」比（真正的 REAPER 恰恰是这次启动之后才开始的）
+function Get-WriterCases([string]$Tmp) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $now = [DateTime]::UtcNow
+    $mtime = $now.AddMinutes(-10) # 日志最后一次写入
+    $holder = { param($exists, $start) [pscustomobject]@{ Exists = $exists; StartUtc = $start } }
+    & $add '写日志的进程：没有这个进程是 Gone' $false ((Get-ReaperWriterState -Holder (& $holder $false $null) -LastWriteUtc $mtime) -ceq 'Gone')
+    & $add '写日志的进程：持有者比日志最后一次写入还晚开始（pid 被复用）是 Reused' $true ((Get-ReaperWriterState -Holder (& $holder $true $now) -LastWriteUtc $mtime) -ceq 'Reused')
+    & $add '写日志的进程：持有者在日志最后一次写入之前就开始了是 Alive（写它的进程还在）' $true ((Get-ReaperWriterState -Holder (& $holder $true $mtime.AddMinutes(-5)) -LastWriteUtc $mtime) -ceq 'Alive')
+    & $add '写日志的进程：开始时间比最后一次写入晚不过时钟余量（2 s）仍是 Alive，超过一刻才是 Reused' $true (
+        (Get-ReaperWriterState -Holder (& $holder $true $mtime.AddSeconds(2)) -LastWriteUtc $mtime) -ceq 'Alive' -and (Get-ReaperWriterState -Holder (& $holder $true $mtime.AddSeconds(2).AddTicks(1)) -LastWriteUtc $mtime) -ceq 'Reused')
+    & $add '写日志的进程：有进程但读不到开始时间是 Unknown（没法排除复用，按还在处理）' $true ((Get-ReaperWriterState -Holder (& $holder $true $null) -LastWriteUtc $mtime) -ceq 'Unknown')
+    # 真进程：自己、已退出的、刚起的子进程
+    $self = Get-ReaperPidHolder $PID
+    $selfStart = (Get-Process -Id $PID).StartTime.ToUniversalTime()
+    & $add '持有者：本进程的 pid 查得到，开始时间与进程自己报的一致' $false ($self.Exists -and $null -ne $self.StartUtc -and [math]::Abs(($self.StartUtc - $selfStart).TotalSeconds) -lt 1)
+    $gone = Get-ExitedPid
+    & $add '持有者：已退出进程的 pid 查不到' $false (-not (Get-ReaperPidHolder $gone).Exists)
+    # 搬走的接线：持有者由 ProcessInfo 注入
+    $since = $now.AddHours(-1)
+    $run = {
+        param([string]$Name, $Holder)
+        $d = Join-Path $Tmp "writer-$Name"; $null = New-Item -ItemType Directory -Force -Path $d
+        $f = Join-Path $d "probe-I-$gone-1a2b.csv"; [IO.File]::WriteAllText($f, "log`n"); (Get-Item -LiteralPath $f).LastWriteTimeUtc = $mtime
+        $h = $Holder
+        $m = Move-ReaperProbeLogs -LogDir $d -Pids @($gone) -SinceUtc $since -DestDir (Join-Path $Tmp "writer-$Name-dest") -ProcessInfo ({ param($p) $h }.GetNewClosure())
+        [pscustomobject]@{ M = $m; File = $f; Dest = (Join-Path $Tmp "writer-$Name-dest/probe-I-$gone-1a2b.csv") }
+    }
+    $rGone = & $run 'gone' (& $holder $false $null)
+    & $add '搬走：写它的进程已退出（pid 没人持有）：照常搬走，没有问题，没有备注' $false ($rGone.M.Moved.Count -eq 1 -and $rGone.M.Problems.Count -eq 0 -and $rGone.M.Notes.Count -eq 0 -and -not (Test-Path -LiteralPath $rGone.File) -and (Test-Path -LiteralPath $rGone.Dest))
+    $rReuse = & $run 'reused' (& $holder $true $now)
+    & $add "搬走：pid 被别的进程复用（持有者比日志最后一次写入还晚开始）：不判假的「进程还在」，照常搬走，备注里写明 pid 被复用" $false (
+        $rReuse.M.Moved.Count -eq 1 -and $rReuse.M.Problems.Count -eq 0 -and $rReuse.M.Notes.Count -eq 1 -and $rReuse.M.Notes[0] -like '*pid 被复用*' -and -not (Test-Path -LiteralPath $rReuse.File) -and (Test-Path -LiteralPath $rReuse.Dest))
+    $rAlive = & $run 'alive' (& $holder $true $mtime.AddMinutes(-5))
+    & $add '搬走：持有者在日志最后一次写入之前就开始了（写它的进程还在）：不动，判红，原文件还在' $true (
+        $rAlive.M.Moved.Count -eq 0 -and (Test-Path -LiteralPath $rAlive.File) -and @($rAlive.M.Problems | Where-Object { $_ -like '*还没退出*' }).Count -eq 1 -and $rAlive.M.Notes.Count -eq 0)
+    $rEdge = & $run 'edge' (& $holder $true $mtime.AddSeconds(1))
+    & $add '搬走：开始时间只比最后一次写入晚 1 s（在时钟余量里）按还在处理：不动，判红' $true ($rEdge.M.Moved.Count -eq 0 -and (Test-Path -LiteralPath $rEdge.File) -and $rEdge.M.Problems.Count -eq 1)
+    $rUnknown = & $run 'unknown' (& $holder $true $null)
+    & $add '搬走：读不到持有者的开始时间：按还在处理（不动文件），原因里写明没法排除 pid 被复用' $true (
+        $rUnknown.M.Moved.Count -eq 0 -and (Test-Path -LiteralPath $rUnknown.File) -and @($rUnknown.M.Problems | Where-Object { $_ -like '*还没退出*pid 被复用*' }).Count -eq 1)
+    # 真进程：这次启动之后才开始、还在写日志的进程不能被当成「复用」（拿开始时间去比启动时刻会把它错判成复用，然后删掉它还在写的日志）
+    $sinceLaunch = [DateTime]::UtcNow.AddSeconds(-10) # 启动时刻取在子进程开始之前，比时钟余量（2 s）早得多
+    $child = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path, '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 120'))
+    try {
+        $dc = Join-Path $Tmp 'writer-child'; $null = New-Item -ItemType Directory -Force -Path $dc
+        $fc = Join-Path $dc "probe-O-$($child.Id)-3c4d.csv"; [IO.File]::WriteAllText($fc, "still writing`n")
+        $mc = Move-ReaperProbeLogs -LogDir $dc -Pids @($child.Id) -SinceUtc $sinceLaunch -DestDir (Join-Path $Tmp 'writer-child-dest')
+        & $add '搬走：这次启动之后才开始、正在跑的进程（开始时间晚于启动时刻）：写它的进程还在，不动，判红（不能因为它比启动时刻晚就当成 pid 复用）' $true (
+            $mc.Moved.Count -eq 0 -and (Test-Path -LiteralPath $fc) -and @($mc.Problems | Where-Object { $_ -like '*还没退出*' }).Count -eq 1 -and $mc.Notes.Count -eq 0)
+    } finally { if (-not $child.HasExited) { $child.Kill(); $child.WaitForExit() } }
+    # 真进程：本进程的 pid，日志最后一次写入早于本进程开始（同一个 pid 以前属于别的进程）：算复用
+    $dr = Join-Path $Tmp 'writer-self-reused'; $null = New-Item -ItemType Directory -Force -Path $dr
+    $fr = Join-Path $dr "probe-I-$PID-5e6f.csv"; [IO.File]::WriteAllText($fr, "old owner`n"); (Get-Item -LiteralPath $fr).LastWriteTimeUtc = $selfStart.AddHours(-1)
+    $mr = Move-ReaperProbeLogs -LogDir $dr -Pids @($PID) -SinceUtc $selfStart.AddHours(-3) -DestDir (Join-Path $Tmp 'writer-self-reused-dest')
+    & $add '搬走：真进程（本进程）的 pid，日志最后一次写入早于它开始之前一小时：算 pid 复用，照常搬走并留备注' $false ($mr.Moved.Count -eq 1 -and $mr.Notes.Count -eq 1 -and -not (Test-Path -LiteralPath $fr))
+    # 备注记进这一轮的上下文（Save-ProbeLogs 是各个场景处理器收日志的入口）
+    $ds = Join-Path $Tmp 'writer-save'; $null = New-Item -ItemType Directory -Force -Path $ds
+    $fs = Join-Path $ds "probe-O-$PID-7a8b.csv"; [IO.File]::WriteAllText($fs, "old owner`n"); (Get-Item -LiteralPath $fs).LastWriteTimeUtc = $selfStart.AddHours(-1)
+    $saveCtx = @{ Probe = @{ LogDir = $ds; Own = [Collections.Generic.List[string]]::new(); Problems = [Collections.Generic.List[string]]::new(); Notes = [Collections.Generic.List[string]]::new(); Moved = 0 } }
+    $null = & (Get-Module Scenarios) { param($c, $run, $cell) Save-ProbeLogs $c $run $cell } $saveCtx ([pscustomobject]@{ Status = 'Exited'; Pid = $PID; StartedUtc = $selfStart.AddHours(-3) }) (Join-Path $Tmp 'writer-save-dest')
+    & $add '搬走：Save-ProbeLogs 把 pid 复用的备注记进这一轮的 Ctx.Probe.Notes，搬走数照记，没有问题' $false (
+        $saveCtx.Probe.Moved -eq 1 -and $saveCtx.Probe.Notes.Count -eq 1 -and $saveCtx.Probe.Notes[0] -like '*pid 被复用*' -and $saveCtx.Probe.Problems.Count -eq 0)
+    # 读开始时间出错（拒绝访问等）：进程还在就是 Exists 为真、StartUtc 为空；出错的当口进程已退出就算不存在。Get-Process 在模块里临时换成替身。
+    $holderOf = {
+        param([bool]$Exited)
+        & (Get-Module ProbeLogs) {
+            param($exited)
+            $script:FakeExited = $exited
+            function script:Get-Process {
+                param($Id, $ErrorAction)
+                $o = [pscustomobject]@{ Id = $Id }
+                Add-Member -InputObject $o -MemberType ScriptProperty -Name StartTime -Value { throw [ComponentModel.Win32Exception]::new(5) }
+                Add-Member -InputObject $o -MemberType ScriptProperty -Name HasExited -Value { $script:FakeExited }
+                $o
+            }
+            try { Get-ReaperPidHolder 1234 } finally { Remove-Item -LiteralPath Function:\script:Get-Process -ErrorAction SilentlyContinue }
+        } $Exited
+    }
+    $hAlive = & $holderOf $false
+    $hExited = & $holderOf $true
+    & $add '持有者：读开始时间出错而进程还在：Exists 为真、StartUtc 为空（Unknown，不动文件）' $true ($hAlive.Exists -and $null -eq $hAlive.StartUtc)
+    & $add '持有者：读开始时间出错的当口进程已退出：算不存在' $false (-not $hExited.Exists)
+    $cases
+}
+
+# -Python 可以是路径，也可以是 PATH 上的命令名：裸名先按命令解析，解析出来的路径再走原来的判断（包括 py 启动器的 -3）
+function Get-PythonCases([string]$Tmp) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $bin = Join-Path $Tmp 'pybin'; $null = New-Item -ItemType Directory -Force -Path $bin
+    foreach ($spec in @(@('zzpyfake.cmd', '3.10.11'), @('zzpyold.cmd', '2.7.18'), @('py.cmd', '3.10.11'))) { [IO.File]::WriteAllText((Join-Path $bin $spec[0]), "@echo Python $($spec[1])`r`n") }
+    $savedPath = $env:PATH
+    $env:PATH = "$bin;$savedPath"
+    try {
+        $bare = Resolve-ReaperPython 'zzpyfake'
+        & $add "-Python 裸命令名（zzpyfake，在 PATH 上）：解析成现成文件的绝对路径，版本读得出（$($bare.Exe)）" $false (
+            -not $bare.Why -and [IO.Path]::IsPathRooted($bare.Exe) -and (Test-Path -LiteralPath $bare.Exe -PathType Leaf) -and (Split-Path -Leaf $bare.Exe) -ieq 'zzpyfake.cmd' -and $bare.Version -ceq '3.10.11')
+        $byPath = Resolve-ReaperPython (Join-Path $bin 'zzpyfake.cmd')
+        & $add '-Python 给文件路径：原样用，不走 PATH 解析' $false (-not $byPath.Why -and $byPath.Exe -ceq (Join-Path $bin 'zzpyfake.cmd') -and $byPath.Version -ceq '3.10.11')
+        $bareOld = Resolve-ReaperPython 'zzpyold'
+        & $add '-Python 裸命令名解析到的不是 Python 3：照样被拒（版本照核）' $true ($bareOld.Why -like '*不是 Python 3*')
+        $none = Resolve-ReaperPython 'zzpy-no-such-command'
+        & $add '-Python 裸命令名在 PATH 上找不到：被拒，原因写明找不到' $true ($none.Why -like '*找不到 Python 解释器*' -and -not $none.Exe)
+        $wild = Resolve-ReaperPython 'zzpyf*'
+        & $add '-Python 带通配符的名字不当命令名解析（即使通配会匹配到 PATH 上的文件）：被拒' $true ($wild.Why -like '*找不到 Python 解释器*')
+        # py 启动器的 -3 按解析出来的路径判：裸名 py 在这里解析到 py.cmd（不是 py.exe），所以不带 -3；真正的 py.exe 路径才带
+        $bareLauncher = Resolve-ReaperPython 'py'
+        & $add '-Python py（解析到 py.cmd，不是启动器 py.exe）：前导参数按解析后的路径判，不带 -3' $true ((Split-Path -Leaf $bareLauncher.Exe) -ieq 'py.cmd' -and @($bareLauncher.Lead).Count -eq 0)
+        & $add 'py 启动器前导参数：py.exe / py（不分大小写）带 -3，别的解释器不带' $false (
+            (@(Get-ReaperPythonLead 'C:\Windows\py.exe') -join ',') -ceq '-3' -and (@(Get-ReaperPythonLead 'D:\x\PY.EXE') -join ',') -ceq '-3' -and @(Get-ReaperPythonLead 'C:\Python\python.exe').Count -eq 0 -and @(Get-ReaperPythonLead 'C:\x\py.cmd').Count -eq 0)
+        # 预检里同样可用
+        $marker = Join-Path $Tmp 'py-USER_TESTING'
+        $pre = Get-ReaperPreflight -ReaperExe ((Get-Process -Id $PID).Path) -BuildDir (Join-Path $Tmp 'no-build') -NullTest ((Get-Process -Id $PID).Path) -UserTestingMarker $marker -Flavor probe -Python 'zzpyfake' -ProbeLogDir (Join-Path $Tmp 'py-docs/Rinne Probe Logs')
+        & $add '预检（第二段）：-Python 给裸命令名：解释器解析成路径、版本读出，没有 Python 方面的缺项' $false (
+            $pre.PythonVersion -ceq '3.10.11' -and [IO.Path]::IsPathRooted($pre.Python) -and @($pre.Reasons | Where-Object { $_ -match 'Python 解释器' }).Count -eq 0)
+    } finally { $env:PATH = $savedPath }
+    $cases
+}
+
 function Get-ProbeSelfTestCases {
     param([Parameter(Mandatory)][string]$Tmp, [Parameter(Mandatory)][string]$RepoRoot)
     $all = [Collections.Generic.List[object]]::new()
     foreach ($fn in { Get-CollectCases $Tmp }, { Get-CellCases }, { Get-AnalyzerCases $RepoRoot $Tmp }, { Get-RppProbeCases $RepoRoot }, { Get-ProbeConfigCases $RepoRoot $Tmp },
-                    { Get-ProbePreflightCases $Tmp }, { Get-CompleteCellCases $Tmp }, { Get-WholeCases $Tmp }, { Get-SampleCases }) {
+                    { Get-ProbePreflightCases $Tmp }, { Get-CompleteCellCases $Tmp }, { Get-WholeCases $Tmp }, { Get-SampleCases },
+                    { Get-ListingCases $Tmp }, { Get-WriterCases $Tmp }, { Get-PythonCases $Tmp }) {
         foreach ($c in (& $fn)) { $all.Add($c) }
     }
     $all

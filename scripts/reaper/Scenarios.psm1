@@ -312,6 +312,7 @@ function Save-ProbeLogs($Ctx, $Run, [string]$CellDir) {
     $m = Move-ReaperProbeLogs -LogDir $Ctx.Probe.LogDir -Pids @([int]$Run.Pid) -SinceUtc $Run.StartedUtc -DestDir $CellDir
     foreach ($logName in $m.Own) { $Ctx.Probe.Own.Add($logName) }
     foreach ($why in $m.Problems) { $Ctx.Probe.Problems.Add($why) }
+    foreach ($note in $m.Notes) { $Ctx.Probe.Notes.Add($note) }
     $Ctx.Probe.Moved += $m.Moved.Count
     $m
 }
@@ -471,6 +472,7 @@ function Get-ProbeLuaJob($Ctx, $S, [string]$Variant, [string]$Project) {
     @{
         project = $Project; autoCase = [int]$idx.Case; autoVariant = [int]$idx.Variant; caseMax = [int]$idx.CaseMax; variantMax = [int]$idx.VariantMax
         recordSeconds = [int]$S.recordSeconds; leadSeconds = [double]$Ctx.Limits.leadSeconds; marginSeconds = [double]$Ctx.Limits.marginSeconds
+        afterRenderSeconds = [double]$Ctx.Limits.afterRenderSeconds # 驱动在渲染返回后至少再等的秒数；场景表校验稳态格的停走带后余量用的是同一个字段
     }
 }
 

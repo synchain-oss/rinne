@@ -7,7 +7,8 @@
 #   Invoke-ReaperSmoke                                  整套；返回结果对象，Write-ReaperSmokeResult 写 json
 # 两段：第一段（默认）测正式的 dev 构建，场景在 scenarios.json 顶层；第二段（-Probe）测探针构建，场景、信号与上限在 probe 一节。
 # 第二段每轮另有一个结果目录 <LogDir>\<时刻>-probe-run<k>：probe-logs\<场景>（搬来的日志与比对行）、analyze-<场景>.json（每格的
-# 分析器原始输出）、all-logs 与 analyze.json（整轮合在一起再过一次分析器）、docs-listing-before/after.json（文档目录的前后清单）。
+# 分析器原始输出）、all-logs 与 analyze.json（整轮合在一起再过一次分析器）、docs-listing-before/after.json（文档目录的前后清单：
+# 比较看全部条目，落盘时不是探针日志命名的条目只留每轮随机盐的短散列，不留别人的文件名；变化报告同样只写散列与变化类型）。
 # 结局词汇：PASS / FAIL / SKIPPED / INCOMPLETE。INCOMPLETE 不当 PASS。反例的 status 要同时满足两条才是 PASS：观察到的结局等于期望，
 # 并且原因对得上（Detail 匹配 scenarios.json 里这条反例的 expectDetail）；没启动、没执行凑出来的同名结局不算（Get-NegativeVerdict）。
 
@@ -53,7 +54,11 @@ function Test-ReaperScenarioConfig {
         foreach ($k in 'signal', 'limits', 'group', 'scenarios', 'negative') { if ($null -eq (Get-Prop $probeNode $k)) { $p.Add("probe 一节缺字段 $k") } }
         if ($p.Count) { return , $p.ToArray() }
         if ("$($probeNode.group)" -notmatch '^[0-7]$') { $p.Add('probe.group 应为 0..7 的整数（两端同组才会配对）') }
-        foreach ($k in 'luaTimeoutSec', 'leadSeconds', 'marginSeconds', 'minBlocks') { if ($null -eq (Get-Prop $probeNode.limits $k)) { $p.Add("probe.limits 缺 $k") } }
+        foreach ($k in 'luaTimeoutSec', 'leadSeconds', 'marginSeconds', 'afterRenderSeconds', 'minBlocks') { if ($null -eq (Get-Prop $probeNode.limits $k)) { $p.Add("probe.limits 缺 $k") } }
+        foreach ($k in 'leadSeconds', 'marginSeconds', 'afterRenderSeconds') {
+            $v = Get-Prop $probeNode.limits $k
+            if ($null -ne $v -and -not (Test-ReaperNumber $v -Min 0)) { $p.Add("probe.limits.$k 应为不小于 0 的数") }
+        }
         $sections.Add(@('probe.', $probeNode, $phase2))
     }
     foreach ($sec in $sections) {
@@ -76,16 +81,25 @@ function Test-ReaperScenarioConfig {
                     else { try { $null = [regex]::new($why) } catch { $p.Add("${id}：expectDetail 不是合法的正则") } }
                 }
                 if ($group -eq 'scenarios' -and $kind -in 'hang', 'guard') { $p.Add("${id}：$kind 只能做反例") }
-                if ($kind -in $script:ProbeKinds) { foreach ($x in (Test-ReaperProbeScenarioFields $s)) { $p.Add("${id}：$x") } }
+                if ($kind -in $script:ProbeKinds) { foreach ($x in (Test-ReaperProbeScenarioFields $s (Get-Prop $node limits))) { $p.Add("${id}：$x") } }
             }
         }
     }
     , $p.ToArray()
 }
 
+# 纯函数：一个值是不是数（JSON 里读出来的数，或能按不变区域设置读成数的字符串），且不小于 Min。
+function Test-ReaperNumber($Value, [double]$Min = [double]::NegativeInfinity) {
+    if ($null -eq $Value -or $Value -is [bool]) { return $false }
+    $d = 0.0
+    [double]::TryParse([string]$Value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d) -and -not [double]::IsNaN($d) -and -not [double]::IsInfinity($d) -and $d -ge $Min
+}
+
 # 探针场景的取值：case / variant 在探针的规则表里（导出格是 export-offline 与 export-rt 两个 variant）；记录窗口 1..3600 s（探针隐藏参数
-# auto_record_s 的范围）；稳态格的播放时长短于记录窗口（停走带之后还要留出 Ping 的时间）。
-function Test-ReaperProbeScenarioFields($ProbeScenario) {
+# auto_record_s 的范围）；稳态格停走带之后留给自动 Ping 的时间 recordSeconds + marginSeconds - leadSeconds - playSeconds 不少于
+# limits.afterRenderSeconds（Lua 驱动在导出格里渲染返回后再等的也是这个值：场景表里这一个字段是两处的单一真源；Ping 约 4.4 s 才有结果）。
+# Limits 是 probe 一节的 limits；缺字段由调用方另报，这里只在三个值都在时才核对。
+function Test-ReaperProbeScenarioFields($ProbeScenario, $Limits = $null) {
     $bad = [Collections.Generic.List[string]]::new()
     $variants = ($ProbeScenario.kind -eq 'probe-export') ? @('export-offline', 'export-rt') : @([string](Get-Prop $ProbeScenario variant))
     foreach ($v in $variants) {
@@ -93,7 +107,19 @@ function Test-ReaperProbeScenarioFields($ProbeScenario) {
     }
     $rec = Get-Prop $ProbeScenario recordSeconds
     if ("$rec" -notmatch '^[0-9]{1,4}$' -or [int]$rec -lt 1 -or [int]$rec -gt 3600) { $bad.Add('recordSeconds 应为 1..3600 的整数') }
-    elseif ($ProbeScenario.kind -eq 'probe-play' -and [double](Get-Prop $ProbeScenario playSeconds) -ge [int]$rec) { $bad.Add('playSeconds 要短于 recordSeconds（停走带之后的 Ping 也要落在记录窗口里）') }
+    elseif ($ProbeScenario.kind -eq 'probe-play') {
+        $play = Get-Prop $ProbeScenario playSeconds
+        $lead = Get-Prop $Limits leadSeconds; $margin = Get-Prop $Limits marginSeconds; $after = Get-Prop $Limits afterRenderSeconds
+        if (-not (Test-ReaperNumber $play -Min 0)) { $bad.Add('playSeconds 应为不小于 0 的数') }
+        elseif ((Test-ReaperNumber $lead -Min 0) -and (Test-ReaperNumber $margin -Min 0) -and (Test-ReaperNumber $after -Min 0)) {
+            $inv = [Globalization.CultureInfo]::InvariantCulture
+            $spare = [int]$rec + [double]::Parse([string]$margin, $inv) - [double]::Parse([string]$lead, $inv) - [double]::Parse([string]$play, $inv)
+            $need = [double]::Parse([string]$after, $inv)
+            if ($spare -lt $need - 1e-9) {
+                $bad.Add(('停走带之后留给自动 Ping 的时间只有 {0} s（recordSeconds + marginSeconds - leadSeconds - playSeconds），要不少于 afterRenderSeconds 的 {1} s（Ping 约 4.4 s 才有结果）：缩短 playSeconds，或加长 recordSeconds' -f $spare.ToString('0.###', $inv), $need.ToString('0.###', $inv)))
+            }
+        }
+    }
     $grp = Get-Prop $ProbeScenario group
     $must = @(Get-Prop $ProbeScenario analyzerMustPass)
     if (-not $must.Count -or @($must | Where-Object { "$_" -cnotmatch '^A[1-9]$' }).Count) { $bad.Add('analyzerMustPass 应为非空的 A1..A9 列表（计入这一格结局的分析器项）') }
@@ -120,13 +146,19 @@ function Test-ReaperPluginClassIds {
     , $why.ToArray()
 }
 
-# 解释器与版本。没指定就找 py 启动器（它要 -3）。返回 @{ Exe; Lead（解释器名后面先带的参数）; Version; Why }。
+# 纯函数：解释器名后面先带的参数。py 启动器要 -3，别的解释器不带。按解析后的路径判，不按用户写的那个名字。
+function Get-ReaperPythonLead([string]$Interpreter) { ((Split-Path -Leaf $Interpreter) -in 'py', 'py.exe') ? @('-3') : @() }
+
+# 解释器与版本。没指定就找 py 启动器（它要 -3）。-Python 可以是解释器文件的路径，也可以是 PATH 上的命令名（python、py）：不是现成的文件时，
+# 按命令名在 PATH 上解析（只认可执行文件，不认别名与函数），之后一律用解析出来的路径。
+# 返回 @{ Exe; Lead（解释器名后面先带的参数）; Version; Why }。
 function Resolve-ReaperPython([string]$Python = '') {
     $exe = $Python
     if (-not $exe) { $cmd = Get-Command py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; $exe = $cmd ? $cmd.Source : '' }
+    elseif (-not (Test-Path -LiteralPath $exe -PathType Leaf) -and $exe -notmatch '[*?\[\]]') { $cmd = Get-Command $exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; $exe = $cmd ? $cmd.Source : '' }
     $out = [pscustomobject]@{ Exe = $exe; Lead = @(); Version = ''; Why = '' }
-    if (-not $exe -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) { $out.Why = '找不到 Python 解释器（用 -Python 指定，或装 py 启动器）'; return $out }
-    $out.Lead = ((Split-Path -Leaf $exe) -in 'py', 'py.exe') ? @('-3') : @()
+    if (-not $exe -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) { $out.Why = '找不到 Python 解释器（用 -Python 指定路径或 PATH 上的命令名，或装 py 启动器）'; return $out }
+    $out.Lead = @(Get-ReaperPythonLead $exe)
     $r = try { Invoke-Native -Exe $exe -Arguments (@($out.Lead) + '--version') } catch { $null }
     $versionText = $r ? ("$($r.Out) $($r.Err)".Trim()) : ''
     if (-not $r -or $r.Exit -ne 0 -or $versionText -notmatch '^Python (3\.[0-9]+\.[0-9]+)') { $out.Why = 'Python 解释器跑不起来，或不是 Python 3'; return $out }
@@ -330,6 +362,8 @@ function New-ReaperProbeRound($Preflight, $ProbeSection, [string]$ResultDir) {
         Redact = @(@($env:USERNAME, $env:COMPUTERNAME) | Where-Object { $_ }); Own = [Collections.Generic.List[string]]::new(); Moved = 0
         Excluded = [Collections.Generic.List[string]]::new() # 不并进整轮分析的格（反例：它的丢记录与同键记录会混进整轮的读数）
         Problems = [Collections.Generic.List[string]]::new(); Analyses = [ordered]@{}; Rejected = $false
+        Notes = [Collections.Generic.List[string]]::new() # 照常搬走、但值得记一笔的（例如 pid 已被别的进程复用）
+        Salt = (New-ReaperListingSalt) # 文档目录清单里别人的文件名只留这一轮的盐加名字的散列；盐不落盘
     }
 }
 
@@ -400,7 +434,7 @@ function Invoke-ReaperSmoke {
             $null = New-Item -ItemType Directory -Force -Path $roundDir
             $ctx.Probe = New-ReaperProbeRound $pre $section $roundDir
             $docsBefore = Get-ReaperProbeLogListing -Dir $pre.ProbeLogDir # 列不出就抛错：看不见不能当作没变
-            Write-ReaperJson (Join-Path $roundDir 'docs-listing-before.json') $docsBefore
+            Write-ReaperJson (Join-Path $roundDir 'docs-listing-before.json') (ConvertTo-ReaperSafeListing -Listing $docsBefore -Salt $ctx.Probe.Salt) # 比较用全部条目，落盘的不留别人的文件名
         }
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $rows = [Collections.Generic.List[object]]::new()
@@ -423,8 +457,8 @@ function Invoke-ReaperSmoke {
             foreach ($s in $negative) { if ($s.kind -in $script:ProbeKinds) { $ctx.Probe.Excluded.Add([string]$s.id) } } # 反例格不并进整轮分析
             $whole = Invoke-ReaperProbeWhole $ctx.Probe
             $docsAfter = Get-ReaperProbeLogListing -Dir $pre.ProbeLogDir
-            Write-ReaperJson (Join-Path $roundDir 'docs-listing-after.json') $docsAfter
-            $docs = Compare-ReaperProbeLogListing -Before $docsBefore -After $docsAfter -Own $ctx.Probe.Own.ToArray()
+            Write-ReaperJson (Join-Path $roundDir 'docs-listing-after.json') (ConvertTo-ReaperSafeListing -Listing $docsAfter -Salt $ctx.Probe.Salt)
+            $docs = Compare-ReaperProbeLogListing -Before $docsBefore -After $docsAfter -Own $ctx.Probe.Own.ToArray() -Salt $ctx.Probe.Salt
             $docsSame = $docs.Same
         }
         # 全绿就删掉这一轮的临时文件（逐个删，不递归）；有红的留着供查
@@ -448,6 +482,7 @@ function Invoke-ReaperSmoke {
             $runRow.probe = [ordered]@{
                 roundDir = (Split-Path -Leaf $roundDir); logDir = $script:ProbeDirShown; moved = $ctx.Probe.Moved; own = @($ctx.Probe.Own)
                 problems = @($ctx.Probe.Problems | ForEach-Object { Hide-LocalPaths $_ })
+                notes = @($ctx.Probe.Notes | ForEach-Object { Hide-LocalPaths $_ })
                 docsListing = [ordered]@{ unchanged = $docs.Same; entriesBefore = $docs.Count; changed = @($docs.Changed | Select-Object -First 8) }
                 analyzer = [ordered]@{ cells = [ordered]@{}; whole = $whole; rejected = $ctx.Probe.Rejected }
             }
@@ -476,5 +511,5 @@ function Write-ReaperSmokeResult {
 }
 
 Export-ModuleMember -Function Get-ReaperSmokeConfig, Test-ReaperScenarioConfig, Test-ReaperPluginClassIds, Get-ReaperPreflight, Install-ReaperPlugins, Hide-LocalPaths, Select-ReaperScenarios,
-    Resolve-ReaperPython, Test-ReaperProbeScenarioFields, Get-ReaperRoundStop,
+    Resolve-ReaperPython, Get-ReaperPythonLead, Test-ReaperNumber, Test-ReaperProbeScenarioFields, Get-ReaperRoundStop,
     Get-WorstStatus, Get-RunVerdict, Get-NegativeVerdict, Invoke-GuardNegative, Invoke-ReaperNegativeRow, Invoke-ReaperSmoke, Write-ReaperSmokeResult

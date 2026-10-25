@@ -5,7 +5,7 @@
 #   pwsh scripts/reaper/doctor.ps1 -CfgDir <私有配置目录> -Init      建配置目录（私有插件目录、最小 reaper.ini）并写哨兵文件
 #   pwsh scripts/reaper/doctor.ps1 -CfgDir <私有配置目录> -BuildDir build-wf -UserTestingMarker <标记文件路径>
 #       逐项体检；缺项就打印 SKIPPED 和原因（和 run.ps1 同一套预检）
-#   … -BuildDir build-probe -UserTestingMarker <标记文件路径> -Probe [-Python <解释器>]   按第二段（探针构建）体检
+#   … -BuildDir build-probe -UserTestingMarker <标记文件路径> -Probe [-Python <解释器路径或 PATH 上的命令名>]   按第二段（探针构建）体检
 # -Init 只接受还不存在的目录、空目录或以前 -Init 过的目录（有哨兵）；已有内容又没有哨兵的一律拒绝，什么都不写。
 # -CfgDir 在 AppData 之下（或指向那里）一律拒绝，-Init 也一样。
 # 退出码：0 可以跑、3 会被 SKIPPED、64 被护栏拒绝或用法错误。

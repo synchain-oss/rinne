@@ -209,11 +209,13 @@ function steps.probeplay()
 end
 
 -- 渲染结束也是一次停走带，探针随后自动 Ping，约 4.4 s 才有结果（静音段、注入与回读、恢复、500 ms 淡入）。
--- 导出格在渲染返回之后至少再等这么久才退出；稳态格停走带之后留的时间由场景表的秒数算出来，也是 6.5 s
-local afterRenderSeconds = 6.5
+-- 导出格在渲染返回之后至少再等 job.afterRenderSeconds 才退出。这个秒数来自场景表 probe.limits.afterRenderSeconds：脚本里不写字面量，
+-- 稳态格停走带之后留的时间（recordSeconds + marginSeconds - leadSeconds - playSeconds）也由场景表校验成不少于它。
 
 -- 导出格：开窗口后按工程里的渲染设置渲染（离线或在线由工程的 RENDER_1X 决定），等窗口到时、且渲染结束后的 Ping 跑完再退出
 function steps.probeexport()
+    local afterRenderSeconds = job.afterRenderSeconds
+    if type(afterRenderSeconds) ~= "number" then error("任务里没有 afterRenderSeconds") end
     openAndWait(job.project)
     local track = reaper.GetTrack(0, 0)
     probeChain(track)

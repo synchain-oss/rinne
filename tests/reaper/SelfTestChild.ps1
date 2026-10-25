@@ -269,7 +269,7 @@ function New-FakeReaperLauncher([hashtable]$Spec) {
         $peer = ($resultName -match 'neg-probe-unpaired') ? 0 : -1
         $pings = $Spec.NoPing -contains $leg ? @() : @($Spec.PingFor.Contains($leg) ? $Spec.PingFor[$leg] : 4800)
         $renderSpeed = [regex]::Match([IO.File]::ReadAllText($job['project']), '(?m)^\s*RENDER_1X (\d+)').Groups[1].Value
-        $Spec.Seen.Add([pscustomobject]@{ Pid = $ownPid; Step = $job['step']; Leg = $leg; RenderSpeed = $renderSpeed })
+        $Spec.Seen.Add([pscustomobject]@{ Pid = $ownPid; Step = $job['step']; Leg = $leg; RenderSpeed = $renderSpeed; AfterRender = $job['afterRenderSeconds'] })
         $null = New-Item -ItemType Directory -Force -Path $Spec.LogDir
         [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-I-$ownPid-a1b1.csv"), (& $Spec.NewLog -Role I -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings $pings))
         [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-O-$ownPid-c2d2.csv"), (& $Spec.NewLog -Role O -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings @()))
@@ -329,6 +329,7 @@ Write-Case "稳态格走收日志：只搬本次启动的两份（$($moved -join
     $w.Out.Status -eq 'PASS' -and ($left -join '|') -ceq ($expectLeft -join '|') -and ($moved -join '|') -ceq (@("probe-I-$ownPid-a1b1.csv", "probe-O-$ownPid-c2d2.csv") -join '|') -and
     $w.Ctx.Probe.Moved -eq 2 -and $w.Ctx.Probe.Own.Count -eq 2 -and $w.Ctx.Probe.Problems.Count -eq 0)
 Write-Case '稳态格：Ctx.Probe.Own 只有本次启动的两份（轮末前后清单比较时才会只除外这两份）' $true (($w.Ctx.Probe.Own -join '|') -ceq "probe-I-$ownPid-a1b1.csv|probe-O-$ownPid-c2d2.csv")
+Write-Case "稳态格：任务里的 afterRenderSeconds 就是场景表的值（$($plantSpec.Seen[0].AfterRender)）" $false ([double]$plantSpec.Seen[0].AfterRender -eq [double]$probeSection.limits.afterRenderSeconds)
 Write-Case '稳态格：好路径的结局 PASS，写出 Ping 4800 / D 4800 与驱动记下的停走带后留给 Ping 的时间' $false ($w.Out.Status -eq 'PASS' -and $w.Out.Detail -match 'Ping 4800 样本 / D 4800 样本' -and $w.Out.Detail -match 'stop_to_exit_s=6\.500')
 
 $w = Invoke-WireScenario 'play-noping' $playScenario (New-WireSpecWith 'play-noping' @{ NoPing = @('play') })
@@ -358,6 +359,9 @@ $speeds = @($w.Spec.Seen | ForEach-Object { "$($_.Leg)=$($_.RenderSpeed)" }) -jo
 Write-Case "导出格：好路径 PASS，两趟都起了，离线那趟工程的渲染速度是 0、在线那趟是 2（$speeds）" $false (
     $w.Out.Status -eq 'PASS' -and $speeds -ceq 'offline=0 online=2' -and $w.Out.Detail -match 'export-offline' -and $w.Out.Detail -match 'export-rt' -and $w.Out.Detail -match 'exit_bound=window' -and
     (Test-Path -LiteralPath (Join-Path $w.Cell 'compare-reaper.csv')) -and (Get-WireCellLogs $w.Cell).Count -eq 4 -and $w.Ctx.Probe.Moved -eq 4)
+$afterSeen = @($w.Spec.Seen | ForEach-Object { $_.AfterRender }) -join ' '
+Write-Case "导出格：两趟任务里的 afterRenderSeconds 都是场景表的值（$afterSeen）" $false (
+    @($w.Spec.Seen).Count -eq 2 -and @($w.Spec.Seen | Where-Object { [double]$_.AfterRender -ne [double]$probeSection.limits.afterRenderSeconds }).Count -eq 0)
 $w = Invoke-WireScenario 'export-noping-off' $exportScenario (New-WireSpecWith 'export-noping-off' @{ NoPing = @('offline') })
 Write-Case '导出格：离线那趟渲染后的 Ping 没出来判 FAIL（没有 Ping），不再放过去' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*export-offline：没有 Ping*')
 $w = Invoke-WireScenario 'export-noping-on' $exportScenario (New-WireSpecWith 'export-noping-on' @{ NoPing = @('online') })
@@ -406,13 +410,26 @@ if ($realReaperRunning) {
                 Only = $Only; Repeat = $Repeat; Probe = $true; Python = $fakePy.Python; SelfTestHooks = $hooks }
         if ($NoNegative) { $p.NoNegative = $true }
         $env:FAKE_COMPARE_FILE = ''
-        $r = Invoke-ReaperSmoke @p 6>$null
-        [pscustomobject]@{ R = $r; Results = (Join-Path $results $Id) }
+        $all = @(Invoke-ReaperSmoke @p 6>&1) # 控制台上的 Write-Host 是信息流：留下来，核对里面没有别人的文件名
+        $r = @($all | Where-Object { $_ -isnot [Management.Automation.InformationRecord] })[-1]
+        $console = (@($all | Where-Object { $_ -is [Management.Automation.InformationRecord] } | ForEach-Object { "$($_.MessageData)" }) -join "`n")
+        [pscustomobject]@{ R = $r; Results = (Join-Path $results $Id); Console = $console }
     }
     $smoke1 = Invoke-WireSmoke 'clean' (New-WireSpec 'clean') '^probe-steady-48000-512$' -NoNegative
     $run1 = $smoke1.R.runs[0]
     Write-Case "整轮入口（第二段）：干净的一轮 PASS，文档目录除本轮自己的文件外没变，搬走 2 份，没留 reaper 进程（$($smoke1.R.verdict)）" $false (
-        $smoke1.R.verdict -eq 'PASS' -and $run1.probe.docsListing.unchanged -and $run1.probe.moved -eq 2 -and $run1.reaperProcessesLeft -eq 0 -and -not ($run1.PSObject.Properties.Name -contains 'stoppedBecause'))
+        $smoke1.R.verdict -eq 'PASS' -and $run1.probe.docsListing.unchanged -and $run1.probe.moved -eq 2 -and @($run1.probe.notes).Count -eq 0 -and $run1.reaperProcessesLeft -eq 0 -and -not ($run1.PSObject.Properties.Name -contains 'stoppedBecause'))
+
+    # 文档目录的前后清单落盘时，别人的文件名（文件、子目录）只留散列；比较用的是全部条目，所以清单里条目一个不少
+    $roundDir1 = Join-Path $smoke1.Results $run1.probe.roundDir
+    $listBefore1 = Get-Content -LiteralPath (Join-Path $roundDir1 'docs-listing-before.json') -Raw
+    $listAfter1 = Get-Content -LiteralPath (Join-Path $roundDir1 'docs-listing-after.json') -Raw
+    $hashed1 = @((ConvertFrom-Json $listBefore1).PSObject.Properties.Name | Where-Object { $_ -cmatch '^other-[0-9a-f]{8}$' })
+    Write-Case "整轮入口（第二段）：落盘的 docs-listing-before / after.json 里没有别人的文件名（foreign-a.csv、notes.txt、子目录 sub），三个条目都只留散列（$($hashed1.Count) 个）" $true (
+        $listBefore1 -cnotmatch 'foreign|notes|sub' -and $listAfter1 -cnotmatch 'foreign|notes|sub' -and $hashed1.Count -eq 3 -and
+        @((ConvertFrom-Json $listAfter1).PSObject.Properties.Name | Where-Object { $_ -cmatch '^other-[0-9a-f]{8}$' }).Count -eq 3)
+    Write-Case '整轮入口（第二段）：控制台输出与结果 json 里也没有别人的文件名' $true (
+        $smoke1.Console -cnotmatch 'foreign|notes' -and (($smoke1.R | ConvertTo-Json -Depth 12) -cnotmatch 'foreign|notes\.txt'))
 
     # 别人的文件在这一轮里被动了（改、删、增）：场景全绿也判 FAIL，记下停手的原因，-Repeat 2 也只跑一轮
     $touch = [ordered]@{
@@ -429,7 +446,18 @@ if ($realReaperRunning) {
         $row = $sm.R.runs[0]
         Write-Case "整轮入口（第二段）：别人的文件在这一轮里$what，场景全绿也判 FAIL，文档目录记为有变，停手，-Repeat 2 只跑了 $(@($sm.R.runs).Count) 轮" $true (
             $row.scenarios[0].status -eq 'PASS' -and $row.verdict -eq 'FAIL' -and $sm.R.verdict -eq 'FAIL' -and -not $row.probe.docsListing.unchanged -and $row.stoppedBecause -like '*探针日志目录*' -and @($sm.R.runs).Count -eq 1 -and $sm.R.launches -eq 1)
+        # FAIL 的原因文字、控制台、结果 json 里只有变化类型加散列，没有别人的文件名；散列在这一轮落盘的清单里找得到
+        $changedOne = @($row.probe.docsListing.changed)
+        $roundDirT = Join-Path $sm.Results $row.probe.roundDir
+        $keysT = @((ConvertFrom-Json (Get-Content -LiteralPath (Join-Path $roundDirT 'docs-listing-before.json') -Raw)).PSObject.Properties.Name)
+        $keysAfterT = @((ConvertFrom-Json (Get-Content -LiteralPath (Join-Path $roundDirT 'docs-listing-after.json') -Raw)).PSObject.Properties.Name)
+        $hashOfChange = ($changedOne.Count -eq 1 -and $changedOne[0] -cmatch '^(removed|changed|added):(other-[0-9a-f]{8})$') ? $Matches[2] : ''
+        Write-Case "整轮入口（第二段）：别人的文件$what 判 FAIL 时，变化报告只写类型加散列（$($changedOne -join ' ')），控制台与结果 json 里没有文件名，散列在这一轮落盘的清单里找得到" $true (
+            $hashOfChange -and ($hashOfChange -in $keysT -or $hashOfChange -in $keysAfterT) -and $sm.Console -cnotmatch 'foreign|notes' -and (($sm.R | ConvertTo-Json -Depth 12) -cnotmatch 'foreign|notes\.txt') -and $sm.Console -cmatch $hashOfChange)
+        if ($k -eq 1) { $keysTouch1 = $keysT }
     }
+    Write-Case '整轮入口（第二段）：盐每轮不同：两轮里同一个别人的文件（foreign-a.csv）的散列对不上' $true (
+        @($keysTouch1 | Where-Object { $_ -cmatch '^other-' -and $_ -in (ConvertFrom-Json $listBefore1).PSObject.Properties.Name }).Count -eq 0)
 
     # 自己的文件因为收日志出了问题留在了日志目录里：场景判 FAIL，但这不算「别人的文件变了」（本轮自己的新文件才除外），文档目录记为没变
     if ($hardOk) {
