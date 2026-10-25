@@ -37,6 +37,8 @@ class Log:
         self.tok = tok
         self.lines = [MAGIC, f"H,{role},{fmt},{host_kind},{os_name},{arch},{pid},{ppid},{tok},0123abcd"]
         self.seq = 0
+        self.written = 0  # 实际写出的 B 行数
+        self.lost = 0  # 占了 seq 却没写出的块数（探针计入 dropped）
         self.closed = False
 
     @property
@@ -64,7 +66,10 @@ class Log:
         )  # fmt: skip
         row.update(kw)
         self.seq += 1
-        if not drop:
+        if drop:
+            self.lost += 1
+        else:
+            self.written += 1
             self.lines.append("B," + ",".join(str(row[c]) for c in BLOCK_COLS))
 
     def close(self, t, blocks=None, dropped=0):
@@ -77,8 +82,10 @@ class Log:
 
 def pair(case, variant="-", buf="-", guard="na", *, count=40, hook=None, fmt=("vst3", "vst3"), pid=4100,
          tok=("a1b2", "c3d4"), host_kind="cubase", os_name="win", prepare_max=256, blocks=True, close=True,
-         sr=48000, pre_blocks=0):  # fmt: skip
-    """一对 In / Out 实例。hook(role, k, row) 可改行；row["_drop"] = True 表示丢掉这一条（制造序号缺口）。"""
+         sr=48000, pre_blocks=0, period=PERIOD):  # fmt: skip
+    """一对 In / Out 实例。hook(role, k, row) 可改行；row["_drop"] = True 表示丢掉这一条（制造序号缺口）。
+    period 是相邻两块的间隔（ns）。默认 5.3 ms 一块，整个格不到 1 s；换成 LONG 这类慢节奏时，摘要改成每秒一条一直写到最后一块之后，
+    这样几十秒的格里 1 Hz 摘要不缺，收尾也在最后一块之后。"""
     li = Log("I", fmt[0], host_kind, os_name, pid=pid, tok=tok[0])
     lo = Log("O", fmt[1], host_kind, os_name, pid=pid, tok=tok[1])
     for lg in (li, lo):
@@ -90,20 +97,25 @@ def pair(case, variant="-", buf="-", guard="na", *, count=40, hook=None, fmt=("v
             lg.block(2 * j + (lg is lo), T_START - 1000 + j * 100 + dt, host_ns=HOST0 - 10_000 + j)
     if blocks:
         for k in range(count):
-            t = T_START + k * PERIOD
+            t = T_START + k * period
             k2 = k + pre_blocks
             for lg, cs, dt in ((li, 2 * k2, 0), (lo, 2 * k2 + 1, 1000)):
-                row = dict(host_ns=HOST0 + k * PERIOD, mono_ns=t + dt, rs=1 if k == 0 and lg is li else 0)
+                row = dict(host_ns=HOST0 + k * period, mono_ns=t + dt, rs=1 if k == 0 and lg is li else 0)
                 if hook:
                     hook(lg.role, k, row)
                 drop = row.pop("_drop", False)
                 cs = row.pop("_cs", cs)
                 lg.block(cs, row.pop("mono_ns"), drop=drop, **row)
+    end = T_START + 2_000_000_000
+    if period != PERIOD and blocks:
+        end = max(end, T_START + count * period + 1_000_000_000)
     for lg in (li, lo):
-        lg.summary(T_START + 1_000_000_000, blocks=count if blocks else 0)
-        lg.summary(T_START + 2_000_000_000, blocks=count if blocks else 0)
+        s = T_START + 1_000_000_000
+        while s <= end:  # 默认节奏下就是 1 s、2 s 两条
+            lg.summary(s, blocks=count if blocks else 0)
+            s += 1_000_000_000
         if close:
-            lg.close(T_START + 2_100_000_000)
+            lg.close(end + 100_000_000)
     return li, lo
 
 
@@ -133,45 +145,54 @@ def multi_pair(cells, *, pid, tok=("e1f2", "e3f4"), fmt=("vst3", "vst3"), host_k
     return li, lo
 
 
-def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024):
+def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024, summaries=True):
     """像 multi_pair，但每格单独指定块数与记录方式，用来造「现场误记了一格」的日志。
     cells = [(case, variant, buf, guard, 块数, 方式)]，方式：
-      ok       正常写出；
-      unbound  窗口里拿不到绑定：块不写 B 行，却占 seq、计丢弃（探针对没取到绑定的块就是这么记的）；
-      gap:K    In 端第 K 块丢掉（序号缺口，同时计丢弃）；
-      taildrop 正常写完之后，窗口末尾又有 3 块没写出（占 seq、计丢弃，但之后没有任何块可以让缺口露出来）。
-    S 行与 Z 行带累计丢弃数。"""
+      ok          正常写出；
+      unbound     窗口里拿不到绑定：块不写 B 行，却占 seq、计丢弃（探针对没取到绑定的块就是这么记的）；
+      gap:K       In 端第 K 块丢掉（序号缺口，同时计丢弃）；
+      headdrop    两端的第 0 块都没拿到绑定：占 seq、计丢弃，其余正常（紧跟在前一格后面时，缺口出现在两格交界处）；
+      headdrop-in 同上，只有 In 端丢第 0 块；
+      taildrop    正常写完之后，窗口末尾又有 3 块没写出（占 seq、计丢弃，但之后没有任何块可以让缺口露出来）；
+      drift       In 端从第 20 块起 m=3（稳态对齐不通过）；
+      bign        两端每块的 n 都是 2048，超过 prepare 声明的最大块长（A4 不通过）；
+      hostns      Out 端每块的 hostNs 比 In 端大 7（A7 不通过）。
+    每格的 S 行在这一格的块都写完之后才写，`blocks` 是此刻实际写出的累计块数，`dropped` 是累计丢弃数，与探针的计数一致；
+    Z 行同理。这样 `blocks + dropped` 就是此刻已经占用的 seq 个数。
+    summaries=False 不写任何 S 行（摘要线程被宿主占住、一条都没写出来），只剩收尾的 Z 行报累计丢弃数。"""
     li = Log("I", "vst3", "cubase", "win", pid=pid, tok=tok[0])
     lo = Log("O", "vst3", "cubase", "win", pid=pid, tok=tok[1])
     span = 1_000_000_000
-    dropped = {"I": 0, "O": 0}
     for lg in (li, lo):
         lg.event(T_START - 500, "prepare", sr, prepare_max)
-        lg.summary(T_START)
+        if summaries:
+            lg.summary(T_START)
     g = 0
     for c, (case, variant, buf, guard, count, mode) in enumerate(cells):
         base = T_START + c * span
         for lg in (li, lo):
             lg.case(base - 100, case, variant, buf, guard, sr)
-            lg.summary(base + span // 2, dropped=dropped[lg.role])
         for k in range(count):
             host = HOST0 + c * span + k * PERIOD
-            drop_in = mode == "unbound" or mode == f"gap:{k}"
-            drop_out = mode == "unbound"
-            li.block(2 * g, base + k * PERIOD, host_ns=host, rs=1 if g == 0 else 0, drop=drop_in)
-            lo.block(2 * g + 1, base + k * PERIOD + 1000, host_ns=host, drop=drop_out)
-            dropped["I"] += drop_in
-            dropped["O"] += drop_out
+            lost_in = mode == "unbound" or mode == f"gap:{k}" or (k == 0 and mode in ("headdrop", "headdrop-in"))
+            lost_out = mode == "unbound" or (k == 0 and mode == "headdrop")
+            extra = dict(m=3, off=483) if mode == "drift" and k >= 20 else {}
+            both = dict(n=2048) if mode == "bign" else {}
+            li.block(2 * g, base + k * PERIOD, host_ns=host, rs=1 if g == 0 else 0, drop=lost_in, **extra, **both)
+            lo.block(2 * g + 1, base + k * PERIOD + 1000, host_ns=host + 7 if mode == "hostns" else host, drop=lost_out, **both)
             g += 1
         if mode == "taildrop":
             for lg in (li, lo):
                 for _ in range(3):
                     lg.block(0, 0, drop=True)
-                dropped[lg.role] += 3
+        for lg in (li, lo):
+            if summaries:
+                lg.summary(base + span // 2, blocks=lg.written, dropped=lg.lost)
     end = T_START + len(cells) * span
     for lg in (li, lo):
-        lg.summary(end, dropped=dropped[lg.role])
-        lg.close(end + 100_000_000, dropped=dropped[lg.role])
+        if summaries:
+            lg.summary(end, blocks=lg.written, dropped=lg.lost)
+        lg.close(end + 100_000_000, blocks=lg.written, dropped=lg.lost)
     return li, lo
 
 
@@ -235,33 +256,105 @@ def scen_a2(state, pid=4100):
 
 
 THREADS = ("1a2b3c4d", "5e6f7a8b")
+THREAD3 = "9c0d1e2f"
+LONG = 200_000_000  # 慢节奏夹具的块间隔：0.2 s 一块，2 s 窗口里有 10 块
+SW_GAP = 15  # 相邻两次切换隔 15 块 = 3 s：比 2 s 窗口宽，也是清单让用户等的节奏
 
 
-def scen_a2_thread(state, pid=4100, switches=10, explicit=False):
+def switch_blocks(n, gap=SW_GAP):
+    return [gap * (i + 1) for i in range(n)]
+
+
+def a2_long(pid, thread_of, *, count, rs_of=None, explicit_at=(), buf=256, guard="low", tok=("a1b2", "c3d4")):
+    """慢节奏的 CB-02 toggle 格（0.2 s 一块）。thread_of(k) 给 In 端第 k 块的线程散列，rs_of(k) 给它的重同步次数；
+    explicit_at 里的块序号处另写 monitor_toggle 事件（宿主不通知监听键，真实日志里没有这类事件）。"""
+
+    def hook(r, k, row):
+        if r != "I":
+            return
+        row["thread"] = thread_of(k)
+        if rs_of and rs_of(k):
+            row["rs"] = rs_of(k)
+
+    li, lo = pair("CB-02", "toggle", buf, guard, count=count, hook=hook, pid=pid, tok=tok, period=LONG)
+    for i, k in enumerate(explicit_at):
+        li.event(T_START + k * LONG, "monitor_toggle", i % 2)
+    return li, lo
+
+
+def alternating(sw, skew=0):
+    """线程在 THREADS 两个值之间来回，每次切换换一次；skew 是线程比切换点晚几块变。"""
+    return lambda k: THREADS[sum(1 for x in sw if x + skew <= k) % 2]
+
+
+def scen_a2_thread(state, pid=4100, switches=10, explicit=False, skew=0):
     """宿主不通知监听键，日志里没有 monitor_toggle：切换点只能从 In 端 B 行 thread 的变化推断。
-    state：pass；fail（第 3 次切换后重同步两次）；incomplete（thread 一直不变，只有块长 n 来回抖，抖动不算切换）；
-    flap（thread 每 3 块换一次，一共几十次，每个窗口都不足 8 块）。
-    explicit=True 另外写出显式事件，与 thread 变化落在同一块上：同一次切换不能数两遍。"""
-    ks = [5 + 10 * i for i in range(switches)]
+    state：pass / fail（第 3 次切换后重同步两次）：线程每 3 s 换一次，切换块记一次重同步；
+    incomplete（thread 一直不变，只有块长 n 来回抖，抖动不算切换）；
+    flap（thread 每 3 块换一次，一共几十次，全挤在 2 s 之内：不是用户在按）。
+    explicit=True 另外写出显式事件，线程比事件晚 skew 块变：同一次切换不能数两遍。"""
+    if state in ("pass", "fail"):
+        sw = switch_blocks(switches)
+
+        def rs_of(k):
+            at = k - skew
+            return (2 if state == "fail" and at == sw[2] else 1) if at in sw else 0
+
+        li, lo = a2_long(pid, alternating(sw, skew), count=sw[-1] + 20, rs_of=rs_of, explicit_at=sw if explicit else ())
+        return files_of(li, lo)
 
     def hook(r, k, row):
         if r != "I":
             return
         if state == "incomplete":
             row["n"] = 128 if k % 2 else 256
-            return
-        if state == "flap":  # 线程池里每 3 块换一次线程：窗口都太短，不能当成十几次像样的切换去判通过
+        else:  # flap
             row["thread"] = THREADS[(k // 3) % 2]
-            return
-        row["thread"] = THREADS[sum(1 for x in ks if x <= k) % 2]
-        if k in ks:
-            row["rs"] = 2 if (state == "fail" and k == ks[2]) else 1
 
     li, lo = pair("CB-02", "toggle", 256, "low", count=120, hook=hook, pid=pid)
-    if explicit:
-        for i, k in enumerate(ks):
-            li.event(T_START + k * PERIOD, "monitor_toggle", i % 2)
     return files_of(li, lo)
+
+
+def scen_a2_pool(pid, threads, every=23, switches=13):
+    """用户一次都没按：宿主的线程池每 every 块把这条轨交给下一个线程。三个线程轮转、4.6 s 一次、13 次。"""
+    count = every * switches + 20
+    li, lo = a2_long(pid, lambda k: threads[(k // every) % len(threads)], count=count)
+    return files_of(li, lo)
+
+
+def scen_a2_split(pid, spurious=True):
+    """12 次切换，每 3 s 一次。第 3 次切换时重同步两次（切换块一次，0.8 s 后又一次）：每次切换后 2 s 内最多 1 次的判据应当不通过。
+    spurious=True 在第 3 次切换后 0.6 s 又让宿主把线程换到第三个值（监听状态没变，只是线程池调度）：推断出来的下一次切换
+    不能把第 3 次的窗口截成两段，让这两次重同步各占一段而都不超限。"""
+    sw = switch_blocks(12)
+    base = alternating(sw)
+
+    def thread_of(k):
+        return THREAD3 if spurious and sw[2] + 3 <= k < sw[3] else base(k)
+
+    def rs_of(k):
+        return 1 if k in sw or k == sw[2] + 4 else 0
+
+    return files_of(*a2_long(pid, thread_of, count=sw[-1] + 20, rs_of=rs_of, buf=256, guard="normal"))
+
+
+def scen_a2_presync(pid):
+    """重同步落在旧线程的最后一块上，加上切换块自己的一次，两次紧挨着：窗口从切换块之前的一块算起才数得到。"""
+    sw = switch_blocks(12)
+    return files_of(*a2_long(pid, alternating(sw), count=sw[-1] + 20, rs_of=lambda k: 1 if k in sw or k == sw[2] - 1 else 0))
+
+
+def scen_a2_mixed(pid):
+    """12 次切换：前 6 次有显式事件，后 6 次只有线程变化；第 9 次（只有线程变化的那几次之一）切换后重同步两次。
+    有显式事件的格不能只看显式的那几次切换：推断出来的切换点照样要判。"""
+    sw = switch_blocks(12)
+    return files_of(*a2_long(pid, alternating(sw), count=sw[-1] + 20, rs_of=lambda k: 2 if k == sw[8] else (1 if k in sw else 0), explicit_at=sw[:6]))
+
+
+def scen_a2_tail(pid):
+    """10 次切换，最后一次离记录结束只剩 4 块：这一次的窗口不够 8 块。"""
+    sw = switch_blocks(10)
+    return files_of(*a2_long(pid, alternating(sw), count=sw[-1] + 4, rs_of=lambda k: 1 if k in sw else 0))
 
 
 def scen_a3(state, pid=4100):
@@ -358,13 +451,49 @@ SCENARIOS = {
 }  # fmt: skip
 
 
-def full_pass(skip_cell=None, cb05_blocks=True, skip_rip=False):
-    """所有判据都通过，且 F1 要求的七个 case 与两张矩阵都齐。每个场景用自己的 pid，文件名不冲突。"""
+STOP_GAP = 5_000_000_000  # 清单让用户把插件停用 5 s
+
+
+def cb05_cell(variant, *, pid, events=(), pre_events=(), gap_at=20, gap_ns=STOP_GAP, count=40, blocks=True,
+              tok=("c0a1", "c0a2")):  # fmt: skip
+    """CB-05 停用格。Out 端在第 gap_at 块之后断开 gap_ns（宿主停用了它），In 端一直在跑。
+    events = [(相对断开前 Out 最后一块的偏移 ns, 事件名, a)]，写在 Out 端的本段内；gap_at=None 时没有断开，
+    偏移相对 Out 的最后一块。pre_events 在第一个 C 行之前（实例级的事件）。"""
+
+    def hook(r, k, row):
+        if r == "O" and gap_at is not None and k >= gap_at:
+            row["mono_ns"] += gap_ns
+            row["host_ns"] += gap_ns
+
+    li, lo = pair("CB-05", variant, pid=pid, tok=tok, hook=hook, count=count, blocks=blocks)
+    anchor = T_START + ((gap_at if gap_at is not None else count) - 1) * PERIOD + 1000
+    for off, name, a in events:
+        lo.event(anchor + off, name, a)
+    for name, a in pre_events:
+        lo.event(T_START - 400, name, a)
+    return li, lo
+
+
+def cb05_single_end(event_at, *, pid, name="set_processing", a=0, variant="deactivate"):
+    """Out 整段没有块（一直停用），In 慢节奏跑 4 s；Out 的停用事件在 event_at（相对第一块）。"""
+    li, lo = pair("CB-05", variant, pid=pid, tok=("c0a1", "c0a2"), period=100_000_000)
+    lo.lines = [ln for ln in lo.lines if not ln.startswith("B,")]
+    lo.event(T_START + event_at, name, a)
+    return li, lo
+
+
+def full_pass(skip_cell=None, cb05_blocks=True, skip_rip=False, deact="stop", a2=None):
+    """所有判据都通过，且 F1 要求的七个 case 与两张矩阵都齐。每个场景用自己的 pid，文件名不冲突。
+    deact：CB-05 停用与禁用轨道两格怎么做 stop = Out 断开 5 s、事件在断开处；play-reset = 没有停用，只有起播的 reset；
+    teardown = 没有停用，只有析构写的 release。a2：换掉 CB-02 的文件（dict），None 用显式事件的 scen_a2。"""
     out = {}
     cb01 = [c for c in _matrix("CB-01") if c != skip_cell]
     out.update(files_of(*multi_pair(cb01, pid=4100)))
     out.update(files_of(*multi_pair(_matrix("LU-03"), pid=4300, host_kind="luna", os_name="mac")))
     for n, item in enumerate(("A2", "A6", "A9"), start=1):
+        if item == "A2" and a2 is not None:
+            out.update(a2)
+            continue
         out.update(SCENARIOS[item]("pass", pid=4100 + n))
     out.update(scen_a5("pass", pid=7000))
     out["compare-1.csv"] = compare_text("CB-04,export-offline,1,-inf,-inf,0", "LU-04,export-offline,0,-128.0,-99.5,0")
@@ -375,8 +504,13 @@ def full_pass(skip_cell=None, cb05_blocks=True, skip_rip=False):
     for n, v in enumerate(("bypass-out", "bypass-in")):
         out.update(files_of(*pair("CB-05", v, hook=bypass, pid=4200 + n, tok=(f"b{n}a1", f"b{n}a2"), blocks=cb05_blocks)))
     for n, v in enumerate(("deactivate", "disable-track")):
-        li, lo = pair("CB-05", v, pid=4210 + n, tok=(f"c{n}a1", f"c{n}a2"), blocks=cb05_blocks)
-        lo.event(T_START + 10, "set_processing", 0)
+        kw = dict(pid=4210 + n, tok=(f"c{n}a1", f"c{n}a2"), blocks=cb05_blocks)
+        if deact == "stop":
+            li, lo = cb05_cell(v, events=[(10_000, "set_processing", 0)], **kw)
+        elif deact == "play-reset":  # 起播时 setProcessing(false) 转成的 reset，块流没有断
+            li, lo = cb05_cell(v, gap_at=None, events=[(-(39 * PERIOD), "reset", "")], **kw)
+        else:  # 析构：块停下来 1.85 s 之后 release、destruct，之后才是 Z
+            li, lo = cb05_cell(v, gap_at=None, events=[(1_850_000_000, "release", ""), (1_850_100_000, "destruct", "")], **kw)
         out.update(files_of(li, lo))
     out.update(files_of(*pair("CB-04", "freeze", pid=4220, tok=("e0a1", "e0a2"))))
     if not skip_rip:
@@ -486,13 +620,6 @@ def extra_cells():
         lg.event(T_START + 5, "track_props", name, "ff8800")
     broken = scen_a8("pass", pid=4780)
     broken["probe-I-9999-dead.csv"] = ""  # 实例刚创建就崩溃：0 字节
-    def one_end(**kw):
-        a, b = pair("CB-05", "deactivate", pid=kw["pid"], blocks=kw.get("blocks", True))
-        b.lines = [ln for ln in b.lines if not ln.startswith("B,")]  # Out 被停用，没有块
-        if kw.get("event", True):
-            b.event(T_START + 10, "set_processing", 0)
-        return a, b
-
     dead_a, dead_b = pair("CB-05", "deactivate", pid=4810, blocks=False)
     for lg in (dead_a, dead_b):
         lg.event(T_START + 10, "set_processing", 0)
@@ -513,8 +640,7 @@ def extra_cells():
     bad_dup = pair("CB-07", "dup", blocks=False, pid=4890, tok=("a9b8", "c7d6"))
     dup_good = pair("CB-07", "dup", blocks=False, pid=4890)
     dup_good[0].event(T_START + 20, "paired", dup_good[1].pid, "A")
-    cat2_only = pair("CB-05", "deactivate", pid=4870)
-    cat2_only[1].event(T_START + 10, "set_processing", 0)
+    cat2_only = cb05_cell("deactivate", pid=4870, events=[(10_000, "set_processing", 0)])
     guard_fail = pair("CB-03", "guard-in", 256, "low", hook=drift2, pid=4872)
     names_a = pair("LU-06", "rename", host_kind="luna", os_name="mac", blocks=False, pid=4880)
     names_b = pair("LU-06", "rename", host_kind="luna", os_name="mac", blocks=False, pid=4881, tok=("a9b8", "c7d6"))
@@ -534,11 +660,13 @@ def extra_cells():
     for lg in one_cell_missing[:2]:
         lg.event(T_START + 5, "track_props", "Track%201", "ff8800")
 
-    def cb05_stop(variant, name, a="", pid=4940, pre=False):
-        """CB-05 停用格：Out 端在本段里（或段之前，pre=True）记一个停用相关的事件。"""
-        a_, b_ = pair("CB-05", variant, pid=pid, tok=("c0a1", "c0a2"))
-        b_.event(T_START - 400 if pre else T_START + 10, name, a)
-        return files_of(a_, b_)
+    def stop(variant, events=(), pre=(), pid=4940, **kw):
+        """CB-05 停用格（Out 端断开 5 s）：events 写在本段里，pre 写在第一个 C 行之前。"""
+        return files_of(*cb05_cell(variant, pid=pid, events=events, pre_events=pre, **kw))
+
+    reset_at = [(10_000, "reset", "")]  # 断开前最后一块之后 10 us
+    play_reset = [(-(39 * PERIOD), "reset", "")]  # 起播时的 reset：在第一块上，块流没有断
+    teardown = [(1_850_000_000, "release", ""), (1_850_100_000, "destruct", "")]  # 块停下 1.85 s 后析构
 
     pre_ping = pair("CB-06", "smart", pid=4950)
     pre_ping[0].event(T_START - 400, "ping", 9600)  # 第一个 C 行之前的 Ping（第 0 步留下的）
@@ -549,7 +677,7 @@ def extra_cells():
     stray = ("CB-01", "steady", "-", "na", 5, "ok")  # 面板默认 Case 误记的一格：只有几块
     stray_unbound = ("CB-01", "steady", "-", "na", 40, "unbound")
     return {
-        "a2-pass-thread-inferred": (scen_a2_thread("pass", pid=5000), {"A2": "PASS"}),
+        "a2-incomplete-thread-unconfirmed": (scen_a2_thread("pass", pid=5000), {"A2": "INCOMPLETE"}),
         "a2-fail-thread-inferred": (scen_a2_thread("fail", pid=5001), {"A2": "FAIL"}),
         "a2-incomplete-thread-constant": (scen_a2_thread("incomplete", pid=5002), {"A2": "INCOMPLETE"}),
         "a2-incomplete-thread-few": (scen_a2_thread("pass", pid=5003, switches=3), {"A2": "INCOMPLETE"}),
@@ -559,11 +687,30 @@ def extra_cells():
             {"A2": "INCOMPLETE"},
         ),
         "a2-pass-explicit-and-thread": (scen_a2_thread("pass", pid=5004, explicit=True), {"A2": "PASS"}),
-        "cb05-deactivate-reset-only": (cb05_stop("deactivate", "reset"), {"OBS": "PASS"}),
-        "cb05-deactivate-release-only": (cb05_stop("deactivate", "release"), {"OBS": "PASS"}),
-        "cb05-disable-track-reset-only": (cb05_stop("disable-track", "reset"), {"OBS": "PASS"}),
-        "cb05-deactivate-set-processing-on": (cb05_stop("deactivate", "set_processing", 1), {"OBS": "INCOMPLETE"}),
-        "cb05-deactivate-pre-release": (cb05_stop("deactivate", "release", pre=True), {"OBS": "INCOMPLETE"}),
+        "a2-pass-explicit-skewed-thread": (scen_a2_thread("pass", pid=5008, explicit=True, skew=2), {"A2": "PASS"}),
+        "a2-incomplete-thread-pool3": (scen_a2_pool(5009, (*THREADS, THREAD3)), {"A2": "INCOMPLETE"}),
+        "a2-fail-thread-split-window": (scen_a2_split(5030), {"A2": "FAIL"}),
+        "a2-fail-thread-double-resync": (scen_a2_split(5031, spurious=False), {"A2": "FAIL"}),
+        "a2-fail-thread-presync": (scen_a2_presync(5032), {"A2": "FAIL"}),
+        "a2-fail-mixed-explicit-and-inferred": (scen_a2_mixed(5034), {"A2": "FAIL"}),
+        "a2-incomplete-thread-tail-thin": (scen_a2_tail(5033), {"A2": "INCOMPLETE"}),
+        "cb05-deactivate-reset-only": (stop("deactivate", reset_at), {"OBS": "PASS"}),
+        "cb05-deactivate-release-only": (stop("deactivate", [(10_000, "release", "")]), {"OBS": "PASS"}),
+        "cb05-deactivate-set-processing-off": (stop("deactivate", [(10_000, "set_processing", 0)]), {"OBS": "PASS"}),
+        "cb05-disable-track-reset-only": (stop("disable-track", reset_at), {"OBS": "PASS"}),
+        "cb05-deactivate-reset-before-last-block": (stop("deactivate", [(-100_000_000, "reset", "")]), {"OBS": "PASS"}),
+        "cb05-deactivate-set-processing-on": (stop("deactivate", [(10_000, "set_processing", 1)]), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-no-event": (stop("deactivate"), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-pre-release": (stop("deactivate", pre=[("release", "")], gap_at=1), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-pre-reset": (stop("deactivate", pre=[("reset", "")], gap_at=1), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-pre-set-processing": (stop("deactivate", pre=[("set_processing", 0)], gap_at=1), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-reset-at-play-only": (stop("deactivate", play_reset, gap_at=None), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-teardown-release-only": (stop("deactivate", teardown, gap_at=None), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-short-gap": (stop("deactivate", reset_at, gap_ns=600_000_000), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-event-late-in-gap": (stop("deactivate", [(3_750_000_000, "reset", "")]), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-single-end": (files_of(*cb05_single_end(2_000_000_000, pid=4800)), {"OBS": "PASS"}),
+        "cb05-deactivate-single-end-at-start": (files_of(*cb05_single_end(10, pid=4801)), {"OBS": "INCOMPLETE"}),
+        "cb05-deactivate-single-end-at-end": (files_of(*cb05_single_end(3_900_000_000, pid=4802)), {"OBS": "INCOMPLETE"}),
         "cb06-smart-pre-ping": (files_of(*pre_ping), {"OBS": "INCOMPLETE"}),
         "a8-pass-short-clones": (
             files_of(*pair("CB-11", "constrain", 256, "low", pid=5010), clone("I", 5011, "f0f1"), clone("O", 5011, "f0f2", 120_000_000)),
@@ -572,6 +719,14 @@ def extra_cells():
         "a8-incomplete-long-no-c": (
             files_of(*pair("CB-11", "constrain", 256, "low", pid=5012), clone("I", 5013, "f0f3", 2_500_000_000)),
             {"A8": "INCOMPLETE"},
+        ),
+        "a8-incomplete-long-no-c-2200ms": (
+            files_of(*pair("CB-11", "constrain", 256, "low", pid=5017), clone("I", 5018, "f0f5", 2_200_000_000)),
+            {"A8": "INCOMPLETE"},
+        ),
+        "a8-pass-short-clone-1900ms": (
+            files_of(*pair("CB-11", "constrain", 256, "low", pid=5019), clone("I", 5036, "f0f6", 1_900_000_000)),
+            {"A8": "PASS"},
         ),
         "a8-fail-short-clone-crash": (
             files_of(*pair("CB-11", "constrain", 256, "low", pid=5014), clone("I", 5015, "f0f4", close=False)),
@@ -593,10 +748,54 @@ def extra_cells():
             files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5024)),
             {"A1": "INCOMPLETE"},
         ),
+        "a1-fail-misrecorded-drift": (  # 误记的一格有 40 块，In 端从第 20 块起 m=3：排除它也拿不掉不通过
+            files_of(*multi_cells([good, ("CB-01", "steady", "-", "na", 40, "drift"), good3], pid=5040)),
+            {"A1": "FAIL"},
+        ),
+        "a1-incomplete-headdrop-after-excluded": (  # 误记格后面一格自己丢了第 0 块（两端）
+            files_of(*multi_cells([good, stray, ("CB-01", "steady", 1024, "high", 40, "headdrop")], pid=5041)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-headdrop-in-after-excluded": (
+            files_of(*multi_cells([good, stray, ("CB-01", "steady", 1024, "high", 40, "headdrop-in")], pid=5042)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-taildrop-after-unrelated-excluded": (  # 被排除的段没有丢弃，最后一个真格尾部丢块
+            files_of(*multi_cells([stray, good, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5043)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-taildrop-after-unbound-excluded": (  # 被排除的段整段没拿到绑定，后面的真格尾部另有丢块
+            files_of(*multi_cells([good, stray_unbound, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5044)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-two-excluded-taildrop": (  # 同一实例里两个被排除的段，丢块只归第二个，最后的真格尾部丢块不能被吞
+            files_of(*multi_cells([stray, good, stray_unbound, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5045)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a4-fail-misrecorded-bign": (  # 误记的一格每块 n 都超过 prepare 声明的最大块长：排除它也拿不掉 A4 不通过
+            files_of(*multi_cells([good, ("CB-01", "steady", "-", "na", 40, "bign"), good3], pid=5048)),
+            {"A4": "FAIL"},
+        ),
+        "a7-fail-misrecorded-hostns": (  # 误记的一格两端 hostNs 对不上：排除它也拿不掉 A7 不通过
+            files_of(*multi_cells([good, ("CB-01", "steady", "-", "na", 40, "hostns"), good3], pid=5049)),
+            {"A7": "FAIL"},
+        ),
+        "a1-incomplete-misrecorded-nosummary": (  # 一条摘要都没有：缺失的块序号无从归属，各个未排除的段都记一次
+            files_of(*multi_cells([good, stray_unbound, good2], pid=5047, summaries=False)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-two-excluded-ok": (  # 两个被排除的段各是一种误记（整段丢、几块），排除之后 A1 回到通过
+            files_of(*multi_cells([stray_unbound, good, stray, good2], pid=5046)),
+            {"A1": "INCOMPLETE"},
+        ),
         "a7-incomplete-cat2-full": (files_of(*cat2_full), {"A7": "INCOMPLETE"}),
         "a4-incomplete-cat2-gap": (files_of(*gap_a), {"A4": "INCOMPLETE"}),
         "a6-incomplete-one-cell-missing": (files_of(*one_cell_missing), {"A6": "INCOMPLETE"}),
         "f1-cb04-no-rip": (full_pass(skip_rip=True), {}),
+        "f1-cb05-reset-at-play-only": (full_pass(deact="play-reset"), {}),
+        "f1-cb05-teardown-release-only": (full_pass(deact="teardown"), {}),
+        "f1-a2-inferred": (full_pass(a2=scen_a2_thread("pass", pid=4101)), {}),
+        "f1-a2-pool3": (full_pass(a2=scen_a2_pool(4101, (*THREADS, THREAD3))), {}),
         "cb12-twoproj-stray-out": (files_of(*tp_ok, lone_out), {"OBS": "INCOMPLETE"}),
         "f1-cb05-bypass-dup": (files_of(*two_bypass[0], *two_bypass[1]), {"OBS": "INCOMPLETE"}),
         "cb12-twoproj-two-pairs": (files_of(*tp_ok), {"OBS": "PASS"}),
@@ -606,9 +805,7 @@ def extra_cells():
         "a1-fail-guard-variant": (files_of(*guard_fail), {"A1": "FAIL"}),
         "a6-fail-multi-instance": (files_of(*names_a, *names_b), {"A6": "FAIL"}),
         **obs_fixtures(),
-        "cb05-deactivate-single-end": (files_of(*one_end(pid=4800)), {"OBS": "PASS"}),
         "cb05-deactivate-no-blocks": (files_of(dead_a, dead_b), {"OBS": "INCOMPLETE"}),
-        "cb05-deactivate-no-event": (files_of(*one_end(pid=4840, event=False)), {"OBS": "INCOMPLETE"}),
         "cb07-dup-two-pairs": (files_of(*dup1, *dup2), {"OBS": "PASS"}),
         "cb07-dup-unpaired": (files_of(*undup), {"OBS": "INCOMPLETE"}),
         "a1-fail-spurious-toggle": (files_of(*sp), {"A1": "FAIL"}),

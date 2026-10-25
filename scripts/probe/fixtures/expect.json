@@ -5,6 +5,9 @@
   "a1-fail-guard-variant": {
     "A1": "FAIL"
   },
+  "a1-fail-misrecorded-drift": {
+    "A1": "FAIL"
+  },
   "a1-fail-spurious-toggle": {
     "A1": "FAIL"
   },
@@ -17,10 +20,19 @@
   "a1-incomplete-gap-beside-excluded": {
     "A1": "INCOMPLETE"
   },
+  "a1-incomplete-headdrop-after-excluded": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-headdrop-in-after-excluded": {
+    "A1": "INCOMPLETE"
+  },
   "a1-incomplete-in-only": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-misrecorded-mid": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-misrecorded-nosummary": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-misrecorded-tail": {
@@ -32,6 +44,18 @@
   "a1-incomplete-misrecorded-unbound": {
     "A1": "INCOMPLETE"
   },
+  "a1-incomplete-taildrop-after-unbound-excluded": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-taildrop-after-unrelated-excluded": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-two-excluded-ok": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-two-excluded-taildrop": {
+    "A1": "INCOMPLETE"
+  },
   "a1-incomplete-unlocated-drop": {
     "A1": "INCOMPLETE"
   },
@@ -41,7 +65,19 @@
   "a2-fail": {
     "A2": "FAIL"
   },
+  "a2-fail-mixed-explicit-and-inferred": {
+    "A2": "FAIL"
+  },
+  "a2-fail-thread-double-resync": {
+    "A2": "FAIL"
+  },
   "a2-fail-thread-inferred": {
+    "A2": "FAIL"
+  },
+  "a2-fail-thread-presync": {
+    "A2": "FAIL"
+  },
+  "a2-fail-thread-split-window": {
     "A2": "FAIL"
   },
   "a2-incomplete": {
@@ -65,13 +101,22 @@
   "a2-incomplete-thread-flap": {
     "A2": "INCOMPLETE"
   },
+  "a2-incomplete-thread-pool3": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-thread-tail-thin": {
+    "A2": "INCOMPLETE"
+  },
+  "a2-incomplete-thread-unconfirmed": {
+    "A2": "INCOMPLETE"
+  },
   "a2-pass": {
     "A2": "PASS"
   },
   "a2-pass-explicit-and-thread": {
     "A2": "PASS"
   },
-  "a2-pass-thread-inferred": {
+  "a2-pass-explicit-skewed-thread": {
     "A2": "PASS"
   },
   "a3-fail": {
@@ -90,6 +135,9 @@
     "A3": "PASS"
   },
   "a4-fail": {
+    "A4": "FAIL"
+  },
+  "a4-fail-misrecorded-bign": {
     "A4": "FAIL"
   },
   "a4-incomplete": {
@@ -147,6 +195,9 @@
   "a7-fail": {
     "A7": "FAIL"
   },
+  "a7-fail-misrecorded-hostns": {
+    "A7": "FAIL"
+  },
   "a7-incomplete": {
     "A7": "INCOMPLETE"
   },
@@ -180,10 +231,16 @@
   "a8-incomplete-long-no-c": {
     "A8": "INCOMPLETE"
   },
+  "a8-incomplete-long-no-c-2200ms": {
+    "A8": "INCOMPLETE"
+  },
   "a8-incomplete-short-with-c": {
     "A8": "INCOMPLETE"
   },
   "a8-pass": {
+    "A8": "PASS"
+  },
+  "a8-pass-short-clone-1900ms": {
     "A8": "PASS"
   },
   "a8-pass-short-clones": {
@@ -201,6 +258,9 @@
   "a9-pass-early": {
     "A9": "PASS"
   },
+  "cb05-deactivate-event-late-in-gap": {
+    "OBS": "INCOMPLETE"
+  },
   "cb05-deactivate-no-blocks": {
     "OBS": "INCOMPLETE"
   },
@@ -210,17 +270,44 @@
   "cb05-deactivate-pre-release": {
     "OBS": "INCOMPLETE"
   },
+  "cb05-deactivate-pre-reset": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-deactivate-pre-set-processing": {
+    "OBS": "INCOMPLETE"
+  },
   "cb05-deactivate-release-only": {
+    "OBS": "PASS"
+  },
+  "cb05-deactivate-reset-at-play-only": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-deactivate-reset-before-last-block": {
     "OBS": "PASS"
   },
   "cb05-deactivate-reset-only": {
     "OBS": "PASS"
   },
+  "cb05-deactivate-set-processing-off": {
+    "OBS": "PASS"
+  },
   "cb05-deactivate-set-processing-on": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-deactivate-short-gap": {
     "OBS": "INCOMPLETE"
   },
   "cb05-deactivate-single-end": {
     "OBS": "PASS"
+  },
+  "cb05-deactivate-single-end-at-end": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-deactivate-single-end-at-start": {
+    "OBS": "INCOMPLETE"
+  },
+  "cb05-deactivate-teardown-release-only": {
+    "OBS": "INCOMPLETE"
   },
   "cb05-disable-track-reset-only": {
     "OBS": "PASS"
@@ -246,11 +333,15 @@
   "cb12-twoproj-unpaired": {
     "OBS": "INCOMPLETE"
   },
+  "f1-a2-inferred": {},
+  "f1-a2-pool3": {},
   "f1-cb04-no-rip": {},
   "f1-cb05-bypass-dup": {
     "OBS": "INCOMPLETE"
   },
   "f1-cb05-no-blocks": {},
+  "f1-cb05-reset-at-play-only": {},
+  "f1-cb05-teardown-release-only": {},
   "f1-missing-cell": {},
   "obs-abnormal": {},
   "obs-normal": {},

@@ -2,6 +2,7 @@
 """探针日志分析：读一个目录里的 CSV，按 A1-A9 出结论表，并给出冻结条件 F1 的判定。
 
     python analyze-probe.py <日志目录> [--json] [--hash-salt <文本>] [--redact <词>]... [--exclude <文件名>:<C 行序号或 t_ns>]...
+                            [--toggles <case>:<现场按键次数>]...
     python analyze-probe.py --self-test [--json]     # 夹具、严格格式、脱敏的自测
     python analyze-probe.py --mutation-check         # 逐条屏蔽判据与脱敏，每条都必须让自测变红
     python analyze-probe.py --spec                   # 以 JSON 打印日志格式的机读规格
@@ -12,8 +13,13 @@
 
 `--exclude <文件名>:<选择子>` 把现场误记的一段（一个 C 行起、到下一个 C 行或文件尾止）整段拿出判据，可重复。文件名是日志目录里的 CSV 文件名；
 选择子是该文件里 C 行的 1 起算序号（按文件里出现的顺序），或 C 行的 `t_ns`；两者都可能指同一个数时写 `#3`（序号）或 `t=3`（t_ns）。
-In 与 Out 各有一份文件，一格误记要在两个文件里各排除一次。被排除的段不进任何判据，输出的「已排除的段」逐条列出参数与对应的格；
-段与段之间的序号缺口照旧按块序号算，但落在被排除段上的缺口（含探针报告丢弃却定位不到缺口时）记在被排除段身上，不记给相邻的段。
+In 与 Out 各有一份文件，一格误记要在两个文件里各排除一次；同一个 C 行指两次也算参数错。输出里不写文件名，只写「实例 N 的第 k 个 C 行」。
+被排除的段不进任何判据，但**排除只能拿掉数据不全的段，拿不掉不通过的段**：被排除的段单独判一遍，本来会不通过的项照样记不通过。
+缺失的块序号按探针摘要里的累计块数归到所属的段（见 `Session._segment`）：归给被排除的段的才被吞掉，归不清或归给未排除的段的仍让它数据不全。
+
+`--toggles <case>:<N>` 告诉分析器现场实际按了多少次监听 / 录音使能键（case 取 CB-02 或 LU-03，可重复）。探针看不到这类按键，
+切换点只能从处理线程的变化推断；推断出来的切换点要和这个次数对得上（差不超过 A2_TOGGLE_TOLERANCE）、而且这一格里线程不超过
+A2_MAX_THREADS 个，A2 才能通过，否则判数据不全：宿主线程池在稳态下换线程，和用户的按键分不开。
 
 输出会被公开粘贴，所以只由枚举、整数、case 编号和 8 位散列拼成：不含路径、用户名、主机名，
 轨道名只给 same / different / unknown 和一个 8 位散列。格式出错时的消息只带文件序号、行号和固定的列名，
@@ -33,7 +39,7 @@ import shutil
 import socket
 import sys
 import tempfile
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from urllib.parse import unquote_to_bytes
 
 sys.dont_write_bytecode = True  # 自测会导入同目录的 probe_synth，不往仓里写 __pycache__
@@ -93,6 +99,10 @@ A3_CASES = ("CB-04", "LU-04")
 A3_JUDGED = ("export-offline", "bounce")
 A3_REQUIRED = {"CB-04": ("export-offline",), "LU-04": ("export-offline", "bounce")}
 MIN_SLICE_BLOCKS = 8
+A2_TOGGLE_TOLERANCE = 1  # --toggles 给的现场次数与分析器数出的次数最多差这么多
+A2_MAX_THREADS = 2  # 靠现场次数确认推断出的切换时，这一格里最多出现几个不同的处理线程（预取线程与实时线程来回换）
+DEACT_GAP_NS = 1_000_000_000  # 停用证据要落在至少这么长的块流中断里（清单让用户把插件停用 5 s）
+DEACT_LEAD_NS = 250_000_000  # 停用事件可以比中断前最后一块早这么多（事件与块是不同线程取的时间戳）
 SHORT_LIVED_NS = 2_000_000_000  # 没有 C 行、首尾时间跨度短于此值的实例：Render in Place / Freeze 的临时克隆，A8 只记说明
 EXIT_EXCLUDE = 5  # --exclude 指定的段不存在或不唯一
 CLONE_VARIANTS = ("rip", "freeze")  # 宿主可能克隆实例：同键出现多个实例是预期内的
@@ -113,7 +123,7 @@ def _r(cases, variants, cat, feeds, evidence):
 
 _STEADY = "两端各至少 32 块"
 _EXPORT = "导出比对行见 A3；块只查块长上限，不进 A7"
-_DEACT = "至少一端 32 块，且本段内有 set_processing（a 为 0）、reset 或 release 事件"
+_DEACT = "至少一端 32 块，且本段内的 set_processing（a 为 0）、reset 或 release 事件落在块流中断里（不短于 1 s，前后都有块）"
 _PAIRED_EV = "每个 In 实例都有 paired 事件（同一宿主里两端同 pid，所以不核对对端 pid）"
 _r("CB-01 LU-03", "steady", 1, "A1 A4 A7", _STEADY)
 _r("CB-02 LU-03", "toggle", 1, "A2 A4 A7", "两端各至少 32 块，每次切换后的窗口里至少 8 块")
@@ -544,7 +554,7 @@ class Segment:
         self.blocks = []
         self.events = []
         self.gaps = 0
-        self.excluded = False  # --exclude 点名的误记段：留在 _segment 里算缺口，算完即拿出，不进任何判据
+        self.excluded = False  # --exclude 点名的误记段：留在 _segment 里算缺口，算完即拿出，不进判据（但会单独判一遍，见 Session.shadow）
 
     def has(self, name):
         return any(e["name"] == name for e in self.events)
@@ -556,16 +566,18 @@ def key_label(key):
 
 class Session:
     def __init__(self, logs, compares, broken=(), exclude=()):
-        """exclude = [(Log, 该 Log.cases 里的下标, 参数原文)]，由 resolve_excludes 解析而来。"""
+        """exclude = [(Log, 该 Log.cases 里的下标, 选择子原文)]，由 resolve_excludes 解析而来。"""
         self.logs = logs
         self.compares = compares  # 比对行
         self.broken = list(broken)  # 不完整的日志文件（只有标签，没有内容）
-        self.segments = []
+        self.segments = []  # 进判据的段
+        self.hidden = []  # 被 --exclude 拿出去的段：不进判据，只在 shadow() 里单独判一遍
         self.cells = {}
         self.orphans = 0
-        self.excluded = []  # 被排除的段：{param, instance, role, cell, c_index}
+        self.excluded = []  # 被排除的段：{selector, instance, role, cell, c_index}
+        self.attribution = {}  # 实例序号 → (归给被排除段的缺失块序号数, 归给未排除段的数, 是否按摘要归属)：有被排除段的实例才有
         for lg in logs:
-            self._segment(lg, [(k, param) for g, k, param in exclude if g is lg])
+            self._segment(lg, [(k, sel) for g, k, sel in exclude if g is lg])
         for seg in self.segments:
             self.cells.setdefault(seg.key, {"I": [], "O": []})[seg.role].append(seg)
         self.dups = sorted(
@@ -573,7 +585,20 @@ class Session:
             key=lambda k: (k[0], k[1], str(k[2]), k[3]),
         )
 
+    def shadow(self):
+        """被排除的段单独成一个会话，用来问「它们若不被排除，会不会不通过」：同一个键的 In / Out 按出现顺序两两配成一格。
+        --exclude 只许拿掉数据不全的段，不许拿掉本来不通过的段。"""
+        sh = Session.__new__(Session)
+        sh.logs, sh.compares, sh.broken = self.logs, self.compares, self.broken
+        sh.segments, sh.hidden, sh.excluded, sh.orphans, sh.attribution, sh.dups = list(self.hidden), [], [], 0, {}, []
+        sh.cells, nth = {}, {}
+        for seg in sh.segments:
+            n = nth[(seg.key, seg.role)] = nth.get((seg.key, seg.role), -1) + 1
+            sh.cells.setdefault(seg.key + (n,), {"I": [], "O": []})[seg.role].append(seg)
+        return sh
+
     def _segment(self, lg, exclude=()):
+        lg.pre_events, lg.orphans = [], 0  # 同一份日志会分段不止一次，先清零
         times = [c["t_ns"] for c in lg.cases]
         order = sorted(range(len(times)), key=lambda i: times[i])
         times = [times[i] for i in order]
@@ -588,35 +613,83 @@ class Session:
                 segs[i].events.append(e)
             else:
                 lg.pre_events.append(e)
+        lost_total, cross = 0, []  # 缺失的块序号总数；隔着段的缺失区间 [lo, hi)（只有带被排除段的实例才分开记）
         prev = prev_i = None
         for b in lg.blocks:
             i = at(b["mono_ns"])
             if i >= 0:
                 segs[i].blocks.append(b)
                 if prev is not None and b["seq"] != prev + 1:
-                    # 缺口记给后一块所在的段；但缺口前后的块之间若隔着被排除的段（该段的块被探针按丢弃计、占了序号，
-                    # 或它自己的尾部丢了块），这处缺口就是被排除段的，不能让相邻的段替它背
-                    owner = i
-                    if not segs[i].excluded:
-                        hidden = [k for k in range(max(prev_i, 0), i) if segs[k].excluded]
-                        owner = hidden[-1] if hidden else i
-                    segs[owner].gaps += 1
+                    lost_total += b["seq"] - prev - 1
+                    if not exclude or prev_i == i:
+                        segs[i].gaps += 1  # 没有被排除的段，或缺口两头在同一段里：记给后一块所在的段
+                    else:
+                        cross.append((prev + 1, b["seq"]))
             else:
                 lg.orphans += 1
                 self.orphans += 1
             prev, prev_i = b["seq"], i
         dropped = max([s["dropped"] for s in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0])
-        if dropped and not any(s.gaps for s in segs):
-            # 探针报告丢过记录、却定位不到缺口：有被排除的段就记在它们身上（现场排除的正是没拿到绑定的误记段），否则整个实例都按缺口算
-            for s in [s for s in segs if s.excluded] or segs:
-                s.gaps += 1
-        for k, param in exclude:
+        if not exclude:
+            if dropped and not any(s.gaps for s in segs):
+                for s in segs:  # 探针报告丢过记录、却定位不到缺口：整个实例都按缺口算
+                    s.gaps += 1
+        else:
+            self._attribute(lg, segs, times, cross, lost_total, dropped)
+        for k, sel in exclude:
             seg = segs[where[k]]
             self.excluded.append({
-                "param": param, "instance": self.logs.index(lg) + 1, "role": lg.header["role"],
+                "selector": sel, "instance": self.logs.index(lg) + 1, "role": lg.header["role"],
                 "cell": key_label(seg.key), "c_index": k + 1,
             })  # fmt: skip
+        self.hidden += [s for s in segs if s.excluded]
         self.segments += [s for s in segs if not s.excluded]
+
+    def _attribute(self, lg, segs, times, cross, lost_total, dropped):
+        """有被排除段的实例：把缺失的块序号归到所属的段。
+        探针每个块（写出的与丢弃的）都占一个 seq，1 Hz 摘要里的「累计块数 + 累计丢弃数」就是那一刻已经占用的 seq 个数。
+        取 C 行之前最近一条摘要的这个数当作该格窗口开始前已占用的 seq 数，一格的窗口就是 [本格的数, 下一格的数)：
+        落在这个范围里的缺失块序号归给这一格。归给被排除段的不计入任何判据；归给未排除段的让它数据不全。
+        缺口两头在同一段里的已经直接记给那一段。前一格最后一秒之内紧接着下一格时，摘要分不开两格，
+        这部分归到后一格（后一格未排除时仍让它数据不全，后一格被排除时前一格最后不到 1 s 内的丢块会被吞掉：见 LOG-FORMAT）。
+        探针报告的丢弃数比缺口多出来的部分（尾部丢块，也含丢掉的事件）接在最后一个块之后；
+        前面没有摘要可用时无从归属，各个未排除的段都记一次。"""
+        if lg.blocks and lg.blocks[0]["seq"] > 0:
+            cross.append((0, lg.blocks[0]["seq"]))
+            lost_total += lg.blocks[0]["seq"]
+        tail = max(0, dropped - lost_total)
+        if tail:
+            start = lg.blocks[-1]["seq"] + 1 if lg.blocks else 0
+            cross.append((start, start + tail))
+        st = sorted(lg.summaries, key=lambda s: s["t_ns"])
+        stt = [s["t_ns"] for s in st]
+        starts = [0]
+        for k in range(1, len(segs)):
+            j = bisect_left(stt, times[k]) - 1  # 最后一条严格早于该 C 行的摘要
+            if j < 0:
+                starts = None
+                break
+            starts.append(max(starts[-1], st[j]["blocks"] + st[j]["dropped"]))
+        absorbed = charged = 0
+        for lo, hi in cross:
+            if starts is None:  # 摘要不可用，无从归属：各个未排除的段都记一次
+                charged += hi - lo
+                for seg in segs:
+                    if not seg.excluded:
+                        seg.gaps += 1
+                continue
+            for k, seg in enumerate(segs):
+                top = starts[k + 1] if k + 1 < len(segs) else hi
+                mine = max(0, min(hi, top) - max(lo, starts[k]))
+                if not mine:
+                    continue
+                if seg.excluded:
+                    absorbed += mine
+                else:
+                    seg.gaps += 1
+                    charged += mine
+        if absorbed or charged:
+            self.attribution[self.logs.index(lg) + 1] = (absorbed, charged, starts is not None)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -707,17 +780,34 @@ def switch_points(seg):
     """A2 的切换点：显式的监听 / 录音使能事件，加上 In 端 B 行 thread 的变化点。
     VST3 不通知监听键与录音使能键，探针从不写这两个事件；ASIO-Guard 开着时，这类切换会把轨从预取线程挪到实时线程，
     所以相邻两块的 thread 散列不同，就是一次处理路径切换，切换时刻取新线程上的第一块的 mono_ns。
-    显式事件前后 SLICE_NS 内的 thread 变化算同一次切换，不重复数。块长 n 的变化稳态下也会抖，只作旁证，不当切换。
-    返回 (显式切换时刻, 推断切换时刻, n 变化次数)。"""
+    - 显式事件前后 SLICE_NS 内的 thread 变化算同一次切换，不重复数。
+    - 推断出的切换之后 SLICE_NS 内又出现的 thread 变化并入这一次（folded），不单独算：宿主线程池调度、或者用户按得比窗口还快，
+      都分不出来；并入之后，窗口不会被这类变化截断，一次切换后的两次重同步也就拆不开。
+    - 块长 n 的变化稳态下也会抖，只作旁证，不当切换。
+    返回 {explicit: [时刻], inferred: [(切换时刻, 前一块的时刻)], folded, n_changes, threads}。"""
     explicit = sorted(e["t_ns"] for e in seg.events if e["name"] in TOGGLES)
     blocks = sorted(seg.blocks, key=lambda b: b["seq"])
-    changed = [b["mono_ns"] for a, b in zip(blocks, blocks[1:]) if a["thread"] != b["thread"]]
-    inferred = [t for t in changed if not any(abs(t - e) < SLICE_NS for e in explicit)]
-    n_changes = sum(1 for a, b in zip(blocks, blocks[1:]) if a["n"] != b["n"])
-    return explicit, inferred, n_changes
+    changed = [(b["mono_ns"], a["mono_ns"]) for a, b in zip(blocks, blocks[1:]) if a["thread"] != b["thread"]]
+    inferred, folded, last = [], 0, None
+    for t, t_prev in changed:
+        if any(abs(t - e) < SLICE_NS for e in explicit):
+            continue
+        if last is not None and t - last < SLICE_NS:
+            folded += 1
+            continue
+        inferred.append((t, t_prev))
+        last = t
+    return {
+        "explicit": explicit, "inferred": inferred, "folded": folded,
+        "n_changes": sum(1 for a, b in zip(blocks, blocks[1:]) if a["n"] != b["n"]),
+        "threads": len({b["thread"] for b in blocks}),
+    }  # fmt: skip
 
 
-def judge_a2(s):
+def judge_a2(s, toggles=None):
+    """toggles = {case: 现场实际按键次数}（--toggles）。显式事件是宿主亲口报的切换；按处理线程推断出来的切换
+    可能是用户按的，也可能只是线程池调度，所以推断的切换单独撑不出通过：要现场次数对得上、线程只有预取与实时两个。"""
+    toggles = toggles or {}
     parts, cover, per_case = [], [], {}
     for key, cell in _cells(s):
         if key[0] not in A2_CASES or key[1] != "toggle":
@@ -728,39 +818,61 @@ def judge_a2(s):
             parts.append(("INCOMPLETE", f"{label} In 端记录数为 {len(cell['I'])}，应恰有 1 个"))
             continue
         seg = cell["I"][0]
-        explicit, inferred, n_changes = switch_points(seg)
-        ts = sorted(explicit + inferred)
-        got = per_case.setdefault(key[0], [0, 0])
-        got[0] += len(explicit)
-        got[1] += len(inferred)
+        sw = switch_points(seg)
+        explicit, inferred = sw["explicit"], sw["inferred"]
+        got = per_case.setdefault(key[0], {"explicit": 0, "inferred": 0, "threads": 0, "folded": 0})
+        got["explicit"] += len(explicit)
+        got["inferred"] += len(inferred)
+        got["folded"] += sw["folded"]
+        if inferred:
+            got["threads"] = max(got["threads"], sw["threads"])
         how = f"显式事件 {len(explicit)}、按处理线程切换推断 {len(inferred)}"
         bad, why = _usable(seg)
         if bad:
             parts.append((bad, why))
             continue
-        if not ts:
+        points = sorted([(t, t) for t in explicit] + inferred)
+        if not points:
             parts.append(("INCOMPLETE", f"{label} 这一格里处理线程没有变化（ASIO-Guard 关着时监听可能不改处理线程），也没有显式切换事件"))
             continue
         worst, thin = 0, 0
-        for i, t in enumerate(ts):
-            end = min(ts[i + 1] if i + 1 < len(ts) else t + SLICE_NS, t + SLICE_NS)
-            window = [b for b in seg.blocks if t <= b["mono_ns"] < end]
+        for t, start in points:
+            # 窗口从切换块之前的一块算起（切换瞬间旧线程上最后一块的重同步也算这一次），到 SLICE_NS 之后为止；
+            # 只有用户真按了的显式事件才截断窗口，推断出的切换不截断：线程池的又一次调度不能把一次切换后的重同步拆开
+            nxt = next((e for e in explicit if e > t), None)
+            end = t + SLICE_NS if nxt is None else min(t + SLICE_NS, nxt)
+            window = [b for b in seg.blocks if start <= b["mono_ns"] < end]
             if len(window) < MIN_SLICE_BLOCKS:
                 thin += 1
             worst = max(worst, sum(b["rs"] for b in window))
         if thin:
-            parts.append(("INCOMPLETE", f"{label} 有 {thin} 次切换后的窗口里块数不足 {MIN_SLICE_BLOCKS}（切换 {len(ts)} 次：{how}）"))
+            parts.append(("INCOMPLETE", f"{label} 有 {thin} 次切换后的窗口里块数不足 {MIN_SLICE_BLOCKS}（切换 {len(points)} 次：{how}）"))
             continue
         ds = {b["d"] for b in seg.blocks}
-        detail = f"切换 {len(ts)} 次（{how}），块长 n 变化 {n_changes} 次（旁证，不计入切换）"
+        detail = f"切换 {len(points)} 次（{how}），块长 n 变化 {sw['n_changes']} 次（旁证，不计入切换），处理线程 {sw['threads']} 种"
+        if sw["folded"]:
+            detail += f"，另有 {sw['folded']} 次线程变化落在上一次切换后 {SLICE_NS // 1_000_000_000} s 内，并入那一次"
         if worst > 1 or len(ds) > 1:
             parts.append(("FAIL", f"{label} 每次切换后重同步最多 {worst} 次、D 取值 {len(ds)} 种；{detail}"))
         else:
             parts.append(("PASS", f"{label} {detail}"))
-    for case, (n_explicit, n_inferred) in sorted(per_case.items()):
-        n = n_explicit + n_inferred
+    for case, got in sorted(per_case.items()):
+        n = got["explicit"] + got["inferred"]
+        want = toggles.get(case)
+        how = f"显式事件 {got['explicit']}、按处理线程切换推断 {got['inferred']}"
         if 0 < n < MIN_TOGGLES:  # 一次都没有的格已经各自说明过原因
-            parts.append(("INCOMPLETE", f"{case} 只有 {n} 次切换（显式事件 {n_explicit}、按处理线程切换推断 {n_inferred}），不足 {MIN_TOGGLES}"))
+            folded = f"；另有 {got['folded']} 次线程变化挤在上一次切换后 {SLICE_NS // 1_000_000_000} s 内，并入了那一次" if got["folded"] else ""
+            parts.append(("INCOMPLETE", f"{case} 只有 {n} 次切换（{how}{folded}），不足 {MIN_TOGGLES}"))
+        elif n and want is not None and abs(n - want) > A2_TOGGLE_TOLERANCE:
+            parts.append(("INCOMPLETE", f"{case} 数出 {n} 次切换（{how}），与现场记录的 {want} 次相差超过 {A2_TOGGLE_TOLERANCE}，对不上"))
+        elif got["inferred"] and want is None:
+            parts.append(("INCOMPLETE", f"{case} 的切换点里有 {got['inferred']} 次是按处理线程推断的（{how}），没有给现场按键次数（--toggles {case}:<次数>）可对照，"
+                                        "推断不能单独撑出通过：宿主线程池在稳态下也会换线程，和用户的按键分不开"))  # fmt: skip
+        elif got["inferred"] and got["threads"] > A2_MAX_THREADS:
+            parts.append(("INCOMPLETE", f"{case} 的推断切换出现了 {got['threads']} 个不同的处理线程，多于预取与实时两个，更像线程池调度而不是监听切换；"
+                                        "拿到一份真实的线程分布之前不据此通过"))  # fmt: skip
+        elif n and want is not None:
+            parts.append(("NOTE", f"{case} 数出 {n} 次切换（{how}），与现场记录的 {want} 次相符（相差不超过 {A2_TOGGLE_TOLERANCE}）"))
     return fold("A2", parts, cover)
 
 
@@ -980,7 +1092,7 @@ def judge_a8(s):
             problems.append(f"摘要间隔超限（最长 {stall // 1_000_000} ms，阈值 {STALL_NS // 1_000_000} ms；也可能是写摘要的线程被宿主占住）")
         if trips:
             problems.append(f"跳闸 {trips} 次")
-        if problems:  # 克隆实例也一样：没收尾、跳闸都照常不通过，只豁免「摘要行不足」
+        if problems:  # 克隆实例也一样：没收尾、摘要里记了跳闸都照常不通过，只豁免「摘要行不足」
             parts.append(("FAIL", f"{who} " + "；".join(problems)))
         elif len(ts) < 2 and lg.is_short_clone():
             clones.append((n, lg))
@@ -990,7 +1102,8 @@ def judge_a8(s):
             parts.append(("PASS", ""))
     if clones:  # 汇成一条放在最后，免得挤掉前面真正的不通过说明
         parts.append(("NOTE", f"{len(clones)} 个没有 C 行、存活短于 {SHORT_LIVED_NS // 1_000_000} ms 的实例不计入稳定性判定"
-                              f"（疑似 Render in Place / Freeze 的克隆，来不及写摘要）：{_clone_list(clones)}"))  # fmt: skip
+                              f"（疑似 Render in Place / Freeze 的克隆，来不及写摘要）：{_clone_list(clones)}；"
+                              "跳闸只记在摘要行里，它们没有摘要行，跳闸与卡死无从判断（没收尾的仍判不通过）"))  # fmt: skip
     return fold("A8", parts, [g.case["case"] for g in s.segments])
 
 
@@ -1084,10 +1197,52 @@ def warnings_of(s):
             if max([x["dropped"] for x in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0])]  # fmt: skip
     if lost:
         out.append(f"{len(lost)} 个实例的探针报告过丢弃记录，相关格按数据不全处理")
-        both = [n for n in lost if any(x["instance"] == n for x in s.excluded)]
-        if both:
-            out.append(f"其中 {len(both)} 个实例有被排除的段：定位不到缺口的丢弃记在被排除的段上，其余各格只看自己段内的序号缺口")
+    for n, (absorbed, charged, by_summary) in sorted(s.attribution.items()):
+        if by_summary:
+            out.append(f"实例 {n} 有被排除的段：缺失的块序号按摘要里的累计块数归属，{absorbed} 个归给被排除的段（不计入判据），"
+                       f"{charged} 个归给未排除的段（这些段按数据不全处理）")  # fmt: skip
+        else:
+            out.append(f"实例 {n} 有被排除的段，但某个 C 行之前没有摘要行可用，{charged} 个缺失的块序号无从归属，各个未排除的段都按数据不全处理")
     return out
+
+
+def _stop_name(e):
+    if e["name"] == "set_processing" and e["a"] == 0:
+        return "set_processing(0)"
+    return e["name"] if e["name"] in ("reset", "release") else None
+
+
+def stop_evidence(segs):
+    """CB-05 停用格：停用事件要落在块流中断里才算数。JUCE 的 VST3 包装层把 setProcessing(false) 转成 reset()，
+    析构时 terminate() 与 setActive(false) 都会写 release，宿主起播时也会 reset；这些事件不带「用户停用了插件」的信息，
+    只有它们和块流的中断对得上（停用 5 s，实例不再收到回调）才是停用。
+    - 实例自己有块：事件落在它的某一次块间隔里（间隔不短于 DEACT_GAP_NS，前后都有块），位置在间隔的前半（停用发生在断开的时候；
+      起播的 reset 在间隔末尾，不算），可以比间隔前的最后一块早 DEACT_LEAD_NS；
+    - 实例整段没有块（一直停用）：本格另一端的块流在事件前后都至少延续 DEACT_GAP_NS（起播的 reset、析构的 release 在块流两头，不算）。
+    返回 (落在中断里的 {名: 条数}, 不在中断里的 {名: 条数}, 说明中断的文字, 各端最长块间隙 ms)。"""
+    all_t = [b["mono_ns"] for g in segs for b in g.blocks]
+    matched, loose, via, longest = {}, {}, [], 0
+    for g in segs:
+        ts = sorted(b["mono_ns"] for b in g.blocks)
+        gaps = [(a, b) for a, b in zip(ts, ts[1:]) if b - a >= DEACT_GAP_NS]
+        longest = max([longest] + [b - a for a, b in zip(ts, ts[1:])])
+        for e in g.events:
+            name, at = _stop_name(e), e["t_ns"]
+            if name is None:
+                continue
+            if ts:
+                hit = [b - a for a, b in gaps if a - DEACT_LEAD_NS <= at <= a + (b - a) // 2]
+                how = f"块流中断 {max(hit, default=0) // 1_000_000} ms"
+            else:
+                hit = bool(all_t) and min(all_t) + DEACT_GAP_NS <= at <= max(all_t) - DEACT_GAP_NS
+                how = "该端整段没有块、另一端的块流在事件前后都在"
+            if hit:
+                matched[name] = matched.get(name, 0) + 1
+                if how not in via:
+                    via.append(how)
+            else:
+                loose[name] = loose.get(name, 0) + 1
+    return matched, loose, "；".join(via), longest // 1_000_000
 
 
 def _cell_evidence(s, key, cell):
@@ -1108,18 +1263,17 @@ def _cell_evidence(s, key, cell):
     evs = [e for g in segs for e in g.events + g.log.pre_events]
     here = [e for g in segs for e in g.events]  # 只数本段（本格 C 行到下一个 C 行或文件尾）内的事件，实例级的 pre_events 不算
     if v in ("deactivate", "disable-track"):
-        # JUCE 的 VST3 包装层把 setProcessing(false) 转成 reset()，探针记 reset 而不记 set_processing；setActive(false) 才有 release
-        found = {
-            "set_processing(0)": sum(1 for e in here if e["name"] == "set_processing" and e["a"] == 0),
-            "reset": sum(1 for e in here if e["name"] == "reset"),
-            "release": sum(1 for e in here if e["name"] == "release"),
-        }
         if not full:
             return [("INCOMPLETE", f"{label} 没有一端达到 {MIN_STEADY_BLOCKS} 块")]
-        if not any(found.values()):
+        matched, loose, via, longest = stop_evidence(segs)
+        if not matched and not loose:
             return [("INCOMPLETE", f"{label} 本段内缺停用的生命周期事件（set_processing(0)、reset、release 都没有）")]
-        seen = "、".join(f"{k} {n}" for k, n in found.items() if n)
-        return [("PASS", f"{label} 单端 {len(full)} 个实例有块，本段内停用事件在（{seen}）")]
+        if not matched:
+            seen = "、".join(f"{k} {n}" for k, n in loose.items())
+            return [("INCOMPLETE", f"{label} 本段内有停用事件（{seen}），但都不在不短于 {DEACT_GAP_NS // 1_000_000} ms 的块流中断里"
+                                   f"（各端最长块间隙 {longest} ms）：起播的 reset、析构的 release 不算停用")]  # fmt: skip
+        seen = "、".join(f"{k} {n}" for k, n in matched.items())
+        return [("PASS", f"{label} 单端 {len(full)} 个实例有块，停用事件落在块流中断里（{seen}）：{via}")]
     if v in ("bypass-in", "bypass-out"):
         if not full:
             return [("INCOMPLETE", f"{label} 没有一端达到 {MIN_STEADY_BLOCKS} 块")]
@@ -1289,8 +1443,9 @@ _EXCLUDE_SEL = re.compile(r"^(#|t=)?(0|[1-9][0-9]{0,18})$")
 
 
 def parse_excludes(raw):
-    """['文件名:选择子', ...] → [(文件名, 前缀, 数值, 参数)]；写法不对抛 ValueError（用法错误，退出码 2）。
-    文件名只取最后一级（带了目录也行）；选择子是 C 行序号或 t_ns，`#N` 强制按序号、`t=N` 强制按 t_ns。"""
+    """['文件名:选择子', ...] → [(文件名, 前缀, 数值, 选择子原文)]；写法不对抛 ValueError（用法错误，退出码 2）。
+    文件名只取最后一级（带了目录也行），只用来在日志目录里找文件，不进任何输出；
+    选择子是 C 行序号或 t_ns，`#N` 强制按序号、`t=N` 强制按 t_ns。"""
     out = []
     for text in raw:
         name, sep, sel = text.rpartition(":")
@@ -1298,13 +1453,28 @@ def parse_excludes(raw):
         m = _EXCLUDE_SEL.match(sel)
         if not sep or not name or not m:
             raise ValueError
-        out.append((name, m.group(1) or "", int(m.group(2)), f"{name}:{sel}"))
+        out.append((name, m.group(1) or "", int(m.group(2)), sel))
+    return out
+
+
+_TOGGLES_ARG = re.compile(r"^([A-Z]{2}-[0-9]{2}):(0|[1-9][0-9]{0,3})$")
+
+
+def parse_toggles(raw):
+    """['CB-02:12', ...] → {case: 现场按键次数}；case 不是 A2 判的 case、写法不对、同一个 case 写两次抛 ValueError（退出码 2）。"""
+    out = {}
+    for text in raw:
+        m = _TOGGLES_ARG.match(text)
+        if not m or m.group(1) not in A2_CASES or m.group(1) in out:
+            raise ValueError
+        out[m.group(1)] = int(m.group(2))
     return out
 
 
 def resolve_excludes(logs, specs):
-    """→ [(Log, 该 Log.cases 里的下标, 参数)]。裸数字先按 t_ns 找、找不到再当序号；两种读法指向不同的 C 行就报错，不替用户猜。"""
-    out = []
+    """→ [(Log, 该 Log.cases 里的下标, 选择子)]。裸数字先按 t_ns 找、找不到再当序号；两种读法指向不同的 C 行就报错，不替用户猜；
+    同一个文件的同一个 C 行指两次也报错（多半是写错了，数段数时不能算两遍）。"""
+    out, seen = [], {}
     for n, (name, prefix, value, param) in enumerate(specs, start=1):
         lg = next((g for g in logs if g.name == name), None)
         if lg is None:
@@ -1323,14 +1493,32 @@ def resolve_excludes(logs, specs):
             raise ExcludeError(f"第 {n} 个参数：这个文件里没有这样的 C 行（该文件共 {len(lg.cases)} 个 C 行）")
         if len(hit) > 1:
             raise ExcludeError(f"第 {n} 个参数：有 {len(hit)} 个 C 行的 t_ns 相同，请改用序号")
+        if (id(lg), hit[0]) in seen:
+            raise ExcludeError(f"第 {n} 个参数与第 {seen[(id(lg), hit[0])]} 个参数指向同一个 C 行")
+        seen[(id(lg), hit[0])] = n
         out.append((lg, hit[0], param))
     return out
 
 
-def analyze(path, salt, exclude=()):
+def _judge(sess, iid, fn, salt, toggles):
+    if iid == "A6":
+        return fn(sess, salt)
+    return fn(sess, toggles) if iid == "A2" else fn(sess)
+
+
+def analyze(path, salt, exclude=(), toggles=None):
     logs, compares, broken = load_dir(path)
     s = Session(logs, compares, broken, resolve_excludes(logs, exclude))
-    items = [(fn(s, salt) if iid == "A6" else fn(s)) for iid, fn in JUDGES]
+    items = [_judge(s, iid, fn, salt, toggles) for iid, fn in JUDGES]
+    would_fail = []
+    if s.hidden:  # --exclude 只许拿掉数据不全的段：被排除的段单独判一遍，本来会不通过的项照样记不通过
+        sh = s.shadow()
+        for item, (iid, fn) in zip(items, JUDGES):
+            was = _judge(sh, iid, fn, salt, toggles)
+            if was["verdict"] == "FAIL" and item["verdict"] != "FAIL":
+                item["verdict"] = "FAIL"
+                item["notes"] = ["被排除的段若计入，本项不通过（--exclude 拿不掉不通过的段）：" + "；".join(was["notes"][:2])] + item["notes"]
+                would_fail.append(item["id"])
     obs = observations(s)
     f1 = freeze_f1(s, items, obs)
     roles = [lg.header["role"] for lg in logs]
@@ -1346,6 +1534,8 @@ def analyze(path, salt, exclude=()):
         "warnings": warnings_of(s),
         "observations": obs,
         "excluded": s.excluded,
+        "excluded_fail": would_fail,
+        "toggles": dict(sorted((toggles or {}).items())),
     }
 
 
@@ -1353,7 +1543,12 @@ def render_md(res):
     i = res["inputs"]
     out = ["# 探针分析结果", "", f"输入：实例日志 {i['logs']} 个（In {i['in']}、Out {i['out']}、不完整 {i['broken']}），导出比对 {i['compares']} 行", ""]
     if res["excluded"]:
-        out += [f"**本次按 `--exclude` 排除了 {len(res['excluded'])} 段，结论不含这些段，见文末「已排除的段」。**", ""]
+        out += [f"**本次按 `--exclude` 排除了 {len(res['excluded'])} 段，结论不含这些段，见文末「已排除的段」；"
+                "是否确属误记请人工确认。**", ""]  # fmt: skip
+    if res["excluded_fail"]:
+        out += [f"**被排除的段里本来就不通过的项（{'、'.join(res['excluded_fail'])}）照样记不通过：排除只拿得掉数据不全的段。**", ""]
+    if res["toggles"]:
+        out += ["现场按键次数（`--toggles`）：" + "、".join(f"{c} {n} 次" for c, n in res["toggles"].items()), ""]
     if res["stop"]:
         out += ["**A1 不通过：停工并上报**，评估时间线寻址加固定 D 的混合方案，此前不冻结。", ""]
     out += ["| 项 | 内容 | 结论 | 依据 |", "|---|---|---|---|"]
@@ -1367,9 +1562,9 @@ def render_md(res):
     out += ["- F2 无需改布局：人工确认", "- F3 Win/mac 测试与压测全绿：以 gates 与 dispatch 结果为准", "- F4 用户已过目：人工确认"]
     out += render_observations(res["observations"])
     if res["excluded"]:
-        out += ["", "## 已排除的段", "", "这些段整段不进任何判据（`--exclude` 的参数照录）：", ""]
+        out += ["", "## 已排除的段", "", "这些段整段不进任何判据（文件名不写进输出，按实例序号和 C 行序号列）：", ""]
         for x in res["excluded"]:
-            out.append(f"- `{x['param']}`：实例 {x['instance']}（{x['role']}）的第 {x['c_index']} 个 C 行，{x['cell']}")
+            out.append(f"- 实例 {x['instance']}（{x['role']}）的第 {x['c_index']} 个 C 行（选择子 `{x['selector']}`），{x['cell']}")
     if res["warnings"]:
         out += ["", "## 提示", ""] + [f"- {x}" for x in res["warnings"]]
     if res["extras"]:
@@ -1393,7 +1588,7 @@ def _scrub_result(res):
         for m in ob[k]:
             m["cell"] = scrub(m["cell"])
     for x in res["excluded"]:
-        x["param"], x["cell"] = scrub(x["param"]), scrub(x["cell"])
+        x["selector"], x["cell"] = scrub(x["selector"]), scrub(x["cell"])
     return res
 
 
@@ -1423,6 +1618,7 @@ def _run(argv, out, err):
         salt_arg = take("--hash-salt")
         _extra_terms[:] = take("--redact", many=True)
         exclude_args = take("--exclude", many=True)
+        toggle_args = take("--toggles", many=True)
     except SystemExit:
         err.write("用法错误：选项缺少取值\n")
         return 2
@@ -1430,6 +1626,11 @@ def _run(argv, out, err):
         exclude = parse_excludes(exclude_args)
     except ValueError:
         err.write("用法错误：--exclude 应写成 <文件名>:<C 行序号或 t_ns>（序号与 t_ns 重名时写 #N 或 t=N）\n")
+        return 2
+    try:
+        toggles = parse_toggles(toggle_args)
+    except ValueError:
+        err.write("用法错误：--toggles 应写成 <case>:<现场按键次数>，case 取 " + " 或 ".join(A2_CASES) + "，同一个 case 只写一次\n")
         return 2
     as_json = "--json" in args
     args = [a for a in args if a != "--json"]
@@ -1449,11 +1650,11 @@ def _run(argv, out, err):
         out.write(json.dumps(r) + "\n" if as_json else f"analyze-probe 变异检查：{'通过' if r['ok'] else '失败'}\n")
         return 0 if r["ok"] else 1
     if len(args) != 1 or not os.path.isdir(args[0]):
-        err.write("用法：analyze-probe.py <日志目录> [--json] [--exclude <文件名>:<C 行序号或 t_ns>]... | --self-test | --mutation-check | --spec\n")
+        err.write("用法：analyze-probe.py <日志目录> [--json] [--exclude <文件名>:<C 行序号或 t_ns>]... [--toggles <case>:<次数>]... | --self-test | --mutation-check | --spec\n")
         return 2
     salt = (salt_arg or secrets.token_hex(16)).encode()
     try:
-        res = analyze(args[0], salt, exclude)
+        res = analyze(args[0], salt, exclude, toggles)
     except FormatError as e:
         err.write(scrub(f"日志格式错误：{e}") + "\n")
         return 2
@@ -1745,11 +1946,13 @@ def _self_test(tmp):
 
 
 def _self_test_gaps(tmp, check):
-    """补口：A2 按处理线程推断切换点、CB-05 认 reset、只数段内事件、短命克隆的 A8、--exclude。夹具的判定已在夹具矩阵里查过，这里查说明文字与命令行。"""
+    """补口：A2 的切换点与现场次数确认、CB-05 的停用证据要和块流中断对上、只数段内事件、短命克隆的 A8、--exclude 的归属与影子判定。
+    夹具的判定已在夹具矩阵里查过，这里查说明文字、命令行与退出码。"""
 
     def run_json(d, *extra):
         code, so, se = _cli([os.path.join(tmp, d), "--json", "--hash-salt", "s", *extra])
-        empty = {"items": [], "excluded": [], "warnings": [], "extras": [], "observations": {"cells": [], "smart": []}}
+        empty = {"items": [], "excluded": [], "excluded_fail": [], "warnings": [], "extras": [], "stop": False, "toggles": {}, "f1": {"ok": False, "missing": []},
+                 "observations": {"cells": [], "smart": []}}  # fmt: skip
         return code, (json.loads(so) if so.strip() else empty), se  # 参数错时没有 JSON：给个空壳，让断言失败而不是自测崩溃
 
     def said(res, iid):
@@ -1758,43 +1961,118 @@ def _self_test_gaps(tmp, check):
     def verdict(res, iid):
         return next((it["verdict"] for it in res["items"] if it["id"] == iid), None)
 
-    # A2：切换点 = 显式事件 ∪ 处理线程变化点；块长抖动不算
-    said_a2 = lambda d: said(run_json(d)[1], "A2")  # noqa: E731
-    check("A2 推断：结论文字写明按处理线程切换推断 10 次", "按处理线程切换推断 10" in said_a2("a2-pass-thread-inferred"), False)
-    check("A2 推断：显式事件与线程变化同时出现时只数一遍", "显式事件 10、按处理线程切换推断 0" in said_a2("a2-pass-explicit-and-thread"), False)
-    txt = said_a2("a2-incomplete-thread-constant")
-    check("A2 推断：线程不变（只有块长抖动）时写明原因", "处理线程没有变化" in txt and "ASIO-Guard 关着" in txt, True)
-    txt = said_a2("a2-incomplete-one-cell-no-switch")
-    check("A2 推断：某一格一次切换都没有时单独说明，不被另一格的切换数盖住", "buf=64" in txt and "处理线程没有变化" in txt, True)
-    txt = said_a2("a2-incomplete-thread-few")
-    check("A2 推断：次数不足时分开写显式与推断的次数", "按处理线程切换推断 3" in txt and f"不足 {MIN_TOGGLES}" in txt, True)
-    txt = said_a2("a2-incomplete-thread-flap")
-    check("A2 推断：线程频繁抖动、窗口太短时数据不全，不因次数多而通过", "窗口里块数不足" in txt, True)
-    check("A2 推断：不通过的说明也写明推断", "按处理线程切换推断" in said_a2("a2-fail-thread-inferred"), True)
+    def a2(d, want=None):
+        """→ (退出码, A2 结论, A2 说明)：want 是 --toggles CB-02:<次数>，None 表示不给。"""
+        extra = [] if want is None else ["--toggles", f"CB-02:{want}"]
+        code, r, _ = run_json(d, *extra)
+        return code, verdict(r, "A2"), said(r, "A2")
 
-    # CB-05：set_processing(a=0)、reset、release 各自成立，写明是哪一种；段之前的事件不算
-    for d, word in (("cb05-deactivate-reset-only", "reset 1"), ("cb05-deactivate-release-only", "release 1"),
-                    ("cb05-disable-track-reset-only", "reset 1"), ("cb05-deactivate-no-event", "")):  # fmt: skip
-        cells = [c for c in run_json(d)[1]["observations"]["cells"] if c["variant"] in ("deactivate", "disable-track")]
-        ok = bool(cells) and (cells[0]["state"] == "PASS" and word in cells[0]["note"] if word else cells[0]["state"] == "INCOMPLETE")
-        check(f"CB-05 停用证据：{d}", ok, not word)
-    for d in ("cb05-deactivate-pre-release", "cb05-deactivate-set-processing-on"):
-        cells = [c for c in run_json(d)[1]["observations"]["cells"] if c["variant"] == "deactivate"]
-        check(f"CB-05 停用证据：{d} 不算", bool(cells) and cells[0]["state"] == "INCOMPLETE" and "本段内" in cells[0]["note"], True)
+    # A2：切换点 = 显式事件 ∪ 处理线程变化点（2 s 内并成一次）；块长抖动不算；推断出来的切换必须有现场次数确认才能通过
+    _, v, txt = a2("a2-incomplete-thread-unconfirmed")
+    check("A2 推断：不给现场次数时，推断的切换撑不出通过", v == "INCOMPLETE" and "没有给现场按键次数" in txt and "--toggles CB-02" in txt, True)
+    _, v, txt = a2("a2-incomplete-thread-unconfirmed", 10)
+    check("A2 推断：现场次数对得上时通过，文字写明按处理线程切换推断 10 次与相符", v == "PASS" and "按处理线程切换推断 10" in txt and "与现场记录的 10 次相符" in txt, False)
+    for want, expect in ((9, "PASS"), (11, "PASS"), (8, "INCOMPLETE"), (12, "INCOMPLETE"), (0, "INCOMPLETE")):
+        _, v, txt = a2("a2-incomplete-thread-unconfirmed", want)
+        check(f"A2 推断：数出 10 次、现场记 {want} 次应为 {expect}", v == expect and (expect == "PASS" or "对不上" in txt), expect != "PASS")
+    _, v, txt = a2("a2-pass", 20)
+    check("A2 显式：显式事件数出 10 次、现场记 20 次时数据不全，显式事件也要对得上现场", v == "INCOMPLETE" and "对不上" in txt, True)
+    _, v, txt = a2("a2-pass", 10)
+    check("A2 显式：现场次数相符时通过并写明相符", v == "PASS" and "相符" in txt, False)
+    _, v, txt = a2("a2-pass")
+    check("A2 显式：不给现场次数时显式事件照样能通过（宿主亲口报的切换）", v == "PASS" and "显式事件 10、按处理线程切换推断 0" in txt, False)
+    _, v, txt = a2("a2-incomplete-thread-pool3", 13)
+    check("A2 推断：次数对得上但出现 3 个处理线程，更像线程池调度，数据不全", v == "INCOMPLETE" and "多于预取与实时两个" in txt, True)
+    _, v, txt = a2("a2-incomplete-thread-pool3", 10)
+    check("A2 推断：线程池轮转的次数与现场次数对不上，数据不全", v == "INCOMPLETE" and "对不上" in txt, True)
+    for d in ("a2-fail-thread-inferred", "a2-fail-thread-split-window", "a2-fail-thread-double-resync", "a2-fail-thread-presync", "a2-fail-mixed-explicit-and-inferred"):
+        for want in (None, 10, 12):
+            _, v, txt = a2(d, want)
+            check(f"A2 推断：{d} 现场次数 {want} 时仍是不通过（重同步不能因次数对得上而被放过）", v == "FAIL" and "按处理线程切换推断" in txt, True)
+    _, v, txt = a2("a2-fail-thread-split-window", 12)
+    check("A2 推断：一次切换后的两次线程变化并成一次，窗口不被截断", v == "FAIL" and "并入那一次" in txt and "重同步最多 2 次" in txt, True)
+    _, v, txt = a2("a2-pass-explicit-and-thread", 10)
+    check("A2 推断：显式事件与线程变化同时出现时只数一遍", v == "PASS" and "显式事件 10、按处理线程切换推断 0" in txt, False)
+    _, v, txt = a2("a2-pass-explicit-skewed-thread", 10)
+    check("A2 推断：显式事件旁 2 块外的线程变化仍算同一次切换", v == "PASS" and "显式事件 10、按处理线程切换推断 0" in txt, False)
+    _, v, txt = a2("a2-incomplete-thread-constant", 10)
+    check("A2 推断：线程不变（只有块长抖动）时写明原因", v == "INCOMPLETE" and "处理线程没有变化" in txt and "ASIO-Guard 关着" in txt, True)
+    _, v, txt = a2("a2-incomplete-one-cell-no-switch", 10)
+    check("A2 推断：某一格一次切换都没有时单独说明，不被另一格的切换数盖住", v == "INCOMPLETE" and "buf=64" in txt and "处理线程没有变化" in txt, True)
+    _, v, txt = a2("a2-incomplete-thread-few", 3)
+    check("A2 推断：次数不足时分开写显式与推断的次数", v == "INCOMPLETE" and "按处理线程切换推断 3" in txt and f"不足 {MIN_TOGGLES}" in txt, True)
+    _, v, txt = a2("a2-incomplete-thread-flap", 1)
+    check("A2 推断：线程频繁抖动并成一次切换，不因变化次数多而通过", v == "INCOMPLETE" and "并入了那一次" in txt and f"不足 {MIN_TOGGLES}" in txt, True)
+    _, v, txt = a2("a2-incomplete-thread-tail-thin", 10)
+    check("A2 推断：最后一次切换后块数不足时数据不全，不被前面的切换盖住", v == "INCOMPLETE" and "窗口里块数不足" in txt, True)
+    # 命令行：--toggles 的结果、用法错误与全路径退出码
+    code, r, _ = run_json("a2-pass", "--toggles", "CB-02:10")
+    check("--toggles：JSON 里回显现场次数", r["toggles"] == {"CB-02": 10}, False)
+    code, so, _ = _cli([os.path.join(tmp, "a2-pass"), "--hash-salt", "s", "--toggles", "CB-02:10"])
+    check("--toggles：文本输出回显现场次数", "`--toggles`" in so and "CB-02 10 次" in so, False)
+    code, r, _ = run_json("a2-pass", "--toggles", "LU-03:10")
+    check("--toggles：给了日志里没有的 case 不改判定", verdict(r, "A2") == "PASS" and code in (0, 3), False)
+    for label, extra in (
+        ("缺冒号", ["--toggles", "CB-02"]),
+        ("次数不是数字", ["--toggles", "CB-02:abc"]),
+        ("不是 A2 判的 case", ["--toggles", "CB-03:5"]),
+        ("同一个 case 写两次", ["--toggles", "CB-02:5", "--toggles", "CB-02:6"]),
+        ("选项缺取值", ["--toggles"]),
+    ):  # fmt: skip
+        code, so, se = _cli([os.path.join(tmp, "a2-pass"), *extra])
+        check(f"--toggles 用法错误：{label}，退出码 2", code == 2 and not so, True)
+    full = os.path.join(tmp, "f1-a2-inferred")
+    check("F1：A2 全靠推断的切换又没给现场次数时，全部判据过不了，退出码 3", _cli([full])[0] == 3, True)
+    check("F1：A2 全靠推断的切换，现场次数对得上时可以冻结，退出码 0", _cli([full, "--toggles", "CB-02:10"])[0] == 0, False)
+    check("F1：现场次数对不上时退出码 3", _cli([full, "--toggles", "CB-02:20"])[0] == 3, True)
+    check("F1：线程池轮转即使次数凑得上也不能冻结", _cli([os.path.join(tmp, "f1-a2-pool3"), "--toggles", "CB-02:13"])[0] == 3, True)
+    check("F1：显式事件的次数对不上现场时不能冻结", _cli([os.path.join(tmp, "full-pass"), "--toggles", "CB-02:20"])[0] == 3, True)
+    check("F1：显式事件的次数对得上现场时可以冻结", _cli([os.path.join(tmp, "full-pass"), "--toggles", "CB-02:10"])[0] == 0, False)
+
+    # CB-05：停用事件要落在块流中断里；set_processing(a=0)、reset、release 各自成立，写明是哪一种；段之前的事件、起播的 reset、析构的 release 不算
+    def stop_cell(d, variant="deactivate"):
+        cells = [c for c in run_json(d)[1]["observations"]["cells"] if c["variant"] == variant]
+        return cells[0] if cells else {"state": None, "note": ""}
+
+    for d, variant, word in (("cb05-deactivate-reset-only", "deactivate", "reset 1"), ("cb05-deactivate-release-only", "deactivate", "release 1"),
+                             ("cb05-deactivate-set-processing-off", "deactivate", "set_processing(0) 1"), ("cb05-disable-track-reset-only", "disable-track", "reset 1"),
+                             ("cb05-deactivate-reset-before-last-block", "deactivate", "reset 1")):  # fmt: skip
+        c = stop_cell(d, variant)
+        check(f"CB-05 停用证据：{d} 落在块流中断里算数，写明事件与中断时长", c["state"] == "PASS" and word in c["note"] and "块流中断 5005 ms" in c["note"], False)
+    c = stop_cell("cb05-deactivate-single-end")
+    check("CB-05 停用证据：一端整段没有块，看另一端的块流在事件前后都在", c["state"] == "PASS" and "另一端的块流在事件前后都在" in c["note"], False)
+    for d in ("cb05-deactivate-no-event", "cb05-deactivate-pre-release", "cb05-deactivate-pre-reset", "cb05-deactivate-pre-set-processing", "cb05-deactivate-set-processing-on"):
+        c = stop_cell(d)
+        check(f"CB-05 停用证据：{d} 本段内没有停用事件，数据不全", c["state"] == "INCOMPLETE" and "本段内缺停用的生命周期事件" in c["note"], True)
+    for d in ("cb05-deactivate-reset-at-play-only", "cb05-deactivate-teardown-release-only", "cb05-deactivate-short-gap", "cb05-deactivate-event-late-in-gap",
+              "cb05-deactivate-single-end-at-start", "cb05-deactivate-single-end-at-end"):  # fmt: skip
+        c = stop_cell(d)
+        check(f"CB-05 停用证据：{d} 有事件但不在不短于 1 s 的块流中断里，不算停用", c["state"] == "INCOMPLETE" and "都不在不短于 1000 ms 的块流中断里" in c["note"], True)
+    for d in ("f1-cb05-reset-at-play-only", "f1-cb05-teardown-release-only"):
+        res = analyze(os.path.join(tmp, d), b"s")
+        miss = res["f1"]["missing"]
+        check(f"F1：{d} 的停用证据不算数，F1 点名 deactivate 与 disable-track", (not res["f1"]["ok"]) and "CB-05 缺 deactivate 格的本格证据" in miss and "CB-05 缺 disable-track 格的本格证据" in miss, True)
+        check(f"F1：{d} 其余判据都过了也不能冻结，退出码 3", _cli([os.path.join(tmp, d)])[0] == 3, True)
     ob = run_json("cb06-smart-pre-ping")[1]["observations"]
     check("smart：段前的 ping 不算，格观察与本格证据都只数 1 条", ob["smart"][0]["pings"] == 1 and "本段内只有 1 条 ping" in ob["cells"][0]["note"], True)
 
-    # A8：没有 C 行又活不到 2 s 的实例只记说明
+    # A8：没有 C 行又活不到 2 s 的实例只记说明；说明不得声称查过它们的跳闸
     _, r, _ = run_json("a8-pass-short-clones")
-    check("A8：短命克隆只记说明，写明实例与时长", "实例 2（I，300 ms）" in said(r, "A8") and "实例 4（O，120 ms）" in said(r, "A8"), False)
+    txt = said(r, "A8")
+    check("A8：短命克隆只记说明，写明实例与时长", "实例 2（I，300 ms）" in txt and "实例 4（O，120 ms）" in txt, False)
+    check("A8：说明写明没有摘要行、跳闸与卡死无从判断，不声称跳闸仍判不通过", "没有摘要行" in txt and "跳闸与卡死无从判断" in txt and "跳闸仍判不通过" not in txt and "没收尾的仍判不通过" in txt, False)
     check("extras：照常数出短命克隆", any("实例 2（I，300 ms）" in x and "2 个" in x for x in r["extras"]), False)
     check("A8：克隆没收尾仍是不通过", verdict(run_json("a8-fail-short-clone-crash")[1], "A8") == "FAIL", True)
+    _, r, _ = run_json("a8-pass-short-clone-1900ms")
+    check("A8：1.9 s 的克隆在短命界线内，只记说明", verdict(r, "A8") == "PASS" and "1900 ms" in said(r, "A8"), False)
+    _, r, _ = run_json("a8-incomplete-long-no-c-2200ms")
+    check("A8：2.2 s 的无 C 行实例过了界线，摘要行不足就是数据不全", verdict(r, "A8") == "INCOMPLETE" and "摘要行不足" in said(r, "A8"), True)
 
-    # --exclude
+    # --exclude：归属、影子判定、只输出选择子
     mid, pids = "a1-incomplete-misrecorded-mid", {"mid": 5020, "unbound": 5021, "trailing": 5022, "gap": 5023, "tail": 5025}
 
-    def both(pid, sel):
-        return ["--exclude", f"probe-I-{pid}-e1f2.csv:{sel}", "--exclude", f"probe-O-{pid}-e3f4.csv:{sel}"]
+    def both(pid, *sels):
+        return [x for sel in sels for x in ("--exclude", f"probe-I-{pid}-e1f2.csv:{sel}", "--exclude", f"probe-O-{pid}-e3f4.csv:{sel}")]
 
     for tag, d, sel in (("mid", mid, 2), ("unbound", "a1-incomplete-misrecorded-unbound", 2), ("trailing", "a1-incomplete-misrecorded-trailing", 3), ("tail", "a1-incomplete-misrecorded-tail", 2),
                         ("mid", mid, "#2"), ("mid", mid, "t=1999999900"), ("mid", mid, 1999999900)):  # fmt: skip
@@ -1802,30 +2080,73 @@ def _self_test_gaps(tmp, check):
         ok = verdict(r, "A1") == "PASS" and [x["cell"] for x in r["excluded"]] == ["CB-01/steady/buf=-/guard=na"] * 2
         check(f"--exclude：{d} 排除 {sel} 后 A1 回到通过", ok, True)
     _, r, _ = run_json("a1-incomplete-misrecorded-trailing", *both(pids["trailing"], 3))
-    check("--exclude：丢弃记在被排除的段上时，提示里说明", any("记在被排除的段上" in w for w in r["warnings"]), False)
+    check("--exclude：丢弃归给被排除的段时，提示里说明归属", any("归给被排除的段" in w and "40 个归给被排除的段" in w for w in r["warnings"]), False)
     _, r, _ = run_json(mid, "--exclude", f"probe-I-{pids['mid']}-e1f2.csv:2")
     check("--exclude：只排除 In 一份时，Out 一份仍留着，这一格还是数据不全", verdict(r, "A1") == "INCOMPLETE" and "只有 Out 一端" in said(r, "A1"), True)
     _, r, _ = run_json("a1-incomplete-gap-beside-excluded", *both(pids["gap"], 2))
     check("--exclude：邻段自己的缺口仍按段内连续性算，排除别的段盖不住它", verdict(r, "A1") == "INCOMPLETE" and "序号缺口" in said(r, "A1"), True)
+    for d, pid, sels, want, word in (
+        ("a1-incomplete-headdrop-after-excluded", 5041, (2,), "INCOMPLETE", "序号缺口"),
+        ("a1-incomplete-headdrop-in-after-excluded", 5042, (2,), "INCOMPLETE", "序号缺口"),
+        ("a1-incomplete-taildrop-after-unrelated-excluded", 5043, (1,), "INCOMPLETE", "序号缺口"),
+        ("a1-incomplete-taildrop-after-unbound-excluded", 5044, (2,), "INCOMPLETE", "序号缺口"),
+        ("a1-incomplete-two-excluded-taildrop", 5045, (1, 3), "INCOMPLETE", "序号缺口"),
+        ("a1-incomplete-unlocated-drop", 5024, (1,), "INCOMPLETE", "序号缺口"),
+        ("a1-incomplete-misrecorded-nosummary", 5047, (2,), "INCOMPLETE", "序号缺口"),
+        ("a1-incomplete-two-excluded-ok", 5046, (1, 3), "PASS", ""),
+    ):  # fmt: skip
+        _, r, _ = run_json(d, *both(pid, *sels))
+        check(f"--exclude：{d} 排除 {sels} 后 A1 为 {want}（丢块只归它自己的段，不被别的被排除段吞掉）", verdict(r, "A1") == want and word in said(r, "A1"), want != "PASS")
+    _, r, _ = run_json("a1-incomplete-headdrop-after-excluded", *both(5041, 2))
+    check("--exclude：被排除段后面一格的头部丢块，提示里写明归给未排除的段", any("0 个归给被排除的段" in w and "1 个归给未排除的段" in w for w in r["warnings"]), True)
+    _, r, _ = run_json("a1-incomplete-taildrop-after-unrelated-excluded", *both(5043, 1))
+    check("--exclude：尾部丢块不会因为前面有被排除的段而被吞", any("0 个归给被排除的段" in w and "3 个归给未排除的段" in w for w in r["warnings"]), True)
+    _, r, _ = run_json("a1-incomplete-misrecorded-nosummary", *both(5047, 2))
+    check("--exclude：没有摘要行时缺失的块序号无从归属，提示里写明，各个未排除的段都记一次", any("无从归属" in w and "没有摘要行可用" in w for w in r["warnings"]), True)
+    code, r, _ = run_json("a1-fail-misrecorded-drift", *both(5040, 2))
+    check("--exclude：被排除的段本来就不通过时，A1 照样不通过并停工，退出码 1", verdict(r, "A1") == "FAIL" and r["stop"] and r["excluded_fail"] == ["A1"] and code == 1, True)
+    check("--exclude：影子判定的说明写明拿不掉不通过", "拿不掉不通过的段" in said(r, "A1") and "m≠0" in said(r, "A1"), True)
+    for d, pid, iid in (("a4-fail-misrecorded-bign", 5048, "A4"), ("a7-fail-misrecorded-hostns", 5049, "A7")):
+        code, r, _ = run_json(d, *both(pid, 2))
+        check(f"--exclude：被排除的段里 {iid} 本来就不通过时照样不通过，不止 A1 一项", verdict(r, iid) == "FAIL" and r["excluded_fail"] == [iid] and code == 1, True)
+    code, so, _ = _cli([os.path.join(tmp, "a1-fail-misrecorded-drift"), "--hash-salt", "s", *both(5040, 2)])
+    check("--exclude：文本输出写明被排除的段里本来就不通过的项", "照样记不通过" in so and "A1" in so and code == 1, True)
     _, r, _ = run_json(mid)
-    check("--exclude：不给参数时 excluded 为空", r["excluded"] == [], False)
+    check("--exclude：不给参数时 excluded 与 excluded_fail 为空", r["excluded"] == [] and r["excluded_fail"] == [], False)
     args_md = [os.path.join(tmp, mid), "--hash-salt", "s", *both(pids["mid"], 2)]
     code, so, _ = _cli(args_md)
-    check("--exclude：文本输出列出被排除的段与参数", "## 已排除的段" in so and f"probe-I-{pids['mid']}-e1f2.csv:2" in so and "第 2 个 C 行" in so, False)
+    check("--exclude：文本输出按实例序号与 C 行序号列出被排除的段，带选择子，不写文件名", "## 已排除的段" in so and "选择子 `2`" in so and "第 2 个 C 行" in so and "probe-" not in so and "e1f2" not in so, False)
+    _, r, _ = run_json(mid, *both(pids["mid"], 2))
+    check("--exclude：JSON 的 excluded 只有选择子、实例序号、角色、格与 C 行序号", all(set(x) == {"selector", "instance", "role", "cell", "c_index"} for x in r["excluded"]) and len(r["excluded"]) == 2, False)
+    # 文件名可能带用户自己加的字：任何输出都不回显
+    ren = os.path.join(tmp, "renamed-for-exclude")
+    os.makedirs(ren)
+    src = os.path.join(tmp, mid)
+    a_name, b_name = f"probe-I-{pids['mid']}-e1f2-take2-quuxfile.csv", f"probe-O-{pids['mid']}-e3f4-take2-quuxfile.csv"
+    shutil.copyfile(os.path.join(src, f"probe-I-{pids['mid']}-e1f2.csv"), os.path.join(ren, a_name))
+    shutil.copyfile(os.path.join(src, f"probe-O-{pids['mid']}-e3f4.csv"), os.path.join(ren, b_name))
+    pair = ["--exclude", f"{a_name}:2", "--exclude", f"{b_name}:2"]
     for fmt in ([], ["--json"]):
-        _, so, se = _cli([*args_md, "--redact", "e1f2", *fmt])
-        check(f"--redact：被排除段的文件名照常脱敏（{'json' if fmt else 'md'}）", "e1f2" not in so + se and REDACTED in so, True)
+        code, so, se = _cli([ren, "--hash-salt", "s", *pair, *fmt])
+        check(f"--exclude：文件名里的自加字不进输出（{'json' if fmt else 'md'}）", code == 3 and "quuxfile" not in so + se and "take2" not in so + se, True)
+    code, so, se = _cli([ren, "--hash-salt", "s", "--exclude", f"{a_name}x:2"])
+    check("--exclude：文件名写错时报错也不回显", code == EXIT_EXCLUDE and "quuxfile" not in so + se, True)
     for label, extra, want in (
         ("文件不存在", ["--exclude", "probe-I-1-zzzz.csv:2"], EXIT_EXCLUDE),
         ("C 行序号超出", ["--exclude", f"probe-I-{pids['mid']}-e1f2.csv:9"], EXIT_EXCLUDE),
         ("t_ns 对不上", ["--exclude", f"probe-I-{pids['mid']}-e1f2.csv:t=12345"], EXIT_EXCLUDE),
+        ("同一个 C 行写两次（序号与 #N）", ["--exclude", f"probe-I-{pids['mid']}-e1f2.csv:2", "--exclude", f"probe-I-{pids['mid']}-e1f2.csv:#2"], EXIT_EXCLUDE),
+        ("同一个 C 行写两次（原样重复）", ["--exclude", f"probe-I-{pids['mid']}-e1f2.csv:2", "--exclude", f"probe-I-{pids['mid']}-e1f2.csv:2"], EXIT_EXCLUDE),
         ("缺冒号", ["--exclude", "nocolon"], 2),
         ("选择子不是数字", ["--exclude", f"probe-I-{pids['mid']}-e1f2.csv:abc"], 2),
         ("选项缺取值", ["--exclude"], 2),
     ):  # fmt: skip
         code, so, se = _cli([os.path.join(tmp, mid), *extra])
         check(f"--exclude 参数错：{label}，退出码 {want}", code == want and not so and "zzzz" not in se, True)
+    code, so, se = _cli([os.path.join(tmp, mid), "--exclude", f"probe-I-{pids['mid']}-e1f2.csv:2", "--exclude", f"probe-I-{pids['mid']}-e1f2.csv:#2"])
+    check("--exclude：重复指向同一个 C 行时说明是第几个参数，不替用户去重", "同一个 C 行" in se and "第 2 个参数与第 1 个参数" in se, True)
     check("--exclude 的参数错有自己的退出码，不与 0 1 2 3 4 混用", EXIT_EXCLUDE not in (0, 1, 2, 3, 4), True)
+
     def resolved(rows, *params):
         """用只有 name 与 cases 的替身解析选择子：→ C 行下标的列表；报错时返回 None。"""
         stub = type("Stub", (), {})()
@@ -1836,9 +2157,11 @@ def _self_test_gaps(tmp, check):
             return None
 
     check("--exclude：序号与 t_ns 撞车时报错，不替用户猜", resolved([2, 5], "x.csv:2") is None, True)
-    check("--exclude：#N 按序号、t=N 按 t_ns、裸数字先按 t_ns", resolved([2, 5], "x.csv:#2", "x.csv:t=2", "x.csv:5") == [1, 0, 1], False)
+    check("--exclude：#N 按序号、t=N 按 t_ns、裸数字先按 t_ns", resolved([2, 5, 9], "x.csv:#2", "x.csv:t=2", "x.csv:9") == [1, 0, 2], False)
     check("--exclude：两个 C 行的 t_ns 相同时，按 t_ns 选报错、按序号选可以", resolved([7, 7], "x.csv:t=7") is None and resolved([7, 7], "x.csv:#2") == [1], True)
+    check("--exclude：同一个 C 行用序号和 t_ns 各写一遍报错", resolved([2, 5], "x.csv:#2", "x.csv:t=5") is None, True)
     check("--exclude：带目录的文件名只取最后一级", [p[0] for p in parse_excludes(["a/b/x.csv:3", "a\\b\\y.csv:4"])] == ["x.csv", "y.csv"], False)
+    check("--exclude：parse_excludes 保留选择子原文，输出用它而不是文件名", [p[3] for p in parse_excludes(["x.csv:3", "y.csv:#4", "z.csv:t=5"])] == ["3", "#4", "t=5"], False)
 
 
 def mutation_check():
@@ -1852,7 +2175,7 @@ def mutation_check():
         if iid == "A6":
             JUDGES[k] = (iid, lambda s, salt, _i=iid: {**stub(), "id": _i, "name": ITEM_NAMES[_i]})
         else:
-            JUDGES[k] = (iid, lambda s, _i=iid: {**stub(), "id": _i, "name": ITEM_NAMES[_i]})
+            JUDGES[k] = (iid, lambda s, *a, _i=iid: {**stub(), "id": _i, "name": ITEM_NAMES[_i]})  # A2 还会收到 toggles
         try:
             if self_test()["ok"]:
                 lines.append(f"屏蔽 {iid} 后自测仍是绿的")
@@ -1867,7 +2190,8 @@ def mutation_check():
         finally:
             HOOKS[hook] = orig
     # 阈值常量：放宽后对应的坏夹具必须不再被拦住，自测随之变红
-    for const, loose in (("RESIDUAL_LIMIT_DB", 0.0), ("MIN_TOGGLES", 0), ("HOSTNS_MISMATCH_RATIO", 1.0), ("MIN_SLICE_BLOCKS", 0), ("MIN_STEADY_BLOCKS", 0), ("SHORT_LIVED_NS", 0)):
+    for const, loose in (("RESIDUAL_LIMIT_DB", 0.0), ("MIN_TOGGLES", 0), ("HOSTNS_MISMATCH_RATIO", 1.0), ("MIN_SLICE_BLOCKS", 0), ("MIN_STEADY_BLOCKS", 0), ("SHORT_LIVED_NS", 0),
+                         ("A2_TOGGLE_TOLERANCE", 99), ("A2_MAX_THREADS", 99), ("DEACT_GAP_NS", 0)):  # fmt: skip
         orig = globals()[const]
         globals()[const] = loose
         try:
