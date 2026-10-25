@@ -22,7 +22,8 @@ clang-format==18.1.8 \
 # 相同」指同一个 fontTools 版本：入库的四个 woff2 是 4.62.1 生成的，用它按 fetch_fonts.py 重跑，四个都逐字节相同；用这里钉的
 # 4.65.0 重跑，三款逐字节相同，Noto Sans SC 的字节不同、码位与字形不变（4.67.0 的产物与 4.65.0 逐字节相同）。检查只读入库
 # 字体的 cmap 与 name 表，没有哪项重跑字体或比对字节。brotli 没有通用 wheel，两个哈希各对应一个平台：ef87b8ab… 是 cp310
-# win_amd64（本机），072e7624… 是 cp312 manylinux x86_64（CI）。升级时两个平台都要核对。
+# win_amd64（本机），072e7624… 是 cp312 manylinux x86_64（CI：compliance 与 docs-truth 钉在 ubuntu-24.04，系统 Python 3.12）。
+# 升级时两个平台都要核对；换 CI 镜像（包括 GitHub 下线 24.04 时）也要连同这里的哈希一起改。
 fonttools==4.65.0 \
     --hash=sha256:3060b8c1fc2329fa20265b7c138614143ea7c1624e26c5c180c76aeb74deae6f
 brotli==1.2.0 \
