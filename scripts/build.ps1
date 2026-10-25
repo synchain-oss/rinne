@@ -23,8 +23,33 @@
 # 输出：cmake、ninja、ctest、pluginval 的输出写进 <构建目录>/logs/ 下的文件，不经管道；本进程的标准句柄开跑前设为不可继承。
 # MSVC 的 mspdbsrv、编译缓存的服务进程会比构建活得久，它们继承了调用方的管道，调用方读 EOF 就要等它们退出，超时也就失效了。
 # 屏幕上只打印步骤、告警与失败步骤日志的末尾。
-# 环境：开跑前从本进程删掉凭据与个人针变量（判据见 $SecretEnv），CMake 配置期与编译器都看不到；VSLANG=1033 让 MSVC 输出英文，零 warning 才判得准；
+# 环境：开跑前从本进程删掉凭据与个人针变量（判据见 $SecretEnv），CMake 配置期与编译器都看不到；VSLANG=1033 在配置与构建两边都设
+# （进 MSVC 开发者 shell 之后再设一次），让 MSVC 的输出语言前后一致，零 warning 才判得准；
 # pluginval 会把同名环境变量（SKIP_GUI_TESTS 之类）当参数用，验之前一并删掉。
+# 头文件依赖：ninja 靠 cl /showIncludes 的输出行开头与 rules.ninja 的 msvc_deps_prefix 逐字节相同才记依赖，对不上就一条都不记，
+# 只改 .h 时含它的编译单元不会重编。配置后拿一个探针编译单元实测 cl 的输出，与 rules.ninja 的前缀逐字节核对；对不上说明构建目录里
+# 的编译器探测结果是在别的语言或编码下留下的，或者 CMake 解码 cl 输出用的代码页与 cl 编码用的不同（无控制台的后台进程里，cl 输出
+# UTF-8、CMake 按 ANSI 解，探测结果就成了二次编码的乱码）。先删掉 CMakeFiles/<版本>/ 下 C 与 CXX 的编译器信息文件（只删这两个文件）
+# 重配；仍对不上，且探针里 cl 的前缀是干净的 UTF-8 文本，就把它写进构建目录里的一个 cmake 文件、经 CMAKE_PROJECT_INCLUDE 在
+# project() 之后覆盖 CMAKE_CL_SHOWINCLUDES_PREFIX，再重配；两步之后仍对不上判红。
+# 判红而不是悄悄放过的理由：前缀对不上时 ninja 不报错，只是不记依赖，只改 .h 时 gates 会跑在旧对象上。
+# clean：修过的构建目录 clean 一次（旧目标文件没有依赖记录）；核对通过的前缀记在 <构建目录>/rinne-deps-prefix-<配置>.txt
+# （clean 只清当前配置，所以按配置分开记），没有记录（含 0 字节的残留文件）或记录不同的目录也 clean 一次。
+# 构建后再查 ninja -t deps：至少记下一条依赖，且第一方编译单元（源文件里有 #include "…" 的）各自都要记下，否则判红；本次新编的与记录里
+# 之前留下的一视同仁（断言判红时 ninja 已把没记依赖的对象的 #deps 0 写进记录，下一次构建不会重编它，不能靠「下一次会重编」放过）。
+# 记录里只判当前配置的对象（对象路径里 `.dir/<配置>/` 那一段）：.ninja_deps 整个构建目录共用，别的配置留下的不是这次构建的问题，clean 当前配置也清不掉。
+# 对象路径统一成正斜杠再比：构建日志里是反斜杠，ninja -t deps 在本机打印的是正斜杠，不能指望两边一致。
+# 第一方 = git 跟踪的源文件（git ls-files），third_party/ 下的除外；不按目录位置判：CI 把 JUCE 检出在仓根下的 JUCE/（未被跟踪），
+# 本机在仓外，按「在不在仓根下」判会把 CI 上的 JUCE 编译单元算成第一方（有的整个文件包在 #if 里，Windows 上一个头文件都不进，没有依赖可记）。
+# 前缀的空白口径：ninja 逐字节比前缀，前缀之后只跳过空格（0x20），Tab、换行、0x85、0xA0 都会让路径记错。核对只容忍空格。
+# 探针贴近第一方目标的真实编译命令：第一方目标在 cmake/RinneWarnings.cmake 里加了 /utf-8（源文件注释是中文），CI 上还经
+# -Launcher（sccache）跑，所以探针带 /utf-8 跑一次、不带 /utf-8 跑一次、给了 -Launcher 时再经它跑一次，几次的前缀必须一致。
+# 探针自己出错（没跑起来、输出里找不到 include 行、几种跑法的前缀不一致）与「前缀对不上」是两回事，分开报错，不清探测也不重配。
+# 代码页：cl 的输出编码跟随控制台代码页（实测 936 是乱码、65001 才是「注意: 包含文件:」）。脚本开头把 [Console]::OutputEncoding
+# 钉在 UTF-8 是前缀一致的前提之一（探针与第一方 TU 都靠它），别去掉。
+# 覆盖文件（rinne-showincludes-prefix.cmake）是持久的：-DCMAKE_PROJECT_INCLUDE 写进 cache 后一直有效，所以每次配置都显式表态
+# （文件在就传 -D、不在就传 -U），重配那一步固定传 -U（要真的重新探测），覆盖那一步才传 -D。cache 里记着覆盖文件而文件没了时，
+# 不带 -U 的 cmake 会在 project() 处报「could not find requested file」；带 -U 就把那条记录清掉，这里打印一行说明并照常往下走。
 # 退出码：0 通过；1 失败；2 -NoBuild 时构建目录里没有当前 HEAD 的构建；3 等构建槽超时。
 [CmdletBinding()]
 param(
@@ -153,6 +178,324 @@ function Get-CacheValue([string]$Text, [string]$Name) {
     $m.Success ? $m.Groups[1].Value : $null
 }
 
+# ninja 记头文件依赖的前提：cl /showIncludes 每行输出的开头与 rules.ninja 里 msvc_deps_prefix 的字节逐字节相同（ninja 按字节比，
+# 编码不同的同一句话也对不上）。字节一律按 Latin-1 转成字符串比较，字节与字符一一对应；报错时再按 UTF-8 显示。
+function ConvertFrom-Latin1([byte[]]$Bytes) { [Text.Encoding]::Latin1.GetString($Bytes) }
+function ConvertTo-Display([string]$Latin1) { [Text.Encoding]::UTF8.GetString([Text.Encoding]::Latin1.GetBytes($Latin1)) }
+
+# rules.ninja 里第一条 msvc_deps_prefix 的值（Latin-1 字符串）；没有这一条返回 $null。
+function Get-NinjaDepsPrefix([string]$RulesFile) {
+    if (-not (Test-Path -LiteralPath $RulesFile)) { return $null }
+    $m = [regex]::Match((ConvertFrom-Latin1 ([IO.File]::ReadAllBytes($RulesFile))), '(?m)^[ \t]*msvc_deps_prefix[ \t]*=[ \t]?(?<v>[^\r\n]*)')
+    $m.Success ? $m.Groups['v'].Value : $null
+}
+
+# 探针编译的 cl 输出（Latin-1 字符串）里那条 /showIncludes 行开头、路径之前的部分；找不到返回 $null。
+function Get-ClIncludePrefix([string]$ClOutput, [string]$Header) {
+    $m = [regex]::Match($ClOutput, '(?m)^(?<p>.*?)(?:[A-Za-z]:\\|\\\\)[^\r\n]*' + [regex]::Escape($Header) + '[ \t]*\r?$')
+    $m.Success ? $m.Groups['p'].Value : $null
+}
+
+# rules.ninja 的前缀（$Rules）与 cl 实际输出的前缀（$Cl）对不上就返回错误文字，对上了返回空。
+# ninja 先要求行以 $Rules 开头，再跳过后面的空白，所以 cl 的前缀可以比 $Rules 多出空白，但不能多出别的。
+# 跳过的空白只认空格（0x20）：ninja 1.13.1 实测只跳过空格，Tab、换行、0x85、0xA0 都会被它算进路径里（路径记错），
+# 所以这里也只容忍空格，别用 .Trim()（它还吞 \t \r \n \v \f U+0085 U+00A0）。正则用 \z 收尾：$ 会放过末尾的一个 \n。
+function Test-ShowIncludesPrefix($Rules, $Cl) {
+    if ($null -eq $Rules -or -not "$Rules".Trim()) { return 'rules.ninja 里没有 msvc_deps_prefix，或者它是空的' }
+    if ($null -eq $Cl) { return 'cl 探针的输出里找不到 /showIncludes 行' }
+    if ($Cl.StartsWith($Rules, [StringComparison]::Ordinal) -and $Cl.Substring($Rules.Length) -match '^ *\z') { return '' }
+    "rules.ninja 的 msvc_deps_prefix 是「$(ConvertTo-Display $Rules)」，cl 实际输出的是「$(ConvertTo-Display $Cl)」，字节对不上，ninja 一条头文件依赖都不会记"
+}
+
+# ninja -t deps 的输出里至少有一个目标记下了依赖（形如 `x.obj: #deps 12, deps mtime …`）；返回错误文字，有就返回空。
+function Test-DepsRecorded([string[]]$Lines) {
+    $n = @($Lines | Where-Object { $_ -match ': #deps ([1-9]\d*),' }).Count
+    $n ? '' : 'ninja -t deps 里没有任何一个目标记下头文件依赖：只改 .h 时含它的编译单元不会重编'
+}
+
+# 对象路径的规范写法：正斜杠。构建日志的描述行里是反斜杠（`src\core\…`），ninja -t deps 在这台机器上打印的是正斜杠（CMake 生成的
+# 构建文件里就是正斜杠），不能指望两边一直一致；产生对象路径的两个函数（Get-DepsCounts、Get-BuiltObjects）都过这一个函数，
+# 后面按路径查表、还原源文件、取配置段都只认这种写法。
+function ConvertTo-ObjectKey([string]$Path) { $Path -replace '\\', '/' }
+
+# ninja -t deps 的输出解析成 { 对象路径 => 依赖个数 }；对象路径以构建目录为基准（ninja 就是这么记的），键用规范写法（ConvertTo-ObjectKey）。
+function Get-DepsCounts([string[]]$Lines) {
+    $out = @{}
+    foreach ($l in $Lines) {
+        if ($l -match '^(?<obj>.+?): #deps (?<n>\d+),') { $out[(ConvertTo-ObjectKey $Matches.obj)] = [int]$Matches.n }
+    }
+    $out
+}
+
+# 构建日志里这次新编的对象（形如 `[3/264] Building CXX object src\core\…\Foo.cpp.obj`）；返回构建目录为基准的相对路径（规范写法）。
+function Get-BuiltObjects([string[]]$Lines) {
+    @($Lines | ForEach-Object {
+            if ($_ -match '^\[\d+/\d+\] Building C(?:XX)? object (?<obj>.+?\.obj)\s*$') {
+                ConvertTo-ObjectKey $Matches.obj
+            }
+        })
+}
+
+# 规范写法（正斜杠）的对象路径拆成 @{ Dir; Config; Src }：<目标目录>/CMakeFiles/<目标>.dir/<配置>/<源路径>.obj，根 CMakeLists.txt 里的目标没有
+# <目标目录>（Dir 为空）。不是这个形状返回 $null。配置段只有 Ninja Multi-Config 这类多配置生成器才有；本脚本固定用 Ninja Multi-Config 配置，
+# 单配置生成器（对象路径是 <目标>.dir/<源路径>.obj，没有配置段）不在支持之列，见 Get-ObjectConfig。
+function Get-ObjectParts([string]$Obj) {
+    if ($Obj -notmatch '^(?:(?<dir>.+)/)?CMakeFiles/(?<tgt>[^/]+)\.dir/(?<cfg>[^/]+)/(?<src>.+)\.obj$') { return $null }
+    @{ Dir = $Matches.dir; Config = $Matches.cfg; Src = $Matches.src }
+}
+
+# 对象路径里 `.dir/<配置>/` 那一段（规范写法的路径）；不是 CMake 对象的形状返回 $null。.ninja_deps 整个构建目录共用一份，里面有别的配置
+# （例如 Debug）留下的记录，要判当前配置的构建，只能认这一段等于当前配置的记录。没有配置段的路径（单配置生成器的 <目标>.dir/<源路径>.obj）
+# 要么解析不出（$null），要么被当成第一段目录是配置名（不会等于当前配置），都不算当前配置的记录；本脚本不会生成这样的路径。
+function Get-ObjectConfig([string]$Obj) {
+    $parts = Get-ObjectParts $Obj
+    $parts ? $parts.Config : $null
+}
+
+# 对象路径 → 源文件（相对仓根的路径）：CMake 的对象路径是 <目标目录>/CMakeFiles/<目标>.dir/<配置>/<源路径>.obj（根 CMakeLists.txt
+# 里的目标没有 <目标目录>），源路径里的 `__` 是 CMake 对 `..` 的转义。还原出仓根之外的路径、或不是 CMake 对象的形状，返回 $null。
+# 这里只还原路径，不判第一方：JUCE 检出在仓根下时（CI）也会还原成 JUCE/…，是不是第一方由 Test-FirstPartySource 判。
+function Get-ObjectSource([string]$Obj) {
+    $parts = Get-ObjectParts $Obj
+    if ($null -eq $parts) { return $null }
+    # `__` 只在整段是 `__` 时才还原。用前后断言而不消耗分隔符：消耗掉的话相邻的两个 `__`（`__/__/x`）
+    # 共用中间那个 `/`，第二个匹配不上，被还原成 `../__/x`，这个第一方 TU 就被当成仓外文件跳过。
+    $rel = $parts.Src -replace '(?<=^|/)__(?=$|/)', '..'
+    $segs = [System.Collections.Generic.List[string]]::new()
+    foreach ($s in (("$($parts.Dir)/$rel") -split '/')) {
+        # 退到仓根之外就是仓外的文件：不能夹回仓根（夹回去会和仓内同名的路径撞上）
+        if ($s -eq '..') { if (-not $segs.Count) { return $null }; $segs.RemoveAt($segs.Count - 1) }
+        elseif ($s -and $s -ne '.') { $segs.Add($s) }
+    }
+    $segs -join '/'
+}
+
+# 仓内被 git 跟踪的文件，git ls-files -z 的输出（以 NUL 分隔）转成 { 相对仓根、正斜杠的路径 } 的集合；路径不分大小写（Windows）。
+function ConvertTo-TrackedSet([string[]]$Raw) {
+    $set = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in ((@($Raw) -join "`n") -split "`0")) { if ($p) { $null = $set.Add(($p -replace '\\', '/')) } }
+    , $set
+}
+
+# 仓里被 git 跟踪的文件（第一方的判据，见 Test-FirstPartySource）。取不到清单就抛：返回空集会让每个编译单元都被当成非第一方跳过，断言整个失效。
+function Get-TrackedFiles([string]$RepoRoot) {
+    $raw, $code = $null, -1
+    try { $raw = & git -C $RepoRoot ls-files -z 2>$null; $code = $LASTEXITCODE } catch { $null = $_ }
+    if ($code -ne 0) { throw [BuildStop]::new("取不到仓里被 git 跟踪的文件清单（在仓根跑 git ls-files 的退出码是 $code）：第一方编译单元按它判定，没有它没法核对依赖记录", 1) }
+    ConvertTo-TrackedSet $raw
+}
+
+# 第一方源文件 = 仓里被 git 跟踪的文件，不含 third_party/ 下的。不按目录位置判：CI 把 JUCE 检出在仓根下的 JUCE/（没被跟踪），
+# 本机的 JUCE 在仓外，按「文件在不在仓根下」判会把 CI 上的 JUCE 编译单元当成第一方。JUCE 有些编译单元（LV2 的
+# juce_audio_processors_lv2_libs.cpp 等）整个文件包在 #if 里，Windows 上预处理后一个头文件都不进，cl 没有 /showIncludes 行，
+# 依赖个数恒为 0，不是前缀出了问题。尚未 git add 的新文件不算第一方（断言在它被跟踪之后才覆盖到它）。
+function Test-FirstPartySource([string]$Src, $Tracked) {
+    if ($null -eq $Tracked) { throw 'Test-FirstPartySource 要给仓里被 git 跟踪的文件集合' }
+    [bool]$Src -and $Tracked.Contains($Src) -and $Src -notmatch '^third_party/'
+}
+
+# 仓内源文件里有 #include "…" 的（尖括号的是系统或第三方头文件，不算第一方）。
+# 只做文本匹配，不看 #if：带引号的 include 在本平台为假的 #if 里时，预处理后头文件不进来，ninja 记下的依赖个数是 0，这个单元会被判红。
+# 这是有意的取舍，误判的方向是红（看得见，不会放过）：目前被跟踪的第一方编译单元没有这种情形，真出现了，改源文件的结构，
+# 或让这个单元不被当作第一方，都比悄悄放过好。改成只认预处理深度 0 的 include 会走向另一头：带引号的 include 全在「本平台为真」
+# 的 #if 里的单元（例如整个文件包在 #if JUCE_WINDOWS 里）会被整个跳过，它没记下依赖时反而放过真缺陷。
+function Test-SourceHasQuotedInclude([string]$Abs) {
+    if (-not (Test-Path -LiteralPath $Abs -PathType Leaf)) { return $false }
+    foreach ($l in @(Get-Content -LiteralPath $Abs)) {
+        if ($l -match '^\s*#\s*include\s+"') { return $true }
+    }
+    $false
+}
+
+# 第一方编译单元各自都要记下依赖：源文件里有 #include "…" 的，ninja 必须给它记下至少一条。判两遍，判据相同：
+# 先判本次新编的对象，再判 ninja 记录里的每个第一方对象（记录跨构建保留，含之前的构建留下的；本次没新编任何第一方 TU 时就只剩这一遍），
+# 记录里还要至少有一个第一方对象记下依赖。只看「目录里有任意一个目标记了依赖」抓不到「第一方 TU 这次没记依赖」（增量构建里旧记录一直在）；
+# 记录那一遍也不能只要求「有一个第一方对象记了」：断言判红后 ninja 已把那个对象的 #deps 0 写进记录，下一次构建不会重编它。
+# 记录那一遍只判当前配置的：.ninja_deps 整个构建目录（Ninja Multi-Config 的各个配置）共用一份，别的配置（例如 Debug）留下的 #deps 0
+# 不是这次构建的问题，判红也清不掉它（clean 只清 --config 指定的那个配置）。按对象路径里 `.dir/<配置>/` 那一段等于当前配置筛，
+# 没有配置段的路径不算（见 Get-ObjectConfig）。「本次新编」那一遍不用筛：它们来自这次 `--config <当前配置>` 的构建日志。
+# $Objects 是本次新编的对象（构建目录为基准，规范写法），$Counts 是 ninja -t deps 的 { 对象 => 依赖个数 }（键也是规范写法，
+# 见 Get-DepsCounts），$RepoRoot 是仓根，$Tracked 是仓里被 git 跟踪的文件的集合（Get-TrackedFiles）：第一方就是它里面的源文件，
+# 见 Test-FirstPartySource。$ConfigName 是这次构建的配置（脚本的 -Config；形参不能叫 $Config，会遮住脚本参数）。
+# 返回错误文字，都记下了返回空。
+function Test-FirstPartyDeps([string[]]$Objects, $Counts, [string]$RepoRoot, $Tracked, [string]$ConfigName) {
+    if (-not $ConfigName) { throw 'Test-FirstPartyDeps 要给这次构建的配置名' }
+    $bad = [System.Collections.Generic.List[string]]::new()
+    foreach ($obj in $Objects) {
+        $src = Get-ObjectSource $obj
+        # 不是第一方的（JUCE、第三方、生成的、仓外的）跳过；没有第一方头文件要记的 TU（源文件里没有带引号的 include）也跳过
+        if (-not (Test-FirstPartySource $src $Tracked)) { continue }
+        if (-not (Test-SourceHasQuotedInclude (Join-Path $RepoRoot $src))) { continue }
+        $n = 0
+        if ($Counts.ContainsKey($obj)) { $n = $Counts[$obj] }
+        if ($n -lt 1) { $bad.Add("$src（$obj）") }
+    }
+    if ($bad.Count) {
+        return "本次新编的第一方编译单元没有记下头文件依赖：$($bad -join '、')"
+    }
+    # 再按记录逐个查，判据与上面「本次新编」那一支相同：记录里的每个第一方对象，源文件有带引号的 include 的都要记下依赖。
+    # 不能只要求「记录里有一个第一方对象记了依赖」：构建后断言判红时，ninja 已把没记依赖的对象的 #deps 0 写进 .ninja_deps，
+    # 那个对象是最新的，下一次增量构建一个都不编，别的单元记下的依赖会让「有一个就行」放过它；只重编了几个别的单元时也一样。
+    # 记录跨构建保留，所以这一步对本次新编的、之前留下的第一方对象一视同仁。
+    $stale = [System.Collections.Generic.List[string]]::new()
+    $recorded = $false
+    foreach ($obj in ($Counts.Keys | Sort-Object)) {
+        if ((Get-ObjectConfig $obj) -ne $ConfigName) { continue }   # 不分大小写：-Config 的取值不分大小写，Windows 的目录也不分
+        $src = Get-ObjectSource $obj
+        if (-not (Test-FirstPartySource $src $Tracked)) { continue }
+        if ($Counts[$obj] -ge 1) { $recorded = $true; continue }
+        if (Test-SourceHasQuotedInclude (Join-Path $RepoRoot $src)) { $stale.Add("$src（$obj）") }
+    }
+    if ($stale.Count) {
+        return "ninja 的记录里这些第一方编译单元（配置 ${ConfigName}）没有记下头文件依赖（多半是上一次构建的断言判红时留下的：对象是最新的，增量构建不会重编它们）：$($stale -join '、')；" +
+        "查明原因后 clean 当前配置的目标再构建（cmake --build <构建目录> --config $ConfigName --target clean）"
+    }
+    if ($recorded) { return '' }
+    "ninja -t deps 里没有任何一个配置 $ConfigName 的第一方对象记下头文件依赖：只改 .h 时含它的编译单元不会重编"
+}
+
+# 核对通过的前缀（Latin-1 字符串）的十六进制，记在构建目录的 rinne-deps-prefix-<配置>.txt 里。
+function Get-DepsPrefixHex([string]$Prefix) { [BitConverter]::ToString([Text.Encoding]::Latin1.GetBytes("$Prefix")) }
+
+# 记录缺失或与这次核对通过的前缀不同，就要 clean：旧目标文件可能没有依赖记录。
+function Test-DepsNeedClean($Recorded, [string]$Verified) { $null -eq $Recorded -or $Recorded -cne $Verified }
+
+# 读记录文件（核对通过的前缀的十六进制）。0 字节的文件（写的时候进程被杀）读出来是 $null：直接对它 .Trim() 会抛
+# RuntimeException（catch [BuildStop] 接不住，之后每次构建都失败且不自愈）。空值与全是空白都按「没有记录」处理（触发一次 clean）。
+function Read-DepsMarker([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $raw = Get-Content -LiteralPath $Path -Raw
+    if ($null -eq $raw) { return $null }
+    $text = $raw.Trim()
+    $text ? $text : $null
+}
+
+# 决定要不要 clean（前缀修过一次，或记录缺失、为空、不同），再把这次核对通过的前缀记下来。clean 失败就抛，记录不更新，下次还会 clean。
+# $Resolved 是 Resolve-DepsPrefix 的返回值，$Verified 是这次核对通过的前缀的十六进制，$Clean 是执行 clean 的脚本块。
+function Sync-DepsMarker($Resolved, [string]$MarkerFile, [string]$Verified, [scriptblock]$Clean) {
+    $recorded = Read-DepsMarker $MarkerFile
+    if ($Resolved.Clean -or (Test-DepsNeedClean $recorded $Verified)) { & $Clean }
+    Set-Content -LiteralPath $MarkerFile -Value $Verified
+}
+
+# 构建后的依赖断言：ninja -t deps 里至少一个目标记下依赖，且本次新编的第一方编译单元各自都记下，否则抛 BuildStop。
+# 记录里只判 $ConfigName（这次构建的配置）的对象，见 Test-FirstPartyDeps。
+function Assert-DepsAfterBuild([string[]]$DepsLines, [string[]]$BuildLines, [string]$RepoRoot, $Tracked, [string]$ConfigName) {
+    $noDeps = Test-DepsRecorded $DepsLines
+    if ($noDeps) { throw [BuildStop]::new($noDeps, 1) }
+    $bad = Test-FirstPartyDeps (Get-BuiltObjects $BuildLines) (Get-DepsCounts $DepsLines) $RepoRoot $Tracked $ConfigName
+    if ($bad) { throw [BuildStop]::new($bad, 1) }
+}
+
+# 每次配置显式表态要不要带覆盖文件（见头部注释）：文件在就 -D；不在就 -U，cache 里还记着它时附一行说明。返回 @{ Arg; Note }。
+function Get-ProjectIncludeArg([string]$OverrideFile, [string]$CacheText) {
+    if (Test-Path -LiteralPath $OverrideFile -PathType Leaf) { return @{ Arg = "-DCMAKE_PROJECT_INCLUDE=$OverrideFile"; Note = '' } }
+    $cached = Get-CacheValue $CacheText 'CMAKE_PROJECT_INCLUDE'
+    $note = ''
+    if ($cached) {
+        $note = "CMakeCache.txt 里还记着覆盖文件 $cached，但它不在了：这次配置带 -UCMAKE_PROJECT_INCLUDE 清掉那条记录，" +
+        '前缀按无覆盖重新探测，对不上再重写覆盖文件（不清掉的话 cmake 会在 project() 处失败）'
+    }
+    @{ Arg = '-UCMAKE_PROJECT_INCLUDE'; Note = $note }
+}
+
+# 用一个两行的探针编译单元（写在构建目录的 logs 下）按本进程的环境跑 cl，取它的 /showIncludes 前缀（Latin-1 字符串）；
+# 失败时 $script:ProbeError 记原因并返回 $null。
+# 探针跑的命令要与第一方目标一致：第一方目标带 /utf-8（cmake/RinneWarnings.cmake），CI 上还经 launcher（sccache）跑。
+# $Extra 是额外加的编译开关（/utf-8），$CacheLauncher 是编译缓存（经它跑时命令变成 launcher cl …；形参不叫 $Launcher，与脚本参数同名会遮住它）。
+function Invoke-ClProbe([string[]]$Extra, [string]$CacheLauncher) {
+    $dir = Join-Path $script:LogDir 'prefix-probe'
+    $null = New-Item -ItemType Directory -Force -Path $dir
+    Set-Content -LiteralPath (Join-Path $dir 'probe.h') -Value '#define RINNE_PROBE_H 1'
+    Set-Content -LiteralPath (Join-Path $dir 'probe.cpp') -Value '#include "probe.h"'
+    $log = Join-Path $dir 'cl.log'
+    $exe = 'cl.exe'
+    $clArgs = @('/nologo', '/showIncludes', '/c') + $Extra + @((Join-Path $dir 'probe.cpp'), "/Fo$(Join-Path $dir 'probe.obj')")
+    if ($CacheLauncher) { $exe = $CacheLauncher; $clArgs = @('cl.exe') + $clArgs }
+    $code = Invoke-Logged $exe $clArgs $log 120
+    if ($code -ne 0) { return @{ Error = "cl 探针编译退出码 $code（日志 $log）" } }
+    @{ Prefix = Get-ClIncludePrefix (ConvertFrom-Latin1 ([IO.File]::ReadAllBytes($log))) 'probe.h' }
+}
+
+# 探针几种跑法得到的前缀必须一致：与第一方目标跑的命令一致才算数。返回错误文字，一致返回空。
+function Test-ProbeRunsAgree([string[]]$Labels, [string[]]$Prefixes) {
+    if (@($Prefixes | Select-Object -Unique).Count -le 1) { return '' }
+    'cl 探针的几种跑法得到的前缀不一致：' + (@(0..($Prefixes.Count - 1) | ForEach-Object { "$($Labels[$_])=「$(ConvertTo-Display $Prefixes[$_])」" }) -join '；')
+}
+
+# 探针的跑法：带 /utf-8、不带 /utf-8，给了 -Launcher 时再经它跑一次。返回 cl 的前缀（Latin-1 字符串）；
+# 失败时 $script:ProbeError 记原因并返回 $null（探针自己没跑起来、输出里没有那条 include 行、几种跑法的前缀不一致都算探针出错）。
+function Get-ProbedClPrefix {
+    $script:ProbeError = ''
+    $runs = @(@{ Label = '带 /utf-8'; Extra = @('/utf-8'); Launcher = '' }, @{ Label = '不带 /utf-8'; Extra = @(); Launcher = '' })
+    if ($Launcher) { $runs += @{ Label = '经编译缓存'; Extra = @('/utf-8'); Launcher = $Launcher } }
+    $labels, $prefixes = @(), @()
+    foreach ($run in $runs) {
+        $r = Invoke-ClProbe $run.Extra $run.Launcher
+        if ($r.Error) { $script:ProbeError = "cl 探针（$($run.Label)）没跑起来：$($r.Error)"; return $null }
+        if ($null -eq $r.Prefix) { $script:ProbeError = "cl 探针（$($run.Label)）的输出里找不到 /showIncludes 行"; return $null }
+        $labels += $run.Label
+        $prefixes += $r.Prefix
+    }
+    $disagree = Test-ProbeRunsAgree $labels $prefixes
+    if ($disagree) { $script:ProbeError = $disagree; return $null }
+    $prefixes[0]
+}
+
+# 构建目录的 rules.ninja 与 cl 探针核对。返回 @{ Problem; ProbeError; ClPrefix }：
+# ProbeError 非空是探针自己出错（与前缀无关，调用方要分开报错，不能走「删编译器信息重配」那条路）；
+# Problem 非空是前缀对不上；ClPrefix 是这次探到的 cl 前缀（写覆盖文件时要用）。
+function Get-DepsPrefixStatus {
+    $cl = Get-ProbedClPrefix
+    if ($script:ProbeError) { return @{ Problem = ''; ProbeError = $script:ProbeError; ClPrefix = $null } }
+    $problem = Test-ShowIncludesPrefix (Get-NinjaDepsPrefix (Join-Path $BuildDir 'CMakeFiles/rules.ninja')) $cl
+    @{ Problem = $problem; ProbeError = ''; ClPrefix = $cl }
+}
+
+# 前缀对不上时的修复流程（纯函数：只按探针与配置的结果决定下一步，跑 cmake 与写文件交给传入的脚本块）。
+# $ProbeStep 返回 @{ Problem; ProbeError; ClPrefix }（形参不叫 $Probe：与脚本开关 -Probe 同名，动态作用域里会遮住下游读到的 $Probe）；
+# $Configure 参数是覆盖文件路径（$null = 不带覆盖重配，要真的重新探测），返回同样的形状；
+# $Clear 清掉构建目录里缓存的编译器探测结果；$WriteOverride 参数是 cl 实测的前缀，返回写出的覆盖文件路径
+# （前缀不能写成 cmake 字符串时返回 $null）。
+# 返回 @{ Clean; Override }：Clean 是要不要 clean 一次（旧目标文件没有依赖记录）。
+# 探针自己失败与「前缀对不上」分开报错：探针失败不重配、不清探测。覆盖之后仍对不上就抛 BuildStop。
+function Resolve-DepsPrefix {
+    param([scriptblock]$ProbeStep, [scriptblock]$Configure, [scriptblock]$Clear, [scriptblock]$WriteOverride)
+    $s = & $ProbeStep
+    if ($s.ProbeError) { throw [BuildStop]::new("cl 探针出错，与前缀对不对上无关，所以不清探测也不重配：$($s.ProbeError)", 1) }
+    if (-not $s.Problem) { return @{ Clean = $false; Override = $null } }
+    & $Clear
+    $s = & $Configure $null
+    if ($s.ProbeError) { throw [BuildStop]::new("重配后 cl 探针出错：$($s.ProbeError)", 1) }
+    if (-not $s.Problem) { return @{ Clean = $true; Override = $null } }
+    $file = & $WriteOverride $s.ClPrefix
+    if (-not $file) { throw [BuildStop]::new("重配后头文件依赖前缀仍对不上，cl 的前缀也不能写成 cmake 字符串：$($s.Problem)", 1) }
+    $s = & $Configure $file
+    if ($s.ProbeError) { throw [BuildStop]::new("覆盖后 cl 探针出错：$($s.ProbeError)", 1) }
+    if ($s.Problem) { throw [BuildStop]::new("覆盖之后头文件依赖前缀仍对不上：$($s.Problem)", 1) }
+    @{ Clean = $true; Override = $s.ClPrefix }
+}
+
+# 覆盖用的 cmake 文件的内容：$ClPrefix（Latin-1 字符串）必须是干净的 UTF-8 文本，且不含 cmake 字符串里要转义的字符；
+# 否则返回 $null。文件按 UTF-8 写，cmake 原样写进 rules.ninja，字节就与 cl 输出的一致。
+function Get-PrefixOverride([string]$ClPrefix) {
+    if (-not $ClPrefix.Trim() -or $ClPrefix -match '["\\$;\[\]\x00-\x1f]') { return $null }
+    try { $text = [Text.UTF8Encoding]::new($false, $true).GetString([Text.Encoding]::Latin1.GetBytes($ClPrefix)) } catch { return $null }
+    "# 由 build.ps1 按本次 cl 实际输出生成：CMake 解码 cl 输出的代码页与 cl 编码用的不同时，探测到的 /showIncludes 前缀是乱码，这里改正。`n" +
+    "foreach(lang C CXX)`n    set(CMAKE_`${lang}_CL_SHOWINCLUDES_PREFIX `"$text`")`nendforeach()`nset(CMAKE_CL_SHOWINCLUDES_PREFIX `"$text`")`n"
+}
+
+# 清掉构建目录里缓存的编译器探测结果（CMakeFiles/<版本>/ 下 C 与 CXX 的编译器信息文件，只删这两个文件、不递归），下次配置会重新探测。
+function Clear-CompilerProbe {
+    $cmakeFiles = Join-Path $BuildDir 'CMakeFiles'
+    foreach ($d in @(Get-ChildItem -LiteralPath $cmakeFiles -Directory -ErrorAction SilentlyContinue)) {
+        foreach ($n in 'CMakeCCompiler.cmake', 'CMakeCXXCompiler.cmake') {
+            $f = Join-Path $d.FullName $n
+            if (Test-Path -LiteralPath $f -PathType Leaf) { Remove-Item -LiteralPath $f }
+        }
+    }
+}
+
 # CI 与发布构建的段名前缀必须是默认值：返回错误文字，对上了返回空。
 function Test-CachePrefix([string]$CacheText) {
     $have, $want = (Get-CacheValue $CacheText 'RINNE_SHM_PREFIX'), (Get-CacheValue $CacheText 'RINNE_SHM_PREFIX_DEFAULT')
@@ -237,13 +580,52 @@ function Invoke-Build([string]$Flavor) {
     Remove-Item -LiteralPath $script:StampFile -ErrorAction SilentlyContinue
     $env:VSLANG = '1033'
     Enter-MsvcShell
+    $env:VSLANG = '1033'
     $prefix = Get-ShmPrefix $Flavor
     $cfg = @('-S', $Root, '-B', $BuildDir, '-G', 'Ninja Multi-Config', "-DCMAKE_CONFIGURATION_TYPES=$Config", "-DCMAKE_MAKE_PROGRAM=$ninjaExe",
         '-DCMAKE_C_COMPILER=cl', '-DCMAKE_CXX_COMPILER=cl', "-DJUCE_PATH=$juce", "-DRINNE_PROBE_BUILD=$($Probe ? 'ON' : 'OFF')", "-DRINNE_BUILD_LABEL=$BuildLabel")
     # CI 不传前缀、先删掉 cache 里的旧值，让根 CMakeLists.txt 的默认值生效；本机显式给 D 或 P
     $cfg += ($Flavor -eq 'ci') ? '-URINNE_SHM_PREFIX' : "-DRINNE_SHM_PREFIX=$prefix"
     if ($Launcher) { $cfg += "-DCMAKE_C_COMPILER_LAUNCHER=$Launcher", "-DCMAKE_CXX_COMPILER_LAUNCHER=$Launcher" }
-    $null = Invoke-Step 'configure' 'cmake' $cfg 1800
+    # 覆盖文件是持久的（-DCMAKE_PROJECT_INCLUDE 写进 cache 后一直有效）：每次配置都显式表态，文件在就传 -D、不在就传 -U。
+    # cache 里还记着覆盖文件而文件没了：-U 把那条记录清掉（不清的话 cmake 在 project() 处报一个看不懂的错），这里说一声。
+    $overrideFile = Join-Path $BuildDir 'rinne-showincludes-prefix.cmake'
+    $cacheFile = Join-Path $BuildDir 'CMakeCache.txt'
+    $includeArg = Get-ProjectIncludeArg $overrideFile ((Test-Path -LiteralPath $cacheFile -PathType Leaf) ? (Get-Content -LiteralPath $cacheFile -Raw) : '')
+    if ($includeArg.Note) { Write-Host $includeArg.Note }
+    $null = Invoke-Step 'configure' 'cmake' ($cfg + $includeArg.Arg) 1800
+    # 头文件依赖的前缀对不上：先清掉编译器探测结果重配（这一步不带覆盖，要真的重新探测），仍不行就用 cl 实测的前缀覆盖；
+    # 旧目标文件没有依赖记录，clean 一次让它们全部重编。探针自己失败与前缀对不上分开报错。
+    $probeStatus = {
+        $s = Get-DepsPrefixStatus
+        if ($s.Problem) { Write-Host "头文件依赖前缀对不上：$($s.Problem)" }
+        $s
+    }
+    $configure = {
+        param($file)
+        $cmakeArgs = $cfg + ($file ? "-DCMAKE_PROJECT_INCLUDE=$file" : '-UCMAKE_PROJECT_INCLUDE')
+        $null = Invoke-Step ($file ? 'configure-override' : 'configure-retry') 'cmake' $cmakeArgs 1800
+        Get-DepsPrefixStatus
+    }
+    $clear = {
+        Write-Host '清掉编译器探测结果后重配'
+        Clear-CompilerProbe
+    }
+    $writeOverride = {
+        param($clPrefix)
+        $override = Get-PrefixOverride $clPrefix
+        if ($null -eq $override) { return $null }
+        Write-Host '改用 cl 实测的前缀覆盖'
+        $file = Join-Path $BuildDir 'rinne-showincludes-prefix.cmake'
+        [IO.File]::WriteAllText($file, $override, [Text.UTF8Encoding]::new($false))
+        $file
+    }
+    $resolved = Resolve-DepsPrefix $probeStatus $configure $clear $writeOverride
+    # 核对通过的前缀记在构建目录里；没有记录（含 0 字节的残留文件）或记录的前缀不同，说明这个目录里的目标文件可能是前缀对不上时
+    # 编的（#deps 0，改头文件不会重编，哪怕别的目标有依赖，断言也看不出来），clean 一次
+    $verified = Get-DepsPrefixHex (Get-NinjaDepsPrefix (Join-Path $BuildDir 'CMakeFiles/rules.ninja'))
+    $clean = { $null = Invoke-Step 'clean' 'cmake' @('--build', $BuildDir, '--config', $Config, '--target', 'clean') 1800 }
+    Sync-DepsMarker $resolved (Join-Path $BuildDir "rinne-deps-prefix-$Config.txt") $verified $clean
     $cache = Get-Content -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt') -Raw
     $got = Get-CacheValue $cache 'RINNE_SHM_PREFIX'
     if ($got -cne $prefix) { throw [BuildStop]::new("配置后的 RINNE_SHM_PREFIX 是 $got，本次应当是 $prefix", 1) }
@@ -251,6 +633,10 @@ function Invoke-Build([string]$Flavor) {
     $b = @('--build', $BuildDir, '--config', $Config)
     if ($script:Jobs -gt 0) { $b += '--parallel', "$($script:Jobs)" }
     $log = Invoke-Step 'build' 'cmake' $b 5400
+    $depsLines = Get-LogLines (Invoke-Step 'ninja-deps' $ninjaExe @('-C', $BuildDir, '-t', 'deps') 600)
+    # 本次新编的第一方编译单元各自都要记下依赖：只看「有任意一个目标记了依赖」抓不到「第一方 TU 这次没记」。
+    $tracked = Get-TrackedFiles $Root
+    Assert-DepsAfterBuild $depsLines (Get-LogLines $log) $Root $tracked $Config
     $warnings = @(Get-FirstPartyWarnings (Get-LogLines $log) $Root @($juce, $BuildDir))
     if ($warnings.Count) {
         $warnings | ForEach-Object { Write-Host "    $_" }
@@ -273,9 +659,17 @@ function Get-BuildRecord([string]$Flavor) {
     $r
 }
 
+# 钉版文件里的版本号（去掉开头的 v）。文件是空的时 Get-Content -Raw 返回 $null，直接 .Trim() 会抛 RuntimeException，
+# 这里先转成字符串，空版本号抛 BuildStop。
+function Read-PinnedVersion([string]$Path) {
+    $v = "$(Get-Content -LiteralPath $Path -Raw)".Trim() -replace '^v', ''
+    if (-not $v) { throw [BuildStop]::new("$(Split-Path -Leaf $Path) 是空的：钉版文件必须写版本号", 1) }
+    $v
+}
+
 function Invoke-Pluginval([string[]]$Bundles, [bool]$Gui) {
     $pv = Get-Setting $Pluginval 'RINNE_PLUGINVAL' 'rinne.pluginval' 'pluginval'
-    $want = (Get-Content -LiteralPath (Join-Path $Root '.pluginval-version') -Raw).Trim() -replace '^v', ''
+    $want = Read-PinnedVersion (Join-Path $Root '.pluginval-version')
     $vlog = Invoke-Step 'pluginval-version' $pv @('--version') 120
     if (-not ((Get-LogLines $vlog) -join "`n" -match "(?<![\d.])$([regex]::Escape($want))(?![\d.])")) {
         throw [BuildStop]::new("pluginval 不是钉版的 $want（.pluginval-version）", 1)
@@ -301,6 +695,32 @@ function Invoke-Stage([string[]]$Bundles) {
     Write-Host "已拷到 $Stage：$($Bundles.Count) 个插件、$($tools.Count) 个工具"
 }
 
+# 与脚本参数同名的变量（PowerShell 的变量名不分大小写），两种写法都会经动态作用域盖住下游读到的脚本参数：
+# 给它赋值（`$probe = {…}` 把 -Probe 开关盖成脚本块），或把它声明成形参（`param([scriptblock]$Probe)`）。
+# 返回每处的 @{ Line; Kind }（Kind 是「赋值」或「形参」）。脚本自己的 param 块不算；赋值只查函数体里的，形参查整个文件。
+function Get-ScriptParamShadows([Management.Automation.Language.ScriptBlockAst]$Ast) {
+    $names = @($Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+    $named = { param($v) $v -is [Management.Automation.Language.VariableExpressionAst] -and $names -contains $v.VariablePath.UserPath }
+    $assigned = {
+        param($a)
+        if ($a -isnot [Management.Automation.Language.AssignmentStatementAst]) { return $false }
+        $targets = $a.Left -is [Management.Automation.Language.ArrayLiteralAst] ? $a.Left.Elements : @($a.Left)
+        @($targets | Where-Object { & $named $_ }).Count -gt 0
+    }
+    $declared = {
+        param($p)
+        $p -is [Management.Automation.Language.ParameterAst] -and -not [object]::ReferenceEquals($p.Parent, $Ast.ParamBlock) -and
+        $names -contains $p.Name.VariablePath.UserPath
+    }
+    $found = [System.Collections.Generic.List[object]]::new()
+    foreach ($f in $Ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        foreach ($a in $f.Body.FindAll($assigned, $true)) { $found.Add(@{ Line = $a.Extent.StartLineNumber; Kind = '赋值' }) }
+    }
+    foreach ($p in $Ast.FindAll($declared, $true)) { $found.Add(@{ Line = $p.Extent.StartLineNumber; Kind = '形参' }) }
+    # 嵌套函数会被外层函数的 FindAll 再扫一遍，按行与种类去重
+    @($found | Sort-Object { $_.Line }, { $_.Kind } -Unique)
+}
+
 # 自测：纯判据逐条给正反例；另起子进程核对两件只有真跑才看得出的事：构建留下的长命子进程不拖住调用方的管道，
 # 调用方持槽的标记生效、残留的标记不生效。
 function Invoke-SelfTest {
@@ -316,11 +736,402 @@ function Invoke-SelfTest {
     & $check '告警归属：仓内第一方与无源文件的链接器告警算，JUCE、构建目录、third_party/、仓外与 error 不算' $true ($w.Count -eq 3 -and
         $w[0] -match 'InputProcessor' -and $w[1] -match 'LNK4098' -and $w[2] -match 'OutputProcessor')
     & $check '告警归属：没有告警时为空' $false (-not @(Get-FirstPartyWarnings @($lines[1], $lines[2]) $r @($j, $bd)).Count)
-    $formal, $probe = (Get-ExpectedBundles $false), (Get-ExpectedBundles $true)
+    # 头文件依赖的前缀：ninja 按字节比，同一句话换了编码也对不上
+    $zh = [Text.Encoding]::UTF8.GetBytes('注意: 包含文件:')
+    $rules, $okLine = (ConvertFrom-Latin1 $zh), (ConvertFrom-Latin1 ($zh + [byte[]]@(32, 32)))
+    $gbk = [byte[]]@(0xD7, 0xA2, 0xD2, 0xE2, 0x3A, 0x20, 0xB0, 0xFC, 0xBA, 0xAC, 0xCE, 0xC4, 0xBC, 0xFE, 0x3A, 0x20, 0x20)   # 「注意: 包含文件:  」的 GBK 字节，不是合法 UTF-8
+    $moji = ConvertFrom-Latin1 ([Text.Encoding]::UTF8.GetBytes((ConvertFrom-Latin1 $zh)))
+    & $check '依赖前缀：rules.ninja 与 cl 的输出一致（cl 多出的空白不碍事）' $false (-not (Test-ShowIncludesPrefix $rules $okLine))
+    & $check '依赖前缀：二次编码的乱码前缀（别的语言或编码下配置时留下的）对不上 cl 的输出' $true (Test-ShowIncludesPrefix $moji $okLine)
+    & $check '依赖前缀：英文前缀对不上中文的 cl 输出' $true (Test-ShowIncludesPrefix 'Note: including file:' $okLine)
+    & $check '依赖前缀：cl 的前缀比 rules.ninja 的多出别的字符' $true (Test-ShowIncludesPrefix $rules ($okLine + 'x'))
+    & $check '依赖前缀：rules.ninja 没有前缀（null）：判红，理由是没有 msvc_deps_prefix，哪怕 cl 的输出是空的' $true ((Test-ShowIncludesPrefix $null $okLine) -match '没有 msvc_deps_prefix' -and (Test-ShowIncludesPrefix $null '') -match '没有 msvc_deps_prefix')
+    & $check '依赖前缀：rules.ninja 的前缀全是空白：判红，哪怕 cl 的输出开头恰好也是这些空白' $true ((Test-ShowIncludesPrefix '  ' $okLine) -match '没有 msvc_deps_prefix' -and (Test-ShowIncludesPrefix '  ' '  ') -match '没有 msvc_deps_prefix')
+    & $check '依赖前缀：探针输出里找不到 /showIncludes 行' $true (Test-ShowIncludesPrefix $rules $null)
+    $rf = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-rules-$PID-$(Get-Random).ninja"
+    [IO.File]::WriteAllBytes($rf, [byte[]]([Text.Encoding]::ASCII.GetBytes("rule CXX`r`n  command = cl`r`n  msvc_deps_prefix = ") + $zh + [Text.Encoding]::ASCII.GetBytes("  `r`n  deps = msvc`r`n")))
+    try { $got = Get-NinjaDepsPrefix $rf } finally { Remove-Item -LiteralPath $rf }
+    & $check '依赖前缀：从 rules.ninja 按字节读出 msvc_deps_prefix（含行尾空白，不含换行）' $false ($got -ceq ($rules + '  '))
+    $out = "probe.cpp`r`n$(ConvertFrom-Latin1 ($zh + [byte[]]@(32, 32)))C:\x\logs\probe.h`r`n"
+    & $check '依赖前缀：从 cl 输出里取 /showIncludes 行的路径前缀' $false ((Get-ClIncludePrefix $out 'probe.h') -ceq ($rules + '  '))
+    $unc = { param($path) Get-ClIncludePrefix "x`r`n$(ConvertFrom-Latin1 $zh)  $path`r`n" 'probe.h' }
+    & $check '依赖前缀：UNC 路径与 \\?\ 长路径的 include 行也取得到' $false (((& $unc '\\srv\share\logs\probe.h') -ceq ($rules + '  ')) -and ((& $unc '\\?\C:\x\probe.h') -ceq ($rules + '  ')))
+    & $check '依赖前缀：cl 输出里没有那条 include 行时取不到' $false ($null -eq (Get-ClIncludePrefix "probe.cpp`r`n" 'probe.h'))
+    $ov = Get-PrefixOverride $rules
+    & $check '依赖前缀覆盖：干净的 UTF-8 前缀生成 cmake 文件，C、CXX 与通用变量都设' $false ($ov -match 'foreach\(lang C CXX\)' -and $ov -match '\$\{lang\}_CL_SHOWINCLUDES_PREFIX' -and $ov.Contains((ConvertTo-Display $rules)))
+    & $check '依赖前缀覆盖：不是合法 UTF-8 的前缀（GBK 字节）不覆盖' $true ($null -eq (Get-PrefixOverride (ConvertFrom-Latin1 $gbk)))
+    & $check '依赖前缀覆盖：含引号、反斜杠、美元符或空的前缀不覆盖' $true (-not ((Get-PrefixOverride 'a"b: ') -or (Get-PrefixOverride 'a\b: ') -or (Get-PrefixOverride 'a$b: ') -or (Get-PrefixOverride '  ')))
+    & $check '依赖记录：没有记录要 clean' $true (Test-DepsNeedClean $null 'AA-BB')
+    & $check '依赖记录：记录的前缀与这次的不同要 clean' $true (Test-DepsNeedClean 'AA-BB' 'AA-CC')
+    & $check '依赖记录：记录与这次相同不 clean' $false (-not (Test-DepsNeedClean 'AA-BB' 'AA-BB'))
+    & $check '依赖记录：前缀转十六进制按字节' $false ((Get-DepsPrefixHex 'a:') -ceq '61-3A')
+    & $check 'ninja -t deps：有目标记下依赖' $false (-not (Test-DepsRecorded @('a.obj: #deps 3, deps mtime 1 (VALID)', '    ../a.h')))
+    & $check 'ninja -t deps：全是 #deps 0（前缀对不上时的样子）' $true (Test-DepsRecorded @('a.obj: #deps 0, deps mtime 1 (VALID)', 'b.obj: #deps 0, deps mtime 2 (VALID)'))
+    & $check 'ninja -t deps：什么都没输出' $true (Test-DepsRecorded @())
+    # 前缀之后只容忍空格：ninja 只跳过 0x20，Tab、换行、0x85、0xA0 都会让路径记错
+    & $check '依赖前缀：cl 多出的空白只认空格' $true (Test-ShowIncludesPrefix $rules ($okLine + "`t"))
+    & $check '依赖前缀：cl 多出的 Latin-1 0xA0 不算空白' $true (Test-ShowIncludesPrefix $rules ($okLine + [char]0xA0))
+    & $check '依赖前缀：cl 多出的 0x85 不算空白' $true (Test-ShowIncludesPrefix $rules ($okLine + [char]0x85))
+    & $check '依赖前缀：cl 多出的换行不算空白' $true (Test-ShowIncludesPrefix $rules ($okLine + "`r`n"))
+    & $check '依赖前缀：cl 多出的末尾单个 LF 不算空白（正则的 $ 会放过它，要用 \z）' $true (Test-ShowIncludesPrefix $rules ($okLine + "`n"))
+    & $check '依赖前缀：cl 多出的 VT 不算空白' $true (Test-ShowIncludesPrefix $rules ($okLine + [char]0x0B))
+    & $check '依赖前缀：cl 多出的只是空格时对得上' $false (-not (Test-ShowIncludesPrefix $rules ($okLine + '  ')))
+    # 探针几种跑法的前缀必须一致
+    & $check '探针一致性：几种跑法的前缀相同' $false (-not (Test-ProbeRunsAgree @('带 /utf-8', '不带 /utf-8') @($rules, $rules)))
+    $disagree = Test-ProbeRunsAgree @('带 /utf-8', '不带 /utf-8', '经编译缓存') @($rules, $rules, $moji)
+    & $check '探针一致性：其中一种跑法的前缀不同时判红，文字里列出每种跑法的前缀' $true ($disagree -and $disagree.Contains('经编译缓存=') -and $disagree.Contains((ConvertTo-Display $moji)))
+    # 记录文件是 0 字节时按「没有记录」处理：Get-Content -Raw 对空文件返回 $null，直接 .Trim() 会抛 RuntimeException
+    $emptyMarker = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-marker-$PID-$(Get-Random).txt"
+    Set-Content -LiteralPath $emptyMarker -Value '' -NoNewline
+    $emptyRaw = Get-Content -LiteralPath $emptyMarker -Raw
+    & $check '依赖记录：0 字节的记录文件读出来是 $null，不是空串' $false ($null -eq $emptyRaw)
+    & $check '依赖记录：0 字节的记录文件按「没有记录」处理（要 clean）' $true (Test-DepsNeedClean (Read-DepsMarker $emptyMarker) 'AA-BB')
+    & $check '依赖记录：0 字节的记录文件不会在 .Trim() 上抛异常' $false ($null -eq (Read-DepsMarker $emptyMarker))
+    $okMarker = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-marker-ok-$PID-$(Get-Random).txt"
+    Set-Content -LiteralPath $okMarker -Value 'AA-BB'
+    & $check '依赖记录：正常的记录文件读出前缀十六进制' $false ((Read-DepsMarker $okMarker) -ceq 'AA-BB')
+    & $check '依赖记录：没有记录文件时按「没有记录」处理' $true (Test-DepsNeedClean (Read-DepsMarker ($okMarker + '.missing')) 'AA-BB')
+    Set-Content -LiteralPath $emptyMarker -Value "  `r`n" -NoNewline
+    & $check '依赖记录：全是空白的记录文件按「没有记录」处理' $false ($null -eq (Read-DepsMarker $emptyMarker))
+    Remove-Item -LiteralPath $emptyMarker, $okMarker -ErrorAction SilentlyContinue
+    # 钉版文件：空文件不能在 .Trim() 上抛 RuntimeException
+    $pinFile = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-pin-$PID-$(Get-Random).txt"
+    Set-Content -LiteralPath $pinFile -Value "v3.4.5`n" -NoNewline
+    & $check '钉版文件：去掉开头的 v 与末尾换行' $false ((Read-PinnedVersion $pinFile) -ceq '3.4.5')
+    Set-Content -LiteralPath $pinFile -Value '' -NoNewline
+    $pinMsg = ''
+    try { $null = Read-PinnedVersion $pinFile } catch [BuildStop] { $pinMsg = $_.Exception.Message }
+    & $check '钉版文件：空文件抛 BuildStop（不是 RuntimeException）' $true ($pinMsg -match '是空的')
+    Remove-Item -LiteralPath $pinFile -ErrorAction SilentlyContinue
+    # 记录文件与 clean 的接线：每删掉一处，下面对应的用例都要变红
+    $syncDir = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-sync-$PID-$(Get-Random)"
+    $null = New-Item -ItemType Directory -Path $syncDir
+    $syncMarker = Join-Path $syncDir 'marker.txt'
+    # $Recorded：$null 没有记录文件，字符串是文件内容；返回 clean 了几次、之后记录文件里的内容、有没有抛异常
+    $sync = {
+        param([bool]$ResolvedClean, $Recorded, [scriptblock]$Clean = { $script:Cleaned++ })
+        Remove-Item -LiteralPath $syncMarker -ErrorAction SilentlyContinue
+        if ($null -ne $Recorded) { Set-Content -LiteralPath $syncMarker -Value $Recorded -NoNewline }
+        $script:Cleaned = 0
+        $err = ''
+        try { Sync-DepsMarker @{ Clean = $ResolvedClean } $syncMarker 'AA-BB' $Clean } catch { $err = "$($_.Exception.Message)" }
+        $after = (Test-Path -LiteralPath $syncMarker) ? "$(Get-Content -LiteralPath $syncMarker -Raw)".Trim() : $null
+        @{ Cleaned = $script:Cleaned; After = $after; Error = $err }
+    }
+    $s = & $sync $false 'AA-BB'
+    & $check '记录接线：记录与这次相同、前缀没修过：不 clean' $false ($s.Cleaned -eq 0 -and $s.After -ceq 'AA-BB' -and -not $s.Error)
+    $s = & $sync $false $null
+    & $check '记录接线：没有记录文件：clean 一次并写下记录' $true ($s.Cleaned -eq 1 -and $s.After -ceq 'AA-BB')
+    $s = & $sync $false ''
+    & $check '记录接线：记录文件是 0 字节：clean 一次、写下记录、不抛异常' $true ($s.Cleaned -eq 1 -and $s.After -ceq 'AA-BB' -and -not $s.Error)
+    $s = & $sync $false 'AA-CC'
+    & $check '记录接线：记录的前缀与这次不同：clean 一次并改写记录' $true ($s.Cleaned -eq 1 -and $s.After -ceq 'AA-BB')
+    $s = & $sync $true 'AA-BB'
+    & $check '记录接线：记录相同但前缀这次修过：照样 clean' $true ($s.Cleaned -eq 1 -and $s.After -ceq 'AA-BB')
+    $s = & $sync $false 'AA-CC' { throw [BuildStop]::new('clean 失败', 1) }
+    & $check '记录接线：clean 失败时记录不更新（下次还会 clean）' $true ($s.Error -eq 'clean 失败' -and $s.After -ceq 'AA-CC')
+    # 覆盖文件：每次配置显式表态，文件在就 -D，不在就 -U；cache 里还记着一个不在了的文件时说明一声
+    $ovFile = Join-Path $syncDir 'rinne-showincludes-prefix.cmake'
+    $stale = "// x`r`nCMAKE_PROJECT_INCLUDE:UNINITIALIZED=$($ovFile -replace '\\', '/')`r`n"
+    Set-Content -LiteralPath $ovFile -Value '# x'
+    $a = Get-ProjectIncludeArg $ovFile $stale
+    & $check '覆盖文件在：每次配置都传 -DCMAKE_PROJECT_INCLUDE，没有说明' $false ($a.Arg -ceq "-DCMAKE_PROJECT_INCLUDE=$ovFile" -and -not $a.Note)
+    Remove-Item -LiteralPath $ovFile
+    $a = Get-ProjectIncludeArg $ovFile ''
+    & $check '覆盖文件不在、cache 里也没记：传 -UCMAKE_PROJECT_INCLUDE，没有说明' $false ($a.Arg -ceq '-UCMAKE_PROJECT_INCLUDE' -and -not $a.Note)
+    $a = Get-ProjectIncludeArg $ovFile $stale
+    & $check '覆盖文件不在、cache 里还记着它：传 -UCMAKE_PROJECT_INCLUDE，并说明记录的路径与做法' $true (
+        $a.Arg -ceq '-UCMAKE_PROJECT_INCLUDE' -and $a.Note.Contains('rinne-showincludes-prefix.cmake') -and $a.Note.Contains('-UCMAKE_PROJECT_INCLUDE'))
+    Remove-Item -LiteralPath $syncMarker -ErrorAction SilentlyContinue   # 不递归删：夹具里只有这一个文件，之后目录是空的
+    Remove-Item -LiteralPath $syncDir -ErrorAction SilentlyContinue
+    # 前缀对不上时的修复流程（接线）：每删掉一处判红，下面对应的用例都要变红
+    $prefixFlow = {
+        param($Script)
+        $script:Flow = @()
+        $probeStep = {
+            $script:Flow += 'probe'
+            & $Script.Probe
+        }
+        $configure = {
+            param($file)
+            $script:Flow += $(if ($file) { 'configure-override' } else { 'configure-retry' })
+            & $Script.Configure $file
+        }
+        $clear = { $script:Flow += 'clear' }
+        $writeOverride = {
+            param($cl)
+            $script:Flow += 'write-override'
+            & $Script.WriteOverride $cl
+        }
+        $r = Resolve-DepsPrefix $probeStep $configure $clear $writeOverride
+        @{ Result = $r; Flow = $script:Flow }
+    }
+    $okProbe = { @{ Problem = ''; ProbeError = ''; ClPrefix = 'PFX' } }
+    $badProbe = { @{ Problem = '对不上'; ProbeError = ''; ClPrefix = 'PFX' } }
+    $probeFail = { @{ Problem = ''; ProbeError = 'cl 探针编译退出码 1'; ClPrefix = $null } }
+    $r = & $prefixFlow @{ Probe = $okProbe; Configure = $okProbe; WriteOverride = { 'x' } }
+    & $check '前缀接线：对上了就什么都不做' $false ((-not $r.Result.Clean) -and $r.Flow.Count -eq 1)
+    $r = & $prefixFlow @{ Probe = $badProbe; Configure = $okProbe; WriteOverride = { 'x' } }
+    & $check '前缀接线：对不上就清探测重配一次，并 clean' $false ($r.Result.Clean -and ($r.Flow -join ',') -eq 'probe,clear,configure-retry')
+    # 重配后才好：重配（不带覆盖）仍对不上，写了覆盖再配才对上
+    $script:RetryProbe = 0
+    $afterRetry = { param($f) $script:RetryProbe++; if ($script:RetryProbe -ge 2) { & $okProbe } else { & $badProbe } }
+    $r = & $prefixFlow @{ Probe = $badProbe; Configure = $afterRetry; WriteOverride = { 'x' } }
+    & $check '前缀接线：重配后仍对不上就写覆盖文件再配一次，并 clean，返回写进覆盖的前缀' $false (
+        $r.Result.Clean -and $r.Result.Override -ceq 'PFX' -and ($r.Flow -join ',') -eq 'probe,clear,configure-retry,write-override,configure-override')
+    $r = & $prefixFlow @{ Probe = $badProbe; Configure = $okProbe; WriteOverride = { 'x' } }
+    & $check '前缀接线：重配一步就好时不写覆盖' $false ($null -eq $r.Result.Override -and $r.Flow -cnotcontains 'write-override')
+    $threw = $false
+    $msg = ''
+    try { $null = & $prefixFlow @{ Probe = $badProbe; Configure = $probeFail; WriteOverride = { 'x' } } } catch [BuildStop] { $threw = $true; $msg = $_.Exception.Message }
+    & $check '前缀接线：重配之后探针自己失败：判红并说是探针出错，不写覆盖' $true ($threw -and $msg -match '重配后 cl 探针出错' -and $script:Flow -cnotcontains 'write-override')
+    $script:RetryProbe = 0
+    $failOnOverride = { param($f) $script:RetryProbe++; if ($script:RetryProbe -ge 2) { & $probeFail } else { & $badProbe } }
+    $threw = $false
+    $msg = ''
+    try { $null = & $prefixFlow @{ Probe = $badProbe; Configure = $failOnOverride; WriteOverride = { 'x' } } } catch [BuildStop] { $threw = $true; $msg = $_.Exception.Message }
+    & $check '前缀接线：写了覆盖之后探针自己失败：判红并说是探针出错' $true ($threw -and $msg -match '覆盖后 cl 探针出错')
+    $threw = $false
+    $msg = ''
+    try { $null = & $prefixFlow @{ Probe = $probeFail; Configure = $okProbe; WriteOverride = { 'x' } } } catch [BuildStop] { $threw = $true; $msg = $_.Exception.Message }
+    & $check '前缀接线：探针自己失败时判红，不清探测也不重配' $true ($threw -and ($script:Flow -join ',') -eq 'probe' -and $msg -match 'cl 探针出错')
+    $threw = $false
+    $msg = ''
+    try { $null = & $prefixFlow @{ Probe = $badProbe; Configure = { param($f) & $badProbe }; WriteOverride = { $null } } } catch [BuildStop] { $threw = $true; $msg = $_.Exception.Message }
+    & $check '前缀接线：前缀写不成 cmake 字符串时判红' $true ($threw -and $msg -match '不能写成 cmake 字符串')
+    $threw = $false
+    $msg = ''
+    try { $null = & $prefixFlow @{ Probe = $badProbe; Configure = { param($f) & $badProbe }; WriteOverride = { 'x' } } } catch [BuildStop] { $threw = $true; $msg = $_.Exception.Message }
+    & $check '前缀接线：覆盖之后仍对不上时判红' $true ($threw -and $msg -match '覆盖之后头文件依赖前缀仍对不上')
+    # 构建后：本次新编的第一方编译单元各自都要记下依赖（夹具只有四个文件，逐个删、不递归删）
+    $fpRoot = Join-Path ([IO.Path]::GetTempPath()) "rinne-build-fp-$PID-$(Get-Random)"
+    $fpCore = Join-Path $fpRoot 'src/core'
+    $null = New-Item -ItemType Directory -Force -Path $fpCore
+    Set-Content -LiteralPath (Join-Path $fpCore 'A.cpp') -Value '#include "A.h"'
+    Set-Content -LiteralPath (Join-Path $fpCore 'B.cpp') -Value '#include <vector>'
+    Set-Content -LiteralPath (Join-Path $fpCore 'C.cpp') -Value '#include "C.h"'
+    # CI 布局：JUCE 检出在仓根下的 JUCE/，没被 git 跟踪（下面的 $fpTracked 里只有 src/core 的三个文件）。这个文件的形状同 JUCE 的
+    # LV2 编译单元：有带引号的 include（按文本看是），但整个包在 #if 里，Windows 上预处理后一个头文件都不进来
+    $fpJuce = Join-Path $fpRoot 'JUCE/modules/juce_audio_processors'
+    $null = New-Item -ItemType Directory -Force -Path $fpJuce
+    Set-Content -LiteralPath (Join-Path $fpJuce 'juce_audio_processors_lv2_libs.cpp') -Value @('#if JUCE_PLUGINHOST_LV2', '#include "format_types/juce_LV2SupportLibs.cpp"', '#endif')
+    $fpTracked = ConvertTo-TrackedSet "src/core/A.cpp`0src/core/B.cpp`0src/core/C.cpp`0"
+    $fpCfg = 'Release'   # 这次构建的配置（脚本的 -Config）；夹具里的对象路径都在 .dir/Release/ 下
+    $fpObj = 'src/core/CMakeFiles/rinne_core.dir/Release/A.cpp.obj'
+    $fpLog = @("[1/2] Building CXX object src\core\CMakeFiles\rinne_core.dir\Release\A.cpp.obj",
+        "[2/2] Building CXX object src\core\CMakeFiles\rinne_core.dir\Release\B.cpp.obj")
+    $fpDeps = @("$fpObj`: #deps 3, deps mtime 1 (VALID)")
+    $fpZero = @("$fpObj`: #deps 0, deps mtime 1 (VALID)")
+    $fpOther = "_deps/juce/CMakeFiles/juce.dir/Release/a.cpp.obj`: #deps 9, deps mtime 1 (VALID)"
+    & $check '第一方依赖：本次新编的带引号头文件的 TU 记下了依赖（只含系统头的 TU 没记也不要紧）' $false (-not (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
+    & $check '第一方依赖：本次新编的 TU 没记下依赖时判红' $true (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpZero) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：别处有依赖记录也不能替这次新编的第一方 TU 作数' $true (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts ($fpZero + $fpOther)) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次没新编第一方 TU 时查 ninja 的记录，都没有依赖就判红' $true (Test-FirstPartyDeps @() @{} $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次没新编第一方 TU 时 ninja 的记录里有第一方对象记下依赖就不判红' $false (-not (Test-FirstPartyDeps @() (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
+    & $check '第一方依赖：本次没新编第一方 TU 时只有第三方对象记了依赖，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts @($fpOther)) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次没新编第一方 TU 时第一方对象的依赖个数是 0，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts $fpZero) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：记录里的对象路径不是 CMake 对象的形状，仍判红' $true (Test-FirstPartyDeps @() (Get-DepsCounts @('weird.obj: #deps 5, deps mtime 1 (VALID)')) $fpRoot $fpTracked $fpCfg)
+    & $check '第一方依赖：本次新编的对象路径不是 CMake 对象的形状时跳过，不抛错也不判红' $false (-not (Test-FirstPartyDeps @('weird.obj', $fpObj) (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
+    # 对象路径 → 源文件：`__` 是 CMake 对 `..` 的转义，只有整段是 `__` 才还原；相邻的 `__/__/` 每个都要还原
+    # （消耗分隔符的正则让两个 `__` 共用中间的 `/`，第二个漏掉，源文件被当成仓外文件跳过）
+    $objSrc = { param($Rel) Get-ObjectSource "p/q/r/s/CMakeFiles/t.dir/Release/$Rel.obj" }
+    & $check '对象路径还原：单个 __ 还原成上一级' $false ((& $objSrc '__/x.cpp') -ceq 'p/q/r/x.cpp')
+    & $check '对象路径还原：开头连续的 __/__/ 都还原' $true ((& $objSrc '__/__/x.cpp') -ceq 'p/q/x.cpp')
+    & $check '对象路径还原：中间夹在目录之间的连续 __/__/ 都还原' $true ((& $objSrc 'a/__/__/b.cpp') -ceq 'p/q/r/b.cpp')
+    & $check '对象路径还原：三个连续的 __ 都还原' $true ((& $objSrc '__/__/__/x.cpp') -ceq 'p/x.cpp')
+    & $check '对象路径还原：只是以 __ 开头或结尾的名字不还原' $true ((& $objSrc '__x/a__/__b/y.cpp') -ceq 'p/q/r/s/__x/a__/__b/y.cpp')
+    $fpFar = 'src/core/CMakeFiles/rinne_core.dir/Release/__/__/src/core/A.cpp.obj'
+    & $check '第一方依赖：对象路径里连续的 __/__/ 还原成仓内路径，没记依赖的第一方 TU 照样判红' $true (
+        (Test-FirstPartyDeps @($fpFar) @{} $fpRoot $fpTracked $fpCfg) -match '本次新编的第一方编译单元没有记下')
+    & $check '第一方依赖：对象路径里连续的 __/__/ 的第一方 TU 记下了依赖，不判红' $false (-not (Test-FirstPartyDeps @($fpFar) @{ $fpFar = 3 } $fpRoot $fpTracked $fpCfg))
+    & $check '对象路径还原：根 CMakeLists.txt 里的目标（对象路径前面没有目录）也还原' $true ((Get-ObjectSource 'CMakeFiles/t.dir/Release/src/x.cpp.obj') -ceq 'src/x.cpp')
+    & $check '对象路径还原：刚好退到仓根的路径还原成根下的文件' $true ((& $objSrc '__/__/__/__/x.cpp') -ceq 'x.cpp')
+    & $check '对象路径还原：退到仓根之外的返回 $null，不夹回仓根（夹回去会和仓内同名的路径撞上）' $true (
+        $null -eq (& $objSrc '__/__/__/__/__/x.cpp') -and $null -eq (Get-ObjectSource 'CMakeFiles/t.dir/Release/__/x.cpp.obj'))
+    # CI 布局：JUCE 检出在仓根下的 JUCE/，对象路径还原后落在仓内（本机 JUCE 在仓外，还原后是仓外路径，碰不到这一类）。
+    # 第一方按「git 跟踪的文件」判，JUCE 的编译单元没记依赖不能判红；仓内第一方 TU 没记依赖照样判红
+    $ciSrc = 'JUCE/modules/juce_audio_processors/juce_audio_processors_lv2_libs.cpp'
+    $ciObjs = @("src/input/CMakeFiles/RinneInput.dir/Release/__/__/$ciSrc.obj", "tests/CMakeFiles/rinne_host_tests.dir/Release/__/$ciSrc.obj")
+    $ciBuilt = @($fpObj) + $ciObjs
+    $ciJuceZero = "$($ciObjs[0])`: #deps 0, deps mtime 1 (VALID)"
+    & $check 'CI 布局：夹具里的 JUCE 文件按文本有带引号的 include（用例不是靠「没有 include」放过它）' $false (Test-SourceHasQuotedInclude (Join-Path $fpRoot $ciSrc))
+    & $check 'CI 布局：JUCE 检出在仓根下时对象路径还原成 JUCE/…（目标目录深度不同的两种都对）' $false ((Get-ObjectSource $ciObjs[0]) -ceq $ciSrc -and (Get-ObjectSource $ciObjs[1]) -ceq $ciSrc)
+    & $check 'CI 布局：JUCE 的编译单元没记依赖，不判红' $false (-not (Test-FirstPartyDeps $ciBuilt (Get-DepsCounts $fpDeps) $fpRoot $fpTracked $fpCfg))
+    $ciBad = Test-FirstPartyDeps $ciBuilt (Get-DepsCounts $fpZero) $fpRoot $fpTracked $fpCfg
+    & $check 'CI 布局：同一次构建里仓内第一方 TU 没记依赖仍判红，文字里只点名第一方 TU、不点名 JUCE' $true ($ciBad -match '本次新编的第一方编译单元没有记下' -and $ciBad -match 'src/core/A\.cpp' -and $ciBad -notmatch 'JUCE')
+    & $check 'CI 布局：本次没新编第一方 TU 时，只有 JUCE 的对象记了依赖不能顶替第一方，仍判红' $true (
+        Test-FirstPartyDeps @() (Get-DepsCounts @("$($ciObjs[0])`: #deps 9, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg)
+    & $check 'CI 布局：本次没新编第一方 TU 时，第一方对象记了依赖就不判红，JUCE 的对象没记不碍事' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + $ciJuceZero)) $fpRoot $fpTracked $fpCfg))
+    # 构建后断言的包装：抛 BuildStop 就返回消息文字，不抛返回空串
+    # 不只接 BuildStop：断言自己出了别的错（例如漏传配置名）也返回消息，对应的用例变红，而不是整个自测中途崩掉
+    $assert = { param($Deps, $Log) try { Assert-DepsAfterBuild $Deps $Log $fpRoot $fpTracked $fpCfg; '' } catch { $_.Exception.Message } }
+    $ciLog = $fpLog + @("[3/4] Building CXX object src\input\CMakeFiles\RinneInput.dir\Release\__\__\JUCE\modules\juce_audio_processors\juce_audio_processors_lv2_libs.cpp.obj",
+        "[4/4] Building CXX object tests\CMakeFiles\rinne_host_tests.dir\Release\__\JUCE\modules\juce_audio_processors\juce_audio_processors_lv2_libs.cpp.obj")
+    & $check 'CI 布局：构建后断言整条走一遍（构建日志里有 JUCE 的对象），不抛' $false ((& $assert ($fpDeps + $ciJuceZero) $ciLog) -eq '')
+    & $check 'CI 布局：构建后断言整条走一遍，第一方 TU 没记依赖照样抛' $true ((& $assert ($fpZero + $fpOther + $ciJuceZero) $ciLog) -match '本次新编的第一方编译单元没有记下')
+    # 断言判红之后的下一次构建：判红时 ninja 已经把没记依赖的对象的 #deps 0 写进 .ninja_deps，对象本身是最新的，下一次增量构建什么都不编。
+    # 回退检查若只要求「记录里有一个第一方对象记了依赖」，别的单元记下了就放过，没记的那个永远不会再被查到。
+    # 桩模拟 ninja 的这一行为（真 ninja 也是这样，实测过）：记录 $fpNinja 跨构建保留，记录里已有的对象不再编；
+    # $fpRun 的参数是各对象这次编译时 cl 给出的头文件个数，返回这次构建的日志与此后 ninja -t deps 的输出
+    $fpObjB = 'src/core/CMakeFiles/rinne_core.dir/Release/B.cpp.obj'
+    $fpObjC = 'src/core/CMakeFiles/rinne_core.dir/Release/C.cpp.obj'
+    $fpNinja = @{}
+    $fpRun = {
+        param($ClDeps)
+        $new = @($ClDeps.Keys | Sort-Object | Where-Object { -not $fpNinja.ContainsKey($_) })
+        foreach ($o in $new) { $fpNinja[$o] = $ClDeps[$o] }
+        $i = 0
+        $log = $new.Count ? @($new | ForEach-Object { $i++; "[$i/$($new.Count)] Building CXX object $($_ -replace '/', '\')" }) : @('ninja: no work to do.')
+        @{ Log = $log; Deps = @($fpNinja.Keys | Sort-Object | ForEach-Object { "$_`: #deps $($fpNinja[$_]), deps mtime 1 (VALID)" }) }
+    }
+    $clDeps = @{ $fpObj = 3; $fpObjB = 0; $fpObjC = 0 }   # A、C 都有带引号的 include，cl 只给 A 记下了头文件；B 只含系统头，没有可记的
+    $b1 = & $fpRun $clDeps
+    & $check '断言判红之后：第一次构建，没记依赖的 C 被点名判红' $true ((& $assert $b1.Deps $b1.Log) -match '本次新编的第一方编译单元没有记下.*C\.cpp')
+    $b2 = & $fpRun $clDeps
+    & $check '断言判红之后：第二次构建零新编，C 的 #deps 0 还留在 ninja 的记录里' $false (
+        $b2.Log.Count -eq 1 -and $b2.Log[0] -match 'no work to do' -and $b2.Deps -contains "$fpObjC`: #deps 0, deps mtime 1 (VALID)")
+    $r2 = & $assert $b2.Deps $b2.Log
+    & $check '断言判红之后：第二次构建零新编，回退检查照样判红，点名 C、不点名已经记下依赖的 A' $true ($r2 -match 'C\.cpp' -and $r2 -notmatch 'A\.cpp')
+    & $check '断言判红之后：回退检查的判红文字给出怎么清（clean 的命令）' $true ($r2 -match '--target clean')
+    # 部分重编：只有 A 重编（记下了依赖），本次新编的都没问题，C 留在记录里的 #deps 0 仍要判红
+    $null = $fpNinja.Remove($fpObj)
+    $b3 = & $fpRun $clDeps
+    & $check '断言判红之后：只重编了别的单元（新编的都记下了依赖）时，记录里 C 的 #deps 0 仍判红' $true (
+        $b3.Log.Count -eq 1 -and $b3.Log[0] -match 'A\.cpp\.obj' -and (& $assert $b3.Deps $b3.Log) -match 'C\.cpp')
+    # 按提示 clean 之后（对象与记录都清掉）重编，C 这回记下了依赖：通过，之后无事可做的构建也通过
+    $fpNinja.Clear()
+    $clDeps[$fpObjC] = 2
+    $b4 = & $fpRun $clDeps
+    $b5 = & $fpRun $clDeps
+    & $check '断言判红之后：clean 重编、C 记下依赖，通过；之后零新编的构建也通过' $false (
+        (& $assert $b4.Deps $b4.Log) -eq '' -and $b5.Log[0] -match 'no work to do' -and (& $assert $b5.Deps $b5.Log) -eq '')
+    # 记录里没有第一方的带引号 include 就没有要记的依赖：B 记 0 不碍事；第三方与 JUCE 的 0 也不碍事
+    & $check '记录里的判据：只含系统头的第一方单元（B）记 0 不判红' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpObjB`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg))
+    # 边界：依赖个数恰好是 1 就算记下了（判据是 >= 1）；新编的那一遍与记录那一遍各一个
+    $fpOne = @("$fpObj`: #deps 1, deps mtime 1 (VALID)")
+    & $check '边界：本次新编的第一方对象恰好 #deps 1，不判红' $false (-not (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts $fpOne) $fpRoot $fpTracked $fpCfg))
+    & $check '边界：本次没新编第一方 TU，记录里的第一方对象恰好 #deps 1，不判红' $false (-not (Test-FirstPartyDeps @() (Get-DepsCounts $fpOne) $fpRoot $fpTracked $fpCfg))
+    $oneAndZero = Test-FirstPartyDeps @() (Get-DepsCounts ($fpOne + "$fpObjC`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg
+    & $check '边界：记录里 A 恰好 #deps 1、C 是 0：只点名 C，不点名 A' $true ($oneAndZero -match 'C\.cpp' -and $oneAndZero -notmatch 'A\.cpp')
+    # 配置：.ninja_deps 整个构建目录共用（默认目录是 Ninja Multi-Config，各个配置的记录都在里面），回退检查只判当前配置的对象。
+    # 别的配置（Debug）留下的 #deps 0 不是 Release 这次构建的问题，判红文字里的 clean 只清 --config 指定的配置，也清不掉它
+    $fpDbg = 'src/core/CMakeFiles/rinne_core.dir/Debug/A.cpp.obj'
+    $fpDbgZero, $fpDbgDeps = "$fpDbg`: #deps 0, deps mtime 1 (VALID)", "$fpDbg`: #deps 3, deps mtime 1 (VALID)"
+    & $check '配置：记录里 Debug 的对象 #deps 0、这次构建 Release 且 Release 的对象记下了依赖，不判红' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + $fpDbgZero)) $fpRoot $fpTracked $fpCfg))
+    $cfgRel = Test-FirstPartyDeps @() (Get-DepsCounts ($fpZero + $fpDbgDeps)) $fpRoot $fpTracked $fpCfg
+    & $check '配置：Release 的对象 #deps 0（Debug 的记下了依赖）：判红，点名 Release 的对象' $true ($cfgRel -match 'dir/Release/A\.cpp\.obj' -and $cfgRel -notmatch 'Debug')
+    $cfgOnly = Test-FirstPartyDeps @() (Get-DepsCounts @($fpDbgDeps)) $fpRoot $fpTracked $fpCfg
+    & $check '配置：记录里只有 Debug 的第一方对象记了依赖、Release 一个都没有：判红，Debug 的依赖不能替当前配置作数' $true ($cfgOnly -match '配置 Release 的第一方对象')
+    $cfgBoth = Test-FirstPartyDeps @() (Get-DepsCounts ($fpZero + $fpDbgZero)) $fpRoot $fpTracked $fpCfg
+    & $check '配置：Release 与 Debug 的对象都是 #deps 0：只点名 Release 的，文字里没有 Debug，clean 命令带当前配置' $true (
+        $cfgBoth -match 'dir/Release/A\.cpp\.obj' -and $cfgBoth -notmatch 'Debug' -and $cfgBoth -match '--config Release --target clean')
+    $cfgDbg = Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + $fpDbgZero)) $fpRoot $fpTracked 'Debug'
+    & $check '配置：这次构建是 Debug 时，同一份记录判红，点名 Debug 的对象，文字里没有 Release，clean 命令带 Debug' $true (
+        $cfgDbg -match 'dir/Debug/A\.cpp\.obj' -and $cfgDbg -notmatch 'Release' -and $cfgDbg -match '--config Debug --target clean')
+    & $check '配置：这次构建是 Debug 时，Release 的 #deps 0 不碍事' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpZero + $fpDbgDeps)) $fpRoot $fpTracked 'Debug'))
+    $fpLowC = 'src/core/CMakeFiles/rinne_core.dir/release/C.cpp.obj'
+    $cfgLow = Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpLowC`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg
+    & $check '配置：配置名不分大小写（-Config 的取值不分大小写，Windows 的目录也不分），release 的 #deps 0 算 Release 的' $true ($cfgLow -match 'C\.cpp')
+    & $check '配置：对象路径里取配置段（Release、Debug；根目标没有目标目录也取得到）' $true (
+        (Get-ObjectConfig $fpObj) -ceq 'Release' -and (Get-ObjectConfig $fpDbg) -ceq 'Debug' -and (Get-ObjectConfig 'CMakeFiles/t.dir/Debug/src/x.cpp.obj') -ceq 'Debug')
+    # 单配置生成器的对象路径没有配置段（<目标>.dir/<源路径>.obj），本脚本固定用 Ninja Multi-Config，不会生成这样的路径：
+    # 取不出配置段（或把第一段目录当配置名），都不等于当前配置，既不算当前配置的记录、也不替它作数
+    $fpSingle = 'src/core/CMakeFiles/rinne_core.dir/A.cpp.obj'
+    & $check '配置：没有配置段的对象路径（单配置生成器）取不出配置段；不是 CMake 对象的形状也取不出' $true (
+        $null -eq (Get-ObjectConfig $fpSingle) -and $null -eq (Get-ObjectConfig 'weird.obj') -and (Get-ObjectConfig 'src/core/CMakeFiles/rinne_core.dir/util/X.cpp.obj') -ceq 'util')
+    & $check '配置：没有配置段的记录 #deps 0 不算当前配置的，不判红' $false (
+        -not (Test-FirstPartyDeps @() (Get-DepsCounts ($fpDeps + "$fpSingle`: #deps 0, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg))
+    & $check '配置：没有配置段的记录记了依赖也不替当前配置作数，仍判红' $true (
+        Test-FirstPartyDeps @() (Get-DepsCounts @("$fpSingle`: #deps 5, deps mtime 1 (VALID)")) $fpRoot $fpTracked $fpCfg)
+    & $check '配置：构建后断言整条走一遍，记录里有 Debug 留下的 #deps 0、这次是 Release：不抛' $false ((& $assert ($fpDeps + $fpDbgZero) $fpLog) -eq '')
+    & $check '配置：构建后断言整条走一遍，Release 的对象 #deps 0：抛，理由是新编的第一方 TU' $true ((& $assert ($fpZero + $fpDbgDeps) $fpLog) -match '本次新编的第一方编译单元没有记下')
+    # 路径写法：构建日志的描述行是反斜杠，ninja -t deps 在本机打印的是正斜杠（真实的构建目录核对过），但不能指望两边一直一致；
+    # 两边的路径都过 ConvertTo-ObjectKey，查表、还原源文件、取配置段才对得上。夹具把记录里的路径写成反斜杠
+    $fpObjBs = $fpObj -replace '/', '\'
+    $bsDeps, $bsZero = "$fpObjBs`: #deps 3, deps mtime 1 (VALID)", "$fpObjBs`: #deps 0, deps mtime 1 (VALID)"
+    $bsCounts = Get-DepsCounts @($bsDeps)
+    & $check '路径写法：规范化把反斜杠转成正斜杠，正斜杠不动' $true ((ConvertTo-ObjectKey 'a\b/c\d.obj') -ceq 'a/b/c/d.obj')
+    & $check '路径写法：ninja -t deps 若打印反斜杠，解析出的键也是正斜杠' $true ($bsCounts.Count -eq 1 -and $bsCounts.ContainsKey($fpObj))
+    & $check '路径写法：新编的那一遍，反斜杠的记录记下了依赖，不判红' $false (-not (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) $bsCounts $fpRoot $fpTracked $fpCfg))
+    & $check '路径写法：新编的那一遍，反斜杠的记录 #deps 0，判红并点名（不是被当成别的路径悄悄跳过）' $true (
+        (Test-FirstPartyDeps (Get-BuiltObjects $fpLog) (Get-DepsCounts @($bsZero)) $fpRoot $fpTracked $fpCfg) -match '本次新编的第一方编译单元没有记下.*A\.cpp')
+    & $check '路径写法：回退检查，反斜杠的记录记下了依赖，不判红' $false (-not (Test-FirstPartyDeps @() $bsCounts $fpRoot $fpTracked $fpCfg))
+    & $check '路径写法：回退检查，反斜杠的记录 #deps 0，判红并点名' $true ((Test-FirstPartyDeps @() (Get-DepsCounts @($bsZero)) $fpRoot $fpTracked $fpCfg) -match 'A\.cpp')
+    & $check '路径写法：构建后断言整条走一遍，反斜杠的记录：记下依赖不抛，#deps 0 抛' $true (
+        (& $assert @($bsDeps) $fpLog) -eq '' -and (& $assert @($bsZero + $fpOther) $fpLog) -match '本次新编的第一方编译单元没有记下')
+    # 第一方的判据本身：git 跟踪的文件，third_party/ 除外
+    $setT = ConvertTo-TrackedSet "src/core/A.cpp`0third_party/v/v.cpp`0"
+    & $check '第一方判据：git 跟踪的源文件算' $false (Test-FirstPartySource 'src/core/A.cpp' $setT)
+    & $check '第一方判据：没被 git 跟踪的不算（仓根下的 JUCE/ 检出、生成的文件、尚未 git add 的新文件）' $false (
+        -not ((Test-FirstPartySource $ciSrc $setT) -or (Test-FirstPartySource 'src/core/New.cpp' $setT)))
+    & $check '第一方判据：third_party/ 下的不算，哪怕被跟踪' $false (-not (Test-FirstPartySource 'third_party/v/v.cpp' $setT))
+    & $check '第一方判据：空路径（对象路径不是 CMake 对象的形状）不算' $false (-not ((Test-FirstPartySource $null $setT) -or (Test-FirstPartySource '' $setT)))
+    & $check '第一方判据：路径不分大小写（Windows）' $false (Test-FirstPartySource 'SRC/Core/a.cpp' $setT)
+    $noSet = $false
+    try { $null = Test-FirstPartySource 'src/core/A.cpp' $null } catch { $noSet = $_.Exception.Message -match '被 git 跟踪的文件集合' }
+    & $check '第一方判据：没给跟踪的文件集合时抛，不当成「没有第一方」悄悄放过' $true $noSet
+    $parsed = ConvertTo-TrackedSet "a/b.cpp`0c\d.cpp`0`0e.h`0"
+    & $check '跟踪的文件清单：按 NUL 切开，反斜杠转成正斜杠，空段丢掉' $false ($parsed.Count -eq 3 -and $parsed.Contains('a/b.cpp') -and $parsed.Contains('c/d.cpp') -and $parsed.Contains('e.h'))
+    & $check '跟踪的文件清单：git 没有输出（空仓）得到空集，不抛' $false ((ConvertTo-TrackedSet $null).Count -eq 0)
+    $real = Get-TrackedFiles $Root
+    & $check '跟踪的文件清单：本仓的清单里有本脚本，没有 .git/ 下的东西' $false ($real.Contains('scripts/build.ps1') -and -not @($real | Where-Object { $_ -like '.git/*' }).Count)
+    $noGit = $false
+    try { $null = Get-TrackedFiles (Join-Path $fpRoot 'no-such-dir') } catch [BuildStop] { $noGit = $_.Exception.Message -match '取不到仓里被 git 跟踪的文件清单' }
+    & $check '跟踪的文件清单：取不到时抛 BuildStop，不返回空集（空集会让每个编译单元都被跳过，断言整个失效）' $true $noGit
+    $noTracked = $false
+    try { $null = Test-FirstPartyDeps @($fpObj) @{} $fpRoot $null $fpCfg } catch { $noTracked = $_.Exception.Message -match '被 git 跟踪的文件集合' }
+    & $check '第一方依赖：没给跟踪的文件集合时抛，不悄悄跳过所有对象' $true $noTracked
+    $noCfg = $false
+    try { $null = Test-FirstPartyDeps @($fpObj) @{} $fpRoot $fpTracked } catch { $noCfg = $_.Exception.Message -match '要给这次构建的配置名' }
+    & $check '第一方依赖：没给这次构建的配置名时抛，不当成「没有任何记录属于当前配置」悄悄判红或放过' $true $noCfg
+    $cLog = @('[1/2] Building C object tools\CMakeFiles\x.dir\Release\a.c.obj','[2/2] Linking CXX executable tools\Release\x.exe')
+    $builtCxx, $builtC = @(Get-BuiltObjects $fpLog), @(Get-BuiltObjects $cLog)   # 单个结果会被函数返回值展开成字符串，用 @() 兜住
+    & $check '构建日志：取出本次新编的对象（CXX 与 C，不含链接行）' $false ($builtCxx.Count -eq 2 -and $builtCxx[0] -eq $fpObj -and
+        $builtC.Count -eq 1 -and $builtC[0] -eq 'tools/CMakeFiles/x.dir/Release/a.c.obj')
+    # 构建后断言的接线：每删掉一处判红，对应的用例都要变红（消息文字也要对：判红的理由不能张冠李戴）
+    & $check '构建后断言：第一方 TU 记下了依赖，不抛' $false ((& $assert $fpDeps $fpLog) -eq '')
+    & $check '构建后断言：ninja 里一条依赖都没有：判红，理由是没有任何目标记下依赖' $true ((& $assert @() $fpLog) -match '没有任何一个目标记下头文件依赖')
+    & $check '构建后断言：别处有依赖、本次新编的第一方 TU 没记：判红，理由是新编的第一方 TU' $true ((& $assert ($fpZero + $fpOther) $fpLog) -match '本次新编的第一方编译单元没有记下')
+    # Invoke-Build 里这些函数的调用（删掉任何一处，或者换了先后顺序，这里变红）：先给配置表态，再核对前缀，再记录与 clean，再取 git 跟踪的文件清单，最后断言依赖
+    $called = @((Get-Command Invoke-Build).ScriptBlock.Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true) |
+            ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+    $wired = 'Get-ProjectIncludeArg', 'Resolve-DepsPrefix', 'Sync-DepsMarker', 'Get-TrackedFiles', 'Assert-DepsAfterBuild'
+    $pos = @($wired | ForEach-Object { [array]::IndexOf($called, $_) })
+    & $check 'Invoke-Build 的接线：表态覆盖文件、核对前缀、记录与 clean、取 git 跟踪的文件清单、断言依赖，五步都在且先后不乱' $false (
+        @($pos | Where-Object { $_ -lt 0 }).Count -eq 0 -and ($pos -join ',') -eq (($pos | Sort-Object) -join ','))
+    # 断言依赖的那次调用要带着这次构建的配置（脚本的 $Config）：漏传的话记录里别的配置的 #deps 0 照样让这次构建判红，或者直接抛错
+    $assertCall = @((Get-Command Invoke-Build).ScriptBlock.Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq 'Assert-DepsAfterBuild' }, $true))
+    $passesConfig = $assertCall.Count -eq 1 -and @($assertCall[0].CommandElements | Where-Object { $_ -is [Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.UserPath -ceq 'Config' }).Count -eq 1
+    & $check 'Invoke-Build 的接线：断言依赖时带着这次构建的配置（$Config）' $false $passesConfig
+    # 函数里与脚本参数同名的变量（赋值或形参）：PowerShell 的变量名不分大小写，`$probe = {…}` 会把 -Probe 开关盖成脚本块，
+    # 形参 `$Probe` 经动态作用域也会遮住下游读到的 $Probe；之后 Get-ExpectedBundles $Probe 才在真跑里抛错，上面那些纯函数的用例碰不到它。
+    $astTokens, $astErrors = $null, $null
+    $selfAst = [Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$astTokens, [ref]$astErrors)
+    $shadow = @(Get-ScriptParamShadows $selfAst)
+    & $check "函数里不给与脚本参数同名的变量赋值、形参也不与脚本参数同名（变量名不分大小写）$(if ($shadow.Count) { '：' + (($shadow | ForEach-Object { "第 $($_.Line) 行$($_.Kind)" }) -join '、') })" $false ($shadow.Count -eq 0)
+    # 判据自己的正反例：赋值、函数体里的 param 块、函数名后括号里的形参都要抓到（大小写不论），改名后的与脚本自己的 param 块不能误报
+    $shadowKinds = {
+        param($Text)
+        $t, $e = $null, $null
+        (@(Get-ScriptParamShadows ([Management.Automation.Language.Parser]::ParseInput($Text, [ref]$t, [ref]$e)) | ForEach-Object { $_.Kind })) -join ','
+    }
+    $scriptParam = 'param([switch]$Probe, [string]$BuildDir)'
+    & $check '同名检查：函数里给同名变量赋值，抓到' $true ((& $shadowKinds "$scriptParam`nfunction F { `$probe = 1 }") -ceq '赋值')
+    & $check '同名检查：函数体 param 块里的同名形参，抓到' $true ((& $shadowKinds "$scriptParam`nfunction F { param([scriptblock]`$Probe) }") -ceq '形参')
+    & $check '同名检查：函数名后括号里的同名形参（大小写不论），抓到' $true ((& $shadowKinds "$scriptParam`nfunction F([scriptblock]`$builddir) { }") -ceq '形参')
+    & $check '同名检查：脚本块 param 里的同名形参，抓到' $true ((& $shadowKinds "$scriptParam`n`$sb = { param(`$Probe) }") -ceq '形参')
+    & $check '同名检查：改了名的形参与变量、脚本自己的 param 块，不误报' $false ((& $shadowKinds "$scriptParam`nfunction F { param([scriptblock]`$ProbeStep); `$probeStep = 1 }") -ceq '')
+    Remove-Item -LiteralPath (Join-Path $fpCore 'A.cpp'), (Join-Path $fpCore 'B.cpp'), (Join-Path $fpCore 'C.cpp'), (Join-Path $fpJuce 'juce_audio_processors_lv2_libs.cpp') -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $fpCore, (Join-Path $fpRoot 'src'), $fpJuce, (Join-Path $fpRoot 'JUCE/modules'), (Join-Path $fpRoot 'JUCE'), $fpRoot -ErrorAction SilentlyContinue
+    $formal, $probeBundles = (Get-ExpectedBundles $false), (Get-ExpectedBundles $true)
     & $check '产物断言：正式版恰好两个' $false (-not (Test-BundleSet $formal $formal))
     & $check '产物断言：缺一个' $true (Test-BundleSet @($formal[0]) $formal)
-    & $check '产物断言：正式目录里混进探针产物' $true (Test-BundleSet ($formal + $probe[0]) $formal)
-    & $check '产物断言：探针恰好两个' $false (-not (Test-BundleSet $probe $probe))
+    & $check '产物断言：正式目录里混进探针产物' $true (Test-BundleSet ($formal + $probeBundles[0]) $formal)
+    & $check '产物断言：探针恰好两个' $false (-not (Test-BundleSet $probeBundles $probeBundles))
     $cache = { param($v, $d) "// x`r`nRINNE_SHM_PREFIX:STRING=$v`r`nRINNE_SHM_PREFIX_DEFAULT:INTERNAL=$d`r`n" }
     & $check 'cache 断言：前缀是默认值' $false (-not (Test-CachePrefix (& $cache 'SynchainRinne' 'SynchainRinne')))
     & $check 'cache 断言：CI 覆盖成本机前缀' $true (Test-CachePrefix (& $cache 'SynchainRinneD' 'SynchainRinne'))
@@ -399,8 +1210,8 @@ function Invoke-SelfTest {
         Set-Content -LiteralPath (Join-Path $bd 'CMakeCache.txt') -Value (& $cache $f $f)
         # -Ci 只在 GitHub Actions 上：没有 GITHUB_ACTIONS=true 退出 1；有的话照常往下走（这里没有构建记录，退出 2）
         $savedGa = $env:GITHUB_ACTIONS
-        $ci = { param($v) $env:GITHUB_ACTIONS = $v; $o = & $pwsh -NoProfile -NonInteractive -File $PSCommandPath -Ci -NoBuild -BuildDir $bd 2>&1 | Out-String; @($LASTEXITCODE, $o) }
-        $off, $on = (& $ci $null), (& $ci 'true')
+        $ciRun = { param($v) $env:GITHUB_ACTIONS = $v; $o = & $pwsh -NoProfile -NonInteractive -File $PSCommandPath -Ci -NoBuild -BuildDir $bd 2>&1 | Out-String; @($LASTEXITCODE, $o) }
+        $off, $on = (& $ciRun $null), (& $ciRun 'true')
         $env:GITHUB_ACTIONS = $savedGa
         & $check '-Ci 在 GitHub Actions 之外被拒' $true ($off[0] -eq 1 -and $off[1] -match 'GITHUB_ACTIONS=true')
         & $check '-Ci 在 GITHUB_ACTIONS=true 时照常往下走' $false ($on[0] -eq 2)

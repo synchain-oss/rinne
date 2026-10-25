@@ -7,9 +7,11 @@
 namespace rinne
 {
 
-// 界面接上之前先用 JUCE 的通用参数编辑器
+// 界面接上之前先用 JUCE 的通用参数编辑器；探针构建里是探针面板
 juce::AudioProcessorEditor* InputProcessor::createEditor()
 {
+    if (auto* editor = createProbeEditor())
+        return editor;
     return new juce::GenericAudioProcessorEditor(*this);
 }
 

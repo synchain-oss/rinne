@@ -1,0 +1,596 @@
+{
+  "version": 1,
+  "platforms": [
+    {
+      "id": "win-x64",
+      "os": "Windows",
+      "arch": "x64",
+      "formats": ["VST3"],
+      "minVersion": "Windows 10"
+    },
+    {
+      "id": "mac-arm64",
+      "os": "macOS",
+      "arch": "arm64",
+      "formats": ["VST3", "AU"],
+      "minVersion": "macOS 11"
+    }
+  ],
+  "hosts": [
+    {
+      "host": "Cubase Pro",
+      "versions": "15",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 1,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "LUNA",
+      "versions": "3.x",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 2,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Cubase Pro",
+      "versions": "14",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Cubase Artist",
+      "versions": "15",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Cubase Elements",
+      "versions": "15",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Nuendo",
+      "versions": "any",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Cubase Pro",
+      "versions": "15",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "REAPER",
+      "versions": "7",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "REAPER",
+      "versions": "7",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Ableton Live",
+      "versions": "12",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Ableton Live",
+      "versions": "12",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Studio One",
+      "versions": "any",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Studio One",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Bitwig",
+      "versions": "any",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet. Its plug-in hosting mode may load the two plug-ins into different processes.",
+        "zh": "尚未在真机上测试。它的插件托管模式可能把两个插件分进不同进程。"
+      }
+    },
+    {
+      "host": "Bitwig",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet. Its plug-in hosting mode may load the two plug-ins into different processes.",
+        "zh": "尚未在真机上测试。它的插件托管模式可能把两个插件分进不同进程。"
+      }
+    },
+    {
+      "host": "FL Studio",
+      "versions": "any",
+      "os": "windows",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "FL Studio",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not tested on a real host yet.",
+        "zh": "尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "Logic Pro",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["AU"],
+      "tier": null,
+      "targetTier": 3,
+      "status": "awaiting-test",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Audio Units only. Not tested on a real host yet.",
+        "zh": "只加载 AU。尚未在真机上测试。"
+      }
+    },
+    {
+      "host": "GarageBand",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["AU"],
+      "tier": null,
+      "targetTier": "out-of-scope",
+      "status": "out-of-scope",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not supported: sandboxed and out-of-process Audio Unit hosting is not tested.",
+        "zh": "不支持：沙盒与进程外的 AU 托管未测。"
+      }
+    },
+    {
+      "host": "Pro Tools",
+      "versions": "any",
+      "os": "any",
+      "formats": ["AAX"],
+      "tier": null,
+      "targetTier": "out-of-scope",
+      "status": "out-of-scope",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not supported: this build ships VST3 and Audio Units only.",
+        "zh": "不支持：本构建只提供 VST3 与 Audio Unit。"
+      }
+    },
+    {
+      "host": "CLAP",
+      "versions": "any",
+      "os": "any",
+      "formats": ["CLAP"],
+      "tier": null,
+      "targetTier": "out-of-scope",
+      "status": "out-of-scope",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not supported: this build ships VST3 and Audio Units only.",
+        "zh": "不支持：本构建只提供 VST3 与 Audio Unit。"
+      }
+    },
+    {
+      "host": "VST2 hosts",
+      "versions": "any",
+      "os": "any",
+      "formats": ["VST2"],
+      "tier": null,
+      "targetTier": "out-of-scope",
+      "status": "out-of-scope",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not supported: this build ships VST3 and Audio Units only.",
+        "zh": "不支持：本构建只提供 VST3 与 Audio Unit。"
+      }
+    },
+    {
+      "host": "Linux hosts",
+      "versions": "any",
+      "os": "linux",
+      "formats": ["VST3"],
+      "tier": null,
+      "targetTier": "out-of-scope",
+      "status": "out-of-scope",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not supported: this build ships Windows and macOS plug-ins only.",
+        "zh": "不支持：本构建只提供 Windows 与 macOS 插件。"
+      }
+    },
+    {
+      "host": "Intel Macs",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": "out-of-scope",
+      "status": "out-of-scope",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not supported: the macOS build is Apple Silicon only.",
+        "zh": "不支持：macOS 版只有 Apple Silicon 版本。"
+      }
+    },
+    {
+      "host": "Rosetta hosts",
+      "versions": "any",
+      "os": "macos",
+      "formats": ["VST3", "AU"],
+      "tier": null,
+      "targetTier": "out-of-scope",
+      "status": "out-of-scope",
+      "evidence": [],
+      "checks": {
+        "realtime": false,
+        "offline": false,
+        "freeze": false,
+        "reopen": false,
+        "buffers": false,
+        "asioGuard": false,
+        "loopPeriod": false
+      },
+      "notes": {
+        "en": "Not supported: the host has to run natively.",
+        "zh": "不支持：宿主必须原生运行。"
+      }
+    }
+  ]
+}

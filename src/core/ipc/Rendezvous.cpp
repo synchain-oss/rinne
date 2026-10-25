@@ -517,8 +517,17 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     // 冲突重试每 1 s 一次；时钟倒退得比一个重试间隔还多时不多等，立刻重试（与 tick 的退避同一个口径）
     const bool retryDue =
         !conflict || nowMs >= nextConflictRetryMs_ || nextConflictRetryMs_ - nowMs > RendezvousTiming::kConflictRetryMs;
-    // 工程恢复与用户确认在原意图有效期内：不到重试的拍子也每一拍看一次休眠档，证据一攒够就拿到
-    const bool held = conflict && intentHeld(nowMs);
+    // 工程恢复与用户确认在原意图有效期内：不到重试的拍子也每一拍看一次休眠档，证据一攒够就拿到。
+    // intentHeld 不论冲突与否每一拍都问，不能写成只在冲突时问的短路：
+    // - 不在冲突的一拍是按原意图的完整认领（effective 就是 intent_，各档都判），落在有效期内就算评估过。首拍之后
+    //   宿主就卡过了截止时刻（工程加载、用户刚点确认时都常见），过期后的那次补评全靠这个记号；只在冲突时问，首拍
+    //   不记，补评就丢了；
+    // - 到期补评被不在冲突的一拍用掉也无害：那一拍在不早于截止时刻的时间、按原意图对同一份样本完整判一遍，各档的
+    //   年龄只随判定时刻增长，补评拿得到的它都拿得到；之后照旧只剩冲突重试，有效期不因此延长；
+    // - 推进 intentSeenMs_ 也是有意的：有效期内哪一拍看到时钟倒退，都当已经到期。
+    u64 holdEvalMs = nowMs;
+    const bool hold = intentHeld(nowMs, holdEvalMs);
+    const bool held = conflict && hold;
     if (!retryDue && !held)
     {
         return;
@@ -549,20 +558,17 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
                 tier = TakeoverTier::kPreemptProvisional;
             }
         }
-        // 原意图有效期只放宽休眠这一档，其余各档照旧只在重试的拍子上按 kConflictRetry 判。不传探活：这里只认休眠
+        // 原意图有效期只放宽休眠这一档，其余各档照旧只在重试的拍子上按 kConflictRetry 判。不传探活：这里只认休眠。
+        // 判定时刻是 holdEvalMs：补评那一拍取截止时刻，证据按截止时刻算，不按这一拍落在多晚算
         if (latest.ctl == observed && tier == TakeoverTier::kNone && held &&
-            takeoverTier(latest, nowMs, currentProcessId(), intent_, nullptr) == TakeoverTier::kDormant)
+            takeoverTier(latest, holdEvalMs, currentProcessId(), intent_, nullptr) == TakeoverTier::kDormant)
         {
             tier = TakeoverTier::kDormant;
         }
     }
     if (tier == TakeoverTier::kNone)
     {
-        state_ = RendezvousState::kConflict;
-        if (retryDue)
-        {
-            nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs; // 有效期内多看的拍子不推迟它
-        }
+        enterConflict(nowMs, retryDue);
         return;
     }
     // provisional 位与 kCfgSmartOrigin 跟着认领的来源走（intent_），不跟这一拍的档位走（effective）：智能默认的
@@ -572,8 +578,7 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     const CtlCas claimed = casCtl(slot.ctl, observed, claimState);
     if (!claimed.ok)
     {
-        state_ = RendezvousState::kConflict;
-        nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
+        enterConflict(nowMs, retryDue);
         return;
     }
     myCtl_ = claimed.word;
@@ -588,16 +593,27 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
     {
         // 别人把我们的 claiming 判成幽灵或接管了：什么都不写，进冲突重试
         myCtl_ = 0;
-        state_ = RendezvousState::kConflict;
-        nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
+        enterConflict(nowMs, retryDue);
         return;
     }
     myCtl_ = activated.word;
     intentUntilMs_ = 0; // 原意图有效期只服务于这一次认领
+    intentEvaluated_ = false;
     lastHeartbeatMs_ = nowMs;
     labelDirty_ = true; // 新属主把自己的标签写上去
     labelOddSinceMs_ = 0;
     // 状态留给 openRing：成功时由 publishBinding 置 kActive，失败时置 kOpening
+}
+
+// 进冲突。只有按常规重试的那一拍才把下一次重试排到 1 s 之后；有效期内只多看了一眼休眠档的拍子，不论是没判出档位
+// 还是 CAS 输了，都不推迟它，其余各档照旧每 1 s 试一次
+void Rendezvous::enterConflict(u64 nowMs, bool retryDue) noexcept
+{
+    state_ = RendezvousState::kConflict;
+    if (retryDue)
+    {
+        nextConflictRetryMs_ = nowMs + RendezvousTiming::kConflictRetryMs;
+    }
 }
 
 // 工程恢复与用户确认的原意图有效期。拿休眠槽要观察者看满 2 s 的证据，可这两种意图恰恰常在证据还没攒够的时候
@@ -612,6 +628,7 @@ void Rendezvous::claimTick(RvSegment& rv, u64 nowMs)
 void Rendezvous::armIntentHold(u64 nowMs) noexcept
 {
     intentUntilMs_ = 0;
+    intentEvaluated_ = false;
     intentSeenMs_ = nowMs;
     if (intent_ == ClaimIntent::kManualConfirmed)
     {
@@ -627,9 +644,15 @@ void Rendezvous::armIntentHold(u64 nowMs) noexcept
 // 截止时刻定下之后不动：有效期内 ctl 变了、观察者的静止起点重新计，有效期也按原定时刻到期，不顺延，所以最长就是
 // kIntentHoldMs。时钟倒退也拉不长它：离截止还有不止 kIntentHoldMs 就当已经到期（与冲突闸门的上界同一个口径）；
 // 有效期内时钟比上一次看到的还早，也当已经到期，否则按原截止时刻算就多出了倒退的那一段。到期就清掉，之后时钟
-// 再怎么倒退也不会让它复活
-bool Rendezvous::intentHeld(u64 nowMs) noexcept
+// 再怎么倒退也不会让它复活。
+// 一个例外：证据是按拍子比的，拍子稀的时候（宿主让消息线程饿了几拍，工程加载时尤其常见）上一次评估可能还在证据攒满
+// 之前，下一拍已经过了截止时刻，休眠档就这样被错过。所以有效期内评估过的话，过期之后的第一拍按原意图补评一次
+// （只这一次，之后照旧清掉）。补评不设迟到上界，但休眠档的证据按截止时刻判（evalMs 取截止时刻之前一毫秒）：
+// 截止之前已经攒满、且到这一拍整字没变（认领 CAS 对观察到的整字，槽动过就会输）才拿；休眠在有效期末段才开始、
+// 按不卡顿的时序本来攒不满的，不会因为这一拍来得晚就拿到。倒退的一拍不补评
+bool Rendezvous::intentHeld(u64 nowMs, u64& evalMs) noexcept
 {
+    evalMs = nowMs;
     if (intentUntilMs_ == 0)
     {
         return false;
@@ -637,10 +660,17 @@ bool Rendezvous::intentHeld(u64 nowMs) noexcept
     if (nowMs >= intentSeenMs_ && nowMs < intentUntilMs_ && intentUntilMs_ - nowMs <= RendezvousTiming::kIntentHoldMs)
     {
         intentSeenMs_ = nowMs;
+        intentEvaluated_ = true;
         return true;
     }
+    const bool catchUp = intentEvaluated_ && nowMs >= intentSeenMs_ && nowMs >= intentUntilMs_;
+    if (catchUp)
+    {
+        evalMs = intentUntilMs_ - 1;
+    }
     intentUntilMs_ = 0;
-    return false;
+    intentEvaluated_ = false;
+    return catchUp;
 }
 
 void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs)

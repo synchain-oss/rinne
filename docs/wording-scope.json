@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "scope": [
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "docs/USER_GUIDE.md",
+    "docs/USER_GUIDE.zh-CN.md",
+    "docs/INSTALL.md",
+    "docs/KNOWN_ISSUES.md",
+    "docs/RELEASE.md",
+    "docs/DAW_COMPATIBILITY.md",
+    "docs/hard-rules.i18n.json",
+    "docs/daw-tiers.json",
+    "docs/media/placement.txt"
+  ],
+  "excluded": [
+    {
+      "reason": "内部架构说明与桥契约，合法地引用禁用词本身（「整条通道」「界面文字里不出现「自动配对」」）",
+      "paths": ["docs/ARCHITECTURE.md", "docs/UI_BRIDGE.md", "docs/contracts/", "docs/contract-changes/", "docs/adr/"]
+    },
+    {
+      "reason": "上机实测记录与稳定链接清单：前者逐字记录现场，后者只有网址，都不是写给用户看的文字",
+      "paths": ["docs/validation/", "docs/stable-links.txt"]
+    },
+    {
+      "reason": "给开发者与维护者看的构建与职责说明，不是面向用户的文字",
+      "paths": ["docs/BUILDING.md", "docs/MAINTAINERS.md", "docs/testing/"]
+    },
+    {
+      "reason": "声明登记表与范围表自己：strong 短语栏与理由栏列的就是被管控的强断言与禁用词本身",
+      "paths": ["docs/claims.json", "docs/wording-scope.json"]
+    },
+    {
+      "reason": "维护者规则：禁言清单本身就列着这些词",
+      "paths": ["CLAUDE.md", ".github/"]
+    },
+    {
+      "reason": "脚本、测试、构建与第三方：不是用户面文字",
+      "paths": [
+        "scripts/",
+        "src/",
+        "tests/",
+        "tools/",
+        "upstream/",
+        "third_party/",
+        "LICENSES/",
+        "web/fonts/",
+        "web/js/",
+        "web-preview/",
+        "THIRD-PARTY-NOTICES.md",
+        "requirements-tools.txt",
+        "CMakeLists.txt"
+      ]
+    }
+  ]
+}

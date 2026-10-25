@@ -133,7 +133,7 @@ the rationale is in [ADR-0003](adr/0003-safety-model.md). Weakening any invarian
 | --- | --- | --- |
 | Panic | ≤ 1 块 + 10 ms | 是 |
 | `loop_on` 关、Input 旁路 | ≤ 1 块 + 10 ms | 否 |
-| Output 旁路 | ≤ D + 10 ms | 否 |
+| Output 旁路 | 读头 ≤ D + 10 ms 逐位为 0；回送只剩 DC 阻断的衰减尾巴（每 100 ms 的峰值只降不升，读头归零 1 s 之后 < 10⁻⁶），安全链照常运行、不跳闸 | 否 |
 
 窗口关着时最快的办法是旁路 Rinne Input。
 
@@ -148,12 +148,12 @@ the rationale is in [ADR-0003](adr/0003-safety-model.md). Weakening any invarian
 
 | # | 不变量 | 守住它的测试（Catch2 用例名） |
 | --- | --- | --- |
-| 1 | 任何失败只会让回送变成 0，干声照常 | `every failure leaves the return at exactly zero`；`a non-finite value produced inside the Input trips immediately`；`panic fades out in 10 ms, asks for one flush, and stays latched`；`losing the pairing fades out in 10 ms; re-pairing fades in as first_pair`；`an unprepared machine gives zero gain`。安全链不碰干声（由引擎相加）；干声逐位不变在接线后由外壳用例 `stereo audio passes through bit for bit at every block size` 覆盖（安全链接进引擎之前它只测外壳） |
+| 1 | 任何失败只会让回送变成 0，干声照常 | `every failure leaves the return at exactly zero`；`a non-finite value produced inside the Input trips immediately`；`panic fades out in 10 ms, asks for one flush, and stays latched`；`losing the pairing fades out in 10 ms; re-pairing fades in as first_pair`；`an unprepared machine gives zero gain`。安全链不碰干声（由引擎相加）；干声逐位不变在引擎这一层由 `tests/core/engine/test_input_wiring.cpp` 的逐位直通用例覆盖（含 −0.0 与 NaN 载荷），外壳用例 `stereo audio passes through bit for bit at every block size` 在壳调用引擎之后才覆盖整条处理（现在它只测外壳） |
 | 2 | 永不读旧数据或别名数据 | `panic fades out in 10 ms, asks for one flush, and stays latched`（跳闸后清空延迟线）；读位下界与撕裂判定的用例随环路层与 IPC 层的代码一起入库，届时补进这一格 |
 | 3 | 回送有硬上界：\|ret\| < 1.0；限制器开时 ≤ 上限 | `return stays below 1.0 and within the ceiling for random and extreme input`；`a million parameter jumps never make the chain diverge`；`soft clip stays finite and strictly below 1.0f at the extremes`；`soft clip never expands, is odd and monotonic over a dense sweep`；`limiter output never exceeds the ceiling, bit for bit` |
 | 4 | 默认安全：反馈默认 0；新配对、换写方、载入预设、恢复之后，都从首个有效读样本起 500 ms 淡入 | `safety controls default to the safe settings`；`a new instance stays silent until paired, then fades in over 500 ms from the first valid sample`；`entering a fade-in from RUN ramps down over 10 ms before the 500 ms ramp, without a step`；`a fade-in after the ramp-down still waits for the first valid read sample`；`recover is refused during the 1.5 s cooldown and never queued` |
-| 5 | 音频线程不加锁、不分配、不做 I/O、不读墙钟 | `test_safety_chain.cpp` 开头的静态断言（安全链可平凡析构、不持有堆内存，处理函数 noexcept）与 `Meters.h` 的无锁断言。回调内零分配的运行时检查随接线补：外壳用例 `stereo audio passes through bit for bit at every block size` 在安全链接进引擎之后才覆盖安全链 |
+| 5 | 音频线程不加锁、不分配、不做 I/O、不读墙钟 | `test_safety_chain.cpp` 开头的静态断言（安全链可平凡析构、不持有堆内存，处理函数 noexcept）与 `Meters.h` 的无锁断言。回调内零分配的运行时检查随接线补：外壳用例 `stereo audio passes through bit for bit at every block size` 在壳调用引擎之后才覆盖安全链 |
 | 6 | 两端向宿主上报的延迟恒为 0 | `latency is always zero` |
-| 7 | 参数恒定时，输出与宿主怎么切块逐位无关 | `output and state transitions do not depend on how the host splits blocks`（安全链这一层）；接线后由外壳用例 `stereo audio passes through bit for bit at every block size` 覆盖整条处理 |
+| 7 | 参数恒定时，输出与宿主怎么切块逐位无关 | `output and state transitions do not depend on how the host splits blocks`（安全链这一层）；引擎这一层由 `tests/core/engine/test_input_wiring.cpp` 的不变量 7 用例覆盖（含跨 8192 与 32768 的块）；壳调用引擎之后由外壳用例 `stereo audio passes through bit for bit at every block size` 覆盖整条处理 |
 | 8 | Output 永不改动宿主 buffer（逐位直通） | `stereo audio passes through bit for bit at every block size`；`mono audio passes through bit for bit at every block size` |
 | 9 | 环头与标签头只由该槽的属主写 | 由 IPC 层的测试守住，随该层代码入库时补进这一格 |
