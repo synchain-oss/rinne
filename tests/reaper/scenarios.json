@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "notes": "第一段：Input 在首、Output 在末的空壳直通。第二段（回声间隔、探针录音）以后只往 scenarios 里加条目：新种类在 Scenarios.psm1 的登记表里加一项，环境变量放进条目的 env。反例除 expect（结局）外还要写 expectDetail（结局里必须出现的原因，正则）：没启动、没执行凑出来的同名结局不算验证过。",
+  "notes": "第一段：Input 在首、Output 在末的空壳直通。第二段（探针构建）的场景在 probe 一节。以后加场景只往 scenarios 里加条目：新种类在 Scenarios.psm1 的登记表里加一项，环境变量放进条目的 env。反例除 expect（结局）外还要写 expectDetail（结局里必须出现的原因，正则）：没启动、没执行凑出来的同名结局不算验证过。",
   "signal": { "kind": "impulse-noise", "seconds": 4 },
   "limits": {
     "renderTimeoutSec": 90,
@@ -84,5 +84,89 @@
       "expect": "REFUSED",
       "expectDetail": "^REFUSED: .*永不碰"
     }
-  ]
+  ],
+  "probe": {
+    "notes": "第二段（run.ps1 -Probe，探针构建）：一条轨道 [Probe In][Probe Out]，Dummy 设备，feedback 保持探针默认的 0。记录窗口只靠三个隐藏参数开（auto_case / auto_variant / auto_record_s），探针自动开的窗口里 buf 写 -、guard 写 na。group 是两端探针 state 里的组（0..7 即 A..H），两端同组才会配对。每次 REAPER 正常退出后把它自己的日志从文档目录下的 Rinne Probe Logs 搬进本轮的结果目录。停走带之后留给自动 Ping 的时间只有 limits.afterRenderSeconds 一个真源：Lua 驱动在导出格里渲染返回后至少再等这么久，稳态格校验 recordSeconds + marginSeconds - leadSeconds - playSeconds 不少于它。",
+    "signal": { "kind": "impulse-noise", "seconds": 10 },
+    "group": 0,
+    "limits": {
+      "renderTimeoutSec": 90,
+      "luaTimeoutSec": 120,
+      "leadSeconds": 1.5,
+      "marginSeconds": 2,
+      "afterRenderSeconds": 6.5,
+      "minBlocks": 32
+    },
+    "scenarios": [
+      {
+        "id": "probe-steady-48000-64",
+        "kind": "probe-play",
+        "sr": 48000,
+        "block": 64,
+        "case": "CB-01",
+        "variant": "steady",
+        "recordSeconds": 14,
+        "playSeconds": 8,
+        "analyzerMustPass": ["A1", "A4", "A8"]
+      },
+      {
+        "id": "probe-steady-48000-512",
+        "kind": "probe-play",
+        "sr": 48000,
+        "block": 512,
+        "case": "CB-01",
+        "variant": "steady",
+        "recordSeconds": 14,
+        "playSeconds": 8,
+        "analyzerMustPass": ["A1", "A4", "A8"]
+      },
+      {
+        "id": "probe-steady-48000-1024",
+        "kind": "probe-play",
+        "sr": 48000,
+        "block": 1024,
+        "case": "CB-01",
+        "variant": "steady",
+        "recordSeconds": 14,
+        "playSeconds": 8,
+        "analyzerMustPass": ["A1", "A4", "A8"]
+      },
+      {
+        "id": "probe-export-48000-512",
+        "kind": "probe-export",
+        "sr": 48000,
+        "block": 512,
+        "case": "CB-04",
+        "recordSeconds": 19,
+        "analyzerMustPass": ["A3", "A8"]
+      },
+      {
+        "id": "probe-steady-44100-512",
+        "kind": "probe-play",
+        "sr": 44100,
+        "block": 512,
+        "case": "CB-01",
+        "variant": "steady",
+        "recordSeconds": 14,
+        "playSeconds": 8,
+        "analyzerMustPass": ["A1", "A4", "A8"]
+      }
+    ],
+    "negative": [
+      {
+        "id": "neg-probe-unpaired",
+        "kind": "probe-play",
+        "sr": 48000,
+        "block": 512,
+        "case": "CB-01",
+        "variant": "steady",
+        "recordSeconds": 14,
+        "playSeconds": 8,
+        "analyzerMustPass": ["A1", "A4", "A8"],
+        "group": -1,
+        "expect": "FAIL",
+        "expectDetail": "没有配对"
+      }
+    ]
+  }
 }

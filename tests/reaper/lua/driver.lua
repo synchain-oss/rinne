@@ -6,6 +6,8 @@
 --   probe       读设备块长 / 采样率，读两个插件的上报延迟（pdc 与 chain_pdc_actual）
 --   instances   反复加减插件实例，在预热结束和循环结束时落标记文件，runner 在这两处取进程的句柄与内存
 --   savereopen  打开工程、存成新文件、再打开新文件读一遍状态；runner 之后离线渲染新文件
+--   probeplay   探针稳态格：经隐藏参数开记录窗口，实时播放，停走带触发探针的自动 Ping，等窗口到时
+--   probeexport 探针导出格：经隐藏参数开记录窗口，按工程里的渲染设置渲染一次，等窗口到时
 
 local jobPath = os.getenv("RINNE_REAPER_JOB")
 local job = dofile(jobPath)
@@ -113,6 +115,126 @@ end
 
 function steps.hang()
     while true do wait(0.5) end
+end
+
+-- ---- 第二段：探针 ----
+-- 探针的窗口按钮 Lua 碰不到，只靠三个隐藏参数开记录窗口。参数按名字找（不假设下标）；AudioParameterInt 的取值 0..上限按 v / 上限
+-- 归一化，上限从参数自己读（设到 1.0 看显示的整数），每次写入后核对显示值。三项合规且与上一次不同时探针开一个窗口，
+-- 所以先把 case 与 variant 写好，最后两端一起写 auto_record_s；读 auto_record_s 的上限时 case 还是 0（不合规，不会开窗口）。
+
+local function waitUntil(t)
+    while reaper.time_precise() < t do coroutine.yield() end
+end
+
+local function findParam(track, fx, name)
+    for p = 0, reaper.TrackFX_GetNumParams(track, fx) - 1 do
+        local _, pn = reaper.TrackFX_GetParamName(track, fx, p, "")
+        if pn == name then return p end
+    end
+    error("第 " .. fx .. " 个插件上找不到参数 " .. name)
+end
+
+local function paramText(track, fx, p)
+    local _, txt = reaper.TrackFX_GetFormattedParamValue(track, fx, p, "")
+    return txt
+end
+
+local function paramMax(track, fx, p)
+    reaper.TrackFX_SetParamNormalized(track, fx, p, 1.0)
+    local top = tonumber(paramText(track, fx, p))
+    reaper.TrackFX_SetParamNormalized(track, fx, p, 0.0)
+    if not top or top < 1 then error("读不出第 " .. fx .. " 个插件第 " .. p .. " 个参数的上限") end
+    return top
+end
+
+local function setInt(track, fx, p, top, value)
+    reaper.TrackFX_SetParamNormalized(track, fx, p, value / top)
+    local txt = paramText(track, fx, p)
+    if tonumber(txt) ~= value then error("第 " .. fx .. " 个插件第 " .. p .. " 个参数写入后显示 " .. tostring(txt) .. "，应为 " .. value) end
+end
+
+local function probeChain(track)
+    if reaper.TrackFX_GetCount(track) ~= 2 then error("轨道上应有 2 个插件，实际 " .. reaper.TrackFX_GetCount(track)) end
+    for i, want in ipairs({ "Rinne Probe Input", "Rinne Probe Output" }) do
+        local _, name = reaper.TrackFX_GetFXName(track, i - 1, "")
+        put("fx" .. (i - 1) .. "_name", name)
+        if not string.find(name, want, 1, true) then error("第 " .. (i - 1) .. " 个插件不是 " .. want) end
+    end
+end
+
+-- 两端都开窗口；返回窗口开始的时刻
+local function armRecording(track)
+    local records = {}
+    for fx = 0, 1 do
+        local pc, pv, pr = findParam(track, fx, "auto_case"), findParam(track, fx, "auto_variant"), findParam(track, fx, "auto_record_s")
+        for _, p in ipairs({ pr, pc, pv }) do reaper.TrackFX_SetParamNormalized(track, fx, p, 0.0) end
+        local topR = paramMax(track, fx, pr)
+        local topC = paramMax(track, fx, pc)
+        local topV = paramMax(track, fx, pv)
+        put("fx" .. fx .. "_max", topC .. "," .. topV .. "," .. topR)
+        if topC ~= job.caseMax or topV ~= job.variantMax then
+            error("第 " .. fx .. " 个插件的 auto_case / auto_variant 上限是 " .. topC .. " / " .. topV .. "，规则表是 " .. job.caseMax .. " / " .. job.variantMax)
+        end
+        setInt(track, fx, pc, topC, job.autoCase)
+        setInt(track, fx, pv, topV, job.autoVariant)
+        records[#records + 1] = { fx = fx, p = pr, top = topR }
+    end
+    for _, r in ipairs(records) do setInt(track, r.fx, r.p, r.top, job.recordSeconds) end
+    return reaper.time_precise(), records
+end
+
+local function disarm(track, records)
+    for _, r in ipairs(records) do reaper.TrackFX_SetParamNormalized(track, r.fx, r.p, 0.0) end
+end
+
+-- 稳态格：开窗口、实时播放、停走带（探针在停走带时自动 Ping），等窗口到时再退出，让日志正常收尾
+function steps.probeplay()
+    openAndWait(job.project)
+    local track = reaper.GetTrack(0, 0)
+    probeChain(track)
+    local armedAt, records = armRecording(track)
+    wait(job.leadSeconds)
+    reaper.OnPlayButton()
+    wait(job.playSeconds)
+    put("play_state", reaper.GetPlayState())
+    put("play_pos", string.format("%.3f", reaper.GetPlayPosition()))
+    reaper.OnStopButton()
+    local stoppedAt = reaper.time_precise()
+    local exitAt = armedAt + job.recordSeconds + job.marginSeconds
+    put("stopped_after", string.format("%.3f", stoppedAt - armedAt))
+    put("stop_to_exit_s", string.format("%.3f", exitAt - stoppedAt)) -- 停走带之后留给自动 Ping 的时间（要 4.4 s 多）
+    waitUntil(exitAt)
+    disarm(track, records)
+    wait(0.3)
+end
+
+-- 渲染结束也是一次停走带，探针随后自动 Ping，约 4.4 s 才有结果（静音段、注入与回读、恢复、500 ms 淡入）。
+-- 导出格在渲染返回之后至少再等 job.afterRenderSeconds 才退出。这个秒数来自场景表 probe.limits.afterRenderSeconds：脚本里不写字面量，
+-- 稳态格停走带之后留的时间（recordSeconds + marginSeconds - leadSeconds - playSeconds）也由场景表校验成不少于它。
+
+-- 导出格：开窗口后按工程里的渲染设置渲染（离线或在线由工程的 RENDER_1X 决定），等窗口到时、且渲染结束后的 Ping 跑完再退出
+function steps.probeexport()
+    local afterRenderSeconds = job.afterRenderSeconds
+    if type(afterRenderSeconds) ~= "number" then error("任务里没有 afterRenderSeconds") end
+    openAndWait(job.project)
+    local track = reaper.GetTrack(0, 0)
+    probeChain(track)
+    local armedAt, records = armRecording(track)
+    wait(job.leadSeconds)
+    local t0 = reaper.time_precise()
+    reaper.Main_OnCommand(42230, 0) -- File: Render project, using the most recent render settings, auto-close render dialog
+    local renderedAt = reaper.time_precise()
+    put("render_seconds", string.format("%.3f", renderedAt - t0))
+    put("rendered", reaper.file_exists(job.wav))
+    -- 退出时刻由两项里晚的那个定：记录窗口到时（窗口项），或渲染返回后再等 afterRenderSeconds（渲染后项）。
+    -- 哪一项在起作用写进结果：只有渲染后项起作用的那几次，才说明「渲染返回后再等」这一道在管用
+    local windowEnd = armedAt + job.recordSeconds + job.marginSeconds
+    local waitEnd = renderedAt + afterRenderSeconds
+    put("exit_bound", waitEnd > windowEnd and "after_render" or "window")
+    put("render_end_to_exit_s", string.format("%.3f", math.max(windowEnd, waitEnd) - renderedAt))
+    waitUntil(math.max(windowEnd, waitEnd))
+    disarm(track, records)
+    wait(0.3)
 end
 
 local function run()

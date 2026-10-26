@@ -14,6 +14,7 @@ Import-Module (Join-Path $script:Scripts 'Host.psm1') -ErrorAction Stop
 Import-Module (Join-Path $script:Scripts 'Scenarios.psm1') -ErrorAction Stop
 Import-Module (Join-Path $script:Scripts 'Suite.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Rpp.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'SelfTestProbe.psm1') -ErrorAction Stop # 第二段（探针）的用例
 Import-Module (Join-Path $script:Scripts '../lib/TempDir.psm1') -ErrorAction Stop
 
 function Test-Refused([scriptblock]$Action, [string]$Like = '*') {
@@ -115,6 +116,7 @@ function Get-GuardCases([string]$Tmp) {
     $sibling = Join-Path $Tmp ((Split-Path -Leaf $roam) + '-Other')
     & $add '名字只是以 APPDATA 目录名开头的兄弟目录不被误拒' $false ((New-ReaperCfgDir $sibling).Dir -like '*-Other')
     & $add 'New-ReaperCfgDir 对默认资源目录也拒绝，且什么都没建' $true ((Test-Refused { New-ReaperCfgDir $defaultDir } $byString) -and -not (Test-Path -LiteralPath (Join-Path $defaultDir '.rinne-reaper-cfg')))
+    foreach ($c in (Get-InitCases $Tmp)) { $cases.Add($c) }
     $gone = Join-Path $Tmp 'not-there'
     & $add '目录不存在被拒绝' $true (Test-Refused { Assert-ReaperCfgDir $gone } '*不存在*')
     $bare = Join-Path $Tmp 'bare'; $null = New-Item -ItemType Directory -Path $bare; Set-Content -LiteralPath (Join-Path $bare 'reaper.ini') -Value '[REAPER]'
@@ -126,6 +128,68 @@ function Get-GuardCases([string]$Tmp) {
     & $add '正常初始化的配置目录通过校验' $false ($made.Ini -like '*good\reaper.ini' -and (Assert-ReaperCfgDir $good).Dir -eq $made.Dir)
     Remove-Item -LiteralPath (Join-Path $good 'reaper.ini')
     & $add '哨兵在、ini 没了被拒绝' $true (Test-Refused { Assert-ReaperCfgDir $good } '*reaper.ini*')
+    $cases
+}
+
+# doctor.ps1 -Init（New-ReaperCfgDir）只接管三种目录：还不存在的、空的、以前 -Init 过的（有哨兵）。已有内容又没有哨兵的一律拒绝，
+# 什么都不写：前后按「名字、大小、修改时间、内容散列」比一遍整棵树。
+function Get-TreeFingerprint([string]$TreeDir) {
+    @(Get-ChildItem -LiteralPath $TreeDir -Recurse -Force | Sort-Object FullName | ForEach-Object {
+        $rel = $_.FullName.Substring($TreeDir.Length)
+        $_.PSIsContainer ? "$rel|dir" : ('{0}|{1}|{2}|{3}' -f $rel, $_.Length, $_.LastWriteTimeUtc.Ticks, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)
+    }) -join "`n"
+}
+
+function Get-InitCases([string]$Tmp) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $sentinel = (Get-ReaperSentinel).Name
+    $refusedUntouched = {
+        param([string]$TreeDir)
+        $before = Get-TreeFingerprint $TreeDir
+        $refused = Test-Refused { New-ReaperCfgDir $TreeDir } '*已有内容却没有哨兵*'
+        $refused -and (Get-TreeFingerprint $TreeDir) -ceq $before -and -not (Test-Path -LiteralPath (Join-Path $TreeDir $sentinel))
+    }
+    # 一份便携版 REAPER 的样子：有 reaper.ini、有 plugins 子目录
+    $portable = Join-Path $Tmp 'init-portable'
+    $null = New-Item -ItemType Directory -Path (Join-Path $portable 'plugins')
+    [IO.File]::WriteAllText((Join-Path $portable 'reaper.ini'), "[REAPER]`nvstpath64=elsewhere`n[audioconfig]`nmode=3`n")
+    [IO.File]::WriteAllText((Join-Path $portable 'plugins/user.dll'), 'bits')
+    & $add '-Init：已有内容又没有哨兵的目录（例如便携版 REAPER 的目录）被拒绝，什么都没写（树前后逐项相同，没建哨兵）' $true (& $refusedUntouched $portable)
+    $hiddenOnly = Join-Path $Tmp 'init-hidden-only'
+    $null = New-Item -ItemType Directory -Path $hiddenOnly
+    $hiddenFile = Join-Path $hiddenOnly 'desktop.ini'
+    [IO.File]::WriteAllText($hiddenFile, 'x')
+    (Get-Item -LiteralPath $hiddenFile -Force).Attributes = 'Hidden'
+    & $add '-Init：只有一个隐藏文件的目录也算有内容，被拒绝且什么都没写' $true (& $refusedUntouched $hiddenOnly)
+    $subOnly = Join-Path $Tmp 'init-subdir-only'
+    $null = New-Item -ItemType Directory -Path (Join-Path $subOnly 'empty-sub')
+    & $add '-Init：只有一个空子目录的目录也算有内容，被拒绝且什么都没写' $true (& $refusedUntouched $subOnly)
+    $wrongMagic = Join-Path $Tmp 'init-wrong-sentinel'
+    $null = New-Item -ItemType Directory -Path $wrongMagic
+    [IO.File]::WriteAllText((Join-Path $wrongMagic $sentinel), "something else`n")
+    [IO.File]::WriteAllText((Join-Path $wrongMagic 'reaper.ini'), "[REAPER]`n")
+    $before = Get-TreeFingerprint $wrongMagic
+    & $add '-Init：哨兵内容不对的目录不算以前 -Init 过的，被拒绝且什么都没写' $true ((Test-Refused { New-ReaperCfgDir $wrongMagic } '*已有内容却没有哨兵*') -and (Get-TreeFingerprint $wrongMagic) -ceq $before)
+    $aFile = Join-Path $Tmp 'init-a-file'
+    [IO.File]::WriteAllText($aFile, 'x')
+    & $add '-Init：-CfgDir 指向一个文件被拒绝，文件没被动' $true ((Test-Refused { New-ReaperCfgDir $aFile } '*是一个文件*') -and [IO.File]::ReadAllText($aFile) -ceq 'x')
+    $empty = Join-Path $Tmp 'init-empty'
+    $null = New-Item -ItemType Directory -Path $empty
+    $made = try { New-ReaperCfgDir $empty } catch { $null }
+    & $add '-Init：空目录照常接管（建 plugins、reaper.ini、哨兵）' $false ($made -and (Test-Path -LiteralPath (Join-Path $empty $sentinel)) -and (Test-Path -LiteralPath (Join-Path $empty 'plugins') -PathType Container) -and (Test-Path -LiteralPath (Join-Path $empty 'reaper.ini')))
+    [IO.File]::WriteAllText((Join-Path $empty 'reaper.ini'), "[REAPER]`nkept=1`n")
+    $again = try { New-ReaperCfgDir $empty } catch { $null }
+    & $add '-Init：以前 -Init 过的目录（有哨兵）照常可用，已有的 reaper.ini 不动' $false ($again -and [IO.File]::ReadAllText((Join-Path $empty 'reaper.ini')) -ceq "[REAPER]`nkept=1`n")
+    $fresh = Join-Path $Tmp 'init-not-yet'
+    & $add '-Init：还不存在的目录照常新建' $false ($(try { New-ReaperCfgDir $fresh } catch { $null }) -and (Test-Path -LiteralPath (Join-Path $fresh $sentinel)))
+    # 走真正的入口：doctor.ps1 -Init 对已有内容又没有哨兵的目录退出码 64，什么都没写
+    $viaDoctor = Join-Path $Tmp 'init-doctor-portable'
+    $null = New-Item -ItemType Directory -Path $viaDoctor
+    [IO.File]::WriteAllText((Join-Path $viaDoctor 'reaper.ini'), "[REAPER]`nportable=1`n")
+    $before = Get-TreeFingerprint $viaDoctor
+    $r = Invoke-Native -Exe (Get-Process -Id $PID).Path -Arguments @('-NoProfile', '-NonInteractive', '-File', (Join-Path $script:Scripts 'doctor.ps1'), '-CfgDir', $viaDoctor, '-Init')
+    & $add '-Init 入口：doctor.ps1 -Init 对已有内容又没有哨兵的目录退出码 64，什么都没写' $true ($r.Exit -eq 64 -and $r.Out -match 'REFUSED:' -and (Get-TreeFingerprint $viaDoctor) -ceq $before)
     $cases
 }
 
@@ -282,6 +346,10 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '对拍结论：只有退出码是 2 判 FAIL' $true ((Get-CompareVerdict 2 $good).Status -eq 'FAIL')
     & $add '对拍结论：报告读不出来判 FAIL，不当 PASS' $true ((Get-CompareVerdict 0 '').Status -eq 'FAIL')
     & $add '对拍结论：退出码 1（没能比）是 INCOMPLETE，不是 FAIL 也不是 PASS' $true ((Get-CompareVerdict 1 '' '打不开文件').Status -eq 'INCOMPLETE')
+    $weak = "A：a.wav（48000 Hz，2 声道，480000 帧，10.000 秒）`nB：b.wav（48000 Hz，2 声道，480000 帧，10.000 秒）`n结果：FAIL`n原因：信号太弱，无法判定：A 的峰值 -inf dBFS 低于 -60 dBFS，里面没有声音，对拍没有意义`n"
+    $weakVerdict = Get-CompareVerdict 2 $weak
+    & $add '对拍结论：对拍工具给了拒绝理由（A 里没有声音）时判 FAIL，并把理由写进结论（没有比对行也说得清）' $true ($weakVerdict.Status -eq 'FAIL' -and $weakVerdict.Detail -like '*对拍工具说：信号太弱，无法判定：A 的峰值 -inf dBFS*没有声音*')
+    & $add '对拍结论：对拍工具没给理由时，结论里不带「对拍工具说」' $false ((Get-CompareVerdict 0 $good).Detail -notlike '*对拍工具说*' -and (Get-CompareVerdict 0 (& $nt '否' '0' '-6.94')).Detail -notlike '*对拍工具说*')
     & $add '汇总：INCOMPLETE 不当 PASS' $true ((Get-WorstStatus @('PASS', 'INCOMPLETE')) -eq 'INCOMPLETE')
     & $add '汇总：FAIL 压过 INCOMPLETE' $true ((Get-WorstStatus @('INCOMPLETE', 'FAIL', 'PASS')) -eq 'FAIL')
     & $add '汇总：全 SKIPPED 才是 SKIPPED，混着 PASS 算 INCOMPLETE' $false ((Get-WorstStatus @('SKIPPED', 'SKIPPED')) -eq 'SKIPPED' -and (Get-WorstStatus @('PASS', 'SKIPPED')) -eq 'INCOMPLETE')
@@ -437,7 +505,8 @@ function Invoke-ReaperSelfTest {
         $null = New-Item -ItemType Directory -Path (Join-Path $fakeRoam 'REAPER')
         $env:APPDATA = $fakeRoam # 之后所有「默认资源目录」都指向这个假的；子进程继承
         foreach ($group in @{ Fn = { Get-GuardCases $scratch } }, @{ Fn = { Get-SubstResidueCases $scratch } }, @{ Fn = { Get-IniCases } }, @{ Fn = { Get-SnapshotCases $scratch } },
-                           @{ Fn = { Get-LintCases $scratch $RepoRoot $CollisionSample } }, @{ Fn = { Get-PureCases $scratch $RepoRoot } }, @{ Fn = { Get-ChildCases $scratch $RepoRoot } }) {
+                           @{ Fn = { Get-LintCases $scratch $RepoRoot $CollisionSample } }, @{ Fn = { Get-PureCases $scratch $RepoRoot } }, @{ Fn = { Get-ProbeSelfTestCases -Tmp $scratch -RepoRoot $RepoRoot } },
+                           @{ Fn = { Get-ChildCases $scratch $RepoRoot } }) {
             foreach ($c in (& $group.Fn)) { $cases.Add($c) }
         }
     } finally {
