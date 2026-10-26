@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# macOS arm64 发行包的 zip 根条目清单，一行一个，按期望顺序排列。
+# 打包脚本（scripts/package-macos.sh）把 zip 的根条目集合与本文件比对：集合相等且数量相等才算通过，
+# 多一个少一个都红。清单由 scripts/package.ps1 -Preflight 读进机读清单，sh 这边不再自己解析第二遍。
+# 「根条目」= zip 内路径的第一段：目录以 / 结尾，文件不带尾斜杠。
+# ditto 打出来的 zip 里目录既有自己的条目也有文件条目，比对时只看第一段，所以清单里的目录一行代表它的整棵子树。
+# third_party/ 下面只许有 notices/，所以这一段写成 third_party/notices/。
+#
+# 与 Windows 的清单（packaging/manifest-win64.txt）同构：同样的合规文件，mac 这边多两个 .component
+# 与安装 / 卸载脚本。清单里的顺序只用于阅读，比对按集合做。
+#
+# 本清单只描述发行包（不带 --kit）。kit 包多一个 tools/ 目录，由打包脚本在比对时追加，不写在这里。
+
+Rinne Input.vst3/
+Rinne Output.vst3/
+Rinne Input.component/
+Rinne Output.component/
+INSTALL.txt
+LICENSE
+LICENSES/
+SHA256SUMS
+THIRD-PARTY-NOTICES.md
+install-macos.sh
+third_party/notices/
+uninstall-macos.sh

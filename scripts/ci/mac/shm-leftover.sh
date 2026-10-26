@@ -48,8 +48,20 @@ probe() { # $1 仓根 $2 构建目录 $3 说明
 
 if [ "${1:-}" = "--self-test" ]; then
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
-  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
-  trap 'rm -rf "$tmp"' EXIT
+  # 「走完了」标记（约定写法，selftest.sh 与本机 gate 会扫）：macOS 自带的 bash 3.2 在变量展开出错时会静默结束脚本，
+  # 装了 EXIT trap 时进入 trap 的 $? 常常是 0。自测只有走到末尾才把标记置 1，trap 里退出码为 0 而标记没置位，就改成非 0。
+  # trap 只装在自测这条分支里（正常模式不装），所以标记和 trap 函数也只在这条分支里。
+  RINNE_RAN_TO_END=0
+  on_exit() {
+    local rc=$?
+    # rinne-delete-ok: 自测里 mktemp -d 新建的目录
+    rm -rf "$tmp"
+    if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
+      echo "::error::shm-leftover.sh：脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理"
+      exit 1
+    fi
+  }
+  trap on_exit EXIT
   export GITHUB_STEP_SUMMARY=/dev/null
   bad=0
   mk_src() { mkdir -p "$1/tests/ipc"; printf '// 假源码\n' > "$1/tests/ipc/test_x.cpp"; }
@@ -96,6 +108,7 @@ exit 0'
   expect "有用例失败时判错" bad "$tmp/r5" "$tmp/b5"
   [ "$bad" = 0 ] || { echo "shm-leftover 自测失败"; exit 1; }
   echo "shm-leftover 自测通过"
+  RINNE_RAN_TO_END=1
   exit 0
 fi
 

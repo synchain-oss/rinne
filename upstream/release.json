@@ -1,0 +1,46 @@
+{
+  "sources": {
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "909195713ad6898daca5f86dbb422cf5b86e13be"
+    }
+  },
+  "files": [
+    {
+      "path": ".github/workflows/release.yml",
+      "source": "scvb-dev",
+      "from": ".github/workflows/release.yml",
+      "fromBlob": "ec3953c8b9fe0895f13259962018973e71adc9f9",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/package.ps1",
+      "source": "scvb-dev",
+      "from": "scripts/package.ps1",
+      "fromBlob": "6c46f4b7cd70011119bbb5c6ba688c64d9c52a06",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/package-macos.sh",
+      "source": "scvb-dev",
+      "from": "scripts/package-macos.sh",
+      "fromBlob": "7bd2b1b7e29058f9aa2923114d9fb3d94562c691",
+      "mode": "forked"
+    },
+    {
+      "path": "scripts/lib/release-version.ps1",
+      "source": "scvb-dev",
+      "from": "scripts/lib/release-version.ps1",
+      "fromBlob": "2760ce7f06d94a488193c3d70d5e670a88afd44d",
+      "mode": "adapted"
+    },
+    {
+      "path": "scripts/check-release-tag.ps1",
+      "source": "scvb-dev",
+      "from": "scripts/check-release-tag.ps1",
+      "fromBlob": "c3967922cf3ce7d14eeeabb5c0ab7428242b226d",
+      "mode": "forked"
+    }
+  ]
+}

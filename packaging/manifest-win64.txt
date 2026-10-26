@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Windows x64 发行包的 zip 根条目清单，一行一个，按期望顺序排列。
+# 打包脚本把 zip 的根条目集合与本文件比对：集合相等且数量相等才算通过，多一个少一个都红。
+# 「根条目」= zip 内路径的第一段：目录以 / 结尾，文件不带尾斜杠。
+# 目录条目不进 zip（zip 里只落文件），清单里的目录条目靠文件路径的第一段推导出来。
+#
+# 本清单只描述发行包（不带 -Kit）。kit 包多一个 tools/ 目录，走另一套判定，不在这里比。
+
+Rinne Input.vst3/
+Rinne Output.vst3/
+INSTALL.txt
+LICENSE
+LICENSES/
+SHA256SUMS
+THIRD-PARTY-NOTICES.md
+third_party/notices/

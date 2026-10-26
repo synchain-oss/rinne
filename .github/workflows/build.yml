@@ -5,6 +5,12 @@
 #   pr        PR → dev / prod。子 PR（→ feature/**）不跑本 workflow，这是有意的：子 PR 的编译门是本机 gates
 #   dispatch  workflow_dispatch：ref = 要构建的 40 位提交（scripts/maintainer/dispatch.ps1 按 sha 触发），probe = 另出探针身份
 #   release   被 release.yml 以 workflow_call 调用，构建 release-tag 指向的提交
+# release 模式的 tag **不走 with:**：release.yml 由 push tag 触发，被调用方拿到的 github.ref 就是 refs/tags/<tag>、
+# github.ref_name 就是 tag 名、github.ref_type 就是 tag（工作流检查禁止可复用 workflow 的 with: 里插值表达式）。
+# 「Mode and names」那一步据此算出 tag：显式输入优先，否则 REF_TYPE 是 tag 时取 REF_NAME。
+# kit-version（两种触发方式都有）：填了就多打一个 kit 包（Rinne-kit-{win64,macos-arm64}-<kit>-<sha40>）并上传成
+# artifact，构建标签 RINNE_BUILD_LABEL = <kit>+<sha7>；不填就不打。kit 只进 Actions artifact，不进 Release；
+# kit 没有 tag，它的 INSTALL.txt 与 summary 里的对应源码链接钉在 40 位提交上。
 # build-win 的配置、构建与验证都调 scripts/build.ps1，与本机 gates、合并后构建同一份配方：MSVC 环境、第一方零 warning、
 # 恰好两个插件（按名字，探针身份另算）、ctest、pluginval strictness 5 无 GUI；另外断言 cache 里的段名前缀是默认值。
 # 钉版：JUCE 按 .juce-version 的 tag 浅克隆，CMake 守卫再断言它就是 .juce-commit；ninja 与 pluginval 由 bootstrap-tools.ps1
@@ -21,7 +27,9 @@
 # 这四个 job 的名字就是 dev / prod ruleset 里 required check 的 context（见 .github/required-checks.json），不要改名，也不要加 job 级 if。
 # run-name：`Build & Validate <事件> <40 位提交> <nonce>`。dispatch.ps1 给每次触发带一个随机 nonce，靠它在 run-name 里精确认出
 # 自己触发的那次运行；nonce 没给时末尾就是空的。
-# concurrency：PR 按 PR 号分组、新推送取消旧的；dispatch 与 release 按提交分组、不取消，每次运行都对应确定的一次提交。
+# concurrency：PR 按 PR 号分组、新推送取消旧的；dispatch 按提交分组、不取消，每次运行都对应确定的一次提交；
+# release 单独一组（release-<提交>），不与同一提交上的 dispatch 共用：同组只留一个排队项，后来的会顶掉先排的，
+# 发版的构建不能被一次手动 dispatch 顶掉。
 name: Build & Validate
 run-name: Build & Validate ${{ github.event_name }} ${{ inputs.ref || github.sha }} ${{ inputs.nonce }}
 
@@ -44,18 +52,26 @@ on:
         description: 随机串，只用来让 dispatch.ps1 在 run-name 里认出自己触发的那次运行；可以不填
         required: false
         type: string
+      kit-version:
+        description: kit 版本号（如 0.9.0-preview.0）。填了就另外打一个 kit 包并上传；不填就不打
+        required: false
+        type: string
   workflow_call:
     inputs:
       release-tag:
-        description: 要构建的 tag
-        required: true
+        description: 要构建的 tag；留空则由 github.ref / github.ref_name 隐式取（release.yml 走这条路）
+        required: false
+        type: string
+      kit-version:
+        description: kit 版本号（如 0.9.0-preview.0）。填了就另外打一个 kit 包并上传；不填就不打
+        required: false
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.pull_request.number) || inputs.ref || inputs.release-tag || github.sha }}
+  group: build-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.pull_request.number) || inputs.ref || inputs.release-tag || (github.ref_type == 'tag' && format('release-{0}', github.sha)) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -74,7 +90,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref || inputs.release-tag || '' }}
+          # tag 触发时 github.ref 就是 refs/tags/<tag>：release 模式靠它检出被 tag 的提交。
+          ref: ${{ inputs.ref || inputs.release-tag || github.ref }}
           persist-credentials: false
 
       - name: Mode and names
@@ -83,18 +100,29 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           WANT_REF: ${{ inputs.ref }}
           RELEASE_TAG: ${{ inputs.release-tag }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
           NONCE: ${{ inputs.nonce }}
+          KIT_VERSION: ${{ inputs.kit-version }}
         run: |
-          # nonce 只进 run-name，这里仍限死字符集：不让任何不可信文本流进后面的步骤
-          if ($env:NONCE -and $env:NONCE -notmatch '^[0-9A-Za-z._-]{1,64}$') { Write-Error 'nonce 只能是 1 到 64 个字母、数字、点、下划线或连字符'; exit 1 }
+          # nonce 只进 run-name，这里仍限死字符集：不让任何不可信文本流进后面的步骤。
+          # -cnotmatch 配 \z 锚定：$ 会匹配到结尾换行之前，多行值能混过，所以整串锚定用 \z。
+          if ($env:NONCE -and $env:NONCE -cnotmatch '^[0-9A-Za-z._-]{1,64}\z') { Write-Error 'nonce 只能是 1 到 64 个字母、数字、点、下划线或连字符'; exit 1 }
           $sha = "$(git rev-parse HEAD)".Trim()
           if ($sha -notmatch '^[0-9a-f]{40}$') { Write-Error '取不到检出的提交'; exit 1 }
           # ref 只收 40 位提交号：分支名、tag、短 sha 都会变，构建与 concurrency 组就对应不到确定的提交
-          if ($env:WANT_REF -and $env:WANT_REF -notmatch '^[0-9a-f]{40}$') { Write-Error 'ref 必须是 40 位提交号（空着就构建所选分支的 tip）'; exit 1 }
+          if ($env:WANT_REF -and $env:WANT_REF -cnotmatch '^[0-9a-f]{40}\z') { Write-Error 'ref 必须是 40 位提交号（空着就构建所选分支的 tip）'; exit 1 }
           if ($env:WANT_REF -and $env:WANT_REF -ne $sha) { Write-Error "检出的是 $sha，不是要构建的 $env:WANT_REF"; exit 1 }
-          if ($env:RELEASE_TAG) {
-            if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { Write-Error 'release-tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1 }
-            $mode, $name, $keep = 'release', "Rinne-release-win64-$($env:RELEASE_TAG)", 7
+          # tag：显式输入优先；否则 REF_TYPE 是 tag 时取 REF_NAME（release.yml 走这条路：工作流检查禁止
+          # 在 with: 里插值表达式，tag 靠 github 上下文隐式传递）。
+          $tag = $env:RELEASE_TAG
+          if (-not $tag -and $env:REF_TYPE -eq 'tag') { $tag = $env:REF_NAME }
+          if ($tag) {
+            # 整串匹配 + 显式拒 CR/LF + 长度上限：多行值与超长值都混不过。
+            if ($tag -match '[\r\n]') { Write-Error 'tag 含换行'; exit 1 }
+            if ($tag.Length -gt 64) { Write-Error 'tag 太长（上限 64 个字符）'; exit 1 }
+            if ($tag -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?\z') { Write-Error 'tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1 }
+            $mode, $name, $keep = 'release', "Rinne-release-win64-$tag", 7
           } elseif ($env:EVENT_NAME -eq 'pull_request') {
             if ($env:PR_NUMBER -notmatch '^\d+$') { Write-Error '取不到 PR 号'; exit 1 }
             $mode, $name, $keep = 'pr', "Rinne-win64-pr$($env:PR_NUMBER)-$sha", 14
@@ -108,9 +136,22 @@ jobs:
           Write-Host "mode=$mode sha=$sha artifact=$name msvc=$msvc"
           @("MODE=$mode", "BUILT_SHA=$sha", "ARTIFACT=$name", "RETENTION=$keep", "PROBE_ARTIFACT=Rinne-probe-win64-$sha",
             "JUCE_TAG=$((Get-Content .juce-version -Raw).Trim())", "MSVC_VER=$msvc") | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          # kit 版本号：形如 0.9.0-preview.0。整串锚定 + 显式拒换行 + 长度上限，填错就红，
+          # 不让它进文件名与构建标签；形态与 scripts/package.ps1 的版本判据同一口径（点分、每段非空），
+          # 否则要等整个构建跑完才在 Package kit 那一步红。
+          if ($env:KIT_VERSION) {
+            if ($env:KIT_VERSION -match '[\r\n]') { Write-Error 'kit-version 含换行'; exit 1 }
+            if ($env:KIT_VERSION.Length -gt 64) { Write-Error 'kit-version 太长（上限 64 个字符）'; exit 1 }
+            if ($env:KIT_VERSION -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?\z') { Write-Error 'kit-version 不是版本号形态'; exit 1 }
+            @("KIT_VERSION=$($env:KIT_VERSION)", "KIT_LABEL=$($env:KIT_VERSION)+$($sha.Substring(0, 7))",
+              "KIT_ARTIFACT=Rinne-kit-win64-$($env:KIT_VERSION)-$sha") | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          }
 
+      # release 模式不读缓存：tag 触发的 run 能读默认分支作用域的缓存，而 JUCE 与 sccache 的内容直接决定产物字节，
+      # 不能依赖 dev 上任何一次运行写下的东西。跳过后 JUCE 走下一步的浅克隆，CMake 守卫再断言它就是 .juce-commit。
       - name: Restore JUCE
         id: juce-cache
+        if: env.MODE != 'release'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.JUCE_DIR }}
@@ -121,6 +162,7 @@ jobs:
         run: git clone --quiet --depth 1 --branch "$env:JUCE_TAG" https://github.com/juce-framework/JUCE.git "$env:JUCE_DIR"
 
       - name: Restore WebView2 package
+        if: env.MODE != 'release'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: build/packages
@@ -154,6 +196,7 @@ jobs:
       # 键里带 MSVC 工具集与构建脚本的哈希：换了它们旧对象多半不命中，换一把键重新长。键尾的 run_id 让每次都写回，
       # 下一次靠 restore-keys 的前缀捞到上一次的那份。
       - name: Restore compiler cache
+        if: env.MODE != 'release'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.SCCACHE_DIR }}
@@ -163,7 +206,7 @@ jobs:
             sccache-${{ runner.os }}-${{ env.MSVC_VER }}-
 
       - name: Build
-        run: pwsh -NoProfile -File scripts/build.ps1 -Ci -JucePath "$env:JUCE_DIR" -Launcher "$env:RINNE_SCCACHE"
+        run: pwsh -NoProfile -File scripts/build.ps1 -Ci -JucePath "$env:JUCE_DIR" -Launcher "$env:RINNE_SCCACHE" -BuildLabel "$env:KIT_LABEL"
 
       - name: Shared-memory prefix is the default
         run: pwsh -NoProfile -File scripts/build.ps1 -CheckCache
@@ -200,7 +243,36 @@ jobs:
           name: ${{ env.ARTIFACT }}
           path: ${{ runner.temp }}/dist
           if-no-files-found: error
+          # 名字在一个 run 内固定：Re-run 时同名 artifact 已在，默认 overwrite: false 会撞 409。
+          overwrite: true
           retention-days: ${{ env.RETENTION }}
+
+      # kit 包：只在填了 kit-version 时打。kit 里多一个 tools/rinne_nulltest，其余与发行包同构。
+      # kit 只进 Actions artifact，不进 Release（Release 恒为 6 个资产）。
+      # -BuildDir 指向 Stage 出来的 dist 是对的：build.ps1 -Stage 把 tools-bin/<配置>/*.exe 拷进了 dist/tools/，
+      # package.ps1 -Kit 在构建目录的 tools/ 下找 rinne_nulltest.exe（也认 tools-bin/<配置>/），所以包里有 tools/rinne_nulltest.exe。
+      - name: Package kit
+        if: env.KIT_VERSION != ''
+        shell: pwsh
+        env:
+          KIT_VERSION: ${{ inputs.kit-version }}
+          BUILT_SHA: ${{ env.BUILT_SHA }}
+          BUILD_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $kitName = "Rinne-kit-win64-$env:KIT_VERSION-$env:BUILT_SHA"
+          pwsh -NoProfile -File scripts/package.ps1 -Version "$env:KIT_VERSION" -Tag "v$env:KIT_VERSION" `
+            -BuildDir (Join-Path $env:RUNNER_TEMP 'dist') -OutDir (Join-Path $env:RUNNER_TEMP 'dist-kit') -Kit -KitName $kitName -SourceCommit "$env:BUILT_SHA" -BuildRun "$env:BUILD_RUN"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload kit package
+        if: env.KIT_VERSION != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.KIT_ARTIFACT }}
+          path: ${{ runner.temp }}/dist-kit
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
 
       - name: Build probe identity
         if: inputs.probe
@@ -235,8 +307,9 @@ jobs:
 
   # mac 构建（macos-15，arm64 原生）。配置、构建、验证的判据都在 scripts/ci/mac/ 的脚本里，那里每个判据有自测，本 job 最后跑一遍。
   # 阶段：构建与 ctest（含 TIMEOUT 门禁、免 DAW 宿主测试）→ 零分配计数器的反例 → bundle 身份（2 个 .vst3 + 2 个 .component、
-  # 架构、minos、AU 三元组）→ ad-hoc 签名与 codesign --verify → 上传 → 残段检查 → 装 AU、auval ×2、auval -a 唯一性、
-  # pluginval ×4（不开 GUI）→ 残段检查 → 进程外自测（非门禁）→ arm64 压测与变异构建 →（probe）探针 universal。
+  # 架构、minos、AU 三元组）→ ad-hoc 签名与 codesign --verify → 暂存 → 残段检查 → 装 AU、auval ×2、auval -a 唯一性、
+  # pluginval ×4（不开 GUI）→ 残段检查 → 上传（release 模式要 auval 与 pluginval 都过）→ 进程外自测（非门禁）→
+  # arm64 压测与变异构建 →（probe）探针 universal → 判据脚本自测 → 打包与安装脚本自测。
   # 后面的步骤都用 !cancelled() 加前置步骤的结论判断，前面红了也尽量把能看的都跑出来；job 的结论仍然是任何一步红即红。
   # 压测与变异构建：rinne_stress 存在时自动生效，不存在时打印 SKIP 并通过；进程外自测（mac-au-oop）是 continue-on-error，release 时跳过。
   build-mac:
@@ -250,7 +323,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref || inputs.release-tag || '' }}
+          # tag 触发时 github.ref 就是 refs/tags/<tag>：release 模式靠它检出被 tag 的提交。
+          ref: ${{ inputs.ref || inputs.release-tag || github.ref }}
           persist-credentials: false
 
       - name: Mode and names
@@ -259,19 +333,37 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           WANT_REF: ${{ inputs.ref }}
           RELEASE_TAG: ${{ inputs.release-tag }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
           NONCE: ${{ inputs.nonce }}
+          KIT_VERSION: ${{ inputs.kit-version }}
         run: |
           set -euo pipefail
-          # nonce 只进 run-name，这里仍限死字符集：不让任何不可信文本流进后面的步骤
-          if [ -n "$NONCE" ] && ! printf '%s' "$NONCE" | grep -Eq '^[0-9A-Za-z._-]{1,64}$'; then echo '::error::nonce 只能是 1 到 64 个字母、数字、点、下划线或连字符'; exit 1; fi
+          # nonce 只进 run-name，这里仍限死字符集：不让任何不可信文本流进后面的步骤。
+          # 整串匹配 + 长度上限 + 显式拒 CR/LF：grep -E '^…$' 是逐行匹配，多行值能混过。
+          if [ -n "$NONCE" ]; then
+            case "$NONCE" in
+              *[!0-9A-Za-z._-]*) echo '::error::nonce 只能是 1 到 64 个字母、数字、点、下划线或连字符'; exit 1 ;;
+            esac
+            if [ "${#NONCE}" -gt 64 ]; then echo '::error::nonce 太长（上限 64 个字符）'; exit 1; fi
+          fi
           sha="$(git rev-parse HEAD)"
           if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then echo '::error::取不到检出的提交'; exit 1; fi
           # ref 只收 40 位提交号：分支名、tag、短 sha 都会变，构建与 concurrency 组就对应不到确定的提交
           if [ -n "$WANT_REF" ] && ! printf '%s' "$WANT_REF" | grep -Eq '^[0-9a-f]{40}$'; then echo '::error::ref 必须是 40 位提交号（空着就构建所选分支的 tip）'; exit 1; fi
           if [ -n "$WANT_REF" ] && [ "$WANT_REF" != "$sha" ]; then echo "::error::检出的是 ${sha}，不是要构建的 $WANT_REF"; exit 1; fi
-          if [ -n "$RELEASE_TAG" ]; then
-            if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then echo '::error::release-tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1; fi
-            mode=release; name="Rinne-release-macos-arm64-$RELEASE_TAG"; keep=7
+          # tag：显式输入优先；否则 REF_TYPE 是 tag 时取 REF_NAME（release.yml 走这条路：工作流检查禁止
+          # 在 with: 里插值表达式，tag 靠 github 上下文隐式传递）。
+          tag="$RELEASE_TAG"
+          if [ -z "$tag" ] && [ "$REF_TYPE" = "tag" ]; then tag="$REF_NAME"; fi
+          if [ -n "$tag" ]; then
+            # 整串匹配 + 显式拒 CR/LF + 长度上限：多行值与超长值都混不过。
+            case "$tag" in
+              *[!0-9A-Za-z.+-]*) echo '::error::tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1 ;;
+            esac
+            if [ "${#tag}" -gt 64 ]; then echo '::error::tag 太长（上限 64 个字符）'; exit 1; fi
+            if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then echo '::error::tag 不是 vX.Y.Z[-后缀] 的形式'; exit 1; fi
+            mode=release; name="Rinne-release-macos-arm64-$tag"; keep=7
           elif [ "$EVENT_NAME" = pull_request ]; then
             if ! printf '%s' "$PR_NUMBER" | grep -Eq '^[0-9]+$'; then echo '::error::取不到 PR 号'; exit 1; fi
             mode=pr; name="Rinne-macos-arm64-pr$PR_NUMBER-$sha"; keep=14
@@ -287,6 +379,19 @@ jobs:
             echo "PROBE_ARTIFACT=Rinne-probe-macos-universal-$sha"
             echo "JUCE_TAG=$(tr -d '[:space:]' < .juce-version)"
           } >> "$GITHUB_ENV"
+          # kit 版本号：形如 0.9.0-preview.0。整串锚定 + 显式拒换行 + 长度上限，填错就红。
+          if [ -n "$KIT_VERSION" ]; then
+            case "$KIT_VERSION" in
+              *[!0-9A-Za-z.+-]*) echo '::error::kit-version 不是版本号形态'; exit 1 ;;
+            esac
+            if [ "${#KIT_VERSION}" -gt 64 ]; then echo '::error::kit-version 太长（上限 64 个字符）'; exit 1; fi
+            if ! printf '%s' "$KIT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'; then echo '::error::kit-version 不是版本号形态'; exit 1; fi
+            {
+              echo "KIT_VERSION=$KIT_VERSION"
+              echo "KIT_LABEL=$KIT_VERSION+$(printf '%s' "$sha" | cut -c1-7)"
+              echo "KIT_ARTIFACT=Rinne-kit-macos-arm64-$KIT_VERSION-$sha"
+            } >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -315,8 +420,11 @@ jobs:
             echo "| JUCE | $JUCE_TAG |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # release 模式不读缓存：tag 触发的 run 能读默认分支作用域的缓存，而 JUCE 与 sccache 的内容直接决定产物字节，
+      # 不能依赖 dev 上任何一次运行写下的东西。跳过后 JUCE 走下一步的浅克隆，CMake 守卫再断言它就是 .juce-commit。
       - name: Restore JUCE
         id: juce-cache
+        if: env.MODE != 'release'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.JUCE_DIR }}
@@ -335,8 +443,9 @@ jobs:
 
       # 架构与部署目标不在命令行传：它们的唯一真源是 cmake/RinneMac.cmake，下一步从 CMakeCache 读回来核，传了就证明不了它在起作用。
       # CMAKE_COLOR_DIAGNOSTICS=OFF：诊断行里夹进颜色码，日志里的告警就认不出来了。
+      # RINNE_BUILD_LABEL：kit 版本 + 短 sha（kit 时非空，其余时候空串，与 CMake 的默认值相同）。
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJUCE_PATH="$JUCE_DIR" -DCMAKE_COLOR_DIAGNOSTICS=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJUCE_PATH="$JUCE_DIR" -DCMAKE_COLOR_DIAGNOSTICS=OFF -DRINNE_BUILD_LABEL="$KIT_LABEL"
 
       - name: Architecture, deployment target and shared-memory prefix are the defaults
         run: bash scripts/ci/mac/check-cache.sh build formal
@@ -393,15 +502,6 @@ jobs:
           ditto -c -k --keepParent "$tool" "$dist/tools/rinne_nulltest.zip"
           ls -l "$dist" "$dist/tools"
 
-      - name: Upload plugins
-        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ env.ARTIFACT }}
-          path: ${{ runner.temp }}/dist
-          if-no-files-found: error
-          retention-days: ${{ env.RETENTION }}
-
       - name: Shared-memory leftovers before validation
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: bash scripts/ci/mac/shm-leftover.sh build before
@@ -431,10 +531,56 @@ jobs:
         if: ${{ !cancelled() && steps.au_install.outcome == 'success' }}
         run: bash scripts/ci/mac/shm-leftover.sh build after
 
+      # release 模式只在 auval 与 pluginval 都过之后才上传：发布包不从验证没过的构建里出。
+      # 其余模式（PR、dispatch）验证红了也上传，方便测试者拿到包看现象。
+      - name: Upload plugins
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' && (env.MODE != 'release' || (steps.auval.outcome == 'success' && steps.pluginval.outcome == 'success')) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ env.RETENTION }}
+
+      # kit 包：只在填了 kit-version 时打。kit 里多一个 tools/rinne_nulltest，其余与发行包同构。
+      # kit 只进 Actions artifact，不进 Release（Release 恒为 6 个资产）。
+      # kit 会发给测试者，也是许可审计要对照的构建：与 release 同口径，stage、auval、pluginval 都过才打、才传（Win 侧走默认的 success()，两边一致）。
+      - name: Package kit
+        id: kit
+        if: ${{ !cancelled() && env.KIT_VERSION != '' && steps.stage.outcome == 'success' && steps.auval.outcome == 'success' && steps.pluginval.outcome == 'success' }}
+        shell: bash
+        env:
+          KIT_VERSION: ${{ inputs.kit-version }}
+          BUILT_SHA: ${{ env.BUILT_SHA }}
+          BUILD_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          kit_name="Rinne-kit-macos-arm64-$KIT_VERSION-$BUILT_SHA"
+          bash scripts/package-macos.sh --version "$KIT_VERSION" --build-dir build \
+            --out-dir "$RUNNER_TEMP/dist-kit" --source-commit "$BUILT_SHA" \
+            --kit --kit-name "$kit_name" --build-run "$BUILD_RUN"
+          # 兜底：脚本退出 0 却没出包，也判红（macOS 自带的 bash 3.2 下，脚本里变量展开出错会静默结束脚本，退出码可能是 0）
+          for f in "$kit_name.zip" "$kit_name.zip.sha256" "package-summary-$kit_name.md"; do
+            [ -s "$RUNNER_TEMP/dist-kit/$f" ] || { echo "::error::package-macos.sh 退出 0，但输出目录里没有 $f"; exit 1; }
+          done
+
+      - name: Upload kit package
+        if: ${{ !cancelled() && steps.kit.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.KIT_ARTIFACT }}
+          path: ${{ runner.temp }}/dist-kit
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
       # 进程外自测：不是门禁，红了只在 summary 里留痕；release 时跳过，mac 的失败不挡发布
+      # 条件按 MODE 写（env.MODE != 'release'），不按输入写：release 模式没有 inputs.release-tag，
+      # tag 靠 github 上下文隐式传递，按输入判断会判错。
       - name: mac-au-oop (AUHostingService, not a gate)
         id: oop
-        if: ${{ !cancelled() && steps.au_install.outcome == 'success' && !inputs.release-tag }}
+        if: ${{ !cancelled() && steps.au_install.outcome == 'success' && env.MODE != 'release' }}
         continue-on-error: true
         timeout-minutes: 15
         run: bash scripts/ci/mac/oop-run.sh triples.txt build-oop
@@ -477,6 +623,14 @@ jobs:
       - name: Gate script self-tests
         if: ${{ !cancelled() }}
         run: bash scripts/ci/mac/selftest.sh
+
+      # 打包脚本与两个安装脚本的自测（package-macos.sh --self-test 内含 install-macos.sh、uninstall-macos.sh 的 --self-test）。
+      # 在真 mac 上跑：权限位相关的用例在这里实跑，不会像 Windows 上那样跳过。发版前它们没有别处可以先跑，
+      # 所以每次 mac 构建都带上（release.yml 的 package-mac 要等本 job 绿才会开始）。
+      - name: Packaging and installer script self-tests
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: bash scripts/package-macos.sh --self-test all
 
       - name: Upload logs
         if: failure()

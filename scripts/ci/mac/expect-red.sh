@@ -132,7 +132,19 @@ if [ "$mode" != "catch2" ] && { [ -n "$tag" ] || [ -n "$section" ]; }; then
 fi
 
 out=$(mktemp "${TMPDIR:-/tmp}/rinne.XXXXXX")
-trap 'rm -f "$out" "$out.timedout"' EXIT
+# 「走完了」标记（约定写法，selftest.sh 与本机 gate 会扫）：macOS 自带的 bash 3.2 在变量展开出错时会静默结束脚本，
+# 装了 EXIT trap 时进入 trap 的 $? 常常是 0，变异构建的压测就会在半路死掉之后被当成「抓住了」。所以只有走到末尾才把标记置 1，
+# trap 里退出码为 0 而标记没置位，就改成非 0。这里只拦「本脚本自己没走完」，被测命令的结果照 classify 的判法，一个字没改。
+RINNE_RAN_TO_END=0
+on_exit() {
+  local rc=$?
+  rm -f "$out" "$out.timedout"
+  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
+    echo "::error::expect-red.sh：脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理"
+    exit 1
+  fi
+}
+trap on_exit EXIT
 rc=0
 if [ "$timeout" -gt 0 ]; then
   "$@" >"$out" 2>&1 &
@@ -156,4 +168,5 @@ case "$(classify "$rc" "$out" "$mode" "$tag" "$section")" in
   SURVIVED) echo "::error::${label}：被测命令通过了，变异没有被抓住"; exit 1 ;;
   *) echo "::error::${label}：被测命令没有按预期失败（退出码 ${rc}，输出里没有失败断言，或是崩溃），不能算抓住了变异"; exit 1 ;;
 esac
+RINNE_RAN_TO_END=1
 exit 0

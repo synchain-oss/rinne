@@ -86,13 +86,21 @@ Unlock first, then open your DAW. Requirements: macOS 11 or later on an Apple Si
    shasum -a 256 ~/Downloads/{{ZIP}}
    ```
 
-2. Extract the zip.
+2. Extract the zip into a new folder. If `~/Downloads/Rinne` is already there (an earlier version), move it to the Trash
+   first: `ditto` merges into an existing folder and keeps its old files.
 
    ```sh
    ditto -x -k ~/Downloads/{{ZIP}} ~/Downloads/Rinne
    ```
 
-3. Run the installer script. It copies the plug-ins to your Library folder, clears the download quarantine flag and
+3. Remove the download quarantine flag from the extracted folder. The plug-ins are not signed, so macOS has to be told
+   to allow them.
+
+   ```sh
+   xattr -dr com.apple.quarantine ~/Downloads/Rinne
+   ```
+
+4. Run the installer script. It copies the plug-ins to your Library folder, clears the download quarantine flag and
    restarts the audio-component service. In Terminal type `bash` and a space, drag `install-macos.sh` into the window,
    press Return.
 
@@ -100,9 +108,9 @@ Unlock first, then open your DAW. Requirements: macOS 11 or later on an Apple Si
    bash ~/Downloads/Rinne/install-macos.sh
    ```
 
-4. Open your DAW and rescan plug-ins. In LUNA, VST3 scanning is off by default.
+5. Open your DAW and rescan plug-ins. In LUNA, VST3 scanning is off by default.
 
-If macOS says it cannot verify the plug-in, do not click "Move to Trash": click "Done", run step 3 and try again.
+If macOS says it cannot verify the plug-in, do not click "Move to Trash": click "Done", run step 4 and try again.
 
 <!-- END install:mac:en -->
 
@@ -119,22 +127,29 @@ Intel Mac 与 GarageBand。
    shasum -a 256 ~/Downloads/{{ZIP}}
    ```
 
-2. 解压 zip。
+2. 解压 zip 到一个新文件夹。如果 `~/Downloads/Rinne` 已经在（旧版本解压的），先把它移到废纸篓：`ditto` 会合并进已有的文件夹，
+   旧文件会留着。
 
    ```sh
    ditto -x -k ~/Downloads/{{ZIP}} ~/Downloads/Rinne
    ```
 
-3. 运行安装脚本。它会把插件复制到你的资源库文件夹、清除下载隔离标记并重启音频组件服务。在终端里输入 `bash` 和一个空格，
+3. 清除解压出来的文件夹上的下载隔离标记。插件没有签名，要明确告诉 macOS 放行。
+
+   ```sh
+   xattr -dr com.apple.quarantine ~/Downloads/Rinne
+   ```
+
+4. 运行安装脚本。它会把插件复制到你的资源库文件夹、清除下载隔离标记并重启音频组件服务。在终端里输入 `bash` 和一个空格，
    把 `install-macos.sh` 拖进窗口，按回车。
 
    ```sh
    bash ~/Downloads/Rinne/install-macos.sh
    ```
 
-4. 打开 DAW，重新扫描插件。LUNA 默认没有启用 VST3 扫描。
+5. 打开 DAW，重新扫描插件。LUNA 默认没有启用 VST3 扫描。
 
-如果 macOS 提示无法验证插件，不要点「移到废纸篓」：点「完成」，执行第 3 步后重试。
+如果 macOS 提示无法验证插件，不要点「移到废纸篓」：点「完成」，执行第 4 步后重试。
 
 <!-- END install:mac:zh -->
 

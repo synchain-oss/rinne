@@ -77,8 +77,20 @@ verify() { # $1 构建目录 $2 formal|probe
 
 if [ "${1:-}" = "--self-test" ]; then
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
-  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
-  trap 'rm -rf "$tmp"' EXIT
+  # 「走完了」标记（约定写法，selftest.sh 与本机 gate 会扫）：macOS 自带的 bash 3.2 在变量展开出错时会静默结束脚本，
+  # 装了 EXIT trap 时进入 trap 的 $? 常常是 0。自测只有走到末尾才把标记置 1，trap 里退出码为 0 而标记没置位，就改成非 0。
+  # trap 只装在自测这条分支里（正常模式不装），所以标记和 trap 函数也只在这条分支里。
+  RINNE_RAN_TO_END=0
+  on_exit() {
+    local rc=$?
+    # rinne-delete-ok: 自测里 mktemp -d 新建的目录
+    rm -rf "$tmp"
+    if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
+      echo "::error::check-cache.sh：脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理"
+      exit 1
+    fi
+  }
+  trap on_exit EXIT
   bad=0
   mk() { # $1 目录 $2 架构 $3 目标 $4 前缀 $5 默认前缀 $6 探针开关 [$7 编进去的前缀] [$8 编进去的探针]
     local dir=$1 hp hb
@@ -122,6 +134,7 @@ if [ "${1:-}" = "--self-test" ]; then
   expect "头文件里的 kProbeBuild 不是 true/false 判错" bad "$tmp/n" formal
   [ "$bad" = 0 ] || { echo "check-cache 自测失败"; exit 1; }
   echo "check-cache 自测通过"
+  RINNE_RAN_TO_END=1
   exit 0
 fi
 

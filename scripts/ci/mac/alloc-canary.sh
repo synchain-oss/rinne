@@ -48,8 +48,20 @@ run_canaries() {
 
 if [ "${1:-}" = "--self-test" ]; then
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
-  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
-  trap 'rm -rf "$tmp"' EXIT
+  # 「走完了」标记（约定写法，selftest.sh 与本机 gate 会扫）：macOS 自带的 bash 3.2 在变量展开出错时会静默结束脚本，
+  # 装了 EXIT trap 时进入 trap 的 $? 常常是 0。自测只有走到末尾才把标记置 1，trap 里退出码为 0 而标记没置位，就改成非 0。
+  # trap 只装在自测这条分支里（正常模式不装），所以标记和 trap 函数也只在这条分支里。
+  RINNE_RAN_TO_END=0
+  on_exit() {
+    local rc=$?
+    # rinne-delete-ok: 自测里 mktemp -d 新建的目录
+    rm -rf "$tmp"
+    if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
+      echo "::error::alloc-canary.sh：脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理"
+      exit 1
+    fi
+  }
+  trap on_exit EXIT
   # 假的测试程序，都按 Catch2 的输出样子造：good 对致盲有反应（失败、点名 section、有汇总行），deaf 对致盲没反应，
   # wrong 失败但点的不是对应的 section，silent 致盲后什么都没跑，killed 先出 FAILED 再被杀死（没有汇总行），skipped 全被 SKIP
   fake() { # $1 文件名 $2 致盲时执行的命令（空表示致盲无反应）$3 不致盲时执行的命令
@@ -80,6 +92,7 @@ if [ -n "${RINNE_TEST_ALLOC_BLIND:-}" ]; then %s; fi
   expect "用例被 SKIP：红" 1 "$tmp/skipped"
   [ "$bad" = 0 ] || { echo "alloc-canary 自测失败"; exit 1; }
   echo "alloc-canary 自测通过"
+  RINNE_RAN_TO_END=1
   exit 0
 fi
 
