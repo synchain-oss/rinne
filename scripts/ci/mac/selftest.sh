@@ -214,6 +214,8 @@ bash32_selftest() {
 #   脚本没有走完就退出了                                      报错文字
 # 所以「foo_rc=$?」「别处的 || rc=$?」「写在别的函数里的判据」都不算数；处理程序是带引号的命令、找不到函数定义、
 # 函数写在一行里、右花括号对不上缩进，一律判红：宁可多报，约定写法就这一种。
+# 找右花括号时一旦先碰到别的函数的定义行（「名字() {」「名字 ()」「function 名字」），也算找不到结尾：处理函数的右花括号缩进写错时，
+# bash 照样把它当成函数结尾，不能让扫描接着往下找到后面另一个函数的结尾，把那个函数里的判据与报错文字也算进处理函数。
 # 判据是否真的接在 if 里并 exit 1，静态扫描核不了：下面的动态用例用同样写法的最小脚本、/bin/bash 真跑来验这一段的逻辑。
 # 本机 Full 档 gate（scripts/gates.d/60-package.ps1）扫同一套写法；登记表（bash32_exempt）两道扫描共用。
 # RETURN、INT、TERM 的 trap 不是 EXIT trap，不在此列。字符串里写出「trap … EXIT」也会被当成装了 trap：宁可多报。
@@ -225,6 +227,8 @@ exit_fin_re='(^|[[:space:];{(])RINNE_RAN_TO_END=1([[:space:];})]|$)'
 exit_rcfirst_re='^[[:space:]]*(local[[:space:]]+)?rc=\$\?([[:space:];]|$)'
 exit_guard_re='(^|[[:space:];{(])\[ "\$rc" -eq 0 \] && \[ "\$RINNE_RAN_TO_END" != 1 \]([[:space:];})]|$)'
 exit_skip_re='^[[:space:]]*(#|$)'
+# 别的函数的定义行（只看行首：「function 名字」或「名字 ()」，后面接什么不管）：找处理函数的右花括号时先碰到它，就是找不到结尾
+exit_fndef_re='^[[:space:]]*(function[[:space:]]+[A-Za-z_]|[A-Za-z_][A-Za-z0-9_.:-]*[[:space:]]*\([[:space:]]*\))'
 exit_guard_with_trap=0
 
 # 注释行之外有没有装 EXIT trap
@@ -236,7 +240,8 @@ exit_guard_has_trap() { # $1 文件
 
 # 一个文件的检查：没装 EXIT trap 或五样都齐返回 0；缺了就逐行打印缺什么，返回 1。
 # 函数体是子 shell：LC_ALL=C 只管这里，下面的 =~ 与 case 都按字节匹配。整个文件读进数组 code（去掉注释行与空行），
-# 先扫出 EXIT trap 的处理函数名，再在每个处理函数的函数体（定义行的下一行起，到与定义行同缩进的右花括号前）里核三样。
+# 先扫出 EXIT trap 的处理函数名，再在每个处理函数的函数体（定义行的下一行起，到与定义行同缩进的右花括号前；
+# 往下找右花括号的路上先碰到别的函数的定义行，就记 noend）里核三样。
 # 不用 ${#code[@]} 与 "${code[@]}"：bash 3.2 在 set -u 下对空数组会报 unbound variable。
 exit_guard_scan_file() ( # $1 文件
   LC_ALL=C
@@ -275,6 +280,7 @@ exit_guard_scan_file() ( # $1 文件
       end=-1
       for ((j = i + 1; j < n; j++)); do
         if [[ ${code[j]} =~ $end_re ]]; then end=$j; break; fi
+        if [[ ${code[j]} =~ $exit_fndef_re ]]; then break; fi
       done
       if [ "$end" -lt 0 ]; then noend="$noend $name"; continue; fi
       if [ $((i + 1)) -ge "$end" ] || ! [[ ${code[i + 1]} =~ $exit_rcfirst_re ]]; then rc_bad=1; fi
@@ -444,6 +450,20 @@ exit_guard_selftest() {
   eg_miss "坏：处理函数写在一行里（不认）" bad22.sh "找不到 EXIT trap 处理函数 on_exit 的定义"
   eg_write bad23.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" "$grd" "$msg" '  fi' '  }' "$T on_exit EXIT" "$fin"
   eg_miss "坏：右花括号对不上定义行的缩进" bad23.sh "找不到函数体的结尾"
+  # 错位的右花括号后面紧跟别的函数：bash 照样把错位的那个当成处理函数的结尾，别让扫描一路找到后面那个函数的结尾，
+  # 把 helper 里的判据与报错文字也算进处理函数（三种定义写法：名字() {、function 名字、名字 () 加下一行的左花括号）
+  eg_write bad29.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" '  }' 'helper() {' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：右花括号错位，后面紧跟带判据与报错文字的 helper 函数" bad29.sh "找不到函数体的结尾"
+  eg_write bad30.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" '  }' 'function helper {' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：右花括号错位，后面紧跟 function 关键字写法的 helper" bad30.sh "找不到函数体的结尾"
+  eg_write bad31.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" '  }' 'helper ()' '{' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：右花括号错位，后面紧跟左花括号换行的 helper" bad31.sh "找不到函数体的结尾"
+  eg_write bad32.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" "$grd" '  fi' 'helper() {' "$msg" '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：处理函数漏了右花括号，下一个函数的定义行就在眼前" bad32.sh "找不到函数体的结尾"
+  eg_write bad33.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" '  }' '  helper() {' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：右花括号错位，后面的 helper 定义行带缩进" bad33.sh "找不到函数体的结尾"
+  eg_write bad34.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" '  }' 'my-helper.x:y() {' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：右花括号错位，后面的 helper 函数名带 - . :" bad34.sh "找不到函数体的结尾"
   # 两个 EXIT trap 处理函数：每个都要齐全
   eg_write bad24.sh '#!/bin/bash' "$init" 'h1() {' "$rcl" "$grd" "$msg" '  fi' '}' 'h2() {' "$rcl" "$msg" '}' "$T h1 EXIT" "$T h2 EXIT" "$fin"
   eg_miss "坏：两个处理函数，第二个缺判据" bad24.sh '（EXIT trap 处理函数里：退出码为 0'
@@ -467,6 +487,10 @@ exit_guard_selftest() {
   eg_expect "好：trap -- 函数名 EXIT，定义写成「名字 () {」" clean "$(eg_verdict ok10.sh)"
   eg_write ok11.sh '#!/bin/bash' "$init" 'h1() {' "$rcl" "$grd" "$msg" '  fi' '}' 'h2() {' "$rcl" "$grd" "$msg" '  fi' '}' "$T h1 EXIT" "$T h2 EXIT" "$fin"
   eg_expect "好：两个处理函数各自齐全" clean "$(eg_verdict ok11.sh)"
+  # 处理函数写对了，前后都有别的函数（含 function 关键字与「名字 ()」写法）：函数体里长得像函数定义的行
+  # （空数组赋值、(( )) 算术、case 分支、花括号组、字符串里的「名字() {」）不当成函数定义
+  eg_write ok12.sh '#!/bin/bash' "$init" 'before() {' '  :' '}' 'function after_a {' '  :' '}' 'on_exit() {' "$rcl" '  arr=()' '  if (( rc == 0 )); then :; fi' '  echo "helper() {"' '  case "$rc" in 0) ;; *) ;; esac' '  { :; }' "$grd" "$msg" '  fi' '}' 'after_b ()' '{' '  :' '}' "$T on_exit EXIT" "$fin"
+  eg_expect "好：处理函数前后都有别的函数，函数体里有长得像函数定义的行" clean "$(eg_verdict ok12.sh)"
 
   # 整仓（真走 git ls-files）：临时仓里放好文件 → 绿；再放坏文件 → 红并点名；登记路径里的坏写法放行；未跟踪的与非 .sh 不扫
   local repo="$dir/repo"

@@ -191,6 +191,8 @@ function Invoke-RinneBash32Scan([string]$Root, $Lines) {
 #   脚本没有走完就退出了                                      报错文字
 # 所以「foo_rc=$?」「别处的 || rc=$?」「写在别的函数里的判据」都不算数；处理程序是带引号的命令、找不到函数定义、
 # 函数写在一行里、右花括号对不上缩进，一律判红：宁可多报，约定写法就这一种。
+# 找右花括号时一旦先碰到别的函数的定义行（「名字() {」「名字 ()」「function 名字」），也算找不到结尾：处理函数的右花括号缩进写错时，
+# bash 照样把它当成函数结尾，不能让扫描接着往下找到后面另一个函数的结尾，把那个函数里的判据与报错文字也算进处理函数。
 # mac CI 的 scripts/ci/mac/selftest.sh 扫同一套写法（外加一个用 /bin/bash 跑的动态用例），这里是本机 Full 档的那一份；
 # 两侧的报错文字也一字不差。
 # 文件同样按 Latin-1 逐字节读；空白类写成显式的 ASCII 字符类（不用 \s：.NET 的 \s 会把 0x85、0xA0 这两个字节也算空白）。
@@ -204,12 +206,14 @@ $script:RinneExitFinPattern = '(^|[ \t\r\f\v;{(])RINNE_RAN_TO_END=1([ \t\r\f\v;}
 $script:RinneExitRcFirstPattern = '^[ \t\r\f\v]*(local[ \t\r\f\v]+)?rc=\$\?([ \t\r\f\v;]|$)'
 $script:RinneExitGuardPattern = '(^|[ \t\r\f\v;{(])\[ "\$rc" -eq 0 \] && \[ "\$RINNE_RAN_TO_END" != 1 \]([ \t\r\f\v;})]|$)'
 $script:RinneExitSkipPattern = '^[ \t\r\f\v]*(#|$)'
+# 别的函数的定义行（只看行首：「function 名字」或「名字 ()」，后面接什么不管）：找处理函数的右花括号时先碰到它，就是找不到结尾
+$script:RinneExitFnDefPattern = '^[ \t\r\f\v]*(function[ \t\r\f\v]+[A-Za-z_]|[A-Za-z_][A-Za-z0-9_.:-]*[ \t\r\f\v]*\([ \t\r\f\v]*\))'
 # 报错文字是中文：文件按 Latin-1 读，所以拿它的 UTF-8 字节按 Latin-1 还原成同样的字符串再比
 $script:RinneExitText = [System.Text.Encoding]::Latin1.GetString([System.Text.Encoding]::UTF8.GetBytes('脚本没有走完就退出了'))
 
 # 一个文件（字节）的检查：返回 @{ HasTrap; Missing }。没装 EXIT trap 时 Missing 为空；装了就逐条列出缺的东西。
 # 整个文件读成行（去掉注释行与空行），先扫出 EXIT trap 的处理函数名，再在每个处理函数的函数体（定义行的下一行起，
-# 到与定义行同缩进的右花括号前）里核三样。输出的文字与顺序同 selftest.sh 的 exit_guard_scan_file。
+# 到与定义行同缩进的右花括号前；往下找右花括号的路上先碰到别的函数的定义行，就记 noend）里核三样。输出的文字与顺序同 selftest.sh 的 exit_guard_scan_file。
 function Get-RinneExitGuardInfo([byte[]]$Bytes) {
     $code = @([System.Text.Encoding]::Latin1.GetString($Bytes) -split "`n" | Where-Object { $_ -cnotmatch $script:RinneExitSkipPattern })
     $hasTrap = $false
@@ -243,6 +247,7 @@ function Get-RinneExitGuardInfo([byte[]]$Bytes) {
                 $end = -1
                 for ($j = $i + 1; $j -lt $code.Count; $j++) {
                     if ($code[$j] -cmatch $endRe) { $end = $j; break }
+                    if ($code[$j] -cmatch $script:RinneExitFnDefPattern) { break }
                 }
                 if ($end -lt 0) { $noend.Add($name); continue }
                 if (($i + 1) -ge $end -or -not ($code[$i + 1] -cmatch $script:RinneExitRcFirstPattern)) { $rcBad = $true }
@@ -578,6 +583,14 @@ function Test-RinneGates([string]$Root) {
     & $egBad 'EXIT trap 的处理函数找不到定义' (@($egI) + $egFnLines + @('trap other_exit EXIT', $egF)) (& $egNoDef 'other_exit')
     & $egBad '处理函数写在一行里（不认）' @($egI, 'on_exit() { local rc=$?; if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then echo "::error::脚本没有走完就退出了"; exit 1; fi; }', 'trap on_exit EXIT', $egF) (& $egNoDef 'on_exit')
     & $egBad '右花括号对不上定义行的缩进' @($egI, 'on_exit() {', $egR, $egG, $egT, '  fi', '  }', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
+    # 错位的右花括号后面紧跟别的函数：bash 照样把错位的那个当成处理函数的结尾，别让扫描一路找到后面那个函数的结尾，
+    # 把 helper 里的判据与报错文字也算进处理函数（三种定义写法：名字() {、function 名字、名字 () 加下一行的左花括号）
+    & $egBad '右花括号错位，后面紧跟带判据与报错文字的 helper 函数' @($egI, 'on_exit() {', $egR, '  }', 'helper() {', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
+    & $egBad '右花括号错位，后面紧跟 function 关键字写法的 helper' @($egI, 'on_exit() {', $egR, '  }', 'function helper {', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
+    & $egBad '右花括号错位，后面紧跟左花括号换行的 helper' @($egI, 'on_exit() {', $egR, '  }', 'helper ()', '{', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
+    & $egBad '处理函数漏了右花括号，下一个函数的定义行就在眼前' @($egI, 'on_exit() {', $egR, $egG, '  fi', 'helper() {', $egT, '}', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
+    & $egBad '右花括号错位，后面的 helper 定义行带缩进' @($egI, 'on_exit() {', $egR, '  }', '  helper() {', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
+    & $egBad '右花括号错位，后面的 helper 函数名带 - . :' @($egI, 'on_exit() {', $egR, '  }', 'my-helper.x:y() {', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
     & $egBad '两个处理函数，第二个缺判据' @($egI, 'h1() {', $egR, $egG, $egT, '  fi', '}', 'h2() {', $egR, $egT, '}', 'trap h1 EXIT', 'trap h2 EXIT', $egF) $egMsg.Guard
     & $egBad 'rc=$? 后面紧跟别的字符不算' @($egI, 'on_exit() {', ('  local rc' + '=$?x'), $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) $egMsg.Rc
     & $egBad '判据后面紧跟引号（写在字符串里）不算' @($egI, 'on_exit() {', $egR, '  echo "x [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]"', $egT, '}', 'trap on_exit EXIT', $egF) $egMsg.Guard
@@ -588,6 +601,9 @@ function Test-RinneGates([string]$Root) {
     & $egOk 'function 关键字的写法、信号列表里带别的信号' @($egI, 'function on_exit {', $egR, $egG, $egT, '  fi', '}', 'trap on_exit INT EXIT', $egF)
     & $egOk 'trap -- 函数名 EXIT，定义写成「名字 () {」' @($egI, 'on_exit () {', $egR, $egG, $egT, '  fi', '}', 'trap -- on_exit EXIT', $egF)
     & $egOk '两个处理函数各自齐全' @($egI, 'h1() {', $egR, $egG, $egT, '  fi', '}', 'h2() {', $egR, $egG, $egT, '  fi', '}', 'trap h1 EXIT', 'trap h2 EXIT', $egF)
+    # 处理函数写对了，前后都有别的函数（含 function 关键字与「名字 ()」写法）：函数体里长得像函数定义的行
+    # （空数组赋值、(( )) 算术、case 分支、花括号组、字符串里的「名字() {」）不当成函数定义
+    & $egOk '处理函数前后都有别的函数，函数体里有长得像函数定义的行' @($egI, 'before() {', '  :', '}', 'function after_a {', '  :', '}', 'on_exit() {', $egR, '  arr=()', '  if (( rc == 0 )); then :; fi', '  echo "helper() {"', '  case "$rc" in 0) ;; *) ;; esac', '  { :; }', $egG, $egT, '  fi', '}', 'after_b ()', '{', '  :', '}', 'trap on_exit EXIT', $egF)
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：只有 RETURN trap 不误报'; Bad = $false; Passed = (@(& $egMissing @("trap 'rm -rf x' RETURN")).Count -eq 0) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：只有 INT、TERM trap 不误报'; Bad = $false; Passed = (@(& $egMissing @("trap 'exit 130' INT", "trap 'exit 143' TERM")).Count -eq 0) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：注释里提到 trap … EXIT 不误报'; Bad = $false; Passed = (@(& $egMissing @("# trap 'rm -f x' EXIT")).Count -eq 0) }
