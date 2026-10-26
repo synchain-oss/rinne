@@ -34,6 +34,18 @@ $gone = { param($ProcessId) $null -eq (Get-Process -Id $ProcessId -ErrorAction S
 function New-StandIn([string]$Command, [hashtable]$Seen) {
     { param($psi) $Seen.Args = $psi.Arguments; $Seen.Called = $true; $psi.FileName = $pwshExe; $psi.Arguments = "-NoProfile -Command `"$Command`""; [Diagnostics.Process]::Start($psi) }.GetNewClosure()
 }
+# 真机上 Process.ExitTime 偶尔读出 FILETIME 0（换算成 UTC 是 1601-01-01）：把真进程包一层，ExitTime 照这个读，其余照真进程
+function New-BadExitTimeProcess($Wrapped) {
+    $w = [pscustomobject]@{ Real = $Wrapped }
+    foreach ($member in 'Id', 'HasExited', 'ExitCode') { Add-Member -InputObject $w -MemberType ScriptProperty -Name $member -Value ([scriptblock]::Create("`$this.Real.$member")) }
+    Add-Member -InputObject $w -MemberType ScriptProperty -Name ExitTime -Value { [DateTime]::FromFileTime(0) }
+    Add-Member -InputObject $w -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $this.Real.WaitForExit($ms) }
+    $w
+}
+function New-BadExitTimeStandIn([string]$Command) {
+    $launch = New-StandIn $Command @{}
+    { param($psi) New-BadExitTimeProcess (& $launch $psi) }.GetNewClosure()
+}
 function New-BoxCommand([string]$Title, [string]$Buttons, [string]$OutFile) {
     "Add-Type -AssemblyName System.Windows.Forms; `$r = [System.Windows.Forms.MessageBox]::Show('x', '$Title', '$Buttons'); Set-Content -LiteralPath '$OutFile' -Value `$r"
 }
@@ -81,6 +93,21 @@ Write-Case '启动记录：ExitedUtc 是进程自己报的退出时刻，晚于�
 $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
 Write-Case '启动记录：被结束的进程也记 ExitedUtc（结束之后、不晚于现在），收日志靠它认「退出之后新建的文件」' $false (
     $run.Status -eq 'Killed' -and $run.PSObject.Properties.Name -contains 'ExitedUtc' -and $run.ExitedUtc -gt $run.StartedUtc.AddSeconds(1) -and $run.ExitedUtc -le [DateTime]::UtcNow.AddSeconds(1))
+# 进程自报的退出时刻不可信（真机上偶尔是 1601 年）：取检测到退出的当下，不拿它当上界
+$xs = [DateTime]::new(2026, 10, 26, 6, 0, 0, [DateTimeKind]::Utc); $xd = $xs.AddSeconds(20)
+$xr = { param($rep) Resolve-ReaperExitedUtc -Reported $rep -NotBeforeUtc $xs -NoticedUtc $xd }
+Write-Case '退出时刻：进程自报的落在 [启动前一刻, 检测当下 + 1 s] 里就采信（含两个端点）' $false (
+    (& $xr $xs.AddSeconds(19.9)) -eq $xs.AddSeconds(19.9) -and (& $xr $xs) -eq $xs -and (& $xr $xd.AddSeconds(1)) -eq $xd.AddSeconds(1) -and (& $xr $xs.AddSeconds(19.9)).Kind -eq [DateTimeKind]::Utc)
+Write-Case '退出时刻：进程自报 FILETIME 0（1601-01-01 UTC，真机上见过）：不采信，取检测到退出的当下' $true ((& $xr ([DateTime]::FromFileTime(0).ToUniversalTime())) -eq $xd)
+Write-Case '退出时刻：进程自报早于启动前一刻哪怕 1 ms：不采信' $true ((& $xr $xs.AddMilliseconds(-1)) -eq $xd)
+Write-Case '退出时刻：进程自报晚于检测当下 1 s 哪怕 1 ms：不采信' $true ((& $xr $xd.AddSeconds(1).AddMilliseconds(1)) -eq $xd)
+Write-Case '退出时刻：进程没报（取不到）：取检测到退出的当下' $true ((& $xr $null) -eq $xd -and (& $xr $null).Kind -eq [DateTimeKind]::Utc)
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -Launcher (New-BadExitTimeStandIn 'exit 0')
+Write-Case '启动记录：进程自报的退出时刻是 1601 年（自己退出的进程）：ExitedUtc 取检测到退出的当下，晚于启动、不晚于现在' $true (
+    $run.Status -eq 'Exited' -and $run.ExitedUtc -ge $run.StartedUtc -and $run.ExitedUtc -le [DateTime]::UtcNow.AddSeconds(1) -and ($run.ExitedUtc - $run.StartedUtc).TotalSeconds -lt 20)
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 -Launcher (New-BadExitTimeStandIn 'Start-Sleep -Seconds 60')
+Write-Case '启动记录：进程自报的退出时刻是 1601 年（被结束的进程）：ExitedUtc 同样取检测到退出的当下' $true (
+    $run.Status -eq 'Killed' -and $run.ExitedUtc -gt $run.StartedUtc.AddSeconds(1) -and $run.ExitedUtc -le [DateTime]::UtcNow.AddSeconds(1))
 $seenB = @{ Called = $false }
 $sentinelFile = Join-Path $pinned.Dir (Get-ReaperSentinel).Name
 $sentinelText = Get-Content -LiteralPath $sentinelFile -Raw
@@ -288,14 +315,14 @@ function New-FakeReaperLauncher([hashtable]$Spec) {
         $started.WaitForExit()
         Remove-Item -LiteralPath $release -ErrorAction SilentlyContinue
         if ($Spec.AfterExit) { & $Spec.AfterExit $ownPid $Spec.LogDir $started.ExitTime.ToUniversalTime() }
-        $started
+        $Spec.BadExitTime ? (New-BadExitTimeProcess $started) : $started
     }.GetNewClosure()
 }
 
 function New-WireSpec([string]$Id) {
     $logDir = Join-Path $wire "$Id-docs/Rinne Probe Logs"
     $null = New-Item -ItemType Directory -Force -Path $logDir
-    @{ Pwsh = $pwshExe; NewLog = $newLog; LogDir = $logDir; Seen = [Collections.Generic.List[object]]::new(); NoPing = @(); NoWav = @(); PingFor = @{}; NonRt = @{}; Plant = $null; DuringRun = $null; AfterExit = $null }
+    @{ Pwsh = $pwshExe; NewLog = $newLog; LogDir = $logDir; Seen = [Collections.Generic.List[object]]::new(); NoPing = @(); NoWav = @(); PingFor = @{}; NonRt = @{}; Plant = $null; DuringRun = $null; AfterExit = $null; BadExitTime = $false }
 }
 
 # 一个场景的上下文：假的文档目录、本轮结果目录、替身启动器
@@ -365,6 +392,10 @@ Write-Case '稳态格：这次启动的进程退出之后才新建的同 pid 日
     $w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*收日志出错*创建时间晚于这次启动的 REAPER 退出*' -and $w.Ctx.Probe.Moved -eq 2 -and $w.Ctx.Probe.Problems.Count -eq 1 -and
     (Test-Path -LiteralPath (Join-Path $lateSpec.LogDir "probe-O-$latePid-1a7e.csv")) -and (Get-WireCellLogs $w.Cell).Count -eq 2)
 
+# 进程自报的退出时刻是 1601 年（真机上偶尔如此）：真日志照常搬走，不能因为上界退到 1601 年把它们判成「退出之后才新建」
+$w = Invoke-WireScenario 'play-badexit' $playScenario (New-WireSpecWith 'play-badexit' @{ BadExitTime = $true })
+Write-Case '稳态格：进程自报的退出时刻是 1601 年（真机上偶尔如此）：真日志两份照常搬走，这一格 PASS，没有收日志的问题' $true (
+    $w.Out.Status -eq 'PASS' -and $w.Ctx.Probe.Moved -eq 2 -and $w.Ctx.Probe.Problems.Count -eq 0 -and (Get-WireCellLogs $w.Cell).Count -eq 2)
 $w = Invoke-WireScenario 'play-noping' $playScenario (New-WireSpecWith 'play-noping' @{ NoPing = @('play') })
 Write-Case '稳态格：Ping 没出来判 FAIL（没有 Ping）' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*没有 Ping*')
 $w = Invoke-WireScenario 'play-offline' $playScenario (New-WireSpecWith 'play-offline' @{ NonRt = @{ play = 1 } })
