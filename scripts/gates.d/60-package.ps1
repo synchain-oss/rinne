@@ -178,42 +178,92 @@ function Invoke-RinneBash32Scan([string]$Root, $Lines) {
 # macOS 自带的 bash 3.2 在 set -u 下遇到变量展开出错会直接结束整个脚本；脚本装了 EXIT trap 时，进入 trap 的 $? 常常是 0
 # （出事前最后一条命令的状态），于是脚本半路死了却以 0 退出，调用它的 CI 步骤是绿的。对策是「走完了」标记：主流程正常结束处
 # （以及每个合法的提前 exit 0 之前）置位；EXIT trap 里退出码为 0 而标记没置位，就改成非 0 并打印 ::error::。
-# 约定写法固定，git 跟踪的 *.sh 里凡是装了 EXIT trap（trap … EXIT，或末尾写 0）的，都要同时带下面五样，按行扫，注释行不算：
-#   RINNE_RAN_TO_END=0                                      装 trap 之前初始化
-#   RINNE_RAN_TO_END=1                                      主流程正常结束处置位
-#   rc=$?                                                   trap 函数一进来先取退出码
-#   [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]         退出码为 0、标记却没置位
+# 约定写法固定，git 跟踪的 *.sh 里凡是装了 EXIT trap（trap … EXIT，或末尾写 0）的，都要同时带下面五样，按行扫，注释行与空行不算：
+#   RINNE_RAN_TO_END=0                                      装 trap 之前初始化（整个文件里有这一行）
+#   RINNE_RAN_TO_END=1                                      主流程正常结束处置位（整个文件里有这一行）
+# 下面三样只认 EXIT trap 的处理函数的函数体里（trap 后面直接写函数名，不写带引号的命令；函数定义写成「名字() {」独占一行，
+# 右花括号独占一行、与定义行同缩进）：
+#   rc=$?                                                   函数体的第一条命令（可以带 local）：一进来先取退出码；行首与 rc 之间
+#                                                           只许空白与 local，所以 foo_rc=$?、self_test_rc=$? 不算；只认第一条，
+#                                                           是因为前面再有别的命令，$? 就已经被冲掉了
+#   [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]         退出码为 0、标记却没置位（前后要有分隔符，写在字符串里的不算；
+#                                                           因为 rc=$? 必是函数体的第一条，判据读到的 rc 一定是取过的）
 #   脚本没有走完就退出了                                      报错文字
-# mac CI 的 scripts/ci/mac/selftest.sh 扫同一套写法（外加一个用 /bin/bash 跑的动态用例），这里是本机 Full 档的那一份。
+# 所以「foo_rc=$?」「别处的 || rc=$?」「写在别的函数里的判据」都不算数；处理程序是带引号的命令、找不到函数定义、
+# 函数写在一行里、右花括号对不上缩进，一律判红：宁可多报，约定写法就这一种。
+# mac CI 的 scripts/ci/mac/selftest.sh 扫同一套写法（外加一个用 /bin/bash 跑的动态用例），这里是本机 Full 档的那一份；
+# 两侧的报错文字也一字不差。
 # 文件同样按 Latin-1 逐字节读；空白类写成显式的 ASCII 字符类（不用 \s：.NET 的 \s 会把 0x85、0xA0 这两个字节也算空白）。
 # RETURN、INT、TERM 的 trap 不是 EXIT trap，不在此列。字符串里写出「trap … EXIT」也会被当成装了 trap：宁可多报。
 # 登记表与上面的 bash 3.2 兼容扫描共用（Test-RinneBash32Exempt）。
 $script:RinneExitTrapPattern = '(^|[^A-Za-z0-9_])trap[ \t\r\f\v].*[ \t\r\f\v](EXIT|0)([ \t\r\f\v;})]|$)'
-$script:RinneExitGuardItems = @(
-    @{ Missing = '缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）'; Re = '(^|[ \t\r\f\v;{(])RINNE_RAN_TO_END=0([ \t\r\f\v;})]|$)' }
-    @{ Missing = '缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）'; Re = '(^|[ \t\r\f\v;{(])RINNE_RAN_TO_END=1([ \t\r\f\v;})]|$)' }
-    @{ Missing = '缺 rc=$?（trap 函数一进来先取退出码）'; Fixed = 'rc=$?' }
-    @{ Missing = '缺 [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]（退出码为 0、标记却没置位）'; Fixed = '[ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]' }
-    # 报错文字是中文：文件按 Latin-1 读，所以拿它的 UTF-8 字节按 Latin-1 还原成同样的字符串再比
-    @{ Missing = '缺报错文字「脚本没有走完就退出了」'
-        Fixed = [System.Text.Encoding]::Latin1.GetString([System.Text.Encoding]::UTF8.GetBytes('脚本没有走完就退出了')) }
-)
+# trap 后面直接是函数名（可带 --），函数名之后只有信号名，信号表里有 EXIT 或 0；函数名在命名组 name 里
+$script:RinneExitHandlerPattern = '(^|[^A-Za-z0-9_])trap[ \t\r\f\v]+(--[ \t\r\f\v]+)?(?<name>[A-Za-z_][A-Za-z0-9_]*)[ \t\r\f\v]+([A-Za-z0-9_]+[ \t\r\f\v]+)*(EXIT|0)([ \t\r\f\v;})]|$)'
+$script:RinneExitInitPattern = '(^|[ \t\r\f\v;{(])RINNE_RAN_TO_END=0([ \t\r\f\v;})]|$)'
+$script:RinneExitFinPattern = '(^|[ \t\r\f\v;{(])RINNE_RAN_TO_END=1([ \t\r\f\v;})]|$)'
+$script:RinneExitRcFirstPattern = '^[ \t\r\f\v]*(local[ \t\r\f\v]+)?rc=\$\?([ \t\r\f\v;]|$)'
+$script:RinneExitGuardPattern = '(^|[ \t\r\f\v;{(])\[ "\$rc" -eq 0 \] && \[ "\$RINNE_RAN_TO_END" != 1 \]([ \t\r\f\v;})]|$)'
+$script:RinneExitSkipPattern = '^[ \t\r\f\v]*(#|$)'
+# 报错文字是中文：文件按 Latin-1 读，所以拿它的 UTF-8 字节按 Latin-1 还原成同样的字符串再比
+$script:RinneExitText = [System.Text.Encoding]::Latin1.GetString([System.Text.Encoding]::UTF8.GetBytes('脚本没有走完就退出了'))
 
 # 一个文件（字节）的检查：返回 @{ HasTrap; Missing }。没装 EXIT trap 时 Missing 为空；装了就逐条列出缺的东西。
+# 整个文件读成行（去掉注释行与空行），先扫出 EXIT trap 的处理函数名，再在每个处理函数的函数体（定义行的下一行起，
+# 到与定义行同缩进的右花括号前）里核三样。输出的文字与顺序同 selftest.sh 的 exit_guard_scan_file。
 function Get-RinneExitGuardInfo([byte[]]$Bytes) {
-    $code = @([System.Text.Encoding]::Latin1.GetString($Bytes) -split "`n" | Where-Object { $_ -cnotmatch '^[ \t\r\f\v]*#' })
+    $code = @([System.Text.Encoding]::Latin1.GetString($Bytes) -split "`n" | Where-Object { $_ -cnotmatch $script:RinneExitSkipPattern })
     $hasTrap = $false
     foreach ($l in $code) { if ($l -cmatch $script:RinneExitTrapPattern) { $hasTrap = $true; break } }
     $missing = New-Object System.Collections.Generic.List[string]
     if ($hasTrap) {
-        foreach ($it in $script:RinneExitGuardItems) {
-            $found = $false
-            foreach ($l in $code) {
-                if ($it.Re) { if ($l -cmatch $it.Re) { $found = $true; break } }
-                elseif ($l.Contains($it.Fixed)) { $found = $true; break }
+        $initOk = $false; $finOk = $false; $unres = $false
+        $names = New-Object System.Collections.Generic.List[string]
+        foreach ($l in $code) {
+            if ($l -cmatch $script:RinneExitInitPattern) { $initOk = $true }
+            if ($l -cmatch $script:RinneExitFinPattern) { $finOk = $true }
+            if ($l -cmatch $script:RinneExitTrapPattern) {
+                if ($l -cmatch $script:RinneExitHandlerPattern) {
+                    $nm = $Matches['name']
+                    if (-not $names.Contains($nm)) { $names.Add($nm) }
+                } else { $unres = $true }
             }
-            if (-not $found) { $missing.Add($it.Missing) }
         }
+        # 装了 EXIT trap 却一个处理函数名也没认出来：按处理程序不是函数名处理（不会发生，防的是两处正则漂移）
+        if ($names.Count -eq 0) { $unres = $true }
+        $nodef = New-Object System.Collections.Generic.List[string]
+        $noend = New-Object System.Collections.Generic.List[string]
+        $rcBad = $false; $guardBad = $false; $textBad = $false
+        foreach ($name in $names) {
+            $defRe = '^(?<indent>[ \t\r\f\v]*)(function[ \t\r\f\v]+' + $name + '([ \t\r\f\v]*\(\))?|' + $name + '[ \t\r\f\v]*\(\))[ \t\r\f\v]*\{[ \t\r\f\v]*$'
+            $found = $false
+            for ($i = 0; $i -lt $code.Count; $i++) {
+                if (-not ($code[$i] -cmatch $defRe)) { continue }
+                $found = $true
+                $endRe = '^' + $Matches['indent'] + '\}([ \t\r\f\v;]|$)'
+                $end = -1
+                for ($j = $i + 1; $j -lt $code.Count; $j++) {
+                    if ($code[$j] -cmatch $endRe) { $end = $j; break }
+                }
+                if ($end -lt 0) { $noend.Add($name); continue }
+                if (($i + 1) -ge $end -or -not ($code[$i + 1] -cmatch $script:RinneExitRcFirstPattern)) { $rcBad = $true }
+                $g = $false; $t = $false
+                for ($j = $i + 1; $j -lt $end; $j++) {
+                    if ($code[$j] -cmatch $script:RinneExitGuardPattern) { $g = $true }
+                    if ($code[$j].Contains($script:RinneExitText)) { $t = $true }
+                }
+                if (-not $g) { $guardBad = $true }
+                if (-not $t) { $textBad = $true }
+            }
+            if (-not $found) { $nodef.Add($name) }
+        }
+        if (-not $initOk) { $missing.Add('缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）') }
+        if (-not $finOk) { $missing.Add('缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）') }
+        if ($unres) { $missing.Add('EXIT trap 的处理程序不是函数名（要写成「trap 函数名 EXIT」，不写带引号的命令）') }
+        foreach ($n in $nodef) { $missing.Add("找不到 EXIT trap 处理函数 ${n} 的定义（要写成「${n}() {」独占一行）") }
+        foreach ($n in $noend) { $missing.Add("EXIT trap 处理函数 ${n} 找不到函数体的结尾（右花括号要独占一行、与定义行同缩进）") }
+        if ($rcBad) { $missing.Add('缺 rc=$?（EXIT trap 处理函数的第一条命令要先取退出码）') }
+        if ($guardBad) { $missing.Add('缺 [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]（EXIT trap 处理函数里：退出码为 0、标记却没置位）') }
+        if ($textBad) { $missing.Add('缺报错文字「脚本没有走完就退出了」（要写在 EXIT trap 处理函数里）') }
     }
     @{ HasTrap = $hasTrap; Missing = [string[]]$missing.ToArray() }
 }
@@ -475,50 +525,75 @@ function Test-RinneGates([string]$Root) {
     }
 
     # EXIT trap 的「走完了」标记检查：少一样就红并点名，写法只是长得像不算，没装 EXIT trap 的不管；整仓也真走 git ls-files 过一遍。
-    $egFull = @('#!/bin/bash', 'set -euo pipefail', 'RINNE_RAN_TO_END=0', 'on_exit() {', '  local rc=$?',
-        '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then', '    echo "::error::脚本没有走完就退出了"; exit 1', '  fi', '}',
-        'trap on_exit EXIT', 'work', 'RINNE_RAN_TO_END=1')
+    # rc=$?、判据、报错文字三样只认 EXIT trap 处理函数的函数体：别处的、长得像的（foo_rc=$?）、不在第一条命令位置的都不算。
+    $egI = 'RINNE_RAN_TO_END=0'; $egF = 'RINNE_RAN_TO_END=1'
+    $egR = '  local rc=$?'
+    $egG = '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then'
+    $egT = '    echo "::error::脚本没有走完就退出了"; exit 1'
+    $egFull = @('#!/bin/bash', 'set -euo pipefail', $egI, 'on_exit() {', $egR, $egG, $egT, '  fi', '}', 'trap on_exit EXIT', 'work', $egF)
     $egMissing = { param([string[]]$Lines, [string]$Sep = "`n") [string[]]@((Get-RinneExitGuardInfo $utf8.GetBytes(($Lines -join $Sep) + $Sep)).Missing) }
+    $egJoin = { param([string[]]$Lines) (@(& $egMissing $Lines)) -join '|' }
     $egMsg = @{
         Init = '缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）'
         Fin = '缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）'
-        Rc = '缺 rc=$?（trap 函数一进来先取退出码）'
-        Guard = '缺 [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]（退出码为 0、标记却没置位）'
-        Text = '缺报错文字「脚本没有走完就退出了」'
+        Unres = 'EXIT trap 的处理程序不是函数名（要写成「trap 函数名 EXIT」，不写带引号的命令）'
+        Rc = '缺 rc=$?（EXIT trap 处理函数的第一条命令要先取退出码）'
+        Guard = '缺 [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]（EXIT trap 处理函数里：退出码为 0、标记却没置位）'
+        Text = '缺报错文字「脚本没有走完就退出了」（要写在 EXIT trap 处理函数里）'
     }
+    $egNoDef = { param([string]$N) "找不到 EXIT trap 处理函数 ${N} 的定义（要写成「${N}() {」独占一行）" }
+    $egNoEnd = { param([string]$N) "EXIT trap 处理函数 ${N} 找不到函数体的结尾（右花括号要独占一行、与定义行同缩进）" }
+    # 坏样例：整个文件算出来的缺项（用 | 连起来）必须恰好等于期望；好样例：一项都不缺
+    $egBad = { param([string]$Label, [string[]]$Lines, [string]$Expect) [pscustomobject]@{ Label = "EXIT trap 标记检查：$Label"; Bad = $true; Passed = ((& $egJoin $Lines) -ceq $Expect) } }
+    $egOk = { param([string]$Label, [string[]]$Lines) [pscustomobject]@{ Label = "EXIT trap 标记检查：$Label"; Bad = $false; Passed = (@(& $egMissing $Lines).Count -eq 0) } }
     $egWithout = { param([string]$Line) [string[]]@($egFull | Where-Object { $_ -cne $Line }) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：五样齐全不误报'; Bad = $false; Passed = (@(& $egMissing $egFull).Count -eq 0) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：行尾是 CRLF 的齐全写法不误报'; Bad = $false; Passed = (@(& $egMissing $egFull "`r`n").Count -eq 0) }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：没有初始化 RINNE_RAN_TO_END=0 要点名'; Bad = $true
-        Passed = (@(& $egMissing (& $egWithout 'RINNE_RAN_TO_END=0')) -join '|') -ceq $egMsg.Init }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：从不置位 RINNE_RAN_TO_END=1 要点名'; Bad = $true
-        Passed = (@(& $egMissing (& $egWithout 'RINNE_RAN_TO_END=1')) -join '|') -ceq $egMsg.Fin }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：trap 函数里没有先取 rc=$? 要点名'; Bad = $true
-        Passed = (@(& $egMissing (& $egWithout '  local rc=$?')) -join '|') -ceq $egMsg.Rc }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：没有「退出码为 0、标记没置位」的判据要点名'; Bad = $true
-        Passed = (@(& $egMissing (& $egWithout '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then')) -join '|') -ceq $egMsg.Guard }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：没有报错文字要点名'; Bad = $true
-        Passed = (@(& $egMissing (& $egWithout '    echo "::error::脚本没有走完就退出了"; exit 1')) -join '|') -ceq $egMsg.Text }
+    & $egBad '没有初始化 RINNE_RAN_TO_END=0 要点名' (& $egWithout $egI) $egMsg.Init
+    & $egBad '从不置位 RINNE_RAN_TO_END=1 要点名' (& $egWithout $egF) $egMsg.Fin
+    & $egBad 'trap 函数里没有先取 rc=$? 要点名' (& $egWithout $egR) $egMsg.Rc
+    & $egBad '没有「退出码为 0、标记没置位」的判据要点名' (& $egWithout $egG) $egMsg.Guard
+    & $egBad '没有报错文字要点名' (& $egWithout $egT) $egMsg.Text
     $egCommented = [string[]]@($egFull | ForEach-Object { if ($_ -ceq 'trap on_exit EXIT') { $_ } else { "# $_" } })
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：标记只写在注释里不算（五样全缺）'; Bad = $true; Passed = (@(& $egMissing $egCommented).Count -eq 5) }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：if 的一行分支里装 EXIT trap 认得出来'; Bad = $true
-        Passed = (@(& $egMissing @('#!/bin/bash', "if true; then trap 'rm -f x' EXIT; fi")).Count -eq 5) }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：trap 末尾写 0（等同 EXIT）认得出来'; Bad = $true
-        Passed = (@(& $egMissing @("trap 'rm -f x' 0")).Count -eq 5) }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：trap 装在函数里（缩进）认得出来'; Bad = $true
-        Passed = (@(& $egMissing @('f() {', "    trap 'rm -f x' EXIT", '}')).Count -eq 5) }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：信号列表里带 EXIT 认得出来'; Bad = $true
-        Passed = (@(& $egMissing @("trap 'rm -f x' INT EXIT")).Count -eq 5) }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：变量名带前缀的同名写法不算初始化'; Bad = $true
-        Passed = ((@(& $egMissing @('PKG_RINNE_RAN_TO_END=0', '  local rc=$?', '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then', '    echo "脚本没有走完就退出了"', 'RINNE_RAN_TO_END=1', 'trap cleanup EXIT')) -join '|') -ceq $egMsg.Init) }
-    [pscustomobject]@{ Label = 'EXIT trap 标记检查：RINNE_RAN_TO_END=10 不算置位 1'; Bad = $true
-        Passed = ((@(& $egMissing @('RINNE_RAN_TO_END=0', 'RINNE_RAN_TO_END=10', '  local rc=$?', '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then', '    echo "脚本没有走完就退出了"', 'trap cleanup EXIT')) -join '|') -ceq $egMsg.Fin) }
+    & $egBad '标记只写在注释里不算（只剩 trap 一行：缺初始化、缺置位、找不到处理函数的定义）' $egCommented ((@($egMsg.Init, $egMsg.Fin, (& $egNoDef 'on_exit'))) -join '|')
+    $egNoFn = (@($egMsg.Init, $egMsg.Fin, $egMsg.Unres)) -join '|'
+    & $egBad 'if 的一行分支里装 EXIT trap 认得出来（引号命令不是函数名）' @('#!/bin/bash', "if true; then trap 'rm -f x' EXIT; fi") $egNoFn
+    & $egBad 'trap 末尾写 0（等同 EXIT）认得出来' @("trap 'rm -f x' 0") $egNoFn
+    & $egBad 'trap 装在函数里（缩进）认得出来' @('f() {', "    trap 'rm -f x' EXIT", '}') $egNoFn
+    & $egBad '信号列表里带 EXIT 认得出来' @("trap 'rm -f x' INT EXIT") $egNoFn
+    $egFnLines = @('on_exit() {', $egR, $egG, $egT, '  fi', '}')
+    & $egBad '变量名带前缀的同名写法不算初始化' (@('PKG_RINNE_RAN_TO_END=0') + $egFnLines + @($egF, 'trap on_exit EXIT')) $egMsg.Init
+    & $egBad 'RINNE_RAN_TO_END=10 不算置位 1' (@($egI, 'RINNE_RAN_TO_END=10') + $egFnLines + @('trap on_exit EXIT')) $egMsg.Fin
+    # rc=$? 的判据：处理函数的第一条命令，行首与 rc 之间只许空白与 local
+    foreach ($rcn in @('foo_rc', 'self_test_rc', 'main_rc', 'xrc')) {
+        & $egBad "处理函数里只有 ${rcn}=`$?，没有 rc=`$?" @($egI, 'on_exit() {', ('  local ' + $rcn + '=$?'), $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) $egMsg.Rc
+    }
+    & $egBad 'rc=$? 写在别的函数与别的行里，处理函数里没有' @($egI, 'other() {', '  rc=$?', '  return "$rc"', '}', 'on_exit() {', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', 'work || rc=$?', 'main "$@" || main_rc=$?', 'self_test; self_rc=$?', $egF) $egMsg.Rc
+    & $egBad 'rc=$? 不是处理函数的第一条命令' @($egI, 'on_exit() {', '  cleanup_temp "$tmp"', $egR, $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) $egMsg.Rc
+    & $egBad '处理函数是空的' @($egI, 'on_exit() {', '}', 'trap on_exit EXIT', $egF) ((@($egMsg.Rc, $egMsg.Guard, $egMsg.Text)) -join '|')
+    & $egBad '「退出码为 0、标记没置位」的判据写在别的函数里' @($egI, 'helper() {', $egG, '  fi', '}', 'on_exit() {', $egR, $egT, '}', 'trap on_exit EXIT', $egF) $egMsg.Guard
+    & $egBad '报错文字写在别的函数里' @($egI, 'helper() {', $egT, '}', 'on_exit() {', $egR, $egG, '  fi', '}', 'trap on_exit EXIT', $egF) $egMsg.Text
+    & $egBad '判据只是写在字符串里（前后没有分隔符）' @($egI, 'on_exit() {', $egR, "  echo '[ `"`$rc`" -eq 0 ] && [ `"`$RINNE_RAN_TO_END`" != 1 ]'", $egT, '}', 'trap on_exit EXIT', $egF) $egMsg.Guard
+    & $egBad '处理程序是带引号的命令（不是函数名）' (@($egI) + $egFnLines + @('trap "on_exit" EXIT', $egF)) $egMsg.Unres
+    & $egBad 'EXIT trap 的处理函数找不到定义' (@($egI) + $egFnLines + @('trap other_exit EXIT', $egF)) (& $egNoDef 'other_exit')
+    & $egBad '处理函数写在一行里（不认）' @($egI, 'on_exit() { local rc=$?; if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then echo "::error::脚本没有走完就退出了"; exit 1; fi; }', 'trap on_exit EXIT', $egF) (& $egNoDef 'on_exit')
+    & $egBad '右花括号对不上定义行的缩进' @($egI, 'on_exit() {', $egR, $egG, $egT, '  fi', '  }', 'trap on_exit EXIT', $egF) (& $egNoEnd 'on_exit')
+    & $egBad '两个处理函数，第二个缺判据' @($egI, 'h1() {', $egR, $egG, $egT, '  fi', '}', 'h2() {', $egR, $egT, '}', 'trap h1 EXIT', 'trap h2 EXIT', $egF) $egMsg.Guard
+    & $egBad 'rc=$? 后面紧跟别的字符不算' @($egI, 'on_exit() {', ('  local rc' + '=$?x'), $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF) $egMsg.Rc
+    & $egBad '判据后面紧跟引号（写在字符串里）不算' @($egI, 'on_exit() {', $egR, '  echo "x [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]"', $egT, '}', 'trap on_exit EXIT', $egF) $egMsg.Guard
+    & $egBad '判据前面紧跟别的字符（粘在别的词后面）不算' @($egI, 'on_exit() {', $egR, '  if x[ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then', $egT, '  fi', '}', 'trap on_exit EXIT', $egF) $egMsg.Guard
+    & $egBad '函数处理程序之外还有一个带引号的 EXIT trap（后装的会盖掉前一个）' (@($egI) + $egFnLines + @('trap on_exit EXIT', "trap 'rm -f x' EXIT", $egF)) $egMsg.Unres
+    & $egOk '处理函数里行首的 rc=$?（不带 local）' @($egI, 'on_exit() {', 'rc=$?', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF)
+    & $egOk '函数体里有注释与空行，rc=$? 后面跟注释' @($egI, 'on_exit() {', '', '  # 先取退出码，别在前面放别的命令', '  local rc=$? # 退出码', $egG, $egT, '  fi', '}', 'trap on_exit EXIT', $egF)
+    & $egOk 'function 关键字的写法、信号列表里带别的信号' @($egI, 'function on_exit {', $egR, $egG, $egT, '  fi', '}', 'trap on_exit INT EXIT', $egF)
+    & $egOk 'trap -- 函数名 EXIT，定义写成「名字 () {」' @($egI, 'on_exit () {', $egR, $egG, $egT, '  fi', '}', 'trap -- on_exit EXIT', $egF)
+    & $egOk '两个处理函数各自齐全' @($egI, 'h1() {', $egR, $egG, $egT, '  fi', '}', 'h2() {', $egR, $egG, $egT, '  fi', '}', 'trap h1 EXIT', 'trap h2 EXIT', $egF)
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：只有 RETURN trap 不误报'; Bad = $false; Passed = (@(& $egMissing @("trap 'rm -rf x' RETURN")).Count -eq 0) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：只有 INT、TERM trap 不误报'; Bad = $false; Passed = (@(& $egMissing @("trap 'exit 130' INT", "trap 'exit 143' TERM")).Count -eq 0) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：注释里提到 trap … EXIT 不误报'; Bad = $false; Passed = (@(& $egMissing @("# trap 'rm -f x' EXIT")).Count -eq 0) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：引号里的 0 不当成 EXIT'; Bad = $false; Passed = (@(& $egMissing @("trap 'echo 0' INT")).Count -eq 0) }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：空文件不误报'; Bad = $false; Passed = (@(Get-RinneExitGuardInfo ([byte[]]@())).Missing.Count -eq 0) }
-    $egIndented = [string[]]@($egFull | ForEach-Object { if ($_ -ceq 'RINNE_RAN_TO_END=1') { '    --self-test) RINNE_RAN_TO_END=1; exit 0 ;;' } else { "    $_" } })
+    $egIndented = [string[]]@($egFull | ForEach-Object { if ($_ -ceq $egF) { '    --self-test) RINNE_RAN_TO_END=1; exit 0 ;;' } else { "    $_" } })
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：整体缩进、置位写在 case 分支里不误报'; Bad = $false; Passed = (@(& $egMissing $egIndented).Count -eq 0) }
     # 接线：gate 主体里真的调了这一步，而且在假版本打包之前
     $gateSrc2 = (${function:Invoke-RinnePackageGate}).ToString()
@@ -529,11 +604,11 @@ function Test-RinneGates([string]$Root) {
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：登记过的 Linux 专用脚本放行（整条路径相等）'; Bad = $false
         Passed = (Get-RinneExitGuardProblems @(& $egItem 'tests/sanitizer-canary/run.sh')).Problems.Count -eq 0 }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：登记表不是后缀匹配'; Bad = $true
-        Passed = (Get-RinneExitGuardProblems @(& $egItem 'scripts/tests/sanitizer-canary/run.sh')).Problems.Count -eq 5 }
+        Passed = (Get-RinneExitGuardProblems @(& $egItem 'scripts/tests/sanitizer-canary/run.sh')).Problems.Count -eq 3 }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：登记表区分大小写'; Bad = $true
-        Passed = (Get-RinneExitGuardProblems @(& $egItem 'Tests/sanitizer-canary/run.sh')).Problems.Count -eq 5 }
+        Passed = (Get-RinneExitGuardProblems @(& $egItem 'Tests/sanitizer-canary/run.sh')).Problems.Count -eq 3 }
     [pscustomobject]@{ Label = 'EXIT trap 标记检查：打包脚本不在登记表里'; Bad = $true
-        Passed = (Get-RinneExitGuardProblems @(& $egItem 'scripts/package-macos.sh')).Problems.Count -eq 5 }
+        Passed = (Get-RinneExitGuardProblems @(& $egItem 'scripts/package-macos.sh')).Problems.Count -eq 3 }
     # 整仓：临时 git 仓里放好文件 → 绿并数得出个数；再放坏文件 → 红并点名；登记路径里放行；未跟踪的 .sh 与非 .sh 不扫。
     $egtmp = New-RinneTempDir -Prefix 'rinne-gate-eg-selftest-'
     try {

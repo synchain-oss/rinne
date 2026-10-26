@@ -201,36 +201,104 @@ bash32_selftest() {
 # （出事前最后一条命令的状态），于是脚本半路死了却以 0 退出，调用它的 CI 步骤是绿的（pluginval 闸门因此会静默放行）。
 # 对策是「走完了」标记：主流程正常结束处（以及每个合法的提前 exit 0 之前）置位；EXIT trap 里退出码为 0 而标记没置位，
 # 就改成非 0 并打印 ::error::。约定写法固定，git 跟踪的 *.sh 里凡是装了 EXIT trap（trap … EXIT，或末尾写 0）的，都要同时带下面五样，
-# 按行扫，注释行不算：
-#   RINNE_RAN_TO_END=0                                      装 trap 之前初始化
-#   RINNE_RAN_TO_END=1                                      主流程正常结束处置位
-#   rc=$?                                                   trap 函数一进来先取退出码
-#   [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]         退出码为 0、标记却没置位
+# 按行扫，注释行与空行不算：
+#   RINNE_RAN_TO_END=0                                      装 trap 之前初始化（整个文件里有这一行）
+#   RINNE_RAN_TO_END=1                                      主流程正常结束处置位（整个文件里有这一行）
+# 下面三样只认 EXIT trap 的处理函数的函数体里（trap 后面直接写函数名，不写带引号的命令；函数定义写成「名字() {」独占一行，
+# 右花括号独占一行、与定义行同缩进）：
+#   rc=$?                                                   函数体的第一条命令（可以带 local）：一进来先取退出码；行首与 rc 之间
+#                                                           只许空白与 local，所以 foo_rc=$?、self_test_rc=$? 不算；只认第一条，
+#                                                           是因为前面再有别的命令，$? 就已经被冲掉了
+#   [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]         退出码为 0、标记却没置位（前后要有分隔符，写在字符串里的不算；
+#                                                           因为 rc=$? 必是函数体的第一条，判据读到的 rc 一定是取过的）
 #   脚本没有走完就退出了                                      报错文字
+# 所以「foo_rc=$?」「别处的 || rc=$?」「写在别的函数里的判据」都不算数；处理程序是带引号的命令、找不到函数定义、
+# 函数写在一行里、右花括号对不上缩进，一律判红：宁可多报，约定写法就这一种。
+# 判据是否真的接在 if 里并 exit 1，静态扫描核不了：下面的动态用例用同样写法的最小脚本、/bin/bash 真跑来验这一段的逻辑。
 # 本机 Full 档 gate（scripts/gates.d/60-package.ps1）扫同一套写法；登记表（bash32_exempt）两道扫描共用。
 # RETURN、INT、TERM 的 trap 不是 EXIT trap，不在此列。字符串里写出「trap … EXIT」也会被当成装了 trap：宁可多报。
 exit_trap_re='(^|[^A-Za-z0-9_])trap[[:space:]].*[[:space:]](EXIT|0)([[:space:];})]|$)'
+# trap 后面直接是函数名（可带 --），函数名之后只有信号名，信号表里有 EXIT 或 0；BASH_REMATCH[3] 是函数名
+exit_handler_re='(^|[^A-Za-z0-9_])trap[[:space:]]+(--[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]+([A-Za-z0-9_]+[[:space:]]+)*(EXIT|0)([[:space:];})]|$)'
+exit_init_re='(^|[[:space:];{(])RINNE_RAN_TO_END=0([[:space:];})]|$)'
+exit_fin_re='(^|[[:space:];{(])RINNE_RAN_TO_END=1([[:space:];})]|$)'
+exit_rcfirst_re='^[[:space:]]*(local[[:space:]]+)?rc=\$\?([[:space:];]|$)'
+exit_guard_re='(^|[[:space:];{(])\[ "\$rc" -eq 0 \] && \[ "\$RINNE_RAN_TO_END" != 1 \]([[:space:];})]|$)'
+exit_skip_re='^[[:space:]]*(#|$)'
 exit_guard_with_trap=0
 
 # 注释行之外有没有装 EXIT trap
 exit_guard_has_trap() { # $1 文件
   local code
-  code=$(LC_ALL=C grep -v '^[[:space:]]*#' -- "$1" || true)
+  code=$(LC_ALL=C grep -av '^[[:space:]]*#' -- "$1" || true)
   LC_ALL=C grep -Eq "$exit_trap_re" <<< "$code"
 }
 
 # 一个文件的检查：没装 EXIT trap 或五样都齐返回 0；缺了就逐行打印缺什么，返回 1。
-exit_guard_scan_file() { # $1 文件
-  local code miss=0
-  if ! exit_guard_has_trap "$1"; then return 0; fi
-  code=$(LC_ALL=C grep -v '^[[:space:]]*#' -- "$1" || true)
-  LC_ALL=C grep -Eq '(^|[[:space:];{(])RINNE_RAN_TO_END=0([[:space:];})]|$)' <<< "$code" || { echo "缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）"; miss=1; }
-  LC_ALL=C grep -Eq '(^|[[:space:];{(])RINNE_RAN_TO_END=1([[:space:];})]|$)' <<< "$code" || { echo "缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）"; miss=1; }
-  LC_ALL=C grep -Fq 'rc=$?' <<< "$code" || { echo "缺 rc=\$?（trap 函数一进来先取退出码）"; miss=1; }
-  LC_ALL=C grep -Fq '[ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]' <<< "$code" || { echo "缺 [ \"\$rc\" -eq 0 ] && [ \"\$RINNE_RAN_TO_END\" != 1 ]（退出码为 0、标记却没置位）"; miss=1; }
-  LC_ALL=C grep -Fq '脚本没有走完就退出了' <<< "$code" || { echo "缺报错文字「脚本没有走完就退出了」"; miss=1; }
-  return "$miss"
-}
+# 函数体是子 shell：LC_ALL=C 只管这里，下面的 =~ 与 case 都按字节匹配。整个文件读进数组 code（去掉注释行与空行），
+# 先扫出 EXIT trap 的处理函数名，再在每个处理函数的函数体（定义行的下一行起，到与定义行同缩进的右花括号前）里核三样。
+# 不用 ${#code[@]} 与 "${code[@]}"：bash 3.2 在 set -u 下对空数组会报 unbound variable。
+exit_guard_scan_file() ( # $1 文件
+  LC_ALL=C
+  export LC_ALL
+  local line name names="" def_re end_re found end g t i j n=0
+  local miss=0 init_ok=0 fin_ok=0 unres=0 nodef="" noend="" rc_bad=0 guard_bad=0 text_bad=0
+  local -a code
+  if ! exit_guard_has_trap "$1"; then exit 0; fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ $line =~ $exit_skip_re ]]; then continue; fi
+    code[n]=$line
+    n=$((n + 1))
+  done < "$1"
+  for ((i = 0; i < n; i++)); do
+    line=${code[i]}
+    if [[ $line =~ $exit_init_re ]]; then init_ok=1; fi
+    if [[ $line =~ $exit_fin_re ]]; then fin_ok=1; fi
+    if [[ $line =~ $exit_trap_re ]]; then
+      if [[ $line =~ $exit_handler_re ]]; then
+        name=${BASH_REMATCH[3]}
+        case " $names " in *" $name "*) ;; *) names="$names $name" ;; esac
+      else
+        unres=1
+      fi
+    fi
+  done
+  # 装了 EXIT trap 却一个处理函数名也没认出来：按处理程序不是函数名处理（不会发生，防的是两处正则漂移）
+  if [ -z "$names" ]; then unres=1; fi
+  for name in $names; do
+    def_re='^([[:space:]]*)(function[[:space:]]+'"$name"'([[:space:]]*\(\))?|'"$name"'[[:space:]]*\(\))[[:space:]]*\{[[:space:]]*$'
+    found=0
+    for ((i = 0; i < n; i++)); do
+      if ! [[ ${code[i]} =~ $def_re ]]; then continue; fi
+      found=1
+      end_re='^'"${BASH_REMATCH[1]}"'\}([[:space:];]|$)'
+      end=-1
+      for ((j = i + 1; j < n; j++)); do
+        if [[ ${code[j]} =~ $end_re ]]; then end=$j; break; fi
+      done
+      if [ "$end" -lt 0 ]; then noend="$noend $name"; continue; fi
+      if [ $((i + 1)) -ge "$end" ] || ! [[ ${code[i + 1]} =~ $exit_rcfirst_re ]]; then rc_bad=1; fi
+      g=0
+      t=0
+      for ((j = i + 1; j < end; j++)); do
+        if [[ ${code[j]} =~ $exit_guard_re ]]; then g=1; fi
+        case "${code[j]}" in *"脚本没有走完就退出了"*) t=1 ;; esac
+      done
+      if [ "$g" = 0 ]; then guard_bad=1; fi
+      if [ "$t" = 0 ]; then text_bad=1; fi
+    done
+    if [ "$found" = 0 ]; then nodef="$nodef $name"; fi
+  done
+  if [ "$init_ok" = 0 ]; then echo "缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）"; miss=1; fi
+  if [ "$fin_ok" = 0 ]; then echo "缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）"; miss=1; fi
+  if [ "$unres" = 1 ]; then echo "EXIT trap 的处理程序不是函数名（要写成「trap 函数名 EXIT」，不写带引号的命令）"; miss=1; fi
+  for name in $nodef; do echo "找不到 EXIT trap 处理函数 ${name} 的定义（要写成「${name}() {」独占一行）"; miss=1; done
+  for name in $noend; do echo "EXIT trap 处理函数 ${name} 找不到函数体的结尾（右花括号要独占一行、与定义行同缩进）"; miss=1; done
+  if [ "$rc_bad" = 1 ]; then echo "缺 rc=\$?（EXIT trap 处理函数的第一条命令要先取退出码）"; miss=1; fi
+  if [ "$guard_bad" = 1 ]; then echo "缺 [ \"\$rc\" -eq 0 ] && [ \"\$RINNE_RAN_TO_END\" != 1 ]（EXIT trap 处理函数里：退出码为 0、标记却没置位）"; miss=1; fi
+  if [ "$text_bad" = 1 ]; then echo "缺报错文字「脚本没有走完就退出了」（要写在 EXIT trap 处理函数里）"; miss=1; fi
+  exit "$miss"
+)
 
 # 仓库里 git 跟踪的 *.sh 全扫（跳过登记过的）；有问题的打印成 <路径>: <缺什么>，有问题返回 1。装了 EXIT trap 的个数记在 exit_guard_with_trap。
 exit_guard_scan_repo() { # $1 仓根
@@ -305,7 +373,7 @@ exit_guard_selftest() {
   eg_full_without bad3.sh "$rcl"
   eg_miss "坏：trap 函数里没有先取 rc=\$?" bad3.sh '缺 rc=$?'
   eg_full_without bad4.sh "$grd"
-  eg_miss "坏：trap 里没有「退出码为 0、标记没置位」的判据" bad4.sh '!= 1 ]（退出码为 0'
+  eg_miss "坏：trap 里没有「退出码为 0、标记没置位」的判据" bad4.sh '（EXIT trap 处理函数里：退出码为 0'
   eg_full_without bad5.sh "$msg"
   eg_miss "坏：没有报错文字" bad5.sh "缺报错文字"
   # 坏样例：只写在注释里不算
@@ -344,6 +412,61 @@ exit_guard_selftest() {
     if [ "$l" = "$fin" ]; then printf '%s\n' '    --self-test) RINNE_RAN_TO_END=1; exit 0 ;;' >> "$dir/ok6.sh"; else printf '    %s\n' "$l" >> "$dir/ok6.sh"; fi
   done
   eg_expect "好：整体缩进、置位写在 case 分支里（RINNE_RAN_TO_END=1; exit 0）" clean "$(eg_verdict ok6.sh)"
+
+  # S1：rc=$? 只认 EXIT trap 处理函数的函数体里、第一条命令的位置（可以带 local），带左边界。
+  # 坏样例：处理函数里只有「长得像」的 foo_rc=$? 之类，没有 rc=$?（之前整个文件做子串匹配，这些都会被当成已经取了退出码）
+  local rcn
+  for rcn in foo_rc self_test_rc main_rc xrc; do
+    eg_write "bad13-${rcn}.sh" '#!/bin/bash' "$init" 'on_exit() {' "  local ${rcn}"'=$?' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+    eg_miss "坏：处理函数里只有 ${rcn}=\$?，没有 rc=\$?" "bad13-${rcn}.sh" '缺 rc=$?'
+  done
+  # 坏样例：处理函数里没有，文件别处有（别的函数里的 rc=$?、到处都有的 || rc=$?、install-macos.sh 那样的 self_rc=$?）
+  eg_write bad14.sh '#!/bin/bash' "$init" 'other() {' '  rc=$?' '  return "$rc"' '}' 'on_exit() {' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" 'work || rc=$?' 'main "$@" || main_rc=$?' 'self_test; self_rc=$?' "$fin"
+  eg_miss "坏：rc=\$? 写在别的函数与别的行里，处理函数里没有" bad14.sh '缺 rc=$?'
+  # 坏样例：rc=$? 不是处理函数的第一条命令（前面的命令已经把 $? 冲掉了），或者处理函数是空的
+  eg_write bad15.sh '#!/bin/bash' "$init" 'on_exit() {' '  cleanup_temp "$tmp"' "$rcl" "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：rc=\$? 不是处理函数的第一条命令" bad15.sh '缺 rc=$?'
+  eg_write bad16.sh '#!/bin/bash' "$init" 'on_exit() {' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：处理函数是空的" bad16.sh '缺 rc=$?'
+  # 坏样例：判据与报错文字不在处理函数里，或者判据只是写在字符串里
+  eg_write bad17.sh '#!/bin/bash' "$init" 'helper() {' "$grd" '  fi' '}' 'on_exit() {' "$rcl" "$msg" '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：「退出码为 0、标记没置位」的判据写在别的函数里" bad17.sh '（EXIT trap 处理函数里：退出码为 0'
+  eg_write bad18.sh '#!/bin/bash' "$init" 'helper() {' "$msg" '}' 'on_exit() {' "$rcl" "$grd" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：报错文字写在别的函数里" bad18.sh "缺报错文字"
+  eg_write bad19.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" "  echo '[ \"\$rc\" -eq 0 ] && [ \"\$RINNE_RAN_TO_END\" != 1 ]'" "$msg" '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：判据只是写在字符串里（前后没有分隔符）" bad19.sh '（EXIT trap 处理函数里：退出码为 0'
+  # 坏样例：认不出处理函数就判红
+  eg_write bad20.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" "$grd" "$msg" '  fi' '}' "$T \"on_exit\" EXIT" "$fin"
+  eg_miss "坏：处理程序是带引号的命令（不是函数名）" bad20.sh "处理程序不是函数名"
+  eg_write bad21.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" "$grd" "$msg" '  fi' '}' "$T other_exit EXIT" "$fin"
+  eg_miss "坏：处理函数找不到定义" bad21.sh "找不到 EXIT trap 处理函数 other_exit 的定义"
+  eg_write bad22.sh '#!/bin/bash' "$init" 'on_exit() { local rc=$?; if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then echo "::error::脚本没有走完就退出了"; exit 1; fi; }' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：处理函数写在一行里（不认）" bad22.sh "找不到 EXIT trap 处理函数 on_exit 的定义"
+  eg_write bad23.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" "$grd" "$msg" '  fi' '  }' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：右花括号对不上定义行的缩进" bad23.sh "找不到函数体的结尾"
+  # 两个 EXIT trap 处理函数：每个都要齐全
+  eg_write bad24.sh '#!/bin/bash' "$init" 'h1() {' "$rcl" "$grd" "$msg" '  fi' '}' 'h2() {' "$rcl" "$msg" '}' "$T h1 EXIT" "$T h2 EXIT" "$fin"
+  eg_miss "坏：两个处理函数，第二个缺判据" bad24.sh '（EXIT trap 处理函数里：退出码为 0'
+  # rc=$? 后面紧跟别的字符不算；判据后面紧跟引号（写在双引号字符串里）不算；有函数处理程序之外，再来一个带引号的 EXIT trap 也判红（后装的会盖掉前一个）
+  eg_write bad25.sh '#!/bin/bash' "$init" 'on_exit() {' "  local rc"'=$?x' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：rc=\$? 后面紧跟别的字符" bad25.sh '缺 rc=$?'
+  eg_write bad26.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" '  echo "x [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]"' "$msg" '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：判据后面紧跟引号（写在字符串里）" bad26.sh '（EXIT trap 处理函数里：退出码为 0'
+  eg_write bad27.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" '  if x[ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then' "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_miss "坏：判据前面紧跟别的字符（粘在别的词后面）" bad27.sh '（EXIT trap 处理函数里：退出码为 0'
+  eg_write bad28.sh '#!/bin/bash' "$init" 'on_exit() {' "$rcl" "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$T 'rm -f x' EXIT" "$fin"
+  eg_miss "坏：函数处理程序之外还有一个带引号的 EXIT trap" bad28.sh "处理程序不是函数名"
+  # 正例：行首的 rc=$?（不带 local）、带注释与空行、function 关键字、带 -- 与别的信号、两个处理函数各自齐全
+  eg_write ok7.sh '#!/bin/bash' "$init" 'on_exit() {' 'rc=$?' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_expect "好：处理函数里行首的 rc=\$?（不带 local）" clean "$(eg_verdict ok7.sh)"
+  eg_write ok8.sh '#!/bin/bash' "$init" 'on_exit() {' '' '  # 先取退出码，别在前面放别的命令' '  local rc=$? # 退出码' "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" "$fin"
+  eg_expect "好：函数体里有注释与空行，rc=\$? 后面跟注释" clean "$(eg_verdict ok8.sh)"
+  eg_write ok9.sh '#!/bin/bash' "$init" 'function on_exit {' "$rcl" "$grd" "$msg" '  fi' '}' "$T on_exit INT EXIT" "$fin"
+  eg_expect "好：function 关键字的写法、信号列表里带别的信号" clean "$(eg_verdict ok9.sh)"
+  eg_write ok10.sh '#!/bin/bash' "$init" 'on_exit () {' "$rcl" "$grd" "$msg" '  fi' '}' "$T -- on_exit EXIT" "$fin"
+  eg_expect "好：trap -- 函数名 EXIT，定义写成「名字 () {」" clean "$(eg_verdict ok10.sh)"
+  eg_write ok11.sh '#!/bin/bash' "$init" 'h1() {' "$rcl" "$grd" "$msg" '  fi' '}' 'h2() {' "$rcl" "$grd" "$msg" '  fi' '}' "$T h1 EXIT" "$T h2 EXIT" "$fin"
+  eg_expect "好：两个处理函数各自齐全" clean "$(eg_verdict ok11.sh)"
 
   # 整仓（真走 git ls-files）：临时仓里放好文件 → 绿；再放坏文件 → 红并点名；登记路径里的坏写法放行；未跟踪的与非 .sh 不扫
   local repo="$dir/repo"
