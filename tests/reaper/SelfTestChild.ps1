@@ -76,6 +76,11 @@ $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 
 Write-Case '采样：轮询里取样时进程已退出，记作 SampleLost，不当成取到了计数' $true ($run.Status -eq 'Killed' -and @($run.SampleLost) -contains 'warm' -and -not $run.Marks.Contains('warm') -and (& $gone $run.Pid))
 $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -Launcher (New-StandIn 'exit 3' @{})
 Write-Case '自己退出的进程：状态 Exited，退出码照实记' $false ($run.Status -eq 'Exited' -and $run.ExitCode -eq 3)
+Write-Case '启动记录：ExitedUtc 是进程自己报的退出时刻，晚于启动前一刻、不晚于现在；StartedUtc 在它之前' $false (
+    $run.PSObject.Properties.Name -contains 'ExitedUtc' -and $run.ExitedUtc -ge $run.StartedUtc -and $run.ExitedUtc -le [DateTime]::UtcNow.AddSeconds(1) -and ($run.ExitedUtc - $run.StartedUtc).TotalSeconds -lt 20 -and $run.ExitedUtc.Kind -eq [DateTimeKind]::Utc)
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '启动记录：被结束的进程也记 ExitedUtc（结束之后、不晚于现在），收日志靠它认「退出之后新建的文件」' $false (
+    $run.Status -eq 'Killed' -and $run.PSObject.Properties.Name -contains 'ExitedUtc' -and $run.ExitedUtc -gt $run.StartedUtc.AddSeconds(1) -and $run.ExitedUtc -le [DateTime]::UtcNow.AddSeconds(1))
 $seenB = @{ Called = $false }
 $sentinelFile = Join-Path $pinned.Dir (Get-ReaperSentinel).Name
 $sentinelText = Get-Content -LiteralPath $sentinelFile -Raw
@@ -248,12 +253,13 @@ $diffReport = Join-Path $wire 'compare-diff.txt'
 [IO.File]::WriteAllText($diffReport, (Get-FakeCompareText -Bit '否' -Lag '0' -Whole '-96.5' -Head '-101.25'), [Text.UTF8Encoding]::new($false))
 
 # Spec 的键：LogDir（假的文档目录里的日志目录）、Seen（记每次启动）、NoPing / NoWav（哪一趟不写：'offline' / 'online' / 'play'）、PingFor（趟 → Ping 值）、
-# NonRt（趟 → 播放中的块的 nonrt）、Plant（启动中往日志目录放别人的文件的块）、DuringRun（启动中动别人文件的块）
+# NonRt（趟 → 播放中的块的 nonrt）、Plant（启动中往日志目录放别人的文件的块）、DuringRun（启动中动别人文件的块）、AfterExit（进程退出之后才往日志目录放文件的块，收到 pid、目录、退出时刻）
 function New-FakeReaperLauncher([hashtable]$Spec) {
     {
         param($psi)
-        $started = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($Spec.Pwsh, '-NoProfile -NonInteractive -Command exit 0'))
-        $started.WaitForExit()
+        # 替身进程在世时写日志（真 REAPER 的探针在进程活着时新建日志，收日志的创建时间判据看的就是这个）：它等一个放行文件，写完才放它退出
+        $release = [IO.Path]::GetFullPath((Join-Path $Spec.LogDir "../release-$([guid]::NewGuid().ToString('N')).flag"))
+        $started = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($Spec.Pwsh, "-NoProfile -NonInteractive -Command `"while (-not (Test-Path -LiteralPath '$release')) { Start-Sleep -Milliseconds 20 }`""))
         $ownPid = $started.Id
         $job = @{}
         foreach ($m in [regex]::Matches([IO.File]::ReadAllText($psi.Environment['RINNE_REAPER_JOB']), '\["(\w+)"\]=("(?:[^"\\]|\\.)*"|[^,}]+)')) {
@@ -271,13 +277,17 @@ function New-FakeReaperLauncher([hashtable]$Spec) {
         $renderSpeed = [regex]::Match([IO.File]::ReadAllText($job['project']), '(?m)^\s*RENDER_1X (\d+)').Groups[1].Value
         $Spec.Seen.Add([pscustomobject]@{ Pid = $ownPid; Step = $job['step']; Leg = $leg; RenderSpeed = $renderSpeed; AfterRender = $job['afterRenderSeconds'] })
         $null = New-Item -ItemType Directory -Force -Path $Spec.LogDir
-        [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-I-$ownPid-a1b1.csv"), (& $Spec.NewLog -Role I -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings $pings))
-        [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-O-$ownPid-c2d2.csv"), (& $Spec.NewLog -Role O -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings @()))
+        [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-I-$ownPid-a1b1.csv"), (& $Spec.NewLog -Role I -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings $pings -Tok4 a1b1))
+        [IO.File]::WriteAllText((Join-Path $Spec.LogDir "probe-O-$ownPid-c2d2.csv"), (& $Spec.NewLog -Role O -LogPid $ownPid -Case $case -Variant $variant -NonRt $nonRt -PeerPid $peer -Pings @() -Tok4 c2d2))
         if ($Spec.Plant) { & $Spec.Plant $ownPid $Spec.LogDir }
         if ($Spec.DuringRun) { & $Spec.DuringRun $ownPid $Spec.LogDir }
         if ($isExport -and $Spec.NoWav -notcontains $leg) { [IO.File]::WriteAllBytes($job['wav'], [byte[]]@(0)) }
         $driver = $isExport ? "render_seconds=10.000`nexit_bound=window`nrender_end_to_exit_s=8.000`n" : "stopped_after=9.100`nstop_to_exit_s=6.500`n"
         [IO.File]::WriteAllText($job['result'], "${driver}done=1`n")
+        [IO.File]::WriteAllText($release, 'go')
+        $started.WaitForExit()
+        Remove-Item -LiteralPath $release -ErrorAction SilentlyContinue
+        if ($Spec.AfterExit) { & $Spec.AfterExit $ownPid $Spec.LogDir $started.ExitTime.ToUniversalTime() }
         $started
     }.GetNewClosure()
 }
@@ -285,7 +295,7 @@ function New-FakeReaperLauncher([hashtable]$Spec) {
 function New-WireSpec([string]$Id) {
     $logDir = Join-Path $wire "$Id-docs/Rinne Probe Logs"
     $null = New-Item -ItemType Directory -Force -Path $logDir
-    @{ Pwsh = $pwshExe; NewLog = $newLog; LogDir = $logDir; Seen = [Collections.Generic.List[object]]::new(); NoPing = @(); NoWav = @(); PingFor = @{}; NonRt = @{}; Plant = $null; DuringRun = $null }
+    @{ Pwsh = $pwshExe; NewLog = $newLog; LogDir = $logDir; Seen = [Collections.Generic.List[object]]::new(); NoPing = @(); NoWav = @(); PingFor = @{}; NonRt = @{}; Plant = $null; DuringRun = $null; AfterExit = $null }
 }
 
 # 一个场景的上下文：假的文档目录、本轮结果目录、替身启动器
@@ -331,6 +341,29 @@ Write-Case "稳态格走收日志：只搬本次启动的两份（$($moved -join
 Write-Case '稳态格：Ctx.Probe.Own 只有本次启动的两份（轮末前后清单比较时才会只除外这两份）' $true (($w.Ctx.Probe.Own -join '|') -ceq "probe-I-$ownPid-a1b1.csv|probe-O-$ownPid-c2d2.csv")
 Write-Case "稳态格：任务里的 afterRenderSeconds 就是场景表的值（$($plantSpec.Seen[0].AfterRender)）" $false ([double]$plantSpec.Seen[0].AfterRender -eq [double]$probeSection.limits.afterRenderSeconds)
 Write-Case '稳态格：好路径的结局 PASS，写出 Ping 4800 / D 4800 与驱动记下的停走带后留给 Ping 的时间' $false ($w.Out.Status -eq 'PASS' -and $w.Out.Detail -match 'Ping 4800 样本 / D 4800 样本' -and $w.Out.Detail -match 'stop_to_exit_s=6\.500')
+
+# pid 复用的接线：同 pid 的 Cubase 日志（H 行 host_kind=cubase）与退出之后才新建的同 pid 日志都留在原处，真日志两份照常搬走；这一格判 FAIL 并写明原因
+$cbSpec = New-WireSpec 'play-cubase'
+$cbSpec.Plant = { param($ownPid, $dir) [IO.File]::WriteAllText((Join-Path $dir "probe-I-$ownPid-cb01.csv"), (New-LogForName "probe-I-$ownPid-cb01.csv" 'decoy' -HostKind cubase)) }
+$w = Invoke-WireScenario 'play-cubase' $playScenario $cbSpec
+$cbPid = $cbSpec.Seen[0].Pid
+$cbFile = Join-Path $cbSpec.LogDir "probe-I-$cbPid-cb01.csv"
+Write-Case '稳态格：同 pid 的 Cubase 日志（H 行 host_kind=cubase）留在原处没变，真日志两份照常搬走，这一格判 FAIL 并写明 host_kind，问题记进这一轮' $true (
+    $w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*收日志出错*host_kind 是 cubase*' -and $w.Ctx.Probe.Moved -eq 2 -and $w.Ctx.Probe.Problems.Count -eq 1 -and
+    (Test-Path -LiteralPath $cbFile) -and [IO.File]::ReadAllText($cbFile) -ceq (New-LogForName "probe-I-$cbPid-cb01.csv" 'decoy' -HostKind cubase) -and (Get-WireCellLogs $w.Cell).Count -eq 2)
+$lateSpec = New-WireSpec 'play-late'
+$lateSpec.AfterExit = {
+    param($ownPid, $dir, $exitUtc)
+    # 退出 3 s 之后才新建（pid 复用者的样子，比 2 s 余量晚）；H 行、名字、pid、修改时间都对得上。真等 3 s：收日志拿不到 Run 里的退出时刻、退回「取现在」时，
+    # 这份文件的创建时间还在「现在 + 2 s」以内，会被误收，这条用例才分得出两者
+    Start-Sleep -Seconds 3
+    $f = Join-Path $dir "probe-O-$ownPid-1a7e.csv"; [IO.File]::WriteAllText($f, (New-LogForName "probe-O-$ownPid-1a7e.csv" 'late'))
+}
+$w = Invoke-WireScenario 'play-late' $playScenario $lateSpec
+$latePid = $lateSpec.Seen[0].Pid
+Write-Case '稳态格：这次启动的进程退出之后才新建的同 pid 日志（创建时间晚于退出）留在原处，真日志两份照常搬走，这一格判 FAIL 并写明创建时间' $true (
+    $w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*收日志出错*创建时间晚于这次启动的 REAPER 退出*' -and $w.Ctx.Probe.Moved -eq 2 -and $w.Ctx.Probe.Problems.Count -eq 1 -and
+    (Test-Path -LiteralPath (Join-Path $lateSpec.LogDir "probe-O-$latePid-1a7e.csv")) -and (Get-WireCellLogs $w.Cell).Count -eq 2)
 
 $w = Invoke-WireScenario 'play-noping' $playScenario (New-WireSpecWith 'play-noping' @{ NoPing = @('play') })
 Write-Case '稳态格：Ping 没出来判 FAIL（没有 Ping）' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*没有 Ping*')
@@ -458,6 +491,42 @@ if ($realReaperRunning) {
     }
     Write-Case '整轮入口（第二段）：盐每轮不同：两轮里同一个别人的文件（foreign-a.csv）的散列对不上' $true (
         @($keysTouch1 | Where-Object { $_ -cmatch '^other-' -and $_ -in (ConvertFrom-Json $listBefore1).PSObject.Properties.Name }).Count -eq 0)
+
+    # 硬链接数一时取不到（OneDrive 正在同步、杀毒软件短暂独占……）：前一份清单是 1、后一份记 ?。列清单在 Suite 模块里换成替身，
+    # 这一轮里「放行文件」出现之后，别人的 foreign-a.csv 的硬链接数就记成 ?
+    $linkFlag = Join-Path $wire 'link-unknown.flag'
+    $env:RINNE_SELFTEST_LINKFLAG = $linkFlag
+    & (Get-Module Suite) {
+        function script:Get-ReaperProbeLogListing {
+            param([Parameter(Mandatory)][Alias('Dir')][string]$ListingDir)
+            $l = ProbeLogs\Get-ReaperProbeLogListing -Dir $ListingDir
+            $flagPath = $env:RINNE_SELFTEST_LINKFLAG
+            if ($flagPath -and (Test-Path -LiteralPath $flagPath) -and $l.Contains('foreign-a.csv')) { $l['foreign-a.csv'] = $l['foreign-a.csv'] -replace '\|[0-9]+$', '|?' }
+            $l
+        }
+    }
+    try {
+        Remove-Item -LiteralPath $linkFlag -ErrorAction SilentlyContinue
+        $sp = New-WireSpec 'link-unknown'; $sp.DuringRun = { param($ownPid, $dir) [IO.File]::WriteAllText($linkFlag, '1') }.GetNewClosure()
+        $smokeQ = Invoke-WireSmoke 'link-unknown' $sp '^probe-steady-48000-512$' -Repeat 2 -NoNegative
+        $runQ = $smokeQ.R.runs[0]
+        Write-Case "整轮入口（第二段）：别人的文件的硬链接数前一份是 1、后一份取不到（?）、其余相同：不判变，这一轮 PASS，-Repeat 2 照常跑完两轮（$(@($smokeQ.R.runs).Count) 轮），结果里记一笔「硬链接数没取到」" $false (
+            $smokeQ.R.verdict -eq 'PASS' -and @($smokeQ.R.runs).Count -eq 2 -and $runQ.probe.docsListing.unchanged -and $runQ.probe.docsListing.Contains('linkCountUnknown') -and $runQ.probe.docsListing['linkCountUnknown'] -eq 1 -and
+            -not ($runQ.PSObject.Properties.Name -contains 'stoppedBecause') -and @($runQ.probe.notes | Where-Object { $_ -like '*硬链接数没取到：1 项*' }).Count -eq 1)
+        Write-Case '整轮入口（第二段）：硬链接数没取到的提示里和控制台上都只有散列，没有别人的文件名' $true (
+            $smokeQ.Console -cmatch '有 1 项硬链接数没取到' -and $smokeQ.Console -cnotmatch 'foreign|notes' -and (($smokeQ.R | ConvertTo-Json -Depth 12) -cnotmatch 'foreign|notes\.txt') -and $runQ.probe.notes[0] -cmatch 'other-[0-9a-f]{8}')
+        # 同样取不到，但文件被改了（大小变了）：照样判 FAIL 并停手
+        Remove-Item -LiteralPath $linkFlag -ErrorAction SilentlyContinue
+        $sp2 = New-WireSpec 'link-unknown-edit'; $sp2.DuringRun = { param($ownPid, $dir) [IO.File]::WriteAllText($linkFlag, '1'); [IO.File]::AppendAllText((Join-Path $dir 'foreign-a.csv'), "more`n") }.GetNewClosure()
+        $smokeQ2 = Invoke-WireSmoke 'link-unknown-edit' $sp2 '^probe-steady-48000-512$' -Repeat 2 -NoNegative
+        $runQ2 = $smokeQ2.R.runs[0]
+        Write-Case '整轮入口（第二段）：硬链接数取不到，但别人的文件同时被改了：照样判 FAIL 并停手' $true (
+            $smokeQ2.R.verdict -eq 'FAIL' -and -not $runQ2.probe.docsListing.unchanged -and $runQ2.stoppedBecause -like '*探针日志目录*' -and @($smokeQ2.R.runs).Count -eq 1)
+    } finally {
+        $env:RINNE_SELFTEST_LINKFLAG = ''
+        & (Get-Module Suite) { Remove-Item -LiteralPath Function:\script:Get-ReaperProbeLogListing -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $linkFlag -ErrorAction SilentlyContinue
+    }
 
     # 自己的文件因为收日志出了问题留在了日志目录里：场景判 FAIL，但这不算「别人的文件变了」（本轮自己的新文件才除外），文档目录记为没变
     if ($hardOk) {

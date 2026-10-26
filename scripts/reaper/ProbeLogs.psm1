@@ -5,11 +5,14 @@
 # 维护者接着要在 Cubase 里往同一个目录写上机数据，REAPER 留下的日志不能混进去，所以每个 REAPER 进程退出后，
 # 把它自己的日志搬走：复制到本轮的结果目录，核对 sha256 相同，再只删那一个原文件。
 #   Get-ReaperProbeLogDir          文档目录下的 Rinne Probe Logs 的路径（只取路径，不建目录）
-#   Get-ReaperProbeLogListing      目录里全部条目的清单（相对名 → 大小|修改时间刻度|重解析点 0/1|硬链接数，子目录记 dir，重解析点的目录记 dir|link）
-#   Compare-ReaperProbeLogListing  前后两份清单：除本轮新出现的自己的文件外必须完全相同；变化的名字不回显别人的文件名（只写散列与变化类型）
+#   Get-ReaperProbeLogListing      目录里全部条目的清单（相对名 → 大小|修改时间刻度|重解析点 0/1|硬链接数，子目录记 dir，重解析点的目录记 dir|link；硬链接数一时取不到记 ?）
+#   Compare-ReaperProbeLogListing  前后两份清单：除本轮新出现的自己的文件外必须完全相同；变化的名字不回显别人的文件名（只写散列与变化类型）；
+#                                  某一项一侧的硬链接数是 ? 时只比前三段，不判变，另记一笔提示（Compare-ReaperListingValue）
 #   ConvertTo-ReaperSafeListing    清单落盘前的改写：不是探针日志命名的条目，名字换成「每轮随机盐 + 名字」的短散列（盐不落盘）
 #   Get-ReaperPidHolder / Get-ReaperWriterState  pid 现在属于哪个进程、它能不能是写这份日志的进程（pid 可能已被复用）
 #   Select-ReaperOwnProbeLogs      纯函数：一组条目里哪些是本轮自己的
+#   Get-ReaperCreationRefusal      纯函数：钉住的文件的创建时间要落在「这次启动前一刻 ~ 这次启动的 REAPER 退出 + 2 s」里
+#   Get-ReaperHeaderRefusal        纯函数：钉住的文件的 H 行（第 2 行）要是 REAPER 里的探针写的（host_kind=other）、与文件名的 role / pid / tok4 一致
 #   Move-ReaperProbeLogs           钉住原文件、复制、核对哈希、按同一个句柄删它；哈希不同不删并判红
 #   Open-ReaperPinnedFile          以「别人不能写、不能改名、不能删」的方式打开一个普通文件，拿到的句柄就是之后读、算哈希、删的那个对象
 #   Read-ReaperProbeLog            纯函数：从一份日志文本读出头、测试格、块长、配对、Ping、D、丢记录与收尾
@@ -18,28 +21,33 @@
 # probe-<I|O>-<pid>-<tok4>.csv，pid 写成不补零的十进制；pid 是本轮自己启动、并且已经退出的 REAPER（这个 pid 现在属于别的进程、
 # 而那个进程比这份日志最后一次写入还晚开始，是 pid 被复用，写日志的进程其实已经退出，照常搬，并记一笔；读不到开始时间按「还在」处理）；修改时间落在
 # 这次启动到现在之间（既不早于启动，也不晚于现在）；原文件钉住之后，大小与修改时间还是列目录时看到的那个；
+# 钉住的这个对象的创建时间落在这次启动到这次启动的 REAPER 退出（加 2 s 余量）之间；它的 H 行（第 2 行，从同一个句柄读）是 host_kind=other
+# （REAPER；Cubase 里的探针写 cubase）、role / pid / tok4 与文件名一致，读不出 H 行也不动；
 # 复制件的 sha256 与钉住的原文件相同。删除走钉住的那个句柄（FileDispositionInfo），不再按路径：从读内容、算哈希到删除，
 # 中间没有别的对象能顶替它（共享方式只放行读，别人写不了、改不了名、删不了）。删的只会是已经原样复制出去的那个文件，
 # 也不进子目录、不递归、不删目录。
 # 清单比较：本轮新出现的自己的文件（清单开头本来没有的名字）不参与比较；开头就在清单里的名字，哪怕是「自己的」，也照常比，
-# 变了或没了就是别人的文件被动了——时间与 pid 的筛选万一选错，这一道照样会红。
+# 变了或没了就是别人的文件被动了——时间与 pid 的筛选万一选错，这一道照样会红。硬链接数是尽力取的：某一项一侧没取到（?）时只比大小、
+# 修改时间与重解析点，不判变（前三段任何一段变了照样判变），另在结果的提示里记一笔；两侧都取到才比硬链接数。
 # 清单里记全部条目（别人的文件也记，比较要看全部），但结果目录、控制台、结果 json 里不留别人的文件名：落盘的清单和比较报出来的
 # 变化，凡不是探针日志命名的条目，名字都换成短散列。
 # 写它的进程还在不在：只按 pid 查会被 pid 复用骗到（REAPER 退出后，同一个 pid 可能已经分给了别的进程）。所以再看现在持有这个 pid 的进程
 # 是什么时候开始的：它比这份日志最后一次被写入还晚开始，就不可能是写它的那个。拿它的开始时间去比「这次启动的时刻」是不行的——
 # 真正的 REAPER 恰恰就是这次启动之后才开始的。取不到开始时间时按「还在」处理（不动文件），并在原因里写明可能是 pid 复用。
+# pid 没人持有（Gone）时 pid 判据说明不了什么：同号的别的进程（例如 Cubase 里的探针）若在窗口里写了日志、又已经退出，名字、pid、修改时间都对得上。
+# 所以钉住之后再看这个对象自己：H 行里的 host_kind 与创建时间。
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # 钉住文件用的几个系统调用。CreateFile 带 DELETE，共享方式只放行读，并带 OPEN_REPARSE_POINT（链接被当成链接本身，不被跟到目标上）。
 # 类型名带版本后缀：同一个会话里再导入改过的本文件时，旧类型不会被悄悄沿用。
-if (-not ('RinneProbeFileV2' -as [type])) {
+if (-not ('RinneProbeFileV3' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
-public static class RinneProbeFileV2 {
+public static class RinneProbeFileV3 {
     [StructLayout(LayoutKind.Sequential)] struct FILETIME { public uint Low; public uint High; }
     [StructLayout(LayoutKind.Sequential)] struct BY_HANDLE_FILE_INFORMATION {
         public uint FileAttributes; public FILETIME CreationTime; public FILETIME LastAccessTime; public FILETIME LastWriteTime;
@@ -52,7 +60,7 @@ public static class RinneProbeFileV2 {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, ref byte info, uint size);
     public sealed class Opened {
-        public SafeFileHandle Handle; public int Error; public uint Attributes; public long Length; public long LastWriteUtcTicks; public string FileId; public uint Links;
+        public SafeFileHandle Handle; public int Error; public uint Attributes; public long Length; public long LastWriteUtcTicks; public long CreationUtcTicks; public string FileId; public uint Links;
     }
     public static Opened Open(string path) {
         var r = new Opened();
@@ -64,6 +72,7 @@ public static class RinneProbeFileV2 {
         r.Handle = h; r.Attributes = i.FileAttributes; r.Links = i.NumberOfLinks;
         r.Length = ((long)i.FileSizeHigh << 32) | i.FileSizeLow;
         r.LastWriteUtcTicks = DateTime.FromFileTimeUtc(((long)i.LastWriteTime.High << 32) | i.LastWriteTime.Low).Ticks;
+        r.CreationUtcTicks = DateTime.FromFileTimeUtc(((long)i.CreationTime.High << 32) | i.CreationTime.Low).Ticks;
         r.FileId = i.VolumeSerialNumber.ToString("x8") + "-" + i.FileIndexHigh.ToString("x8") + i.FileIndexLow.ToString("x8");
         return r;
     }
@@ -173,6 +182,20 @@ function ConvertTo-ReaperSafeListing {
     $out
 }
 
+# 纯函数：同一个名字前后两份清单的值算不算一样。文件的值是「大小|刻度|重解析点|硬链接数」，硬链接数是尽力取的，一时取不到记 ?
+# （OneDrive 正在同步、杀毒软件短暂独占……）。一侧是 ? 时只比前三段，不因为「这一次没取到」判变，返回 LinkUnknown 让调用方另记一笔；
+# 两侧都取到才比硬链接数。注意这条只放宽「取不到」本身：前三段任何一段变了，不管硬链接数取没取到，照样判变。目录（dir、dir|link）等别的写法整串比。
+function Compare-ReaperListingValue {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Before, [Parameter(Mandatory)][AllowEmptyString()][string]$After)
+    $shape = '^([0-9]+\|[0-9]+\|[01])\|([0-9]+|\?)$'
+    $b = [regex]::Match($Before, $shape)
+    $a = [regex]::Match($After, $shape)
+    if (-not ($b.Success -and $a.Success)) { return [pscustomobject]@{ Same = ($Before -ceq $After); LinkUnknown = $false } }
+    if ($b.Groups[1].Value -cne $a.Groups[1].Value) { return [pscustomobject]@{ Same = $false; LinkUnknown = $false } }
+    $unknown = ($b.Groups[2].Value -ceq '?') -or ($a.Groups[2].Value -ceq '?')
+    [pscustomobject]@{ Same = ($unknown -or ($Before -ceq $After)); LinkUnknown = $unknown }
+}
+
 # 前后两份清单。Own 是本轮认作自己的文件名（搬走的与没搬走的都算）：其中清单开头本来就没有的，是本轮新出现的文件，不参与比较
 # （它们搬走了，或者留着、另有判红）；清单开头就有的名字不除外，照常比——自己的文件不可能在本轮开始之前就在，
 # 这样的名字出现在 Own 里说明时间与 pid 的筛选选错了，它被搬走或被动了就是变化，一轮判 FAIL。
@@ -183,12 +206,21 @@ function Compare-ReaperProbeLogListing {
     foreach ($n in $Own) { if (-not $Before.Contains($n)) { $null = $skip.Add($n) } }
     $changed = [Collections.Generic.List[string]]::new()
     $shown = { param($entry) Get-ReaperListingShownName -EntryName $entry -Salt $Salt }
+    $linkUnknown = [Collections.Generic.List[string]]::new()
     foreach ($k in $Before.Keys) {
-        if (-not $After.Contains($k)) { $changed.Add("removed:$(& $shown $k)") }
-        elseif ($After[$k] -cne $Before[$k]) { $changed.Add("changed:$(& $shown $k)") }
+        if (-not $After.Contains($k)) { $changed.Add("removed:$(& $shown $k)"); continue }
+        $v = Compare-ReaperListingValue -Before $Before[$k] -After $After[$k]
+        if (-not $v.Same) { $changed.Add("changed:$(& $shown $k)") }
+        elseif ($v.LinkUnknown) { $linkUnknown.Add((& $shown $k)) }
     }
     foreach ($k in $After.Keys) { if (-not $skip.Contains($k) -and -not $Before.Contains($k)) { $changed.Add("added:$(& $shown $k)") } }
-    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.Count; Changed = $changed.ToArray() }
+    # 硬链接数没取到的条目不判变，只在提示里记一笔（名字照样只写散列）；提示最多列 8 项，数目写全
+    $notes = [Collections.Generic.List[string]]::new()
+    if ($linkUnknown.Count) {
+        $listed = (@($linkUnknown | Select-Object -First 8) -join '、') + ($linkUnknown.Count -gt 8 ? '……' : '')
+        $notes.Add("硬链接数没取到：$($linkUnknown.Count) 项的前后清单里至少一侧是 ?（一时打不开，例如 OneDrive 正在同步、杀毒软件短暂独占），这几项只比了大小、修改时间与重解析点，没比硬链接数（$listed）")
+    }
+    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.Count; Changed = $changed.ToArray(); LinkUnknown = $linkUnknown.ToArray(); Notes = $notes.ToArray() }
 }
 
 # 纯函数。Entries 的每一项要有 Name、IsFile、IsLink、LastWriteUtc（[datetime]，UTC）。返回本轮自己的那些（原样），
@@ -230,13 +262,13 @@ function Get-ReaperPinnedRefusal([uint32]$Attributes) {
 }
 
 # 钉住一个文件：打开时共享方式只放行读，别的程序在这期间写不了、改不了名、删不了；带 OPEN_REPARSE_POINT，链接被当成链接本身而不是被跟到
-# 目标上。返回 @{ Ok; Why; Stream（只读）; Handle; Length; LastWriteUtc; FileId; Links }。被别的程序占着（共享冲突）时稍等几次再试。
+# 目标上。返回 @{ Ok; Why; Stream（只读）; Handle; Length; LastWriteUtc; CreationUtc; FileId; Links }。被别的程序占着（共享冲突）时稍等几次再试。
 # 用完要 Close-ReaperPinnedFile；标记过删除的，在最后一个句柄关闭时才真的删。
 function Open-ReaperPinnedFile {
     param([Parameter(Mandatory)][string]$Path, [int]$Tries = 10)
-    $failed = { param($why) [pscustomobject]@{ Ok = $false; Why = $why; Stream = $null; Handle = $null; Length = -1; LastWriteUtc = [DateTime]::MinValue; FileId = ''; Links = 0 } }
+    $failed = { param($why) [pscustomobject]@{ Ok = $false; Why = $why; Stream = $null; Handle = $null; Length = -1; LastWriteUtc = [DateTime]::MinValue; CreationUtc = [DateTime]::MinValue; FileId = ''; Links = 0 } }
     for ($try = 1; $true; $try++) {
-        $o = [RinneProbeFileV2]::Open($Path)
+        $o = [RinneProbeFileV3]::Open($Path)
         if (-not $o.Error) { break }
         if ($o.Error -ne 32 -or $try -ge $Tries) {
             $why = switch ($o.Error) { 2 { '文件不见了' } 3 { '路径不见了' } 5 { '拒绝访问（可能是目录）' } 32 { '被别的程序占着' } default { "打不开（系统错误 $($o.Error)）" } }
@@ -249,13 +281,70 @@ function Open-ReaperPinnedFile {
     $stream = [IO.FileStream]::new($o.Handle, [IO.FileAccess]::Read, 4096, $false)
     [pscustomobject]@{
         Ok = $true; Why = ''; Stream = $stream; Handle = $o.Handle; Length = $o.Length
-        LastWriteUtc = [DateTime]::new($o.LastWriteUtcTicks, [DateTimeKind]::Utc); FileId = $o.FileId; Links = $o.Links
+        LastWriteUtc = [DateTime]::new($o.LastWriteUtcTicks, [DateTimeKind]::Utc); CreationUtc = [DateTime]::new($o.CreationUtcTicks, [DateTimeKind]::Utc); FileId = $o.FileId; Links = $o.Links
     }
 }
 
 function Close-ReaperPinnedFile($Pinned) {
     if ($Pinned.Stream) { $Pinned.Stream.Dispose() }
     if ($Pinned.Handle) { $Pinned.Handle.Dispose() }
+}
+
+# 纯函数：钉住的文件的创建时间 → 不能当本轮日志收的理由；可以收返回 $null。创建时间要落在 [SinceUtc, ExitedUtc + 余量] 里：
+# SinceUtc 是这次启动前一刻，ExitedUtc 是这次启动的 REAPER 进程退出的时刻（取不到就是收日志的当下）。pid 复用只能发生在原进程退出之后，
+# 复用者新建的文件创建时间一定晚于它；启动之前创建的是更早的进程留下的。比修改时间硬：修改时间谁都能改（复用者在窗口里追加写一笔就落进窗口），
+# 创建时间在文件系统里只有新建时才定。
+# NTFS 文件名隧道：同一目录里同名文件被删或改名之后 15 s 内又以同名新建，新文件会继承旧文件的创建时间。继承只会让创建时间变早，所以：
+#   下界一侧：旧文件在启动之前创建的，新文件继承了它，会被判「早于启动」，只会多拒绝，不会多放行；
+#   上界一侧：复用者的文件若继承了更早的创建时间，这一道会被绕过——但前提是同一个文件名在 15 s 内刚被删过或改过名，而文件名里有这次启动的
+#   pid 和探针随机取的 tok4，写出这个名字的只有这次启动的 REAPER 里的探针，它的日志在收日志之前不会被删或改名，所以这个缺口在这里够不着；
+#   且这一道本来就不是唯一一道：H 行的 host_kind、pid、tok4 要对得上，pid 持有者的开始时间也要对得上。
+function Get-ReaperCreationRefusal {
+    param([Parameter(Mandatory)][datetime]$CreationUtc, [Parameter(Mandatory)][datetime]$SinceUtc, [Parameter(Mandatory)][datetime]$ExitedUtc)
+    if ($CreationUtc -lt $SinceUtc) { return '创建时间早于这次启动（不是这次启动的进程新建的）' }
+    if ($CreationUtc -gt $ExitedUtc.AddSeconds($script:UntilSlackSeconds)) { return '创建时间晚于这次启动的 REAPER 退出（只有 pid 被复用的进程才会在那之后新建这个文件）' }
+    $null
+}
+
+# 从钉住的流里读文件开头（最多 MaxBytes 字节，按 ASCII 解码），读完把位置放回 0。读的就是之后算哈希、复制、删除的那个对象。
+function Read-ReaperPinnedHead {
+    param([Parameter(Mandatory)][IO.Stream]$Pinned, [int]$MaxBytes = 1024)
+    $Pinned.Position = 0
+    $buf = [byte[]]::new([int][Math]::Min([long]$MaxBytes, [Math]::Max(0L, $Pinned.Length)))
+    $got = 0
+    while ($got -lt $buf.Length) {
+        $n = $Pinned.Read($buf, $got, $buf.Length - $got)
+        if ($n -le 0) { break }
+        $got += $n
+    }
+    $Pinned.Position = 0
+    [Text.Encoding]::ASCII.GetString($buf, 0, $got)
+}
+
+# 纯函数：文件开头的文本（Head）和文件名 → 它的 H 行（第 2 行）是不是这次启动的 REAPER 写出来的。对得上返回 $null，否则返回理由。
+# 要求：第 1 行是魔数、第 2 行是写完的 H 行（探针日志格式：LF 结尾，列数与列序见 $script:Columns）；host_kind 是 ExpectHostKind
+# （REAPER 不是 Cubase 也不是 LUNA，探针按 other 写；Cubase 里的探针写 cubase，pid 被复用时就是靠它认出别人的日志）；role、pid、tok4 与文件名一致。
+# 理由里不回显文件里的任意内容：host_kind 只在它属于枚举（cubase / luna / other）时才写出来。
+function Get-ReaperHeaderRefusal {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Head, [Parameter(Mandatory)][string]$LogName, [string]$ExpectHostKind = 'other')
+    $nm = [regex]::Match($LogName, $script:NamePattern)
+    if (-not $nm.Success) { return '名字不是探针日志的名字' }
+    if (($Head.Split("`n").Count - 1) -lt 2) { return '读不出 H 行（文件太短，第 2 行没写完）' }
+    $lines = $Head.Split("`n")
+    if ($lines[0] -cne 'rinne-probe-log,1') { return '读不出 H 行（第 1 行不是探针日志的魔数）' }
+    $cols = [string[]]$script:Columns['H']
+    $f = $lines[1].Split(',')
+    if ($f.Count -ne $cols.Count + 1 -or $f[0] -cne 'H') { return '读不出 H 行（第 2 行不是 H 行，或列数不对）' }
+    $at = { param($col) $f[1 + [array]::IndexOf($cols, $col)] }
+    $kind = & $at 'host_kind'
+    if ($kind -cne $ExpectHostKind) {
+        $shown = ($kind -cin 'cubase', 'luna', 'other') ? $kind : '不在枚举里的值'
+        return "H 行的 host_kind 是 $shown，不是 $ExpectHostKind（不是 REAPER 里的探针写的）"
+    }
+    if ((& $at 'role') -cne $nm.Groups[1].Value) { return 'H 行的 role 与文件名不符' }
+    if ((& $at 'pid') -cne $nm.Groups[2].Value) { return 'H 行的 pid 与文件名不符' }
+    if ((& $at 'tok4') -cne $nm.Groups[3].Value) { return 'H 行的 tok4 与文件名不符' }
+    $null
 }
 
 function Get-ReaperStreamSha256([IO.Stream]$Source) {
@@ -293,16 +382,18 @@ function Get-ReaperWriterState {
 # 把 Pids 里（已退出的）进程在 LogDir 里留下的日志搬到 DestDir。返回 @{ Moved（搬走并删了原文件的名字）; Kept（自己的、但留在原处的，
 # 每项带原因）; Skipped（没认作自己的同 pid 条目与原因）; Own（本轮自己的全部名字）; Problems（要判红的）; Notes（照常搬走、但值得记一笔的，
 # 例如 pid 已被别的进程复用）}。写它的进程还在不在，见 Get-ReaperWriterState。
-# UntilUtc 不给就取现在（再留 2 s 余量）。ProcessInfo、BeforePin、AfterCopy 只给自测注入：ProcessInfo 代替 Get-ReaperPidHolder
+# UntilUtc 不给就取现在（再留 2 s 余量）：修改时间的上界。ExitedUtc 是这次启动的 REAPER 进程退出的时刻，不给就取现在：钉住的文件的创建时间要落在
+# [SinceUtc, ExitedUtc + 2 s]（见 Get-ReaperCreationRefusal），H 行要对得上（见 Get-ReaperHeaderRefusal）。ProcessInfo、BeforePin、AfterCopy 只给自测注入：ProcessInfo 代替 Get-ReaperPidHolder
 # （收到 pid，返回 @{ Exists; StartUtc }）；BeforePin 收到原文件路径，在列完目录、钉住之前调用
 # （自测在这里换掉原文件）；AfterCopy 收到原文件与复制件的路径，在复制件写完、原文件仍被钉住时调用（自测在这里弄坏复制件，
 # 或者试着改动被钉住的原文件）。
 function Move-ReaperProbeLogs {
     param(
         [Parameter(Mandatory)][string]$LogDir, [Parameter(Mandatory)][int[]]$Pids, [Parameter(Mandatory)][datetime]$SinceUtc,
-        [Parameter(Mandatory)][string]$DestDir, [datetime]$UntilUtc = [datetime]::MinValue, [scriptblock]$BeforePin = $null, [scriptblock]$AfterCopy = $null, [int]$PinTries = 10, [scriptblock]$ProcessInfo = $null
+        [Parameter(Mandatory)][string]$DestDir, [datetime]$UntilUtc = [datetime]::MinValue, [datetime]$ExitedUtc = [datetime]::MinValue, [scriptblock]$BeforePin = $null, [scriptblock]$AfterCopy = $null, [int]$PinTries = 10, [scriptblock]$ProcessInfo = $null
     )
     if ($UntilUtc -eq [datetime]::MinValue) { $UntilUtc = [DateTime]::UtcNow.AddSeconds($script:UntilSlackSeconds) }
+    if ($ExitedUtc -eq [datetime]::MinValue) { $ExitedUtc = [DateTime]::UtcNow } # 没给退出时刻（只有自测会不给）：取现在，创建时间的上界就是现在加余量
     $moved = [Collections.Generic.List[string]]::new()
     $kept = [Collections.Generic.List[string]]::new()
     $problems = [Collections.Generic.List[string]]::new()
@@ -329,6 +420,11 @@ function Move-ReaperProbeLogs {
             # 钉住的对象还得是列目录时看到的那个（大小与修改时间相同；列目录时的修改时间已经过了窗口筛选）
             if ($pin.Length -ne $e.Length -or $pin.LastWriteUtc -ne $e.LastWriteUtc) { & $keep $e.Name '列目录之后原文件变了（大小或修改时间不同），不动'; continue }
             if ($pin.Links -gt 1) { & $keep $e.Name "有 $($pin.Links) 个硬链接（探针新建的日志只有一个名字），不动"; continue }
+            # 两道只有真日志过得去的判据，都对钉住的这个对象：创建时间在这次启动的存活区间里；H 行（第 2 行）是 REAPER 里的探针写的、与文件名一致
+            $creationWhy = Get-ReaperCreationRefusal -CreationUtc $pin.CreationUtc -SinceUtc $SinceUtc -ExitedUtc $ExitedUtc
+            if ($creationWhy) { & $keep $e.Name "$creationWhy，不动"; continue }
+            $headerWhy = Get-ReaperHeaderRefusal -Head (Read-ReaperPinnedHead $pin.Stream) -LogName $e.Name
+            if ($headerWhy) { & $keep $e.Name "$headerWhy，不动"; continue }
             $srcHash = Get-ReaperStreamSha256 $pin.Stream
             $pin.Stream.Position = 0
             $out = [IO.FileStream]::new($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) # 已有同名文件就抛错，不覆盖
@@ -336,7 +432,7 @@ function Move-ReaperProbeLogs {
             if ($AfterCopy) { & $AfterCopy $e.FullName $target }
             $dstHash = (Test-Path -LiteralPath $target -PathType Leaf) ? (Get-ReaperSha256 $target) : ''
             if ($srcHash -cne $dstHash) { & $keep $e.Name '复制件的 sha256 与原文件不同，原文件不删（复制后哈希不同）'; continue }
-            if (-not [RinneProbeFileV2]::MarkDelete($pin.Handle)) { & $keep $e.Name '标记删除失败，原文件不删'; continue }
+            if (-not [RinneProbeFileV3]::MarkDelete($pin.Handle)) { & $keep $e.Name '标记删除失败，原文件不删'; continue }
         } catch {
             & $keep $e.Name "复制出错：$($_.Exception.Message -replace '\s+', ' ')"
             continue
@@ -351,7 +447,7 @@ function Move-ReaperProbeLogs {
 }
 
 # 纯函数：一份日志的文本 → 读得出的事实。只读第二段要的几项，格式判定交给 analyze-probe.py，这里读不懂的行不抛错，只计数。
-#   Header（role pid tok4 build host_kind）、Cases（每个 C 行）、Blocks / PlayingBlocks、NValues（播放中块长的取值）、NDecl、MaxN、
+#   Header（role pid tok4 build host_kind）、Cases（每个 C 行）、Blocks / PlayingBlocks、NValues（播放中块长的取值）、NDecl、MaxN、OverBlocks / OverExample（n 大于该块自己的 n_decl 的块数与第一例）、
 #   DValues（块记录里的 D）、Pings（ping 事件的样本数）、PairedPids（paired 事件的对端 pid）、Prepares（采样率/块长）、
 #   SeqGaps（块序号缺口数）、Dropped（S 行与 Z 行里最大的丢弃计数）、NonRt（块里的 nonrt 取值）、PlayingNonRt（播放中的块里的 nonrt 取值：
 #   宿主对插件报的是实时还是离线，只看正在走带的块）、Complete（有 Z 行且以换行结尾）
@@ -359,7 +455,7 @@ function Read-ReaperProbeLog {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     $facts = [ordered]@{
         Header = $null; Cases = [Collections.Generic.List[object]]::new(); Blocks = 0; PlayingBlocks = 0
-        NValues = [Collections.Generic.SortedSet[int]]::new(); NDecl = [Collections.Generic.SortedSet[int]]::new(); MaxN = 0
+        NValues = [Collections.Generic.SortedSet[int]]::new(); NDecl = [Collections.Generic.SortedSet[int]]::new(); MaxN = 0; OverBlocks = 0; OverExample = ''
         DValues = [Collections.Generic.SortedSet[long]]::new(); Pings = [Collections.Generic.List[long]]::new()
         PairedPids = [Collections.Generic.List[long]]::new(); Prepares = [Collections.Generic.List[string]]::new()
         SeqGaps = 0; Dropped = 0; NonRt = [Collections.Generic.SortedSet[int]]::new(); PlayingNonRt = [Collections.Generic.SortedSet[int]]::new()
@@ -391,6 +487,8 @@ function Read-ReaperProbeLog {
                     $lastSeq = $seq
                     $null = $facts.NDecl.Add($nDecl); $null = $facts.NonRt.Add($nonRt)
                     if ($n -gt $facts.MaxN) { $facts.MaxN = $n }
+                    # 块长上限逐块比：每个 B 行带自己的 n 与 n_decl（一份日志里可以有多次 prepare，n_decl 不止一个值），不拿全文件的最大值去比某一个声明
+                    if ($n -gt $nDecl) { $facts.OverBlocks++; if (-not $facts.OverExample) { $facts.OverExample = "块序号 $seq 的 n=$n 大于它自己的 n_decl=$nDecl" } }
                     if ($f[$bPlaying] -ceq '1') { $facts.PlayingBlocks++; $null = $facts.NValues.Add($n); $null = $facts.PlayingNonRt.Add($nonRt) }
                     $null = $facts.DValues.Add($d)
                 }
@@ -413,4 +511,5 @@ function Read-ReaperProbeLog {
 
 Export-ModuleMember -Function Get-ReaperProbeLogDir, Get-ReaperProbeLogListing, Compare-ReaperProbeLogListing, Select-ReaperOwnProbeLogs,
     Move-ReaperProbeLogs, Read-ReaperProbeLog, Get-ReaperProbeLogColumns, Open-ReaperPinnedFile, Close-ReaperPinnedFile, Get-ReaperPinnedRefusal,
-    Format-ReaperListingValue, New-ReaperListingSalt, Get-ReaperListingShownName, ConvertTo-ReaperSafeListing, Get-ReaperPidHolder, Get-ReaperWriterState
+    Format-ReaperListingValue, New-ReaperListingSalt, Get-ReaperListingShownName, ConvertTo-ReaperSafeListing, Get-ReaperPidHolder, Get-ReaperWriterState,
+    Compare-ReaperListingValue, Get-ReaperCreationRefusal, Get-ReaperHeaderRefusal, Read-ReaperPinnedHead

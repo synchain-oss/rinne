@@ -309,7 +309,9 @@ function Test-RinneLockFree([string]$Name) {
 # 每个 REAPER 进程退出后立即收它自己的日志（只按这次启动的 pid 与启动时刻认）。锁等不到（REAPER 根本没启动）时没什么可收。
 function Save-ProbeLogs($Ctx, $Run, [string]$CellDir) {
     if ($Run.Status -eq 'LockBusy' -or -not ($Run.PSObject.Properties.Name -contains 'Pid') -or -not $Run.Pid) { return $null }
-    $m = Move-ReaperProbeLogs -LogDir $Ctx.Probe.LogDir -Pids @([int]$Run.Pid) -SinceUtc $Run.StartedUtc -DestDir $CellDir
+    # 退出时刻是这次启动的进程退出的那一刻（Invoke-ReaperHost 记下）；没有这个字段的 Run（自测里手造的）不给，收日志取现在
+    $exited = ($Run.PSObject.Properties.Name -contains 'ExitedUtc') ? @{ ExitedUtc = $Run.ExitedUtc } : @{}
+    $m = Move-ReaperProbeLogs -LogDir $Ctx.Probe.LogDir -Pids @([int]$Run.Pid) -SinceUtc $Run.StartedUtc -DestDir $CellDir @exited
     foreach ($logName in $m.Own) { $Ctx.Probe.Own.Add($logName) }
     foreach ($why in $m.Problems) { $Ctx.Probe.Problems.Add($why) }
     foreach ($note in $m.Notes) { $Ctx.Probe.Notes.Add($note) }
@@ -322,7 +324,7 @@ function Get-SortedText($Values) { (@($Values) | ForEach-Object { "$_" }) -join 
 # 纯函数：一次 REAPER 启动留下的两份日志（Read-ReaperProbeLog 的结果）对不对。Expect：Pid、Case、Variant、Sr、Block、MinBlocks、
 # NeedPing（要有 Ping，且 Ping 求出的延迟恰为块记录里的 D；稳态格与导出格的两次都要）、PlayingNonRt（播放中的块的 nonrt 应恰为这个值：
 # 宿主对插件报实时是 0、离线是 1；给了才查）、Driver（Lua 驱动记下的退出时刻，原样写进事实）。
-# 每格都查：两端各一份、恰好一个测试格、正常收尾、块数够、没丢记录、块长不超过声明、配对、播放中的块长恰为设定的块长、
+# 每格都查：两端各一份、恰好一个测试格、正常收尾、块数够、没丢记录、每块的块长不超过它自己声明的最大块长（逐块比 n 与 n_decl）、配对、播放中的块长恰为设定的块长、
 # D 恰为探针默认的 100 ms（工程里的探针 state 写的就是它；不是它说明 state 模板与探针对不上）。
 # 返回 @{ Bad（要判 FAIL 的原因）; Facts（读出来的事实，写进结果） }。
 function Test-ReaperProbeCell {
@@ -346,7 +348,8 @@ function Test-ReaperProbeCell {
         if ($lg.Blocks -lt $Expect.MinBlocks) { $bad.Add("$tag 只有 $($lg.Blocks) 块记录，至少要 $($Expect.MinBlocks) 块") }
         if ($lg.Dropped -gt 0 -or $lg.SeqGaps -gt 0) { $bad.Add("$tag 丢了记录（丢弃计数 $($lg.Dropped)、块序号缺口 $($lg.SeqGaps)）") }
         $decl = @($lg.NDecl)
-        if ($decl.Count -and $lg.MaxN -gt ($decl | Measure-Object -Minimum).Minimum) { $bad.Add("$tag 有块长 $($lg.MaxN) 超过声明的最大块长 $(Get-SortedText $decl)") }
+        # 块长上限逐块比：每个 B 行带自己的 n 与 n_decl（一份日志里 prepare 可以有多次，n_decl 不止一个值），比最小值会冤枉后一段，比最大值会放过前一段
+        if ($lg.OverBlocks -gt 0) { $bad.Add("$tag 有 $($lg.OverBlocks) 块的块长超过它自己声明的最大块长（第一例：$($lg.OverExample)；全部声明值 $(Get-SortedText $decl)）") }
         if ($Expect.Pid -notin @($lg.PairedPids)) { $bad.Add("$tag 没有配对（没有对端是本进程的 paired 事件）") }
         if ($Expect.ContainsKey('PlayingNonRt')) {
             $seen = @($lg.PlayingNonRt)
@@ -357,7 +360,7 @@ function Test-ReaperProbeCell {
         if ($lg.Unread -gt 0) { $bad.Add("$tag 有 $($lg.Unread) 行读不懂（格式交给分析器判）") }
         $cellFacts[$tag] = [ordered]@{
             cell = ($cells -join '; '); blocks = $lg.Blocks; playingBlocks = $lg.PlayingBlocks; playingSeconds = [math]::Round($lg.PlayingBlocks * [double]$Expect.Block / [double]$Expect.Sr, 2); n = (Get-SortedText $lg.NValues); nDecl = (Get-SortedText $decl)
-            maxN = $lg.MaxN; nonrt = (Get-SortedText $lg.NonRt); playingNonrt = (Get-SortedText $lg.PlayingNonRt); dropped = $lg.Dropped; seqGaps = $lg.SeqGaps; paired = ($Expect.Pid -in @($lg.PairedPids))
+            maxN = $lg.MaxN; overBlocks = $lg.OverBlocks; nonrt = (Get-SortedText $lg.NonRt); playingNonrt = (Get-SortedText $lg.PlayingNonRt); dropped = $lg.Dropped; seqGaps = $lg.SeqGaps; paired = ($Expect.Pid -in @($lg.PairedPids))
             complete = $lg.Complete; prepare = (@($lg.Prepares) -join ' ')
         }
     }

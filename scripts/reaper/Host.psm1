@@ -121,7 +121,7 @@ function Get-ReaperMarkProblem {
 }
 
 # 起 REAPER 并等它退出。Status：Exited / Timeout（到 TimeoutSec）/ Killed（到 KillAfterSec，反例用）/ Modal（卡死的对话框）。
-# Pid 与 StartedUtc（启动前一刻）给第二段收探针日志用；SampleLost 是想取进程计数时进程已经退出的那些标记。
+# Pid、StartedUtc（启动前一刻）与 ExitedUtc（进程退出的时刻）给第二段收探针日志用；SampleLost 是想取进程计数时进程已经退出的那些标记。
 # WatchFiles：标签 → 路径，文件一出现就记一次进程的句柄与内存（Lua 用它标出循环的开头与结尾）。
 # Launcher 只给自测注入：收到准备好的 ProcessStartInfo，返回已启动的 Process。Sampler 也只给自测注入：代替 Get-ReaperProcessSample。
 function Invoke-ReaperHost {
@@ -190,8 +190,11 @@ function Invoke-ReaperHost {
         $null = $proc.WaitForExit(5000)
     }
     $exit = ($proc.HasExited -and -not $status) ? $proc.ExitCode : $null
+    # 进程退出的时刻（进程自己报的）：收日志用它认文件是不是这次启动的进程在世时新建的。取不到（进程没退出、替身没有这个属性）就取现在，
+    # 只会放宽上界，不会误拒真日志
+    $exitedUtc = try { $proc.ExitTime.ToUniversalTime() } catch { [DateTime]::UtcNow }
     [pscustomobject]@{
-        Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid; StartedUtc = $startedUtc
+        Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid; StartedUtc = $startedUtc; ExitedUtc = $exitedUtc
         Modal = $modal; Dismissed = $dismissed.ToArray(); Windows = @($titles); Marks = $marks; SampleLost = $lost.ToArray()
     }
 }

@@ -460,6 +460,7 @@ function Invoke-ReaperSmoke {
             Write-ReaperJson (Join-Path $roundDir 'docs-listing-after.json') (ConvertTo-ReaperSafeListing -Listing $docsAfter -Salt $ctx.Probe.Salt)
             $docs = Compare-ReaperProbeLogListing -Before $docsBefore -After $docsAfter -Own $ctx.Probe.Own.ToArray() -Salt $ctx.Probe.Salt
             $docsSame = $docs.Same
+            foreach ($note in $docs.Notes) { $ctx.Probe.Notes.Add($note) } # 硬链接数没取到的提示进结果的 notes，不判变
         }
         # 全绿就删掉这一轮的临时文件（逐个删，不递归）；有红的留着供查
         if (@($rows | Where-Object { $_.status -ne 'PASS' }).Count -eq 0) {
@@ -483,7 +484,7 @@ function Invoke-ReaperSmoke {
                 roundDir = (Split-Path -Leaf $roundDir); logDir = $script:ProbeDirShown; moved = $ctx.Probe.Moved; own = @($ctx.Probe.Own)
                 problems = @($ctx.Probe.Problems | ForEach-Object { Hide-LocalPaths $_ })
                 notes = @($ctx.Probe.Notes | ForEach-Object { Hide-LocalPaths $_ })
-                docsListing = [ordered]@{ unchanged = $docs.Same; entriesBefore = $docs.Count; changed = @($docs.Changed | Select-Object -First 8) }
+                docsListing = [ordered]@{ unchanged = $docs.Same; entriesBefore = $docs.Count; changed = @($docs.Changed | Select-Object -First 8); linkCountUnknown = @($docs.LinkUnknown).Count }
                 analyzer = [ordered]@{ cells = [ordered]@{}; whole = $whole; rejected = $ctx.Probe.Rejected }
             }
             foreach ($id in $ctx.Probe.Analyses.Keys) { $runRow.probe.analyzer.cells[$id] = $ctx.Probe.Analyses[$id].exit }
@@ -491,7 +492,7 @@ function Invoke-ReaperSmoke {
         $result.runs += $runRow
         Write-Host ("第 {0}/{1} 轮：{2}，{3} s，REAPER 启动 {4} 次，默认资源目录{5}" -f $k, $Repeat, $verdict, $result.runs[-1].seconds, $ctx.Launches, ($cmp.Same ? '未变' : "变了：$($cmp.Changed -join ', ')"))
         if ($Probe) {
-            Write-Host ("  探针日志：搬走 {0} 份，文档目录除本轮自己的文件外{1}；整轮分析 {2}" -f $ctx.Probe.Moved, ($docs.Same ? '未变' : "变了：$($docs.Changed -join ', ')"), $whole.summary)
+            Write-Host ("  探针日志：搬走 {0} 份，文档目录除本轮自己的文件外{1}{2}；整轮分析 {3}" -f $ctx.Probe.Moved, ($docs.Same ? '未变' : "变了：$($docs.Changed -join ', ')"), (@($docs.LinkUnknown).Count ? "（有 $(@($docs.LinkUnknown).Count) 项硬链接数没取到，只比了大小、修改时间与重解析点）" : ''), $whole.summary)
         }
         $stop = Get-ReaperRoundStop -CfgUnchanged $cmp.Same -DocsUnchanged $docsSame -Rejected ($Probe -and $ctx.Probe.Rejected)
         if ($stop) { $runRow.stoppedBecause = $stop; Write-Host "  停止后续轮次：$stop"; break }
