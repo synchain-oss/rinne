@@ -16,11 +16,14 @@
 In 与 Out 各有一份文件，一格误记要在两个文件里各排除一次；同一个 C 行指两次也算参数错。输出里不写文件名，只写「实例 N 的第 k 个 C 行」。
 被排除的段不进任何判据，但**排除只能拿掉数据不全的段，拿不掉不通过的段**：被排除的段单独判一遍，本来会不通过的项照样记不通过。
 缺失的块序号按探针摘要里的累计块数归到所属的段（见 `Session._segment`）：归给被排除的段的才被吞掉，归不清或归给未排除的段的仍让它数据不全。
+早于第一个 C 行的孤块之间（及第一个块是孤块时它之前）缺的块序号属实例级，不归任何格，只在提示里报个数，也不当成尾部丢块记给最后一格。
+B 行的 seq / call_seq 按文件顺序严格递增（不递增判格式错，退出码 2），所以缺口、开头与尾部的丢块都按文件顺序算。
 
 `--toggles <case>:<N>` 告诉分析器现场实际按了多少次监听 / 录音使能键（case 取 CB-02 或 LU-03，可重复）。探针看不到这类按键，
 切换点只能从处理形态的变化推断（线程池预取与专用线程实时是两种形态，线程池内部的轮换不算切换，见 `regimes_of`）；推断出来的切换点要和
 这个次数对得上（差不超过 A2_TOGGLE_TOLERANCE）、而且这一格里形态不超过 A2_MAX_REGIMES 种，A2 才能通过，否则判数据不全：
-宿主线程池在稳态下换线程，和用户的按键分不开。次数的对账是整个 case 的性质，主会话算一次（`toggle_reviews`），`--exclude` 的影子判定沿用，不拿只含被排除的段的计数去对。
+宿主线程池在稳态下换线程，和用户的按键分不开。次数的对账是整个 case 的性质，主会话算一次（`toggle_reviews`），`--exclude` 的影子判定沿用，不拿只含被排除的段的计数去对；
+处理形态数却是逐段的性质，影子沿用之前先核被排除的段自己的形态数（`shadow_reviews`），多于 A2_MAX_REGIMES 种就不沿用。
 
 `--crashed <文件名>`（可重复）由人工标注「这个实例的日志因整机崩溃中断」：没有收尾行不再计为插件崩溃，A8 写一条说明，报告开头醒目提示
 请人工确认是否确属整机崩溃；摘要间隔、跳闸照常判。标注了的实例却有收尾行，或文件不存在，按参数错处理（退出码 5）。输出里不写文件名。
@@ -437,6 +440,7 @@ class Log:
         self.partial_bytes = 0  # 丢掉的残缺末行的字节数
         self.pre_events = []  # 第一个 C 行之前的事件：实例级
         self.orphans = 0  # 早于第一个 C 行、没法归入任何格的块
+        self.orphan_lost = 0  # 早于第一个 C 行的缺失块序号个数（孤块之间、孤块之前）：属实例级，不归任何格
         self.name = None  # 日志目录里的文件名：只用于匹配 --exclude 与 --crashed，不进任何输出
         self.crashed = False  # --crashed 标注：这个实例的日志因整机崩溃中断，没有收尾不算插件崩溃
 
@@ -590,6 +594,11 @@ def key_label(key):
     return f"{key[0]}/{key[1]}/buf={key[2]}/guard={key[3]}"
 
 
+def dropped_of(lg):
+    """探针报告的这个实例的累计丢弃数（各条摘要与收尾行里最大的一个）。"""
+    return max([x["dropped"] for x in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0])
+
+
 class Session:
     def __init__(self, logs, compares, broken=(), exclude=()):
         """exclude = [(Log, 该 Log.cases 里的下标, 选择子原文)]，由 resolve_excludes 解析而来。"""
@@ -600,6 +609,7 @@ class Session:
         self.hidden = []  # 被 --exclude 拿出去的段：不进判据，只在 shadow() 里单独判一遍
         self.cells = {}
         self.orphans = 0
+        self.orphan_lost = self.orphan_gaps = 0  # 早于第一个 C 行的缺失块序号个数与缺口处数（孤块之间、孤块之前）：属实例级，不归任何格
         self.excluded = []  # 被排除的段：{selector, instance, role, cell, c_index}
         self.attribution = {}  # 实例序号 → (归给被排除段的缺失块序号数, 归给未排除段的数, 是否按摘要归属)：有被排除段的实例才有
         for lg in logs:
@@ -617,6 +627,7 @@ class Session:
         sh = Session.__new__(Session)
         sh.logs, sh.compares, sh.broken = self.logs, self.compares, self.broken
         sh.segments, sh.hidden, sh.excluded, sh.orphans, sh.attribution, sh.dups = list(self.hidden), [], [], 0, {}, []
+        sh.orphan_lost = sh.orphan_gaps = 0
         sh.cells, nth = {}, {}
         for seg in sh.segments:
             n = nth[(seg.key, seg.role)] = nth.get((seg.key, seg.role), -1) + 1
@@ -639,29 +650,44 @@ class Session:
                 segs[i].events.append(e)
             else:
                 lg.pre_events.append(e)
-        lost_total, cross = 0, []  # 缺失的块序号总数；隔着段的缺失区间 [lo, hi)（只有带被排除段的实例才分开记）
+        # lg.blocks 在文件里就是按 seq（与 call_seq）严格递增排的：parse_log 对不递增的 B 行判格式错（退出码 2），
+        # 所以文件顺序就是 seq 顺序，下面的缺口、实例开头与尾部的丢块都直接按文件顺序算
+        lost_total, cross = 0, []  # 缺失的块序号总数（所有缺口都计，包括孤块之间的）；隔着段的缺失区间 [lo, hi)（只有带被排除段的实例才分开记）
+        orphan_lost = orphan_gaps = 0  # 早于第一个 C 行的缺失块序号（孤块之间、孤块之前）：属实例级，不归任何格，只报个数
+        head = lg.blocks[0]["seq"] if lg.blocks else 0  # 实例开头缺的块序号个数
+        if head and at(lg.blocks[0]["mono_ns"]) < 0:  # 第一个块就是孤块：它之前缺的块更早，同样早于第一个 C 行
+            orphan_lost, orphan_gaps, lost_total, head = head, 1, head, 0
         prev = prev_i = None
         for b in lg.blocks:
             i = at(b["mono_ns"])
             if i >= 0:
                 segs[i].blocks.append(b)
-                if prev is not None and b["seq"] != prev + 1:
-                    lost_total += b["seq"] - prev - 1
-                    if not exclude or prev_i == i:
-                        segs[i].gaps += 1  # 没有被排除的段，或缺口两头在同一段里：记给后一块所在的段
-                    else:
-                        cross.append((prev + 1, b["seq"]))
             else:
                 lg.orphans += 1
                 self.orphans += 1
+            if prev is not None and b["seq"] != prev + 1:
+                gap = b["seq"] - prev - 1
+                lost_total += gap
+                if i < 0 and prev_i < 0:  # 缺口两头都是孤块：早于第一个 C 行，不归任何格
+                    orphan_lost += gap
+                    orphan_gaps += 1
+                else:
+                    at_i = i if i >= 0 else prev_i  # 后一块在某格里就记给它；它是孤块（时间戳倒着走的文件）时记给前一块所在的格
+                    if not exclude or prev_i == i:
+                        segs[at_i].gaps += 1  # 没有被排除的段，或缺口两头在同一段里：记给后一块所在的段
+                    else:
+                        cross.append((prev + 1, b["seq"]))
             prev, prev_i = b["seq"], i
-        dropped = max([s["dropped"] for s in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0])
+        lg.orphan_lost = orphan_lost
+        self.orphan_lost += orphan_lost
+        self.orphan_gaps += orphan_gaps
+        dropped = dropped_of(lg)
         if not exclude:
-            if dropped and not any(s.gaps for s in segs):
-                for s in segs:  # 探针报告丢过记录、却定位不到缺口：整个实例都按缺口算
+            if dropped > orphan_lost and not any(s.gaps for s in segs):
+                for s in segs:  # 探针报告丢过记录、却定位不到缺口（早于第一个 C 行的丢块已定位，不算）：整个实例都按缺口算
                     s.gaps += 1
         else:
-            self._attribute(lg, segs, times, cross, lost_total, dropped)
+            self._attribute(lg, segs, times, cross, lost_total, dropped, head)
         for k, sel in exclude:
             seg = segs[where[k]]
             self.excluded.append({
@@ -671,7 +697,7 @@ class Session:
         self.hidden += [s for s in segs if s.excluded]
         self.segments += [s for s in segs if not s.excluded]
 
-    def _attribute(self, lg, segs, times, cross, lost_total, dropped):
+    def _attribute(self, lg, segs, times, cross, lost_total, dropped, head):
         """有被排除段的实例：把缺失的块序号归到所属的段。
         探针每个块（写出的与丢弃的）都占一个 seq，1 Hz 摘要里的「累计块数 + 累计丢弃数」就是那一刻已经占用的 seq 个数。
         取 C 行之前最近一条摘要的这个数当作该格窗口开始前已占用的 seq 数，一格的窗口就是 [本格的数, 下一格的数)：
@@ -679,10 +705,13 @@ class Session:
         缺口两头在同一段里的已经直接记给那一段。前一格最后一秒之内紧接着下一格时，摘要分不开两格，
         这部分归到后一格（后一格未排除时仍让它数据不全，后一格被排除时前一格最后不到 1 s 内的丢块会被吞掉：见 LOG-FORMAT）。
         探针报告的丢弃数比缺口多出来的部分（尾部丢块，也含丢掉的事件）接在最后一个块之后；
-        前面没有摘要可用时无从归属，各个未排除的段都记一次。"""
-        if lg.blocks and lg.blocks[0]["seq"] > 0:
-            cross.append((0, lg.blocks[0]["seq"]))
-            lost_total += lg.blocks[0]["seq"]
+        前面没有摘要可用时无从归属，各个未排除的段都记一次。
+        lost_total 是文件里所有缺口的总数（含早于第一个 C 行、不归任何格的那些），尾部丢块 = 探针报告的丢弃数 − lost_total，
+        所以不归任何格的缺口也必须算进去，否则它们会被当成尾部丢块记给最后一格。
+        head = 实例开头缺的块序号个数（第一个块是孤块时已经算作不归任何格，这里是 0）。"""
+        if head:
+            cross.append((0, head))
+            lost_total += head
         tail = max(0, dropped - lost_total)
         if tail:
             start = lg.blocks[-1]["seq"] + 1 if lg.blocks else 0
@@ -990,12 +1019,17 @@ def toggle_reviews(s, toggles):
 
 
 def shadow_reviews(reviews, sh, toggles):
-    """影子会话（被排除的段单独成会话）用的对账结论：沿用主会话的 reviews。
-    只含被排除的段的计数必然对不上整个 case 的现场次数，拿它去对会把被排除的 toggle 格的切换点一律当成没经确认，
-    切换造成的 hostNs 回退就被说成「被排除的段本来就不通过」。
+    """影子会话（被排除的段单独成会话）用的对账结论：沿用主会话的 reviews，但只沿用对这些段仍然成立的部分。
+    - 切换**次数**是整个 case 的性质（`--toggles` 填的是整个 case 的现场按键次数）：只含被排除的段的计数必然对不上，
+      拿它去对会把被排除的 toggle 格的切换点一律当成没经确认，切换造成的 hostNs 回退就被说成「被排除的段本来就不通过」，所以沿用主会话的。
+    - 处理**形态数**是逐段的性质：主会话的结论只说明留下的格里形态不多于 A2_MAX_REGIMES 种，不说明被排除的格也是。
+      沿用之前先用影子自己的 toggle_counts(sh) 核一遍，多于 A2_MAX_REGIMES 种就不沿用，该 case 退回被排除的段自己的对账
+      （形态多于上限，对账只会是数据不全，推断点得不到容忍，其前后的回退照常算非递增，A7 在影子里不通过，记进 excluded_fail）。
     主会话对这个 case 没有结论可沿用时（一个 toggle 格都没有，整个 case 的切换格都被排除了；或留下的格里一次切换都没数到，
-    toggle_case_check 没有话要说），才用被排除的段自己的计数对账——此时 `--toggles` 说的只可能是这些段里的按键。"""
-    return {**toggle_reviews(sh, toggles), **{case: chk for case, chk in reviews.items() if chk is not None}}
+    toggle_case_check 没有话要说），同样用被排除的段自己的计数对账——此时 `--toggles` 说的只可能是这些段里的按键。"""
+    own = toggle_counts(sh)
+    inherited = {case: chk for case, chk in reviews.items() if chk is not None and own.get(case, {}).get("regimes", 0) <= A2_MAX_REGIMES}
+    return {**toggle_reviews(sh, toggles), **inherited}
 
 
 def judge_a2(s, toggles=None, reviews=None):
@@ -1465,12 +1499,13 @@ def warnings_of(s):
     out = []
     if s.orphans:
         out.append(f"{s.orphans} 个块早于所在日志的第一个 C 行，未计入任何测试格")
+    if s.orphan_lost:  # 孤块之间、孤块之前缺的块序号：实例级，不归任何格，也不当成尾部丢块记给最后一格
+        out.append(f"早于第一个 C 行的块之间（含实例开头）缺 {s.orphan_lost} 个块序号、{s.orphan_gaps} 处：属实例级，不归任何格，不计入各格的序号缺口")
     if s.dups:
         out.append(f"{len(s.dups)} 个格同键重复记录（如 {key_label(s.dups[0])}）：旧文件须挪走后重采，相关判据按数据不全处理")
     if s.broken:
         out.append(f"{len(s.broken)} 个日志文件不完整，已记入 A8")
-    lost = [n for n, lg in enumerate(s.logs, start=1)
-            if max([x["dropped"] for x in lg.summaries] + [lg.closing["dropped_total"] if lg.closing else 0])]  # fmt: skip
+    lost = [n for n, lg in enumerate(s.logs, start=1) if dropped_of(lg) > lg.orphan_lost]  # 丢弃全在孤块之间（上一条已单独说）的实例，不算影响各格
     shown = [n for n in lost if s.attribution.get(n, (0, 1, True))[1]]  # 丢弃全部归给了被排除的段（归给未排除段的个数是 0）的实例另说
     if shown:
         out.append(f"{len(shown)} 个实例的探针报告过丢弃记录，相关格按数据不全处理")
@@ -2116,6 +2151,11 @@ def _mutations_of(text):
     yield "role 与 H 不一致", edit(b, 3, "O")
     yield "bool 取 2", edit(b, 7, "2")
     yield "seq 不递增", "\n".join(lines[: b + 1] + [lines[b]] + lines[b + 1 :])
+    yield "seq 回退（相邻两个 B 行互换）", "\n".join(lines[:b] + [lines[b + 1], lines[b]] + lines[b + 2 :])
+    yield "seq 回退（两个 B 行隔着事件行互换）", "\n".join(lines[:b] + [lines[b + 2], lines[e], lines[b + 1], lines[b]] + lines[b + 3 :])
+    yield "seq 回退（call_seq 递增）", edit(b + 2, 1, "0")
+    yield "call_seq 不递增（seq 递增）", edit(b + 1, 2, lines[b].split(",")[2])
+    yield "call_seq 回退（seq 递增）", edit(b + 2, 2, "0")
     yield "未知事件名", edit(e, 2, "explode")
     yield "事件参数类型不符", edit(e, 3, "abc")
     yield "事件应为空的参数非空", with_line(e, "E,5,release,x,")
@@ -2797,6 +2837,7 @@ def _self_test_r2(tmp, check, run_json, said, verdict, a2):
     code, so, _ = _cli([os.path.join(tmp, d), "--hash-salt", "s", *both])
     check("--exclude 影子：文本输出不说「被排除的段里本来就不通过」", "照样记不通过" not in so and "已排除的段" in so, True)
     _self_test_r3(tmp, check, run_json, said, verdict)
+    _self_test_r4(tmp, check, run_json, said, verdict)
 
 
 def _self_test_r3(tmp, check, run_json, said, verdict):
@@ -2892,6 +2933,129 @@ def _self_test_r3(tmp, check, run_json, said, verdict):
         code, so, se = _cli([os.path.join(tmp, d), "--hash-salt", "s", "--crashed", nm])
         check(f"--crashed 不认文件头都没写完的文件：{label}，退出码 {EXIT_EXCLUDE}，说明里讲清缘由且不回显文件名",
               code == EXIT_EXCLUDE and not so and "文件头写完之前就被截断了" in se and nm not in se, True)  # fmt: skip
+
+
+def _self_test_r4(tmp, check, run_json, said, verdict):
+    """第 4 轮整改：
+    1. --exclude 的影子沿用主会话的切换次数对账之前，先用被排除的段自己的 toggle_counts 核处理形态数：形态数是逐段的性质，
+       主会话（留下的格）形态不多于 2 种，不能替被排除的格也有 3 种形态背书；
+    2. 缺失的块序号所有缺口都计入 lost_total（尾部丢块 = 探针报告的丢弃数 − 缺口总数）：早于第一个 C 行的孤块之间（与第一个块是孤块时它之前）
+       的缺口不归任何格，只在提示里报个数，不会被当成尾部丢块记给最后一格；
+    3. B 行的 seq / call_seq 按文件顺序严格递增是格式约束（parse_log 拒收，退出码 2），文件顺序就是 seq 顺序；交错的是别的行（C、E、S）。
+    夹具的判定已在夹具矩阵里查过，这里查带 --exclude 的组合、说明文字与退出码。"""
+    ps = _synth()
+
+    def tree(name, files):
+        _write_tree(os.path.join(tmp, name), files)
+        return name
+
+    def both(pid, *sels):
+        return [x for sel in sels for x in ("--exclude", f"probe-I-{pid}-e1f2.csv:{sel}", "--exclude", f"probe-O-{pid}-e3f4.csv:{sel}")]
+
+    # ---- 1. 影子沿用确认之前核被排除的段自己的形态数 ----
+    ex = ["--exclude", "probe-I-5151-a1b2.csv:#1", "--exclude", "probe-O-5151-c3d4.csv:#1"]
+    d3 = "a7-exclude-toggle-three-regimes"  # 留下的格 10 次切换、2 种形态；被排除的格 3 次切换、3 种形态，第 2 次切换处 hostNs 回退 7.3 s
+    code, r, _ = run_json(d3, *ex, "--toggles", "CB-02:10")
+    txt = said(r, "A7")
+    check("--exclude 影子：被排除的 toggle 格有 3 种处理形态（更像线程池调度）、推断点处 hostNs 回退，主会话的确认不替它背书：A7 不通过，excluded_fail 为 [A7]",
+          verdict(r, "A2") == "PASS" and verdict(r, "A7") == "FAIL" and r["excluded_fail"] == ["A7"] and code == 1 and len(r["excluded"]) == 2, True)  # fmt: skip
+    check("--exclude 影子：说明写明被排除的段若计入不通过、回退没有容忍、怎样才算确认",
+          "被排除的段若计入" in txt and "非递增 2" in txt and "没有经 A2 确认" in txt and f"处理形态不多于 {A2_MAX_REGIMES} 种" in txt, True)  # fmt: skip
+    check("--exclude 影子：A2 在主会话里照旧通过（留下的格对得上现场次数），形态数的核查不改写它", "与现场记录的 10 次相符" in said(r, "A2") and "被排除的段若计入" not in said(r, "A2"), False)
+    code, so, _ = _cli([os.path.join(tmp, d3), "--hash-salt", "s", *ex, "--toggles", "CB-02:10"])
+    check("--exclude 影子：文本输出写明被排除的段里本来就不通过的项，退出码 1", "照样记不通过" in so and "A7" in so and code == 1, True)
+    # 对照：被排除的格形态数不多于 2 种时照旧沿用主会话的确认（第 3 轮的夹具）
+    code, r, _ = run_json("a7-exclude-toggle-beside-main", *ex, "--toggles", "CB-02:10")
+    check("--exclude 影子对照：被排除的格只有 2 种处理形态，照旧沿用主会话的确认，excluded_fail 为空", verdict(r, "A7") == "PASS" and r["excluded_fail"] == [] and code != 1, False)
+    # 形态数只影响推断点的容忍：被排除的格 3 种形态、但 hostNs 没有回退，没有东西要容忍，A7 在影子里通过；A2 的「形态多于 2 种」只是数据不全，排除合法
+    quiet = tree("a7-exclude-toggle-three-regimes-no-regress", ps.toggle_excluded_beside_main(5150, regimes=3, where="none"))
+    code, r, _ = run_json(quiet, *ex, "--toggles", "CB-02:10")
+    check("--exclude 影子：3 种形态但 hostNs 没有回退：没有东西要容忍，A7 通过，excluded_fail 为空（形态多于 2 种只是数据不全，排除合法）",
+          verdict(r, "A2") == "PASS" and verdict(r, "A7") == "PASS" and r["excluded_fail"] == [] and code != 1, False)  # fmt: skip
+    # shadow_reviews 本身：同样的主会话结论，被排除的段形态数不同，沿用与否不同
+    for name, want in (("a7-exclude-toggle-beside-main", "NOTE"), (d3, "INCOMPLETE")):
+        logs, compares, broken = load_dir(os.path.join(tmp, name))
+        s = Session(logs, compares, broken, resolve_excludes(logs, parse_excludes(["probe-I-5151-a1b2.csv:#1", "probe-O-5151-c3d4.csv:#1"])))
+        reviews = toggle_reviews(s, {"CB-02": 10})
+        sh = s.shadow()
+        got = shadow_reviews(reviews, sh, {"CB-02": 10}).get("CB-02") or (None,)  # 判据被改坏时这些键可能不在：让断言失败，不让自测崩溃
+        kinds = toggle_counts(sh).get("CB-02", {}).get("regimes")
+        check(f"shadow_reviews：主会话（留下的格）的确认是 NOTE；{name} 被排除的格 {kinds} 种形态，影子里该 case 的结论应为 {want}",
+              (reviews.get("CB-02") or (None,))[0] == "NOTE" and got[0] == want, want != "NOTE")  # fmt: skip
+
+    # ---- 2. 所有缺口都计入已缺总数，孤块之间的缺口不归任何格 ----
+    code, r, _ = run_json("a1-incomplete-orphan-gaps-before-excluded", *both(5160, 2))
+    check("--exclude 孤块之间的缺口：开窗前的孤块之间缺了块，不归任何格，也不是尾部丢块：排除误记的一格后最后一格的 A1 通过",
+          verdict(r, "A1") == "PASS" and r["excluded_fail"] == [] and len(r["excluded"]) == 2, True)  # fmt: skip
+    check("--exclude 孤块之间的缺口：提示里单独报个数（两个实例各 3 个块序号、2 处），不说相关格按数据不全，也没有归给未排除的段",
+          any("缺 6 个块序号、4 处" in w and "不归任何格" in w for w in r["warnings"]) and not any("相关格按数据不全处理" in w or "归给未排除的段" in w for w in r["warnings"]), True)  # fmt: skip
+    _, r, _ = run_json("a1-incomplete-orphan-gaps-and-taildrop", *both(5161, 2))
+    check("--exclude 孤块之间的缺口：最后一格自己另有 3 块尾部丢块：只有这 3 块归给它（A1 数据不全），孤块之间的 3 块不再被多算成尾部丢块",
+          verdict(r, "A1") == "INCOMPLETE" and "序号缺口" in said(r, "A1")
+          and sum("0 个归给被排除的段" in w and "3 个归给未排除的段" in w for w in r["warnings"]) == 2 and not any("6 个归给未排除的段" in w for w in r["warnings"]), True)  # fmt: skip
+    _, r, _ = run_json("a1-incomplete-orphan-head-before-excluded", *both(5162, 2))
+    check("--exclude 孤块之间的缺口：第一个块就是孤块、它之前缺的块更早，同样不归第一格：A1 通过，提示里报个数（两个实例各 2 个块序号、1 处）",
+          verdict(r, "A1") == "PASS" and any("缺 4 个块序号、2 处" in w for w in r["warnings"]), True)  # fmt: skip
+    # 没有 --exclude：探针报告的丢弃全在孤块之间，已经定位，各格不按数据不全算（旧口径是「定位不到缺口」而整个实例都记缺口）
+    code, r, _ = run_json("a1-pass-orphan-gaps-only")
+    check("孤块之间的缺口：不带 --exclude，丢弃全在孤块之间，已经定位：A1 通过，提示不说相关格按数据不全处理",
+          verdict(r, "A1") == "PASS" and any("缺 6 个块序号、4 处" in w for w in r["warnings"]) and not any("相关格按数据不全处理" in w for w in r["warnings"]), True)  # fmt: skip
+    check("孤块之间的缺口：孤块本身仍挡 F1", not r["f1"]["ok"] and any("不属于任何测试格" in m for m in r["f1"]["missing"]), True)
+    # 探针报告的丢弃比孤块之间的缺口多：多出来的部分定位不到，整个实例仍按数据不全
+    plus = {n: t.replace("S,3000000000,85,3", "S,3000000000,85,5").replace("Z,3100000000,85,3", "Z,3100000000,85,5")
+            for n, t in ps.files_of(*ps.multi_cells([("CB-01", "steady", 64, "off", 40, "ok"), ("CB-01", "steady", 1024, "high", 40, "ok")], pid=5163, pre="ooxxooxo")).items()}  # fmt: skip
+    _, r, _ = run_json(tree("a1-incomplete-orphan-gaps-plus-unlocated", plus))
+    check("孤块之间的缺口：探针报告的丢弃多于孤块之间的缺口（多出的 2 个定位不到）：整个实例仍按数据不全",
+          verdict(r, "A1") == "INCOMPLETE" and any("相关格按数据不全处理" in w for w in r["warnings"]), True)  # fmt: skip
+    # Session 层面：缺口按谁的格记
+    logs, compares, broken = load_dir(os.path.join(tmp, "a1-pass-orphan-gaps-only"))
+    s = Session(logs, compares, broken)
+    check("孤块之间的缺口：Session 记下孤块之间缺 6 个块序号、4 处，任何格都没有序号缺口",
+          (s.orphan_lost, s.orphan_gaps, s.orphans) == (6, 4, 10) and all(g.gaps == 0 for g in s.segments), False)  # fmt: skip
+    # 时间戳倒着走的文件：孤块紧跟在某格的块之后、中间缺了块，缺口记给前一块所在的格（不丢，也不记给别的格）
+    li, lo = ps.multi_cells([("CB-01", "steady", 64, "off", 40, "ok"), ("CB-01", "steady", 256, "low", 40, "ok"), ("CB-01", "steady", 1024, "high", 40, "ok")], pid=5164)
+    bs = [k for k, ln in enumerate(li.lines) if ln.startswith("B,")]
+    f = li.lines[bs[10]].split(",")
+    f[11] = str(ps.T_START - 50_000)  # mono_ns 早于第一个 C 行：孤块
+    li.lines[bs[10]] = ",".join(f)
+    del li.lines[bs[9]]  # 第 9 块丢掉：缺口在第一格的第 8 块与孤块之间
+    back = tree("a1-incomplete-orphan-after-block", ps.files_of(li, lo))
+    logs, compares, broken = load_dir(os.path.join(tmp, back))
+    ins = [g for g in Session(logs, compares, broken).segments if g.role == "I"]
+    check("孤块之间的缺口：孤块紧跟在第一格的块之后、中间缺了块（时间戳倒着走）：缺口记给前一块所在的第一格", [g.gaps for g in ins] == [1, 0, 0], True)
+
+    # ---- 3. B 行 seq / call_seq 按文件顺序严格递增是格式约束，文件顺序就是 seq 顺序 ----
+    base = ps.files_of(*ps.pair("CB-01", "steady", 256, "low", pid=5170))
+    iname, oname = "probe-I-5170-a1b2.csv", "probe-O-5170-c3d4.csv"
+    ilines = base[iname].split("\n")
+    bs = [k for k, ln in enumerate(ilines) if ln.startswith("B,")]
+    blocks = parse_log(base[iname].encode(), "日志#1").blocks
+    check("B 行：合法文件的 seq 与 call_seq 按文件顺序严格递增", all(a["seq"] < b["seq"] and a["call_seq"] < b["call_seq"] for a, b in zip(blocks, blocks[1:])), False)
+    cs = ilines[bs[4]].split(",")
+    cs[2] = ilines[bs[3]].split(",")[2]  # call_seq 与前一块相同，seq 递增
+    for tag, label, text in (
+        ("swap", "seq 回退（相邻两个 B 行互换）", "\n".join(ilines[: bs[3]] + [ilines[bs[4]], ilines[bs[3]]] + ilines[bs[4] + 1 :])),
+        ("cseq", "call_seq 不递增（seq 递增）", "\n".join(ilines[: bs[4]] + [",".join(cs)] + ilines[bs[4] + 1 :])),
+    ):  # fmt: skip
+        d = tree("b-order-" + tag, {"probe-I-5170-a1b2-quuxfile.csv": text, oname: base[oname]})
+        code, so, se = _cli([os.path.join(tmp, d), "--hash-salt", "s"])
+        check(f"B 行：{label}：格式错，退出码 2，没有分析输出；消息只带文件序号与行号，不回显文件名", code == 2 and not so and "日志#" in se and "严格递增" in se and "quux" not in se, True)
+    # 交错的是别的行：事件行、摘要行放在文件里与时间戳不一致的位置，B 行本身仍按 seq 排；分析结果与原文件相同
+    moved = list(ilines)
+    ev = next(k for k, ln in enumerate(moved) if ln.startswith("E,"))
+    sm = next(k for k, ln in enumerate(moved) if ln.startswith("S,"))
+    e_line, s_line = moved[ev], moved[sm]
+    moved = [ln for k, ln in enumerate(moved) if k not in (ev, sm)]
+    at = [k for k, ln in enumerate(moved) if ln.startswith("B,")][20]
+    moved[at:at] = [e_line, s_line]  # 早于第一个块的事件与摘要，写在第 20 个块的位置
+    lg = parse_log("\n".join(moved).encode(), "日志#1")
+    seqs = [b["seq"] for b in lg.blocks]
+    check("B 行：事件行与摘要行夹在 B 行中间、与时间戳顺序不一致：照常解析，B 行的 seq 仍按文件顺序严格递增，事件行与摘要行都在",
+          seqs == sorted(set(seqs)) and len(seqs) == 40 and len(lg.events) >= 1 and len(lg.summaries) >= 1, False)  # fmt: skip
+    _, r1, _ = run_json(tree("b-order-interleaved", {iname: "\n".join(moved), oname: base[oname]}))
+    _, r2, _ = run_json(tree("b-order-plain", base))
+    check("B 行：行交错不改变分析结果（判据逐项相同，没有序号缺口）",
+          [(i["id"], i["verdict"]) for i in r1["items"]] == [(i["id"], i["verdict"]) for i in r2["items"]] and verdict(r1, "A1") == "PASS", False)  # fmt: skip
 
 
 def mutation_check():

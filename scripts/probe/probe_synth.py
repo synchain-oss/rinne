@@ -145,7 +145,7 @@ def multi_pair(cells, *, pid, tok=("e1f2", "e3f4"), fmt=("vst3", "vst3"), host_k
     return li, lo
 
 
-def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024, summaries=True):
+def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024, summaries=True, pre=""):
     """像 multi_pair，但每格单独指定块数与记录方式，用来造「现场误记了一格」的日志。
     cells = [(case, variant, buf, guard, 块数, 方式)]，方式：
       ok          正常写出；
@@ -160,15 +160,22 @@ def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024,
       hostns      Out 端每块的 hostNs 比 In 端大 7（A7 不通过）。
     每格的 S 行在这一格的块都写完之后才写，`blocks` 是此刻实际写出的累计块数，`dropped` 是累计丢弃数，与探针的计数一致；
     Z 行同理。这样 `blocks + dropped` 就是此刻已经占用的 seq 个数。
-    summaries=False 不写任何 S 行（摘要线程被宿主占住、一条都没写出来），只剩收尾的 Z 行报累计丢弃数。"""
+    summaries=False 不写任何 S 行（摘要线程被宿主占住、一条都没写出来），只剩收尾的 Z 行报累计丢弃数。
+    pre：第一个 C 行之前就开始写的块（孤块），每个字符一块：o = 写出，x = 丢掉（占 seq、计丢弃）。"ooxxooxo" 是孤块之间有两处缺口，
+    "xxoo" 是实例开头先丢了两块、之后才有孤块。第一条摘要在这些块之后写，blocks + dropped 仍是已占用的 seq 个数。"""
     li = Log("I", "vst3", "cubase", "win", pid=pid, tok=tok[0])
     lo = Log("O", "vst3", "cubase", "win", pid=pid, tok=tok[1])
     span = 1_000_000_000
     for lg in (li, lo):
         lg.event(T_START - 500, "prepare", sr, prepare_max)
-        if summaries:
-            lg.summary(T_START)
     g = 0
+    for ch in pre:  # 孤块的时间戳早于第一个 C 行（T_START - 100）
+        for lg, cs, dt in ((li, 2 * g, 0), (lo, 2 * g + 1, 50)):
+            lg.block(cs, T_START - 5_000 + g * 100 + dt, host_ns=HOST0 - 10_000 + g, drop=ch == "x")
+        g += 1
+    for lg in (li, lo):
+        if summaries:
+            lg.summary(T_START, blocks=lg.written, dropped=lg.lost)
     for c, (case, variant, buf, guard, count, mode) in enumerate(cells):
         base = T_START + c * span
         for lg in (li, lo):
@@ -285,9 +292,10 @@ def a2_long(pid, thread_of, *, count, rs_of=None, explicit_at=(), buf=256, guard
     return li, lo
 
 
-def alternating(sw, skew=0):
-    """线程在 THREADS 两个值之间来回，每次切换换一次；skew 是线程比切换点晚几块变。"""
-    return lambda k: THREADS[sum(1 for x in sw if x + skew <= k) % 2]
+def alternating(sw, skew=0, kinds=2):
+    """线程在 THREADS 两个值之间来回，每次切换换一次；skew 是线程比切换点晚几块变。kinds=3 轮流用三个线程（三种处理形态）。"""
+    pool = (*THREADS, THREAD3)[:kinds]
+    return lambda k: pool[sum(1 for x in sw if x + skew <= k) % kinds]
 
 
 def scen_a2_thread(state, pid=4100, switches=10, explicit=False, skew=0):
@@ -511,17 +519,18 @@ def scen_a7_out_opens_first(pid, extra=5, count=40):
     return files_of(*pair("CB-01", "steady", 256, "low", count=count + extra, hook=_drop_at_range(0, extra), pid=pid))
 
 
-def scen_a7_toggle_regress(pid, where, switches=10, at=3, double_resync=False):
+def scen_a7_toggle_regress(pid, where, switches=10, at=3, double_resync=False, regimes=2):
     """CB-02 toggle 格（0.2 s 一块，线程每 3 s 换一次）。hostNs 在第 at + 1 次切换处（at-switch）或切换之后 1.6 s 处（away）整体回退 7.3 s，
     两端同样回退。explicit：线程不变，切换点来自显式事件，回退在第 at + 1 次切换处。switches 是切换次数，默认 10，at 默认 3（第 4 次）。
-    double_resync：第 at + 1 次切换块上重同步 2 次（A2 不通过）。"""
+    double_resync：第 at + 1 次切换块上重同步 2 次（A2 不通过）。regimes：线程轮流用几个（2 = 预取与实时，3 = 三种处理形态）。
+    where="none"：hostNs 不回退。"""
     sw = switch_blocks(switches)
-    k0 = sw[at] + (8 if where == "away" else 0)
+    k0 = 10**9 if where == "none" else sw[at] + (8 if where == "away" else 0)
 
     def host_of(k):
         return HOST0 + k * LONG - (7_300_000_000 if k >= k0 else 0)
 
-    thread = (lambda k: THREADS[0]) if where == "explicit" else alternating(sw)
+    thread = (lambda k: THREADS[0]) if where == "explicit" else alternating(sw, kinds=regimes)
     return files_of(*a2_long(pid, thread, count=sw[-1] + 20, rs_of=lambda k: (2 if double_resync and k == sw[at] else 1) if k in sw else 0,
                              explicit_at=sw if where == "explicit" else (), host_of=host_of))  # fmt: skip
 
@@ -590,13 +599,15 @@ def others_fail_excluded_clean(pid):
     }
 
 
-def toggle_excluded_beside_main(pid, double_resync=False):
+def toggle_excluded_beside_main(pid, double_resync=False, regimes=2, where="at-switch"):
     """CB-02 toggle 格录了两遍（同一个键）：第一遍（pid）10 次切换、hostNs 没有回退，是要留下的；第二遍（pid + 1）是误记的一遍，
     只有 3 次切换，第 2 次切换处两端的 hostNs 整体回退 7.3 s（ASIO-Guard 的现场现象），要被 --exclude 排除。
     --toggles CB-02:10 是整个 case 的现场按键次数，对得上留下的那一遍；被排除的那一遍自己只数出 3 次，对不上这个次数（也不足 10 次）。
     被排除的段单独判时，A7 的容忍要沿用主会话的确认，不能拿它自己的 3 次去对整场的 10 次。
-    double_resync：被排除的那一遍第 2 次切换块上重同步 2 次，A2 若计入就不通过（逐格的判定，与现场次数无关）。"""
-    return {**scen_a2_thread("pass", pid=pid), **scen_a7_toggle_regress(pid + 1, "at-switch", switches=3, at=1, double_resync=double_resync)}
+    double_resync：被排除的那一遍第 2 次切换块上重同步 2 次，A2 若计入就不通过（逐格的判定，与现场次数无关）。
+    regimes：被排除的那一遍用几种处理形态（线程轮流用几个）：处理形态数是逐段的性质，留下的那一遍只有 2 种，不能替被排除的 3 种背书。
+    where：被排除的那一遍 hostNs 回退的位置（none = 不回退）。"""
+    return {**scen_a2_thread("pass", pid=pid), **scen_a7_toggle_regress(pid + 1, where, switches=3, at=1, double_resync=double_resync, regimes=regimes)}
 
 
 def disable_track_replaced(pid, *, variant="disable-track", new_pid=None, set_state_after=7_500_000_000, pair_after=300_000_000,
@@ -1022,6 +1033,26 @@ def extra_cells():
         "a7-exclude-toggle-beside-main": (  # 不带 --exclude 时同键两遍：留下的与误记的各占一格，同键重复记录；带 --exclude 的判定见自测
             toggle_excluded_beside_main(5150),
             {"A2": "INCOMPLETE", "A7": "INCOMPLETE"},
+        ),
+        "a7-exclude-toggle-three-regimes": (  # 同上，但被排除的那一遍有 3 种处理形态：形态数是逐段的性质，不沿用主会话的确认
+            toggle_excluded_beside_main(5150, regimes=3),
+            {"A2": "INCOMPLETE", "A7": "INCOMPLETE"},
+        ),
+        "a1-incomplete-orphan-gaps-before-excluded": (  # 第一个 C 行之前有孤块、孤块之间缺块：不归任何格，也不是尾部丢块（排除误记的一格后 A1 仍是通过）
+            files_of(*multi_cells([good, stray, good3], pid=5160, pre="ooxxooxo")),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-orphan-gaps-and-taildrop": (  # 同上，最后一格自己另有 3 块尾部丢块：只有这 3 块归给它
+            files_of(*multi_cells([good, stray, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5161, pre="ooxxooxo")),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-orphan-head-before-excluded": (  # 实例开头先丢了两块、之后才有孤块：开头缺的块也早于第一个 C 行，不归第一格
+            files_of(*multi_cells([good, stray, good3], pid=5162, pre="xxoo")),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-pass-orphan-gaps-only": (  # 不带 --exclude：探针报告的丢弃全在孤块之间，已经定位，各格不因此按数据不全算
+            files_of(*multi_cells([good, good3], pid=5163, pre="ooxxooxo")),
+            {"A1": "PASS"},
         ),
         "a8-fail-crashed-stall": (scen_a8_crashed(5100, "stall"), {"A8": "FAIL"}),
         "a8-fail-crashed-trips": (scen_a8_crashed(5101, "trips"), {"A8": "FAIL"}),

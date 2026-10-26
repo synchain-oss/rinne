@@ -71,6 +71,15 @@
   "a1-incomplete-misrecorded-unbound": {
     "A1": "INCOMPLETE"
   },
+  "a1-incomplete-orphan-gaps-and-taildrop": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-orphan-gaps-before-excluded": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-orphan-head-before-excluded": {
+    "A1": "INCOMPLETE"
+  },
   "a1-incomplete-taildrop-after-unbound-excluded": {
     "A1": "INCOMPLETE"
   },
@@ -87,6 +96,9 @@
     "A1": "INCOMPLETE"
   },
   "a1-pass": {
+    "A1": "PASS"
+  },
+  "a1-pass-orphan-gaps-only": {
     "A1": "PASS"
   },
   "a1-pass-out-stall": {
@@ -256,6 +268,10 @@
     "A6": "PASS"
   },
   "a7-exclude-toggle-beside-main": {
+    "A2": "INCOMPLETE",
+    "A7": "INCOMPLETE"
+  },
+  "a7-exclude-toggle-three-regimes": {
     "A2": "INCOMPLETE",
     "A7": "INCOMPLETE"
   },
