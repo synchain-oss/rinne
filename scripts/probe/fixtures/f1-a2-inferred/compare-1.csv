@@ -1,0 +1,3 @@
+case,variant,bit_exact,residual_dbfs,head_residual_dbfs,lag_samples
+CB-04,export-offline,1,-inf,-inf,0
+LU-04,export-offline,0,-128.0,-99.5,0
