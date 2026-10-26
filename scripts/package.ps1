@@ -343,6 +343,13 @@ function Test-RinneRemovableTempPath([string]$Path, [string[]]$OwnedPrefixes) {
 
 # ── 仓库内的真源 ──────────────────────────────────────────────────────────────
 
+# 一条译文规则是否标了 installTxt：与 docs-kit 的 `installTxt === true` 同一口径，只认布尔真。
+# 没有这个字段的规则不算（StrictMode 2.0 下直接读缺失的字段会抛错，所以先看字段在不在）；字符串 "true" 也不算。
+function Test-RinneInstallTxtFlag($Rule) {
+  $p = $Rule.PSObject.Properties['installTxt']
+  ($null -ne $p) -and ($p.Value -is [bool]) -and $p.Value
+}
+
 # 装机说明里要写的那几条规则（标了 installTxt 的那些）：中文真源在用户指南，英文译文在 i18n 文件。
 # 返回 @{ Lead; Body; En; Zh } 的数组。
 function Get-RinneInstallRules([string]$Root) {
@@ -366,7 +373,7 @@ function Get-RinneInstallRules([string]$Root) {
   $out = New-Object System.Collections.Generic.List[object]
   for ($i = 0; $i -lt $zh.Count; $i++) {
     $t = $i18n.rules[$i]
-    if ($t.installTxt -ne $true) { continue }
+    if (-not (Test-RinneInstallTxtFlag $t)) { continue }
     $out.Add([pscustomobject]@{ Lead = $zh[$i].Lead; Body = $zh[$i].Body; En = "$($t.en.lead): $($t.en.body)"; Zh = "$($zh[$i].Lead)：$($zh[$i].Body)" })
   }
   if (-not $out.Count) { Stop-RinnePackage '译文里没有标了 installTxt 的规则' }
@@ -1114,6 +1121,12 @@ Feedback can get loud.
   & $check '规则：英文那条缺，红' $true (0 -lt @(Get-RinneInstallRuleProblems "放置位置：Rinne Input 放在第一格`n" $ruleSample).Count)
   & $check '规则：中文那条缺，红' $true (0 -lt @(Get-RinneInstallRuleProblems "Placement: Put Rinne Input first`n" $ruleSample).Count)
   & $check '规则：没有可核对的规则，红' $true (0 -lt @(Get-RinneInstallRuleProblems $ruleText @()).Count)
+  # installTxt 标记只认布尔真（与 docs-kit 同口径）；规则里没有这个字段时不算、也不抛错（本脚本开着 StrictMode 2.0）。
+  $flag = { param($Json) try { [bool](Test-RinneInstallTxtFlag ($Json | ConvertFrom-Json)) } catch { 'threw' } }
+  & $check 'installTxt：标了 true 的规则算' $false ((& $flag '{"id":"a","installTxt":true}') -eq $true)
+  & $check 'installTxt：没有这个字段的规则不算，也不抛错' $true ((& $flag '{"id":"a"}') -eq $false)
+  & $check 'installTxt：标了 false 的规则不算' $true ((& $flag '{"id":"a","installTxt":false}') -eq $false)
+  & $check 'installTxt：字符串 "true" 不算（docs-kit 只认布尔真）' $true ((& $flag '{"id":"a","installTxt":"true"}') -eq $false)
   # 子进程的输出按 UTF-8 解码：弯引号与中文原样回来。按系统代码页解码的话，INSTALL.txt 和来源表里的非 ASCII 字符全是乱码。
   $encRun = Invoke-RinneCommand (Get-RinneNode $RepoRoot) @('-e', 'process.stdout.write("a\u2019b\u4e2d")') $RepoRoot
   & $check 'Invoke-RinneCommand：子进程的 UTF-8 输出（弯引号、中文）原样解码' $false (($encRun.Code -eq 0) -and ($encRun.Out -ceq "a$([char]0x2019)b$([char]0x4e2d)"))
