@@ -38,13 +38,22 @@
   "a1-incomplete-dup": {
     "A1": "INCOMPLETE"
   },
+  "a1-incomplete-gap-and-taildrop-other-cell": {
+    "A1": "INCOMPLETE"
+  },
   "a1-incomplete-gap-beside-excluded": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-gap-only-in-one-cell": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-headdrop-after-excluded": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-headdrop-in-after-excluded": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-headdrop-with-gap-elsewhere": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-in-only": {
@@ -84,6 +93,9 @@
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-taildrop-after-unrelated-excluded": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-taildrop-nosummary": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-two-excluded-ok": {

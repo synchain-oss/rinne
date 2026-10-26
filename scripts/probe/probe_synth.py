@@ -83,7 +83,8 @@ class Log:
 def pair(case, variant="-", buf="-", guard="na", *, count=40, hook=None, fmt=("vst3", "vst3"), pid=4100,
          tok=("a1b2", "c3d4"), host_kind="cubase", os_name="win", prepare_max=256, blocks=True, close=True,
          sr=48000, pre_blocks=0, period=PERIOD):  # fmt: skip
-    """一对 In / Out 实例。hook(role, k, row) 可改行；row["_drop"] = True 表示丢掉这一条（制造序号缺口）。
+    """一对 In / Out 实例。hook(role, k, row) 可改行；row["_drop"] = True 表示丢掉这一条（制造序号缺口，占 seq、计丢弃）；
+    row["_skip"] = True 表示这个实例对这次回调根本没有记录（窗口还没开）：不占 seq，也不计丢弃。
     period 是相邻两块的间隔（ns）。默认 5.3 ms 一块，整个格不到 1 s；换成 LONG 这类慢节奏时，摘要改成每秒一条一直写到最后一块之后，
     这样几十秒的格里 1 Hz 摘要不缺，收尾也在最后一块之后。"""
     li = Log("I", fmt[0], host_kind, os_name, pid=pid, tok=tok[0])
@@ -104,6 +105,8 @@ def pair(case, variant="-", buf="-", guard="na", *, count=40, hook=None, fmt=("v
                 if hook:
                     hook(lg.role, k, row)
                 drop = row.pop("_drop", False)
+                if row.pop("_skip", False):
+                    continue
                 cs = row.pop("_cs", cs)
                 lg.block(cs, row.pop("mono_ns"), drop=drop, **row)
     end = T_START + 2_000_000_000
@@ -150,7 +153,7 @@ def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024,
     cells = [(case, variant, buf, guard, 块数, 方式)]，方式：
       ok          正常写出；
       unbound     窗口里拿不到绑定：块不写 B 行，却占 seq、计丢弃（探针对没取到绑定的块就是这么记的）；
-      gap:K       In 端第 K 块丢掉（序号缺口，同时计丢弃）；
+      gap:K       In 端第 K 块丢掉（序号缺口，同时计丢弃）；gap:K:M 是从第 K 块起连续丢 M 块；
       headdrop    两端的第 0 块都没拿到绑定：占 seq、计丢弃，其余正常（紧跟在前一格后面时，缺口出现在两格交界处）；
       headdrop-in 同上，只有 In 端丢第 0 块；
       headdrop-drift 两端的第 0 块都没拿到绑定（缺口出现在两格交界处，归给这一格），且 In 端从第 20 块起 m=3；
@@ -182,7 +185,8 @@ def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024,
             lg.case(base - 100, case, variant, buf, guard, sr)
         for k in range(count):
             host = HOST0 + c * span + k * PERIOD
-            lost_in = mode == "unbound" or mode == f"gap:{k}" or (k == 0 and mode in ("headdrop", "headdrop-in", "headdrop-drift"))
+            gap_k, gap_m = map(int, (mode[4:] + ":1").split(":")[:2]) if mode.startswith("gap:") else (-1, 0)  # gap:K 与 gap:K:M
+            lost_in = mode == "unbound" or gap_k <= k < gap_k + gap_m or (k == 0 and mode in ("headdrop", "headdrop-in", "headdrop-drift"))
             lost_out = mode == "unbound" or (k == 0 and mode in ("headdrop", "headdrop-drift"))
             extra = dict(m=3, off=483) if mode in ("drift", "headdrop-drift") and k >= 20 else {}
             both = dict(n=2048) if mode == "bign" else {}
@@ -506,17 +510,17 @@ def two_runs_off(*, stall=3, second_settled=None, resume=25):
     return off_of
 
 
-def _drop_at_range(k0, k1, role="I"):
+def _skip_range(k0, k1, role="I"):
     def hook(r, k, row):
         if r == role and k0 <= k < k1:
-            row["_drop"] = True
+            row["_skip"] = True
 
     return hook
 
 
 def scen_a7_out_opens_first(pid, extra=5, count=40):
-    """Out 先开窗：Out 比 In 多出头 extra 块（In 的前 extra 块没拿到绑定）。两端的 call_seq 差仍是 Out = In + 1。"""
-    return files_of(*pair("CB-01", "steady", 256, "low", count=count + extra, hook=_drop_at_range(0, extra), pid=pid))
+    """Out 先开窗：Out 比 In 多出头 extra 块（In 的窗口还没开，这几次回调 In 没有记录：不占 seq，也不是丢弃）。两端的 call_seq 差仍是 Out = In + 1。"""
+    return files_of(*pair("CB-01", "steady", 256, "low", count=count + extra, hook=_skip_range(0, extra), pid=pid))
 
 
 def scen_a7_toggle_regress(pid, where, switches=10, at=3, double_resync=False, regimes=2):
@@ -1053,6 +1057,22 @@ def extra_cells():
         "a1-pass-orphan-gaps-only": (  # 不带 --exclude：探针报告的丢弃全在孤块之间，已经定位，各格不因此按数据不全算
             files_of(*multi_cells([good, good3], pid=5163, pre="ooxxooxo")),
             {"A1": "PASS"},
+        ),
+        "a1-incomplete-gap-and-taildrop-other-cell": (  # 不带 --exclude：第 2 格中间缺 2 块，第 3 格尾部另丢 3 块：尾部丢块只归第 3 格，不被第 2 格的缺口盖住；第 1 格不受影响
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "gap:15:2"), ("CB-01", "steady", 1024, "high", 40, "taildrop")], pid=5180)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-headdrop-with-gap-elsewhere": (  # 第 1 格丢了第 0 块，第 2 格中间缺 1 块：实例开头缺的块只归第 1 格，不被第 2 格的缺口盖住；第 3 格不受影响
+            files_of(*multi_cells([("CB-01", "steady", 64, "off", 40, "headdrop"), ("CB-01", "steady", 256, "low", 40, "gap:15"), good3], pid=5181)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-gap-only-in-one-cell": (  # 对照：只有第 2 格中间连缺 3 块，探针报告的丢弃恰等于这处缺口：其余格不受影响；带 --exclude 排除第 2 格时丢弃全是被排除段内部的缺口
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "gap:15:3"), good3], pid=5182)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-taildrop-nosummary": (  # 一条摘要都没有：尾部丢块无从归属，各格都记一次
+            files_of(*multi_cells([good, good3, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5183, summaries=False)),
+            {"A1": "INCOMPLETE"},
         ),
         "a8-fail-crashed-stall": (scen_a8_crashed(5100, "stall"), {"A8": "FAIL"}),
         "a8-fail-crashed-trips": (scen_a8_crashed(5101, "trips"), {"A8": "FAIL"}),

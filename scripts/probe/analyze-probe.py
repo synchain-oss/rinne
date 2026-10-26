@@ -611,7 +611,7 @@ class Session:
         self.orphans = 0
         self.orphan_lost = self.orphan_gaps = 0  # 早于第一个 C 行的缺失块序号个数与缺口处数（孤块之间、孤块之前）：属实例级，不归任何格
         self.excluded = []  # 被排除的段：{selector, instance, role, cell, c_index}
-        self.attribution = {}  # 实例序号 → (归给被排除段的缺失块序号数, 归给未排除段的数, 是否按摘要归属)：有被排除段的实例才有
+        self.attribution = {}  # 实例序号 → (归给被排除段的缺失块序号数, 归给未排除段的数, 是否全都按摘要归了属)：有被排除段的实例才有；数里含缺口两头在同一段里、直接记给该段的
         for lg in logs:
             self._segment(lg, [(k, sel) for g, k, sel in exclude if g is lg])
         for seg in self.segments:
@@ -653,6 +653,7 @@ class Session:
         # lg.blocks 在文件里就是按 seq（与 call_seq）严格递增排的：parse_log 对不递增的 B 行判格式错（退出码 2），
         # 所以文件顺序就是 seq 顺序，下面的缺口、实例开头与尾部的丢块都直接按文件顺序算
         lost_total, cross = 0, []  # 缺失的块序号总数（所有缺口都计，包括孤块之间的）；隔着段的缺失区间 [lo, hi)（只有带被排除段的实例才分开记）
+        same_absorbed = same_charged = 0  # 缺口两头在同一段里、已直接记给那一段的缺失块序号数（带被排除段的实例才分开记）：被排除的段 / 未排除的段
         orphan_lost = orphan_gaps = 0  # 早于第一个 C 行的缺失块序号（孤块之间、孤块之前）：属实例级，不归任何格，只报个数
         head = lg.blocks[0]["seq"] if lg.blocks else 0  # 实例开头缺的块序号个数
         if head and at(lg.blocks[0]["mono_ns"]) < 0:  # 第一个块就是孤块：它之前缺的块更早，同样早于第一个 C 行
@@ -675,19 +676,19 @@ class Session:
                     at_i = i if i >= 0 else prev_i  # 后一块在某格里就记给它；它是孤块（时间戳倒着走的文件）时记给前一块所在的格
                     if not exclude or prev_i == i:
                         segs[at_i].gaps += 1  # 没有被排除的段，或缺口两头在同一段里：记给后一块所在的段
+                        if exclude and segs[at_i].excluded:
+                            same_absorbed += gap
+                        elif exclude:
+                            same_charged += gap
                     else:
                         cross.append((prev + 1, b["seq"]))
             prev, prev_i = b["seq"], i
         lg.orphan_lost = orphan_lost
         self.orphan_lost += orphan_lost
         self.orphan_gaps += orphan_gaps
-        dropped = dropped_of(lg)
-        if not exclude:
-            if dropped > orphan_lost and not any(s.gaps for s in segs):
-                for s in segs:  # 探针报告丢过记录、却定位不到缺口（早于第一个 C 行的丢块已定位，不算）：整个实例都按缺口算
-                    s.gaps += 1
-        else:
-            self._attribute(lg, segs, times, cross, lost_total, dropped, head)
+        # 有没有被排除的段，实例开头缺的块与尾部丢块（探针报告的丢弃数比缺口多出来的部分）都按同一个办法归属
+        # （早于第一个 C 行的丢块已经定位在孤块之间，不算在内）；没有被排除的段时 cross 是空的，只有这两部分
+        self._attribute(lg, segs, times, cross, lost_total, dropped_of(lg), head, same_absorbed, same_charged)
         for k, sel in exclude:
             seg = segs[where[k]]
             self.excluded.append({
@@ -697,12 +698,13 @@ class Session:
         self.hidden += [s for s in segs if s.excluded]
         self.segments += [s for s in segs if not s.excluded]
 
-    def _attribute(self, lg, segs, times, cross, lost_total, dropped, head):
-        """有被排除段的实例：把缺失的块序号归到所属的段。
+    def _attribute(self, lg, segs, times, cross, lost_total, dropped, head, absorbed=0, charged=0):
+        """把缺失的块序号归到所属的段。带不带被排除的段都走这一段：没有被排除的段时 cross 是空的，只处理实例开头缺的块与尾部丢块。
         探针每个块（写出的与丢弃的）都占一个 seq，1 Hz 摘要里的「累计块数 + 累计丢弃数」就是那一刻已经占用的 seq 个数。
         取 C 行之前最近一条摘要的这个数当作该格窗口开始前已占用的 seq 数，一格的窗口就是 [本格的数, 下一格的数)：
         落在这个范围里的缺失块序号归给这一格。归给被排除段的不计入任何判据；归给未排除段的让它数据不全。
-        缺口两头在同一段里的已经直接记给那一段。前一格最后一秒之内紧接着下一格时，摘要分不开两格，
+        缺口两头在同一段里的已经直接记给那一段，个数由调用方作为 absorbed（被排除的段）/ charged（未排除的段）的初值传进来，一并计入提示。
+        前一格最后一秒之内紧接着下一格时，摘要分不开两格，
         这部分归到后一格（后一格未排除时仍让它数据不全，后一格被排除时前一格最后不到 1 s 内的丢块会被吞掉：见 LOG-FORMAT）。
         探针报告的丢弃数比缺口多出来的部分（尾部丢块，也含丢掉的事件）接在最后一个块之后；
         前面没有摘要可用时无从归属，各个未排除的段都记一次。
@@ -725,9 +727,10 @@ class Session:
                 starts = None
                 break
             starts.append(max(starts[-1], st[j]["blocks"] + st[j]["dropped"]))
-        absorbed = charged = 0
+        unplaced = False  # 有缺失的块序号因为没有摘要可用而无从归属
         for lo, hi in cross:
             if starts is None:  # 摘要不可用，无从归属：各个未排除的段都记一次（被排除的段也记，只给 shadow() 用，同上）
+                unplaced = True
                 if any(not seg.excluded for seg in segs):
                     charged += hi - lo
                 else:
@@ -746,8 +749,8 @@ class Session:
                 else:
                     seg.gaps += 1
                     charged += mine
-        if absorbed or charged:
-            self.attribution[self.logs.index(lg) + 1] = (absorbed, charged, starts is not None)
+        if (absorbed or charged) and any(seg.excluded for seg in segs):  # 提示里的归属统计只给带被排除段的实例
+            self.attribution[self.logs.index(lg) + 1] = (absorbed, charged, not unplaced)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1513,10 +1516,11 @@ def warnings_of(s):
         out.append(f"{len(lost) - len(shown)} 个实例的探针报告过丢弃记录，已全部归给被排除的段（不计入判据）")
     for n, (absorbed, charged, by_summary) in sorted(s.attribution.items()):
         if by_summary:
-            out.append(f"实例 {n} 有被排除的段：缺失的块序号按摘要里的累计块数归属，{absorbed} 个归给被排除的段（不计入判据），"
-                       f"{charged} 个归给未排除的段（这些段按数据不全处理）")  # fmt: skip
+            out.append(f"实例 {n} 有被排除的段：缺口两头在同一段里的直接归给该段，其余缺失的块序号按摘要里的累计块数归属，"
+                       f"{absorbed} 个归给被排除的段（不计入判据），{charged} 个归给未排除的段（这些段按数据不全处理）")  # fmt: skip
         else:
-            out.append(f"实例 {n} 有被排除的段，但某个 C 行之前没有摘要行可用，{charged} 个缺失的块序号无从归属，各个未排除的段都按数据不全处理")
+            out.append(f"实例 {n} 有被排除的段，但某个 C 行之前没有摘要行可用，缺口两头不在同一段里的缺失块序号无从归属，"
+                       f"各个未排除的段都按数据不全处理（{charged} 个缺失的块序号算给未排除的段）")  # fmt: skip
     return out
 
 
@@ -2838,6 +2842,7 @@ def _self_test_r2(tmp, check, run_json, said, verdict, a2):
     check("--exclude 影子：文本输出不说「被排除的段里本来就不通过」", "照样记不通过" not in so and "已排除的段" in so, True)
     _self_test_r3(tmp, check, run_json, said, verdict)
     _self_test_r4(tmp, check, run_json, said, verdict)
+    _self_test_r5(tmp, check, run_json, said, verdict)
 
 
 def _self_test_r3(tmp, check, run_json, said, verdict):
@@ -3001,11 +3006,11 @@ def _self_test_r4(tmp, check, run_json, said, verdict):
     check("孤块之间的缺口：不带 --exclude，丢弃全在孤块之间，已经定位：A1 通过，提示不说相关格按数据不全处理",
           verdict(r, "A1") == "PASS" and any("缺 6 个块序号、4 处" in w for w in r["warnings"]) and not any("相关格按数据不全处理" in w for w in r["warnings"]), True)  # fmt: skip
     check("孤块之间的缺口：孤块本身仍挡 F1", not r["f1"]["ok"] and any("不属于任何测试格" in m for m in r["f1"]["missing"]), True)
-    # 探针报告的丢弃比孤块之间的缺口多：多出来的部分定位不到，整个实例仍按数据不全
+    # 探针报告的丢弃比孤块之间的缺口多：多出来的部分当作尾部丢块，按摘要归给最后一格（别的格不连坐）
     plus = {n: t.replace("S,3000000000,85,3", "S,3000000000,85,5").replace("Z,3100000000,85,3", "Z,3100000000,85,5")
             for n, t in ps.files_of(*ps.multi_cells([("CB-01", "steady", 64, "off", 40, "ok"), ("CB-01", "steady", 1024, "high", 40, "ok")], pid=5163, pre="ooxxooxo")).items()}  # fmt: skip
     _, r, _ = run_json(tree("a1-incomplete-orphan-gaps-plus-unlocated", plus))
-    check("孤块之间的缺口：探针报告的丢弃多于孤块之间的缺口（多出的 2 个定位不到）：整个实例仍按数据不全",
+    check("孤块之间的缺口：探针报告的丢弃多于孤块之间的缺口（多出的 2 个当作尾部丢块）：最后一格数据不全，提示里说相关格按数据不全处理",
           verdict(r, "A1") == "INCOMPLETE" and any("相关格按数据不全处理" in w for w in r["warnings"]), True)  # fmt: skip
     # Session 层面：缺口按谁的格记
     logs, compares, broken = load_dir(os.path.join(tmp, "a1-pass-orphan-gaps-only"))
@@ -3056,6 +3061,72 @@ def _self_test_r4(tmp, check, run_json, said, verdict):
     _, r2, _ = run_json(tree("b-order-plain", base))
     check("B 行：行交错不改变分析结果（判据逐项相同，没有序号缺口）",
           [(i["id"], i["verdict"]) for i in r1["items"]] == [(i["id"], i["verdict"]) for i in r2["items"]] and verdict(r1, "A1") == "PASS", False)  # fmt: skip
+
+
+def _self_test_r5(tmp, check, run_json, said, verdict):
+    """第 5 轮整改：
+    1. 不带 --exclude 时，实例开头缺的块与尾部丢块（探针报告的丢弃数比缺口多出来的部分）和带 --exclude 时同一个口径：按摘要归给所属的格，
+       没有摘要可用时才各格都记一次。不再只在整个实例没有任何已定位缺口时才处理（别的格有一处缺口，就让这两部分不记给任何格）；
+    2. 缺口两头在同一段里的直接记给该段，同时计入实例的归属统计：丢弃全是被排除段内部的缺口时，提示不再说相关格按数据不全处理，个数也含它们。
+    夹具的判定已在夹具矩阵里查过，这里查逐格的缺口处数（格按 C 行时间排序）、说明文字。"""
+    ps = _synth()
+
+    def tree(name, files):
+        _write_tree(os.path.join(tmp, name), files)
+        return name
+
+    def both(pid, *sels):
+        return [x for sel in sels for x in ("--exclude", f"probe-I-{pid}-e1f2.csv:{sel}", "--exclude", f"probe-O-{pid}-e3f4.csv:{sel}")]
+
+    def cells_of(d, pid=None, *sels):
+        """→ ({"I": [各格的序号缺口处数], "O": [...]}, Session)：带 pid 与选择子时同时排除 In 与 Out 的那几个 C 行。"""
+        logs, compares, broken = load_dir(os.path.join(tmp, d))
+        params = [f"probe-{role}-{pid}-{tok}.csv:{sel}" for sel in sels for role, tok in (("I", "e1f2"), ("O", "e3f4"))]
+        s = Session(logs, compares, broken, resolve_excludes(logs, parse_excludes(params)) if params else ())
+        return {role: [g.gaps for g in sorted((g for g in s.segments if g.role == role), key=lambda g: g.case["t_ns"])] for role in "IO"}, s
+
+    # ---- 1. 不带 --exclude：开头缺的块与尾部丢块按摘要归属 ----
+    got, _ = cells_of("a1-incomplete-gap-and-taildrop-other-cell")
+    check("不带 --exclude：第 2 格中间缺 2 块，第 3 格尾部另丢 3 块：尾部丢块只记给第 3 格，不被第 2 格的缺口盖住；第 1 格不受影响（In 只有第 2 格有缺口）",
+          got == {"I": [0, 1, 1], "O": [0, 0, 1]}, True)  # fmt: skip
+    got, _ = cells_of("a1-incomplete-headdrop-with-gap-elsewhere")
+    check("不带 --exclude：第 1 格丢了第 0 块，第 2 格中间另有缺口：实例开头缺的块只记给第 1 格，不被第 2 格的缺口盖住；第 3 格不受影响",
+          got == {"I": [1, 1, 0], "O": [1, 0, 0]}, True)  # fmt: skip
+    got, _ = cells_of("a1-incomplete-gap-only-in-one-cell")
+    check("不带 --exclude：只有第 2 格中间连缺 3 块、探针报告的丢弃恰等于这处缺口：其余格不受影响，也没有多出来的尾部丢块", got == {"I": [0, 1, 0], "O": [0, 0, 0]}, True)
+    got, _ = cells_of("a1-incomplete-unlocated-drop")
+    check("不带 --exclude：整个实例没有任何已定位缺口、只有最后一格的尾部丢块：只记给最后一格，前面的格不连坐", got == {"I": [0, 1], "O": [0, 1]}, True)
+    got, _ = cells_of("a1-incomplete-taildrop-nosummary")
+    check("不带 --exclude：一条摘要都没有，尾部丢块无从归属：各格都记一次", got == {"I": [1, 1, 1], "O": [1, 1, 1]}, True)
+    _, r, _ = run_json("a1-incomplete-gap-and-taildrop-other-cell")
+    check("不带 --exclude：缺口加尾部丢块的实例，提示仍说相关格按数据不全处理（两个实例），不写归属统计（没有被排除的段）",
+          any("2 个实例的探针报告过丢弃记录，相关格按数据不全处理" in w for w in r["warnings"]) and not any("有被排除的段" in w for w in r["warnings"]), True)  # fmt: skip
+    got, _ = cells_of("a1-pass-orphan-gaps-only")
+    check("不带 --exclude：丢弃全在孤块之间（已定位）：开头与尾部都没有多出来的丢块，各格都没有缺口", got == {"I": [0, 0], "O": [0, 0]}, False)
+
+    # ---- 2. 缺口两头在同一段里：计入实例的归属统计 ----
+    d, pid = "a1-incomplete-gap-only-in-one-cell", 5182  # 第 2 格 In 端连缺 3 块，排除第 2 格（两端）
+    code, r, _ = run_json(d, *both(pid, 2))
+    check("--exclude：丢弃全是被排除段内部的缺口：A1 回到通过，提示不说相关格按数据不全处理，改说已全部归给被排除的段",
+          verdict(r, "A1") == "PASS" and len(r["excluded"]) == 2 and any("已全部归给被排除的段" in w for w in r["warnings"])
+          and not any("相关格按数据不全处理" in w for w in r["warnings"]), True)  # fmt: skip
+    check("--exclude：被排除段内部的缺口计入归属统计：3 个块序号（不是 1 处）归给被排除的段，0 个归给未排除的段，写明直接归给该段",
+          any("3 个归给被排除的段" in w and "0 个归给未排除的段" in w and "缺口两头在同一段里的直接归给该段" in w for w in r["warnings"]), True)  # fmt: skip
+    _, s = cells_of(d, pid, 2)
+    check("--exclude：Session 的归属统计 = (3, 0, 按摘要)", s.attribution == {1: (3, 0, True)}, True)
+    one = tree("a1-incomplete-gap-excluded-and-gap-kept", ps.files_of(*ps.multi_cells(
+        [("CB-01", "steady", 64, "off", 40, "ok"), ("CB-01", "steady", 256, "low", 40, "gap:15:3"), ("CB-01", "steady", 1024, "high", 40, "gap:20:2")], pid=5184)))  # fmt: skip
+    code, r, _ = run_json(one, *both(5184, 2))
+    check("--exclude：被排除的段内部缺 3 块、未排除的段内部缺 2 块：A1 数据不全，提示仍说相关格按数据不全处理，两边的个数分开报（3 个、2 个）",
+          verdict(r, "A1") == "INCOMPLETE" and "序号缺口" in said(r, "A1") and any("相关格按数据不全处理" in w for w in r["warnings"])
+          and any("3 个归给被排除的段" in w and "2 个归给未排除的段" in w for w in r["warnings"]), True)  # fmt: skip
+    _, s = cells_of(one, 5184, 2)
+    check("--exclude：Session 的归属统计 = (3, 2, 按摘要)", s.attribution == {1: (3, 2, True)}, True)
+    nosum = tree("a1-incomplete-gap-excluded-nosummary", ps.files_of(*ps.multi_cells(
+        [("CB-01", "steady", 64, "off", 40, "ok"), ("CB-01", "steady", 256, "low", 40, "gap:15:3"), ("CB-01", "steady", 1024, "high", 40, "ok")], pid=5185, summaries=False)))  # fmt: skip
+    code, r, _ = run_json(nosum, *both(5185, 2))
+    check("--exclude：一条摘要都没有，但丢弃全是被排除段内部的缺口（没有需要靠摘要归属的）：A1 通过，提示不说「没有摘要行可用」「无从归属」",
+          verdict(r, "A1") == "PASS" and any("3 个归给被排除的段" in w for w in r["warnings"]) and not any("无从归属" in w or "没有摘要行可用" in w for w in r["warnings"]), True)  # fmt: skip
 
 
 def mutation_check():
