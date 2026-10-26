@@ -39,6 +39,7 @@ class Log:
         self.seq = 0
         self.written = 0  # 实际写出的 B 行数
         self.lost = 0  # 占了 seq 却没写出的块数（探针计入 dropped）
+        self.events_lost = 0  # 丢掉的事件数：不占 seq，探针却同样计入 dropped
         self.closed = False
 
     @property
@@ -57,6 +58,11 @@ class Log:
 
     def summary(self, t, blocks=0, dropped=0, max_n=256, resync=0, trips=0):
         self._add(f"S,{t},{blocks},{dropped},{max_n},{resync},{trips}")
+
+    @property
+    def dropped(self):
+        """摘要与收尾行里的累计丢弃数：丢掉的块（占 seq）加丢掉的事件（不占 seq）。"""
+        return self.lost + self.events_lost
 
     def block(self, call_seq, mono_ns, drop=False, **kw):
         row = dict(
@@ -148,7 +154,7 @@ def multi_pair(cells, *, pid, tok=("e1f2", "e3f4"), fmt=("vst3", "vst3"), host_k
     return li, lo
 
 
-def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024, summaries=True, pre=""):
+def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024, summaries=True, pre="", edges=False):
     """像 multi_pair，但每格单独指定块数与记录方式，用来造「现场误记了一格」的日志。
     cells = [(case, variant, buf, guard, 块数, 方式)]，方式：
       ok          正常写出；
@@ -158,14 +164,19 @@ def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024,
       headdrop-in 同上，只有 In 端丢第 0 块；
       headdrop-drift 两端的第 0 块都没拿到绑定（缺口出现在两格交界处，归给这一格），且 In 端从第 20 块起 m=3；
       taildrop    正常写完之后，窗口末尾又有 3 块没写出（占 seq、计丢弃，但之后没有任何块可以让缺口露出来）；
+      evdrop:M    块都正常，但这一格里两端各丢了 M 个事件（计丢弃、不占 seq；摘要里的累计丢弃数含它们，文件里没有缺口）；
       drift       In 端从第 20 块起 m=3（稳态对齐不通过）；
+      drift-evdrop:M 同时有 drift 和 evdrop:M；
       bign        两端每块的 n 都是 2048，超过 prepare 声明的最大块长（A4 不通过）；
       hostns      Out 端每块的 hostNs 比 In 端大 7（A7 不通过）。
     每格的 S 行在这一格的块都写完之后才写，`blocks` 是此刻实际写出的累计块数，`dropped` 是累计丢弃数，与探针的计数一致；
-    Z 行同理。这样 `blocks + dropped` 就是此刻已经占用的 seq 个数。
+    Z 行同理。没有丢事件时 `blocks + dropped` 就是此刻已经占用的 seq 个数；丢掉的事件不占 seq，`dropped` 因此比占用的 seq 多出它们的个数。
     summaries=False 不写任何 S 行（摘要线程被宿主占住、一条都没写出来），只剩收尾的 Z 行报累计丢弃数。
-    pre：第一个 C 行之前就开始写的块（孤块），每个字符一块：o = 写出，x = 丢掉（占 seq、计丢弃）。"ooxxooxo" 是孤块之间有两处缺口，
-    "xxoo" 是实例开头先丢了两块、之后才有孤块。第一条摘要在这些块之后写，blocks + dropped 仍是已占用的 seq 个数。"""
+    pre：第一个 C 行之前就开始写的块（孤块），每个字符一块：o = 写出，x = 丢掉（占 seq、计丢弃），e = 丢掉一个事件（计丢弃、不占 seq）。
+    "ooxxooxo" 是孤块之间有两处缺口，"xxoo" 是实例开头先丢了两块、之后才有孤块。第一条摘要在这些块之后写。
+    edges：除了每格中间的摘要，每格（第二格起）的 C 行时刻也写一条摘要，第一条摘要也挪到第一个 C 行之前。默认的摘要稀疏（每格一条），一条摘要管的那段时间总是跨着两格，
+    多出来的丢弃（丢掉的事件、最后一个块之后的丢块）在分析器里两格都记；真实日志里摘要每秒一条、一格几十秒，丢弃通常落在一格的中间，
+    要夹具也表现成这样，就让一段摘要区间正好从 C 行时刻起算（edges=True），区间不跨格。"""
     li = Log("I", "vst3", "cubase", "win", pid=pid, tok=tok[0])
     lo = Log("O", "vst3", "cubase", "win", pid=pid, tok=tok[1])
     span = 1_000_000_000
@@ -173,22 +184,28 @@ def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024,
         lg.event(T_START - 500, "prepare", sr, prepare_max)
     g = 0
     for ch in pre:  # 孤块的时间戳早于第一个 C 行（T_START - 100）
+        if ch == "e":  # 丢掉的事件不是块：不占 seq，不进文件
+            for lg in (li, lo):
+                lg.events_lost += 1
+            continue
         for lg, cs, dt in ((li, 2 * g, 0), (lo, 2 * g + 1, 50)):
             lg.block(cs, T_START - 5_000 + g * 100 + dt, host_ns=HOST0 - 10_000 + g, drop=ch == "x")
         g += 1
     for lg in (li, lo):
         if summaries:
-            lg.summary(T_START, blocks=lg.written, dropped=lg.lost)
+            lg.summary(T_START - 200 if edges else T_START, blocks=lg.written, dropped=lg.dropped)  # edges：这一条在第一个 C 行之前
     for c, (case, variant, buf, guard, count, mode) in enumerate(cells):
         base = T_START + c * span
         for lg in (li, lo):
+            if edges and summaries and c:
+                lg.summary(base - 100, blocks=lg.written, dropped=lg.dropped)
             lg.case(base - 100, case, variant, buf, guard, sr)
         for k in range(count):
             host = HOST0 + c * span + k * PERIOD
             gap_k, gap_m = map(int, (mode[4:] + ":1").split(":")[:2]) if mode.startswith("gap:") else (-1, 0)  # gap:K 与 gap:K:M
             lost_in = mode == "unbound" or gap_k <= k < gap_k + gap_m or (k == 0 and mode in ("headdrop", "headdrop-in", "headdrop-drift"))
             lost_out = mode == "unbound" or (k == 0 and mode in ("headdrop", "headdrop-drift"))
-            extra = dict(m=3, off=483) if mode in ("drift", "headdrop-drift") and k >= 20 else {}
+            extra = dict(m=3, off=483) if (mode in ("drift", "headdrop-drift") or mode.startswith("drift-evdrop:")) and k >= 20 else {}
             both = dict(n=2048) if mode == "bign" else {}
             li.block(2 * g, base + k * PERIOD, host_ns=host, rs=1 if g == 0 else 0, drop=lost_in, **extra, **both)
             lo.block(2 * g + 1, base + k * PERIOD + 1000, host_ns=host + 7 if mode == "hostns" else host, drop=lost_out, **both)
@@ -197,14 +214,17 @@ def multi_cells(cells, *, pid, tok=("e1f2", "e3f4"), sr=48000, prepare_max=1024,
             for lg in (li, lo):
                 for _ in range(3):
                     lg.block(0, 0, drop=True)
+        if mode.startswith(("evdrop:", "drift-evdrop:")):
+            for lg in (li, lo):
+                lg.events_lost += int(mode.split(":")[1])
         for lg in (li, lo):
             if summaries:
-                lg.summary(base + span // 2, blocks=lg.written, dropped=lg.lost)
+                lg.summary(base + span // 2, blocks=lg.written, dropped=lg.dropped)
     end = T_START + len(cells) * span
     for lg in (li, lo):
         if summaries:
-            lg.summary(end, blocks=lg.written, dropped=lg.lost)
-        lg.close(end + 100_000_000, blocks=lg.written, dropped=lg.lost)
+            lg.summary(end, blocks=lg.written, dropped=lg.dropped)
+        lg.close(end + 100_000_000, blocks=lg.written, dropped=lg.dropped)
     return li, lo
 
 
@@ -1047,7 +1067,7 @@ def extra_cells():
             {"A1": "INCOMPLETE"},
         ),
         "a1-incomplete-orphan-gaps-and-taildrop": (  # 同上，最后一格自己另有 3 块尾部丢块：只有这 3 块归给它
-            files_of(*multi_cells([good, stray, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5161, pre="ooxxooxo")),
+            files_of(*multi_cells([good, stray, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5161, pre="ooxxooxo", edges=True)),
             {"A1": "INCOMPLETE"},
         ),
         "a1-incomplete-orphan-head-before-excluded": (  # 实例开头先丢了两块、之后才有孤块：开头缺的块也早于第一个 C 行，不归第一格
@@ -1059,7 +1079,7 @@ def extra_cells():
             {"A1": "PASS"},
         ),
         "a1-incomplete-gap-and-taildrop-other-cell": (  # 不带 --exclude：第 2 格中间缺 2 块，第 3 格尾部另丢 3 块：尾部丢块只归第 3 格，不被第 2 格的缺口盖住；第 1 格不受影响
-            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "gap:15:2"), ("CB-01", "steady", 1024, "high", 40, "taildrop")], pid=5180)),
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "gap:15:2"), ("CB-01", "steady", 1024, "high", 40, "taildrop")], pid=5180, edges=True)),
             {"A1": "INCOMPLETE"},
         ),
         "a1-incomplete-headdrop-with-gap-elsewhere": (  # 第 1 格丢了第 0 块，第 2 格中间缺 1 块：实例开头缺的块只归第 1 格，不被第 2 格的缺口盖住；第 3 格不受影响
@@ -1072,6 +1092,35 @@ def extra_cells():
         ),
         "a1-incomplete-taildrop-nosummary": (  # 一条摘要都没有：尾部丢块无从归属，各格都记一次
             files_of(*multi_cells([good, good3, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5183, summaries=False)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-evdrop-mid-cell": (  # 中间一格丢了 3 个事件、文件里没有任何缺口：摘要的 dropped 在中间那段区间里增长，只有中间一格数据不全，最后一格不受牵连
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "evdrop:3"), good3], pid=5190, edges=True)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-evdrop-last-cell": (  # 对照：丢事件全在最后一格的区间里，只有最后一格数据不全
+            files_of(*multi_cells([good, good2, ("CB-01", "steady", 1024, "high", 40, "evdrop:2")], pid=5191, edges=True)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-evdrop-straddle": (  # 同 mid-cell，但摘要稀疏（每格一条）：中间那段区间跨着第 1、2 格的交界，两格都记；最后一格仍不受牵连
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "evdrop:3"), good3], pid=5192)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-evdrop-with-gap": (  # 第 2 格中间缺 3 块（已定位），第 3 格另丢 2 个事件：缺口的 3 个要从增量里减掉，多出来的 2 个只归第 3 格
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "gap:15:3"), ("CB-01", "steady", 1024, "high", 40, "evdrop:2")], pid=5193, edges=True)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-evdrop-after-gap-at-end": (  # 第 2 格最后 3 块丢了（摘要读到时缺口还没露出来，要等第 3 格的第一块），第 4 格另丢 4 个事件：暂时偏高的 3 个不能记给第 3 格
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "gap:37:3"), ("CB-01", "steady", 1024, "high", 40, "ok"),
+                                   ("CB-01", "steady", 512, "normal", 40, "evdrop:4")], pid=5189, edges=True)),  # fmt: skip
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-misrecorded-evdrop-drift": (  # 误记的一格丢了 2 个事件又有 drift：丢弃记到它名下，影子判定只能算数据不全
+            files_of(*multi_cells([good, ("CB-01", "steady", "-", "na", 40, "drift-evdrop:2"), good3], pid=5188, edges=True)),
+            {"A1": "INCOMPLETE"},
+        ),
+        "a1-incomplete-evdrop-after-unbound": (  # 第 2 格整格没拿到绑定（40 块占 seq、计丢弃，缺口要到第 3 格的第一块才露出来），第 3 格另丢 2 个事件：这 2 个落在哪一段不确定，第 2、3 格都记
+            files_of(*multi_cells([good, stray_unbound, ("CB-01", "steady", 1024, "high", 40, "evdrop:2")], pid=5194, edges=True)),
             {"A1": "INCOMPLETE"},
         ),
         "a8-fail-crashed-stall": (scen_a8_crashed(5100, "stall"), {"A8": "FAIL"}),
@@ -1129,13 +1178,13 @@ def extra_cells():
             files_of(*multi_cells([good, ("CB-01", "steady", "-", "na", 5, "taildrop"), good3], pid=5025)),
             {"A1": "INCOMPLETE"},
         ),
-        "a1-incomplete-misrecorded-trailing": (files_of(*multi_cells([good, good2, stray_unbound], pid=5022)), {"A1": "INCOMPLETE"}),
+        "a1-incomplete-misrecorded-trailing": (files_of(*multi_cells([good, good2, stray_unbound], pid=5022, edges=True)), {"A1": "INCOMPLETE"}),
         "a1-incomplete-gap-beside-excluded": (
             files_of(*multi_cells([good, stray, ("CB-01", "steady", 1024, "high", 40, "gap:15")], pid=5023)),
             {"A1": "INCOMPLETE"},
         ),
         "a1-incomplete-unlocated-drop": (
-            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5024)),
+            files_of(*multi_cells([good, ("CB-01", "steady", 256, "low", 40, "taildrop")], pid=5024, edges=True)),
             {"A1": "INCOMPLETE"},
         ),
         "a1-fail-misrecorded-drift": (  # 误记的一格有 40 块，In 端从第 20 块起 m=3：排除它也拿不掉不通过

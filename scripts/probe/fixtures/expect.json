@@ -38,6 +38,24 @@
   "a1-incomplete-dup": {
     "A1": "INCOMPLETE"
   },
+  "a1-incomplete-evdrop-after-gap-at-end": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-evdrop-after-unbound": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-evdrop-last-cell": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-evdrop-mid-cell": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-evdrop-straddle": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-evdrop-with-gap": {
+    "A1": "INCOMPLETE"
+  },
   "a1-incomplete-gap-and-taildrop-other-cell": {
     "A1": "INCOMPLETE"
   },
@@ -57,6 +75,9 @@
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-in-only": {
+    "A1": "INCOMPLETE"
+  },
+  "a1-incomplete-misrecorded-evdrop-drift": {
     "A1": "INCOMPLETE"
   },
   "a1-incomplete-misrecorded-headdrop-drift": {
