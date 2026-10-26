@@ -193,6 +193,21 @@ cleanup_temp() { # $1 本进程建的临时目录
     return 0
 }
 
+# 「走完了」标记（约定写法，scripts/ci/mac/selftest.sh 与本机 gate 会扫）。macOS 自带的 bash 3.2 在 set -u 下遇到变量展开出错，
+# 会直接结束整个脚本；装了 EXIT trap 时进入 trap 的 $? 常常是 0，自测就会在半路死掉之后以 0 退出，调用它的 CI 步骤是绿的。
+# 所以自测只有走到末尾才把标记置 1，trap 里退出码为 0 而标记没置位，就改成非 0。
+# 这个 trap 只由 self_test 装（正常安装 / 卸载不装），所以标记只在自测那条路上起作用；
+# 自测里的 trap 是整个脚本唯一的 EXIT trap，没有别处会覆盖它。
+RINNE_RAN_TO_END=0
+on_exit() {
+    local rc=$?
+    cleanup_temp "$TEMP_DIR"
+    if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
+        echo "::error::$PROG: 脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理" >&2
+        exit 1
+    fi
+}
+
 # ── 自测 ────────────────────────────────────────────────────────────────────
 # 全部在临时目录里做：HOME 指到临时目录，绝不对真实的资源库做删除测试。
 self_test() {
@@ -206,7 +221,7 @@ self_test() {
     }
     TEMP_DIR="$work"
     SELF_TEST_MODE=1
-    trap 'cleanup_temp "$TEMP_DIR"' EXIT
+    trap on_exit EXIT
 
     saved_home="$HOME"
     home_root="$work/home"
@@ -492,7 +507,7 @@ main() {
         case "$1" in
             --system) scope=system; shift ;;
             --dry-run) dry=yes; shift ;;
-            --self-test) self_test; return $? ;;
+            --self-test) self_test; self_rc=$?; RINNE_RAN_TO_END=1; return "$self_rc" ;;
             -h | --help)
                 usage
                 return 0
@@ -533,7 +548,12 @@ main() {
 }
 
 if [ "${1:-}" = "--self-test" ]; then
-    self_test
-    exit $?
+    self_test_rc=0
+    self_test || self_test_rc=$?
+    RINNE_RAN_TO_END=1
+    exit "$self_test_rc"
 fi
-main "$@"
+main_rc=0
+main "$@" || main_rc=$?
+RINNE_RAN_TO_END=1
+exit "$main_rc"

@@ -431,8 +431,8 @@ cleanup_temp() {
     return 0
 }
 
-# 脚本是不是走完了：只有 main（或 --self-test）正常返回之后，文件末尾才把它置 1。
-PKG_FINISHED=0
+# 「走完了」标记（约定写法，scripts/ci/mac/selftest.sh 与本机 gate 会扫）：只有 main（或 --self-test）正常返回之后，文件末尾才把它置 1。
+RINNE_RAN_TO_END=0
 
 # 退出时的收尾：清掉本进程建的临时目录，并拦住「没走完却以 0 退出」。
 # macOS 自带的 bash 3.2 在 set -u 下遇到未定义的变量（比如变量名后紧跟全角标点被当成变量名的一部分），会直接结束整个脚本，
@@ -441,7 +441,7 @@ PKG_FINISHED=0
 on_exit() {
     local rc=$?
     cleanup_temp "$TEMP_DIR"
-    if [ "$rc" -eq 0 ] && [ "$PKG_FINISHED" -ne 1 ]; then
+    if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
         echo "$PROG: 脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理" >&2
         exit 1
     fi
@@ -2429,9 +2429,9 @@ case "${1:-}" in
         shift
         self_test_rc=0
         self_test "$@" || self_test_rc=$?
-        PKG_FINISHED=1
+        RINNE_RAN_TO_END=1
         exit "$self_test_rc"
         ;;
 esac
 main "$@"
-PKG_FINISHED=1
+RINNE_RAN_TO_END=1

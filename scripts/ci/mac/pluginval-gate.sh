@@ -91,8 +91,20 @@ fi
 
 # 每次都在新建的目录里干活，不去清旧目录；退出时把这次新建的目录删掉，别在开发机上攒下来
 work_root="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rinne.XXXXXX")"
-# rinne-delete-ok: 本脚本 mktemp -d 新建的目录，退出时只删它自己
-cleanup() { local rc=$?; rm -rf "$work_root" || true; exit $rc; }
+# 「走完了」标记（约定写法，selftest.sh 与本机 gate 会扫）：macOS 自带的 bash 3.2 在变量展开出错时会静默结束脚本，
+# 装了 EXIT trap 时进入 trap 的 $? 常常是 0，这道闸门就会在半路死掉之后静默放行。所以只有走到末尾才把标记置 1，
+# trap 里退出码为 0 而标记没置位，就改成非 0（上面和下面的 exit 1 本来就是非 0，不受影响）。
+RINNE_RAN_TO_END=0
+cleanup() {
+  local rc=$?
+  # rinne-delete-ok: 本脚本 mktemp -d 新建的目录，退出时只删它自己
+  rm -rf "$work_root" || true
+  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
+    echo "::error::pluginval-gate.sh：脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理，闸门不能放行"
+    exit 1
+  fi
+  exit $rc
+}
 trap cleanup EXIT
 work="$work_root/pluginval"
 mkdir -p "$work"
@@ -147,4 +159,5 @@ while IFS=$'\t' read -r fmt path <&3; do
   echo "| \`$name\` | $fmt | $rc | $ok | $verdict |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
   if [ "$verdict" = "FAIL" ]; then echo "::error::pluginval ${name}（${fmt}）未通过：退出码 ${rc}，SUCCESS 行 $ok"; fi
 done 3< "$targets"
+RINNE_RAN_TO_END=1
 exit "$fail"

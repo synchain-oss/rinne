@@ -3,7 +3,10 @@
 #
 # mac CI 脚本的判据自测：不需要 mac，不需要构建产物，也不联网。build-mac 在最后跑它（前面的步骤红了也照跑），本机也能跑。
 # sign-and-verify.sh 与 stress.sh 的反例要真 mac 和构建产物，在各自的步骤里实跑，不在这里。
-# 最后一段是 bash 3.2 兼容扫描（对 git 跟踪的所有 *.sh）：判据自己的坏样例与正例先过，再扫真实的仓库。
+# 后两段是对 git 跟踪的所有 *.sh 的静态扫描，各自的坏样例与正例先过，再扫真实的仓库：
+#   - bash 3.2 兼容扫描：「$变量」后面紧跟非 ASCII 字节（以及 ASCII 控制字节）。
+#   - EXIT trap 的「走完了」标记检查：凡是装了 EXIT trap 的脚本，都要带约定写法，脚本没走完就退出时不许以 0 退出。
+#     另有一个动态用例：用同样写法的最小脚本注入一个未定义变量，用 /bin/bash 跑，必须非 0。
 #   bash scripts/ci/mac/selftest.sh
 
 set -euo pipefail
@@ -21,8 +24,10 @@ node "$here/check-bundles.mjs" --self-test
 # macOS 自带的 /bin/bash 是 3.2。变量名后紧跟非 ASCII 字符（全角标点、中文）时，3.2 在 UTF-8 下把多字节的首字节
 # 当成变量名的一部分：set -u 下直接 unbound variable，随后整个脚本静默结束，调用它的 CI 步骤退出码可能是 0。
 # Linux 与 Windows 的 bash 上看不出来，所以只能靠扫描。一律写成 ${name}。
-# 对 git 跟踪的所有 *.sh 逐个扫，命中即红；本机 Full 档 gate（scripts/gates.d/60-package.ps1）扫同一个模式。
+# 对 git 跟踪的所有 *.sh 逐个扫，命中即红；本机 Full 档 gate（scripts/gates.d/60-package.ps1）扫同一个字节集合。
 # 不是 mac 上跑的脚本（只在 Linux 上跑，bash 4 以上）登记在这里，整条路径逐字匹配，不是前缀、不是通配。
+# 后面的 EXIT trap 标记检查共用这张登记表：tests/sanitizer-canary/run.sh 的「变量后紧跟全角标点」与「没有走完的标记」
+# 两处都改掉之后，才可以把它从这里删掉。
 bash32_exempt() { # $1 仓内相对路径；0 = 登记过的 Linux 专用脚本
   case "$1" in
     tests/sanitizer-canary/run.sh) return 0 ;;
@@ -31,9 +36,14 @@ bash32_exempt() { # $1 仓内相对路径；0 = 登记过的 Linux 专用脚本
 }
 
 # 一个文件里的命中，逐行打印成 <行号>:<内容>；有命中返回 1。
-# 用 LC_ALL=C 逐字节看。BSD grep（mac 自带）没有 -P，所以用 POSIX 字符类：不是可打印 ASCII、也不是空白的，都算非 ASCII 字节。
+# 用 LC_ALL=C 逐字节看。BSD grep（mac 自带）没有 -P，所以用 POSIX 字符类。
+# 判的是哪些字节：C locale 下 [:print:] 是 0x20–0x7E，[:space:] 是 0x09–0x0D 与 0x20，所以 [^[:print:][:space:]] 命中
+# 「不在 0x09–0x0D 与 0x20–0x7E 里」的字节：0x00–0x08、0x0E–0x1F、0x7F 这些 ASCII 控制字节，加上 0x80–0xFF 的全部非 ASCII 字节。
+# scripts/gates.d/60-package.ps1 按 Latin-1 逐字节读，用 [^\x09-\x0D\x20-\x7E]，两边的字节集合逐字节相同（下面的逐字节用例钉着）。
+# ASCII 控制字节其实不会被 bash 3.2 并进变量名，这里从严一并判红：*.sh 里本来就不该有裸的控制字节。
+# -a：含 NUL 的文件也按文本逐行匹配。不加的话 GNU grep 把二进制文件里的 NUL 当成行尾，变量名后紧跟 NUL 的写法就漏了。
 bash32_scan_file() { # $1 文件
-  if LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^[:print:][:space:]]' -- "$1"; then
+  if LC_ALL=C grep -anE '\$[A-Za-z_][A-Za-z0-9_]*[^[:print:][:space:]]' -- "$1"; then
     return 1
   fi
   return 0
@@ -96,6 +106,18 @@ bash32_selftest() {
   expect "坏：命中在第 3 行，报的行号是 3" "3" "$(bash32_scan_file "$dir/bad5.sh" | sed -n '1s/:.*//p')"
   sample bad6.sh 'x=$name%s\n' "$colon"
   expect "坏：不在引号里的 \$name 后紧跟非 ASCII" hit "$(verdict bad6.sh)"
+  # 坏样例：变量后紧跟 ASCII 控制字节（0x00–0x08、0x0E–0x1F、0x7F）。这些字节 mac 侧的字符类命中、PowerShell 侧也要命中。
+  # 样例用 printf 的八进制转义造，本文件自己不含裸的控制字节。
+  sample bad7.sh 'echo "$name\001x"\n'
+  expect "坏：变量后紧跟 ASCII 控制字节 0x01" hit "$(verdict bad7.sh)"
+  sample bad8.sh 'echo "$name\033[0m"\n'
+  expect "坏：变量后紧跟 ESC（0x1B）" hit "$(verdict bad8.sh)"
+  sample bad9.sh 'echo "$name\177"\n'
+  expect "坏：变量后紧跟 DEL（0x7F）" hit "$(verdict bad9.sh)"
+  sample bad10.sh 'echo "$name\010"\n'
+  expect "坏：变量后紧跟退格（0x08，空白类之前的最后一个控制字节）" hit "$(verdict bad10.sh)"
+  sample bad11.sh 'echo "$name\016"\n'
+  expect "坏：变量后紧跟 0x0E（空白类之后的第一个控制字节）" hit "$(verdict bad11.sh)"
   # 正例：这些写法在 3.2 上没问题，不许误报
   sample ok1.sh 'echo "${name}%sx"\n' "$colon"
   expect "好：\${name} 后紧跟非 ASCII" clean "$(verdict ok1.sh)"
@@ -113,6 +135,24 @@ bash32_selftest() {
   expect "好：注释里写成 \${name}" clean "$(verdict ok7.sh)"
   sample ok8.sh 'echo %s\n' "$colon"
   expect "好：没有变量的纯中文行" clean "$(verdict ok8.sh)"
+  sample ok9.sh 'echo "$name"\t$x\v$y\f$z\r\n'
+  expect "好：变量在引号里、后面是 TAB、VT、FF、CR（0x09–0x0D 属于空白类）" clean "$(verdict ok9.sh)"
+  sample ok10.sh 'x=$name\011y=$z\n'
+  expect "好：变量后紧跟 TAB（0x09）" clean "$(verdict ok10.sh)"
+  sample ok11.sh 'x=$name~\n'
+  expect "好：变量后紧跟 ~（0x7E，可打印 ASCII 的最后一个）" clean "$(verdict ok11.sh)"
+  # 逐字节：「变量名 + 一个字节」的文件，0x01–0xFF（0x0A 是换行，行就断了，不在内）里恰好「不在 0x09–0x0D 与 0x20–0x7E」的字节命中。
+  # 0x00 不在这里扫：BSD grep 对含 NUL 的文件按二进制文件处理；PowerShell 侧的同一组逐字节用例包含 0x00。
+  local b fmtb want sweep_wrong=""
+  for ((b = 1; b <= 255; b++)); do
+    [ "$b" -ne 10 ] || continue
+    fmtb=$(printf 'echo "$name\\%03ox"\\n' "$b")
+    # shellcheck disable=SC2059
+    printf "$fmtb" > "$dir/sweep.sh"
+    if { [ "$b" -ge 9 ] && [ "$b" -le 13 ]; } || { [ "$b" -ge 32 ] && [ "$b" -le 126 ]; }; then want=clean; else want=hit; fi
+    if [ "$(verdict sweep.sh)" != "$want" ]; then sweep_wrong="$sweep_wrong $b"; fi
+  done
+  expect "逐字节：0x01–0xFF 里恰好不在 0x09–0x0D、0x20–0x7E 的字节命中（不符的字节：${sweep_wrong:-无}）" "" "${sweep_wrong# }"
   # 登记表：整条路径逐字匹配
   if bash32_exempt tests/sanitizer-canary/run.sh; then expect "登记过的 Linux 专用脚本被放行" clean clean; else expect "登记过的 Linux 专用脚本被放行" clean hit; fi
   if bash32_exempt scripts/tests/sanitizer-canary/run.sh; then expect "登记表不是后缀匹配" clean hit; else expect "登记表不是后缀匹配" clean clean; fi
@@ -155,6 +195,245 @@ bash32_selftest() {
   echo "bash 3.2 兼容扫描的自测通过"
 }
 
+
+# ── EXIT trap 的「走完了」标记检查 ───────────────────────────────────────────────
+# macOS 自带的 bash 3.2 在 set -u 下遇到变量展开出错会直接结束整个脚本；脚本装了 EXIT trap 时，进入 trap 的 $? 常常是 0
+# （出事前最后一条命令的状态），于是脚本半路死了却以 0 退出，调用它的 CI 步骤是绿的（pluginval 闸门因此会静默放行）。
+# 对策是「走完了」标记：主流程正常结束处（以及每个合法的提前 exit 0 之前）置位；EXIT trap 里退出码为 0 而标记没置位，
+# 就改成非 0 并打印 ::error::。约定写法固定，git 跟踪的 *.sh 里凡是装了 EXIT trap（trap … EXIT，或末尾写 0）的，都要同时带下面五样，
+# 按行扫，注释行不算：
+#   RINNE_RAN_TO_END=0                                      装 trap 之前初始化
+#   RINNE_RAN_TO_END=1                                      主流程正常结束处置位
+#   rc=$?                                                   trap 函数一进来先取退出码
+#   [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]         退出码为 0、标记却没置位
+#   脚本没有走完就退出了                                      报错文字
+# 本机 Full 档 gate（scripts/gates.d/60-package.ps1）扫同一套写法；登记表（bash32_exempt）两道扫描共用。
+# RETURN、INT、TERM 的 trap 不是 EXIT trap，不在此列。字符串里写出「trap … EXIT」也会被当成装了 trap：宁可多报。
+exit_trap_re='(^|[^A-Za-z0-9_])trap[[:space:]].*[[:space:]](EXIT|0)([[:space:];})]|$)'
+exit_guard_with_trap=0
+
+# 注释行之外有没有装 EXIT trap
+exit_guard_has_trap() { # $1 文件
+  local code
+  code=$(LC_ALL=C grep -v '^[[:space:]]*#' -- "$1" || true)
+  LC_ALL=C grep -Eq "$exit_trap_re" <<< "$code"
+}
+
+# 一个文件的检查：没装 EXIT trap 或五样都齐返回 0；缺了就逐行打印缺什么，返回 1。
+exit_guard_scan_file() { # $1 文件
+  local code miss=0
+  if ! exit_guard_has_trap "$1"; then return 0; fi
+  code=$(LC_ALL=C grep -v '^[[:space:]]*#' -- "$1" || true)
+  LC_ALL=C grep -Eq '(^|[[:space:];{(])RINNE_RAN_TO_END=0([[:space:];})]|$)' <<< "$code" || { echo "缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）"; miss=1; }
+  LC_ALL=C grep -Eq '(^|[[:space:];{(])RINNE_RAN_TO_END=1([[:space:];})]|$)' <<< "$code" || { echo "缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）"; miss=1; }
+  LC_ALL=C grep -Fq 'rc=$?' <<< "$code" || { echo "缺 rc=\$?（trap 函数一进来先取退出码）"; miss=1; }
+  LC_ALL=C grep -Fq '[ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]' <<< "$code" || { echo "缺 [ \"\$rc\" -eq 0 ] && [ \"\$RINNE_RAN_TO_END\" != 1 ]（退出码为 0、标记却没置位）"; miss=1; }
+  LC_ALL=C grep -Fq '脚本没有走完就退出了' <<< "$code" || { echo "缺报错文字「脚本没有走完就退出了」"; miss=1; }
+  return "$miss"
+}
+
+# 仓库里 git 跟踪的 *.sh 全扫（跳过登记过的）；有问题的打印成 <路径>: <缺什么>，有问题返回 1。装了 EXIT trap 的个数记在 exit_guard_with_trap。
+exit_guard_scan_repo() { # $1 仓根
+  local root="$1" f out bad=0
+  exit_guard_with_trap=0
+  while IFS= read -r -d '' f; do
+    if bash32_exempt "$f"; then continue; fi
+    if exit_guard_has_trap "$root/$f"; then exit_guard_with_trap=$((exit_guard_with_trap + 1)); fi
+    if ! out=$(exit_guard_scan_file "$root/$f"); then
+      printf '%s\n' "$out" | sed "s|^|${f}: |"
+      bad=1
+    fi
+  done < <(git -C "$root" ls-files -z -- '*.sh')
+  return "$bad"
+}
+
+# 整仓检查（真正挂在 CI 上的那一步）：有问题就打印位置和一条 ::error::，返回 1。
+exit_guard_check_repo() { # $1 仓根
+  if ! exit_guard_scan_repo "$1"; then
+    echo "::error::上面这些 *.sh 装了 EXIT trap，却没有带「走完了」标记的约定写法（写法见 scripts/ci/mac/selftest.sh 里这一节的注释）：macOS 自带的 bash 3.2 下变量展开出错会静默结束脚本，退出码可能是 0"
+    return 1
+  fi
+  echo "走完了标记检查：git 跟踪的 *.sh 里有 ${exit_guard_with_trap} 个装了 EXIT trap（登记过的除外），全部带约定写法"
+}
+
+exit_guard_selftest() {
+  local dir bad=0 eg_rc=0 eg_out=""
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
+  # rinne-delete-ok: 自测里 mktemp -d 新建的目录
+  trap 'rm -rf "$dir"' RETURN
+  # 样例里的 trap 一词用变量 $T 拼出来，不直接写在本文件的行里：本文件自己也是被扫的 *.sh，
+  # 免得它被当成装了 EXIT trap 的脚本。其余四样的写法放在下面的单引号里，本文件没有 trap 行，不受影响。
+  local T=trap
+  local init='RINNE_RAN_TO_END=0' fin='RINNE_RAN_TO_END=1'
+  local rcl='  local rc=$?'
+  local grd='  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then'
+  local msg='    echo "::error::脚本没有走完就退出了"; exit 1'
+  local full_lines=('#!/bin/bash' 'set -euo pipefail' "$init" 'on_exit() {' "$rcl" "$grd" "$msg" '  fi' '}' "$T on_exit EXIT" 'work' "$fin")
+  local l
+  eg_expect() { # $1 说明 $2 期望 $3 实际
+    if [ "$2" != "$3" ]; then echo "FAIL  ${1}（期望 ${2}，实际 ${3}）"; bad=1; else echo "PASS  $1"; fi
+  }
+  eg_write() { # $1 文件名 其余：一行一个参数
+    local f=$1
+    shift
+    printf '%s\n' "$@" > "$dir/$f"
+  }
+  eg_full_without() { # $1 文件名 $2 要去掉的那一行
+    local f=$1 skip=$2 line
+    : > "$dir/$f"
+    for line in "${full_lines[@]}"; do
+      if [ "$line" != "$skip" ]; then printf '%s\n' "$line" >> "$dir/$f"; fi
+    done
+  }
+  eg_verdict() { # $1 文件名 → hit（缺东西）| clean
+    if exit_guard_scan_file "$dir/$1" > /dev/null; then echo clean; else echo hit; fi
+  }
+  eg_miss() { # $1 说明 $2 文件名 $3 输出里应当点名的片段：判红，并且点名缺的是哪一样
+    local out rc=0
+    out=$(exit_guard_scan_file "$dir/$2") || rc=$?
+    if [ "$rc" != 0 ] && grep -Fq -- "$3" <<< "$out"; then echo "PASS  $1"; else echo "FAIL  ${1}（退出码 ${rc}，输出 '${out}'）"; bad=1; fi
+  }
+
+  # 正例：五样齐全
+  eg_write good1.sh "${full_lines[@]}"
+  eg_expect "好：五样齐全" clean "$(eg_verdict good1.sh)"
+  # 坏样例：装了 EXIT trap，少其中一样（少一样就红，并且点名缺的那一样）
+  eg_full_without bad1.sh "$init"
+  eg_miss "坏：没有初始化 RINNE_RAN_TO_END=0" bad1.sh "缺 RINNE_RAN_TO_END=0"
+  eg_full_without bad2.sh "$fin"
+  eg_miss "坏：从不置位 RINNE_RAN_TO_END=1" bad2.sh "缺 RINNE_RAN_TO_END=1"
+  eg_full_without bad3.sh "$rcl"
+  eg_miss "坏：trap 函数里没有先取 rc=\$?" bad3.sh '缺 rc=$?'
+  eg_full_without bad4.sh "$grd"
+  eg_miss "坏：trap 里没有「退出码为 0、标记没置位」的判据" bad4.sh '!= 1 ]（退出码为 0'
+  eg_full_without bad5.sh "$msg"
+  eg_miss "坏：没有报错文字" bad5.sh "缺报错文字"
+  # 坏样例：只写在注释里不算
+  : > "$dir/bad6.sh"
+  for l in "${full_lines[@]}"; do
+    if [ "$l" = "$T on_exit EXIT" ]; then printf '%s\n' "$l" >> "$dir/bad6.sh"; else printf '%s\n' "# $l" >> "$dir/bad6.sh"; fi
+  done
+  eg_expect "坏：标记只写在注释里不算" hit "$(eg_verdict bad6.sh)"
+  # 坏样例：各种装 EXIT trap 的写法都认得出来
+  eg_write bad7.sh '#!/bin/bash' "if true; then $T 'rm -f x' EXIT; fi"
+  eg_expect "坏：if 的一行分支里装 EXIT trap" hit "$(eg_verdict bad7.sh)"
+  eg_write bad8.sh '#!/bin/bash' "$T 'rm -f x' 0"
+  eg_expect "坏：trap 末尾写 0（等同 EXIT）" hit "$(eg_verdict bad8.sh)"
+  eg_write bad9.sh '#!/bin/bash' 'f() {' "    $T 'rm -f x' EXIT" '}'
+  eg_expect "坏：trap 装在函数里（缩进）" hit "$(eg_verdict bad9.sh)"
+  eg_write bad10.sh '#!/bin/bash' "$T 'rm -f x' INT EXIT"
+  eg_expect "坏：信号列表里带 EXIT" hit "$(eg_verdict bad10.sh)"
+  # 坏样例：写法只是长得像
+  eg_write bad11.sh '#!/bin/bash' 'PKG_RINNE_RAN_TO_END=0' "$rcl" "$grd" "$msg" "$fin" "$T cleanup EXIT"
+  eg_miss "坏：变量名带前缀的同名写法不算初始化" bad11.sh "缺 RINNE_RAN_TO_END=0"
+  eg_write bad12.sh '#!/bin/bash' "$init" 'RINNE_RAN_TO_END=10' "$rcl" "$grd" "$msg" "$T cleanup EXIT"
+  eg_miss "坏：RINNE_RAN_TO_END=10 不算置位 1" bad12.sh "缺 RINNE_RAN_TO_END=1"
+  # 正例：没装 EXIT trap 的不管；缩进、写在 case 分支里的齐全版本放行
+  eg_write ok1.sh '#!/bin/bash' "$T 'echo x' RETURN"
+  eg_expect "好：只有 RETURN trap" clean "$(eg_verdict ok1.sh)"
+  eg_write ok2.sh '#!/bin/bash' "$T 'exit 130' INT" "$T 'exit 143' TERM"
+  eg_expect "好：只有 INT、TERM trap" clean "$(eg_verdict ok2.sh)"
+  eg_write ok3.sh '#!/bin/bash' "# $T 'rm -f x' EXIT"
+  eg_expect "好：注释里提到 trap … EXIT" clean "$(eg_verdict ok3.sh)"
+  eg_write ok4.sh '#!/bin/bash' "$T 'echo 0' INT"
+  eg_expect "好：引号里的 0 不当成 EXIT" clean "$(eg_verdict ok4.sh)"
+  : > "$dir/ok5.sh"
+  eg_expect "好：空文件" clean "$(eg_verdict ok5.sh)"
+  : > "$dir/ok6.sh"
+  for l in "${full_lines[@]}"; do
+    if [ "$l" = "$fin" ]; then printf '%s\n' '    --self-test) RINNE_RAN_TO_END=1; exit 0 ;;' >> "$dir/ok6.sh"; else printf '    %s\n' "$l" >> "$dir/ok6.sh"; fi
+  done
+  eg_expect "好：整体缩进、置位写在 case 分支里（RINNE_RAN_TO_END=1; exit 0）" clean "$(eg_verdict ok6.sh)"
+
+  # 整仓（真走 git ls-files）：临时仓里放好文件 → 绿；再放坏文件 → 红并点名；登记路径里的坏写法放行；未跟踪的与非 .sh 不扫
+  local repo="$dir/repo"
+  mkdir -p "$repo/scripts" "$repo/tests/sanitizer-canary" "$repo/other"
+  git -C "$repo" init -q
+  git -C "$repo" config core.autocrlf false
+  printf '%s\n' "${full_lines[@]}" > "$repo/scripts/good.sh"
+  git -C "$repo" add scripts/good.sh
+  if exit_guard_scan_repo "$repo" > /dev/null; then eg_expect "整仓扫描：只有好文件时通过" clean clean; else eg_expect "整仓扫描：只有好文件时通过" clean hit; fi
+  eg_expect "整仓扫描：数得出装了 EXIT trap 的脚本个数" 1 "$exit_guard_with_trap"
+  printf '%s\n' '#!/bin/bash' "$T 'rm -f x' EXIT" > "$repo/scripts/bad.sh"
+  git -C "$repo" add scripts/bad.sh
+  if exit_guard_scan_repo "$repo" > "$dir/scan.out"; then eg_expect "整仓扫描：混进一个没标记的脚本就红" hit clean; else eg_expect "整仓扫描：混进一个没标记的脚本就红" hit hit; fi
+  eg_expect "整仓扫描：红的输出点名文件与缺的东西" "scripts/bad.sh: 缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）" "$(sed -n '1p' "$dir/scan.out")"
+  if exit_guard_check_repo "$repo" > "$dir/check.out" 2>&1; then eg_expect "整仓检查：有坏文件时返回非 0" hit clean; else eg_expect "整仓检查：有坏文件时返回非 0" hit hit; fi
+  eg_expect "整仓检查：有坏文件时打出 error 标注" 1 "$(grep -c '^::error::' "$dir/check.out" || true)"
+  git -C "$repo" rm -q -f --cached scripts/bad.sh
+  if exit_guard_check_repo "$repo" > "$dir/check.out" 2>&1; then eg_expect "整仓检查：坏文件拿掉后返回 0" clean clean; else eg_expect "整仓检查：坏文件拿掉后返回 0" clean hit; fi
+  printf '%s\n' '#!/bin/bash' "$T 'rm -f x' EXIT" > "$repo/tests/sanitizer-canary/run.sh"
+  git -C "$repo" add tests/sanitizer-canary/run.sh
+  if exit_guard_scan_repo "$repo" > /dev/null; then eg_expect "整仓扫描：登记过的路径里没标记也放行" clean clean; else eg_expect "整仓扫描：登记过的路径里没标记也放行" clean hit; fi
+  printf '%s\n' '#!/bin/bash' "$T 'rm -f x' EXIT" > "$repo/other/run.sh"
+  git -C "$repo" add other/run.sh
+  if exit_guard_scan_repo "$repo" > /dev/null; then eg_expect "整仓扫描：同名文件在别的目录里不放行" hit clean; else eg_expect "整仓扫描：同名文件在别的目录里不放行" hit hit; fi
+  git -C "$repo" rm -q -f --cached other/run.sh
+  printf '%s\n' '#!/bin/bash' "$T 'rm -f x' EXIT" > "$repo/other/untracked.sh"
+  printf '%s\n' '#!/bin/bash' "$T 'rm -f x' EXIT" > "$repo/other/notes.txt"
+  git -C "$repo" add other/notes.txt
+  if exit_guard_scan_repo "$repo" > /dev/null; then eg_expect "整仓扫描：未跟踪的 .sh 与非 .sh 文件不扫" clean clean; else eg_expect "整仓扫描：未跟踪的 .sh 与非 .sh 文件不扫" clean hit; fi
+  # 接线：本文件末尾真的调用了整仓检查（行首匹配；把那一行删掉，这条就红）
+  eg_expect "接线：末尾调用了整仓检查" 1 "$(grep -c '^exit_guard_check_repo "\$root"' "${BASH_SOURCE[0]}" || true)"
+
+  # 动态用例：同样写法的最小脚本，注入一个未定义变量，用 /bin/bash 跑（mac 上就是 3.2），必须非 0。
+  # 注入在 bash 4 以上本来就会让脚本以 1 退出，所以在本机或 Linux 上这几条只证明「注入确实让它红了」；3.2 上才是真正的检验。
+  # 另有「半路 exit 0」的注入：它在任何版本的 bash 上都会以 0 退出，没有标记就看不出来、有标记才会红，所以标记的逻辑在哪个版本上都被验到。
+  eg_min() { # $1 文件名 $2 注入（none | func | main | exit0） $3 guard | noguard
+    local f=$1 inject=$2 mode=$3
+    {
+      printf '%s\n' '#!/bin/bash' 'set -euo pipefail'
+      if [ "$mode" = guard ]; then
+        printf '%s\n' "$init" 'on_exit() {' "$rcl" "$grd" "$msg" '  fi' '}' "$T on_exit EXIT"
+      else
+        printf '%s\n' "$T ':' EXIT"
+      fi
+      case "$inject" in
+        func) printf '%s\n' 'work() { : "$rinne_injected_unset"; }' 'work' ;;
+        main) printf '%s\n' ': "$rinne_injected_unset"' ;;
+        exit0) printf '%s\n' 'exit 0' ;;
+      esac
+      printf '%s\n' 'echo reached-the-end'
+      if [ "$mode" = guard ]; then printf '%s\n' "$fin"; fi
+    } > "$dir/$f"
+  }
+  eg_run() { # $1 文件名 → eg_out、eg_rc
+    eg_rc=0
+    eg_out=$(/bin/bash "$dir/$1" 2>&1) || eg_rc=$?
+  }
+  eg_min m-none-guard.sh none guard
+  eg_expect "最小脚本带标记的写法过静态检查" clean "$(eg_verdict m-none-guard.sh)"
+  eg_min m-none-noguard.sh none noguard
+  eg_expect "最小脚本不带标记的写法过不了静态检查" hit "$(eg_verdict m-none-noguard.sh)"
+  eg_run m-none-guard.sh
+  eg_expect "动态：不注入、带标记，正常走完，退出码 0" "0 reached-the-end" "${eg_rc} $(grep -o 'reached-the-end' <<< "$eg_out" || true)"
+  eg_min m-func-guard.sh func guard
+  eg_run m-func-guard.sh
+  if [ "$eg_rc" != 0 ]; then eg_expect "动态：函数里展开未定义变量，退出码非 0" nonzero nonzero; else eg_expect "动态：函数里展开未定义变量，退出码非 0" nonzero "0，输出：${eg_out}"; fi
+  eg_min m-main-guard.sh main guard
+  eg_run m-main-guard.sh
+  if [ "$eg_rc" != 0 ]; then eg_expect "动态：主流程里展开未定义变量，退出码非 0" nonzero nonzero; else eg_expect "动态：主流程里展开未定义变量，退出码非 0" nonzero "0，输出：${eg_out}"; fi
+  eg_min m-exit0-guard.sh exit0 guard
+  eg_run m-exit0-guard.sh
+  if [ "$eg_rc" != 0 ] && grep -Fq '脚本没有走完就退出了' <<< "$eg_out" && ! grep -Fq 'reached-the-end' <<< "$eg_out"; then
+    eg_expect "动态：半路 exit 0（模拟静默结束），带标记的退出码非 0 并打印原因" ok ok
+  else
+    eg_expect "动态：半路 exit 0（模拟静默结束），带标记的退出码非 0 并打印原因" ok "退出码 ${eg_rc}，输出：${eg_out}"
+  fi
+  eg_min m-exit0-noguard.sh exit0 noguard
+  eg_run m-exit0-noguard.sh
+  eg_expect "对照：同样的半路 exit 0，没有标记就以 0 退出（看不出来）" "0" "$eg_rc"
+  # 对照：同样的注入、没有标记。3.2 上预期是 0（这就是要防的坑），bash 4 以上是 1；只报告，不判。
+  eg_min m-func-noguard.sh func noguard
+  eg_run m-func-noguard.sh
+  echo "INFO  /bin/bash 版本 $(/bin/bash -c 'echo "${BASH_VERSION}"')：函数里展开未定义变量、没有标记的写法，退出码 ${eg_rc}（3.2 上预期 0，bash 4 以上是 1）"
+
+  [ "$bad" = 0 ] || { echo "EXIT trap 标记检查的自测失败"; return 1; }
+  echo "EXIT trap 标记检查的自测通过"
+}
+
 bash32_selftest
+exit_guard_selftest
 root=$(cd "$here/../../.." && pwd)
 bash32_check_repo "$root" || exit 1
+exit_guard_check_repo "$root" || exit 1

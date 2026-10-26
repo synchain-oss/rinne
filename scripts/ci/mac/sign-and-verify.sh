@@ -11,8 +11,20 @@ set -euo pipefail
 
 list=$1
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/rinne.XXXXXX")
-# rinne-delete-ok: 本脚本 mktemp -d 新建的目录
-trap 'rm -rf "$tmp"' EXIT
+# 「走完了」标记（约定写法，selftest.sh 与本机 gate 会扫）：macOS 自带的 bash 3.2 在变量展开出错时会静默结束脚本，
+# 装了 EXIT trap 时进入 trap 的 $? 常常是 0，签名核对就会在半路死掉之后静默放行。所以只有走到末尾才把标记置 1，
+# trap 里退出码为 0 而标记没置位，就改成非 0（脚本里别的 exit 1 本来就是非 0，不受影响）。
+RINNE_RAN_TO_END=0
+on_exit() {
+  local rc=$?
+  # rinne-delete-ok: 本脚本 mktemp -d 新建的目录
+  rm -rf "$tmp"
+  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then
+    echo "::error::sign-and-verify.sh：脚本没有走完就退出了（bash 3.2 下变量展开出错会静默结束脚本，退出码是 0）：按失败处理"
+    exit 1
+  fi
+}
+trap on_exit EXIT
 first=""
 fail=0
 
@@ -65,4 +77,5 @@ else
   echo "反例通过：去掉签名后 codesign --verify 失败"
 fi
 
+RINNE_RAN_TO_END=1
 exit "$fail"

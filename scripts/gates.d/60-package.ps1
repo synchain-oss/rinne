@@ -7,8 +7,10 @@
 #      紧接着是发版判据的两个自测：scripts/check-release-tag.ps1 -SelfTest（tag 门禁，含临时 git 仓里的取数层）与
 #      node scripts/check-release-ready.mjs --self-test（发版就绪，含临时仓的端到端）。发版没有演练 tag，
 #      这两道门第一次真跑就是真发版，所以每次 Full 档都在这里把它们的判据过一遍。
-#   2c. bash 3.2 兼容扫描：git 跟踪的所有 *.sh 里，「$变量」后面紧跟非 ASCII 字符的写法一律判红（macOS 自带的
+#   2c. bash 3.2 兼容扫描：git 跟踪的所有 *.sh 里，「$变量」后面紧跟非 ASCII 字节（以及 ASCII 控制字节）的写法一律判红（macOS 自带的
 #      bash 3.2 会把它当成变量名的一部分，set -u 下脚本静默结束、退出码可能是 0）。带坏样例与正例自测。
+#   2d. EXIT trap 的「走完了」标记检查：git 跟踪的所有 *.sh 里，凡是装了 EXIT trap 的，都要带约定写法（RINNE_RAN_TO_END 标记；
+#      bash 3.2 下变量展开出错会静默结束脚本，进 trap 的 $? 常常是 0，没有标记就会以 0 退出）。带坏样例与正例自测。
 #   3. 假版本打包：在本进程用 New-RinneTempDir 建的临时目录里造一个假 BuildDir（两个 .vst3，各含
 #      Contents/x86_64-win/<名字>），跑 package.ps1 打一个 0.0.0-local 的假包，再把 zip 的根条目与
 #      packaging/manifest-win64.txt 逐条比对。
@@ -113,9 +115,14 @@ function Invoke-RinneRelSelfTests([string]$Root, [object[]]$Steps, [scriptblock]
 # 当成变量名的一部分：set -u 下直接 unbound variable，随后整个脚本静默结束，调用它的 CI 步骤退出码可能是 0。
 # Windows 与 Linux 的 bash 上看不出来，所以只能靠扫描：对 git 跟踪的所有 *.sh 逐个扫，命中即红（一律写成 ${name}）。
 # mac CI 的 scripts/ci/mac/selftest.sh 扫同一个模式（那边在真 mac 上、用 BSD grep 跑），这里是本机 Full 档的那一份。
-# 文件按字节读（Latin-1 一一对应），模式与 `LC_ALL=C grep -P` 的 \$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff] 逐字相同。
-# 不是 mac 上跑的脚本（只在 Linux 上跑，bash 4 以上）登记在这里，整条路径逐字匹配，不是前缀、不是后缀、不是通配。
-$script:RinneBash32Pattern = '\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xFF]'
+# 文件按字节读（Latin-1 一一对应，一个字节一个字符），所以字符类就是字节类。
+# 判的是哪些字节：mac 侧 selftest.sh 用 LC_ALL=C 的 [^[:print:][:space:]]，C locale 下 [:print:] 是 0x20-0x7E、[:space:] 是 0x09-0x0D 与 0x20，
+# 即命中「不在 0x09-0x0D 与 0x20-0x7E 里」的字节：0x00-0x08、0x0E-0x1F、0x7F 这些 ASCII 控制字节，加上 0x80-0xFF 的全部非 ASCII 字节。
+# 这里的 [^\x09-\x0D\x20-\x7E] 是同一个字节集合（下面 Test-RinneGates 里 0x00-0xFF 逐字节的用例钉着；mac 侧有 0x01-0xFF 的同款用例）。
+# ASCII 控制字节其实不会被 bash 3.2 并进变量名，两边都从严一并判红：*.sh 里本来就不该有裸的控制字节。
+# 不是 mac 上跑的脚本（只在 Linux 上跑，bash 4 以上）登记在这里，整条路径逐字匹配，不是前缀、不是后缀、不是通配；
+# 后面的 EXIT trap 标记检查共用这张登记表，tests/sanitizer-canary/run.sh 的两处都改掉之后才可以把它删掉。
+$script:RinneBash32Pattern = '\$[A-Za-z_][A-Za-z0-9_]*[^\x09-\x0D\x20-\x7E]'
 $script:RinneBash32Exempt = @('tests/sanitizer-canary/run.sh')
 
 # 登记过的 Linux 专用脚本（区分大小写，整条路径相等）。
@@ -167,6 +174,73 @@ function Invoke-RinneBash32Scan([string]$Root, $Lines) {
     New-RinnePkgResult 'FAIL' "有 $($problems.Count) 处「`$变量」后面紧跟非 ASCII 字符（macOS 自带的 bash 3.2 会把它当成变量名的一部分；改成 `${name}）" $Lines.ToArray()
 }
 
+# ── EXIT trap 的「走完了」标记检查 ─────────────────────────────────────────────
+# macOS 自带的 bash 3.2 在 set -u 下遇到变量展开出错会直接结束整个脚本；脚本装了 EXIT trap 时，进入 trap 的 $? 常常是 0
+# （出事前最后一条命令的状态），于是脚本半路死了却以 0 退出，调用它的 CI 步骤是绿的。对策是「走完了」标记：主流程正常结束处
+# （以及每个合法的提前 exit 0 之前）置位；EXIT trap 里退出码为 0 而标记没置位，就改成非 0 并打印 ::error::。
+# 约定写法固定，git 跟踪的 *.sh 里凡是装了 EXIT trap（trap … EXIT，或末尾写 0）的，都要同时带下面五样，按行扫，注释行不算：
+#   RINNE_RAN_TO_END=0                                      装 trap 之前初始化
+#   RINNE_RAN_TO_END=1                                      主流程正常结束处置位
+#   rc=$?                                                   trap 函数一进来先取退出码
+#   [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]         退出码为 0、标记却没置位
+#   脚本没有走完就退出了                                      报错文字
+# mac CI 的 scripts/ci/mac/selftest.sh 扫同一套写法（外加一个用 /bin/bash 跑的动态用例），这里是本机 Full 档的那一份。
+# 文件同样按 Latin-1 逐字节读；空白类写成显式的 ASCII 字符类（不用 \s：.NET 的 \s 会把 0x85、0xA0 这两个字节也算空白）。
+# RETURN、INT、TERM 的 trap 不是 EXIT trap，不在此列。字符串里写出「trap … EXIT」也会被当成装了 trap：宁可多报。
+# 登记表与上面的 bash 3.2 兼容扫描共用（Test-RinneBash32Exempt）。
+$script:RinneExitTrapPattern = '(^|[^A-Za-z0-9_])trap[ \t\r\f\v].*[ \t\r\f\v](EXIT|0)([ \t\r\f\v;})]|$)'
+$script:RinneExitGuardItems = @(
+    @{ Missing = '缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）'; Re = '(^|[ \t\r\f\v;{(])RINNE_RAN_TO_END=0([ \t\r\f\v;})]|$)' }
+    @{ Missing = '缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）'; Re = '(^|[ \t\r\f\v;{(])RINNE_RAN_TO_END=1([ \t\r\f\v;})]|$)' }
+    @{ Missing = '缺 rc=$?（trap 函数一进来先取退出码）'; Fixed = 'rc=$?' }
+    @{ Missing = '缺 [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]（退出码为 0、标记却没置位）'; Fixed = '[ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]' }
+    # 报错文字是中文：文件按 Latin-1 读，所以拿它的 UTF-8 字节按 Latin-1 还原成同样的字符串再比
+    @{ Missing = '缺报错文字「脚本没有走完就退出了」'
+        Fixed = [System.Text.Encoding]::Latin1.GetString([System.Text.Encoding]::UTF8.GetBytes('脚本没有走完就退出了')) }
+)
+
+# 一个文件（字节）的检查：返回 @{ HasTrap; Missing }。没装 EXIT trap 时 Missing 为空；装了就逐条列出缺的东西。
+function Get-RinneExitGuardInfo([byte[]]$Bytes) {
+    $code = @([System.Text.Encoding]::Latin1.GetString($Bytes) -split "`n" | Where-Object { $_ -cnotmatch '^[ \t\r\f\v]*#' })
+    $hasTrap = $false
+    foreach ($l in $code) { if ($l -cmatch $script:RinneExitTrapPattern) { $hasTrap = $true; break } }
+    $missing = New-Object System.Collections.Generic.List[string]
+    if ($hasTrap) {
+        foreach ($it in $script:RinneExitGuardItems) {
+            $found = $false
+            foreach ($l in $code) {
+                if ($it.Re) { if ($l -cmatch $it.Re) { $found = $true; break } }
+                elseif ($l.Contains($it.Fixed)) { $found = $true; break }
+            }
+            if (-not $found) { $missing.Add($it.Missing) }
+        }
+    }
+    @{ HasTrap = $hasTrap; Missing = [string[]]$missing.ToArray() }
+}
+
+# 一批文件的问题清单（纯函数）。Items 里每项有 Path 与 Bytes。登记过的路径跳过。每条 "<路径>: <缺什么>"；Count 是装了 EXIT trap 的个数。
+function Get-RinneExitGuardProblems([object[]]$Items) {
+    $out = New-Object System.Collections.Generic.List[string]
+    $withTrap = 0
+    foreach ($it in $Items) {
+        if (Test-RinneBash32Exempt $it.Path) { continue }
+        $info = Get-RinneExitGuardInfo $it.Bytes
+        if ($info.HasTrap) { $withTrap++ }
+        foreach ($m in $info.Missing) { $out.Add("$($it.Path): $m") }
+    }
+    @{ Problems = [string[]]$out.ToArray(); WithTrap = $withTrap }
+}
+
+# gate 里的一步：扫完有问题就返回 FAIL 结论，干净返回 $null。Lines 是调用方的 List，这里往里追加。
+function Invoke-RinneExitGuardScan([string]$Root, $Lines) {
+    $items = @(Get-RinneBash32Items $Root)
+    $res = Get-RinneExitGuardProblems $items
+    $Lines.Add("--- EXIT trap 标记检查：git 跟踪的 *.sh 共 $($items.Count) 个，装了 EXIT trap 的 $($res.WithTrap) 个（登记过的除外），缺约定写法的 $($res.Problems.Count) 处")
+    if ($res.Problems.Count -eq 0) { return $null }
+    foreach ($p in $res.Problems) { $Lines.Add($p) }
+    New-RinnePkgResult 'FAIL' "有 $($res.Problems.Count) 处装了 EXIT trap 的 *.sh 缺「走完了」标记的约定写法（macOS 自带的 bash 3.2 下变量展开出错会静默结束脚本，退出码可能是 0；写法见 60-package.ps1 与 scripts/ci/mac/selftest.sh 里这一节的注释）" $Lines.ToArray()
+}
+
 # Node 用钉版：先找环境变量 RINNE_NODE，再找 git config rinne.node，最后退回 PATH（与 50-web.ps1 同一套口径）。
 function Get-RinnePkgNode($Ctx) {
     $p = & $Ctx.Setting 'RINNE_NODE' 'rinne.node'
@@ -214,6 +288,10 @@ function Invoke-RinnePackageGate($Ctx) {
     # 2c. bash 3.2 兼容扫描：命中即红，不往下打假包。
     $b32Fail = Invoke-RinneBash32Scan $root $lines
     if ($b32Fail) { return $b32Fail }
+
+    # 2d. EXIT trap 的「走完了」标记检查：装了 EXIT trap 的 *.sh 缺约定写法即红，不往下打假包。
+    $egFail = Invoke-RinneExitGuardScan $root $lines
+    if ($egFail) { return $egFail }
 
     # 3. 假版本打包 + 清单比对。0.0.0-local 只是本地假版本号：不涉及任何 tag，也不写进任何仓内文件。
     $tmp = New-RinneTempDir -Prefix 'rinne-gate-pkg-'
@@ -332,6 +410,23 @@ function Test-RinneGates([string]$Root) {
     [pscustomobject]@{ Label = 'bash 3.2 扫描：变量在引号里、非 ASCII 在引号外不误报'; Bad = $false; Passed = (& $b32 ('echo "$name"' + $colon)) -eq 0 }
     [pscustomobject]@{ Label = 'bash 3.2 扫描：行尾是 CRLF 不误报'; Bad = $false; Passed = (& $b32 "echo `"`$name`"`r`n") -eq 0 }
     [pscustomobject]@{ Label = 'bash 3.2 扫描：纯中文行不误报'; Bad = $false; Passed = (& $b32 ('echo ' + $han + $colon)) -eq 0 }
+    # 控制字节：变量后紧跟只含 ASCII 控制字节的样例，两边（mac 侧的 [^[:print:][:space:]] 与这里的字节类）都要命中。
+    $ctl = { param([int]$Byte) @(Get-RinneBash32Hits ([byte[]]($utf8.GetBytes('echo "$name') + [byte[]]@($Byte) + $utf8.GetBytes('x"')))).Count }
+    foreach ($c in @(@(0x01, 'SOH'), @(0x08, '退格，空白类之前的最后一个控制字节'), @(0x0E, '空白类之后的第一个控制字节'), @(0x1B, 'ESC'), @(0x1F, '0x1F'), @(0x7F, 'DEL'), @(0x00, 'NUL'))) {
+        [pscustomobject]@{ Label = ('bash 3.2 扫描：变量后紧跟 ASCII 控制字节 0x{0:X2}（{1}）要报出来' -f $c[0], $c[1]); Bad = $true; Passed = (& $ctl $c[0]) -eq 1 }
+    }
+    foreach ($c in @(@(0x09, 'TAB'), @(0x0B, 'VT'), @(0x0C, 'FF'), @(0x0D, 'CR'), @(0x20, '空格'), @(0x7E, '~，可打印 ASCII 的最后一个'))) {
+        [pscustomobject]@{ Label = ('bash 3.2 扫描：变量后紧跟 0x{0:X2}（{1}）不误报' -f $c[0], $c[1]); Bad = $false; Passed = (& $ctl $c[0]) -eq 0 }
+    }
+    # 逐字节：「变量名 + 一个字节」，0x00-0xFF 里恰好不在 0x09-0x0D 与 0x20-0x7E 的字节命中（和 mac 侧 [^[:print:][:space:]] 的字节集合相同）
+    $sweepWrong = New-Object System.Collections.Generic.List[string]
+    for ($bv = 0; $bv -le 255; $bv++) {
+        $want = -not ((($bv -ge 9) -and ($bv -le 13)) -or (($bv -ge 32) -and ($bv -le 126)))
+        $hit = (& $ctl $bv) -ge 1
+        if ($hit -ne $want) { $sweepWrong.Add('0x{0:X2}' -f $bv) }
+    }
+    [pscustomobject]@{ Label = "bash 3.2 扫描：逐字节 0x00-0xFF，恰好不在 0x09-0x0D、0x20-0x7E 的字节命中（不符的字节：$(if ($sweepWrong.Count) { $sweepWrong -join ' ' } else { '无' })）"
+        Bad = $true; Passed = ($sweepWrong.Count -eq 0) }
     # 接线：gate 主体里真的调了这一步（删掉那一行调用，别的用例都还绿，只有这一条会红），而且在假版本打包之前。
     $gateSrc = (${function:Invoke-RinnePackageGate}).ToString()
     [pscustomobject]@{ Label = 'bash 3.2 扫描：gate 主体里调用了它，且在假版本打包之前'; Bad = $true
@@ -377,6 +472,100 @@ function Test-RinneGates([string]$Root) {
     } finally {
         $b32left = Remove-RinneTempDir -Path $b32tmp -WaitSeconds 5
         [pscustomobject]@{ Label = 'bash 3.2 整仓扫描自测建的临时目录删掉了'; Bad = $true; Passed = ($null -eq $b32left) }
+    }
+
+    # EXIT trap 的「走完了」标记检查：少一样就红并点名，写法只是长得像不算，没装 EXIT trap 的不管；整仓也真走 git ls-files 过一遍。
+    $egFull = @('#!/bin/bash', 'set -euo pipefail', 'RINNE_RAN_TO_END=0', 'on_exit() {', '  local rc=$?',
+        '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then', '    echo "::error::脚本没有走完就退出了"; exit 1', '  fi', '}',
+        'trap on_exit EXIT', 'work', 'RINNE_RAN_TO_END=1')
+    $egMissing = { param([string[]]$Lines, [string]$Sep = "`n") [string[]]@((Get-RinneExitGuardInfo $utf8.GetBytes(($Lines -join $Sep) + $Sep)).Missing) }
+    $egMsg = @{
+        Init = '缺 RINNE_RAN_TO_END=0（装 trap 之前初始化）'
+        Fin = '缺 RINNE_RAN_TO_END=1（主流程正常结束处置位）'
+        Rc = '缺 rc=$?（trap 函数一进来先取退出码）'
+        Guard = '缺 [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]（退出码为 0、标记却没置位）'
+        Text = '缺报错文字「脚本没有走完就退出了」'
+    }
+    $egWithout = { param([string]$Line) [string[]]@($egFull | Where-Object { $_ -cne $Line }) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：五样齐全不误报'; Bad = $false; Passed = (@(& $egMissing $egFull).Count -eq 0) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：行尾是 CRLF 的齐全写法不误报'; Bad = $false; Passed = (@(& $egMissing $egFull "`r`n").Count -eq 0) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：没有初始化 RINNE_RAN_TO_END=0 要点名'; Bad = $true
+        Passed = (@(& $egMissing (& $egWithout 'RINNE_RAN_TO_END=0')) -join '|') -ceq $egMsg.Init }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：从不置位 RINNE_RAN_TO_END=1 要点名'; Bad = $true
+        Passed = (@(& $egMissing (& $egWithout 'RINNE_RAN_TO_END=1')) -join '|') -ceq $egMsg.Fin }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：trap 函数里没有先取 rc=$? 要点名'; Bad = $true
+        Passed = (@(& $egMissing (& $egWithout '  local rc=$?')) -join '|') -ceq $egMsg.Rc }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：没有「退出码为 0、标记没置位」的判据要点名'; Bad = $true
+        Passed = (@(& $egMissing (& $egWithout '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then')) -join '|') -ceq $egMsg.Guard }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：没有报错文字要点名'; Bad = $true
+        Passed = (@(& $egMissing (& $egWithout '    echo "::error::脚本没有走完就退出了"; exit 1')) -join '|') -ceq $egMsg.Text }
+    $egCommented = [string[]]@($egFull | ForEach-Object { if ($_ -ceq 'trap on_exit EXIT') { $_ } else { "# $_" } })
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：标记只写在注释里不算（五样全缺）'; Bad = $true; Passed = (@(& $egMissing $egCommented).Count -eq 5) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：if 的一行分支里装 EXIT trap 认得出来'; Bad = $true
+        Passed = (@(& $egMissing @('#!/bin/bash', "if true; then trap 'rm -f x' EXIT; fi")).Count -eq 5) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：trap 末尾写 0（等同 EXIT）认得出来'; Bad = $true
+        Passed = (@(& $egMissing @("trap 'rm -f x' 0")).Count -eq 5) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：trap 装在函数里（缩进）认得出来'; Bad = $true
+        Passed = (@(& $egMissing @('f() {', "    trap 'rm -f x' EXIT", '}')).Count -eq 5) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：信号列表里带 EXIT 认得出来'; Bad = $true
+        Passed = (@(& $egMissing @("trap 'rm -f x' INT EXIT")).Count -eq 5) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：变量名带前缀的同名写法不算初始化'; Bad = $true
+        Passed = ((@(& $egMissing @('PKG_RINNE_RAN_TO_END=0', '  local rc=$?', '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then', '    echo "脚本没有走完就退出了"', 'RINNE_RAN_TO_END=1', 'trap cleanup EXIT')) -join '|') -ceq $egMsg.Init) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：RINNE_RAN_TO_END=10 不算置位 1'; Bad = $true
+        Passed = ((@(& $egMissing @('RINNE_RAN_TO_END=0', 'RINNE_RAN_TO_END=10', '  local rc=$?', '  if [ "$rc" -eq 0 ] && [ "$RINNE_RAN_TO_END" != 1 ]; then', '    echo "脚本没有走完就退出了"', 'trap cleanup EXIT')) -join '|') -ceq $egMsg.Fin) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：只有 RETURN trap 不误报'; Bad = $false; Passed = (@(& $egMissing @("trap 'rm -rf x' RETURN")).Count -eq 0) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：只有 INT、TERM trap 不误报'; Bad = $false; Passed = (@(& $egMissing @("trap 'exit 130' INT", "trap 'exit 143' TERM")).Count -eq 0) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：注释里提到 trap … EXIT 不误报'; Bad = $false; Passed = (@(& $egMissing @("# trap 'rm -f x' EXIT")).Count -eq 0) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：引号里的 0 不当成 EXIT'; Bad = $false; Passed = (@(& $egMissing @("trap 'echo 0' INT")).Count -eq 0) }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：空文件不误报'; Bad = $false; Passed = (@(Get-RinneExitGuardInfo ([byte[]]@())).Missing.Count -eq 0) }
+    $egIndented = [string[]]@($egFull | ForEach-Object { if ($_ -ceq 'RINNE_RAN_TO_END=1') { '    --self-test) RINNE_RAN_TO_END=1; exit 0 ;;' } else { "    $_" } })
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：整体缩进、置位写在 case 分支里不误报'; Bad = $false; Passed = (@(& $egMissing $egIndented).Count -eq 0) }
+    # 接线：gate 主体里真的调了这一步，而且在假版本打包之前
+    $gateSrc2 = (${function:Invoke-RinnePackageGate}).ToString()
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：gate 主体里调用了它，且在假版本打包之前'; Bad = $true
+        Passed = ($gateSrc2.IndexOf('Invoke-RinneExitGuardScan') -ge 0 -and $gateSrc2.IndexOf('Invoke-RinneExitGuardScan') -lt $gateSrc2.IndexOf('# 3. 假版本打包')) }
+    # 登记表与 bash 3.2 扫描共用：整条路径相等
+    $egItem = { param([string]$P, [string[]]$Lines = @('#!/bin/bash', "trap 'rm -f x' EXIT")) [pscustomobject]@{ Path = $P; Bytes = $utf8.GetBytes(($Lines -join "`n") + "`n") } }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：登记过的 Linux 专用脚本放行（整条路径相等）'; Bad = $false
+        Passed = (Get-RinneExitGuardProblems @(& $egItem 'tests/sanitizer-canary/run.sh')).Problems.Count -eq 0 }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：登记表不是后缀匹配'; Bad = $true
+        Passed = (Get-RinneExitGuardProblems @(& $egItem 'scripts/tests/sanitizer-canary/run.sh')).Problems.Count -eq 5 }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：登记表区分大小写'; Bad = $true
+        Passed = (Get-RinneExitGuardProblems @(& $egItem 'Tests/sanitizer-canary/run.sh')).Problems.Count -eq 5 }
+    [pscustomobject]@{ Label = 'EXIT trap 标记检查：打包脚本不在登记表里'; Bad = $true
+        Passed = (Get-RinneExitGuardProblems @(& $egItem 'scripts/package-macos.sh')).Problems.Count -eq 5 }
+    # 整仓：临时 git 仓里放好文件 → 绿并数得出个数；再放坏文件 → 红并点名；登记路径里放行；未跟踪的 .sh 与非 .sh 不扫。
+    $egtmp = New-RinneTempDir -Prefix 'rinne-gate-eg-selftest-'
+    try {
+        $null = & git -C $egtmp init -q 2>&1
+        $null = & git -C $egtmp config core.autocrlf false 2>&1
+        $null = New-Item -ItemType Directory -Path (Join-Path $egtmp 'scripts'), (Join-Path $egtmp 'tests/sanitizer-canary'), (Join-Path $egtmp 'other') -Force
+        $egw = { param($rel, [string[]]$Lines) [IO.File]::WriteAllBytes((Join-Path $egtmp $rel), $utf8.GetBytes(($Lines -join "`n") + "`n")); $null = & git -C $egtmp add -- $rel 2>&1 }
+        $badTrap = @('#!/bin/bash', "trap 'rm -f x' EXIT")
+        & $egw 'scripts/good.sh' $egFull
+        $egLines = New-Object System.Collections.Generic.List[string]
+        [pscustomobject]@{ Label = 'EXIT trap 整仓扫描：只有好文件时通过，并数出装了 EXIT trap 的 1 个'; Bad = $false
+            Passed = ($null -eq (Invoke-RinneExitGuardScan $egtmp $egLines)) -and (($egLines -join "`n") -like '*装了 EXIT trap 的 1 个*') }
+        & $egw 'scripts/bad.sh' $badTrap
+        $egLines2 = New-Object System.Collections.Generic.List[string]
+        $egRes = Invoke-RinneExitGuardScan $egtmp $egLines2
+        [pscustomobject]@{ Label = 'EXIT trap 整仓扫描：混进一个没标记的脚本就红，并点名文件与缺的东西'; Bad = $true
+            Passed = ($egRes -and $egRes.Status -eq 'FAIL' -and ($egLines2 -contains ('scripts/bad.sh: ' + $egMsg.Init))) }
+        $null = & git -C $egtmp rm -q -f --cached -- scripts/bad.sh 2>&1
+        & $egw 'tests/sanitizer-canary/run.sh' $badTrap
+        [pscustomobject]@{ Label = 'EXIT trap 整仓扫描：登记过的路径里没标记也放行'; Bad = $false
+            Passed = ($null -eq (Invoke-RinneExitGuardScan $egtmp (New-Object System.Collections.Generic.List[string]))) }
+        & $egw 'other/run.sh' $badTrap
+        [pscustomobject]@{ Label = 'EXIT trap 整仓扫描：同名文件在别的目录里不放行'; Bad = $true
+            Passed = ($null -ne (Invoke-RinneExitGuardScan $egtmp (New-Object System.Collections.Generic.List[string]))) }
+        $null = & git -C $egtmp rm -q -f --cached -- other/run.sh 2>&1
+        [IO.File]::WriteAllBytes((Join-Path $egtmp 'other/untracked.sh'), $utf8.GetBytes(($badTrap -join "`n") + "`n"))
+        & $egw 'other/notes.txt' $badTrap
+        [pscustomobject]@{ Label = 'EXIT trap 整仓扫描：未跟踪的 .sh 与非 .sh 文件不扫'; Bad = $false
+            Passed = ($null -eq (Invoke-RinneExitGuardScan $egtmp (New-Object System.Collections.Generic.List[string]))) }
+    } finally {
+        $egleft = Remove-RinneTempDir -Path $egtmp -WaitSeconds 5
+        [pscustomobject]@{ Label = 'EXIT trap 整仓扫描自测建的临时目录删掉了'; Bad = $true; Passed = ($null -eq $egleft) }
     }
 
     # 清单比对的纯函数：一致时没有差异，多一项与少一项都要被报出来。
