@@ -17,10 +17,11 @@ under 4 KB. Records marked "planned" are not written yet.
 | ADR | 决定 | 状态 |
 | --- | --- | --- |
 | [0001](0001-two-binaries.md) | 两个独立的插件二进制，经命名共享内存会合 | accepted |
-| 0002 | 环路时序：固定环路延迟 D、流相对寻址、向宿主报 0 延迟 | planned |
-| 0003 | 安全模型：安全状态机、限幅、淡变与锁存 | planned |
+| [0002](0002-loop-timing.md) | 环路时序：固定环路延迟 D、流相对寻址、向宿主报 0 延迟 | accepted |
+| [0003](0003-safety-model.md) | 安全模型：安全状态机、限幅、淡变与锁存 | accepted |
 | [0004](0004-pairing.md) | 配对：组 A–H、智能默认与对端轨道名核验 | accepted |
 | [0005](0005-platform-toolchain.md) | 平台、格式与工具链；macOS 不签名不公证 | accepted |
 | 0006 | 冻结面与版本策略 | planned |
 | [0007](0007-licensing.md) | 许可与合规口径 | accepted |
 | [0008](0008-shared-code.md) | 与 SCVB 共享代码：复制并登记来源，不抽共享库 | accepted |
+| [0009](0009-loop-evidence.md) | 错序与导出不一致的判据：每块判一次、连续 3 次定案、容忍时间戳回退；离线块计数与已读值锁存 | accepted |

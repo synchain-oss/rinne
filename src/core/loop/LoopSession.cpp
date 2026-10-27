@@ -8,7 +8,7 @@
 //   3. 判据：交给 StreamSync（断档、对齐、容忍、重同步、停用清空、起播复位）。
 //   4. 拉环：把环里 [pulled, W) 的帧全部搬进本地延迟线（一圈之内），pulled 追到 W。
 //   5. 建新读头（需要时），把读头按包络混成一路，写进 ctx.returnLeft / ctx.returnRight，并标出逐样本的有效位。
-//   6. 判错序：读对端槽的宿主时间戳，每块判一次（口径见 OrderEvidence.h 与 ADR-0002）。
+//   6. 判错序：读对端槽的宿主时间戳，每块判一次（口径见 OrderEvidence.h 与 ADR-0009）。
 //   7. 导出不一致：离线块里出了导出可能与播放不同的事，计一次（口径见 ExportLatch.h）。
 //   8. 发布状态：写进 LoopStatus（原子量），消息线程读快照。
 //
@@ -562,7 +562,7 @@ void LoopSession::readPeerSlot(const BlockContext& ctx) noexcept
     havePeerSlot_ = true;
 }
 
-// 错序证据（口径见 OrderEvidence.h 与 ADR-0002）：每个 n > 0 的支持块判一次。
+// 错序证据（口径见 OrderEvidence.h 与 ADR-0009）：每个 n > 0 的支持块判一次。
 //
 // 读到的是块首的对端槽（readPeerSlot 在拉环之前读好）：Input 读 Output 槽里的时间戳与块序号。
 // 宿主时间戳无效、读不到对端槽、对端自上次检查起没有处理新块、时间戳回退或跳变时这一块判不了：

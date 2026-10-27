@@ -221,7 +221,7 @@ private:
     std::int64_t fadeOutUnsupportedBlock(const BlockContext& ctx) noexcept;
     // 对端槽的事实：宿主时间戳、块序号、实时标志。没有会合段或组号不合法时什么都不读。
     void readPeerSlot(const BlockContext& ctx) noexcept;
-    // 错序证据（口径见 OrderEvidence.h 与 ADR-0002）：每个 n > 0 的支持块判一次，结果发布到状态里。
+    // 错序证据（口径见 OrderEvidence.h 与 ADR-0009）：每个 n > 0 的支持块判一次，结果发布到状态里。
     void judgeOrder(const BlockContext& ctx) noexcept;
     // 导出不一致锁存（口径见 ExportLatch.h）用的对端事实：对端槽的 kRtOverMax 只在对端的一个新块上看一次。
     // 每个读了对端槽的块都要调（不管是不是离线块），块序号的记账才跟得上。
