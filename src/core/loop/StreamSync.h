@@ -161,12 +161,6 @@ public:
         return delayEffective > 0 && delayEffective < fadeOut_ ? delayEffective : fadeOut_;
     }
 
-    // 改 D 的过渡（音频线程，LoopSession 在拉环之后调）：还没在淡出的活跃读头开始淡出，口径与重同步的淡出相同
-    // （名义 5 ms、预拷贝尾巴、读到 fadeEnd 为止，fadeEnd 之前的数据不够时缩短到恰好用完）。
-    // 判据的状态（偏移、连续计数、容忍模式的窗口、重同步计数）一概不动：改 D 不是时序出了问题。
-    // 返回是否挂上了淡出（没有可淡出的读头时为假）。
-    bool fadeForDelayChange(LocalLine& line, TapSet& taps, i64 processed, i64 fadeEnd) noexcept;
-
     // 写头与读位的当前账（诊断用）
     i64 writeHead() const noexcept { return writeHead_; }
     i64 processed() const noexcept { return processed_; }

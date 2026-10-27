@@ -5,6 +5,7 @@
 #include "BridgeBase.h"
 #include "PlatformLog.h"
 #include "PlatformWebView.h"
+#include "ResourceProvider.h"
 #include "UiDefaultsStore.h"
 
 #include <type_traits>
@@ -86,6 +87,14 @@ juce::String initialLang()
     const auto saved = uidefaults::langGlobal();
     return saved.isNotEmpty() ? saved : juce::String("zh");
 }
+
+// 页面（或浏览器内核）交上来的文字都是来路不明的：写日志、放进兜底面板之前一律先过 ResourceProvider 的整形函数，
+// 断行类字符换掉、限长（地址用 urlForLog，其余文字用 asciiForLog，后者另把非 ASCII 字符也换掉，面板只显示纯 ASCII）。
+// 这些是各处的长度上限（字符数）
+constexpr int kBootStageMaxChars = 40;
+constexpr int kBootDetailMaxChars = 300;
+constexpr int kNavErrorMaxChars = 200;
+constexpr int kNavUrlLogMaxChars = 200;
 } // namespace
 
 // -----------------------------------------------------------------------------
@@ -143,10 +152,21 @@ public:
 #endif
     }
 
+    // 导航闸：页面带着原生桥（会写磁盘的 setLang、setUiScale、commitUiScale），一旦被带到外站，外站的脚本就够得到桥。
+    // 所以只放行资源提供者的根下面的地址，加上页面隐藏时 JUCE 借道的空白页，其余拦下并写一行日志。
+    // 两个平台的回调都走这里：WebView2 的导航开始事件（主框架），WKWebView 的导航策略回调（含子框架）。
+    // 判定是纯函数（ResourceProvider::isRootNavigation），放不放行的全部用例在宿主测试里；
+    // 拦下的导航不算「导航开始」，不起算看门狗的导航后预算。
+    // 这里要写全名：在 WebBrowserComponent 的派生类里，裸写 ResourceProvider 指的是基类里的同名函数类型
     bool pageAboutToLoad(const juce::String& url) override
     {
+        if (!rinne::webview::ResourceProvider::isRootNavigation(url, WBC::getResourceProviderRoot()))
+        {
+            owner_.logDiag("blocked navigation: " + rinne::webview::ResourceProvider::urlForLog(url));
+            return false;
+        }
         owner_.onNavigationStarted(url);
-        return true; // 本插件只导航到资源提供者的根，不拦
+        return true;
     }
 
     void pageFinishedLoading(const juce::String& url) override { owner_.onNavigationFinished(url); }
@@ -157,7 +177,7 @@ public:
     // 在白名单存在之前放行任意 http 地址，等于把「把一个字符串交给系统去执行」的权力交给页面
     void newWindowAttemptingToLoad(const juce::String& newURL) override
     {
-        owner_.logDiag("blocked new-window request: " + newURL.trim().substring(0, 120));
+        owner_.logDiag("blocked new-window request: " + rinne::webview::ResourceProvider::urlForLog(newURL.trim()));
     }
 
     bool pageLoadHadNetworkError(const juce::String& errorInfo) override
@@ -230,6 +250,13 @@ void WebViewHost::beginLoadAttempt()
     startMs_ = juce::Time::getMillisecondCounter(); // 先落起点：兜底面板的「已等待」也从这里算
     runtime_ = PlatformWebView::runtimeInfo();
 
+    // 定时器在三条分支之前起，不能只在能加载的那条路径上起：运行时缺失、过旧时直接切兜底面板，
+    // 而面板上环路开关的显示和恢复按钮的冷却禁用态，都靠定时器每个 tick 调 refreshControls 刷新，
+    // 这恰恰是兜底面板最常用的路径。这两条路径上看门狗不会走（面板在场），定时器只做刷新。
+    // 重试时定时器本来就在跑，所以要防重复启动
+    if (!isTimerRunning())
+        startTimerHz(25);
+
     if (runtime_.status == PlatformWebView::RuntimeStatus::missing)
     {
         webView_->setVisible(false);
@@ -257,8 +284,6 @@ void WebViewHost::beginLoadAttempt()
     // 必须在任何事件发送之前完成首个跳转（前端脚本随后加载并注册监听）
     webView_->setVisible(true);
     webView_->goToURL(entryUrl());
-    if (!isTimerRunning())
-        startTimerHz(25);
 }
 
 // 首页地址是 <资源根>/<角色>/index.html，不是裸的资源根。
@@ -396,12 +421,8 @@ juce::var WebViewHost::buildSnapshot()
     seed.lang = lang_;
     seed.uiScale = scale_.scale();
 
-    bridge::UiFlags stored;
-    stored.langChosen = uidefaults::langChosenGlobal();
-    stored.rulesAck = uidefaults::rulesAckVersion();
-    stored.guideSeen = uidefaults::guideSeenGlobal(config_.role);
-    stored.diagLog = uidefaults::diagLogEnabled();
-    return bridge::buildUiSnapshot(seed, stored);
+    // 四个标志一次读回：快照每秒至少一帧，逐个读会在消息线程上每帧开关四次设置文件
+    return bridge::buildUiSnapshot(seed, uidefaults::readUiFlags(config_.role));
 }
 
 void WebViewHost::emitEvent(const char* eventId, const juce::var& payload)
@@ -482,6 +503,18 @@ void WebViewHost::showFallback(FallbackReason reason)
     // 加载超时的预算恒大于闸门超时，闸门早已自己放行并写过行，不打；前端启动失败可以在闸门超时之内到，只有这一条打得出
     revealGate_.onFallbackShown();
     noteRevealed();
+    // 隐藏网页。这一步在 JUCE 8.0.8 里的真实行为（核对过 WebBrowserComponent 的两个平台实现；
+    // 本宿主没开保留页面的选项，所以隐藏时卸载页面是开着的）：
+    //   - 可见性变化的回调里，组件不可见、页面没在空白页上、且浏览器已建好时，页面被导航到空白页
+    //     （为的是隐藏后不再跑脚本、放声音）。WebView2 的控制器还没建好时这一步不动；
+    //   - 再次可见时，Windows 在页面被卸成了空白页的情况下做一次历史后退，macOS 先按记下的最后地址重新加载。
+    // 所以看门狗在这里切面板，等于把加载得慢的页面卸掉：它的脚本上下文没了，面板不会自己收回，
+    // 回到网页只有点重试这一条路，那是一次完整的重新加载入口页。有意不做「桥迟到就收回面板」：
+    // 隐藏时已卸载的页面不会再发请求，收回时 JUCE 又会让它重新加载，两头都对不上。
+    // 一个例外：WebView2 的控制器若在看门狗超时之后才建好，JUCE 建好后照常导航到入口地址，不看可见性，
+    // 页面可能在隐藏状态下加载完并发来桥请求。四个通用桥函数在面板在场时各自在开头挡住这种请求：
+    // requestInitialState 只回执 ok；setLang、setUiScale、commitUiScale 回 not-ready，不改窗口、不写设置文件。
+    // 细节见 handleRequestInitialState 与它们各自的守卫
     webView_->setVisible(false);
 
     const bool missing = (reason == FallbackReason::MissingRuntime);
@@ -554,6 +587,10 @@ void WebViewHost::showFallback(FallbackReason reason)
     resized();
 }
 
+// 离开兜底面板的唯一出口。beginLoadAttempt 里先让网页重新可见（JUCE 此刻会做一次后退或按旧地址重载，
+// 见 showFallback 的注释），随后立刻显式导航到入口页，后一次导航压过前一次；
+// 所以重试的结果恒为「入口页从头加载一遍」，不依赖页面之前停在哪。
+// 就绪位、活着的桥的计数、启动失败摘要、看门狗起点都在 beginLoadAttempt 里复位
 void WebViewHost::retryWebView()
 {
     fallback_.reset();
@@ -591,7 +628,7 @@ void WebViewHost::onNavigationStarted(const juce::String& url)
         applyRevealGate();
     }
 
-    logDiag("navigation started: " + url);
+    logDiag("navigation started: " + ResourceProvider::urlForLog(url, kNavUrlLogMaxChars));
 }
 
 void WebViewHost::onNavigationFinished(const juce::String& url)
@@ -601,13 +638,14 @@ void WebViewHost::onNavigationFinished(const juce::String& url)
     // 这一条不放行，只记账（定谳见 WebViewRevealGate.h）。记下的这一位只进放行诊断里 timeout 的那一行
     navState_ = NavState::finished;
     revealGate_.onNavigationFinished();
-    logDiag("navigation finished: " + url);
+    logDiag("navigation finished: " + ResourceProvider::urlForLog(url, kNavUrlLogMaxChars));
 }
 
 void WebViewHost::onNavigationError(const juce::String& errorInfo)
 {
     navState_ = NavState::networkError;
-    navDetail_ = errorInfo.substring(0, 200);
+    // 错误说明是内核给的文字：整形一次，同一份既存进成员（兜底面板的诊断行显示它）也写进日志
+    navDetail_ = ResourceProvider::asciiForLog(errorInfo, kNavErrorMaxChars);
     logDiag("navigation error: " + navDetail_);
 
     // 这里刻意不切兜底面板，由看门狗统一裁决。
@@ -629,10 +667,14 @@ void WebViewHost::onNavigationError(const juce::String& errorInfo)
 // 该通道由 JUCE 在文档创建前注入，不经桥脚本，不占用桥契约的名表，名字加 __rinne__ 前缀标明它是诊断面
 void WebViewHost::handleBootError(const juce::var& payload)
 {
-    const auto stage = payload.getProperty("stage", juce::var("unknown")).toString();
-    const auto detail = payload.getProperty("detail", juce::var("")).toString();
-
-    bootError_ = "boot " + stage + ": " + detail.substring(0, 300);
+    // 页面给的 stage 和 detail 原样不能碰日志和面板：里面可以带换行去伪造日志行，也可以带面板显示不了的字符。
+    // 整形一次存进成员，日志与面板用的是同一串
+    bootError_ =
+        "boot " +
+        ResourceProvider::asciiForLog(payload.getProperty("stage", juce::var("unknown")).toString(),
+                                      kBootStageMaxChars) +
+        ": " +
+        ResourceProvider::asciiForLog(payload.getProperty("detail", juce::var("")).toString(), kBootDetailMaxChars);
     logDiag("front-end " + bootError_);
 
     if (bridgeReady_ || fallback_ != nullptr)
@@ -728,6 +770,24 @@ juce::WebBrowserComponent::Options WebViewHost::makeOptions()
 // -----------------------------------------------------------------------------
 void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场：这一次加载尝试已经有了结论（运行时缺失、过旧、前端启动失败或看门狗超时），网页是隐藏的，
+    // 页面多半已被 JUCE 卸成空白页。能走到这里的只有两种：切面板之前就已排进消息队列的那一次调用，
+    // 或者 WebView2 控制器在超时之后才建好、页面在隐藏状态下加载完发来的请求（见 showFallback 的注释）。
+    // 都只回执，不当作就绪，让状态保持自洽：
+    //   - 不置位 bridgeReady_：定时器不往隐藏的网页发事件，看门狗与启动失败上报的判断也不被它改写；
+    //   - 不计入活着的桥：热预算只认真正在用的桥；
+    //   - 不发首帧：网页不可见，发不出去；也不收回面板，页面是否还活着这里无从知道。
+    // 离开面板只有点重试一条路，重试会复位全部就绪状态并重新加载入口页。
+    // 回执仍给 ok：这个函数的回执形状是 { ok }，没有失败原因的位置；页面此刻也看不见。
+    // 会改窗口、改设置文件或改内存状态的另外三个桥函数（setLang、setUiScale、commitUiScale）在面板在场时回 not-ready，
+    // 守卫都在各自函数的开头，与这里同形。
+    // 桥契约时序里「收到请求立刻发首帧」在这一种情形下不适用：网页不可见，首帧没有收件人
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (requestInitialState)");
+        complete(bridge::okResponse());
+        return;
+    }
     bridgeReady_ = true; // 前端确认就绪，此后定时器才允许发送事件
     // 本实例的桥活着，共享的 WebView2 进程组必在跑，其它编辑器可按热预算起看门狗。
     // requestInitialState 可能被同一页面多次调用（页面重载后要重来一次），故用标志防重复计数
@@ -744,11 +804,18 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
 
 void WebViewHost::handleSetLang(const juce::Array<juce::var>& args, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场时拒绝，先于参数校验：隐藏的页面选的语言用户没看见，不能写进设置文件，也不能改内存里的语言。
+    // 守卫分支里不碰设置文件、语言成员与状态发送；原因见 BridgeBase.h 的 Reason::NotReady
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (setLang)");
+        complete(bridge::respondNotReady());
+        return;
+    }
     bool accepted = false;
     complete(bridge::respondSetLang(args, [this, &accepted](const juce::String& code) {
         lang_ = code;
-        uidefaults::setLangGlobal(code);
-        uidefaults::setLangChosenGlobal(true); // 用户显式选过语言，新工程不再重复问
+        uidefaults::chooseLangGlobal(code); // 语言值和「用户显式选过」位一次写完，新工程不再重复问
         accepted = true;
     }));
     if (accepted)
@@ -757,6 +824,15 @@ void WebViewHost::handleSetLang(const juce::Array<juce::var>& args, WBC::NativeF
 
 void WebViewHost::handleSetUiScale(const juce::Array<juce::var>& args, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场时拒绝，先于参数校验：窗口在切面板时被放大到不小于设计盒，这里不能再把它缩回去
+    // （固定像素布局的面板会被挤压或裁掉）；缩放档位也不能被隐藏的页面改动。
+    // 守卫分支里不碰缩放模型、窗口、设置文件与状态发送；重试时窗口按当前档位恢复
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (setUiScale)");
+        complete(bridge::respondNotReady());
+        return;
+    }
     bool windowChanged = false;
     auto response = bridge::respondSetUiScale(scale_, config_.role, args, windowChanged);
     if (windowChanged)
@@ -768,6 +844,14 @@ void WebViewHost::handleSetUiScale(const juce::Array<juce::var>& args, WBC::Nati
 
 void WebViewHost::handleCommitUiScale(const juce::Array<juce::var>&, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场时拒绝，先于待确认与锁定的判断：用户没看见隐藏页面上的确认，不能把它落盘。
+    // 守卫分支里不碰缩放模型与设置文件
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (commitUiScale)");
+        complete(bridge::respondNotReady());
+        return;
+    }
     // 确认保留后才落盘；没有待确认的预览，或处于锁定时，回执里带原因，不落盘
     complete(bridge::respondCommitUiScale(scale_, [this](float scale) { persistUiScale(scale); }));
 }

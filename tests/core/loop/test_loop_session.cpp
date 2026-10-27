@@ -783,6 +783,10 @@ namespace
 // 改 D 的用例：环里每帧写位置编码 encode(p)（缓慢上升的斜坡，相邻两帧差 1/65536）。读头读的位置一跳，回送就跳
 // ΔD/65536；常数信号看不出读位置跳没跳，所以这里不用常数。位置都在 65536 以内，编码不回绕。
 constexpr float kEncodeSlope = 1.0f / 65536.0f;
+// 交叉淡化的总长：40 ms @ 48 kHz
+constexpr std::int64_t kXfade = 1920;
+// 限速窗口：100 ms @ 48 kHz
+constexpr std::int64_t kWindow = 4800;
 
 // 读一块（块长 n），把混好的回送接在轨迹后面，再让写方写 n 帧位置编码（Input 在前、写方在后）。
 void feedEncoded(Session& s, ipc::RingSegment& ring, int n, const EngineParams& params, std::vector<float>& trace,
@@ -803,12 +807,12 @@ float maxAbs(const std::vector<float>& trace, std::size_t from)
     return worst;
 }
 
-// 改 D 时相邻样本差的上界：旧读头 5 ms（240 个样本）淡出、新读头 20 ms（960 个样本）onset，两路同时在场。
-// 每一步的变化不超过「幅度 × (1/240 + 1/960)」加上两路信号自己的变化（各一个斜率）。读位置跳 ΔD 的话，
-// 一步就是 ΔD × 斜率，本组用例的 ΔD 都让它远大于这个上界。
-float delayChangeStepBound(float amplitude)
+// 改 D 时相邻样本差的上界：斜坡信号上，旧读头读 v1、新读头读 v2 = v1 - ΔD·斜率，输出 v1 - x·ΔD·斜率，
+// x 每个样本走 1/L，所以每一步最多是「斜率的一步 + ΔD·斜率/L」。读位置直接跳 ΔD 的话，一步就是 ΔD × 斜率，
+// 本组用例的 ΔD 都让它远大于这个上界。
+float crossfadeStepBound(std::int64_t deltaD)
 {
-    return amplitude * (1.0f / 240.0f + 1.0f / 960.0f) + 2.0f * kEncodeSlope + 1.0e-6f;
+    return kEncodeSlope * (1.0f + static_cast<float>(deltaD) / static_cast<float>(kXfade)) + 1.0e-6f;
 }
 
 // 反例：旧实现「直接改 tap.delay」时，从改 D 的那一块起读头就读新的位置（包络恒为 1）。
@@ -822,7 +826,7 @@ std::vector<float> directSwitchTrace(const std::vector<float>& trace, std::size_
     return direct;
 }
 
-// 过渡走完之后（新读头的 onset 走满）输出下标 t 读的正是环位置 t − D：配对时 W = 0、R = 0，偏移为 0。
+// 交叉淡化走完之后输出下标 t 读的正是环位置 t - D：配对时 W = 0、R = 0，偏移为 0。
 void checkSettledOn(const std::vector<float>& trace, std::size_t from, std::int64_t delay)
 {
     for (std::size_t t = from; t < trace.size(); t += 17)
@@ -830,13 +834,32 @@ void checkSettledOn(const std::vector<float>& trace, std::size_t from, std::int6
         CHECK(trace[t] == encode(static_cast<std::int64_t>(t) - delay));
     }
 }
+
+// 记下改 D 的交叉淡化的起点（事件里带着绝对样本位置）与被限速挂起的次数。
+struct XfadeStarts
+{
+    std::vector<std::int64_t> at;
+    std::vector<std::int64_t> held;
+    static void sink(void* context, std::uint16_t code, std::uint8_t a, std::uint8_t, std::int64_t sample) noexcept
+    {
+        auto* self = static_cast<XfadeStarts*>(context);
+        if (code == static_cast<std::uint16_t>(LoopEventCode::kResync) &&
+            a == static_cast<std::uint8_t>(ResyncReason::kDChange))
+        {
+            self->at.push_back(sample);
+        }
+        else if (code == static_cast<std::uint16_t>(LoopEventCode::kRetargetHeld))
+        {
+            self->held.push_back(sample);
+        }
+    }
+};
 } // namespace
 
-TEST_CASE("环路 改 D（用户改延迟）：旧读头 5 ms 淡出、新读头 20 ms onset，相邻样本差不超过斜坡一步；直接改 tap.delay "
-          "会超出")
+TEST_CASE("环路 改 D（用户改延迟）：40 ms 线性交叉淡化，相邻样本差不超过斜坡一步加 ΔD/L；直接改 tap.delay 会超出")
 {
     // ⛔ 删除式验证点：D 一变就直接改写主读头的 tap.delay（读位置当场跳 600 个样本）→ 回送一步跳 600/65536，
-    //    远大于斜坡一步的上界，本用例变红。
+    //    远大于上界，本用例变红；交叉淡化缩短到 5 ms → 步长超出上界，本用例变红。
     auto ring = makeRing();
     Session s;
     s.setDeclaredBlock(kNearBlock);
@@ -859,24 +882,27 @@ TEST_CASE("环路 改 D（用户改延迟）：旧读头 5 ms 淡出、新读头
     }
     const LoopStatusFields fields = s.status();
     CHECK(fields.delayEffective == 1200);
+    CHECK(fields.delayTarget == 1200);
+    CHECK(fields.delayXfadeLeft == 0);
     CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
     CHECK(fields.resyncCount == 1u);
     CHECK(fields.tapDrop == 0u);
     CHECK(fields.overrun == 0u);
 
-    const float bound = delayChangeStepBound(maxAbs(trace, mark - 1));
+    const float bound = crossfadeStepBound(600);
     CHECK(maxStep(trace, mark - 1) <= bound);
-    // 第一个样本：旧读头满幅 + 新读头 onset 的第一步，不是跳到新位置上。
-    CHECK(std::fabs(trace[mark] - trace[mark - 1]) <= bound);
-    // onset 走满之后读的正是新的 D。
-    checkSettledOn(trace, mark + 960, 1200);
+    // 第一个样本：旧读头满增益、新读头 0，输出就是旧读头的值（不是跳到新位置上）。
+    CHECK(trace[mark] == encode(static_cast<std::int64_t>(mark) - 600));
+    // 40 ms = 1920 个样本之后读的正是新的 D，逐位相同。
+    checkSettledOn(trace, mark + static_cast<std::size_t>(kXfade), 1200);
     // 反例：直接改 tap.delay 的轨迹在改 D 的那一点跳 600 × 斜率，判据抓得住。
     CHECK(maxStep(directSwitchTrace(trace, mark, 1200), mark - 1) > 2.0f * bound);
 }
 
-TEST_CASE("环路 改 D（宿主违约当场抬 D 下限）：同样走淡出与 onset，不阶跃、不补 0；直接改 tap.delay 会超出")
+TEST_CASE("环路 改 D（宿主违约当场抬 D 下限）：旧读头在数据用完之前淡到 0，不阶跃；直接改 tap.delay 会超出")
 {
-    // ⛔ 删除式验证点：同上（直接改 tap.delay）→ 违约那一块读位置跳 424 个样本，本用例变红。
+    // ⛔ 删除式验证点：同上（直接改 tap.delay）→ 违约那一块读位置跳 424 个样本，本用例变红；
+    //    交叉淡化里的旧读头不参加「写头落后时先淡到 0」→ 旧读头读到还没写到的位置，从非零直接掉到 0，本用例变红。
     auto ring = makeRing();
     Session s;
     s.setDeclaredBlock(kNearBlock);
@@ -891,6 +917,7 @@ TEST_CASE("环路 改 D（宿主违约当场抬 D 下限）：同样走淡出与
     const std::size_t mark = trace.size();
 
     // 宿主违约：送来 1024 帧（声明 512）→ D 下限当场抬到 1024，D 从 600 变成 1024。之后回到 512。
+    // 旧读头（D = 600）在这一块的第 600 个样本起就读到还没写到的位置，要在那之前淡到 0；新读头读的都是已经写好的帧。
     feedEncoded(s, *ring, 1024, params, trace);
     for (int block = 0; block < 6; ++block)
     {
@@ -900,16 +927,17 @@ TEST_CASE("环路 改 D（宿主违约当场抬 D 下限）：同样走淡出与
     CHECK(fields.delayEffective == 1024);
     CHECK(fields.delayMinReason == static_cast<std::uint8_t>(DelayMinReason::kHostViolation));
     CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
-    CHECK(fields.overrun == 0u); // 旧读头淡出读的、新读头读的都是已经写好的帧
+    CHECK(fields.overrun == 0u); // 统计里的补 0 认主读头（新读头），它读的都是写好的帧
     CHECK(fields.tapDrop == 0u);
 
-    const float bound = delayChangeStepBound(maxAbs(trace, mark - 1));
+    // 旧读头 600 个样本淡出（1/600）+ 交叉淡化（1/1920）两条斜坡同时在场。
+    const float bound = maxAbs(trace, mark - 1) * (1.0f / 600.0f + 1.0f / 1920.0f) + 2.0f * kEncodeSlope + 1.0e-6f;
     CHECK(maxStep(trace, mark - 1) <= bound);
-    checkSettledOn(trace, mark + 960, 1024);
+    checkSettledOn(trace, mark + static_cast<std::size_t>(kXfade), 1024);
     CHECK(maxStep(directSwitchTrace(trace, mark, 1024), mark - 1) > 2.0f * bound);
 }
 
-TEST_CASE("环路 改 D（节拍模式下 BPM 变了）：同样走淡出与 onset，不阶跃；直接改 tap.delay 会超出")
+TEST_CASE("环路 改 D（节拍模式下 BPM 变了）：同样走 40 ms 交叉淡化，不阶跃；直接改 tap.delay 会超出")
 {
     // ⛔ 删除式验证点：同上（直接改 tap.delay）→ BPM 从 120 变成 150 时读位置跳 300 个样本，本用例变红。
     auto ring = makeRing();
@@ -939,20 +967,22 @@ TEST_CASE("环路 改 D（节拍模式下 BPM 变了）：同样走淡出与 ons
     CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
     CHECK(fields.tapDrop == 0u);
 
-    const float bound = delayChangeStepBound(maxAbs(trace, mark - 1));
+    const float bound = crossfadeStepBound(300);
     CHECK(maxStep(trace, mark - 1) <= bound);
-    checkSettledOn(trace, mark + 960, 1200);
+    checkSettledOn(trace, mark + static_cast<std::size_t>(kXfade), 1200);
     CHECK(maxStep(directSwitchTrace(trace, mark, 1200), mark - 1) > 2.0f * bound);
 }
 
-TEST_CASE("环路 拖着改 D（每块都变）：一次只走一个过渡，不丢读头、不阶跃，停下之后落在最后的 D 上")
+TEST_CASE("环路 拖着改 D（每块都变）：前沿限速，起点相隔恰好 100 ms，中间值合并掉，停下之后落在最后的 D 上")
 {
-    // ⛔ 删除式验证点：去掉「上一个过渡没走完时新的 D 先挂着」→ 块长 64 时每块起一个过渡，第三块读头槽就满了，
-    //    丢掉一个还在出声的读头（一处凹陷），本用例变红。
+    // ⛔ 删除式验证点：去掉限速（每块都起一段交叉淡化）→ 起点不止两个，本用例变红；
+    //    窗口到点时不再向最新的目标淡一次（只认第一次的）→ 最终停在 648，本用例变红。
     constexpr int kBlock = 64;
     auto ring = makeRing();
     Session s;
     s.setDeclaredBlock(kBlock);
+    XfadeStarts starts;
+    s.session().setEventSink(LoopEventSink(&XfadeStarts::sink, &starts));
     s.attachRing(*ring, 1);
     EngineParams params;
     params.delayMs = 12.5f; // D = 600
@@ -962,34 +992,34 @@ TEST_CASE("环路 拖着改 D（每块都变）：一次只走一个过渡，不
         feedEncoded(s, *ring, kBlock, params, trace);
     }
     const std::size_t mark = trace.size();
-    // 拖 60 块：每块 D 加 1 ms（48 个样本），600 → 3480。
+    // 拖 60 块：每块 D 加 1 ms（48 个样本），600 -> 3480。第一块的 648 立即开始，其余合并。
     for (int block = 1; block <= 60; ++block)
     {
         params.delayMs = 12.5f + static_cast<float>(block);
         feedEncoded(s, *ring, kBlock, params, trace);
     }
-    // 停下：挂着的那个 D 在上一个过渡走完之后换上，再等它的 onset 走满。
+    // 停下：窗口到点（第一次的起点之后 4800 个样本）时向最新的目标 3480 淡一次，再等它走完。
     for (int block = 0; block < 80; ++block)
     {
         feedEncoded(s, *ring, kBlock, params, trace);
     }
     const LoopStatusFields fields = s.status();
     CHECK(fields.delayEffective == 3480);
+    CHECK(fields.delayTarget == 3480);
     CHECK(fields.tapDrop == 0u);
-    const std::uint32_t transitions = fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)];
-    CHECK(transitions >= 2u);
-    CHECK(transitions < 60u); // 挂着的 D 被合并了：过渡比 D 的变化少得多
-    CHECK(maxStep(trace, mark - 1) <= delayChangeStepBound(maxAbs(trace, mark - 1)));
+    CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 2u);
+    REQUIRE(starts.at.size() == 2u);
+    CHECK(starts.at[0] == static_cast<std::int64_t>(mark)); // 第一次改动：当块的第一个样本
+    CHECK(starts.at[1] - starts.at[0] == kWindow); // 恰好 100 ms
+    CHECK(starts.held.size() == 1u); // 一次挂起只发一条事件
+    CHECK(maxStep(trace, mark - 1) <= crossfadeStepBound(3480 - 648));
     checkSettledOn(trace, trace.size() - static_cast<std::size_t>(kBlock), 3480);
 }
 
-TEST_CASE("环路 改 D 的过渡里发布的实际 D 是主读头正在读的 D：新的 D 挂着时仍是旧的，读头换上之后才是新的")
+TEST_CASE("环路 改 D 的交叉淡化里发布的实际 D 是主读头的 D，估计窗口取两个读头里较大的 D")
 {
-    // ⛔ 删除式验证点：发布目标 D（不跟主读头走）→ 新的 D 挂着的那几块里，发布的已经是新值，而主读头还在读旧的，
-    //    本用例变红。
-    //
-    // D 逐次变大（600 → 1200 → 1800）：每次换上的新读头都是全部活跃读头里 D 最大的，所以 estimatorDelay
-    // （最大的读头 D，另一条代码路径算出来的）就是主读头正在读的 D，拿它当参照。
+    // ⛔ 删除式验证点：发布目标 D（不跟主读头走）→ 新目标挂在限速窗口里的那几块，发布的已经是新值，而主读头还在读旧的，
+    //    本用例变红；估计窗口只看主读头 → D 变小的交叉淡化里窗口提前缩到新的 D，本用例变红。
     constexpr int kBlock = 64;
     auto ring = makeRing();
     Session s;
@@ -1005,46 +1035,58 @@ TEST_CASE("环路 改 D 的过渡里发布的实际 D 是主读头正在读的 D
     REQUIRE(s.status().delayEffective == 600);
     REQUIRE(s.session().delayTarget() == 600);
 
-    // 每一块都核对三处出口一致（块结果、状态快照、会话的只读访问），且等于主读头的 D。
-    const auto feedChecked = [&](float delayMs, std::int64_t& published) {
+    // 每一块都核对三处出口一致（块结果、状态快照、会话的只读访问）。
+    const auto feedChecked = [&](float delayMs) {
         params.delayMs = delayMs;
         const BlockResult result = s.feed(kBlock, TransportInfo{}, params);
         trace.insert(trace.end(), s.left(), s.left() + kBlock);
         writeFrames(*ring, kBlock);
-        published = result.delayEffective;
-        CHECK(result.delayEffective == result.estimatorDelay);
         CHECK(s.status().delayEffective == result.delayEffective);
         CHECK(s.session().delayEffective() == result.delayEffective);
+        return result;
     };
 
-    // 第一次改（没有过渡在跑）：当块就换上新读头，发布的就是新的 D。
-    std::int64_t published = 0;
-    feedChecked(25.0f, published); // D = 1200
-    CHECK(published == 1200);
+    // 第一次改（窗口早就过了）：当块就开始交叉淡化，新读头是主读头，发布的就是新的 D。
+    BlockResult result = feedChecked(25.0f); // D = 1200
+    CHECK(result.delayEffective == 1200);
+    CHECK(result.estimatorDelay == 1200);
     CHECK(s.session().delayTarget() == 1200);
+    CHECK(s.status().delayXfadeLeft == kXfade - kBlock);
 
-    // 第二次改（上一个过渡的新读头 onset 已经出声）：1800 先挂着，发布的仍是主读头在读的 1200，目标 D 已是 1800。
+    // 第二次改（D = 300）落在窗口里：先挂着，发布的仍是主读头的 1200，目标已是 300。窗口恰好在第一次起点之后
+    // 4800 个样本（75 块）到点：这之前 74 块都挂着。
     int pending = 0;
-    std::int64_t previous = published;
-    for (int block = 0; block < 60; ++block)
+    for (int block = 1; block < 75; ++block)
     {
-        feedChecked(37.5f, published); // D = 1800
-        CHECK(s.session().delayTarget() == 1800);
-        CHECK(published >= previous); // 只在读头换上的那一块跳一次
-        CHECK((published == 1200 || published == 1800));
-        pending += published == 1200 ? 1 : 0;
-        previous = published;
+        result = feedChecked(6.25f); // D = 300
+        CHECK(s.session().delayTarget() == 300);
+        CHECK(result.delayEffective == 1200);
+        CHECK(result.estimatorDelay == 1200);
+        pending += result.delayEffective == 1200 ? 1 : 0;
     }
-    CHECK(pending >= 10); // onset 20 ms = 15 块，挂着的不会是一两块
-    // 过渡走完：发布的是新的 D，读的位置也是它。
-    CHECK(published == 1800);
-    CHECK(s.status().delayEffective == 1800);
-    checkSettledOn(trace, trace.size() - static_cast<std::size_t>(kBlock), 1800);
+    CHECK(pending == 74);
+
+    // 到点：新读头（D = 300）成为主读头，发布 300；旧读头（D = 1200）在 40 ms 里还在读，估计窗口要盖住它。
+    result = feedChecked(6.25f);
+    CHECK(result.delayEffective == 300);
+    CHECK(result.estimatorDelay == 1200);
+    for (int block = 1; block < kXfade / kBlock; ++block)
+    {
+        result = feedChecked(6.25f);
+        CHECK(result.delayEffective == 300);
+        CHECK(result.estimatorDelay == 1200);
+    }
+    // 走完（1920 个样本）之后旧读头退场，估计窗口缩回新的 D。
+    result = feedChecked(6.25f);
+    CHECK(result.delayEffective == 300);
+    CHECK(result.estimatorDelay == 300);
+    CHECK(s.status().delayXfadeLeft == 0);
+    checkSettledOn(trace, trace.size() - static_cast<std::size_t>(kBlock), 300);
 }
 
 TEST_CASE("环路 改 D：D 变大到配对之前时，新读头从配对那一帧起 onset，数据出现时不以满增益冒出来")
 {
-    // ⛔ 删除式验证点：新读头的 validFrom 只取它本块读的第一个位置（不取旧读头的下界）→ onset 从配对之前算起，
+    // ⛔ 删除式验证点：新读头的 validFrom 只取它起点读的第一个位置（不取旧读头的下界）→ onset 从配对之前算起，
     //    数据在配对那一帧出现时 onset 早已走完，回送从 0 直接跳到 0.5，本用例变红。
     auto ring = makeRing();
     Session s;
@@ -1057,16 +1099,18 @@ TEST_CASE("环路 改 D：D 变大到配对之前时，新读头从配对那一�
     REQUIRE(trace.back() == 0.5f);
     const std::size_t mark = trace.size();
 
-    params.delayMs = 100.0f; // D = 4800：新位置 2048 − 4800 落在配对（位置 0）之前
+    params.delayMs = 100.0f; // D = 4800：新位置 2048 - 4800 落在配对（位置 0）之前
     runSteady(s, *ring, params, trace, 16);
     CHECK(s.status().resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
-    // 旧读头 5 ms 淡出之后是一段静音；新读头在 t = 4800 读到位置 0（配对那一帧），从那里起 20 ms onset。
-    CHECK(trace[mark + 240] == 0.0f);
+    // 旧读头 40 ms 线性淡出（0.5 -> 0）；新读头在 t = 4800 读到位置 0（配对那一帧），从那里起 20 ms onset。
+    CHECK(trace[mark] == 0.5f);
+    CHECK(trace[mark + static_cast<std::size_t>(kXfade)] == 0.0f);
     CHECK(trace[4799] == 0.0f);
     CHECK(trace[4800] > 0.0f);
     CHECK(trace[4800] < 0.01f);
     CHECK(trace.back() == 0.5f);
-    CHECK(maxStep(trace, mark - 1) <= 0.5f / 240.0f + 1.0e-6f);
+    // 最陡的是 onset（0.5 / 960），交叉淡化的淡出只有 0.5 / 1920。
+    CHECK(maxStep(trace, mark - 1) <= 0.5f / 960.0f + 1.0e-6f);
 }
 
 TEST_CASE("环路 改 D：起播沿之后改 D，新读头不越过沿上定下的下界，沿前写下的帧不会被读回来")
@@ -1090,24 +1134,37 @@ TEST_CASE("环路 改 D：起播沿之后改 D，新读头不越过沿上定下�
     transport.isPlaying = true;
     const std::size_t edge = trace.size();
     feedEncoded(s, *ring, kBlock, params, trace, transport);
-    // 紧接着改 D：480 → 960。沿上的淡出走完之后换（R = 2816），新读头本块读的第一个位置 2816 − 960 在沿之前。
+    // 紧接着改 D：480 -> 960。沿上的淡出还没走完，交叉淡化已经开始（R = 2688），新读头起点读的第一个位置 2688 - 960
+    // 在沿之前。
     params.delayMs = 20.0f;
-    for (int block = 0; block < 20; ++block)
+    for (int block = 0; block < 30; ++block)
     {
         feedEncoded(s, *ring, kBlock, params, trace, transport);
     }
     const LoopStatusFields fields = s.status();
     CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kPlay)] == 1u);
     CHECK(fields.resyncByReason[static_cast<std::size_t>(SyncReason::kDChange)] == 1u);
-    // 沿上的淡出走完之后，到新读头读到 2800（t = 3760）之前全是 0：沿前写下的帧一帧都没回来。
+    CHECK(fields.tapDrop == 0u);
+
+    // 沿上的淡出在 t = 2800 走完；沿上建的读头读到 2800 要等到 t = 3280。这之间全是 0：沿前写下的帧一帧都没回来。
     std::size_t leaked = 0;
-    for (std::size_t t = edge + 240; t < 3760; ++t)
+    for (std::size_t t = edge + 240; t < 3280; ++t)
     {
         leaked += trace[t] != 0.0f ? 1u : 0u;
     }
     CHECK(leaked == 0u);
+    // t = 3280..3759：只有沿上建的读头（D = 480）在出声，增益 = 交叉淡化的 out × 它自己的 onset（从 2800 起 960 步）。
+    // 新读头（D = 960）要到 t = 3760 才读到 2800；若它读了沿前的帧，这一段会偏离。
+    for (std::size_t t = 3280; t < 3760; t += 7)
+    {
+        const double out = 1.0 - static_cast<double>(t - 2688) / static_cast<double>(kXfade);
+        const double onset = static_cast<double>(t - 480 - 2800 + 1) / 960.0;
+        const double want = out * onset * static_cast<double>(encode(static_cast<std::int64_t>(t) - 480));
+        CHECK(std::fabs(static_cast<double>(trace[t]) - want) < 2.0e-6);
+    }
     CHECK(trace[3760] > 0.0f);
-    checkSettledOn(trace, 3760 + 960, 960);
+    // 新读头的 onset 在 t = 3760 + 960 = 4720 走满，之后读的正是新的 D。
+    checkSettledOn(trace, 4720, 960);
 }
 
 TEST_CASE("环路 超长块（n > 32768）：环路这一块不走，读头先把环拉到 W，在开头 5 ms 淡到 0，之后补 0")
@@ -1141,4 +1198,53 @@ TEST_CASE("环路 超长块（n > 32768）：环路这一块不走，读头先�
     feedInto(s, params, trace);
     CHECK(s.left()[0] == 0.5f);
     CHECK(s.session().processed() == before + kNearBlock);
+}
+
+TEST_CASE("环路 超长块落在改 D 的交叉淡化中间：淡出长度取所有读头里最短的，新读头的数据先用完时回送没有阶跃")
+{
+    // ⛔ 删除式验证点：淡出长度只看第一个读头（旧读头，D = 480）→ 新读头（D = 96）的数据读到第 96 个样本就用完，
+    //    后面读成 0，回送在那里断崖式掉下去，本用例变红。
+    constexpr int kBlock = 64;
+    auto ring = makeRing();
+    Session s;
+    s.setDeclaredBlock(kBlock);
+    s.attachRing(*ring, 1);
+    std::vector<float> trace;
+    const auto step = [&](const EngineParams& params) {
+        s.feed(kBlock, TransportInfo{}, params);
+        trace.insert(trace.end(), s.left(), s.left() + kBlock);
+        writeConstant(*ring, kBlock, 0.5f);
+    };
+    EngineParams params;
+    params.delayMs = 10.0f; // D = 480
+    for (int i = 0; i < 40; ++i)
+    {
+        step(params);
+    }
+    REQUIRE(s.status().delayEffective == 480);
+    REQUIRE(trace.back() == 0.5f);
+
+    // 改到 D = 96（2 ms）：前沿，立即开始 40 ms 交叉淡化；走 10 块（640 个样本）停在中间
+    params.delayMs = 2.0f;
+    for (int i = 0; i < 10; ++i)
+    {
+        step(params);
+    }
+    REQUIRE(s.status().delayEffective == 96);
+    const std::int64_t left = s.status().delayXfadeLeft;
+    REQUIRE(left > 0);
+    REQUIRE(left < 1920);
+    CHECK(std::fabs(trace.back() - 0.5f) < 1.0e-6f); // 常数信号上两路增益之和为 1
+
+    // 超长块：旧读头有 480 个样本可读，新读头只有 96 个，淡出走 96 个样本（取最短的）
+    const BlockResult result = s.feed(40000, TransportInfo{}, params);
+    CHECK(result.unsupportedBlock);
+    REQUIRE(result.returnLength == 96);
+    std::vector<float> faded(trace.end() - 1, trace.end());
+    faded.insert(faded.end(), s.left(), s.left() + result.returnLength);
+    faded.push_back(0.0f); // 淡出之后补 0
+    CHECK(maxStep(faded, 0) <= 0.5f / 96.0f + 1.0e-5f);
+    CHECK(std::fabs(s.left()[0] - 0.5f) < 1.0e-5f);
+    // 时间线不走：交叉淡化的剩余不变，下一块从同一个位置接着淡
+    CHECK(s.status().delayXfadeLeft == left);
 }

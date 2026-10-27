@@ -52,6 +52,13 @@ void LoopStatus::setBpm(std::uint32_t centi, std::uint8_t source) noexcept
     bpmSource_.store(source, std::memory_order_relaxed);
 }
 
+void LoopStatus::setDelayTarget(std::int64_t target, std::uint32_t hints, std::int64_t xfadeLeft) noexcept
+{
+    delayTarget_.store(target, std::memory_order_relaxed);
+    delayHints_.store(hints, std::memory_order_relaxed);
+    delayXfadeLeft_.store(xfadeLeft, std::memory_order_relaxed);
+}
+
 void LoopStatus::setTaps(std::uint32_t active, std::uint32_t dropped) noexcept
 {
     tapsActive_.store(active, std::memory_order_relaxed);
@@ -136,6 +143,9 @@ LoopStatusFields LoopStatus::snapshot() const noexcept
     fields.delayMode = delayMode_.load(std::memory_order_relaxed);
     fields.bpmCenti = bpmCenti_.load(std::memory_order_relaxed);
     fields.bpmSource = bpmSource_.load(std::memory_order_relaxed);
+    fields.delayTarget = delayTarget_.load(std::memory_order_relaxed);
+    fields.delayHints = delayHints_.load(std::memory_order_relaxed);
+    fields.delayXfadeLeft = delayXfadeLeft_.load(std::memory_order_relaxed);
 
     fields.tapsActive = tapsActive_.load(std::memory_order_relaxed);
     fields.tapDrop = tapDrop_.load(std::memory_order_relaxed);

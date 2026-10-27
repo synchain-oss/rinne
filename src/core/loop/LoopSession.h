@@ -25,6 +25,8 @@
 #include "engine/EngineParams.h"
 #include "engine/TransportInfo.h"
 #include "ipc/LoopBinding.h"
+#include "loop/BeatSync.h"
+#include "loop/DelayRetarget.h"
 #include "loop/LocalLine.h"
 #include "loop/LoopEvents.h"
 #include "loop/LoopStatus.h"
@@ -102,8 +104,9 @@ struct BlockResult
     // 引擎据此区分「补出来的 0」与「真的是 0」。
     std::uint8_t* returnValid = nullptr;
 
-    // 本块实际的 D（样本）：主读头正在读的 D，不是目标 D。改 D 的过渡里新的 D 先挂着的那几块（最长约 25 ms），
-    // 主读头还在读旧的 D，这里就还是旧的；过渡起来、新读头成为主读头的那一块起才是新的 D。还没有主读头
+    // 本块实际的 D（样本）：主读头正在读的 D，不是目标 D。改 D 的新目标落在 100 ms 限速窗口里时先挂着，
+    // 主读头还在读旧的 D，这里就还是旧的；交叉淡化开始的那一块起新读头成为主读头，这里就是新的 D
+    // （两个读头同时在跑的 40 ms 里，要覆盖两者的量看 estimatorDelay）。还没有主读头
     // （没配对、延迟线刚清空）时没有「正在读的位置」，退回目标 D。
     // 延迟下限（样本）是下一行。
     std::int64_t delayEffective = 0;
@@ -192,20 +195,26 @@ private:
     // 拉环：把环里 [pulled, W) 的帧搬进本地延迟线（经定长暂存分段搬）。比 W 早一圈减护栏的帧不读（可能正被覆盖），
     // 记 overflow；写方公告领先一圈以上的帧当作撕裂，记 torn。之后 pulled == W。
     void pullRing(const ipc::RingSegment& ring, i64 writeHead, i64 peerMaxBlock) noexcept;
-    // 主读头（没在淡出的那个）本块里「落在有效区间、但环里还没写到」的样本数：这些样本只能补 0。
+    // 一个读头本块里「落在有效区间、但环里还没写到」的样本数：这些样本只能补 0。
+    std::int64_t tapOverrun(const Tap& tap, i64 blockStart, i64 n) const noexcept;
+    // 主读头（TapSet::mainSlot）的 tapOverrun；没有主读头时是 0。统计里的「补 0」认这一个。
     std::int64_t mainTapOverrun(i64 blockStart, i64 n) const noexcept;
-    // 主读头本块要读到还没写到的位置时：在它还读得到的样本里淡到 0，补 0 之前不留阶跃。
-    void fadeMainTapAtUnderrun(i64 blockStart) noexcept;
+    // 每个没在淡出的读头（含交叉淡化里的旧读头）本块要读到还没写到的位置时：在它还读得到的样本里淡到 0，
+    // 补 0 之前不留阶跃。
+    void fadeTapsAtUnderrun(i64 blockStart, i64 n) noexcept;
     // 块首就读不到数据、上一个样本还在出声的读头（写头恰好在块边界落后：补 0、断档、失去对端）：
     // 它在上一个样本上的贡献并进末值保持，5 ms 线性衰减，回送不从末值直接落到 0。
     void holdStrandedTaps(i64 blockStart) noexcept;
     // 读头整体作废时（两端停用之后的清空、写头倒退）：上一块最后一个回送样本按末值保持 5 ms 线性衰减。
     void holdLastReturn() noexcept;
-    // 建一个新读头（onset 走 20 ms）。槽满时丢包络最小的那个，返回槽下标；没有槽时返回 -1。
-    int newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept;
-    // 改 D 的过渡：旧读头 5 ms 淡出、新读头按新的 D 建起来 20 ms onset（读位置不跳变）。一次只走一个过渡：
-    // 还有读头在淡出、或主读头的 onset 已经出声但还没走完时不换，新的 D 先挂着。返回本块是否起了一个过渡。
-    bool changeDelay(i64 blockStart, i64 delay) noexcept;
+    // 建一个新读头（onset 走 20 ms）。槽满时收掉包络最小的那个（它的末值接成 5 ms 衰减的保持，不阶跃），
+    // 返回槽下标；没有槽时返回 -1。blockStart 是本块的读位起点。
+    int newTap(i64 blockStart, i64 validFrom, i64 delay, std::int64_t onset) noexcept;
+    // 改 D：开一段 40 ms 线性交叉淡化（旧读头 1 − x、新读头 x，两路增益之和恒为 1），受 100 ms 前沿限速约束。
+    // 起点可以落在本块中间（限速窗口恰好在那个样本到点），所以结果与宿主怎么切块无关。n 是本块的样本数。
+    // 同一时刻至多一段交叉淡化；读头槽用完、窗口没到点或上一段还没走完时新目标先挂着，下一块再试。
+    // 返回本块是否开了一段交叉淡化。
+    bool startDelayCrossfade(i64 blockStart, i64 n, i64 delay) noexcept;
     // 超长块：环路这一块不走（只读不推进），回送在开头淡到 0。返回写进回送的样本数（淡出的长度，可以是 0）。
     std::int64_t fadeOutUnsupportedBlock(const BlockContext& ctx) noexcept;
     // 对端槽的事实：宿主时间戳、块序号、实时标志。没有会合段或组号不合法时什么都不读。
@@ -245,6 +254,12 @@ private:
     std::int64_t delayInUse_ = 0; // 发布的实际 D：主读头正在读的 D（没有主读头时是目标 D）
     std::int64_t delayMin_ = 0;
     std::int64_t delayRequested_ = 0; // 用户要的 D（样本）
+    std::int64_t xfadeLen_ = 1; // 交叉淡化的总长（样本）：40 ms，prepare 里按采样率换算
+    RetargetLimiter retarget_; // 改 D 的 100 ms 前沿限速
+    bool retargetHeld_ = false; // 新目标正被限速窗口挂着（每次挂起只发一条事件）
+    TempoTracker tempo_; // 节拍同步用的速度：按会话计，prepare 不清
+    SyncTargetFilter syncFilter_; // 节拍同步目标的抗抖滤波
+    std::uint32_t delayHints_ = 0; // 当前的提示位（kDelayHint*）
     DelayMinReason delayMinReason_ = DelayMinReason::kNone; // 下限从哪来
     std::int64_t maxBlockSeen_ = 0; // 本会话见过的最大块长（引擎给的 N_obs 与本块 n 取大；prepare 换采样率清零）
     bool lastPlaying_ = false;

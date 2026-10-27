@@ -17,8 +17,12 @@
 //   ⑥b tokens.css 的 --page-backdrop 是外圈色，与占位是两个角色：必须不等于占位的任何一个色标；
 //   ⑥c 占位的 C++ 真源与 --page-gradient 整张色标表逐项相同（tokens 是真源，C++ 数组与内联字面量照抄它）；
 //   ⑦ 「首帧已绘」上行信号在场：事件名与 C++ 一致，武装是嵌套两层 requestAnimationFrame 且由 paint 记录接线，
-//      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后。
-//   ⑧ 打包与接线：cmake/RinneWebAssets.cmake 的 glob 与这里的 packagedFiles 同口径（逐条解析对拍）；每个角色的
+//      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后；
+//   ⑧ 桥回执的失败原因：C++ 的 BridgeBase.h 里有哪几个原因，docs/UI_BRIDGE.md 里能返回它的函数行就写哪几个，
+//      预览里的 mock 也真的回同样的原因（含缩放锁定：全局位 scaleLocked 为真时，选档与确认回 scale-locked，没确认的预览作废；
+//      含兜底面板在场：全局位 fallbackShown 为真时，setLang、setUiScale、commitUiScale 先于参数校验回 not-ready 且什么都不改，
+//      requestInitialState 只回 ok、不发首帧）。
+//   ⑨ 打包与接线：cmake/RinneWebAssets.cmake 的 glob 与这里的 packagedFiles 同口径（逐条解析对拍）；每个角色的
 //      src/<角色>/sources-webview.cmake 以对的角色目录、命名空间调用 rinne_add_web_assets，嵌入根目录的 LICENSE，
 //      并把生成的目标链进该插件；插件入口文件包含同名头、把四个成员原样交给编辑器工厂；工厂把资源、角色、钩子原样转给网页编辑器。
 //      这几处都在插件目标里编，宿主测试编不到，是「资源没进包」一类空白窗口故障的静态面，只能靠这里的源码判据守。
@@ -30,6 +34,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 
 const ROOT = repoRoot();
@@ -54,7 +59,7 @@ function listFiles(dir, exts, recursive = false) {
 }
 
 /**
- * 打包集合的口径表：cmake/RinneWebAssets.cmake 的 glob 与这里必须逐条相同（见 ⑧）。
+ * 打包集合的口径表：cmake/RinneWebAssets.cmake 的 glob 与这里必须逐条相同（见 ⑨）。
  * dir 里的 "role" 代表本角色目录；recursive 对应 GLOB_RECURSE；exts 不含点。
  */
 const PACKAGING = [
@@ -441,7 +446,157 @@ for (const role of roles) {
     }
 }
 
-// ---------------------------------------------------------------- ⑧ 打包与接线
+// ---------------------------------------------------------------- ⑧ 桥回执的失败原因
+// 哪个函数能回哪个原因，是契约表（docs/UI_BRIDGE.md 的函数表）的内容；这里把「C++ 有哪些原因」「文档的行里写没写」
+// 「mock 回不回」三方对起来。C++ 多出一个原因而这张表没跟上，会判红，逼着同批改文档与 mock。
+const REASON_FUNCTIONS = {
+    "bad-lang": ["setLang"],
+    "bad-scale": ["setUiScale"],
+    "scale-locked": ["setUiScale", "commitUiScale"],
+    "no-pending": ["commitUiScale"],
+    "not-ready": ["setLang", "setUiScale", "commitUiScale"],
+};
+
+/** 从 BridgeBase.h 抽 namespace Reason 里的字符串值（先去注释）；抽不到 namespace 给 null。 */
+function extractCppReasons(rawText) {
+    const text = stripCppComments(rawText);
+    const body = /\bnamespace\s+Reason\s*\{([\s\S]*?)\}/.exec(text)?.[1] ?? null;
+    if (body === null) return null;
+    return [...body.matchAll(/=\s*"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/** 文档函数表里某个函数那一行（第一列是反引号包的函数名）；找不到给 null。 */
+function docFunctionRow(docText, fn) {
+    const prefix = `| \`${fn}\` |`;
+    return docText.split("\n").find((line) => line.startsWith(prefix)) ?? null;
+}
+
+{
+    // 抽取器自测
+    run.eq(
+        extractCppReasons(
+            'namespace Reason {\n// inline constexpr const char* Old = "old-reason";\n/* X = "block-reason" */\n' +
+                'inline constexpr const char* A = "a-b";\n}',
+        ),
+        ["a-b"],
+        "抽取器自测：Reason 里被注释掉的值不算",
+    );
+    run.eq(extractCppReasons('namespace Other { auto x = "y"; }'), null, "抽取器自测：没有 Reason 命名空间给 null");
+    run.eq(
+        docFunctionRow("| `setLang` | a |\n| `setLangX` | b |", "setLang"),
+        "| `setLang` | a |",
+        "抽取器自测：文档行按整个函数名匹配",
+    );
+    run.eq(docFunctionRow("| `setLangX` | b |", "setLang"), null, "抽取器自测：只是前缀相同的函数名不算");
+
+    const cppReasons = extractCppReasons(read("src/plugin-common/BridgeBase.h"));
+    run.check(cppReasons !== null, "⑧ BridgeBase.h 里找不到 namespace Reason");
+    run.eq(
+        [...(cppReasons ?? [])].sort(),
+        Object.keys(REASON_FUNCTIONS).sort(),
+        "⑧ BridgeBase.h 的失败原因与本断言登记的不一致",
+    );
+
+    const doc = read("docs/UI_BRIDGE.md");
+    for (const [reason, fns] of Object.entries(REASON_FUNCTIONS)) {
+        for (const fn of fns) {
+            const row = docFunctionRow(doc, fn);
+            run.check(row !== null, `⑧ UI_BRIDGE.md 的函数表里找不到 ${fn}`);
+            run.check(
+                row !== null && row.includes(`reason: "${reason}"`),
+                `⑧ UI_BRIDGE.md 里 ${fn} 一行没写失败原因 ${reason}`,
+            );
+        }
+    }
+
+    // mock 的行为：同一批原因，同样的函数
+    const u = (f) => pathToFileURL(path.join(ROOT, f)).href;
+    const { createPreviewSession } = await import(u("web-preview/mock/state-driver.js"));
+    const { memoryStorage, UI_DEFAULTS_KEY } = await import(u("web-preview/mock/bridge-common.js"));
+    for (const role of roles) {
+        const store = { local: memoryStorage(), session: memoryStorage() };
+        const session = createPreviewSession({ role, params: "auto=0", storage: store });
+        session.mock.requestInitialState();
+        const m = session.mock;
+        const preset = session.core.box.presets.find((f) => f !== 1);
+        const reasonOf = (r) => (r.ok === false ? r.reason : "ok");
+
+        run.eq(reasonOf(m.setLang("de")), "bad-lang", `${role}：⑧ mock 的 setLang 对不认识的语言码应回 bad-lang`);
+        run.eq(reasonOf(m.setUiScale(0.123)), "bad-scale", `${role}：⑧ mock 的 setUiScale 对表外档位应回 bad-scale`);
+        run.eq(reasonOf(m.commitUiScale()), "no-pending", `${role}：⑧ mock 的 commitUiScale 没有预览时应回 no-pending`);
+
+        // 没锁定：选档、确认都成功
+        run.eq(reasonOf(m.setUiScale(preset)), "ok", `${role}：⑧ 没锁定时 setUiScale 应成功`);
+        run.eq(reasonOf(m.commitUiScale()), "ok", `${role}：⑧ 没锁定时 commitUiScale 应成功`);
+        const confirmed = preset;
+
+        // 预览中锁定：选档与确认都回 scale-locked，窗口钉回 1，没确认的预览作废
+        const preview = session.core.box.presets.find((f) => f !== 1 && f !== confirmed);
+        run.eq(reasonOf(m.setUiScale(preview)), "ok", `${role}：⑧ 锁定前先放一个待确认的预览`);
+        session.core.defaults.set({ scaleLocked: true });
+        run.eq(reasonOf(m.setUiScale(preset)), "scale-locked", `${role}：⑧ 锁定时 setUiScale 应回 scale-locked`);
+        run.eq(session.model.scale, 1, `${role}：⑧ 锁定时窗口档位应钉在 1`);
+        run.eq(reasonOf(m.commitUiScale()), "scale-locked", `${role}：⑧ 锁定时 commitUiScale 应回 scale-locked`);
+
+        // 解锁后，锁定前没确认的预览不会复活，窗口档位回到锁定前最近一次确认的那一档（不是没确认的预览，也不是 1）
+        session.core.defaults.set({ scaleLocked: false });
+        run.eq(reasonOf(m.commitUiScale()), "no-pending", `${role}：⑧ 解锁后，锁定时作废的预览不能再确认`);
+        run.eq(session.model.scale, confirmed, `${role}：⑧ 解锁后窗口档位应回到最近一次确认的 ${confirmed}`);
+
+        // 兜底面板在场：三个会改状态的函数先拒，先于参数校验，回执与参数无关，什么都不改；撤掉后一切照常
+        const keyScale = role === "input" ? "uiScaleInput" : "uiScaleOutput";
+        const stored = () => session.core.defaults.get();
+        run.eq(reasonOf(m.setLang("en")), "ok", `${role}：⑧ 面板不在场时 setLang 应成功`);
+        run.eq(reasonOf(m.setUiScale(preview)), "ok", `${role}：⑧ 面板出现前先放一个待确认的预览`);
+        const scaleBefore = session.model.scale;
+        session.core.defaults.set({ fallbackShown: true });
+        run.eq(reasonOf(m.setLang("fr")), "not-ready", `${role}：⑧ 面板在场时 setLang 应回 not-ready`);
+        run.eq(
+            reasonOf(m.setLang("de")),
+            "not-ready",
+            `${role}：⑧ 面板在场时，坏语言码也先回 not-ready（守卫先于参数校验）`,
+        );
+        run.eq(reasonOf(m.setUiScale(preset)), "not-ready", `${role}：⑧ 面板在场时 setUiScale 应回 not-ready`);
+        run.eq(
+            reasonOf(m.setUiScale(0.123)),
+            "not-ready",
+            `${role}：⑧ 面板在场时，坏档位也先回 not-ready（守卫先于参数校验）`,
+        );
+        run.eq(
+            reasonOf(m.commitUiScale()),
+            "not-ready",
+            `${role}：⑧ 面板在场时 commitUiScale 应回 not-ready，即使有待确认的预览`,
+        );
+        run.eq(stored().lang, "en", `${role}：⑧ 面板在场时 setLang 不能写全局位`);
+        run.eq(session.model.scale, scaleBefore, `${role}：⑧ 面板在场时 setUiScale 不能动窗口档位`);
+        run.eq(stored()[keyScale], confirmed, `${role}：⑧ 面板在场时 commitUiScale 不能落盘`);
+        session.core.defaults.set({ fallbackShown: false });
+        run.eq(reasonOf(m.setLang("de")), "bad-lang", `${role}：⑧ 面板撤掉后 setLang 照常校验参数`);
+        run.eq(reasonOf(m.setLang("fr")), "ok", `${role}：⑧ 面板撤掉后 setLang 应成功`);
+        run.eq(stored().lang, "fr", `${role}：⑧ 面板撤掉后 setLang 应写全局位`);
+        run.eq(
+            reasonOf(m.commitUiScale()),
+            "ok",
+            `${role}：⑧ 面板撤掉后，面板出现前的预览仍可确认（没被 not-ready 吃掉）`,
+        );
+        run.eq(stored()[keyScale], preview, `${role}：⑧ 面板撤掉后确认应把预览档位落盘`);
+
+        // 面板在场时的 requestInitialState：只回执，不发首帧，也不置就绪
+        const coldStore = { local: memoryStorage(), session: memoryStorage() };
+        coldStore.local.setItem(UI_DEFAULTS_KEY, JSON.stringify({ fallbackShown: true }));
+        const cold = createPreviewSession({ role, params: "auto=0", storage: coldStore });
+        run.eq(cold.mock.requestInitialState(), { ok: true }, `${role}：⑧ 面板在场时 requestInitialState 只回 ok`);
+        run.eq(cold.core.ready, false, `${role}：⑧ 面板在场时 requestInitialState 不置就绪`);
+        run.eq(cold.core.sent["rinne.state"] ?? 0, 0, `${role}：⑧ 面板在场时 requestInitialState 不发首帧`);
+        cold.core.defaults.set({ fallbackShown: false });
+        run.eq(cold.mock.requestInitialState(), { ok: true }, `${role}：⑧ 面板撤掉后 requestInitialState 照常`);
+        run.eq(cold.core.ready, true, `${role}：⑧ 面板撤掉后 requestInitialState 置就绪`);
+        run.check((cold.core.sent["rinne.state"] ?? 0) >= 1, `${role}：⑧ 面板撤掉后 requestInitialState 发首帧`);
+    }
+}
+
+
+// ---------------------------------------------------------------- ⑨ 打包与接线
 // 嵌入、入口、工厂这三处都在插件目标里编，宿主测试编不到，写错了的症状是空白窗口加看门狗超时，
 // 而页面预览（按真实目录服务）照样全绿。所以这里把它们当文本读，逐项断言。
 
@@ -585,12 +740,12 @@ function checkFactoryForwarding(text) {
     run.eq(
         parseCmakeGlobRules(goodGlobs),
         { "r:role": ["html", "js"], "f:shared": ["js", "png"] },
-        "⑧ 自测：glob 规则按递归与否分键，注释掉的和 EXTRA_DIRS 的不算",
+        "⑨ 自测：glob 规则按递归与否分键，注释掉的和 EXTRA_DIRS 的不算",
     );
     run.eq(
         tableRules([{ dir: "x", recursive: true, exts: ["js", "css"] }]),
         { "r:x": ["css", "js"] },
-        "⑧ 自测：口径表与 cmake 解析是同一种形态",
+        "⑨ 自测：口径表与 cmake 解析是同一种形态",
     );
 
     const goodCmake = `
@@ -603,38 +758,38 @@ function checkFactoryForwarding(text) {
         target_link_libraries(RinneInput PRIVATE RinneInputWebAssets)`;
     const want = { role: "input", plugin: "RinneInput", namespace: "RinneInputWebData" };
     const cmakeProblems = (text) => checkRoleCmake(text, want);
-    run.eq(cmakeProblems(goodCmake), [], "⑧ 自测：好的 sources-webview.cmake 零问题");
-    run.eq(cmakeProblems("# 只有注释"), ["没有调用 rinne_add_web_assets"], "⑧ 自测：没有调用要报");
+    run.eq(cmakeProblems(goodCmake), [], "⑨ 自测：好的 sources-webview.cmake 零问题");
+    run.eq(cmakeProblems("# 只有注释"), ["没有调用 rinne_add_web_assets"], "⑨ 自测：没有调用要报");
     run.eq(
         cmakeProblems(goodCmake.replace("ROLE_DIR input", "ROLE_DIR output")),
         ["ROLE_DIR 应为 input，实得 output"],
-        "⑧ 自测：角色目录写错要报",
+        "⑨ 自测：角色目录写错要报",
     );
     run.eq(
         cmakeProblems(goodCmake.replace("NAMESPACE RinneInputWebData", "NAMESPACE RinneOutputWebData")),
         ["NAMESPACE 应为 RinneInputWebData，实得 RinneOutputWebData"],
-        "⑧ 自测：命名空间写错要报",
+        "⑨ 自测：命名空间写错要报",
     );
     run.check(
         cmakeProblems(goodCmake.replace(/\s*LICENSE_FILE[^)]*\)/, ")")).some((p) => p.startsWith("LICENSE_FILE")),
-        "⑧ 自测：漏掉 LICENSE_FILE 要报",
+        "⑨ 自测：漏掉 LICENSE_FILE 要报",
     );
     run.check(
         cmakeProblems(goodCmake.replace("PRIVATE RinneInputWebAssets", "PRIVATE Other")).some((p) =>
             p.startsWith("没有把"),
         ),
-        "⑧ 自测：没把资源目标链进插件要报",
+        "⑨ 自测：没把资源目标链进插件要报",
     );
     run.check(
         cmakeProblems(
             goodCmake.replace("target_link_libraries(RinneInput ", "# target_link_libraries(RinneInput "),
         ).some((p) => p.startsWith("没有把")),
-        "⑧ 自测：注释掉的链接不算",
+        "⑨ 自测：注释掉的链接不算",
     );
     run.eq(
         parseAddWebAssetsCall("rinne_add_web_assets(TARGET T NAMESPACE N ROLE_DIR r EXTRA_DIRS a b)")?.EXTRA_DIRS,
         ["a", "b"],
-        "⑧ 自测：EXTRA_DIRS 收齐",
+        "⑨ 自测：EXTRA_DIRS 收齐",
     );
 
     const goodDir = [
@@ -645,16 +800,16 @@ function checkFactoryForwarding(text) {
         '  include("${_part}")',
         "endforeach()",
     ].join(String.fromCharCode(10));
-    run.eq(checkDirCmake(goodDir), [], "⑧ 自测：好的目录 CMakeLists 零问题");
+    run.eq(checkDirCmake(goodDir), [], "⑨ 自测：好的目录 CMakeLists 零问题");
     run.check(
         checkDirCmake(goodDir.replace("/sources-*.cmake", "/source-*.cmake")).some((p) =>
             p.startsWith("没有按 sources"),
         ),
-        "⑧ 自测：注释里还留着 sources-*.cmake 也不能让改坏的收集通过",
+        "⑨ 自测：注释里还留着 sources-*.cmake 也不能让改坏的收集通过",
     );
     run.check(
         checkDirCmake(goodDir.replace("  include(", "  message(")).includes("收集到的文件没有被 include"),
-        "⑧ 自测：收集了不 include 要报",
+        "⑨ 自测：收集了不 include 要报",
     );
     run.check(
         checkDirCmake(
@@ -663,7 +818,7 @@ function checkFactoryForwarding(text) {
                 '# file(GLOB _parts CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/sources-*.cmake")',
             ].join(String.fromCharCode(10)),
         ).some((p) => p.startsWith("没有按 sources")),
-        "⑧ 自测：被注释掉的收集不算",
+        "⑨ 自测：被注释掉的收集不算",
     );
     run.check(
         checkDirCmake(
@@ -671,7 +826,7 @@ function checkFactoryForwarding(text) {
                 String.fromCharCode(10),
             ),
         ).some((p) => p.includes("juce_add_plugin 之前")),
-        "⑧ 自测：收集排在 juce_add_plugin 之前要报",
+        "⑨ 自测：收集排在 juce_add_plugin 之前要报",
     );
 
     const goodEntry = `
@@ -686,28 +841,28 @@ function checkFactoryForwarding(text) {
         }`;
     const wantEntry = { role: "input", namespace: "RinneInputWebData" };
     const entryProblems = (text) => checkEntrySource(text, wantEntry);
-    run.eq(entryProblems(goodEntry), [], "⑧ 自测：好的入口文件零问题");
+    run.eq(entryProblems(goodEntry), [], "⑨ 自测：好的入口文件零问题");
     run.check(
         entryProblems(
             goodEntry.replace("#include <RinneInputWebData.h>", "// #include <RinneInputWebData.h>"),
         ).includes("没有包含 <RinneInputWebData.h>"),
-        "⑧ 自测：注释掉的包含不算",
+        "⑨ 自测：注释掉的包含不算",
     );
     run.check(
         entryProblems(goodEntry.replace("&RinneInputWebData::getNamedResource", "nullptr")).includes(
             "没有把 RinneInputWebData::getNamedResource 交给工厂",
         ),
-        "⑧ 自测：漏交一个成员要报",
+        "⑨ 自测：漏交一个成员要报",
     );
     run.check(
         entryProblems(goodEntry.replace('"input"', '"output"')).includes('options.role 不是 "input"'),
-        "⑧ 自测：角色写错要报",
+        "⑨ 自测：角色写错要报",
     );
     run.check(
         entryProblems(goodEntry.replace("options.probeEditorFactory = ", "auto unused = ")).includes(
             "探针编辑器没有经 options.probeEditorFactory 注入",
         ),
-        "⑧ 自测：探针没有注入要报",
+        "⑨ 自测：探针没有注入要报",
     );
     run.check(
         entryProblems(
@@ -716,13 +871,13 @@ function checkFactoryForwarding(text) {
                 "new juce::GenericAudioProcessorEditor(*this)",
             ),
         ).length >= 2,
-        "⑧ 自测：入口绕过工厂自己造通用编辑器要报",
+        "⑨ 自测：入口绕过工厂自己造通用编辑器要报",
     );
     run.check(
         entryProblems(goodEntry + "\nauto x = RinneOutputWebData::namedResourceList;").some((p) =>
             p.includes("另一个角色"),
         ),
-        "⑧ 自测：串到另一个角色的命名空间要报",
+        "⑨ 自测：串到另一个角色的命名空间要报",
     );
 
     const goodFactory = [
@@ -730,7 +885,7 @@ function checkFactoryForwarding(text) {
         "config.resourceSource = options.resources;",
         "config.controls = options.controls;",
     ].join(String.fromCharCode(10));
-    run.eq(checkFactoryForwarding(goodFactory), [], "⑧ 自测：好的工厂转发零问题");
+    run.eq(checkFactoryForwarding(goodFactory), [], "⑨ 自测：好的工厂转发零问题");
     run.eq(
         checkFactoryForwarding(
             goodFactory.replace(
@@ -739,70 +894,70 @@ function checkFactoryForwarding(text) {
             ),
         ),
         ["config.resourceSource 没有取自 options"],
-        "⑧ 自测：资源没转给网页编辑器要报（空 Source 会让窗口空白）",
+        "⑨ 自测：资源没转给网页编辑器要报（空 Source 会让窗口空白）",
     );
     run.eq(
         checkFactoryForwarding(goodFactory.replace("config.controls = options.controls;", "")),
         ["config.controls 没有取自 options"],
-        "⑧ 自测：钩子没转要报",
+        "⑨ 自测：钩子没转要报",
     );
 }
 
-// ⑧-1 cmake 的打包 glob 与本脚本的口径表逐条相同
+// ⑨-1 cmake 的打包 glob 与本脚本的口径表逐条相同
 const webAssetsCmake = read("cmake/RinneWebAssets.cmake");
 run.eq(
     parseCmakeGlobRules(webAssetsCmake),
     tableRules(PACKAGING),
-    "⑧ cmake/RinneWebAssets.cmake 的打包 glob 与 packagedFiles 的口径不同（改一处要同批改另一处）",
+    "⑨ cmake/RinneWebAssets.cmake 的打包 glob 与 packagedFiles 的口径不同（改一处要同批改另一处）",
 );
 run.check(
     /HEADER_NAME\s+\$\{ARG_NAMESPACE\}\.h\b/.test(stripCmakeComments(webAssetsCmake)),
-    "⑧ juce_add_binary_data 的头文件名应为 <NAMESPACE>.h（插件入口按这个名字包含）",
+    "⑨ juce_add_binary_data 的头文件名应为 <NAMESPACE>.h（插件入口按这个名字包含）",
 );
 
-// ⑧-2 根 CMakeLists：先 include 资源函数，再进插件目录
+// ⑨-2 根 CMakeLists：先 include 资源函数，再进插件目录
 const rootCmake = stripCmakeComments(read("CMakeLists.txt"));
 const includeAt = rootCmake.indexOf("include(RinneWebAssets");
 run.check(
     includeAt >= 0 && includeAt < rootCmake.indexOf("add_subdirectory(src/input)"),
-    "⑧ 根 CMakeLists 必须在 add_subdirectory(src/input) 之前 include(RinneWebAssets)",
+    "⑨ 根 CMakeLists 必须在 add_subdirectory(src/input) 之前 include(RinneWebAssets)",
 );
 
-// ⑧-3 两个角色：cmake 调用、入口文件
+// ⑨-3 两个角色：cmake 调用、入口文件
 for (const role of roles) {
     const cap = role[0].toUpperCase() + role.slice(1);
     const plugin = `Rinne${cap}`;
     const namespace = `${plugin}WebData`;
 
     for (const p of checkDirCmake(read(`src/${role}/CMakeLists.txt`))) {
-        run.check(false, `${role}：⑧ src/${role}/CMakeLists.txt：${p}`);
+        run.check(false, `${role}：⑨ src/${role}/CMakeLists.txt：${p}`);
     }
     const cmakeFile = `src/${role}/sources-webview.cmake`;
-    run.check(exists(cmakeFile), `${role}：⑧ 缺 ${cmakeFile}（页面资源没有嵌进插件）`);
+    run.check(exists(cmakeFile), `${role}：⑨ 缺 ${cmakeFile}（页面资源没有嵌进插件）`);
     if (exists(cmakeFile)) {
         const text = read(cmakeFile);
         for (const p of checkRoleCmake(text, { role, plugin, namespace }))
-            run.check(false, `${role}：⑧ ${cmakeFile}：${p}`);
+            run.check(false, `${role}：⑨ ${cmakeFile}：${p}`);
         // 调用点带了 EXTRA_DIRS 时，口径表里要有对应的行，否则 packagedFiles 与实际嵌入不同
         for (const d of parseAddWebAssetsCall(text)?.EXTRA_DIRS ?? []) {
             run.check(
                 PACKAGING.some((r) => r.dir === d),
-                `${role}：⑧ ${cmakeFile} 的 EXTRA_DIRS 有 ${d}，packagedFiles 的口径表里没有`,
+                `${role}：⑨ ${cmakeFile} 的 EXTRA_DIRS 有 ${d}，packagedFiles 的口径表里没有`,
             );
         }
     }
     const entryFile = `src/${role}/${cap}PluginEntry.cpp`;
-    run.check(exists(entryFile), `${role}：⑧ 缺 ${entryFile}`);
+    run.check(exists(entryFile), `${role}：⑨ 缺 ${entryFile}`);
     if (exists(entryFile)) {
         for (const p of checkEntrySource(read(entryFile), { role, namespace }))
-            run.check(false, `${role}：⑧ ${entryFile}：${p}`);
+            run.check(false, `${role}：⑨ ${entryFile}：${p}`);
     }
 }
-run.check(exists(LICENSE_FILE), `⑧ 仓库根没有 ${LICENSE_FILE}（随包嵌入的许可证文本）`);
+run.check(exists(LICENSE_FILE), `⑨ 仓库根没有 ${LICENSE_FILE}（随包嵌入的许可证文本）`);
 
-// ⑧-4 工厂把 Options 原样转给网页编辑器
+// ⑨-4 工厂把 Options 原样转给网页编辑器
 for (const p of checkFactoryForwarding(read("src/plugin-common/RinneEditorFactory.cpp"))) {
-    run.check(false, `⑧ src/plugin-common/RinneEditorFactory.cpp：${p}`);
+    run.check(false, `⑨ src/plugin-common/RinneEditorFactory.cpp：${p}`);
 }
 
 run.finish();

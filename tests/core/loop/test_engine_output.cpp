@@ -546,7 +546,7 @@ TEST_CASE("引擎 L3-10 事件码不落在 0x0200–0x02FF（安全链段）", "
     static_assert(static_cast<std::uint16_t>(EngineEventCode::kUnsupportedBlock) >= 0x0400u, "引擎段从 0x0400 起");
     static_assert(static_cast<std::uint16_t>(EngineEventCode::kNonRealtime) <= 0x04FFu, "引擎段到 0x04FF 止");
     static_assert(static_cast<std::uint16_t>(rinne::loop::LoopEventCode::kResync) >= 0x0300u, "环路段从 0x0300 起");
-    static_assert(static_cast<std::uint16_t>(rinne::loop::LoopEventCode::kTapDropped) <= 0x03FFu, "环路段到 0x03FF 止");
+    static_assert(static_cast<std::uint16_t>(rinne::loop::LoopEventCode::kDelayHints) <= 0x03FFu, "环路段到 0x03FF 止");
 
     OutputEngine output;
     output.prepare(kSr, 1024);
@@ -620,11 +620,12 @@ TEST_CASE("引擎 L3-12 TransportInfo 的默认与语义：时间戳有效位、
     CHECK(input.loopStatus().bpmSource == static_cast<std::uint8_t>(rinne::loop::BpmSource::kHost));
 }
 
-TEST_CASE("引擎 改 D 的过渡里 Input 槽的 d_eff 与状态快照一致，都是主读头正在读的 D，新的 D 挂着时仍是旧的",
+TEST_CASE("引擎 改 D 的交叉淡化里 Input 槽的 d_eff 与状态快照一致，都是主读头的 D：新目标挂在限速窗口里时仍是旧的",
           "[engine][loop]")
 {
-    // ⛔ 删除式验证点：发布目标 D → 新的 D 挂着的那几块里 d_eff 已经是新值，主读头还在读旧的，本用例变红。
-    // D 逐次变大，最大的读头 D（estimatorDelay）就是主读头正在读的 D，拿它当参照。
+    // ⛔ 删除式验证点：发布目标 D → 新的 D 挂着的那几块里 d_eff 已经是新值，主读头还在读旧的，本用例变红；
+    //    限速窗口不按 100 ms 的样本数算 → 挂起的块数不是 74，本用例变红。
+    // D 逐次变大，最大的读头 D（estimatorDelay）就是主读头的 D，拿它当参照。
     constexpr int kBlock = 64;
     Loop loop(kBlock);
     const RoleSlot& in = roleSlot(*loop.rv, 1, Role::kInput);
@@ -642,17 +643,18 @@ TEST_CASE("引擎 改 D 的过渡里 Input 槽的 d_eff 与状态快照一致，
     }
     REQUIRE(in.d_eff.load() == 600u);
 
-    CHECK(step(25.0f) == 1200); // 没有过渡在跑：当块就换上
+    CHECK(step(25.0f) == 1200); // 第一次改：前沿立即开始，当块新读头就是主读头
+    // 第二次改（D = 1800）落在 100 ms 窗口里：先挂着，窗口恰好在第一次起点之后 4800 个样本（75 块）到点。
     int pending = 0;
     std::int64_t published = 0;
-    for (int block = 0; block < 60; ++block)
+    for (int block = 0; block < 100; ++block)
     {
-        published = step(37.5f); // D = 1800：上一个过渡的 onset 还没走完，先挂着
+        published = step(37.5f);
         CHECK((published == 1200 || published == 1800));
         pending += published == 1200 ? 1 : 0;
     }
-    CHECK(pending >= 10);
-    CHECK(published == 1800); // 走完之后才是新的 D
+    CHECK(pending == 74);
+    CHECK(published == 1800); // 到点之后才是新的 D
 }
 
 TEST_CASE("引擎 混合律：m = mixPercent / 100 的四个点", "[engine]")

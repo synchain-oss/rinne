@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <limits>
 
 namespace rinne::loop
 {
@@ -116,7 +115,10 @@ void StreamSync::clearLine(LocalLine& line, i64 writeHead, SyncOutcome& outcome)
 // 旧回送开始淡出：给还没在淡出的活跃读头挂淡出包络，并把淡出要用的那一段预拷贝进尾巴区。
 //
 // 预拷贝的位置：淡出期间读头读的是 R + off − D 起的 fadeLength 帧（本块的下标 i 从 0 开始）。
-// 取全部淡出读头的并集，一段就够（尾巴区是定长的）。尾巴只拷得到已经拉进来的部分（判据在拉环之前跑），
+// 尾巴区的格号就是读头的槽号：每个读头只写自己的那一格，一格只有一个属主。交叉淡化里的两个读头读的位置相差一个 D，
+// 各占一格；淡出还没走完又来一次重同步时，新挂淡出的读头写它自己的格，仍在淡出的读头的尾巴原样留着，
+// 读到的永远是自己的快照。读头槽被收掉重建时，新读头沿用这个格号，旧的内容只在它自己挂淡出时才被覆盖。
+// 尾巴只拷得到已经拉进来的部分（判据在拉环之前跑），
 // 本块拉环之后才到的那部分在淡出的几毫秒里留在主区（主区容得下 D 的上限加一个最大块长，几毫秒内不会被覆盖）。
 //
 // fadeEnd 是旧读头的 validTo：淡出期间不读这个位置及以后。调用方给的是「本块拉环之后有数据的上界」：
@@ -130,8 +132,6 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
 {
     const std::int64_t length = fadeLength > 0 ? fadeLength : 1;
 
-    i64 lo = std::numeric_limits<i64>::max();
-    i64 hi = std::numeric_limits<i64>::min();
     bool any = false;
     for (int i = 0; i < kMaxTaps; ++i)
     {
@@ -141,21 +141,14 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
             continue;
         }
         any = true;
-        const i64 from = processed + tap.offset - tap.delay;
-        lo = std::min(lo, from);
-        hi = std::max(hi, from + length);
+        // 预拷贝尾巴：淡出要用的那一段里已经拉进来的部分先拷出来，此后读那一段不再依赖延迟线的主区。
+        line.snapshotRange(processed + tap.offset - tap.delay, length, i);
     }
     if (!any)
     {
         return;
     }
     outcome.fadeStarted = true;
-
-    // 预拷贝尾巴：淡出要用的那一段里已经拉进来的部分先拷出来，此后读那一段不再依赖延迟线的主区。
-    if (hi > lo)
-    {
-        line.snapshotRange(lo, hi - lo);
-    }
 
     // 淡出：包络从当前值线性降到 0；validTo 收到 fadeEnd，淡出期间不再读那以后的位置。
     for (int i = 0; i < kMaxTaps; ++i)
@@ -171,13 +164,6 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
         tap.env.fadeOutSteps = std::clamp<std::int64_t>(available, 1, length);
         tap.env.fadeOutStep = 0;
     }
-}
-
-bool StreamSync::fadeForDelayChange(LocalLine& line, TapSet& taps, i64 processed, i64 fadeEnd) noexcept
-{
-    SyncOutcome outcome;
-    startFade(line, taps, processed, fadeOut_, fadeEnd, outcome);
-    return outcome.fadeStarted;
 }
 
 void StreamSync::notePlayReset(i64 processed, i64 n, SyncOutcome& outcome) noexcept
