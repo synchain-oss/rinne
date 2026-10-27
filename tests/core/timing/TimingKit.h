@@ -5,6 +5,10 @@
 // 约定：Input 在前、写方在后。每一块先读（feed），再让写方写同样多的帧（write），所以块首的写头恰好等于读位 R，
 // 同一串输入怎么切块，每一块看到的环都是同一份：块长不同的两次运行才有资格逐位比较。
 //
+// 会合段（可选）：enablePeerSlot() 之后 Rig 带一份会合段，step / stepOutputFirst 在写方写完之后替「Output 端」
+// 发布它的槽（宿主时间戳取本块 transport 的，实时标志取离线位，块序号 +1），错序与导出用例据此得到一份
+// 和真宿主一样「每个周期两端各发布一次」的对端证据。
+//
 // 信号：noiseAt(p) 是绝对位置 p 的哈希，落在 [-0.5, 0.5)，24 位整数除以 2^24，float 精确表示。
 // 它没有任何斜率可言，所以读位置错一个样本、增益错一个比特，输出都会变。
 #pragma once
@@ -23,6 +27,7 @@
 #include "engine/TransportInfo.h"
 #include "ipc/LoopBinding.h"
 #include "ipc/LoopRing.h"
+#include "ipc/SegmentLayout.h"
 #include "loop/LoopEvents.h"
 #include "loop/LoopSession.h"
 #include "loop/LoopStatus.h"
@@ -135,6 +140,12 @@ public:
     {
         BlockContext ctx(params, transport);
         ctx.ring = ring_;
+        if (rv_ != nullptr)
+        {
+            ctx.rendezvous = rv_.get();
+            ctx.group = 1;
+            ctx.role = ipc::Role::kInput;
+        }
         ctx.declaredBlock = declaredBlock_;
         ctx.observedBlock = declaredBlock_;
         ctx.blockLength = n;
@@ -169,12 +180,44 @@ public:
         }
     }
 
+    // 带上一份会合段，之后 step / stepOutputFirst 替 Output 端发布它的槽
+    void enablePeerSlot()
+    {
+        if (rv_ == nullptr)
+        {
+            rv_ = std::make_unique<ipc::RvSegment>();
+        }
+    }
+    bool hasPeerSlot() const { return rv_ != nullptr; }
+    ipc::RoleSlot& outputSlot() { return ipc::roleSlot(*rv_, 1, ipc::Role::kOutput); }
+    // 对端报告违约（kRtOverMax）：之后发布的槽带上这一位
+    void setPeerOverMax(bool on) { peerOverMax_ = on; }
+
+    // 替 Output 端发布它的槽：宿主时间戳（没给就是 0）、实时标志、块序号 +1（最后 release）。
+    void publishPeer(const TransportInfo& transport)
+    {
+        if (rv_ == nullptr)
+        {
+            return;
+        }
+        ipc::RoleSlot& slot = outputSlot();
+        slot.last_host_ns.store(transport.hostNsValid ? transport.hostNs : 0u, std::memory_order_relaxed);
+        std::uint32_t flags = transport.nonrealtime ? ipc::kRtNonrealtime : 0u;
+        if (peerOverMax_)
+        {
+            flags |= ipc::kRtOverMax;
+        }
+        slot.rt_flags.store(flags, std::memory_order_relaxed);
+        slot.block_seq.fetch_add(1, std::memory_order_release);
+    }
+
     // 一块：先读、再写同样多的帧（Input 在前、写方在后）
     BlockResult step(int n, const EngineParams& params, const TransportInfo& transport = TransportInfo{},
                      bool produce = true)
     {
         const BlockResult result = feed(n, params, transport, produce);
         write(n);
+        publishPeer(transport);
         return result;
     }
 
@@ -183,6 +226,7 @@ public:
                                 bool produce = true)
     {
         write(n);
+        publishPeer(transport);
         return feed(n, params, transport, produce);
     }
 
@@ -241,6 +285,8 @@ private:
     double sampleRate_;
     std::int64_t declaredBlock_;
     LoopSession session_;
+    std::unique_ptr<ipc::RvSegment> rv_;
+    bool peerOverMax_ = false;
     std::unique_ptr<ipc::RingSegment> ownRing_;
     ipc::RingSegment* ring_ = nullptr;
     std::function<float(std::int64_t)> signal_ = [](std::int64_t p) { return noiseAt(p); };

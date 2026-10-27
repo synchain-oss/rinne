@@ -6,7 +6,7 @@
 // 同步偏移 off = n0（首块的块长），之后读头始终比正确摆放时靠前 n0，回声的延迟就是 D − n0。回送这时进不了环
 // （Output 写的时候 Input 还没加上它），所以环里只有干声，一个冲激只有一个回声，没有第二个。
 //
-// 五路，环路延迟 D = 4800、反馈 50 %、混合 50 %，宿主时间戳每个周期两端相同、随样本数递增：
+// 七路，环路延迟 D = 4800、反馈 50 %、混合 50 %，宿主时间戳每个周期两端相同、随样本数递增：
 //   恒定 256        首次配对之后零重同步；off 恒为 256；每个周期 D_eff = 4800；回声恰在冲激后 4544 = D − 256 个样本、
 //                   幅度逐位 0.25f，没有第二个回声；漂移量 m 恒为 0；Input 记下 kOutputFirst 的证据；
 //   256 与 2048 交替  同上（m 在 0 与 1792 之间交替，从不连续两次不为 0，被吸收）；
@@ -15,7 +15,13 @@
 //                   置「时序不稳定」，之后不再重同步；延迟稳定在 D − off（off 是最后一次锚定的值），回声幅度逐位
 //                   0.25f；
 //   对照            Input 先 Output 后：off = 0，回声恰在 D，证据是「顺序正确」；宿主没给时间戳时证据是 unknown
-//                   （不猜），其余行为不变。
+//                   （不猜），其余行为不变；
+//   宿主时间戳回退数秒  真 Cubase 在提前处理开关切换时的样子：时间戳先退到另一条时间轴（回退 7.3
+//   s）、在上面走一步又退回、
+//                   再向前跳回原轴、之后几块的步长只有 0.15 ms，然后恢复正常。错放与正确摆放各一路：证据在整段回退里
+//                   始终不变（错放一路始终是 kOutputFirst，不被冲掉也不被翻成 kCorrect；正确一路始终是 kCorrect），
+//                   回退与跳变的块不投票但被计数，回声、重同步、同步偏移与没有回退时逐位相同。
+// Output 一侧的镜像判断（OutputEngine::orderStatus）对同一个现场给出同一个结论。
 // 每路输出与参照安全链按文档接线重算的结果逐位相同。
 //
 // 随机一路的预期：不是「首次之后零重同步、off 恒定」。引擎实现的是严格模式（m 连续两次不为 0 就
@@ -33,6 +39,7 @@
 #include <vector>
 
 #include "loop/LoopStatus.h"
+#include "loop/OrderEvidence.h"
 #include "loop/StreamSync.h"
 #include "s01_rig_kit.h"
 
@@ -54,6 +61,7 @@ struct Leg
     CallOrder order;
     bool hostNsValid;
     std::uint64_t impulseAt;
+    bool regress = false; // 宿主时间戳在第 100 周期起回退数秒再跳回（见 applyRegress）
 };
 
 struct Outcome
@@ -70,7 +78,33 @@ struct Outcome
     std::int64_t driftMax = 0;
     // 冲激之前（周期 settle 起）的重同步总数：settle 之后不得再增
     std::uint32_t resyncAtSettle = 0;
+    // 预热（kWarm 个周期）之后，两端各自见过的结论（按 OrderVerdict 的数值置位）
+    std::uint32_t inputVerdicts = 0;
+    std::uint32_t outputVerdicts = 0;
+    rinne::loop::OrderSnapshot mirror; // Output 一侧最后的镜像判断
 };
+
+constexpr std::size_t kWarm = 30;
+constexpr std::size_t kRegressAt = 100;
+
+// 真 Cubase 在提前处理开关切换时的宿主时间戳（两端取到同一串值）：先退到另一条时间轴（回退约 7.3 s），
+// 在上面走一步又退回，再向前跳回原轴，之后几块的步长只有 0.15 ms，然后恢复正常。
+void applyRegress(std::vector<std::uint64_t>& hostNs)
+{
+    constexpr std::uint64_t kBack = 7340000000ull;
+    constexpr std::uint64_t kStep = 5333333ull;
+    constexpr std::uint64_t kTiny = 150000ull;
+    const std::size_t at = kRegressAt;
+    const std::uint64_t back = hostNs[at] - kBack;
+    hostNs[at] = back;
+    hostNs[at + 1] = back + kStep;
+    hostNs[at + 2] = back;
+    // at + 3 回到原轴（向前跳 7.3 s），此后 4 块每块只前进 0.15 ms，at + 8 起恢复原轴
+    for (std::size_t k = 4; k <= 7; ++k)
+    {
+        hostNs[at + k] = hostNs[at + 3] + (k - 3) * kTiny;
+    }
+}
 
 Outcome runLeg(const Leg& leg)
 {
@@ -88,10 +122,16 @@ Outcome runLeg(const Leg& leg)
     transport.hostNs.resize(cycles);
     transport.hostNsValid = {leg.hostNsValid};
     std::uint64_t position = 0;
+    // 回退的一路要有足够大的起点，回退 7.3 s 之后仍是正数
+    const std::uint64_t base = leg.regress ? 20000000000ull : 1000000u;
     for (std::size_t i = 0; i < cycles; ++i)
     {
-        transport.hostNs[i] = 1000000u + static_cast<std::uint64_t>(static_cast<double>(position) * 1.0e9 / kSr);
+        transport.hostNs[i] = base + static_cast<std::uint64_t>(static_cast<double>(position) * 1.0e9 / kSr);
         position += static_cast<std::uint64_t>(leg.lengths[i]);
+    }
+    if (leg.regress)
+    {
+        applyRegress(transport.hostNs);
     }
     host->setTransportScript(transport);
 
@@ -118,10 +158,16 @@ Outcome runLeg(const Leg& leg)
         {
             outcome.resyncAtSettle = s.resyncCount;
         }
+        if (i >= kWarm)
+        {
+            outcome.inputVerdicts |= 1u << s.orderVerdict;
+            outcome.outputVerdicts |= 1u << static_cast<unsigned>(host->output().orderStatus().verdict);
+        }
     }
     outcome.out = rec.outLeft;
     outcome.matchesReference = rec.matchesReference();
     outcome.last = host->inputStatus();
+    outcome.mirror = host->output().orderStatus();
     return outcome;
 }
 
@@ -201,6 +247,7 @@ public:
             RIG_EQ(v, argmaxAbs(o.out, static_cast<std::size_t>(kLateAt) + 1, o.out.size()), echo);
             RIG_EQ(v, rinne::test::floatBits(o.out[echo]), rinne::test::floatBits(0.25f));
             RIG_CHECK(v, o.last.orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+            RIG_CHECK(v, o.mirror.verdict == OrderVerdict::kOutputFirst);
         }
 
         // 对照：Input 先 Output 后，同样的块长与时间戳
@@ -214,6 +261,8 @@ public:
             RIG_EQ(v, argmaxAbs(o.out, kAt + 1, o.out.size()), kAt + static_cast<std::uint64_t>(kDelay));
             RIG_CHECK(v, o.last.orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kCorrect));
             RIG_EQ(v, o.last.hostNsValid, 1u);
+            RIG_CHECK(v, o.mirror.verdict == OrderVerdict::kCorrect);
+            RIG_EQ(v, o.last.orderGlitches, 0u);
         }
         // 对照：错序但宿主没给时间戳：证据是 unknown（不猜），回声与重同步照旧
         {
@@ -224,6 +273,38 @@ public:
             RIG_EQ(v, argmaxAbs(o.out, kAt + 1, o.out.size()), kAt + static_cast<std::uint64_t>(kDelay - 256));
             RIG_CHECK(v, o.last.orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kUnknown));
             RIG_EQ(v, o.last.hostNsValid, 0u);
+            RIG_CHECK(v, o.mirror.verdict == OrderVerdict::kUnknown);
+        }
+
+        // 宿主时间戳回退数秒：错放一路，证据始终是 kOutputFirst；音频行为与没有回退时一样
+        {
+            INFO("host time regresses by seconds, output first");
+            const Outcome o =
+                runLeg({"regress-wrong", std::vector<int>(160, 256), CallOrder::kOutputFirst, true, kAt, true});
+            steady(v, o, 256, kAt);
+            RIG_EQ(v, o.inputVerdicts, 1u << static_cast<unsigned>(OrderVerdict::kOutputFirst));
+            RIG_EQ(v, o.outputVerdicts, 1u << static_cast<unsigned>(OrderVerdict::kOutputFirst));
+            // 回退与跳变的块被看见了、没有投票：周期 100、102 时间戳回退，103 向前跳 7.3 s。Output 先跑，同一周期里
+            // 自己与对端的异常落在同一块（一块至多计一次）：Input 端 3 次；Output 端读到的是上一周期的 Input
+            // 时间戳，多一次（101）
+            RIG_EQ(v, o.last.orderGlitches, 3u);
+            RIG_EQ(v, o.mirror.glitches, 4u);
+            RIG_EQ(v, o.driftMin, std::int64_t{0});
+            RIG_EQ(v, o.driftMax, std::int64_t{0});
+        }
+        // 同样的回退，正确摆放：证据始终是 kCorrect（回退的块不会被当成「Input 在前」或「Output 在前」的票）
+        {
+            INFO("host time regresses by seconds, input first");
+            const Outcome o =
+                runLeg({"regress-right", std::vector<int>(160, 256), CallOrder::kInputFirst, true, kAt, true});
+            RIG_CHECK(v, o.matchesReference);
+            RIG_EQ(v, o.last.resyncCount, 0u);
+            RIG_EQ(v, argmaxAbs(o.out, kAt + 1, o.out.size()), kAt + static_cast<std::uint64_t>(kDelay));
+            RIG_EQ(v, o.inputVerdicts, 1u << static_cast<unsigned>(OrderVerdict::kCorrect));
+            RIG_EQ(v, o.outputVerdicts, 1u << static_cast<unsigned>(OrderVerdict::kCorrect));
+            // Input 先跑，读到的是上一周期的 Output 时间戳：Input 端 4 次（100、101、102、103），Output 端 3 次
+            RIG_EQ(v, o.last.orderGlitches, 4u);
+            RIG_EQ(v, o.mirror.glitches, 3u);
         }
         return v.ok();
     }
@@ -247,6 +328,9 @@ private:
         RIG_CHECK(v, peakOf(o.out, echo + 1, o.out.size()) < 1.0e-3f);
         RIG_CHECK(v, o.last.orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
         RIG_EQ(v, o.last.hostNsValid, 1u);
+        // Output 一侧的镜像对同一个现场给出同一个结论
+        RIG_CHECK(v, o.mirror.verdict == OrderVerdict::kOutputFirst);
+        RIG_CHECK(v, o.mirror.hostNsValid);
     }
 };
 

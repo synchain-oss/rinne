@@ -31,17 +31,10 @@
 #include <cstdint>
 
 #include "loop/LoopEvents.h"
+#include "loop/OrderEvidence.h"
 
 namespace rinne::loop
 {
-
-// 漂移分类的判定结果（错放证据）。
-enum class OrderVerdict : std::uint8_t
-{
-    kUnknown = 0, // 宿主没给时间戳，无法判定
-    kCorrect = 1, // 顺序正确
-    kOutputFirst = 2, // Output 在 Input 之前（琥珀提示）
-};
 
 // 速度的来源。
 enum class BpmSource : std::uint8_t
@@ -98,10 +91,21 @@ struct LoopStatusFields
     // 1 = 上面三个量出自同一块；0 = 读的时候一直撞上音频线程正在写（重试够了次数仍没读到一份完整的），三个量不可信。
     std::uint32_t geometryConsistent = 1;
 
-    // ---- 顺序 ----
+    // ---- 顺序（Input 一侧的判断；Output 一侧的镜像在 OutputEngine::orderStatus）----
+    // 前四项出自同一块（打成一个 64 位整数发布）；orderGlitches 另存。
     std::uint8_t orderVerdict = 0; // OrderVerdict
-    std::uint32_t orderVotes = 0; // 判定的票数（连续 3 次即判定）
-    std::uint32_t hostNsValid = 0; // 宿主时间戳是否有效
+    std::uint8_t orderDirection = 0; // OrderDirection：当前这串连续票的方向
+    std::uint32_t orderVotes = 0; // 当前连续票数（封顶 3；判不了的块清零）
+    std::uint32_t hostNsValid = 0; // 本端宿主时间戳是否有效
+    std::uint32_t orderChecks = 0; // 累计的有效检查数（投过票的块）
+    std::uint32_t orderGlitches = 0; // 累计因时间戳回退、原地不动或跳变而没投票的块数
+
+    // ---- 导出不一致（口径见 ExportLatch.h）----
+    // 累计计数：离线块里每出一次「导出可能与播放不同」的事加一，不随 prepare 清零。消息线程自己持有已读值，
+    // 锁存 = exportEvents ≠ 已读值。
+    std::uint32_t exportEvents = 0;
+    // 最近一次被计入的那一块的原因位（kExportCause*）
+    std::uint32_t exportCauses = 0;
 };
 
 // 原子量容器。音频线程写，消息线程读。
@@ -132,7 +136,10 @@ public:
     void setFrozenMax(std::uint32_t blocks) noexcept { frozenMax_.store(blocks, std::memory_order_relaxed); }
     // 当前的几何量：m（漂移量）、w（写头）、off（同步偏移）。每块写一次，三个量按顺序锁一起发布（只有音频线程写）。
     void setGeometry(std::int64_t driftValue, std::int64_t writeHead, std::int64_t offset) noexcept;
-    void setOrder(std::uint8_t verdict, std::uint32_t votes, bool hostNsValid) noexcept;
+    // 错序证据的快照：结论、方向、票数、有效位、有效检查数出自同一块，一个 64 位原子量发布。
+    void setOrder(const OrderSnapshot& snapshot) noexcept;
+    // 导出不一致：计一次，并记下这一块的原因位。causes 为 0 时什么都不做（调用方只在有原因时调）。
+    void noteExport(std::uint32_t causes) noexcept;
 
     // ---- 消息线程读 ----
 
@@ -179,9 +186,11 @@ private:
     std::atomic<std::int64_t> writeHead_{0};
     std::atomic<std::int64_t> offset_{0};
 
-    std::atomic<std::uint8_t> orderVerdict_{0};
-    std::atomic<std::uint32_t> orderVotes_{0};
-    std::atomic<bool> hostNsValid_{false};
+    std::atomic<std::uint64_t> orderPacked_{0}; // OrderSnapshot::pack()
+    std::atomic<std::uint32_t> orderGlitches_{0};
+
+    std::atomic<std::uint32_t> exportEvents_{0};
+    std::atomic<std::uint32_t> exportCauses_{0};
 };
 
 } // namespace rinne::loop

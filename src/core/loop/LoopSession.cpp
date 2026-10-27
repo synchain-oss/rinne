@@ -8,8 +8,9 @@
 //   3. 判据：交给 StreamSync（断档、对齐、容忍、重同步、停用清空、起播复位）。
 //   4. 拉环：把环里 [pulled, W) 的帧全部搬进本地延迟线（一圈之内），pulled 追到 W。
 //   5. 建新读头（需要时），把读头按包络混成一路，写进 ctx.returnLeft / ctx.returnRight，并标出逐样本的有效位。
-//   6. 判错序：读对端槽的宿主时间戳，按 ADR-0002 的口径累票。
-//   7. 发布状态：写进 LoopStatus（原子量），消息线程读快照。
+//   6. 判错序：读对端槽的宿主时间戳，每块判一次（口径见 OrderEvidence.h 与 ADR-0002）。
+//   7. 导出不一致：离线块里出了导出可能与播放不同的事，计一次（口径见 ExportLatch.h）。
+//   8. 发布状态：写进 LoopStatus（原子量），消息线程读快照。
 //
 // 读头的生命周期（3 个槽）：
 //   稳态      1 个读头在跑，包络恒为 1。
@@ -45,9 +46,6 @@ constexpr std::int64_t kOnsetFloor = 1;
 // 「没有上界」：读头 validTo 的哨兵值。
 constexpr std::int64_t kNoUpperBound = std::numeric_limits<std::int64_t>::max();
 
-// 错序判据：连续这么多次判为「Output 在 Input 之前」才定案（口径见 ADR-0002）。
-constexpr std::uint32_t kOrderVotesToJudge = 3;
-
 // 拉环的护栏 G：写方最多有一段（≤ 8192 帧）公告了还没发布，比 W 早 (一圈 − G) 帧以上的位置可能正被覆盖。
 // 取 max(8192, 对端声明的最大块长)，截在 [8192, 32768]。
 constexpr std::int64_t kMinPullGuard = 8192;
@@ -80,9 +78,11 @@ bool LoopSession::prepare(double sampleRate) noexcept
         lastWriterToken_ = 0;
         lastEpoch_ = 0;
         tapDropCount_ = 0;
-        orderVotes_ = 0;
-        orderVerdict_ = static_cast<std::uint8_t>(OrderVerdict::kUnknown);
+        haveExportPeerSeq_ = false;
+        lastExportPeerSeq_ = 0;
     }
+    // 错序证据自己判断要不要重来（换采样率才清；同采样率重新 prepare 证据保持连续）
+    order_.prepare(sampleRate_);
     // N_obs 每次 prepare 清零（同采样率也清）：下限因此回落到声明值。
     maxBlockSeen_ = 0;
     delayMinReason_ = DelayMinReason::kNone;
@@ -547,45 +547,32 @@ void LoopSession::readPeerSlot(const BlockContext& ctx) noexcept
     havePeerSlot_ = true;
 }
 
-// 错序判据（口径见 ADR-0002）：
+// 错序证据（口径见 OrderEvidence.h 与 ADR-0002）：每个 n > 0 的支持块判一次。
 //
-//   两端在同一个宿主周期里拿到的是同一个宿主时间戳（它是这一块的时间戳，不是各自被调用的时刻）。
-//   Input 在块首读 Output 槽里发布的 last_host_ns：
-//     比本块的时间戳小  → Output 还停在上一块，本块里 Input 先被处理 → 顺序正确；
-//     等于或大于本块的  → Output 已经处理过本块（或更晚的块）→ Output 在 Input 之前，记一票。
-//   连续 3 票才定为错序（界面给琥珀提示）；判对一次就把票数清零（票是连续计数）。
-//   宿主时间戳无效（没给，或给了 0）、或读不到对端槽、或对端还没发布过时间戳时，一律记 unknown，票数清零：
-//   不猜、不用别的时间源代替。
+// 读到的是块首的对端槽（readPeerSlot 在拉环之前读好）：Input 读 Output 槽里的时间戳与块序号。
+// 宿主时间戳无效、读不到对端槽、对端自上次检查起没有处理新块、时间戳回退或跳变时这一块判不了：
+// 连续票数清零，已有的结论保持，1 s（按样本计）没有有效检查才回到 unknown。
 void LoopSession::judgeOrder(const BlockContext& ctx) noexcept
 {
     const engine::TransportInfo& transport = ctx.transport;
-    const bool hostNsValid = transport.hostNsValid && transport.hostNs != 0;
+    order_.observe(OrderSide::kInput, ctx.blockLength, transport.hostNsValid, transport.hostNs, havePeerSlot_,
+                   peerBlockSeq_, peerHostNs_);
+    status_.setOrder(order_.snapshot());
+}
 
-    if (!hostNsValid || !havePeerSlot_ || peerHostNs_ == 0)
+// 对端槽的违约标志：只在对端的一个新块上看一次（同一块的标志不重复计）。
+// 第一次读到只记下块序号，不计：那是上一个会话留在槽里的旧标志也说不定。读不到对端槽的块什么都不记。
+bool LoopSession::peerOverMaxOnNewBlock() noexcept
+{
+    if (!havePeerSlot_)
     {
-        orderVotes_ = 0;
-        orderVerdict_ = static_cast<std::uint8_t>(OrderVerdict::kUnknown);
-        status_.setOrder(orderVerdict_, 0, hostNsValid);
-        return;
+        return false;
     }
-
-    const bool outputFirst = peerHostNs_ >= transport.hostNs;
-    if (outputFirst)
-    {
-        if (orderVotes_ < kOrderVotesToJudge)
-        {
-            ++orderVotes_;
-        }
-        orderVerdict_ = orderVotes_ >= kOrderVotesToJudge ? static_cast<std::uint8_t>(OrderVerdict::kOutputFirst)
-                                                          : static_cast<std::uint8_t>(OrderVerdict::kUnknown);
-    }
-    else
-    {
-        orderVotes_ = 0;
-        orderVerdict_ = static_cast<std::uint8_t>(OrderVerdict::kCorrect);
-    }
-
-    status_.setOrder(orderVerdict_, orderVotes_, true);
+    const bool known = haveExportPeerSeq_;
+    const bool fresh = peerBlockSeq_ != lastExportPeerSeq_;
+    haveExportPeerSeq_ = true;
+    lastExportPeerSeq_ = peerBlockSeq_;
+    return known && fresh && (peerRtFlags_ & ipc::kRtOverMax) != 0;
 }
 
 BlockResult LoopSession::process(const BlockContext& ctx) noexcept
@@ -616,6 +603,11 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
                        eventUnits256(static_cast<std::int64_t>(ipc::kMaxSupportedBlock)), sync_.processed());
         }
         lastUnsupported_ = true;
+        // 离线渲染里的超长块：导出与播放不会一致（环路这一块不走），计一次
+        ExportBlockFacts unsupportedFacts;
+        unsupportedFacts.nonrealtime = ctx.transport.nonrealtime;
+        unsupportedFacts.unsupportedBlock = true;
+        status_.noteExport(exportCauses(unsupportedFacts));
         const std::int64_t faded = fadeOutUnsupportedBlock(ctx);
         result.returnLeft = ctx.returnLeft;
         result.returnRight = ctx.returnRight;
@@ -856,8 +848,19 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     advanceTaps(taps_, n); // 淡出与交叉淡化都按样本推进 n
     retarget_.endBlock(n); // 限速窗口按样本计：每个正常块恰好一次（0 样本与超长块不走到这里）
 
-    // 错序判据：宿主时间戳有效时比两端的时间戳。
+    // 错序证据：每块判一次（宿主时间戳有效、对端有新块时才有票）。
     judgeOrder(ctx);
+
+    // 导出不一致：离线块里出了导出可能与播放不同的事，计一次。对端的违约标志每块都要看一眼（记块序号），
+    // 不管是不是离线块。只算账不出样本的块（ctx.returnLeft 为空的快速路径）照样走到这里。
+    ExportBlockFacts exportFacts;
+    exportFacts.nonrealtime = transport.nonrealtime;
+    exportFacts.hostViolation = outcome.hostViolation;
+    exportFacts.overrun = static_cast<std::uint64_t>(overrun);
+    exportFacts.peerOverMax = peerOverMaxOnNewBlock();
+    exportFacts.resynced = outcome.resynced;
+    exportFacts.resyncReason = outcome.reason;
+    status_.noteExport(exportCauses(exportFacts));
 
     // 发布状态
     status_.setPaired(paired);

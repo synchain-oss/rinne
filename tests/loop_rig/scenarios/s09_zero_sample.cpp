@@ -2,6 +2,9 @@
 //
 // S09 穿插 0 样本调用：0 样本的调用不推进任何计数，输出与不穿插时逐位相同。
 //
+// 指纹含错序证据的全部字段（结论、方向、票数、有效检查数、时间戳回退或跳变的块数）、Output 一侧的镜像判断、
+// 导出不一致的计数与原因位：0 样本调用（含违约的走带：时间戳倒退到 5、离线渲染）不得推进其中任何一项。
+//
 // 做法：同一串真实块（块长 7…1024 轮换，中途改 D 两次，一次落在 100 ms 限速窗口里被合并），跑两遍：
 //   参照  只有真实周期；
 //   穿插  真实周期之间随机穿插 0 样本的周期，四种形态——两端都以 0 样本被调用、只有 Input 以 0 被调用（Output 跳过）、
@@ -177,8 +180,21 @@ Fingerprint fingerprint(EngineHost& host)
     add("statusWriteHead", s.writeHead);
     add("offset", s.offset);
     add("orderVerdict", s.orderVerdict);
+    add("orderDirection", s.orderDirection);
     add("orderVotes", s.orderVotes);
     add("hostNsValid", s.hostNsValid);
+    add("orderChecks", s.orderChecks);
+    add("orderGlitches", s.orderGlitches);
+    add("exportEvents", s.exportEvents);
+    add("exportCauses", s.exportCauses);
+    // Output 一侧的错序镜像：同样是 0 样本调用不得推进的计数
+    const rinne::loop::OrderSnapshot mirror = host.output().orderStatus();
+    add("mirrorVerdict", static_cast<std::int64_t>(mirror.verdict));
+    add("mirrorDirection", static_cast<std::int64_t>(mirror.direction));
+    add("mirrorVotes", mirror.votes);
+    add("mirrorChecks", mirror.checks);
+    add("mirrorGlitches", mirror.glitches);
+    add("mirrorHostNsValid", mirror.hostNsValid ? 1 : 0);
     add("inputBlockSeq", static_cast<std::int64_t>(host.slot(rinne::ipc::Role::kInput)->block_seq.load()));
     add("outputBlockSeq", static_cast<std::int64_t>(host.slot(rinne::ipc::Role::kOutput)->block_seq.load()));
     add("writeHead", static_cast<std::int64_t>(host.writeHead()));
