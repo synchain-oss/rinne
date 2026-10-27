@@ -51,6 +51,10 @@ enum class BpmSource : std::uint8_t
     kFallback = 2, // 回退到 120
 };
 
+// D 的提示位（LoopStatusFields::delayHints）：界面据此给出提示。只在状态变化时发 kDelayHints 事件。
+inline constexpr std::uint32_t kDelayHintNoTempo = 1u << 0; // 节拍模式下本会话还没拿到过有效的宿主速度，在用 120 BPM
+inline constexpr std::uint32_t kDelayHintClipped = 1u << 1; // 用户要的 D 超过 4000 ms，被截到了上限
+
 // 纯值快照。消息线程拿到的就是这一份。
 struct LoopStatusFields
 {
@@ -63,6 +67,9 @@ struct LoopStatusFields
     std::uint8_t delayMode = 0; // 0 = 时间，1 = 节拍
     std::uint32_t bpmCenti = 0; // 速度（百分之一拍/分钟）
     std::uint8_t bpmSource = 0; // BpmSource
+    std::int64_t delayTarget = 0; // 目标 D（样本）：交叉淡化走完之后读头会停在它
+    std::uint32_t delayHints = 0; // kDelayHint* 的位或
+    std::int64_t delayXfadeLeft = 0; // 改 D 的交叉淡化还要走多少个样本（0 = 没有在淡）
 
     // ---- 读头 ----
     std::uint32_t tapsActive = 0; // 当前活跃的读头数
@@ -111,6 +118,8 @@ public:
     // 界面常驻的「实际 / 最小 / 原因 / 本会话最大块长」里的后两项。
     void setDelayFloor(std::uint8_t reason, std::int64_t maxBlockSeen) noexcept;
     void setBpm(std::uint32_t centi, std::uint8_t source) noexcept;
+    // 目标 D、提示位与交叉淡化的剩余样本数
+    void setDelayTarget(std::int64_t target, std::uint32_t hints, std::int64_t xfadeLeft) noexcept;
     void setTaps(std::uint32_t active, std::uint32_t dropped) noexcept;
     // reason 是 loop::SyncReason 的值（0..8）；越界的值被忽略
     void addResync(std::uint8_t reason) noexcept;
@@ -147,6 +156,9 @@ private:
 
     std::atomic<std::uint32_t> bpmCenti_{0};
     std::atomic<std::uint8_t> bpmSource_{0};
+    std::atomic<std::int64_t> delayTarget_{0};
+    std::atomic<std::uint32_t> delayHints_{0};
+    std::atomic<std::int64_t> delayXfadeLeft_{0};
 
     std::atomic<std::uint32_t> tapsActive_{0};
     std::atomic<std::uint32_t> tapDrop_{0};

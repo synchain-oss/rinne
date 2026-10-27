@@ -502,13 +502,13 @@ TEST_CASE("loop sync L2-10 容忍模式下断档判据仍然生效")
     REQUIRE(driver.sync().state() == SyncState::kStalled);
 }
 
-TEST_CASE("loop sync L2-11 读头槽：3 槽满时丢包络最小的旧读头，不硬丢")
+TEST_CASE("loop sync L2-11 读头槽：3 槽满时收掉包络最小的读头")
 {
     TapSet taps;
     REQUIRE(taps.allocate() == 0);
     REQUIRE(taps.allocate() == 1);
     REQUIRE(taps.allocate() == 2);
-    // 满了：allocate 返回 -1（调用方按「丢一个包络最小的」处理）。
+    // 满了：allocate 返回 -1（调用方按「收掉一个包络最小的」处理）。
     REQUIRE(taps.allocate() == -1);
     REQUIRE(taps.count() == 3);
 
@@ -520,13 +520,115 @@ TEST_CASE("loop sync L2-11 读头槽：3 槽满时丢包络最小的旧读头，
     taps.at(2).env.fadeOutSteps = 240;
     taps.at(2).env.fadeOutStep = 100;
 
-    const int dropped = taps.dropSmallestEnvelope();
-    REQUIRE(dropped == 1);
-    // 丢的是包络最小的那个，不是硬丢第一个。
-    REQUIRE(taps.count() == 2);
-    REQUIRE_FALSE(taps.at(1).active);
+    // 要收掉的是包络最小的那个，不是第一个。
+    REQUIRE(taps.smallestEnvelopeSlot() == 1);
+}
+
+TEST_CASE("loop sync L2-11b 最小包络的读头：只查不动；并列取槽号小的；没有读头时是 -1")
+{
+    // ⛔ 删除式验证点：选包络最大的、或并列取槽号大的 → 本用例变红。
+    TapSet taps;
+    REQUIRE(taps.smallestEnvelopeSlot() == -1);
+    REQUIRE(taps.allocate() == 0);
+    REQUIRE(taps.allocate() == 1);
+    REQUIRE(taps.allocate() == 2);
+    // 三个都是满包络：并列，取槽号小的
+    REQUIRE(taps.smallestEnvelopeSlot() == 0);
+    taps.at(0).env.fadeOutSteps = 240;
+    taps.at(1).env.fadeOutSteps = 240;
+    taps.at(1).env.fadeOutStep = 200; // 包络 40/240
+    taps.at(2).env.fadeOutSteps = 240;
+    taps.at(2).env.fadeOutStep = 200; // 并列
+    REQUIRE(taps.smallestEnvelopeSlot() == 1);
+    REQUIRE(taps.count() == 3); // 只查不动
+    // 交叉淡化的增益也算：槽 0 是新读头，交叉淡化刚开始，增益 0
+    taps.at(0).xfade = XfadeRole::kIncoming;
+    taps.beginCrossfade(1920, 0);
+    REQUIRE(taps.smallestEnvelopeSlot() == 0);
+}
+
+TEST_CASE("loop sync 重同步叠重同步：每个仍在淡出的读头读自己的尾巴，后一次的预拷贝不覆盖它们")
+{
+    // ⛔ 删除式验证点：尾巴格不跟读头槽走（按「未淡出读头的顺序」占第 0 格）
+    //    → 第二次重同步给新读头做的预拷贝盖掉旧读头 A 的尾巴，A 在换段之后只能从尾巴读，本用例变红。
+    // 几何：延迟线里是位置的编码。A（D = 300）与 B（D = 500）在 R = 5000 换段，各占自己的格；
+    // 换段后新环（锚在 6000）上建了读头 C（D = 100），20 个样本之后再换一次段，
+    // C 挂淡出、预拷贝进它自己的格。
+    LocalLine line;
+    REQUIRE(line.allocate(kSr));
+    const auto encode = [](std::int64_t p) { return static_cast<float>(p) * 0.001f; };
+    const auto fillFrom = [&](std::int64_t from, std::int64_t to) {
+        line.pull(from, to, [&](std::int64_t p, float& l, float& r) {
+            l = encode(p);
+            r = encode(p);
+        });
+    };
+    fillFrom(0, 6000);
+
+    TapSet taps;
+    StreamSync sync;
+    sync.prepare(kSr);
+    const auto setTap = [&](int index, std::int64_t offset, std::int64_t delay, std::int64_t validFrom) {
+        Tap& tap = taps.at(index);
+        tap.active = true;
+        tap.offset = offset;
+        tap.delay = delay;
+        tap.validFrom = validFrom;
+        tap.validTo = 1000000000;
+    };
+    REQUIRE(taps.allocate() == 0);
+    REQUIRE(taps.allocate() == 1);
+    setTap(0, 0, 300, 0);
+    setTap(1, 0, 500, 0);
+
+    const auto switchRing = [&](std::int64_t processed, std::int64_t writeHead, int n) {
+        SyncInputs in;
+        in.paired = true;
+        in.ringSwitched = true;
+        in.writeHead = writeHead;
+        in.dataEnd = line.pulled(); // 换段：旧读头只读已经拉进来的
+        in.processed = processed;
+        in.declaredBlock = 512;
+        in.blockLength = n;
+        const SyncOutcome outcome = sync.process(in, line, taps);
+        REQUIRE(outcome.resynced);
+        REQUIRE(outcome.reason == SyncReason::kBindSwitch);
+        line.rebaseKeepingTail(writeHead); // LoopSession 在判据之后做的事
+        return outcome;
+    };
+
+    // 第一次换段（R = 5000，新环的写头 6000）：A、B 各预拷贝 [4700, 4940)、[4500, 4740)
+    switchRing(5000, 6000, 20);
+    REQUIRE(taps.at(0).env.fadingOut());
+    REQUIRE(taps.at(1).env.fadingOut());
+    advanceTaps(taps, 20);
+    // LoopSession 的下一步：新环上建读头 C，并拉进一点数据
+    REQUIRE(taps.allocate() == 2);
+    setTap(2, sync.offset(), 100, 6000);
+    fillFrom(6000, 6100);
+
+    // 第二次换段（R = 5020，新环的写头 7000）：C 挂淡出，它要读的 [5920, 6160) 里 [6000, 6100) 是拉进来的数据
+    switchRing(5020, 7000, 20);
+    REQUIRE(taps.at(2).env.fadingOut());
+
+    // 仍在淡出的 A、B 读到的还是自己的尾巴；C 的尾巴也在
+    const auto tailIs = [&](std::int64_t from, std::int64_t to) {
+        for (std::int64_t p = from; p < to; ++p)
+        {
+            float l = 0.0f;
+            float r = 0.0f;
+            if (!line.readTail(p, l, r) || l != encode(p) || r != encode(p))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
     REQUIRE(taps.at(0).active);
-    REQUIRE(taps.at(2).active);
+    REQUIRE(taps.at(1).active);
+    REQUIRE(tailIs(4700, 4940));
+    REQUIRE(tailIs(4500, 4740));
+    REQUIRE(tailIs(6000, 6100));
 }
 
 TEST_CASE("loop sync 0 样本的调用立刻返回，不推进任何计数")
