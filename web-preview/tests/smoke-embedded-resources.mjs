@@ -17,14 +17,20 @@
 //   ⑥b tokens.css 的 --page-backdrop 是外圈色，与占位是两个角色：必须不等于占位的任何一个色标；
 //   ⑥c 占位的 C++ 真源与 --page-gradient 整张色标表逐项相同（tokens 是真源，C++ 数组与内联字面量照抄它）；
 //   ⑦ 「首帧已绘」上行信号在场：事件名与 C++ 一致，武装是嵌套两层 requestAnimationFrame 且由 paint 记录接线，
-//      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后。
-// C++ 侧文件还没入库时，对拍项记「跳过」并说明原因，其余照常断言。
+//      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后；
+//   ⑧ 桥回执的失败原因：C++ 的 BridgeBase.h 里有哪几个原因，docs/UI_BRIDGE.md 里能返回它的函数行就写哪几个，
+//      预览里的 mock 也真的回同样的原因（含缩放锁定：全局位 scaleLocked 为真时，选档与确认回 scale-locked，没确认的预览作废；
+//      含兜底面板在场：全局位 fallbackShown 为真时，setLang、setUiScale、commitUiScale 先于参数校验回 not-ready 且什么都不改，
+//      requestInitialState 只回 ok、不发首帧）。
+// C++ 侧文件（WebViewHost.h、PlatformWebView.h）都还没入库时，对拍项记「跳过」并说明原因；只要有一个入库，
+// 事件名、字段名、角度与色标表就必须抽得出来，抽不出来判红，不静默跳过。其余照常断言。
 //
 // 用法：node web-preview/tests/smoke-embedded-resources.mjs [仓库根]
 // 退出码：0 全绿；1 有失败项。
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 
 const ROOT = repoRoot();
@@ -137,22 +143,170 @@ for (const role of roles) {
     run.log(`${role}：可达文件 ${seen.size} 个，打包集合 ${pack.length} 个`);
 }
 
-// ---------------------------------------------------------------- C++ 真源（还没入库就跳过对应项）
-const cppFile = ["src/plugin-common/WebViewHost.h", "src/plugin-common/PlatformWebView.h"].filter(exists);
-const cppText = cppFile.map(read).join("\n");
-const cppConst = (name) => new RegExp(`${name}\\s*=\\s*"([^"]+)"`).exec(cppText)?.[1] ?? null;
-const cpp = {
-    boot: cppConst("kBootErrorEventId"),
-    first: cppConst("kFirstFrameEventId"),
-    delta: cppConst("kPaintDeltaField"),
-    angle: /kShellBackdropAngleDeg\s*=\s*(\d+)/.exec(cppText)?.[1] ?? null,
-    stops: /kShellBackdropStops[^{]*\{([\s\S]*?)\}\s*;/.exec(cppText)?.[1] ?? null,
+// ---------------------------------------------------------------- C++ 真源
+// 两个 C++ 文件都还没入库：对拍项记「跳过」并说明原因。只要有一个入库，名字就必须抽得出来：
+// 抽不出来就判红，不静默跳过。抽取前先去掉注释（含被注释掉的旧声明），声明按「名字 = 值」「名字[] = {…};」的形态认，
+// 注释或函数体里提到同名标识符不会被当成声明。
+const CPP_FILES = ["src/plugin-common/WebViewHost.h", "src/plugin-common/PlatformWebView.h"];
+
+/** 去掉 C++ 的行注释与块注释，字符串字面量里的 // 与 /* 原样保留。 */
+function stripCppComments(text) {
+    let out = "";
+    let i = 0;
+    while (i < text.length) {
+        const c = text[i];
+        const n = text[i + 1];
+        if (c === "/" && n === "/") {
+            while (i < text.length && text[i] !== "\n") i++;
+        } else if (c === "/" && n === "*") {
+            const end = text.indexOf("*/", i + 2);
+            i = end < 0 ? text.length : end + 2;
+            out += " ";
+        } else if (c === '"' || c === "'") {
+            out += c;
+            i++;
+            while (i < text.length && text[i] !== c) {
+                if (text[i] === "\\") {
+                    out += text[i++];
+                    if (i >= text.length) break;
+                }
+                out += text[i++];
+            }
+            if (i < text.length) out += text[i++];
+        } else {
+            out += c;
+            i++;
+        }
+    }
+    return out;
+}
+
+/** 色标表的每一项必须是 {0xRRGGBB, 位置}：rgb 在前，位置在后。返回「#rrggbb n%」列表与读不懂的项数。 */
+function parseCppStopEntries(body) {
+    const stops = [];
+    let malformed = 0;
+    for (const m of body.matchAll(/\{([^{}]*)\}/g)) {
+        const e = /^\s*(0x[0-9a-fA-F]{6})\s*,\s*(\d+(?:\.\d+)?)f?\s*$/.exec(m[1]);
+        if (!e) {
+            malformed++;
+            continue;
+        }
+        const pos = Number(e[2]);
+        stops.push(`#${e[1].slice(2).toLowerCase()} ${Math.round(pos <= 1 ? pos * 100 : pos)}%`);
+    }
+    return { stops, malformed };
+}
+
+/** 从 C++ 文本抽出对拍用的五个事实；抽不到的是 null。 */
+function extractCppFacts(rawText) {
+    const text = stripCppComments(rawText);
+    const constant = (name) => new RegExp(`\\b${name}\\s*=\\s*"([^"]+)"`).exec(text)?.[1] ?? null;
+    const table = /\bkShellBackdropStops\s*\[\s*\]\s*=\s*\{([\s\S]*?)\}\s*;/.exec(text)?.[1] ?? null;
+    return {
+        boot: constant("kBootErrorEventId"),
+        first: constant("kFirstFrameEventId"),
+        delta: constant("kPaintDeltaField"),
+        angle: /\bkShellBackdropAngleDeg\s*=\s*(\d+)/.exec(text)?.[1] ?? null,
+        stops: table === null ? null : parseCppStopEntries(table),
+    };
+}
+
+const cppExpected = {
+    boot: "kBootErrorEventId",
+    first: "kFirstFrameEventId",
+    delta: "kPaintDeltaField",
+    angle: "kShellBackdropAngleDeg",
+    stops: "kShellBackdropStops",
 };
-const skipped = new Set();
-const needCpp = (what, v) => {
-    if (v === null) skipped.add(what);
-    return v !== null;
-};
+
+/** 对拍项的归属：C++ 文件都没入库就全部记跳过；只要有一个入库，抽不到的名字就必须判红。 */
+function classifyCppFacts(fileCount, facts) {
+    if (fileCount === 0) return { skip: Object.values(cppExpected), fail: [] };
+    return {
+        skip: [],
+        fail: Object.keys(cppExpected)
+            .filter((k) => facts[k] === null)
+            .map((k) => cppExpected[k]),
+    };
+}
+
+// 抽取器自测：好例抽得出，坏例抽不出或读不懂，注释和同名引用不会冒充声明。
+{
+    const good = extractCppFacts(`
+        // constexpr const char* kBootErrorEventId = "stale";
+        inline constexpr const char* kBootErrorEventId = "evt.boot";
+        /* kFirstFrameEventId = "stale" */
+        inline constexpr const char* kFirstFrameEventId = "evt.first";
+        inline constexpr const char* kPaintDeltaField = "delta";
+        inline constexpr float kShellBackdropAngleDeg = 157.0f;
+        // 色标表 kShellBackdropStops 在下面，注释里 {0xaaaaaa, 0.5f} 不算
+        inline constexpr Stop kShellBackdropStops[] = {
+            {0xb5acc9, 0.00f},   // 起点色，0.5 不是色标
+            {0xfde8ed, 1.00f},
+        };
+        auto f() { return sizeof(kShellBackdropStops); }
+    `);
+    run.eq(good.boot, "evt.boot", "抽取器自测：被注释掉的旧声明不能盖过真声明");
+    run.eq(good.first, "evt.first", "抽取器自测：块注释里的声明不算");
+    run.eq(good.delta, "delta", "抽取器自测：字段名");
+    run.eq(good.angle, "157", "抽取器自测：角度");
+    run.eq(
+        good.stops,
+        { stops: ["#b5acc9 0%", "#fde8ed 100%"], malformed: 0 },
+        "抽取器自测：色标表按声明抽，行尾注释里的数字不进表",
+    );
+
+    const scvbStyle = extractCppFacts(
+        "constexpr Stop kShellBackdropStops[] = { {0.00f, 0xffb5acc9}, {1.00f, 0xfffde8ed} };",
+    );
+    run.eq(scvbStyle.stops, { stops: [], malformed: 2 }, "抽取器自测：位置在前、ARGB 的写法必须读不懂（判红）");
+
+    const refOnly = extractCppFacts("auto n = sizeof(kShellBackdropStops); const char* kBootErrorEventId;");
+    run.eq(refOnly.stops, null, "抽取器自测：只有引用没有声明，色标表抽不到");
+    run.eq(refOnly.boot, null, "抽取器自测：没有赋值的声明抽不到事件名");
+
+    const urlInString = extractCppFacts(
+        `const char* u = "https://x.y/z"; inline constexpr const char* kBootErrorEventId = "e";`,
+    );
+    run.eq(urlInString.boot, "e", "抽取器自测：字符串里的 // 不能当成注释吞掉后面的声明");
+
+    // 声明之前已有函数体引用了同名标识符，其后还有花括号：只认声明形态，不能从第一次出现处起算
+    const earlyRef = extractCppFacts(
+        "inline int f() { auto n = sizeof(kShellBackdropStops); if (n) { g(); } else { h(); } return 0; }\n" +
+            "inline constexpr Stop kShellBackdropStops[] = { {0xb5acc9, 0.00f}, {0xfde8ed, 1.00f} };",
+    );
+    run.eq(
+        earlyRef.stops,
+        { stops: ["#b5acc9 0%", "#fde8ed 100%"], malformed: 0 },
+        "抽取器自测：声明之前的同名引用不能被当成表的起点",
+    );
+
+    // 每一项只许 {rgb, 位置} 两个字段，多出来的字段算读不懂
+    const extraField = extractCppFacts("constexpr Stop kShellBackdropStops[] = { {0xb5acc9, 0.00f, 0x112233} };");
+    run.eq(extraField.stops, { stops: [], malformed: 1 }, "抽取器自测：多出字段的项必须读不懂");
+
+    // 对拍项归属：没有 C++ 文件才跳过；有文件就必须抽得到
+    const allNull = { boot: null, first: null, delta: null, angle: null, stops: null };
+    const names = Object.values(cppExpected);
+    run.eq(classifyCppFacts(0, allNull), { skip: names, fail: [] }, "归属自测：C++ 文件都不在时只记跳过");
+    run.eq(classifyCppFacts(1, allNull), { skip: [], fail: names }, "归属自测：文件在但全抽不到时全部判红");
+    run.eq(
+        classifyCppFacts(2, { ...good, delta: null }).fail,
+        ["kPaintDeltaField"],
+        "归属自测：只有抽不到的那一项判红",
+    );
+}
+
+const cppFile = CPP_FILES.filter(exists);
+const cpp = extractCppFacts(cppFile.map(read).join("\n"));
+const verdict = classifyCppFacts(cppFile.length, cpp);
+const skipped = new Set(verdict.skip.map((name) => `C++ 的 ${name}`));
+for (const name of Object.values(cppExpected)) {
+    run.check(
+        !verdict.fail.includes(name),
+        `C++ 的 ${name}：${cppFile.join("、")} 已入库，但抽不到它（名字、赋值形态或表声明被改了？）`,
+    );
+}
 
 // ---------------------------------------------------------------- ⑥b ⑥c 色标
 const tokens = read("web/shared/tokens.css");
@@ -170,13 +324,20 @@ if (pageGradient && backdrop) {
         "⑥b：--page-backdrop（外圈色）与占位渐变的某个色标相同，两个角色被写成了同值",
     );
 }
-if (needCpp("⑥c C++ 占位色标数组", cpp.stops) && pageGradient) {
-    const cppStops = [...cpp.stops.matchAll(/(0x[0-9a-fA-F]{6}|#[0-9a-fA-F]{6})\s*,\s*(\d+(?:\.\d+)?)/g)].map(
-        (m) =>
-            `#${m[1].replace(/^0x|^#/, "").toLowerCase()} ${Math.round(Number(m[2]) <= 1 ? Number(m[2]) * 100 : Number(m[2]))}%`,
+if (cpp.stops !== null && pageGradient) {
+    run.eq(
+        cpp.stops.malformed,
+        0,
+        "⑥c：C++ 的 kShellBackdropStops 有读不懂的项（每项必须是 {0xRRGGBB, 位置}，rgb 在前）",
     );
-    run.eq(cppStops, pageGradient.stops, "⑥c：C++ 的 kShellBackdropStops 与 tokens.css 的 --page-gradient 色标不同");
-    if (cpp.angle !== null) run.eq(Number(cpp.angle), pageGradient.angle, "⑥c：C++ 的占位角度与 --page-gradient 不同");
+    run.eq(
+        cpp.stops.stops,
+        pageGradient.stops,
+        "⑥c：C++ 的 kShellBackdropStops 与 tokens.css 的 --page-gradient 色标不同",
+    );
+}
+if (cpp.angle !== null && pageGradient) {
+    run.eq(Number(cpp.angle), pageGradient.angle, "⑥c：C++ 的占位角度与 --page-gradient 不同");
 }
 
 // ---------------------------------------------------------------- ④ ⑥ ⑦ 逐个 index.html
@@ -207,8 +368,7 @@ for (const role of roles) {
         run.check(boot.at < firstResource, `${role}：④ boot 守卫必须排在所有外链资源之前`);
         for (const re of ES5_BANNED)
             run.check(!re.test(boot.body.replace(/\/\/.*$/gm, "")), `${role}：⑤ boot 守卫用了非 ES5 语法 ${re}`);
-        if (needCpp("④ C++ 的 kBootErrorEventId", cpp.boot))
-            run.eq("__rinne__bootError", cpp.boot, `${role}：④ boot 事件名与 C++ 不一致`);
+        if (cpp.boot !== null) run.eq("__rinne__bootError", cpp.boot, `${role}：④ boot 事件名与 C++ 不一致`);
     }
 
     // ⑥ 占位底色
@@ -238,8 +398,7 @@ for (const role of roles) {
     run.check(Boolean(ff), `${role}：⑦ 找不到首帧信号（事件 __rinne__firstFrame）`);
     if (ff) {
         const body = ff.body.replace(/\/\/.*$/gm, "");
-        if (needCpp("⑦ C++ 的 kFirstFrameEventId", cpp.first))
-            run.eq("__rinne__firstFrame", cpp.first, `${role}：⑦ 首帧事件名与 C++ 不一致`);
+        if (cpp.first !== null) run.eq("__rinne__firstFrame", cpp.first, `${role}：⑦ 首帧事件名与 C++ 不一致`);
         run.check(
             /requestAnimationFrame\(function\s*\(\)\s*\{\s*window\.requestAnimationFrame\(signal\)/.test(body),
             `${role}：⑦ 武装必须是嵌套两层 requestAnimationFrame`,
@@ -265,11 +424,160 @@ for (const role of roles) {
             post >= 0 && sent > post && clear > post,
             `${role}：⑦ 撤网（sent 置位、清保险）必须排在 postMessage 之后`,
         );
-        if (needCpp("⑦ C++ 的 paint 差值字段名", cpp.delta)) {
+        if (cpp.delta !== null) {
             run.check(body.includes(cpp.delta), `${role}：⑦ 载荷字段名与 C++ 的 ${cpp.delta} 不一致`);
         }
     }
 }
 
-for (const s of skipped) run.skipItem(s, "C++ 侧文件还没入库，入库后自动生效");
+// ---------------------------------------------------------------- ⑧ 桥回执的失败原因
+// 哪个函数能回哪个原因，是契约表（docs/UI_BRIDGE.md 的函数表）的内容；这里把「C++ 有哪些原因」「文档的行里写没写」
+// 「mock 回不回」三方对起来。C++ 多出一个原因而这张表没跟上，会判红，逼着同批改文档与 mock。
+const REASON_FUNCTIONS = {
+    "bad-lang": ["setLang"],
+    "bad-scale": ["setUiScale"],
+    "scale-locked": ["setUiScale", "commitUiScale"],
+    "no-pending": ["commitUiScale"],
+    "not-ready": ["setLang", "setUiScale", "commitUiScale"],
+};
+
+/** 从 BridgeBase.h 抽 namespace Reason 里的字符串值（先去注释）；抽不到 namespace 给 null。 */
+function extractCppReasons(rawText) {
+    const text = stripCppComments(rawText);
+    const body = /\bnamespace\s+Reason\s*\{([\s\S]*?)\}/.exec(text)?.[1] ?? null;
+    if (body === null) return null;
+    return [...body.matchAll(/=\s*"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/** 文档函数表里某个函数那一行（第一列是反引号包的函数名）；找不到给 null。 */
+function docFunctionRow(docText, fn) {
+    const prefix = `| \`${fn}\` |`;
+    return docText.split("\n").find((line) => line.startsWith(prefix)) ?? null;
+}
+
+{
+    // 抽取器自测
+    run.eq(
+        extractCppReasons(
+            'namespace Reason {\n// inline constexpr const char* Old = "old-reason";\n/* X = "block-reason" */\n' +
+                'inline constexpr const char* A = "a-b";\n}',
+        ),
+        ["a-b"],
+        "抽取器自测：Reason 里被注释掉的值不算",
+    );
+    run.eq(extractCppReasons('namespace Other { auto x = "y"; }'), null, "抽取器自测：没有 Reason 命名空间给 null");
+    run.eq(
+        docFunctionRow("| `setLang` | a |\n| `setLangX` | b |", "setLang"),
+        "| `setLang` | a |",
+        "抽取器自测：文档行按整个函数名匹配",
+    );
+    run.eq(docFunctionRow("| `setLangX` | b |", "setLang"), null, "抽取器自测：只是前缀相同的函数名不算");
+
+    const cppReasons = extractCppReasons(read("src/plugin-common/BridgeBase.h"));
+    run.check(cppReasons !== null, "⑧ BridgeBase.h 里找不到 namespace Reason");
+    run.eq(
+        [...(cppReasons ?? [])].sort(),
+        Object.keys(REASON_FUNCTIONS).sort(),
+        "⑧ BridgeBase.h 的失败原因与本断言登记的不一致",
+    );
+
+    const doc = read("docs/UI_BRIDGE.md");
+    for (const [reason, fns] of Object.entries(REASON_FUNCTIONS)) {
+        for (const fn of fns) {
+            const row = docFunctionRow(doc, fn);
+            run.check(row !== null, `⑧ UI_BRIDGE.md 的函数表里找不到 ${fn}`);
+            run.check(
+                row !== null && row.includes(`reason: "${reason}"`),
+                `⑧ UI_BRIDGE.md 里 ${fn} 一行没写失败原因 ${reason}`,
+            );
+        }
+    }
+
+    // mock 的行为：同一批原因，同样的函数
+    const u = (f) => pathToFileURL(path.join(ROOT, f)).href;
+    const { createPreviewSession } = await import(u("web-preview/mock/state-driver.js"));
+    const { memoryStorage, UI_DEFAULTS_KEY } = await import(u("web-preview/mock/bridge-common.js"));
+    for (const role of roles) {
+        const store = { local: memoryStorage(), session: memoryStorage() };
+        const session = createPreviewSession({ role, params: "auto=0", storage: store });
+        session.mock.requestInitialState();
+        const m = session.mock;
+        const preset = session.core.box.presets.find((f) => f !== 1);
+        const reasonOf = (r) => (r.ok === false ? r.reason : "ok");
+
+        run.eq(reasonOf(m.setLang("de")), "bad-lang", `${role}：⑧ mock 的 setLang 对不认识的语言码应回 bad-lang`);
+        run.eq(reasonOf(m.setUiScale(0.123)), "bad-scale", `${role}：⑧ mock 的 setUiScale 对表外档位应回 bad-scale`);
+        run.eq(reasonOf(m.commitUiScale()), "no-pending", `${role}：⑧ mock 的 commitUiScale 没有预览时应回 no-pending`);
+
+        // 没锁定：选档、确认都成功
+        run.eq(reasonOf(m.setUiScale(preset)), "ok", `${role}：⑧ 没锁定时 setUiScale 应成功`);
+        run.eq(reasonOf(m.commitUiScale()), "ok", `${role}：⑧ 没锁定时 commitUiScale 应成功`);
+        const confirmed = preset;
+
+        // 预览中锁定：选档与确认都回 scale-locked，窗口钉回 1，没确认的预览作废
+        const preview = session.core.box.presets.find((f) => f !== 1 && f !== confirmed);
+        run.eq(reasonOf(m.setUiScale(preview)), "ok", `${role}：⑧ 锁定前先放一个待确认的预览`);
+        session.core.defaults.set({ scaleLocked: true });
+        run.eq(reasonOf(m.setUiScale(preset)), "scale-locked", `${role}：⑧ 锁定时 setUiScale 应回 scale-locked`);
+        run.eq(session.model.scale, 1, `${role}：⑧ 锁定时窗口档位应钉在 1`);
+        run.eq(reasonOf(m.commitUiScale()), "scale-locked", `${role}：⑧ 锁定时 commitUiScale 应回 scale-locked`);
+
+        // 解锁后，锁定前没确认的预览不会复活，窗口档位回到锁定前最近一次确认的那一档（不是没确认的预览，也不是 1）
+        session.core.defaults.set({ scaleLocked: false });
+        run.eq(reasonOf(m.commitUiScale()), "no-pending", `${role}：⑧ 解锁后，锁定时作废的预览不能再确认`);
+        run.eq(session.model.scale, confirmed, `${role}：⑧ 解锁后窗口档位应回到最近一次确认的 ${confirmed}`);
+
+        // 兜底面板在场：三个会改状态的函数先拒，先于参数校验，回执与参数无关，什么都不改；撤掉后一切照常
+        const keyScale = role === "input" ? "uiScaleInput" : "uiScaleOutput";
+        const stored = () => session.core.defaults.get();
+        run.eq(reasonOf(m.setLang("en")), "ok", `${role}：⑧ 面板不在场时 setLang 应成功`);
+        run.eq(reasonOf(m.setUiScale(preview)), "ok", `${role}：⑧ 面板出现前先放一个待确认的预览`);
+        const scaleBefore = session.model.scale;
+        session.core.defaults.set({ fallbackShown: true });
+        run.eq(reasonOf(m.setLang("fr")), "not-ready", `${role}：⑧ 面板在场时 setLang 应回 not-ready`);
+        run.eq(
+            reasonOf(m.setLang("de")),
+            "not-ready",
+            `${role}：⑧ 面板在场时，坏语言码也先回 not-ready（守卫先于参数校验）`,
+        );
+        run.eq(reasonOf(m.setUiScale(preset)), "not-ready", `${role}：⑧ 面板在场时 setUiScale 应回 not-ready`);
+        run.eq(
+            reasonOf(m.setUiScale(0.123)),
+            "not-ready",
+            `${role}：⑧ 面板在场时，坏档位也先回 not-ready（守卫先于参数校验）`,
+        );
+        run.eq(
+            reasonOf(m.commitUiScale()),
+            "not-ready",
+            `${role}：⑧ 面板在场时 commitUiScale 应回 not-ready，即使有待确认的预览`,
+        );
+        run.eq(stored().lang, "en", `${role}：⑧ 面板在场时 setLang 不能写全局位`);
+        run.eq(session.model.scale, scaleBefore, `${role}：⑧ 面板在场时 setUiScale 不能动窗口档位`);
+        run.eq(stored()[keyScale], confirmed, `${role}：⑧ 面板在场时 commitUiScale 不能落盘`);
+        session.core.defaults.set({ fallbackShown: false });
+        run.eq(reasonOf(m.setLang("de")), "bad-lang", `${role}：⑧ 面板撤掉后 setLang 照常校验参数`);
+        run.eq(reasonOf(m.setLang("fr")), "ok", `${role}：⑧ 面板撤掉后 setLang 应成功`);
+        run.eq(stored().lang, "fr", `${role}：⑧ 面板撤掉后 setLang 应写全局位`);
+        run.eq(
+            reasonOf(m.commitUiScale()),
+            "ok",
+            `${role}：⑧ 面板撤掉后，面板出现前的预览仍可确认（没被 not-ready 吃掉）`,
+        );
+        run.eq(stored()[keyScale], preview, `${role}：⑧ 面板撤掉后确认应把预览档位落盘`);
+
+        // 面板在场时的 requestInitialState：只回执，不发首帧，也不置就绪
+        const coldStore = { local: memoryStorage(), session: memoryStorage() };
+        coldStore.local.setItem(UI_DEFAULTS_KEY, JSON.stringify({ fallbackShown: true }));
+        const cold = createPreviewSession({ role, params: "auto=0", storage: coldStore });
+        run.eq(cold.mock.requestInitialState(), { ok: true }, `${role}：⑧ 面板在场时 requestInitialState 只回 ok`);
+        run.eq(cold.core.ready, false, `${role}：⑧ 面板在场时 requestInitialState 不置就绪`);
+        run.eq(cold.core.sent["rinne.state"] ?? 0, 0, `${role}：⑧ 面板在场时 requestInitialState 不发首帧`);
+        cold.core.defaults.set({ fallbackShown: false });
+        run.eq(cold.mock.requestInitialState(), { ok: true }, `${role}：⑧ 面板撤掉后 requestInitialState 照常`);
+        run.eq(cold.core.ready, true, `${role}：⑧ 面板撤掉后 requestInitialState 置就绪`);
+        run.check((cold.core.sent["rinne.state"] ?? 0) >= 1, `${role}：⑧ 面板撤掉后 requestInitialState 发首帧`);
+    }
+}
+
+for (const s of skipped) run.skipItem(s, "C++ 侧文件还没入库；入库后这些项必须抽得到，抽不到判红");
 run.finish();
