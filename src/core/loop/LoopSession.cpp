@@ -5,6 +5,8 @@
 // 一块的流程：
 //   1. 算 D：用户要的（毫秒或节拍）→ 样本 → 抬到下限（max(N_prep, N_obs, n)）→ 截到上限。
 //   2. 域锚定：第一次配上或写头倒退时，本地延迟线从当前写头 W 起重来（比 W 早的帧一律作废）。
+//      环头里写方发布的采样率与本端不一致时，等同没有写方（走「没有对端」的路径：读头 10 ms 淡出，回送为 0，
+//      干声照常），恢复一致后按新配对处理。
 //   3. 判据：交给 StreamSync（断档、对齐、容忍、重同步、停用清空、起播复位）。
 //   4. 拉环：把环里 [pulled, W) 的帧全部搬进本地延迟线（一圈之内），pulled 追到 W。
 //   5. 建新读头（需要时），把读头按包络混成一路，写进 ctx.returnLeft / ctx.returnRight，并标出逐样本的有效位。
@@ -57,6 +59,8 @@ bool LoopSession::prepare(double sampleRate) noexcept
 {
     const bool changed = !prepared_ || sampleRate_ != sampleRate;
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
+    // Output 发布到环头的采样率是同一个转换（取整），两边相等才算一致
+    ownRate_ = static_cast<std::uint32_t>(sampleRate_);
 
     if (changed)
     {
@@ -84,6 +88,9 @@ bool LoopSession::prepare(double sampleRate) noexcept
     }
     // 错序证据自己判断要不要重来（换采样率才清；同采样率重新 prepare 证据保持连续）
     order_.prepare(sampleRate_);
+    // 起播去抖：报停已经开始、还没到阈值时，重新 prepare 视为确认；一直在走时不动
+    play_.prepare(sampleRate_);
+    play_.prepared();
     // N_obs 每次 prepare 清零（同采样率也清）：下限因此回落到声明值。
     maxBlockSeen_ = 0;
     delayMinReason_ = DelayMinReason::kNone;
@@ -203,6 +210,8 @@ void LoopSession::flushAfterSuspend() noexcept
 {
     flushLocalDelayLine();
     holdLastReturn();
+    // 挂起期间宿主可能一块 isPlaying=false 都没送过，走带状态不可知：恢复后第一个在走的块算起播沿
+    play_.suspended();
     sink_.emit(LoopEventCode::kLineCleared, 2);
 }
 
@@ -641,11 +650,10 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     updateBpm(ctx);
     const std::int64_t delay = computeDelay(ctx);
 
-    // 走带沿：上一块没走、这一块走了
+    // 走带沿：确认过停走带之后第一个在走的块。宿主走带中间短暂报停（累计不到阈值）不算停走带，见 PlayDebounce.h。
+    // 最大块长取声明值与本会话见过的最大块长里较大的（computeDelay 已经把本块的 n 计进了 maxBlockSeen_）。
     const engine::TransportInfo& transport = ctx.transport;
-    const bool playing = transport.isPlaying;
-    const bool playEdge = playing && !lastPlaying_;
-    lastPlaying_ = playing;
+    const bool playEdge = play_.observe(transport.isPlaying, n, std::max(ctx.declaredBlock, maxBlockSeen_));
 
     // 对端的事实：写头、epoch、写权
     i64 writeHead = 0;
@@ -660,12 +668,20 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     lastRing_ = ctx.ring;
     lastRingGeneration_ = ctx.ring != nullptr ? ctx.ringGeneration : 0u;
 
+    // 两端采样率不一致：写方发布的采样率与本端不同，环里的帧按另一个速率解释，读了就是变调的声音。
+    // 这时等同没有写方：paired 为假，走「没有对端」的路径（读头 10 ms 淡出、回送为 0、干声照常），不另开安全转移。
+    // 恢复一致（任一端改回）后 paired 回到真，按新配对处理：安全链从首个有效读样本起 500 ms 淡入。
+    bool rateMismatch = false;
+    std::uint32_t peerRate = 0;
+
     if (ctx.ring != nullptr)
     {
         const ipc::RingFormat format = ipc::LoopRing::readFormat(*ctx.ring);
         writeHead = static_cast<i64>(ipc::LoopRing::writeHead(*ctx.ring));
         writeIntent = static_cast<i64>(ipc::LoopRing::writeIntent(*ctx.ring));
-        paired = format.writerToken != 0;
+        peerRate = format.writerToken != 0 ? format.sampleRate : 0u;
+        rateMismatch = format.writerToken != 0 && format.sampleRate != ownRate_;
+        paired = format.writerToken != 0 && !rateMismatch;
 
         if (havePeer_ && paired)
         {
@@ -879,6 +895,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
 
     // 发布状态
     status_.setPaired(paired);
+    status_.setRate(rateMismatch, peerRate);
     status_.setStalled(sync_.state() == SyncState::kStalled);
     status_.setTolerant(sync_.tolerant());
     status_.setUnstable(sync_.unstable());

@@ -408,7 +408,7 @@ TEST_CASE("导出锁存 对端的块序号每块都记账，不管是不是离�
     CHECK(rig.status().exportCauses == kExportCausePeerOverMax);
 }
 
-TEST_CASE("导出锁存 重同步：换写方、改格式、写头跳变、断档恢复各计一次；起播沿不计")
+TEST_CASE("导出锁存 重同步：换写方、改格式、写头跳变、断档恢复各计一次；起播沿与采样率不一致不计")
 {
     // 验证点：把重同步这一项去掉 → 本用例变红。
     Rig rig(48000.0, kDeclared);
@@ -432,14 +432,27 @@ TEST_CASE("导出锁存 重同步：换写方、改格式、写头跳变、断�
     }
     CHECK(rig.status().exportEvents == 1u); // 稳定下来之后不再计
 
-    // 写方改了采样率（epoch 变了）
+    // 写方改了采样率又改了回来，本端一块都没跑的间隙里：采样率一致、epoch 变了，是一次格式重同步
     ipc::LoopRing::publishWriter(rig.ring(), 2, 44100, 2);
+    ipc::LoopRing::publishWriter(rig.ring(), 2, 48000, 2);
     rig.step(1024, params, offline());
     CHECK(rig.status().exportEvents == 2u);
     CHECK(rig.status().resyncByReason[static_cast<int>(rinne::loop::SyncReason::kFormat)] == 1u);
-    ipc::LoopRing::publishWriter(rig.ring(), 2, 48000, 2); // 改回去也是一次
+    for (int i = 0; i < 3; ++i)
+    {
+        rig.step(1024, params, offline());
+    }
+
+    // 两端采样率不一致：该块按没有对端处理，回送为 0，导出与播放一致，不计；改回去是新配对，也不计
+    ipc::LoopRing::publishWriter(rig.ring(), 2, 44100, 2);
     rig.step(1024, params, offline());
-    CHECK(rig.status().exportEvents == 3u);
+    CHECK(rig.status().rateMismatch == 1u);
+    CHECK(rig.status().exportEvents == 2u);
+    ipc::LoopRing::publishWriter(rig.ring(), 2, 48000, 2);
+    rig.step(1024, params, offline());
+    CHECK(rig.status().rateMismatch == 0u);
+    CHECK(rig.status().exportEvents == 2u);
+    CHECK(rig.status().resyncByReason[static_cast<int>(rinne::loop::SyncReason::kFormat)] == 1u);
     for (int i = 0; i < 3; ++i)
     {
         rig.step(1024, params, offline());
@@ -448,7 +461,7 @@ TEST_CASE("导出锁存 重同步：换写方、改格式、写头跳变、断�
     // 写头一下子跳到前面（超过 8192 帧）
     rig.write(20000);
     rig.step(1024, params, offline());
-    CHECK(rig.status().exportEvents == 4u);
+    CHECK(rig.status().exportEvents == 3u);
     CHECK(rig.status().resyncByReason[static_cast<int>(rinne::loop::SyncReason::kJump)] == 1u);
     for (int i = 0; i < 3; ++i)
     {

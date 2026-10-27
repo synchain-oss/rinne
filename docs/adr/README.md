@@ -24,4 +24,4 @@ under 4 KB. Records marked "planned" are not written yet.
 | 0006 | 冻结面与版本策略 | planned |
 | [0007](0007-licensing.md) | 许可与合规口径 | accepted |
 | [0008](0008-shared-code.md) | 与 SCVB 共享代码：复制并登记来源，不抽共享库 | accepted |
-| [0009](0009-loop-evidence.md) | 错序与导出不一致的判据：每块判一次、连续 3 次定案、容忍时间戳回退；离线块计数与已读值锁存 | accepted |
+| [0009](0009-loop-evidence.md) | 环路层的证据判据：错序每块判一次、连续 3 次定案；导出不一致计数与锁存；报停短于 max(100 ms, 4 块) 不算起播沿；采样率不一致回送为 0 | accepted |

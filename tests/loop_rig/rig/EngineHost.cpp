@@ -67,7 +67,7 @@ bool EngineHost::open(std::uint32_t group)
     {
         return false;
     }
-    ipc::LoopRing::publishWriter(*ring, outputToken_, static_cast<std::uint32_t>(sampleRate_), 2);
+    ipc::LoopRing::publishWriter(*ring, outputToken_, static_cast<std::uint32_t>(outputRate_), 2);
     writerIsSecond_ = false;
     return true;
 }
@@ -75,6 +75,7 @@ bool EngineHost::open(std::uint32_t group)
 void EngineHost::prepare(double sampleRate, int maxBlock)
 {
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
+    outputRate_ = sampleRate_;
     maxBlock_ = maxBlock > 0 ? maxBlock : 1024;
     config_.sampleRate = sampleRate_;
     config_.maxBlock = maxBlock_;
@@ -99,7 +100,7 @@ void EngineHost::prepare(double sampleRate, int maxBlock)
     if (auto* ring = segments_.ring(group_))
     {
         ipc::LoopRing::publishWriter(*ring, writerIsSecond_ ? secondOutputToken_ : outputToken_,
-                                     static_cast<std::uint32_t>(sampleRate_), 2);
+                                     static_cast<std::uint32_t>(outputRate_), 2);
     }
     if (auto* rv = segments_.rv())
     {
@@ -108,6 +109,41 @@ void EngineHost::prepare(double sampleRate, int maxBlock)
     }
 
     prepared_ = true;
+}
+
+void EngineHost::prepareOutput(double sampleRate, int maxBlock)
+{
+    outputRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
+    const int block = maxBlock > 0 ? maxBlock : maxBlock_;
+    output_.prepare(outputRate_, block);
+    if (haveSecondOutput_)
+    {
+        secondOutput_.prepare(outputRate_, block);
+    }
+    if (auto* ring = segments_.ring(group_))
+    {
+        ipc::LoopRing::publishWriter(*ring, writerIsSecond_ ? secondOutputToken_ : outputToken_,
+                                     static_cast<std::uint32_t>(outputRate_), 2);
+    }
+    if (auto* rv = segments_.rv())
+    {
+        ipc::roleSlot(*rv, group_, ipc::Role::kOutput).max_block.store(static_cast<std::uint32_t>(block));
+    }
+}
+
+void EngineHost::prepareInput(double sampleRate, int maxBlock)
+{
+    const double rate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    const int block = maxBlock > 0 ? maxBlock : maxBlock_;
+    input_.prepare(rate, block);
+    if (haveSecondInput_)
+    {
+        secondInput_.prepare(rate, block);
+    }
+    if (auto* rv = segments_.rv())
+    {
+        ipc::roleSlot(*rv, group_, ipc::Role::kInput).max_block.store(static_cast<std::uint32_t>(block));
+    }
 }
 
 // 宿主缓冲的容量：容得下支持的最大块长（超长块也要送进引擎，引擎才判得出超限）。
@@ -187,7 +223,7 @@ void EngineHost::switchWriter(bool toSecond)
     if (auto* ring = segments_.ring(group_))
     {
         ipc::LoopRing::publishWriter(*ring, toSecond ? secondOutputToken_ : outputToken_,
-                                     static_cast<std::uint32_t>(sampleRate_), 2);
+                                     static_cast<std::uint32_t>(outputRate_), 2);
     }
 }
 
@@ -450,7 +486,7 @@ bool EngineHost::addSecondOutput()
         return false;
     }
     // 第二个 Output：自己的写权 token。第一个写方还持有写权时，第二个写就是冲突（不写环）。
-    secondOutput_.prepare(sampleRate_, maxBlock_);
+    secondOutput_.prepare(outputRate_, maxBlock_);
     haveSecondOutput_ = true;
     config_.outputCount = 2;
     return true;

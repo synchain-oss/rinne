@@ -33,6 +33,7 @@
 #include "loop/LoopStatus.h"
 #include "loop/LoopTiming.h"
 #include "loop/OrderEvidence.h"
+#include "loop/PlayDebounce.h"
 #include "loop/StreamSync.h"
 #include "loop/Taps.h"
 
@@ -171,6 +172,7 @@ public:
     // 音频线程，块首、process 之前：两端停用（宿主挂起）超过 250 ms 之后清空本地延迟线，防停用止啸后原样复燃。
     // 与 flushLocalDelayLine 的区别：上一块的最后一个回送样本不直接落到 0，而是保持它、5 ms 线性衰减（末值保持，
     // 不读任何旧数据）。之后从写头起重建读头，新数据照常 20 ms onset。
+    // 挂起期间走带状态不可知（宿主可能没送过一块 isPlaying=false 就停了），恢复后第一个在走的块算起播沿。
     void flushAfterSuspend() noexcept;
 
     // 音频线程：状态快照（诊断与界面读）
@@ -267,7 +269,8 @@ private:
     std::uint32_t delayHints_ = 0; // 当前的提示位（kDelayHint*）
     DelayMinReason delayMinReason_ = DelayMinReason::kNone; // 下限从哪来
     std::int64_t maxBlockSeen_ = 0; // 本会话见过的最大块长（引擎给的 N_obs 与本块 n 取大；prepare 换采样率清零）
-    bool lastPlaying_ = false;
+    PlayDebounce play_; // 起播沿：宿主短暂报停不算停走带（口径见 PlayDebounce.h 与 ADR-0009）
+    std::uint32_t ownRate_ = 0; // 本端采样率（取整，与 Output 发布到环头的那个数同一个转换），和环头里的比
     std::uint64_t lastWriterToken_ = 0;
     std::uint64_t lastEpoch_ = 0;
     bool havePeer_ = false;
