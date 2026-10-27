@@ -30,8 +30,10 @@ namespace rinne::webview
 //   - 页面选档只是预览，确认后才落盘；
 //   - 缩放锁定时窗口钉在 100%，选档与确认都被拒，已保存的档位不动（系统 WebKit 过旧时由页面或平台层触发）；
 //     锁定时没确认的预览作废，档位退回最近一次确认的那一档。
-// 兜底面板：运行时缺失、过旧、前端启动失败或看门狗超时时切出，点重试回到加载。看门狗超时切出之后桥才起来的话，
-// 页面其实是好的，面板自动收回（只对这一种原因；见实现里的 withdrawFallbackForLateBridge）。
+// 兜底面板：运行时缺失、过旧、前端启动失败或看门狗超时时切出，离开它只有点重试这一条路（重新加载入口页）。
+// 切面板时网页被隐藏，而 JUCE 在隐藏时默认把页面卸载（导航到空白页；本宿主不开保留页面的选项，
+// 那会改变宿主隐藏窗口等所有隐藏场景的资源与重载行为），所以慢页面在看门狗超时那一刻就被卸掉了，面板不会自己收回。
+// 面板在场时迟到的桥请求只回执，不当作就绪：不置位、不计入活着的桥、不发首帧（见 handleRequestInitialState）。
 // 面板在场期间定时器照跑，面板上的环路开关与恢复冷却靠它刷新。
 // 页面和内核交上来的文字（启动失败的阶段与细节、导航错误说明、地址）写日志、上面板之前一律先整形成一行，
 // 面板只显示纯 ASCII，见 ResourceProvider::asciiForLog 与 urlForLog。
@@ -169,7 +171,6 @@ private:
     juce::WebBrowserComponent::Options makeOptions(); // 装配通用 Options，再交给 augmentOptions
     void showFallback(FallbackReason reason);
     void retryWebView();
-    void withdrawFallbackForLateBridge(); // 看门狗切了面板之后桥才起来：收回面板、让网页重新可见
     void resizeToDesignBox();
 
     // 加载时序（消息线程）：由 HostWebView 的页面回调驱动
@@ -220,7 +221,6 @@ private:
 
     std::unique_ptr<HostWebView> webView_;
     std::unique_ptr<FallbackPanel> fallback_;
-    FallbackReason fallbackReason_ = FallbackReason::LoadTimeout; // 面板在场时：这块面板是为什么切出来的
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WebViewHost)
 };

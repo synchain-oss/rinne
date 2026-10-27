@@ -489,7 +489,6 @@ void WebViewHost::showFallback(FallbackReason reason)
 {
     if (fallback_ != nullptr)
         return;
-    fallbackReason_ = reason; // 面板在场期间的「为什么切的」，迟到的桥据此决定要不要收回面板
     // 面板自己铺满本组件，闸门不该再按住 WebView 的位置（否则重试回来时边界还停在可视区外，
     // 而那条路上不一定再有导航事件把它推回来）。
     // 放行诊断要在这里调：拿掉加载完成放行之后，唯一还会调它的地方只剩首帧信号的处理，
@@ -499,6 +498,16 @@ void WebViewHost::showFallback(FallbackReason reason)
     // 加载超时的预算恒大于闸门超时，闸门早已自己放行并写过行，不打；前端启动失败可以在闸门超时之内到，只有这一条打得出
     revealGate_.onFallbackShown();
     noteRevealed();
+    // 隐藏网页。这一步在 JUCE 8.0.8 里的真实行为（核对过 WebBrowserComponent 的两个平台实现；
+    // 本宿主没开保留页面的选项，所以隐藏时卸载页面是开着的）：
+    //   - 可见性变化的回调里，组件不可见、页面没在空白页上、且浏览器已建好时，页面被导航到空白页
+    //     （为的是隐藏后不再跑脚本、放声音）。WebView2 的控制器还没建好时这一步不动；
+    //   - 再次可见时，Windows 在页面被卸成了空白页的情况下做一次历史后退，macOS 先按记下的最后地址重新加载。
+    // 所以看门狗在这里切面板，等于把加载得慢的页面卸掉：它的脚本上下文没了，面板不会自己收回，
+    // 回到网页只有点重试这一条路，那是一次完整的重新加载入口页。有意不做「桥迟到就收回面板」：
+    // 隐藏时已卸载的页面不会再发请求，收回时 JUCE 又会让它重新加载，两头都对不上。
+    // 一个例外：WebView2 的控制器若在看门狗超时之后才建好，JUCE 建好后照常导航到入口地址，不看可见性，
+    // 页面可能在隐藏状态下加载完并发来桥请求。这种请求怎么处理，见 handleRequestInitialState
     webView_->setVisible(false);
 
     const bool missing = (reason == FallbackReason::MissingRuntime);
@@ -571,29 +580,15 @@ void WebViewHost::showFallback(FallbackReason reason)
     resized();
 }
 
+// 离开兜底面板的唯一出口。beginLoadAttempt 里先让网页重新可见（JUCE 此刻会做一次后退或按旧地址重载，
+// 见 showFallback 的注释），随后立刻显式导航到入口页，后一次导航压过前一次；
+// 所以重试的结果恒为「入口页从头加载一遍」，不依赖页面之前停在哪。
+// 就绪位、活着的桥的计数、启动失败摘要、看门狗起点都在 beginLoadAttempt 里复位
 void WebViewHost::retryWebView()
 {
     fallback_.reset();
     resizeToDesignBox();
     beginLoadAttempt(); // 重探运行时三态并重置看门狗；若又是缺失或过旧会就地再切兜底
-    resized();
-}
-
-// 看门狗已经切了兜底面板，桥却在这之后才起来：页面其实是好的，只是比预算慢。收回面板、让网页重新可见、
-// 窗口退回当前档位的设计盒（面板在场时窗口可能被放大过），与重试走的是同一组动作，只是不重新加载页面。
-//
-// 不会来回切换：状态只会单向走「加载中、兜底面板（超时）、就绪」。就绪（bridgeReady_ 为真）之后，
-// 看门狗（要求桥未就绪）和启动失败上报（同样要求）都再也切不回面板，只剩点重试这一条路回到加载中。
-// 所以收回之后不会再被同一次加载尝试顶回去。
-//
-// 只收回「看门狗超时」切出来的面板。运行时缺失、过旧时根本没有页面在加载，不会有桥来；
-// 前端自己上报了启动失败时，面板上显示的是那条诊断，页面说它没起来，就由用户看过之后点重试，不替用户收掉
-void WebViewHost::withdrawFallbackForLateBridge()
-{
-    logDiag("bridge came up after the watchdog fallback, panel withdrawn");
-    fallback_.reset();
-    webView_->setVisible(true);
-    resizeToDesignBox();
     resized();
 }
 
@@ -768,6 +763,22 @@ juce::WebBrowserComponent::Options WebViewHost::makeOptions()
 // -----------------------------------------------------------------------------
 void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场：这一次加载尝试已经有了结论（运行时缺失、过旧、前端启动失败或看门狗超时），网页是隐藏的，
+    // 页面多半已被 JUCE 卸成空白页。能走到这里的只有两种：切面板之前就已排进消息队列的那一次调用，
+    // 或者 WebView2 控制器在超时之后才建好、页面在隐藏状态下加载完发来的请求（见 showFallback 的注释）。
+    // 都只回执，不当作就绪，让状态保持自洽：
+    //   - 不置位 bridgeReady_：定时器不往隐藏的网页发事件，看门狗与启动失败上报的判断也不被它改写；
+    //   - 不计入活着的桥：热预算只认真正在用的桥；
+    //   - 不发首帧：网页不可见，发不出去；也不收回面板，页面是否还活着这里无从知道。
+    // 离开面板只有点重试一条路，重试会复位全部就绪状态并重新加载入口页。
+    // 回执仍给 ok：这个函数的回执里没有失败原因，不为这种情形新增一个；页面此刻也看不见。
+    // 桥契约时序里「收到请求立刻发首帧」在这一种情形下不适用：网页不可见，首帧没有收件人
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown");
+        complete(bridge::okResponse());
+        return;
+    }
     bridgeReady_ = true; // 前端确认就绪，此后定时器才允许发送事件
     // 本实例的桥活着，共享的 WebView2 进程组必在跑，其它编辑器可按热预算起看门狗。
     // requestInitialState 可能被同一页面多次调用（页面重载后要重来一次），故用标志防重复计数
@@ -779,9 +790,6 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
     logDiag("bridge ready after " + juce::String(static_cast<int>(juce::Time::getMillisecondCounter() - startMs_)) +
             " ms");
     complete(bridge::okResponse());
-    // 要在首帧之前收：网页不可见时事件发不出去
-    if (fallback_ != nullptr && fallbackReason_ == FallbackReason::LoadTimeout)
-        withdrawFallbackForLateBridge();
     emitState(); // 首帧必发
 }
 

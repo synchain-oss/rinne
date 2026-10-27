@@ -5,8 +5,8 @@
 //   2. 只给单测用的两个存储钩子（目录重定向、进程间锁替身），发布代码（src/ 下除声明它们的两个文件以外）不得调用；
 //   3. 宿主类（不进宿主测试目标，编译不到这里）里靠调用点守的东西：导航闸必须走纯函数判定并在不放行时返回假，
 //      状态快照必须用一次读回，不能退回逐个读设置文件；页面和内核交上来的文字（启动失败、导航错误、地址）
-//      写日志和上面板之前必须先过整形函数；定时器必须在运行时三态分支之前启动；看门狗切面板之后桥才起来时
-//      必须收回面板，且只收回超时那一种；设置语言必须一次写完语言值与「选过」位。
+//      写日志和上面板之前必须先过整形函数；定时器必须在运行时三态分支之前启动；面板在场时迟到的桥请求
+//      只回执、不置位、不计数、不发首帧、不收回面板，离开面板只有点重试一条路；设置语言必须一次写完语言值与「选过」位。
 //
 // 第一条：网页宿主这一族源文件里，运行期字符串字面量只许 ASCII。
 // 原因：源文件按 UTF-8 存，字面量里一旦有中文，在中文代码页的机器上编译器会报字符集警告，
@@ -432,31 +432,54 @@ bool timerStartsBeforeRuntimeBranches(const std::string& body)
     return timer < fallback && timer < early && guard != std::string::npos && timer - guard < 40;
 }
 
-// 桥晚于看门狗起来时收回面板：只收超时那一种，在首帧之前，收回的动作不重新加载页面
-bool lateBridgeWithdrawsPanel(const std::string& initialState, const std::string& withdraw,
-                              const std::string& showFallback)
+// 数 needle 在 text 里出现几次（不重叠）
+std::size_t countOf(const std::string& text, const std::string& needle)
 {
-    const auto guard = initialState.find("fallbackReason_ == FallbackReason::LoadTimeout");
-    const auto call = initialState.find("withdrawFallbackForLateBridge(");
-    const auto emit = initialState.find("emitState()");
-    if (guard == std::string::npos || call == std::string::npos || emit == std::string::npos)
-        return false;
-    if (!(guard < call && call < emit))
-        return false;
-    // 只许认超时这一个原因，别的原因出现在这个函数里就是放宽了
-    std::size_t reasons = 0;
-    for (auto at = initialState.find("FallbackReason::"); at != std::string::npos;
-         at = initialState.find("FallbackReason::", at + 1))
-        ++reasons;
-    if (reasons != 1)
-        return false;
-    return contains(withdraw, "fallback_.reset()") && contains(withdraw, "setVisible(true)") &&
-           contains(withdraw, "resizeToDesignBox()") && !contains(withdraw, "beginLoadAttempt(") &&
-           contains(showFallback, "fallbackReason_ = reason");
+    std::size_t n = 0;
+    for (auto at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size()))
+        ++n;
+    return n;
 }
 
-// 收回之后不能再被顶回面板：看门狗和启动失败上报都以「桥未就绪」为前提
-bool nothingReshowsPanelOnceReady(const std::string& timerCallback, const std::string& bootError)
+// 面板在场时迟到的桥请求：写一行日志（真机上靠它看这条路径走没走到）、只回执就返回，且这个分支排在置位、计数与首帧之前；
+// 分支里不碰就绪位、不发状态、不收回面板、不动网页的可见性、不重新加载
+bool lateBridgeIsIgnoredWhilePanelShown(const std::string& initialState)
+{
+    const auto guard = initialState.find("if (fallback_ != nullptr)");
+    const auto ready = initialState.find("bridgeReady_ = true");
+    const auto counted = initialState.find("countedAsReady_ = true");
+    const auto emit = initialState.find("emitState()");
+    if (guard == std::string::npos || ready == std::string::npos || counted == std::string::npos ||
+        emit == std::string::npos)
+        return false;
+    if (!(guard < ready && guard < counted && guard < emit))
+        return false;
+    const auto leave = initialState.find("return;", guard);
+    if (leave == std::string::npos || leave > ready)
+        return false;
+    const auto branch = initialState.substr(guard, leave - guard);
+    if (!contains(branch, "complete(") || !contains(branch, "logDiag(")) // 页面的调用要有回执，也要留一行日志
+        return false;
+    for (const char* forbidden : {"bridgeReady_", "countedAsReady_", "readyBridgeCount", "emitState(", "emitEvent(",
+                                  "fallback_.reset()", "setVisible(", "beginLoadAttempt(", "resizeToDesignBox("})
+        if (contains(branch, forbidden))
+            return false;
+    return true;
+}
+
+// 离开面板只有点重试一条路：销毁面板的动作全文件只在重试里出现一次，网页重新可见只在加载尝试的开头出现一次，
+// 重试经加载尝试复位就绪位与活着的桥的计数；以前那条「桥迟到就收回面板」的路径和它的原因记录不得再出现
+bool panelLeavesOnlyThroughRetry(const std::string& text, const std::string& retry, const std::string& beginAttempt)
+{
+    return countOf(text, "fallback_.reset()") == 1 && contains(retry, "fallback_.reset()") &&
+           countOf(text, "setVisible(true)") == 1 && contains(beginAttempt, "setVisible(true)") &&
+           contains(retry, "beginLoadAttempt(") && contains(beginAttempt, "bridgeReady_ = false") &&
+           contains(beginAttempt, "releaseReadyBridge()") && !contains(text, "withdrawFallbackForLateBridge") &&
+           !contains(text, "fallbackReason_");
+}
+
+// 看门狗和启动失败上报都不碰已就绪的桥、也不在面板在场时再切一次：它们的前提写在条件里
+bool watchdogAndBootErrorLeaveReadyAndShownAlone(const std::string& timerCallback, const std::string& bootError)
 {
     return contains(timerCallback, "!bridgeReady_ && fallback_ == nullptr") &&
            contains(bootError, "bridgeReady_ || fallback_ != nullptr");
@@ -556,43 +579,75 @@ TEST_CASE("call-site scanners for the review fixes: good and bad samples", "[web
     CHECK_FALSE(
         timerStartsBeforeRuntimeBranches("{ if (missing) { showFallback(1); return; }\n go(); }")); // 根本不启动
 
-    // 迟到的桥
+    // 面板在场时迟到的桥请求
+    const std::string tail = " bridgeReady_ = true;\n if (!countedAsReady_) { countedAsReady_ = true; }\n"
+                             " complete(ok());\n emitState(); }";
     const std::string goodInit =
-        "{ bridgeReady_ = true;\n complete(ok());\n if (fallback_ != nullptr && fallbackReason_ == "
-        "FallbackReason::LoadTimeout)\n withdrawFallbackForLateBridge();\n emitState(); }";
-    const std::string goodWithdraw =
-        "{ log(); fallback_.reset();\n webView_->setVisible(true);\n resizeToDesignBox();\n resized(); }";
-    const std::string goodShow = "{ if (fallback_ != nullptr) return;\n fallbackReason_ = reason;\n build(); }";
-    CHECK(lateBridgeWithdrawsPanel(goodInit, goodWithdraw, goodShow));
-    CHECK_FALSE(lateBridgeWithdrawsPanel( // 没有任何收回
-        "{ bridgeReady_ = true;\n complete(ok());\n emitState(); }", goodWithdraw, goodShow));
-    CHECK_FALSE(lateBridgeWithdrawsPanel( // 不分原因一律收回
-        "{ bridgeReady_ = true;\n if (fallback_ != nullptr)\n withdrawFallbackForLateBridge();\n emitState(); }",
-        goodWithdraw, goodShow));
-    CHECK_FALSE(lateBridgeWithdrawsPanel( // 把启动失败也算进去
-        "{ if (fallback_ != nullptr && (fallbackReason_ == FallbackReason::LoadTimeout || fallbackReason_ == "
-        "FallbackReason::BootError))\n withdrawFallbackForLateBridge();\n emitState(); }",
-        goodWithdraw, goodShow));
-    CHECK_FALSE(lateBridgeWithdrawsPanel( // 收在首帧之后：网页不可见，首帧发不出去
-        "{ if (fallback_ != nullptr && fallbackReason_ == FallbackReason::LoadTimeout) { emitState();\n"
-        " withdrawFallbackForLateBridge(); } }",
-        goodWithdraw, goodShow));
-    CHECK_FALSE(
-        lateBridgeWithdrawsPanel(goodInit, "{ fallback_.reset();\n resizeToDesignBox(); }", goodShow)); // 网页没放回
-    CHECK_FALSE(lateBridgeWithdrawsPanel(goodInit, "{ webView_->setVisible(true);\n resizeToDesignBox(); }", goodShow));
-    CHECK_FALSE(lateBridgeWithdrawsPanel(goodInit, "{ fallback_.reset();\n webView_->setVisible(true); }", goodShow));
-    CHECK_FALSE(lateBridgeWithdrawsPanel( // 收回时又重新加载：等于重试
-        goodInit, "{ fallback_.reset();\n webView_->setVisible(true);\n resizeToDesignBox();\n beginLoadAttempt(); }",
-        goodShow));
-    CHECK_FALSE(lateBridgeWithdrawsPanel(goodInit, goodWithdraw, "{ if (fallback_ != nullptr) return; build(); }"));
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n return;\n }\n" + tail;
+    CHECK(lateBridgeIsIgnoredWhilePanelShown(goodInit));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown("{" + tail)); // 没有这个分支
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支排在置位之后
+        "{ bridgeReady_ = true;\n if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n return;\n }\n"
+        " if (!countedAsReady_) { countedAsReady_ = true; }\n emitState(); }"));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支排在计数之后
+        "{ if (!countedAsReady_) { countedAsReady_ = true; }\n if (fallback_ != nullptr)\n"
+        " { logDiag(\"x\");\n complete(ok());\n return;\n }\n bridgeReady_ = true;\n emitState(); }"));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支没有返回，一路落到置位
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n }\n" + tail));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里没有日志，真机上看不出这条路径走没走到
+        "{ if (fallback_ != nullptr)\n { complete(ok());\n return;\n }\n" + tail));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里没有回执，页面的调用悬空
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n return;\n }\n" + tail));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里置了就绪位
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n bridgeReady_ = true;\n complete(ok());\n return;\n }\n" +
+        tail));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里计入了活着的桥
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n readyBridgeCount().fetch_add(1);\n complete(ok());\n "
+        "return;\n }\n" +
+        tail));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里发了首帧
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n emitState();\n return;\n }\n" + tail));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里收回了面板
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n fallback_.reset();\n webView_->setVisible(true);\n "
+        "complete(ok());\n"
+        " return;\n }\n" +
+        tail));
+    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里重新加载（等于替用户点了重试）
+        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n beginLoadAttempt();\n return;\n }\n" +
+        tail));
 
-    // 收回之后不再被顶回面板
-    CHECK(nothingReshowsPanelOnceReady("{ if (!bridgeReady_ && fallback_ == nullptr && late()) show(); }",
-                                       "{ if (bridgeReady_ || fallback_ != nullptr) return; show(); }"));
-    CHECK_FALSE(nothingReshowsPanelOnceReady("{ if (fallback_ == nullptr && late()) show(); }",
-                                             "{ if (bridgeReady_ || fallback_ != nullptr) return; show(); }"));
-    CHECK_FALSE(nothingReshowsPanelOnceReady("{ if (!bridgeReady_ && fallback_ == nullptr && late()) show(); }",
-                                             "{ if (fallback_ != nullptr) return; show(); }"));
+    // 离开面板只有点重试一条路
+    const std::string goodHost = "{ fallback_.reset(); }\n { webView_->setVisible(true); }";
+    const std::string goodRetry = "{ fallback_.reset();\n beginLoadAttempt(); }";
+    const std::string goodBegin = "{ releaseReadyBridge();\n bridgeReady_ = false;\n webView_->setVisible(true); }";
+    CHECK(panelLeavesOnlyThroughRetry(goodHost, goodRetry, goodBegin));
+    CHECK_FALSE(panelLeavesOnlyThroughRetry( // 第二处销毁面板：有人又加了一条收回的路
+        goodHost + "\n { fallback_.reset(); }", goodRetry, goodBegin));
+    CHECK_FALSE(panelLeavesOnlyThroughRetry( // 第二处让网页重新可见
+        goodHost + "\n { webView_->setVisible(true); }", goodRetry, goodBegin));
+    CHECK_FALSE(panelLeavesOnlyThroughRetry(goodHost, "{ beginLoadAttempt(); }", goodBegin)); // 销毁面板不在重试里
+    CHECK_FALSE(panelLeavesOnlyThroughRetry(goodHost, "{ fallback_.reset(); }", goodBegin)); // 重试不经加载尝试
+    CHECK_FALSE(panelLeavesOnlyThroughRetry( // 加载尝试不复位就绪位
+        goodHost, goodRetry, "{ releaseReadyBridge();\n webView_->setVisible(true); }"));
+    CHECK_FALSE(panelLeavesOnlyThroughRetry( // 加载尝试不还活着的桥的计数
+        goodHost, goodRetry, "{ bridgeReady_ = false;\n webView_->setVisible(true); }"));
+    CHECK_FALSE(panelLeavesOnlyThroughRetry( // 旧的收回函数还在
+        goodHost + "\n void WebViewHost::withdrawFallbackForLateBridge() {}", goodRetry, goodBegin));
+    CHECK_FALSE(panelLeavesOnlyThroughRetry( // 旧的原因记录还在
+        goodHost + "\n { fallbackReason_ = reason; }", goodRetry, goodBegin));
+
+    // 看门狗和启动失败上报的前提
+    const std::string goodWatchdog = "{ if (!bridgeReady_ && fallback_ == nullptr && late()) show(); }";
+    const std::string goodBootError = "{ if (bridgeReady_ || fallback_ != nullptr) return; show(); }";
+    CHECK(watchdogAndBootErrorLeaveReadyAndShownAlone(goodWatchdog, goodBootError));
+    CHECK_FALSE(watchdogAndBootErrorLeaveReadyAndShownAlone( // 看门狗不看面板在不在
+        "{ if (!bridgeReady_ && late()) show(); }", goodBootError));
+    CHECK_FALSE(watchdogAndBootErrorLeaveReadyAndShownAlone( // 看门狗不看桥就绪了没有
+        "{ if (fallback_ == nullptr && late()) show(); }", goodBootError));
+    CHECK_FALSE(watchdogAndBootErrorLeaveReadyAndShownAlone( // 启动失败上报不看桥就绪了没有
+        goodWatchdog, "{ if (fallback_ != nullptr) return; show(); }"));
+    CHECK_FALSE(watchdogAndBootErrorLeaveReadyAndShownAlone( // 启动失败上报不看面板在不在
+        goodWatchdog, "{ if (bridgeReady_) return; show(); }"));
 
     // 设置语言
     CHECK(setLangWritesOnce("{ lang_ = c; uidefaults::chooseLangGlobal(c); }"));
@@ -603,8 +658,8 @@ TEST_CASE("call-site scanners for the review fixes: good and bad samples", "[web
     CHECK_FALSE(setLangWritesOnce("{ lang_ = c; }"));
 }
 
-TEST_CASE("the web host shapes page text, starts its timer early, takes back a late-bridge panel and writes the "
-          "language once",
+TEST_CASE("the web host shapes page text, starts its timer early, ignores a late-bridge request while the panel is "
+          "shown and writes the language once",
           "[webview][hygiene]")
 {
     const juce::File file =
@@ -638,18 +693,17 @@ TEST_CASE("the web host shapes page text, starts its timer early, takes back a l
     REQUIRE_FALSE(begin.empty());
     CHECK(timerStartsBeforeRuntimeBranches(begin));
 
-    // 迟到的桥
+    // 面板在场时迟到的桥请求，以及离开面板的唯一出口
     const auto initialState = functionBody(text, "void WebViewHost::handleRequestInitialState(");
-    const auto withdraw = functionBody(text, "void WebViewHost::withdrawFallbackForLateBridge()");
-    const auto show = functionBody(text, "void WebViewHost::showFallback(");
+    const auto retry = functionBody(text, "void WebViewHost::retryWebView()");
     REQUIRE_FALSE(initialState.empty());
-    REQUIRE_FALSE(withdraw.empty());
-    REQUIRE_FALSE(show.empty());
-    CHECK(lateBridgeWithdrawsPanel(initialState, withdraw, show));
+    REQUIRE_FALSE(retry.empty());
+    CHECK(lateBridgeIsIgnoredWhilePanelShown(initialState));
+    CHECK(panelLeavesOnlyThroughRetry(text, retry, begin));
 
     const auto timerCallback = functionBody(text, "void WebViewHost::timerCallback()");
     REQUIRE_FALSE(timerCallback.empty());
-    CHECK(nothingReshowsPanelOnceReady(timerCallback, bootError));
+    CHECK(watchdogAndBootErrorLeaveReadyAndShownAlone(timerCallback, bootError));
 
     // 设置语言
     const auto setLang = functionBody(text, "void WebViewHost::handleSetLang(");
