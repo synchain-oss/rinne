@@ -13,7 +13,8 @@
 //
 // 改 D 的交叉淡化不是读头自己的包络，而是整个读头集合的一段状态（同一时刻至多一段）：旧读头（outgoing）与新读头
 // （incoming）的增益逐样本出自同一个函数，两路之和恒为 1（见 DelayRetarget.h）。它与下面的淡出、淡入相乘、互相独立：
-// 交叉淡化进行中遇到重同步，两路读头各自再挂上 5 ms 淡出，一起淡进尾巴，一个读头都不丢。
+// 交叉淡化进行中遇到一次重同步，两路读头各自再挂上 5 ms 淡出，一起淡进各自的尾巴，一个读头都不丢；
+// 5 ms 之内连遇第二次、槽不够第四个读头时，收掉包络最小的那个（见 LoopSession::newTap）。
 //
 // 包络按样本推进，与块长无关：同一段输入怎么切块，输出逐位相同。
 //   淡出按时间走：从挂上淡出的那个样本起，每个输出样本走一步。
@@ -39,6 +40,8 @@ namespace rinne::loop
 
 // 读头槽数：改 D 的交叉淡化 + 重同步同时发生时，旧 A、旧 B 与新读头要同时在场
 inline constexpr int kMaxTaps = 3;
+// 尾巴区的格号就是读头的槽号：每个读头一格，互不覆盖
+static_assert(LocalLine::kTailSlots == kMaxTaps, "尾巴区每个读头槽一格");
 
 // 淡变的时长（样本，按采样率换算后注入）：
 //   旧读头淡出 5 ms（重同步、换组）；新数据 onset 20 ms（重同步之后的新数据）
@@ -112,7 +115,7 @@ class TapSet
 {
 public:
     // 找一个空槽并占住它：槽里的读头被清成初始值，active 置真（调用方接着填 offset / delay / 有效区间）。
-    // 占了之后这个槽就不再是空槽，满了返回 -1（调用方按「丢一个包络最小的旧读头」处理，见 dropSmallestEnvelope）。
+    // 占了之后这个槽就不再是空槽，满了返回 -1（调用方按「收掉一个包络最小的读头」处理，见 smallestEnvelopeSlot）。
     int allocate() noexcept
     {
         for (int i = 0; i < kMaxTaps; ++i)
@@ -127,8 +130,9 @@ public:
         return -1;
     }
 
-    // 丢掉包络最小（最不重要）的读头，返回被丢的下标；没有读头时返回 -1
-    int dropSmallestEnvelope() noexcept
+    // 包络最小（最不重要）的活跃读头的槽号（块首的包络：淡出、淡入与交叉淡化相乘）；并列时取槽号小的。
+    // 没有活跃读头时返回 -1。不改任何东西：调用方要先看一眼它的末值再收掉它。
+    int smallestEnvelopeSlot() const noexcept
     {
         int best = -1;
         float bestEnv = 0.0f;
@@ -144,10 +148,6 @@ public:
                 best = i;
                 bestEnv = e;
             }
-        }
-        if (best >= 0)
-        {
-            taps_[best] = Tap{};
         }
         return best;
     }
