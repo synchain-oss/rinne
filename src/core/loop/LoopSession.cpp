@@ -18,7 +18,8 @@
 //   改 D      40 ms 双读头线性交叉淡化：旧读头增益 1 − x、新读头增益 x，两路之和恒为 1，两个槽。
 //             同一时刻至多一段；受 100 ms 前沿限速（第一次立即开始，窗口内的改动合并，窗口到点再向最新目标淡一次）。
 //             交叉淡化进行中来了重同步，两个读头各自再挂 5 ms 淡出一起淡进尾巴，新读头占第三个槽。
-//   槽满      丢掉包络最小的那个（不是硬丢），并记一次 tapDrop。
+//   槽满      淡化或前一次重同步的淡出还没走完又来重同步，要第 4 个读头：收掉包络最小的那个并记一次 tapDrop；
+//             它在上一个样本上的值接成 5 ms 线性衰减的末值保持，回送不阶跃（见 newTap）。
 //
 // 读位 R 只有一份：判据那一半（StreamSync）持有它。本块的读位起点 R0 在判据之前取一次，
 // 混音、漂移量与逐样本的位置全部用这同一个 R0；判据之后 R 已推进到 R0 + n，那是下一块的起点。
@@ -244,20 +245,34 @@ void LoopSession::holdStrandedTaps(i64 blockStart) noexcept
 
 // 建一个新的读头：validFrom 是环上「从哪一帧起才有数据」，包络走 onset。
 //
-// 槽满了就丢掉包络最小的那个（不是硬丢），并记一次 tapDrop —— 那样丢的时候回送会有一处凹陷，
-// 硬丢则会让一个正在淡出的读头凭空消失，听感更差。
-int LoopSession::newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept
+// 槽满了就收掉包络最小的那个，并记一次 tapDrop。读头只有 3 个槽，而淡化中（或上一次重同步的 5 ms 淡出里）连续来重同步，
+// 会同时要旧 A、旧 B、上一次建的读头和这一次的新读头，没有办法一个不丢。取舍：
+//   - 收掉的是包络最小的读头：这时最新的读头至多走了 5 ms 的 20 ms onset（或 40 ms 交叉淡化的头 5 ms），
+//     所以被收掉的增益不超过 1/4，实际上多半是还没读到数据的新读头（增益 0）；
+//   - 回送不阶跃：它在上一个样本上的贡献并进末值保持，从那个值起 5 ms 线性衰减（与写头落后时同一套办法）。
+//     被收掉的只是它之后那几毫秒的内容，换成了衰减的常数；
+//   - 事件的 b 带被收掉读头的包络（×255），诊断里看得到丢的是多大的份额。
+// 其余读头不动，也没有谁的尾巴被覆盖（尾巴格跟读头槽走，见 StreamSync::startFade）。
+// blockStart 是本块的读位起点（上一个样本是 blockStart − 1）。
+int LoopSession::newTap(i64 blockStart, i64 validFrom, i64 delay, std::int64_t onset) noexcept
 {
     int slot = taps_.allocate();
     if (slot < 0)
     {
-        slot = taps_.dropSmallestEnvelope();
+        slot = taps_.smallestEnvelopeSlot();
         ++tapDropCount_;
-        sink_.emit(LoopEventCode::kTapDropped, 1);
         if (slot < 0)
         {
+            sink_.emit(LoopEventCode::kTapDropped, 1, 0, blockStart);
             return -1;
         }
+        const Tap& victim = taps_.at(slot);
+        if (victim.lastAt == blockStart - 1)
+        {
+            hold_.start(victim.lastLeft, victim.lastRight, sync_.fadeOutSamples());
+        }
+        const float env = std::clamp(taps_.envelopeNow(victim), 0.0f, 1.0f);
+        sink_.emit(LoopEventCode::kTapDropped, 1, static_cast<std::uint8_t>(std::lround(env * 255.0f)), blockStart);
         taps_.at(slot) = Tap{};
     }
     Tap& tap = taps_.at(slot);
@@ -327,7 +342,7 @@ bool LoopSession::startDelayCrossfade(i64 blockStart, i64 n, i64 delay) noexcept
     const i64 firstPosition = blockStart + at + current.offset - delay;
     const i64 validFrom = std::max(current.validFrom, firstPosition);
     const std::int64_t onset = current.validFrom > firstPosition ? sync_.onsetSamples() : 0;
-    const int slot = newTap(validFrom, delay, onset);
+    const int slot = newTap(blockStart, validFrom, delay, onset);
     if (slot < 0)
     {
         return false;
@@ -777,7 +792,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
             {
                 validFrom = std::max(writeHead, writeIntent);
             }
-            newTap(validFrom, delay, sync_.onsetSamples());
+            newTap(R0, validFrom, delay, sync_.onsetSamples());
         }
         else
         {

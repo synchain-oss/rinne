@@ -207,8 +207,9 @@ private:
     void holdStrandedTaps(i64 blockStart) noexcept;
     // 读头整体作废时（两端停用之后的清空、写头倒退）：上一块最后一个回送样本按末值保持 5 ms 线性衰减。
     void holdLastReturn() noexcept;
-    // 建一个新读头（onset 走 20 ms）。槽满时丢包络最小的那个，返回槽下标；没有槽时返回 -1。
-    int newTap(i64 validFrom, i64 delay, std::int64_t onset) noexcept;
+    // 建一个新读头（onset 走 20 ms）。槽满时收掉包络最小的那个（它的末值接成 5 ms 衰减的保持，不阶跃），
+    // 返回槽下标；没有槽时返回 -1。blockStart 是本块的读位起点。
+    int newTap(i64 blockStart, i64 validFrom, i64 delay, std::int64_t onset) noexcept;
     // 改 D：开一段 40 ms 线性交叉淡化（旧读头 1 − x、新读头 x，两路增益之和恒为 1），受 100 ms 前沿限速约束。
     // 起点可以落在本块中间（限速窗口恰好在那个样本到点），所以结果与宿主怎么切块无关。n 是本块的样本数。
     // 同一时刻至多一段交叉淡化；读头槽用完、窗口没到点或上一段还没走完时新目标先挂着，下一块再试。
