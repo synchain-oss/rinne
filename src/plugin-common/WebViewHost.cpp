@@ -188,6 +188,11 @@ WebViewHost::WebViewHost(juce::AudioProcessor& processor, Config config)
     // 这一句挡不住开窗白闪，白闪那一段本组件的 paint 根本不执行（见 HostWebView::paint），它管的是兜底面板路径下这块底
     setOpaque(true);
 
+    // 诊断日志开关打开时装上平台文件日志，早于本构造里的第一行诊断。这个类只在正式身份下构造，
+    // 探针构建有它自己的日志；每个插件二进制只装一次，同一宿主里的其余实例走到这里是空操作
+    if (uidefaults::diagLogEnabled())
+        platformlog::install(config_.role);
+
     // 开窗按显示器可用区夹取档位：只影响本次开窗，已保存的值不动，也不产生待确认的预览
     const auto area = openAreaForNewWindow();
     scale_.fitToDisplay(area.getWidth(), area.getHeight());

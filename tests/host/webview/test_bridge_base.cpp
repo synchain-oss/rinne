@@ -357,6 +357,32 @@ TEST_CASE("commitUiScale while locked never reaches the store", "[webview][bridg
     CHECK(persistCalls == 0);
 }
 
+TEST_CASE("page-enforced 100 percent (old WebKit): the window follows and the saved scale is untouched",
+          "[webview][bridge][receipt]")
+{
+    // 旧 WebKit 上页面量到旧语义后自己请求回 100%（只发 setUiScale，不发 commitUiScale）。
+    // 宿主这一半：窗口跟到 100%，已保存的档位原样留着，等换到新 WebKit 后照旧生效
+    struct Row
+    {
+        const char* role;
+        float saved;
+    };
+    for (const Row row : {Row{"input", 1.5f}, Row{"output", 2.0f}})
+    {
+        INFO(row.role);
+        b::UiScaleModel model(row.role, row.saved);
+        REQUIRE(model.scale() == row.saved); // 宿主按存档开窗
+
+        bool changed = false;
+        const auto response = b::respondSetUiScale(model, row.role, args({1.0}), changed);
+        CHECK(isOk(response));
+        CHECK(changed);
+        CHECK(model.scale() == 1.0f);
+        CHECK(model.requested() == row.saved);
+        CHECK(model.pending()); // 只是预览：页面不确认，就没有任何东西会落盘
+    }
+}
+
 TEST_CASE("open-time fit is not written back by a later commit", "[webview][bridge][receipt]")
 {
     int persistCalls = 0;

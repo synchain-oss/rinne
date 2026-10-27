@@ -50,4 +50,9 @@ struct Options
 juce::AudioProcessorEditor* createEditor(juce::AudioProcessor& processor, const Options& options,
                                          Identity identity = currentIdentity());
 
+// 插件壳的入口：createEditor 造不出就退回 JUCE 的通用参数编辑器，始终返回新建的对象（调用方接管所有权）。
+// 两个插件壳的 createEditor 都只调这一个函数，回退规则因此只写一处、单测守得到
+juce::AudioProcessorEditor* createEditorOrGeneric(juce::AudioProcessor& processor, const Options& options,
+                                                  Identity identity = currentIdentity());
+
 } // namespace rinne::editor

@@ -212,9 +212,23 @@ TEST_CASE("web host sources carry no non-ASCII string literals", "[webview][asci
         "WebViewRevealGate.h",
     };
 
-    for (const char* name : names)
+    // 两个插件壳的入口文件也在这一族里：createEditor 的接线写在那里
+    struct Target
     {
-        const juce::File file = dir.getChildFile(name);
+        std::string name;
+        juce::File file;
+    };
+    std::vector<Target> targets;
+    for (const char* name : names)
+        targets.push_back({name, dir.getChildFile(name)});
+    const juce::File src = dir.getParentDirectory();
+    targets.push_back({"InputPluginEntry.cpp", src.getChildFile("input").getChildFile("InputPluginEntry.cpp")});
+    targets.push_back({"OutputPluginEntry.cpp", src.getChildFile("output").getChildFile("OutputPluginEntry.cpp")});
+
+    for (const auto& target : targets)
+    {
+        const std::string& name = target.name;
+        const juce::File& file = target.file;
         INFO(name);
         REQUIRE(file.existsAsFile());
         juce::MemoryBlock bytes;
