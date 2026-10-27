@@ -18,11 +18,25 @@
 // （开窗一次，用户点「不再显示」或「保持」各一次），开销可忽略。
 // 文件缺失或不可写一律降级为全默认：丢了只会让引导多弹一次，绝不能让开窗失败。
 // 只在消息线程调用；不碰音频线程。
+//
+// 并发：Input、Output 与进程外的宿主进程（进程外的 AU 之类）共用同一份文件，而写是「读全文件、改一个键、整体重写」，
+// 两个进程各改不同的键会丢更新。所以每一次读或写都在一把有名的进程间锁里整段完成（打开、读写、落盘、关闭），
+// 不是只在 JUCE 读盘和写盘的那两小步里各拿一次：那样中间的空隙仍在。
+// 等锁有上限（kProcessLockWaitMs）：别的进程卡死时消息线程不能跟着卡死，等不到就不带锁照常做，代价是这一次可能丢更新。
+// 一次状态快照要的标志用 readUiFlags 一次读回，只开一次文件、拿一次锁。
 
 #include <juce_core/juce_core.h>
 
+#include <functional>
+
+#include "BridgeBase.h"
+
 namespace rinne::uidefaults
 {
+
+// 进程间锁的名字（Rinne 前缀，与别的软件的锁不撞）和最长等待毫秒数
+inline constexpr const char* kProcessLockName = "RinneUiDefaults";
+inline constexpr int kProcessLockWaitMs = 500;
 
 bool langChosenGlobal();
 void setLangChosenGlobal(bool chosen);
@@ -51,6 +65,10 @@ void setUiScalePercentOutput(int percent);
 bool diagLogEnabled();
 void setDiagLogEnabled(bool enabled);
 
+// 状态快照要的几个标志（语言是否选过、规则确认版本、本角色引导是否已看、诊断日志开关）一次读回：
+// 只开一次文件、拿一次锁。每个字段的校验与上面逐个读的函数完全相同。role 取 "input"；其余值一律当 Output
+bridge::UiFlags readUiFlags(const juce::String& role);
+
 // 按角色取值的便捷入口，role 取 "input"；其余值一律当 Output
 bool guideSeenGlobal(const juce::String& role);
 void setGuideSeenGlobal(const juce::String& role, bool seen);
@@ -60,5 +78,10 @@ void setUiScalePercent(const juce::String& role, int percent);
 // 仅供测试：把落盘目录改到临时目录，避免单测写真实用户设置。传空 File
 // 恢复默认位置。生产代码不得调用（宿主测试有一条用例扫描 src/ 守这条）
 void setStorageDirForTests(const juce::File& dir);
+
+// 仅供测试：用一对替身顶替真正的进程间锁，观察每次读写是不是整段都在锁里。
+// enter 收到最长等待毫秒数，返回是否拿到；exit 只在拿到之后调用，且每次 enter 返回真对应一次 exit。
+// 两个参数都传空函数恢复真锁。生产代码不得调用（同上，有用例扫描 src/）
+void setLockForTests(std::function<bool(int timeoutMs)> enter, std::function<void()> exit);
 
 } // namespace rinne::uidefaults

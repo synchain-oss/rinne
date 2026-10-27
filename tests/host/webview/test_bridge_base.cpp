@@ -256,6 +256,73 @@ TEST_CASE("scale model: locking drops a pending preview so it cannot be committe
     CHECK(std::string(model.commit().reason) == b::Reason::NoPending);
 }
 
+TEST_CASE("scale model: locking during an unconfirmed preview rolls back to the last confirmed scale",
+          "[webview][bridge][scale]")
+{
+    // 保存的是 1.5：预览 0.8 还没确认就被锁定，解锁后必须回到 1.5，不能停在没确认的 0.8
+    // （那等于绕过了确认超时的回退：页面看不到待确认状态，也就没有人再把它退回去）
+    b::UiScaleModel model("input", 1.5f);
+    REQUIRE(model.apply(0.8f).ok());
+    REQUIRE(model.pending());
+    REQUIRE(model.scale() == 0.8f);
+
+    model.setLocked(true);
+    CHECK(model.scale() == 1.0f); // 锁定期间钉在 100%
+    CHECK_FALSE(model.pending());
+
+    model.setLocked(false);
+    CHECK(model.scale() == 1.5f);
+    CHECK_FALSE(model.pending());
+    CHECK(std::string(model.commit().reason) == b::Reason::NoPending); // 没有东西可确认，更没有东西会被落盘
+}
+
+TEST_CASE("scale model: the rollback target is the latest confirmed scale, not the one at construction",
+          "[webview][bridge][scale]")
+{
+    b::UiScaleModel model("output", 1.0f);
+    REQUIRE(model.apply(2.0f).ok());
+    REQUIRE(model.commit().ok()); // 2.0 已确认
+
+    REQUIRE(model.apply(0.5f).ok()); // 新的预览没确认
+    model.setLocked(true);
+    model.setLocked(false);
+    CHECK(model.scale() == 2.0f);
+
+    // 回退之后还能照常预览、确认
+    REQUIRE(model.apply(1.25f).ok());
+    CHECK(model.commit().scale == 1.25f);
+    model.setLocked(true);
+    model.setLocked(false);
+    CHECK(model.scale() == 1.25f);
+}
+
+TEST_CASE("scale model: the rollback target after an open-time fit is the fitted scale", "[webview][bridge][scale]")
+{
+    b::UiScaleModel model("input", 2.0f);
+    REQUIRE(model.fitToDisplay(1920, 1040) == 1.5f); // 开窗夹取到 1.5
+
+    REQUIRE(model.apply(0.65f).ok());
+    model.setLocked(true);
+    model.setLocked(false);
+    CHECK(model.scale() == 1.5f);
+    CHECK(model.requested() == 2.0f); // 已保存的那一份仍不动
+}
+
+TEST_CASE("scale model: locking and unlocking without a preview changes nothing", "[webview][bridge][scale]")
+{
+    b::UiScaleModel model("input", 1.25f);
+    model.setLocked(true);
+    model.setLocked(false);
+    CHECK(model.scale() == 1.25f);
+
+    b::UiScaleModel after("output", 1.0f);
+    REQUIRE(after.apply(1.5f).ok());
+    REQUIRE(after.commit().ok());
+    after.setLocked(true);
+    after.setLocked(false);
+    CHECK(after.scale() == 1.5f);
+}
+
 TEST_CASE("setUiScale argument validation uses the role preset table", "[webview][bridge]")
 {
     float out = 0.0f;

@@ -39,6 +39,21 @@ public:
     // JUCE 的后端在调提供者之前已经去掉了来源，这里仍防御性地处理完整 URL，保证跨后端口径一致
     static juce::String normalizePath(const juce::String& url);
 
+    // 页面（或页面里被注入的东西）发起的导航能不能放行：只放行资源提供者的根下面的地址，加上页面隐藏时 JUCE
+    // 借道的空白页。
+    // 页面带着原生桥，导航到外站等于把桥交给外站的脚本，所以其余一律不放。纯函数，两个平台的根都能在宿主测试里直接喂。
+    //   - resourceRoot 取 WebBrowserComponent::getResourceProviderRoot()（Windows 是 https://juce.backend/，
+    //     macOS 是 juce://juce.backend/）；空串（不认识的系统）时只放空白页；
+    //   - 放行的是「协议与主机和根逐字相同」的地址，路径、查询串、片段随意；协议与主机按 ASCII 不分大小写比较
+    //     （浏览器交上来的本来就是规范化后的小写，大小写不同的写法指向同一个地方，拦下没有好处）；
+    //   - 一切别的都拦：形似的主机（多一段、少一段、末尾带点、非 ASCII 的同形字符）、用户信息（host@evil）、
+    //     端口、反斜杠、别的协议（http 降级、file、javascript、data、ftp）、带控制字符或空白的地址、空串；
+    //   - 空白页只认 "about:blank" 这一个整串。
+    static bool isRootNavigation(const juce::String& url, const juce::String& resourceRoot);
+
+    // 把来路不明的地址整理成能写进日志的一行：最多 maxChars 个字符，控制字符换成问号（防止伪造日志行）。
+    static juce::String urlForLog(const juce::String& url, int maxChars = 120);
+
     // url 形如 "/" 或 "/index.html"。命中返回数据与 MIME，否则 nullopt。
     // 源为空（没有可嵌入的资源）时恒 nullopt，不造假资源
     std::optional<Hit> lookup(const juce::String& url) const;

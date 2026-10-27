@@ -17,7 +17,9 @@
 //   ⑥b tokens.css 的 --page-backdrop 是外圈色，与占位是两个角色：必须不等于占位的任何一个色标；
 //   ⑥c 占位的 C++ 真源与 --page-gradient 整张色标表逐项相同（tokens 是真源，C++ 数组与内联字面量照抄它）；
 //   ⑦ 「首帧已绘」上行信号在场：事件名与 C++ 一致，武装是嵌套两层 requestAnimationFrame 且由 paint 记录接线，
-//      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后。
+//      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后；
+//   ⑧ 桥回执的失败原因：C++ 的 BridgeBase.h 里有哪几个原因，docs/UI_BRIDGE.md 里能返回它的函数行就写哪几个，
+//      预览里的 mock 也真的回同样的原因（含缩放锁定：全局位 scaleLocked 为真时，选档与确认回 scale-locked，没确认的预览作废）。
 // C++ 侧文件（WebViewHost.h、PlatformWebView.h）都还没入库时，对拍项记「跳过」并说明原因；只要有一个入库，
 // 事件名、字段名、角度与色标表就必须抽得出来，抽不出来判红，不静默跳过。其余照常断言。
 //
@@ -26,6 +28,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 
 const ROOT = repoRoot();
@@ -422,6 +425,104 @@ for (const role of roles) {
         if (cpp.delta !== null) {
             run.check(body.includes(cpp.delta), `${role}：⑦ 载荷字段名与 C++ 的 ${cpp.delta} 不一致`);
         }
+    }
+}
+
+// ---------------------------------------------------------------- ⑧ 桥回执的失败原因
+// 哪个函数能回哪个原因，是契约表（docs/UI_BRIDGE.md 的函数表）的内容；这里把「C++ 有哪些原因」「文档的行里写没写」
+// 「mock 回不回」三方对起来。C++ 多出一个原因而这张表没跟上，会判红，逼着同批改文档与 mock。
+const REASON_FUNCTIONS = {
+    "bad-lang": ["setLang"],
+    "bad-scale": ["setUiScale"],
+    "scale-locked": ["setUiScale", "commitUiScale"],
+    "no-pending": ["commitUiScale"],
+};
+
+/** 从 BridgeBase.h 抽 namespace Reason 里的字符串值（先去注释）；抽不到 namespace 给 null。 */
+function extractCppReasons(rawText) {
+    const text = stripCppComments(rawText);
+    const body = /\bnamespace\s+Reason\s*\{([\s\S]*?)\}/.exec(text)?.[1] ?? null;
+    if (body === null) return null;
+    return [...body.matchAll(/=\s*"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/** 文档函数表里某个函数那一行（第一列是反引号包的函数名）；找不到给 null。 */
+function docFunctionRow(docText, fn) {
+    const prefix = `| \`${fn}\` |`;
+    return docText.split("\n").find((line) => line.startsWith(prefix)) ?? null;
+}
+
+{
+    // 抽取器自测
+    run.eq(
+        extractCppReasons(
+            'namespace Reason {\n// inline constexpr const char* Old = "old-reason";\n/* X = "block-reason" */\n' +
+                'inline constexpr const char* A = "a-b";\n}',
+        ),
+        ["a-b"],
+        "抽取器自测：Reason 里被注释掉的值不算",
+    );
+    run.eq(extractCppReasons('namespace Other { auto x = "y"; }'), null, "抽取器自测：没有 Reason 命名空间给 null");
+    run.eq(
+        docFunctionRow("| `setLang` | a |\n| `setLangX` | b |", "setLang"),
+        "| `setLang` | a |",
+        "抽取器自测：文档行按整个函数名匹配",
+    );
+    run.eq(docFunctionRow("| `setLangX` | b |", "setLang"), null, "抽取器自测：只是前缀相同的函数名不算");
+
+    const cppReasons = extractCppReasons(read("src/plugin-common/BridgeBase.h"));
+    run.check(cppReasons !== null, "⑧ BridgeBase.h 里找不到 namespace Reason");
+    run.eq(
+        [...(cppReasons ?? [])].sort(),
+        Object.keys(REASON_FUNCTIONS).sort(),
+        "⑧ BridgeBase.h 的失败原因与本断言登记的不一致",
+    );
+
+    const doc = read("docs/UI_BRIDGE.md");
+    for (const [reason, fns] of Object.entries(REASON_FUNCTIONS)) {
+        for (const fn of fns) {
+            const row = docFunctionRow(doc, fn);
+            run.check(row !== null, `⑧ UI_BRIDGE.md 的函数表里找不到 ${fn}`);
+            run.check(
+                row !== null && row.includes(`reason: "${reason}"`),
+                `⑧ UI_BRIDGE.md 里 ${fn} 一行没写失败原因 ${reason}`,
+            );
+        }
+    }
+
+    // mock 的行为：同一批原因，同样的函数
+    const u = (f) => pathToFileURL(path.join(ROOT, f)).href;
+    const { createPreviewSession } = await import(u("web-preview/mock/state-driver.js"));
+    const { memoryStorage } = await import(u("web-preview/mock/bridge-common.js"));
+    for (const role of roles) {
+        const store = { local: memoryStorage(), session: memoryStorage() };
+        const session = createPreviewSession({ role, params: "auto=0", storage: store });
+        session.mock.requestInitialState();
+        const m = session.mock;
+        const preset = session.core.box.presets.find((f) => f !== 1);
+        const reasonOf = (r) => (r.ok === false ? r.reason : "ok");
+
+        run.eq(reasonOf(m.setLang("de")), "bad-lang", `${role}：⑧ mock 的 setLang 对不认识的语言码应回 bad-lang`);
+        run.eq(reasonOf(m.setUiScale(0.123)), "bad-scale", `${role}：⑧ mock 的 setUiScale 对表外档位应回 bad-scale`);
+        run.eq(reasonOf(m.commitUiScale()), "no-pending", `${role}：⑧ mock 的 commitUiScale 没有预览时应回 no-pending`);
+
+        // 没锁定：选档、确认都成功
+        run.eq(reasonOf(m.setUiScale(preset)), "ok", `${role}：⑧ 没锁定时 setUiScale 应成功`);
+        run.eq(reasonOf(m.commitUiScale()), "ok", `${role}：⑧ 没锁定时 commitUiScale 应成功`);
+        const confirmed = preset;
+
+        // 预览中锁定：选档与确认都回 scale-locked，窗口钉回 1，没确认的预览作废
+        const preview = session.core.box.presets.find((f) => f !== 1 && f !== confirmed);
+        run.eq(reasonOf(m.setUiScale(preview)), "ok", `${role}：⑧ 锁定前先放一个待确认的预览`);
+        session.core.defaults.set({ scaleLocked: true });
+        run.eq(reasonOf(m.setUiScale(preset)), "scale-locked", `${role}：⑧ 锁定时 setUiScale 应回 scale-locked`);
+        run.eq(session.model.scale, 1, `${role}：⑧ 锁定时窗口档位应钉在 1`);
+        run.eq(reasonOf(m.commitUiScale()), "scale-locked", `${role}：⑧ 锁定时 commitUiScale 应回 scale-locked`);
+
+        // 解锁后，锁定前没确认的预览不会复活，窗口档位回到锁定前最近一次确认的那一档（不是没确认的预览，也不是 1）
+        session.core.defaults.set({ scaleLocked: false });
+        run.eq(reasonOf(m.commitUiScale()), "no-pending", `${role}：⑧ 解锁后，锁定时作废的预览不能再确认`);
+        run.eq(session.model.scale, confirmed, `${role}：⑧ 解锁后窗口档位应回到最近一次确认的 ${confirmed}`);
     }
 }
 

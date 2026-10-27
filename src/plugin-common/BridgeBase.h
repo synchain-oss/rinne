@@ -45,7 +45,8 @@ inline constexpr const char* UiScale = "uiScale";
 inline constexpr const char* Role = "role"; // "input" 或 "output"
 } // namespace Init
 
-// 失败回执里的 reason。名字与 docs/UI_BRIDGE.md 一致；scale-locked 是缩放锁定时的拒绝，契约文档尚未登记
+// 失败回执里的 reason。名字与 docs/UI_BRIDGE.md 的函数表一致，预览里的 mock 回同样的原因：
+//   setLang 回 bad-lang；setUiScale 回 bad-scale、scale-locked；commitUiScale 回 no-pending、scale-locked
 namespace Reason
 {
 inline constexpr const char* BadScale = "bad-scale";
@@ -167,12 +168,14 @@ struct ScaleOutcome
 // 窗口缩放的状态：已生效的档位、待确认的预览、锁定。窗口尺寸、落盘与回执都由宿主按这里的结果去做。
 //   - 页面选档（setUiScale）只是预览：档位马上生效，但要等确认（commitUiScale）才算数；
 //   - 确认成功才返回要落盘的档位，开窗时按显示器夹取的档位不会被写回；
-//   - 锁定时窗口钉在 100%，选档与确认都被拒，已保存的档位不动。
+//   - 锁定时窗口钉在 100%，选档与确认都被拒，已保存的档位不动；
+//   - 锁定时若有没确认的预览，预览随之作废：档位退回最近一次确认（或开窗）的那一档，
+//     解锁后窗口回到那一档，不会停在一个既没确认、也不在待确认状态的档位上，那等于绕过了确认超时的回退。
 class UiScaleModel
 {
 public:
     UiScaleModel(const juce::String& role, float saved) noexcept
-        : role_(role), requested_(clampUiScale(saved)), applied_(requested_)
+        : role_(role), requested_(clampUiScale(saved)), applied_(requested_), settled_(requested_)
     {
     }
 
@@ -187,16 +190,21 @@ public:
     float fitToDisplay(int availW, int availH)
     {
         applied_ = clampUiScale(fitScaleToDisplay(role_, requested_, availW, availH));
+        settled_ = applied_;
         pending_ = false;
         return scale();
     }
 
-    // 锁定或解锁。锁定会丢掉待确认的预览；解锁后回到锁定前生效的档位
+    // 锁定或解锁。锁定会丢掉待确认的预览，并把档位退回最近一次确认（或开窗）的那一档；解锁后回到那一档。
+    // 没有待确认的预览时 applied_ 本来就等于 settled_，退回是空操作
     void setLocked(bool shouldLock) noexcept
     {
         locked_ = shouldLock;
         if (locked_)
+        {
             pending_ = false;
+            applied_ = settled_;
+        }
     }
 
     // 页面选档（档位已经过档位表校验）。锁定时拒绝，其余成功并进入待确认
@@ -217,13 +225,15 @@ public:
         if (!pending_)
             return {Reason::NoPending, scale()};
         pending_ = false;
+        settled_ = applied_;
         return {nullptr, applied_};
     }
 
 private:
     juce::String role_;
     float requested_;
-    float applied_;
+    float applied_; // 窗口在没锁定时用的档位；有待确认的预览时是预览档位
+    float settled_; // 最近一次确认（或开窗夹取、构造）的档位：没有待确认预览时恒等于 applied_
     bool pending_ = false;
     bool locked_ = false;
 };

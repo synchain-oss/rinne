@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 网页宿主这一族源文件的卫生检查，两条：
+// 网页宿主这一族源文件的卫生检查，三条：
 //   1. 运行期字符串字面量只许 ASCII；
-//   2. 只给单测用的存储目录重定向，发布代码（src/ 下除声明它的两个文件以外）不得调用。
+//   2. 只给单测用的两个存储钩子（目录重定向、进程间锁替身），发布代码（src/ 下除声明它们的两个文件以外）不得调用；
+//   3. 宿主类（不进宿主测试目标，编译不到这里）里两处靠调用点守的东西：导航闸必须走纯函数判定并在不放行时返回假，
+//      状态快照必须用一次读回，不能退回逐个读设置文件。
 //
 // 第一条：网页宿主这一族源文件里，运行期字符串字面量只许 ASCII。
 // 原因：源文件按 UTF-8 存，字面量里一旦有中文，在中文代码页的机器上编译器会报字符集警告，
@@ -227,7 +229,7 @@ TEST_CASE("web host sources carry no non-ASCII string literals", "[webview][asci
     }
 }
 
-TEST_CASE("the test-only storage redirect is not referenced by release code", "[webview][hygiene]")
+TEST_CASE("the test-only storage hooks are not referenced by release code", "[webview][hygiene]")
 {
     const juce::File src = repoRoot().getChildFile("src");
     REQUIRE(src.isDirectory()); // 路径推不出来就是红，不静默跳过
@@ -236,21 +238,127 @@ TEST_CASE("the test-only storage redirect is not referenced by release code", "[
     src.findChildFiles(files, juce::File::findFiles, true, "*.h;*.hpp;*.cpp;*.mm");
     REQUIRE(files.size() > 20); // 扫得到足够多的文件才算数
 
-    int scanned = 0;
-    for (const auto& f : files)
+    for (const char* hook : {"setStorageDirForTests", "setLockForTests"})
     {
-        const auto name = f.getFileName();
-        if (name == "UiDefaultsStore.h" || name == "UiDefaultsStore.cpp")
-            continue;
-        ++scanned;
-        INFO(f.getFullPathName().toStdString());
-        CHECK_FALSE(f.loadFileAsString().contains("setStorageDirForTests"));
-    }
-    CHECK(scanned > 20);
+        INFO(hook);
+        int scanned = 0;
+        for (const auto& f : files)
+        {
+            const auto name = f.getFileName();
+            if (name == "UiDefaultsStore.h" || name == "UiDefaultsStore.cpp")
+                continue;
+            ++scanned;
+            INFO(f.getFullPathName().toStdString());
+            CHECK_FALSE(f.loadFileAsString().contains(hook));
+        }
+        CHECK(scanned > 20);
 
-    // 声明方确实带着它，否则上面的扫描守的是一个不存在的名字
-    CHECK(src.getChildFile("plugin-common")
-              .getChildFile("UiDefaultsStore.h")
-              .loadFileAsString()
-              .contains("setStorageDirForTests"));
+        // 声明方确实带着它，否则上面的扫描守的是一个不存在的名字
+        CHECK(src.getChildFile("plugin-common").getChildFile("UiDefaultsStore.h").loadFileAsString().contains(hook));
+    }
+}
+
+namespace
+{
+
+// 取 text 里第一个以 signature 开头的函数体（含花括号）；找不到或花括号不配对给空串。
+// 只数花括号，字符串和注释里的花括号不处理：被检的两个函数体里没有
+std::string functionBody(const std::string& text, const std::string& signature)
+{
+    const auto at = text.find(signature);
+    if (at == std::string::npos)
+        return {};
+    const auto open = text.find('{', at);
+    if (open == std::string::npos)
+        return {};
+    int depth = 0;
+    for (std::size_t i = open; i < text.size(); ++i)
+    {
+        if (text[i] == '{')
+            ++depth;
+        else if (text[i] == '}' && --depth == 0)
+            return text.substr(open, i - open + 1);
+    }
+    return {};
+}
+
+bool contains(const std::string& text, const std::string& needle)
+{
+    return text.find(needle) != std::string::npos;
+}
+
+// 导航闸的调用点要求：先问纯函数，不放行就返回假，且返回假排在「导航开始」记账之前
+bool navigationGateWellFormed(const std::string& body)
+{
+    const auto ask = body.find("ResourceProvider::isRootNavigation(");
+    const auto refuse = body.find("return false;");
+    const auto account = body.find("onNavigationStarted(");
+    return ask != std::string::npos && refuse != std::string::npos && account != std::string::npos && ask < refuse &&
+           refuse < account;
+}
+
+// 快照要用一次读回，不能逐个读：这些名字都是设置文件的单项读取
+bool snapshotReadsFlagsInOneCall(const std::string& body)
+{
+    if (!contains(body, "uidefaults::readUiFlags("))
+        return false;
+    for (const char* single : {"langChosenGlobal(", "rulesAckVersion(", "guideSeenGlobal(", "diagLogEnabled(",
+                               "langGlobal(", "uiScalePercent"})
+        if (contains(body, single))
+            return false;
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("call-site scanners: good and bad samples", "[webview][hygiene]")
+{
+    const std::string goodGate = "bool pageAboutToLoad(const juce::String& url) override\n{\n"
+                                 "    if (!ResourceProvider::isRootNavigation(url, root))\n    {\n"
+                                 "        log();\n        return false;\n    }\n"
+                                 "    owner_.onNavigationStarted(url);\n    return true;\n}\n";
+    CHECK(navigationGateWellFormed(functionBody(goodGate, "bool pageAboutToLoad(")));
+    // 不问纯函数
+    CHECK_FALSE(navigationGateWellFormed(functionBody("bool pageAboutToLoad(const juce::String& url) override\n{\n"
+                                                      " owner_.onNavigationStarted(url);\n return true;\n}\n",
+                                                      "bool pageAboutToLoad(")));
+    // 问了但不拦
+    CHECK_FALSE(navigationGateWellFormed(functionBody(
+        "bool pageAboutToLoad(const juce::String& url) override\n{\n"
+        " if (!ResourceProvider::isRootNavigation(url, root)) { log(); }\n owner_.onNavigationStarted(url);\n"
+        " return true;\n}\n",
+        "bool pageAboutToLoad(")));
+    // 先记账后拦
+    CHECK_FALSE(navigationGateWellFormed(
+        functionBody("bool pageAboutToLoad(const juce::String& url) override\n{\n owner_.onNavigationStarted(url);\n"
+                     " if (!ResourceProvider::isRootNavigation(url, root)) { return false; }\n return true;\n}\n",
+                     "bool pageAboutToLoad(")));
+    CHECK(functionBody("int f() { if (a) { b(); } return 0; } int g() { return 1; }", "int f(") ==
+          "{ if (a) { b(); } return 0; }");
+    CHECK(functionBody("int f() { return 0;", "int f(").empty());
+    CHECK(functionBody("int g() { return 0; }", "int f(").empty());
+
+    CHECK(snapshotReadsFlagsInOneCall("{ return build(seed, uidefaults::readUiFlags(role)); }"));
+    CHECK_FALSE(
+        snapshotReadsFlagsInOneCall("{ UiFlags f; f.diagLog = uidefaults::diagLogEnabled(); return build(f); }"));
+    CHECK_FALSE(snapshotReadsFlagsInOneCall("{ auto f = uidefaults::readUiFlags(role); "
+                                            "f.rulesAck = uidefaults::rulesAckVersion(); return build(f); }"));
+    CHECK_FALSE(snapshotReadsFlagsInOneCall("{ return build(seed, {}); }"));
+}
+
+TEST_CASE("the web host gates navigation through the pure function and reads stored flags in one call",
+          "[webview][hygiene]")
+{
+    const juce::File file =
+        repoRoot().getChildFile("src").getChildFile("plugin-common").getChildFile("WebViewHost.cpp");
+    REQUIRE(file.existsAsFile()); // 路径推不出来就是红，不静默跳过
+    const std::string text = file.loadFileAsString().toStdString();
+
+    const auto gate = functionBody(text, "bool pageAboutToLoad(");
+    REQUIRE_FALSE(gate.empty());
+    CHECK(navigationGateWellFormed(gate));
+
+    const auto snapshot = functionBody(text, "juce::var WebViewHost::buildSnapshot()");
+    REQUIRE_FALSE(snapshot.empty());
+    CHECK(snapshotReadsFlagsInOneCall(snapshot));
 }

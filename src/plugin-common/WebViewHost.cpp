@@ -5,6 +5,7 @@
 #include "BridgeBase.h"
 #include "PlatformLog.h"
 #include "PlatformWebView.h"
+#include "ResourceProvider.h"
 #include "UiDefaultsStore.h"
 
 #include <type_traits>
@@ -143,10 +144,21 @@ public:
 #endif
     }
 
+    // 导航闸：页面带着原生桥（会写磁盘的 setLang、setUiScale、commitUiScale），一旦被带到外站，外站的脚本就够得到桥。
+    // 所以只放行资源提供者的根下面的地址，加上页面隐藏时 JUCE 借道的空白页，其余拦下并写一行日志。
+    // 两个平台的回调都走这里：WebView2 的导航开始事件（主框架），WKWebView 的导航策略回调（含子框架）。
+    // 判定是纯函数（ResourceProvider::isRootNavigation），放不放行的全部用例在宿主测试里；
+    // 拦下的导航不算「导航开始」，不起算看门狗的导航后预算。
+    // 这里要写全名：在 WebBrowserComponent 的派生类里，裸写 ResourceProvider 指的是基类里的同名函数类型
     bool pageAboutToLoad(const juce::String& url) override
     {
+        if (!rinne::webview::ResourceProvider::isRootNavigation(url, WBC::getResourceProviderRoot()))
+        {
+            owner_.logDiag("blocked navigation: " + rinne::webview::ResourceProvider::urlForLog(url));
+            return false;
+        }
         owner_.onNavigationStarted(url);
-        return true; // 本插件只导航到资源提供者的根，不拦
+        return true;
     }
 
     void pageFinishedLoading(const juce::String& url) override { owner_.onNavigationFinished(url); }
@@ -157,7 +169,7 @@ public:
     // 在白名单存在之前放行任意 http 地址，等于把「把一个字符串交给系统去执行」的权力交给页面
     void newWindowAttemptingToLoad(const juce::String& newURL) override
     {
-        owner_.logDiag("blocked new-window request: " + newURL.trim().substring(0, 120));
+        owner_.logDiag("blocked new-window request: " + rinne::webview::ResourceProvider::urlForLog(newURL.trim()));
     }
 
     bool pageLoadHadNetworkError(const juce::String& errorInfo) override
@@ -391,12 +403,8 @@ juce::var WebViewHost::buildSnapshot()
     seed.lang = lang_;
     seed.uiScale = scale_.scale();
 
-    bridge::UiFlags stored;
-    stored.langChosen = uidefaults::langChosenGlobal();
-    stored.rulesAck = uidefaults::rulesAckVersion();
-    stored.guideSeen = uidefaults::guideSeenGlobal(config_.role);
-    stored.diagLog = uidefaults::diagLogEnabled();
-    return bridge::buildUiSnapshot(seed, stored);
+    // 四个标志一次读回：快照每秒至少一帧，逐个读会在消息线程上每帧开关四次设置文件
+    return bridge::buildUiSnapshot(seed, uidefaults::readUiFlags(config_.role));
 }
 
 void WebViewHost::emitEvent(const char* eventId, const juce::var& payload)

@@ -174,3 +174,233 @@ TEST_CASE("mime table", "[webview][resource]")
     CHECK(std::string(ResourceProvider::mimeForExtension("")) == "application/octet-stream");
     CHECK(std::string(ResourceProvider::mimeForExtension("exe")) == "application/octet-stream");
 }
+
+// ---------------------------------------------------------------------------------------------
+// 导航闸的判定：页面带着原生桥，顶层导航只能留在资源提供者的根下面（外加页面隐藏时借道的空白页）。
+// 两个平台的根都喂：Windows 与 Android 是 https://juce.backend/，macOS、iOS 与 Linux 是 juce://juce.backend/。
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+
+const juce::String kWinRoot = "https://juce.backend/";
+const juce::String kMacRoot = "juce://juce.backend/";
+
+bool allowed(const juce::String& url, const juce::String& root = kWinRoot)
+{
+    return ResourceProvider::isRootNavigation(url, root);
+}
+
+} // namespace
+
+TEST_CASE("navigation gate lets the resource root and everything under it through", "[webview][navigation]")
+{
+    for (const auto& root : {kWinRoot, kMacRoot})
+    {
+        INFO(root.toStdString());
+        const juce::String origin = root.upToLastOccurrenceOf("/", false, false); // 去掉末尾斜杠
+        CHECK(allowed(root, root));
+        CHECK(allowed(origin, root)); // 没有路径的写法
+        CHECK(allowed(root + "input/index.html", root));
+        CHECK(allowed(root + "output/index.html", root));
+        CHECK(allowed(root + "shared/x.js?v=2#frag", root));
+        CHECK(allowed(root + "?x=1", root));
+        CHECK(allowed(origin + "?x=1", root));
+        CHECK(allowed(origin + "#frag", root));
+    }
+}
+
+TEST_CASE("navigation gate ignores case in the scheme and the host only", "[webview][navigation]")
+{
+    CHECK(allowed("HTTPS://JUCE.BACKEND/input/index.html"));
+    CHECK(allowed("Https://Juce.Backend/"));
+    CHECK(allowed("JUCE://JUCE.BACKEND/input/index.html", kMacRoot));
+    // 大小写不同的根也一样（调用方给的根不一定是小写）
+    CHECK(allowed("https://juce.backend/", "HTTPS://JUCE.BACKEND/"));
+    // 路径区分大小写，但路径不参与判定：留在根下面就放行
+    CHECK(allowed("https://juce.backend/INPUT/Index.HTML"));
+}
+
+TEST_CASE("navigation gate lets the blank page through, exactly that string", "[webview][navigation]")
+{
+    CHECK(allowed("about:blank"));
+    CHECK(allowed("about:blank", kMacRoot));
+    CHECK(allowed("about:blank", "")); // 根未知（不认识的系统）时仍放行借道的空白页
+
+    // 只认整串，别的 about: 地址、带后缀的、大写的都拦
+    CHECK_FALSE(allowed("about:blank#x"));
+    CHECK_FALSE(allowed("about:blank?x"));
+    CHECK_FALSE(allowed("about:blank "));
+    CHECK_FALSE(allowed(" about:blank"));
+    CHECK_FALSE(allowed("ABOUT:BLANK"));
+    CHECK_FALSE(allowed("about:srcdoc"));
+    CHECK_FALSE(allowed("about:"));
+    CHECK_FALSE(allowed("about:blank/https://juce.backend/"));
+}
+
+TEST_CASE("navigation gate blocks other sites, including look-alike hosts", "[webview][navigation]")
+{
+    CHECK_FALSE(allowed("https://example.com/"));
+    CHECK_FALSE(allowed("https://synchain.ca/"));
+
+    // 形似的主机名：多一段、少一段、前缀、后缀、连字符、末尾的点
+    CHECK_FALSE(allowed("https://juce.backend.example.com/"));
+    CHECK_FALSE(allowed("https://example.juce.backend/"));
+    CHECK_FALSE(allowed("https://evil-juce.backend/"));
+    CHECK_FALSE(allowed("https://juce.backendx/"));
+    CHECK_FALSE(allowed("https://xjuce.backend/"));
+    CHECK_FALSE(allowed("https://juce-backend/"));
+    CHECK_FALSE(allowed("https://juce.backend./"));
+    CHECK_FALSE(allowed("https://juce/"));
+    CHECK_FALSE(allowed("https://backend/"));
+    CHECK_FALSE(allowed("https://juce%2ebackend/"));
+
+    // 根只出现在路径、查询串或片段里，不算
+    CHECK_FALSE(allowed("https://example.com/https://juce.backend/"));
+    CHECK_FALSE(allowed("https://example.com/?next=https://juce.backend/"));
+    CHECK_FALSE(allowed("https://example.com/#https://juce.backend/"));
+    CHECK_FALSE(allowed("https://example.com/juce.backend/"));
+
+    // 用户信息：@ 前面才是用户，写成 juce.backend@example.com 或 example.com@juce.backend 都拦
+    CHECK_FALSE(allowed("https://juce.backend@example.com/"));
+    CHECK_FALSE(allowed("https://example.com@juce.backend/"));
+    CHECK_FALSE(allowed("https://user:pw@juce.backend/"));
+    // 反斜杠：浏览器把它当斜杠，解析器之间容易不一致，一律拦
+    CHECK_FALSE(allowed("https://juce.backend\\@example.com/"));
+    CHECK_FALSE(allowed("https://example.com\\.juce.backend/"));
+    CHECK_FALSE(allowed("https://juce.backend\\evil/"));
+}
+
+TEST_CASE("navigation gate blocks non-ASCII look-alikes and invisible characters", "[webview][navigation]")
+{
+    // 西里尔字母（U+0441）冒充拉丁字母 c
+    const auto homoglyph = juce::String("https://ju") + juce::String::charToString(0x0441) + "e.backend/";
+    CHECK_FALSE(allowed(homoglyph));
+    // 零宽空格（U+200B）跟在主机名后
+    const auto zeroWidth = juce::String("https://juce.backend") + juce::String::charToString(0x200B) + "/";
+    CHECK_FALSE(allowed(zeroWidth));
+    // 全角点（U+FF0E）
+    const auto fullWidthDot = juce::String("https://juce") + juce::String::charToString(0xFF0E) + "backend/";
+    CHECK_FALSE(allowed(fullWidthDot));
+
+    // 控制字符与空白：任何位置都拦
+    CHECK_FALSE(allowed(" https://juce.backend/"));
+    CHECK_FALSE(allowed("https://juce.backend/ "));
+    CHECK_FALSE(allowed("https://juce.backend/a b"));
+    CHECK_FALSE(allowed("https://juce.backend/\n"));
+    CHECK_FALSE(allowed("https://juce.backend/\t"));
+    CHECK_FALSE(allowed(juce::String("https://juce.backend/") + juce::String::charToString(0x7F)));
+    CHECK_FALSE(allowed(juce::String("https://juce.backend/") + juce::String::charToString(0x01)));
+    CHECK_FALSE(allowed(juce::String("https://juce.backend") + juce::String::charToString(0x0A) + ".evil/"));
+}
+
+TEST_CASE("navigation gate blocks a downgraded or different scheme on the same host", "[webview][navigation]")
+{
+    // http 降级
+    CHECK_FALSE(allowed("http://juce.backend/"));
+    CHECK_FALSE(allowed("http://juce.backend/input/index.html"));
+    CHECK_FALSE(allowed("HTTP://JUCE.BACKEND/"));
+    // 两个平台的根不通用：Windows 的页面不能去 juce:，macOS 的页面不能去 https:
+    CHECK_FALSE(allowed("juce://juce.backend/"));
+    CHECK_FALSE(allowed("https://juce.backend/", kMacRoot));
+    CHECK_FALSE(allowed("http://juce.backend/", kMacRoot));
+    // 别的协议，主机写成根的主机也不行
+    CHECK_FALSE(allowed("ftp://juce.backend/"));
+    CHECK_FALSE(allowed("wss://juce.backend/"));
+    CHECK_FALSE(allowed("file://juce.backend/x"));
+    CHECK_FALSE(allowed("file:///C:/Windows/win.ini"));
+    CHECK_FALSE(allowed("file:///etc/passwd"));
+    CHECK_FALSE(allowed("javascript:alert(1)"));
+    CHECK_FALSE(allowed("JavaScript:alert(1)"));
+    CHECK_FALSE(allowed("javascript://juce.backend/%0Aalert(1)"));
+    CHECK_FALSE(allowed("data:text/html,<script>alert(1)</script>"));
+    CHECK_FALSE(allowed("data:text/plain;charset=UTF-8,Error code: 9")); // JUCE 自己的错误页：我们关掉了，不放
+    CHECK_FALSE(allowed("blob:https://juce.backend/1234"));
+    CHECK_FALSE(allowed("view-source:https://juce.backend/"));
+    CHECK_FALSE(allowed("chrome://settings"));
+    CHECK_FALSE(allowed("edge://settings"));
+    // 协议部分不合文法
+    CHECK_FALSE(allowed("1https://juce.backend/"));
+    CHECK_FALSE(allowed("ht tps://juce.backend/"));
+    CHECK_FALSE(allowed("ht_tps://juce.backend/"));
+    CHECK_FALSE(allowed("://juce.backend/"));
+}
+
+TEST_CASE("navigation gate blocks any port, even the default one", "[webview][navigation]")
+{
+    // 本插件从不用带端口的地址；带端口说明不是我们发起的。默认端口也不例外
+    CHECK_FALSE(allowed("https://juce.backend:443/"));
+    CHECK_FALSE(allowed("https://juce.backend:8443/"));
+    CHECK_FALSE(allowed("https://juce.backend:80/"));
+    CHECK_FALSE(allowed("https://juce.backend:/"));
+    CHECK_FALSE(allowed("https://juce.backend:evil/"));
+    CHECK_FALSE(allowed("juce://juce.backend:1/", kMacRoot));
+    CHECK_FALSE(allowed("https://juce.backend:443"));
+    // 端口写在路径里不算端口
+    CHECK(allowed("https://juce.backend/a:443"));
+}
+
+TEST_CASE("navigation gate blocks scheme-less, empty and malformed input", "[webview][navigation]")
+{
+    CHECK_FALSE(allowed(""));
+    CHECK_FALSE(allowed("   "));
+    CHECK_FALSE(allowed("juce.backend/input/index.html"));
+    CHECK_FALSE(allowed("//juce.backend/input/index.html"));
+    CHECK_FALSE(allowed("/input/index.html"));
+    CHECK_FALSE(allowed("input/index.html"));
+    CHECK_FALSE(allowed("https:juce.backend"));
+    CHECK_FALSE(allowed("https:/juce.backend/"));
+    CHECK_FALSE(allowed("https:///juce.backend/"));
+    CHECK_FALSE(allowed("https://"));
+    CHECK_FALSE(allowed("https://?x"));
+    CHECK_FALSE(allowed("https://#x"));
+}
+
+TEST_CASE("navigation gate with an unknown or malformed root only lets the blank page through", "[webview][navigation]")
+{
+    // 不认识的系统：getResourceProviderRoot 给空串。此时没有可以放行的根，不能退成「全放」
+    CHECK_FALSE(allowed("https://juce.backend/", ""));
+    CHECK_FALSE(allowed("https://example.com/", ""));
+    CHECK_FALSE(allowed("", ""));
+    CHECK(allowed("about:blank", ""));
+    // 根本身读不懂，同样什么都不放
+    CHECK_FALSE(allowed("https://juce.backend/", "not a url"));
+    CHECK_FALSE(allowed("https://juce.backend/", "https://"));
+    CHECK_FALSE(allowed("https://", "https://"));
+    // 协议部分不合文法的根：就算地址与根逐字相同也不放
+    CHECK_FALSE(allowed("ht_tps://juce.backend/", "ht_tps://juce.backend/"));
+    CHECK_FALSE(allowed("1https://juce.backend/", "1https://juce.backend/"));
+
+    // 地址与根逐字相同，但写法本身就是危险的（用户信息、反斜杠、非 ASCII 主机）：不因为「与根相同」而放行
+    const auto homoglyph = juce::String("https://ju") + juce::String::charToString(0x0441) + "e.backend/";
+    for (const auto& bad :
+         {juce::String("https://user@juce.backend/"), juce::String("https://juce.backend\\x/"), homoglyph})
+    {
+        INFO(bad.toStdString());
+        CHECK_FALSE(allowed(bad, bad));
+    }
+}
+
+TEST_CASE("log lines made from untrusted urls are bounded and have no control characters", "[webview][navigation]")
+{
+    CHECK(ResourceProvider::urlForLog("https://juce.backend/a") == "https://juce.backend/a");
+    CHECK(ResourceProvider::urlForLog("").isEmpty());
+
+    // 换行、回车、制表、退格与删除符不能把日志行断开或伪造出新的一行
+    CHECK(ResourceProvider::urlForLog("a\nb\rc\td") == "a?b?c?d");
+    CHECK(ResourceProvider::urlForLog(juce::String("x") + juce::String::charToString(0x7F) + "y") == "x?y");
+    CHECK(ResourceProvider::urlForLog(juce::String("x") + juce::String::charToString(0x08) + "y") == "x?y");
+    CHECK_FALSE(ResourceProvider::urlForLog("a\nRinne input: fake line").contains("\n"));
+
+    // 长度上限按字符数；默认 120
+    const juce::String longUrl = "https://example.com/" + juce::String::repeatedString("a", 500);
+    CHECK(ResourceProvider::urlForLog(longUrl).length() == 120);
+    CHECK(ResourceProvider::urlForLog(longUrl, 10) == "https://ex");
+    CHECK(ResourceProvider::urlForLog(longUrl, 0).isEmpty());
+    CHECK(ResourceProvider::urlForLog("abc", 3) == "abc");
+    CHECK(ResourceProvider::urlForLog("abcd", 3) == "abc");
+    // 中文等多字节字符按字符数截，不会切到字节中间
+    const auto cjk =
+        juce::String::charToString(0x4E2D) + juce::String::charToString(0x6587) + juce::String::charToString(0x5B57);
+    CHECK(ResourceProvider::urlForLog(cjk, 2) == cjk.substring(0, 2));
+}

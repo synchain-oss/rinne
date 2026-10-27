@@ -5,7 +5,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <juce_core/juce_core.h>
 
@@ -285,4 +288,287 @@ TEST_CASE("ui defaults: switching the test directory switches the data", "[ui_de
 
     store::setStorageDirForTests(first.dir());
     CHECK(store::uiScalePercentInput() == 150);
+}
+
+// ---------------------------------------------------------------------------------------------
+// 进程间锁与一次读回。真锁是系统的命名互斥量或文件锁，单个进程里排不出争用，所以用 setLockForTests 装一对替身，
+// 在「拿到锁」的那一刻模拟另一个进程刚写完，再看本进程的读写是不是从拿锁之后才开文件、写完才放锁。
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+
+// 记录每一次拿锁与放锁，并允许在拿到锁的瞬间插一段「别的进程做的事」
+class LockProbe
+{
+public:
+    LockProbe()
+    {
+        store::setLockForTests(
+            [this](int timeoutMs) {
+                waits.push_back(timeoutMs);
+                ++enters;
+                if (!grant)
+                    return false;
+                ++depth;
+                maxDepth = depth > maxDepth ? depth : maxDepth;
+                if (whileWaiting)
+                {
+                    auto once = std::move(whileWaiting);
+                    whileWaiting = nullptr;
+                    once();
+                }
+                return true;
+            },
+            [this]() {
+                ++exits;
+                --depth;
+                if (atRelease)
+                    atRelease();
+            });
+    }
+
+    ~LockProbe() { store::setLockForTests({}, {}); }
+
+    LockProbe(const LockProbe&) = delete;
+    LockProbe& operator=(const LockProbe&) = delete;
+
+    int enters = 0;
+    int exits = 0;
+    int depth = 0;
+    int maxDepth = 0;
+    bool grant = true;
+    std::vector<int> waits;
+    std::function<void()> whileWaiting; // 拿到锁之后第一件事（只做一次）：别的进程在我们等锁期间写了盘
+    std::function<void()> atRelease; // 放锁的那一刻：看盘上是不是已经是写完的样子
+};
+
+} // namespace
+
+TEST_CASE("ui defaults: the lock name and the wait are fixed and bounded", "[ui_defaults][lock]")
+{
+    CHECK(juce::String(store::kProcessLockName).startsWith("Rinne"));
+    CHECK(store::kProcessLockWaitMs > 0);
+    CHECK(store::kProcessLockWaitMs <= 2000); // 别的进程卡死时，消息线程最多等这么久
+}
+
+TEST_CASE("ui defaults: every read and write takes the process lock exactly once, and gives it back",
+          "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+
+    const std::vector<std::pair<const char*, std::function<void()>>> calls = {
+        {"langChosenGlobal", [] { (void)store::langChosenGlobal(); }},
+        {"setLangChosenGlobal", [] { store::setLangChosenGlobal(true); }},
+        {"langGlobal", [] { (void)store::langGlobal(); }},
+        {"setLangGlobal", [] { store::setLangGlobal("fr"); }},
+        {"rulesAckVersion", [] { (void)store::rulesAckVersion(); }},
+        {"setRulesAckVersion", [] { store::setRulesAckVersion(2); }},
+        {"guideSeenGlobalInput", [] { (void)store::guideSeenGlobalInput(); }},
+        {"setGuideSeenGlobalInput", [] { store::setGuideSeenGlobalInput(true); }},
+        {"guideSeenGlobalOutput", [] { (void)store::guideSeenGlobalOutput(); }},
+        {"setGuideSeenGlobalOutput", [] { store::setGuideSeenGlobalOutput(true); }},
+        {"uiScalePercentInput", [] { (void)store::uiScalePercentInput(); }},
+        {"setUiScalePercentInput", [] { store::setUiScalePercentInput(125); }},
+        {"uiScalePercentOutput", [] { (void)store::uiScalePercentOutput(); }},
+        {"setUiScalePercentOutput", [] { store::setUiScalePercentOutput(75); }},
+        {"diagLogEnabled", [] { (void)store::diagLogEnabled(); }},
+        {"setDiagLogEnabled", [] { store::setDiagLogEnabled(true); }},
+        {"guideSeenGlobal", [] { (void)store::guideSeenGlobal("input"); }},
+        {"setGuideSeenGlobal", [] { store::setGuideSeenGlobal("output", true); }},
+        {"uiScalePercent", [] { (void)store::uiScalePercent("input"); }},
+        {"setUiScalePercent", [] { store::setUiScalePercent("input", 65); }},
+        {"readUiFlags", [] { (void)store::readUiFlags("input"); }},
+    };
+
+    for (const auto& call : calls)
+    {
+        INFO(call.first);
+        const int enters = probe.enters;
+        const int exits = probe.exits;
+        call.second();
+        CHECK(probe.enters == enters + 1);
+        CHECK(probe.exits == exits + 1);
+        CHECK(probe.depth == 0);
+    }
+    CHECK(probe.maxDepth == 1); // 从不嵌套
+    for (const int wait : probe.waits)
+        CHECK(wait == store::kProcessLockWaitMs);
+}
+
+TEST_CASE("ui defaults: a write that is refused up front does not need the lock", "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    store::setLangGlobal("de");
+    store::setRulesAckVersion(-1);
+    store::setUiScalePercentInput(9999);
+    store::setUiScalePercentOutput(0);
+    CHECK(probe.enters == 0);
+    CHECK(probe.exits == 0);
+    CHECK_FALSE(scratch.settingsFile().existsAsFile());
+}
+
+TEST_CASE("ui defaults: a write keeps what another process wrote while this one waited for the lock",
+          "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    // 我们在等锁时，另一个进程写好了诊断日志开关；拿到锁之后才开文件，就读得到它，整体重写时不会把它丢掉
+    probe.whileWaiting = [&scratch] { scratch.writeRaw(entry("diag_log_enabled", "1")); };
+
+    store::setUiScalePercentInput(125);
+
+    CHECK(probe.enters == 1);
+    probe.whileWaiting = nullptr;
+    CHECK(store::uiScalePercentInput() == 125);
+    CHECK(store::diagLogEnabled()); // 别的进程写的那个键还在
+}
+
+TEST_CASE("ui defaults: a read sees what another process wrote while this one waited for the lock",
+          "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    probe.whileWaiting = [&scratch] { scratch.writeRaw(entry("lang_global", "en")); };
+    CHECK(store::langGlobal() == "en");
+
+    probe.whileWaiting = [&scratch] {
+        scratch.writeRaw(entry("guide_seen_global_input", "1") + "\n" + entry("rules_ack_version", "9"));
+    };
+    const auto flags = store::readUiFlags("input");
+    CHECK(flags.guideSeen);
+    CHECK(flags.rulesAck == 9);
+}
+
+TEST_CASE("ui defaults: the value is already on disk when the lock is released", "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    juce::String onDiskAtRelease;
+    probe.atRelease = [&] { onDiskAtRelease = scratch.settingsFile().loadFileAsString(); };
+
+    store::setUiScalePercentOutput(150);
+
+    // 别的进程拿到锁时读到的就是这份：写在放锁之前落了盘，不是之后
+    CHECK(onDiskAtRelease.contains("name=\"ui_scale_percent_output\""));
+    CHECK(onDiskAtRelease.contains("val=\"150\""));
+}
+
+TEST_CASE("ui defaults: when the lock cannot be taken the work still happens and nothing is released",
+          "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    probe.grant = false;
+
+    // 别的进程卡死时不能让开窗跟着失败：不带锁照常读写，代价只是这一次可能丢更新
+    store::setLangGlobal("fr");
+    CHECK(store::langGlobal() == "fr");
+    store::setUiScalePercentInput(80);
+    CHECK(store::readUiFlags("input").rulesAck == 0);
+
+    CHECK(probe.enters == 4);
+    CHECK(probe.exits == 0); // 没拿到就不放
+    CHECK(probe.depth == 0);
+}
+
+TEST_CASE("ui defaults: with the stand-in removed the real lock is used and values still round-trip",
+          "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    {
+        LockProbe probe; // 装上再拆掉
+    }
+    store::setUiScalePercentOutput(200);
+    store::setDiagLogEnabled(true);
+    CHECK(store::uiScalePercentOutput() == 200);
+    CHECK(store::diagLogEnabled());
+    // 真锁可重入：同一个线程连着读写不会卡住（上面每一步都拿过放过）
+    CHECK(store::readUiFlags("output").diagLog);
+}
+
+TEST_CASE("ui defaults: readUiFlags agrees with the single reads, field by field", "[ui_defaults][flags]")
+{
+    ScratchStore scratch;
+
+    // 全新：全部默认，而且只读不建文件
+    {
+        const auto flags = store::readUiFlags("input");
+        CHECK_FALSE(flags.langChosen);
+        CHECK(flags.rulesAck == 0);
+        CHECK_FALSE(flags.guideSeen);
+        CHECK_FALSE(flags.diagLog);
+        CHECK_FALSE(scratch.settingsFile().existsAsFile());
+    }
+
+    store::setLangChosenGlobal(true);
+    store::setRulesAckVersion(4);
+    store::setGuideSeenGlobalInput(true);
+    store::setDiagLogEnabled(true);
+
+    for (const char* role : {"input", "output", "anything"})
+    {
+        INFO(role);
+        const auto flags = store::readUiFlags(role);
+        CHECK(flags.langChosen == store::langChosenGlobal());
+        CHECK(flags.rulesAck == store::rulesAckVersion());
+        CHECK(flags.guideSeen == store::guideSeenGlobal(role));
+        CHECK(flags.diagLog == store::diagLogEnabled());
+    }
+
+    // 各字段读各自的键：一个为真另一个为假时不能串（上面的断言里它们恰好同真）
+    store::setLangChosenGlobal(true);
+    store::setDiagLogEnabled(false);
+    CHECK(store::readUiFlags("input").langChosen);
+    CHECK_FALSE(store::readUiFlags("input").diagLog);
+    store::setLangChosenGlobal(false);
+    store::setDiagLogEnabled(true);
+    CHECK_FALSE(store::readUiFlags("input").langChosen);
+    CHECK(store::readUiFlags("input").diagLog);
+    store::setLangChosenGlobal(true);
+    store::setDiagLogEnabled(true);
+
+    // 引导已看按角色取：Input 看过、Output 没看过；其余角色名当 Output
+    CHECK(store::readUiFlags("input").guideSeen);
+    CHECK_FALSE(store::readUiFlags("output").guideSeen);
+    CHECK_FALSE(store::readUiFlags("monitor").guideSeen);
+    store::setGuideSeenGlobalOutput(true);
+    CHECK(store::readUiFlags("output").guideSeen);
+    CHECK(store::readUiFlags("monitor").guideSeen);
+
+    // 取消也读得回来
+    store::setLangChosenGlobal(false);
+    store::setDiagLogEnabled(false);
+    const auto cleared = store::readUiFlags("input");
+    CHECK_FALSE(cleared.langChosen);
+    CHECK_FALSE(cleared.diagLog);
+    CHECK(cleared.rulesAck == 4);
+}
+
+TEST_CASE("ui defaults: readUiFlags validates what is on disk like the single reads do", "[ui_defaults][flags]")
+{
+    ScratchStore scratch;
+
+    scratch.writeRaw(entry("guide_seen_global_input", "banana") + "\n" + entry("diag_log_enabled", "1") + "\n" +
+                     entry("guide_seen_global_output", "1") + "\n" + entry("rules_ack_version", "-4") + "\n" +
+                     entry("lang_chosen_global", "1"));
+    auto flags = store::readUiFlags("input");
+    CHECK_FALSE(flags.guideSeen); // 垃圾值按没看过
+    CHECK(flags.diagLog);
+    CHECK(flags.langChosen);
+    CHECK(flags.rulesAck == 0); // 负数按 0
+    CHECK(store::readUiFlags("output").guideSeen);
+
+    scratch.writeRaw(entry("rules_ack_version", "2"));
+    CHECK(store::readUiFlags("input").rulesAck == 2);
+
+    // 整个文件损坏时全部回到默认，不抛出
+    REQUIRE(scratch.settingsFile().replaceWithText("this is not xml"));
+    flags = store::readUiFlags("input");
+    CHECK_FALSE(flags.langChosen);
+    CHECK(flags.rulesAck == 0);
+    CHECK_FALSE(flags.guideSeen);
+    CHECK_FALSE(flags.diagLog);
 }
