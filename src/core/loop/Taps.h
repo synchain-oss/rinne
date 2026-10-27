@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 读头：每个读头在自己的绝对位置上读本地延迟线，并带一个自己的包络。
-// 最多 3 个读头：改 D 的交叉淡化要两个（旧的与新的），重同步时新旧要同时存在，3 个才够。
+// 最多 3 个读头：改 D 的交叉淡化要两个（旧的与新的），交叉淡化进行中又遇重同步时，旧 A、旧 B 与新读头要同时在场，
+// 3 个才够。
 //
 // 一个读头的字段：
 //   off     同步偏移。读的位置 = R + off + i − D。
@@ -9,6 +10,10 @@
 //   validFrom / validTo  有效区间：区间外读成 0。validFrom 是「从哪个绝对位置起才有数据」，
 //           validTo 是「到哪个绝对位置为止还有数据」（+∞ 表示没有上界）。
 //   env     包络：0..1 的线性淡变，用来淡入（新读头）与淡出（旧读头）。
+//
+// 改 D 的交叉淡化不是读头自己的包络，而是整个读头集合的一段状态（同一时刻至多一段）：旧读头（outgoing）与新读头
+// （incoming）的增益逐样本出自同一个函数，两路之和恒为 1（见 DelayRetarget.h）。它与下面的淡出、淡入相乘、互相独立：
+// 交叉淡化进行中遇到重同步，两路读头各自再挂上 5 ms 淡出，一起淡进尾巴，一个读头都不丢。
 //
 // 包络按样本推进，与块长无关：同一段输入怎么切块，输出逐位相同。
 //   淡出按时间走：从挂上淡出的那个样本起，每个输出样本走一步。
@@ -22,8 +27,10 @@
 // 线程：不分配、不加锁、不读时钟、不抛异常。
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 
+#include "loop/DelayRetarget.h"
 #include "loop/LocalLine.h"
 #include "loop/LoopTiming.h"
 
@@ -53,6 +60,14 @@ struct TapEnvelope
     bool finished() const noexcept { return !fadingOut() && !fadingIn(); }
 };
 
+// 读头在改 D 的交叉淡化里的角色。
+enum class XfadeRole : std::uint8_t
+{
+    kNone = 0, // 不在交叉淡化里
+    kOutgoing = 1, // 旧读头：增益 1 − x，走完退场
+    kIncoming = 2, // 新读头：增益 x，走完成为普通读头
+};
+
 // 一个读头。
 struct Tap
 {
@@ -62,6 +77,7 @@ struct Tap
     i64 validFrom = 0;
     i64 validTo = 0; // +∞ = 没有上界
     TapEnvelope env;
+    XfadeRole xfade = XfadeRole::kNone;
     // 最近一次混音里，这个读头在最后一个样本上的贡献（已乘包络）与那个样本的输出下标（R 坐标；-1 = 没有）。
     // 写头恰好在块边界落后时，环路层靠它「保持末值」：回送不从上一块的末值直接落到 0。
     float lastLeft = 0.0f;
@@ -122,7 +138,7 @@ public:
             {
                 continue;
             }
-            const float e = currentEnvelope(taps_[i]);
+            const float e = envelopeNow(taps_[i]);
             if (best < 0 || e < bestEnv)
             {
                 best = i;
@@ -142,6 +158,8 @@ public:
         {
             taps_[i] = Tap{};
         }
+        xfadeLength_ = 0;
+        xfadeStep_ = 0;
     }
 
     int count() const noexcept
@@ -159,6 +177,59 @@ public:
 
     Tap& at(int index) noexcept { return taps_[index]; }
     const Tap& at(int index) const noexcept { return taps_[index]; }
+
+    // 主读头：第一个既没在淡出、也不是交叉淡化里的旧读头的活跃读头。没有时返回 -1。
+    // 交叉淡化一开始，新读头就是主读头（发布的 D、拉环不足的统计都认它），旧读头照自己的增益走完。
+    int mainSlot() const noexcept
+    {
+        for (int i = 0; i < kMaxTaps; ++i)
+        {
+            const Tap& tap = taps_[i];
+            if (tap.active && !tap.env.fadingOut() && tap.xfade != XfadeRole::kOutgoing)
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // ---- 改 D 的线性交叉淡化（同一时刻至多一段）----
+
+    // 开始一段交叉淡化：总长 length 个样本；stepAtBlockStart 是本块第一个样本上的步数，可以为负
+    // （交叉淡化在本块中途才开始：开始之前旧读头满增益、新读头 0）。角色由调用方标在读头上。
+    void beginCrossfade(std::int64_t length, std::int64_t stepAtBlockStart) noexcept
+    {
+        xfadeLength_ = length > 0 ? length : 1;
+        xfadeStep_ = stepAtBlockStart;
+    }
+    bool crossfadeActive() const noexcept { return xfadeLength_ > 0; }
+    std::int64_t crossfadeLength() const noexcept { return xfadeLength_; }
+    // 本块第一个样本上的步数（块末推进之后就是下一块第一个样本上的步数）
+    std::int64_t crossfadeStep() const noexcept { return xfadeStep_; }
+    // 还要多少个样本走完；没有交叉淡化时是 0
+    std::int64_t crossfadeRemaining() const noexcept
+    {
+        return crossfadeActive() ? xfadeLength_ - std::max<std::int64_t>(xfadeStep_, 0) : 0;
+    }
+    // 本块第 i 个样本上的一对增益
+    XfadeGains crossfadeGainsAt(std::int64_t i) const noexcept
+    {
+        return linearXfadeGains(xfadeStep_ + i, xfadeLength_);
+    }
+    // 推进 n 个样本。走完时旧读头退场、新读头成为普通读头；两路读头都没了（被重同步的淡出走完）也收尾。
+    void advanceCrossfade(std::int64_t n) noexcept;
+
+    // 读头此刻（块首）的增益：淡出、淡入与交叉淡化相乘。
+    float envelopeNow(const Tap& tap) const noexcept
+    {
+        float env = currentEnvelope(tap);
+        if (crossfadeActive() && tap.xfade != XfadeRole::kNone)
+        {
+            const XfadeGains g = crossfadeGainsAt(0);
+            env *= tap.xfade == XfadeRole::kOutgoing ? g.out : g.in;
+        }
+        return env;
+    }
 
     // 读头当前的包络值（块边界上的值）：淡出与淡入相乘。两者都不在进行时是 1。
     // 淡出的起点是 1（读头刚建立时满增益），线性降到 0；淡入从 0 线性升到 1。
@@ -181,6 +252,9 @@ public:
 private:
     // 读头槽：定长 3 个。不用容器：读头集合的大小是编译期常量，音频线程上不分配。
     Tap taps_[kMaxTaps]{};
+    // 交叉淡化的进度：总长为 0 表示没有。
+    std::int64_t xfadeLength_ = 0;
+    std::int64_t xfadeStep_ = 0;
 };
 
 // 下面这几个是读头混音的落点，实现见 Taps.cpp。它们按样本推进包络，与块长无关：
@@ -204,7 +278,7 @@ void advanceTaps(TapSet& taps, std::int64_t n) noexcept;
 void settleOnsets(TapSet& taps, i64 position, std::int64_t n) noexcept;
 // largestTapDelay：全部活跃读头里最大的 D（估计窗口用的那个）。没有活跃读头时是 0。
 std::int64_t largestTapDelay(const TapSet& taps) noexcept;
-// mainTapDelay：主读头（第一个没在淡出的活跃读头）正在读的 D。没有主读头时返回 fallback。
+// mainTapDelay：主读头（见 TapSet::mainSlot）正在读的 D。没有主读头时返回 fallback。
 std::int64_t mainTapDelay(const TapSet& taps, std::int64_t fallback) noexcept;
 // tapsSettledSilent：全部读头都已经彻底安静（没有活跃读头，或每个活跃读头的包络都是 0）。
 bool tapsSettledSilent(const TapSet& taps) noexcept;

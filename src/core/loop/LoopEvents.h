@@ -47,6 +47,8 @@ enum class LoopEventCode : std::uint16_t
     kTorn = 0x030A, // a = 撕裂的帧数（钳 255）
     kOverrun = 0x030B, // a = 补 0 的样本数（钳 255）
     kTapDropped = 0x030C, // a = 1（读头槽满，丢掉了一个）
+    kRetargetHeld = 0x030D, // a = 1：改 D 的新目标落在 100 ms 限速窗口里被挂起（每次只发一条，到点才开始交叉淡化）
+    kDelayHints = 0x030E, // 节拍同步与截断的提示位变了：a = 现在的提示位（LoopStatus.h 的 kDelayHint*），b = 变了的位
 };
 
 // 「÷256」的编码：以 256 个样本为单位向上取整，钳到 255（0 仍是 0）。

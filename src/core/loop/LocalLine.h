@@ -9,6 +9,8 @@
 //
 // 尾巴快照：重同步时旧读头要用「预拷贝的 5 ms 尾巴」淡出。预拷贝是为了防这一段在淡出期间被环覆盖：
 // 快照把淡出要用的那一段先拷到线内的定长尾巴区，此后读旧位置一律从快照读，不再依赖线的主区。
+// 尾巴区有两格：改 D 的交叉淡化进行中遇到重同步时，新旧两个读头读的位置相差一个 D，一段区间装不下，
+// 各占一格。快照按绝对位置存放，过时的快照只会读出它当时那个位置上的数据，不会读错位置。
 //
 // 清空：两端停用超过 250 ms 时清空（防停用止啸后原样复燃）、跳闸淡出后清空、起播复位时清空。
 // 清空只改两个整数（lineValidFrom 与 pulled 的基准），不动缓冲区里的样本：清空之后这些位置落在有效区间外，
@@ -40,6 +42,8 @@ class LocalLine
 public:
     // 尾巴区能放多少帧。取 20 ms：重同步的淡出是 5 ms，onset 是 20 ms，取宽一点够用。
     static constexpr std::int64_t kTailFrames = 1024;
+    // 尾巴区的格数（见文件头）
+    static constexpr int kTailSlots = 2;
 
     // 采样率变化时才重新分配（allocate 返回 false 表示没准备好，调用方按「没有对端」处理）。
     // 非实时线程调用。
@@ -59,8 +63,11 @@ public:
         mask_ = frames - 1;
         left_.assign(static_cast<std::size_t>(frames), 0.0f);
         right_.assign(static_cast<std::size_t>(frames), 0.0f);
-        tailLeft_.assign(static_cast<std::size_t>(kTailFrames), 0.0f);
-        tailRight_.assign(static_cast<std::size_t>(kTailFrames), 0.0f);
+        for (Tail& tail : tails_)
+        {
+            tail.left.assign(static_cast<std::size_t>(kTailFrames), 0.0f);
+            tail.right.assign(static_cast<std::size_t>(kTailFrames), 0.0f);
+        }
         reset();
         return true;
     }
@@ -82,8 +89,11 @@ public:
     {
         pulled_ = position;
         lineValidFrom_ = position;
-        tailStart_ = 0;
-        tailCount_ = 0;
+        for (Tail& tail : tails_)
+        {
+            tail.start = 0;
+            tail.count = 0;
+        }
     }
 
     // 换段：主区从 position 起重来（比它早的位置一律读不出来），但尾巴快照保留 —— 旧读头的淡出正在读它。
@@ -154,29 +164,34 @@ public:
             return false;
         }
         const i64 start = pulled_ - n;
+        Tail& tail = tails_[0];
         for (i64 i = 0; i < n; ++i)
         {
             const auto src = static_cast<std::size_t>((start + i) & mask_);
             const auto dst = static_cast<std::size_t>(i);
-            tailLeft_[dst] = left_[src];
-            tailRight_[dst] = right_[src];
+            tail.left[dst] = left_[src];
+            tail.right[dst] = right_[src];
         }
-        tailStart_ = start;
-        tailCount_ = n;
+        tail.start = start;
+        tail.count = n;
         return true;
     }
 
-    // 从尾巴快照里读。位置不在快照里返回 false。
+    // 从尾巴快照里读（两格都查，先第 0 格）。位置不在任何一格里返回 false。
     bool readTail(i64 position, float& left, float& right) const noexcept
     {
-        if (tailCount_ <= 0 || position < tailStart_ || position >= tailStart_ + tailCount_)
+        for (const Tail& tail : tails_)
         {
-            return false;
+            if (tail.count <= 0 || position < tail.start || position >= tail.start + tail.count)
+            {
+                continue;
+            }
+            const auto at = static_cast<std::size_t>(position - tail.start);
+            left = tail.left[at];
+            right = tail.right[at];
+            return true;
         }
-        const auto at = static_cast<std::size_t>(position - tailStart_);
-        left = tailLeft_[at];
-        right = tailRight_[at];
-        return true;
+        return false;
     }
 
     // 尾巴快照（指定区间）：把 [from, from + count) 拷进尾巴区。
@@ -185,13 +200,14 @@ public:
     // 那段不一定在主区的末尾（读头落后写头 D 个样本），所以要按区间拷。
     //
     // 区间会被夹到主区的可用范围里：[from, from + count) 与 [lineValidFrom, pulled) 的交集。
-    // 夹不到任何帧时返回 false（没有可拷的帧）。
-    bool snapshotRange(i64 from, i64 count) noexcept
+    // 夹不到任何帧时返回 false（没有可拷的帧，这一格原样不动）。slot 是尾巴区的格号（0..kTailSlots-1，越界当 0）。
+    bool snapshotRange(i64 from, i64 count, int slot = 0) noexcept
     {
         if (frames_ == 0 || count <= 0)
         {
             return false;
         }
+        Tail& tail = tails_[slot >= 0 && slot < kTailSlots ? slot : 0];
         const i64 n = std::min(count, kTailFrames);
         const i64 lo = std::max(from, lineValidFrom_);
         const i64 hi = std::min(from + n, pulled_);
@@ -204,30 +220,36 @@ public:
         {
             const auto src = static_cast<std::size_t>((lo + i) & mask_);
             const auto dst = static_cast<std::size_t>(i);
-            tailLeft_[dst] = left_[src];
-            tailRight_[dst] = right_[src];
+            tail.left[dst] = left_[src];
+            tail.right[dst] = right_[src];
         }
-        tailStart_ = lo;
-        tailCount_ = m;
+        tail.start = lo;
+        tail.count = m;
         return true;
     }
 
-    // 尾巴快照覆盖的区间 [tailStart, tailStart + tailCount)
-    i64 tailStart() const noexcept { return tailStart_; }
-    i64 tailCount() const noexcept { return tailCount_; }
+    // 尾巴快照覆盖的区间 [tailStart, tailStart + tailCount)（指定一格，缺省第 0 格）
+    i64 tailStart(int slot = 0) const noexcept { return tails_[slot >= 0 && slot < kTailSlots ? slot : 0].start; }
+    i64 tailCount(int slot = 0) const noexcept { return tails_[slot >= 0 && slot < kTailSlots ? slot : 0].count; }
 
 private:
+    // 尾巴区的一格
+    struct Tail
+    {
+        std::vector<float> left;
+        std::vector<float> right;
+        i64 start = 0;
+        i64 count = 0;
+    };
+
     std::vector<float> left_;
     std::vector<float> right_;
-    std::vector<float> tailLeft_;
-    std::vector<float> tailRight_;
+    Tail tails_[kTailSlots];
     std::int64_t frames_ = 0;
     std::int64_t mask_ = 0;
     double sampleRate_ = 0.0;
     i64 pulled_ = 0;
     i64 lineValidFrom_ = 0;
-    i64 tailStart_ = 0;
-    i64 tailCount_ = 0;
 };
 
 } // namespace rinne::loop

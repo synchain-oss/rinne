@@ -183,6 +183,40 @@ TEST_CASE("loop line 尾巴快照可以按区间拷（重同步时的预拷贝�
     REQUIRE_FALSE(line.snapshotRange(50, 50));
 }
 
+TEST_CASE("loop line 两格尾巴互不覆盖：改 D 的交叉淡化里两个读头同时重同步，各淡各的")
+{
+    // ⛔ 删除式验证点：第二格拷贝写进第 0 格（或 readTail 只查第 0 格）→ 另一个读头的尾巴被覆盖，本用例变红。
+    LocalLine line;
+    REQUIRE(line.allocate(kSr));
+    fill(line, 0, 400);
+
+    REQUIRE(line.snapshotRange(50, 50, 0));
+    REQUIRE(line.snapshotRange(250, 60, 1));
+    REQUIRE(line.tailStart(0) == 50);
+    REQUIRE(line.tailCount(0) == 50);
+    REQUIRE(line.tailStart(1) == 250);
+    REQUIRE(line.tailCount(1) == 60);
+
+    float l = 0.0f;
+    float r = 0.0f;
+    REQUIRE(line.readTail(75, l, r));
+    REQUIRE(l == encode(75));
+    REQUIRE(line.readTail(300, l, r));
+    REQUIRE(l == encode(300));
+    REQUIRE(r == -encode(300));
+    // 两格之间与之外读不到
+    REQUIRE_FALSE(line.readTail(150, l, r));
+    REQUIRE_FALSE(line.readTail(310, l, r));
+
+    // 越界的格号当第 0 格；清空之后两格都读不出来
+    REQUIRE(line.snapshotRange(100, 20, 7));
+    REQUIRE(line.tailStart(0) == 100);
+    REQUIRE(line.tailStart(1) == 250);
+    line.reset();
+    REQUIRE_FALSE(line.readTail(105, l, r));
+    REQUIRE_FALSE(line.readTail(300, l, r));
+}
+
 TEST_CASE("loop line 同采样率重新 allocate 什么都不动，流保持连续")
 {
     LocalLine line;

@@ -112,6 +112,11 @@ TEST_CASE("loop timing L1-06b D 的范围：1–4000 ms，超上限被截断")
     const DelayChoice clipped = chooseDelay(1000000, 0, 0, kSr);
     REQUIRE(clipped.effective == 192000);
     REQUIRE(clipped.raised);
+    REQUIRE(clipped.clipped);
+    // 恰好等于上限不算截断；下限把 D 抬到上限也不算（那是下限的事，不是用户要多了）
+    REQUIRE_FALSE(chooseDelay(192000, 0, 0, kSr).clipped);
+    REQUIRE_FALSE(chooseDelay(100, 400000, 0, kSr).clipped);
+    REQUIRE_FALSE(chooseDelay(4800, 512, 256, kSr).clipped);
 
     // 下限也不能超过上限：下限比上限还大时，下限被压到上限。
     const DelayChoice both = chooseDelay(100, 400000, 0, kSr);

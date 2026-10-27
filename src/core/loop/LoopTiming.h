@@ -41,12 +41,8 @@ inline constexpr double kDelayDefaultMs = 100.0;
 //
 // 交叉淡化 40 ms 线性：新旧两个读头同时在跑，增益是 (1−x) 与 x，两路增益之和恒为 1。
 // 不用等功率交叉：两路信号相关时等功率会抬高约 3 dB，线性不过冲。
-// 去抖 100 ms：重新定目标必须距上一次定目标 ≥ 100 ms（按样本计），窗口内的目标变化被丢掉。
-//
-// 这两个时长给改 D 的交叉淡化用（改 D 时开第二个读头并挂交叉淡化包络，读头槽已留够 3 个）；
-// 这里先把常量与口径钉住，交叉淡化接上时照它做，避免两处各写一套。
-// **尚未接上**：交叉淡化与去抖由后续的时序扩展接入。在那之前改 D 走过渡做法（LoopSession::changeDelay）：
-// 旧读头按重同步的口径 5 ms 淡出、新读头 20 ms onset，读位置不跳变；一次只走一个过渡。
+// 去抖 100 ms，前沿限速：第一次改动立即开始交叉淡化，此后每 100 ms 至多开始一次；窗口内的改动合并（只认最新的目标），
+// 窗口到点时目标与当前不同就再淡一次，所以最终总会停在最新的目标上。两个时长按样本计，口径与实现在 DelayRetarget.h。
 inline constexpr double kDelayCrossfadeSeconds = 0.040;
 inline constexpr double kDelayDebounceSeconds = 0.100;
 
@@ -97,7 +93,8 @@ struct DelayChoice
     std::int64_t minimum = 0; // 抬升后的下限
     std::int64_t requested = 0; // 用户要的 D（样本）
     DelayMinReason reason = DelayMinReason::kNone;
-    bool raised = false; // 是否被抬升过
+    bool raised = false; // 是否被改过（抬到下限或截到上限）
+    bool clipped = false; // 用户要的 D 超过上限、被截到了上限（界面要给「被截断」提示）
 };
 
 // 毫秒转样本：按 round(ms/1000 × sr)，至少 1 个样本
@@ -136,6 +133,7 @@ inline DelayChoice chooseDelay(std::int64_t requestedFrames, std::int64_t nPrep,
     {
         eff = cap;
         choice.raised = true;
+        choice.clipped = true;
         choice.reason = DelayMinReason::kPrepare;
     }
     choice.effective = eff;

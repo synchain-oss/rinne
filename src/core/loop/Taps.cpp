@@ -12,6 +12,8 @@
 // 包络按样本推进，与块长无关：同一段输入怎么切块，输出逐位相同（安全不变量 7）。
 // 混音按样本算包络（本块内的第 i 个样本用「本块起点 + i」处的包络），块末再把淡出推进 n 个样本。
 // 淡入按位置算：读位置 p 处的淡入是 (p − validFrom + 1) / onset（截在 [0, 1]），从第一帧有效数据起淡入。
+// 改 D 的交叉淡化是第三个因子：旧读头乘 out、新读头乘 in，按样本取自 TapSet 的那一段状态（见 Taps.h），
+// 块末由 advanceTaps 推进。三个因子互相独立相乘。
 //
 // 实时约定：不分配、不加锁、不读时钟、不抛异常。
 #include <algorithm>
@@ -113,7 +115,12 @@ std::uint64_t mixTaps(TapSet& taps, const LocalLine& line, i64 position, float* 
             {
                 continue;
             }
-            const float env = fadeOutAt(tap, i) * fadeInAt(tap, p);
+            float env = fadeOutAt(tap, i) * fadeInAt(tap, p);
+            if (tap.xfade != XfadeRole::kNone)
+            {
+                const XfadeGains g = taps.crossfadeGainsAt(i);
+                env *= tap.xfade == XfadeRole::kOutgoing ? g.out : g.in;
+            }
             if (env <= 0.0f)
             {
                 continue;
@@ -191,7 +198,45 @@ void ReturnHold::addInto(float* outLeft, float* outRight, std::int64_t count) no
     }
 }
 
-// 推进全部读头的淡出 n 个样本。淡出走完的读头被释放。淡入按位置算，不在这里推进（见 settleOnsets）。
+void TapSet::advanceCrossfade(std::int64_t n) noexcept
+{
+    if (!crossfadeActive() || n <= 0)
+    {
+        return;
+    }
+    xfadeStep_ += n;
+    bool anyRole = false;
+    for (int i = 0; i < kMaxTaps; ++i)
+    {
+        Tap& tap = taps_[i];
+        if (!tap.active || tap.xfade == XfadeRole::kNone)
+        {
+            continue;
+        }
+        if (xfadeStep_ >= xfadeLength_)
+        {
+            // 走完：旧读头从第 L 个样本起增益为 0，退场；新读头成为普通读头
+            if (tap.xfade == XfadeRole::kOutgoing)
+            {
+                tap = Tap{};
+            }
+            else
+            {
+                tap.xfade = XfadeRole::kNone;
+            }
+            continue;
+        }
+        anyRole = true;
+    }
+    if (xfadeStep_ >= xfadeLength_ || !anyRole)
+    {
+        xfadeLength_ = 0;
+        xfadeStep_ = 0;
+    }
+}
+
+// 推进全部读头的淡出 n 个样本，并推进交叉淡化。淡出走完的读头被释放。
+// 淡入按位置算，不在这里推进（见 settleOnsets）。
 void advanceTaps(TapSet& taps, std::int64_t n) noexcept
 {
     if (n <= 0)
@@ -214,6 +259,7 @@ void advanceTaps(TapSet& taps, std::int64_t n) noexcept
             }
         }
     }
+    taps.advanceCrossfade(n);
 }
 
 // 记下每个淡入中的读头在本块末走到了第几步。本块最后一个读位置是 position + n − 1 + off − D，
@@ -261,18 +307,12 @@ std::int64_t largestTapDelay(const TapSet& taps) noexcept
     return largest;
 }
 
-// 主读头 = 第一个没在淡出的活跃读头（改 D 的过渡、拉环不足时的淡出都认这一个）。没有时返回 fallback。
+// 主读头 = 第一个没在淡出、也不是交叉淡化里旧读头的活跃读头（拉环不足时的淡出、发布的 D 都认这一个）。
+// 没有时返回 fallback。
 std::int64_t mainTapDelay(const TapSet& taps, std::int64_t fallback) noexcept
 {
-    for (int slot = 0; slot < kMaxTaps; ++slot)
-    {
-        const Tap& tap = taps.at(slot);
-        if (tap.active && !tap.env.fadingOut())
-        {
-            return tap.delay;
-        }
-    }
-    return fallback;
+    const int slot = taps.mainSlot();
+    return slot >= 0 ? taps.at(slot).delay : fallback;
 }
 
 // 全部读头都已经彻底安静：没有活跃读头，或者每个活跃读头的包络都是 0。
@@ -286,7 +326,7 @@ bool tapsSettledSilent(const TapSet& taps) noexcept
         {
             continue;
         }
-        // 淡入中的读头（含还没读到第一帧有效数据的新读头）马上要出声：不算安静。
+        // 淡入中的读头（含还没读到第一帧有效数据的新读头，交叉淡化里的新读头也在此列）马上要出声：不算安静。
         if (tap.env.fadingIn() || TapSet::currentEnvelope(tap) > 0.0f)
         {
             return false;

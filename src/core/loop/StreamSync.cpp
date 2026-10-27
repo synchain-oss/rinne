@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <limits>
 
 namespace rinne::loop
 {
@@ -116,7 +115,9 @@ void StreamSync::clearLine(LocalLine& line, i64 writeHead, SyncOutcome& outcome)
 // 旧回送开始淡出：给还没在淡出的活跃读头挂淡出包络，并把淡出要用的那一段预拷贝进尾巴区。
 //
 // 预拷贝的位置：淡出期间读头读的是 R + off − D 起的 fadeLength 帧（本块的下标 i 从 0 开始）。
-// 取全部淡出读头的并集，一段就够（尾巴区是定长的）。尾巴只拷得到已经拉进来的部分（判据在拉环之前跑），
+// 尾巴区有两格：第一个读头的区间进第 0 格，其余读头的区间取并集进第 1 格。平时只有一个读头在场；
+// 改 D 的交叉淡化进行中遇到重同步时有两个，它们读的位置相差一个 D，一格装不下，各占一格。
+// 尾巴只拷得到已经拉进来的部分（判据在拉环之前跑），
 // 本块拉环之后才到的那部分在淡出的几毫秒里留在主区（主区容得下 D 的上限加一个最大块长，几毫秒内不会被覆盖）。
 //
 // fadeEnd 是旧读头的 validTo：淡出期间不读这个位置及以后。调用方给的是「本块拉环之后有数据的上界」：
@@ -130,8 +131,9 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
 {
     const std::int64_t length = fadeLength > 0 ? fadeLength : 1;
 
-    i64 lo = std::numeric_limits<i64>::max();
-    i64 hi = std::numeric_limits<i64>::min();
+    i64 lo[LocalLine::kTailSlots]{};
+    i64 hi[LocalLine::kTailSlots]{};
+    bool used[LocalLine::kTailSlots]{};
     bool any = false;
     for (int i = 0; i < kMaxTaps; ++i)
     {
@@ -142,8 +144,18 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
         }
         any = true;
         const i64 from = processed + tap.offset - tap.delay;
-        lo = std::min(lo, from);
-        hi = std::max(hi, from + length);
+        const int slot = used[0] ? 1 : 0;
+        if (!used[slot])
+        {
+            lo[slot] = from;
+            hi[slot] = from + length;
+            used[slot] = true;
+        }
+        else
+        {
+            lo[slot] = std::min(lo[slot], from);
+            hi[slot] = std::max(hi[slot], from + length);
+        }
     }
     if (!any)
     {
@@ -152,9 +164,12 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
     outcome.fadeStarted = true;
 
     // 预拷贝尾巴：淡出要用的那一段里已经拉进来的部分先拷出来，此后读那一段不再依赖延迟线的主区。
-    if (hi > lo)
+    for (int slot = 0; slot < LocalLine::kTailSlots; ++slot)
     {
-        line.snapshotRange(lo, hi - lo);
+        if (used[slot] && hi[slot] > lo[slot])
+        {
+            line.snapshotRange(lo[slot], hi[slot] - lo[slot], slot);
+        }
     }
 
     // 淡出：包络从当前值线性降到 0；validTo 收到 fadeEnd，淡出期间不再读那以后的位置。
@@ -171,13 +186,6 @@ void StreamSync::startFade(LocalLine& line, TapSet& taps, i64 processed, std::in
         tap.env.fadeOutSteps = std::clamp<std::int64_t>(available, 1, length);
         tap.env.fadeOutStep = 0;
     }
-}
-
-bool StreamSync::fadeForDelayChange(LocalLine& line, TapSet& taps, i64 processed, i64 fadeEnd) noexcept
-{
-    SyncOutcome outcome;
-    startFade(line, taps, processed, fadeOut_, fadeEnd, outcome);
-    return outcome.fadeStarted;
 }
 
 void StreamSync::notePlayReset(i64 processed, i64 n, SyncOutcome& outcome) noexcept
