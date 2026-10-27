@@ -7,6 +7,7 @@
 //   - 块长不变性：同一个事件在同一个样本位置发生，怎么切块都恰好计一次。
 //   - 0 样本的调用不推进任何计数；只算账不出样本的块（快速路径）照样计数，计数与出样本的运行相同。
 //   - 已读值在消息线程一侧：确认之后不再锁存，之后再有新事件又会锁存。
+//   - 重同步叠重同步（槽满收读头）的块照常每块计一次，实时块里不计。
 //
 // 用 Rig 驱动：Input 在前、写方在后，会合段里替 Output 端发布一个槽（块序号每块 +1）。
 
@@ -629,4 +630,42 @@ TEST_CASE("导出锁存 确认之后新事件重新锁存（会话 + 消息线�
     rig.step(2048, params, offline()); // 又一次违约
     view.update(rig.status().exportEvents);
     CHECK(view.latched());
+}
+
+TEST_CASE("导出锁存 重同步叠重同步：槽满收读头的那一块照常只计一次，实时块里一次都不计")
+{
+    // 验证点：重同步的计数不看收读头（并入前一步的整改之后，这条是两边交叠处的守门）。
+    //   - 交叉淡化进行中连来三次换写方：第二、第三次要第 4、第 5 个读头，槽满收掉包络最小的那个；
+    //   - 每次换写方的那一块恰好计一次，原因含重同步；收读头的那两块也一样，不多计、不漏计；
+    //   - 同样的事在实时块里一次都不计。
+    for (const bool offlineRun : {true, false})
+    {
+        Rig rig(48000.0, 32);
+        rig.setSignal([](std::int64_t) { return 0.5f; });
+        const TransportInfo transport = offlineRun ? offline() : realtime();
+        rig.run(8192, {8}, timeParams(160), transport);
+        rig.run(20 * 8, {8}, timeParams(96), transport);
+        REQUIRE(rig.status().delayXfadeLeft > 0);
+
+        for (std::uint64_t k = 0; k < 3; ++k)
+        {
+            const std::uint32_t eventsBefore = rig.status().exportEvents;
+            const std::uint32_t resyncBefore = rig.status().resyncCount;
+            rig.attach(rig.ring(), 2 + k);
+            rig.step(8, timeParams(96), transport);
+            INFO("offline = " << offlineRun << ", 第 " << k + 1 << " 次换写方");
+            CHECK(rig.status().resyncCount == resyncBefore + 1u);
+            CHECK(rig.status().exportEvents == eventsBefore + (offlineRun ? 1u : 0u));
+            if (offlineRun)
+            {
+                CHECK((rig.status().exportCauses & kExportCauseResync) != 0u);
+            }
+            rig.run(3 * 8, {8}, timeParams(96), transport);
+        }
+        CHECK(rig.status().tapDrop >= 1u); // 确实走到了槽满收读头
+        if (!offlineRun)
+        {
+            CHECK(rig.status().exportEvents == 0u);
+        }
+    }
 }
