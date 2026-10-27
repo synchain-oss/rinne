@@ -138,6 +138,9 @@ Not linked into the plugins and not distributed with them.
   the Windows binaries.
 - The WebView2 Runtime itself is not distributed with Rinne; it is installed on the user's system by Microsoft. On
   macOS the plugins use the system WKWebView and ship nothing for it.
+- When the runtime is missing or too old, the plugin window shows a native fallback panel with an "Install WebView2
+  Runtime" button. The button only opens Microsoft's download page in the system browser; Rinne neither downloads nor
+  installs the runtime, and no further third-party component is involved.
 
 <!-- /section:webview2 -->
 
