@@ -87,6 +87,14 @@ juce::String initialLang()
     const auto saved = uidefaults::langGlobal();
     return saved.isNotEmpty() ? saved : juce::String("zh");
 }
+
+// 页面（或浏览器内核）交上来的文字都是来路不明的：写日志、放进兜底面板之前一律先过 ResourceProvider 的整形函数，
+// 断行类字符换掉、限长（地址用 urlForLog，其余文字用 asciiForLog，后者另把非 ASCII 字符也换掉，面板只显示纯 ASCII）。
+// 这些是各处的长度上限（字符数）
+constexpr int kBootStageMaxChars = 40;
+constexpr int kBootDetailMaxChars = 300;
+constexpr int kNavErrorMaxChars = 200;
+constexpr int kNavUrlLogMaxChars = 200;
 } // namespace
 
 // -----------------------------------------------------------------------------
@@ -237,6 +245,13 @@ void WebViewHost::beginLoadAttempt()
     startMs_ = juce::Time::getMillisecondCounter(); // 先落起点：兜底面板的「已等待」也从这里算
     runtime_ = PlatformWebView::runtimeInfo();
 
+    // 定时器在三条分支之前起，不能只在能加载的那条路径上起：运行时缺失、过旧时直接切兜底面板，
+    // 而面板上环路开关的显示和恢复按钮的冷却禁用态，都靠定时器每个 tick 调 refreshControls 刷新，
+    // 这恰恰是兜底面板最常用的路径。这两条路径上看门狗不会走（面板在场），定时器只做刷新。
+    // 重试时定时器本来就在跑，所以要防重复启动
+    if (!isTimerRunning())
+        startTimerHz(25);
+
     if (runtime_.status == PlatformWebView::RuntimeStatus::missing)
     {
         webView_->setVisible(false);
@@ -264,8 +279,6 @@ void WebViewHost::beginLoadAttempt()
     // 必须在任何事件发送之前完成首个跳转（前端脚本随后加载并注册监听）
     webView_->setVisible(true);
     webView_->goToURL(entryUrl());
-    if (!isTimerRunning())
-        startTimerHz(25);
 }
 
 // 首页地址是 <资源根>/<角色>/index.html，不是裸的资源根。
@@ -476,6 +489,7 @@ void WebViewHost::showFallback(FallbackReason reason)
 {
     if (fallback_ != nullptr)
         return;
+    fallbackReason_ = reason; // 面板在场期间的「为什么切的」，迟到的桥据此决定要不要收回面板
     // 面板自己铺满本组件，闸门不该再按住 WebView 的位置（否则重试回来时边界还停在可视区外，
     // 而那条路上不一定再有导航事件把它推回来）。
     // 放行诊断要在这里调：拿掉加载完成放行之后，唯一还会调它的地方只剩首帧信号的处理，
@@ -565,6 +579,24 @@ void WebViewHost::retryWebView()
     resized();
 }
 
+// 看门狗已经切了兜底面板，桥却在这之后才起来：页面其实是好的，只是比预算慢。收回面板、让网页重新可见、
+// 窗口退回当前档位的设计盒（面板在场时窗口可能被放大过），与重试走的是同一组动作，只是不重新加载页面。
+//
+// 不会来回切换：状态只会单向走「加载中、兜底面板（超时）、就绪」。就绪（bridgeReady_ 为真）之后，
+// 看门狗（要求桥未就绪）和启动失败上报（同样要求）都再也切不回面板，只剩点重试这一条路回到加载中。
+// 所以收回之后不会再被同一次加载尝试顶回去。
+//
+// 只收回「看门狗超时」切出来的面板。运行时缺失、过旧时根本没有页面在加载，不会有桥来；
+// 前端自己上报了启动失败时，面板上显示的是那条诊断，页面说它没起来，就由用户看过之后点重试，不替用户收掉
+void WebViewHost::withdrawFallbackForLateBridge()
+{
+    logDiag("bridge came up after the watchdog fallback, panel withdrawn");
+    fallback_.reset();
+    webView_->setVisible(true);
+    resizeToDesignBox();
+    resized();
+}
+
 // -----------------------------------------------------------------------------
 // 加载时序回调（消息线程，来自 HostWebView）
 // -----------------------------------------------------------------------------
@@ -594,7 +626,7 @@ void WebViewHost::onNavigationStarted(const juce::String& url)
         applyRevealGate();
     }
 
-    logDiag("navigation started: " + url);
+    logDiag("navigation started: " + ResourceProvider::urlForLog(url, kNavUrlLogMaxChars));
 }
 
 void WebViewHost::onNavigationFinished(const juce::String& url)
@@ -604,13 +636,14 @@ void WebViewHost::onNavigationFinished(const juce::String& url)
     // 这一条不放行，只记账（定谳见 WebViewRevealGate.h）。记下的这一位只进放行诊断里 timeout 的那一行
     navState_ = NavState::finished;
     revealGate_.onNavigationFinished();
-    logDiag("navigation finished: " + url);
+    logDiag("navigation finished: " + ResourceProvider::urlForLog(url, kNavUrlLogMaxChars));
 }
 
 void WebViewHost::onNavigationError(const juce::String& errorInfo)
 {
     navState_ = NavState::networkError;
-    navDetail_ = errorInfo.substring(0, 200);
+    // 错误说明是内核给的文字：整形一次，同一份既存进成员（兜底面板的诊断行显示它）也写进日志
+    navDetail_ = ResourceProvider::asciiForLog(errorInfo, kNavErrorMaxChars);
     logDiag("navigation error: " + navDetail_);
 
     // 这里刻意不切兜底面板，由看门狗统一裁决。
@@ -632,10 +665,14 @@ void WebViewHost::onNavigationError(const juce::String& errorInfo)
 // 该通道由 JUCE 在文档创建前注入，不经桥脚本，不占用桥契约的名表，名字加 __rinne__ 前缀标明它是诊断面
 void WebViewHost::handleBootError(const juce::var& payload)
 {
-    const auto stage = payload.getProperty("stage", juce::var("unknown")).toString();
-    const auto detail = payload.getProperty("detail", juce::var("")).toString();
-
-    bootError_ = "boot " + stage + ": " + detail.substring(0, 300);
+    // 页面给的 stage 和 detail 原样不能碰日志和面板：里面可以带换行去伪造日志行，也可以带面板显示不了的字符。
+    // 整形一次存进成员，日志与面板用的是同一串
+    bootError_ =
+        "boot " +
+        ResourceProvider::asciiForLog(payload.getProperty("stage", juce::var("unknown")).toString(),
+                                      kBootStageMaxChars) +
+        ": " +
+        ResourceProvider::asciiForLog(payload.getProperty("detail", juce::var("")).toString(), kBootDetailMaxChars);
     logDiag("front-end " + bootError_);
 
     if (bridgeReady_ || fallback_ != nullptr)
@@ -742,6 +779,9 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
     logDiag("bridge ready after " + juce::String(static_cast<int>(juce::Time::getMillisecondCounter() - startMs_)) +
             " ms");
     complete(bridge::okResponse());
+    // 要在首帧之前收：网页不可见时事件发不出去
+    if (fallback_ != nullptr && fallbackReason_ == FallbackReason::LoadTimeout)
+        withdrawFallbackForLateBridge();
     emitState(); // 首帧必发
 }
 
@@ -750,8 +790,7 @@ void WebViewHost::handleSetLang(const juce::Array<juce::var>& args, WBC::NativeF
     bool accepted = false;
     complete(bridge::respondSetLang(args, [this, &accepted](const juce::String& code) {
         lang_ = code;
-        uidefaults::setLangGlobal(code);
-        uidefaults::setLangChosenGlobal(true); // 用户显式选过语言，新工程不再重复问
+        uidefaults::chooseLangGlobal(code); // 语言值和「用户显式选过」位一次写完，新工程不再重复问
         accepted = true;
     }));
     if (accepted)

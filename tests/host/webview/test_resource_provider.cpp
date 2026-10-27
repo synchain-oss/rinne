@@ -392,6 +392,24 @@ TEST_CASE("log lines made from untrusted urls are bounded and have no control ch
     CHECK(ResourceProvider::urlForLog(juce::String("x") + juce::String::charToString(0x08) + "y") == "x?y");
     CHECK_FALSE(ResourceProvider::urlForLog("a\nRinne input: fake line").contains("\n"));
 
+    // C1 控制字符（0x80 到 0x9F，含 U+0085 NEL）以及 U+2028 行分隔符、U+2029 段分隔符，在不少日志查看器里同样断行
+    for (const juce::juce_wchar c : {juce::juce_wchar(0x80), juce::juce_wchar(0x85), juce::juce_wchar(0x8d),
+                                     juce::juce_wchar(0x9f), juce::juce_wchar(0x2028), juce::juce_wchar(0x2029)})
+    {
+        INFO("code point " << static_cast<int>(c));
+        CHECK(ResourceProvider::urlForLog("x" + juce::String::charToString(c) + "y") == "x?y");
+        CHECK_FALSE(ResourceProvider::urlForLog("a" + juce::String::charToString(c) + "Rinne input: fake line")
+                        .containsChar(c));
+    }
+    // 边界外的邻居不动：0x7E、0xA0（不换行空格）、U+2027、U+202A 都不是断行字符，原样保留，诊断同形地址时要看得见
+    for (const juce::juce_wchar c :
+         {juce::juce_wchar(0x7e), juce::juce_wchar(0xa0), juce::juce_wchar(0x2027), juce::juce_wchar(0x202a)})
+    {
+        INFO("code point " << static_cast<int>(c));
+        const auto kept = "x" + juce::String::charToString(c) + "y";
+        CHECK(ResourceProvider::urlForLog(kept) == kept);
+    }
+
     // 长度上限按字符数；默认 120
     const juce::String longUrl = "https://example.com/" + juce::String::repeatedString("a", 500);
     CHECK(ResourceProvider::urlForLog(longUrl).length() == 120);
@@ -403,4 +421,57 @@ TEST_CASE("log lines made from untrusted urls are bounded and have no control ch
     const auto cjk =
         juce::String::charToString(0x4E2D) + juce::String::charToString(0x6587) + juce::String::charToString(0x5B57);
     CHECK(ResourceProvider::urlForLog(cjk, 2) == cjk.substring(0, 2));
+}
+
+TEST_CASE("untrusted text shown on the panel and in the log is one line of plain ASCII", "[webview][navigation]")
+{
+    // 与 urlForLog 同一口径：断行类字符（C0、删除符、C1、U+2028、U+2029）换成问号
+    CHECK(ResourceProvider::asciiForLog("a\nb\rc\td") == "a?b?c?d");
+    for (const juce::juce_wchar c :
+         {juce::juce_wchar(0x08), juce::juce_wchar(0x7f), juce::juce_wchar(0x80), juce::juce_wchar(0x85),
+          juce::juce_wchar(0x9f), juce::juce_wchar(0x2028), juce::juce_wchar(0x2029)})
+    {
+        INFO("code point " << static_cast<int>(c));
+        const auto input = "x" + juce::String::charToString(c) + "y";
+        CHECK(ResourceProvider::asciiForLog(input) == "x?y");
+        CHECK(ResourceProvider::asciiForLog(input) == ResourceProvider::urlForLog(input)); // 同一口径
+    }
+    CHECK_FALSE(ResourceProvider::asciiForLog("boot\nRinne input: fake line").contains("\n"));
+
+    // 多出来的一步：所有非 ASCII 字符也换成问号，面板只显示纯 ASCII
+    const auto cjk =
+        juce::String::charToString(0x4E2D) + juce::String::charToString(0x6587) + juce::String::charToString(0x5B57);
+    CHECK(ResourceProvider::asciiForLog("err " + cjk) == "err ???");
+    CHECK(ResourceProvider::asciiForLog(juce::String("a") + juce::String::charToString(0xA0) + "b") == "a?b");
+    CHECK(ResourceProvider::asciiForLog(juce::String("a") + juce::String::charToString(0x202E) + "b") == "a?b");
+    // 辅助平面的字符按一个字符算
+    CHECK(ResourceProvider::asciiForLog(juce::String("a") + juce::String::charToString(0x1F600) + "b") == "a?b");
+
+    // 码点 1 到 0x2FF 全部过一遍：长度不变（逐字替换），结果里每个字符都是可打印的 ASCII
+    juce::String everything;
+    for (juce::juce_wchar c = 1; c < 0x300; ++c)
+        everything += juce::String::charToString(c);
+    const auto shaped = ResourceProvider::asciiForLog(everything, 1000);
+    CHECK(shaped.length() == everything.length());
+    for (auto it = shaped.begin(); it != shaped.end(); ++it)
+    {
+        const auto c = *it;
+        if (c < 0x20 || c > 0x7e)
+        {
+            FAIL_CHECK("a non-printable or non-ASCII character survived: " << static_cast<int>(c));
+            break;
+        }
+    }
+    // 可打印 ASCII 原样保留
+    CHECK(ResourceProvider::asciiForLog("boot module: Cannot read 'x' (a/b.js:1)") ==
+          "boot module: Cannot read 'x' (a/b.js:1)");
+    CHECK(ResourceProvider::asciiForLog("").isEmpty());
+
+    // 长度上限按字符数，默认 300
+    const auto longText = juce::String::repeatedString("a", 1000);
+    CHECK(ResourceProvider::asciiForLog(longText).length() == 300);
+    CHECK(ResourceProvider::asciiForLog(longText, 40).length() == 40);
+    CHECK(ResourceProvider::asciiForLog(longText, 0).isEmpty());
+    CHECK(ResourceProvider::asciiForLog("abcd", 3) == "abc");
+    CHECK(ResourceProvider::asciiForLog(cjk, 2) == "??");
 }

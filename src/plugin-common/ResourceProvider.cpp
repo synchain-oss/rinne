@@ -89,17 +89,42 @@ bool ResourceProvider::isRootNavigation(const juce::String& url, const juce::Str
            root->authority == wanted->authority;
 }
 
-juce::String ResourceProvider::urlForLog(const juce::String& url, int maxChars)
+namespace
+{
+
+// 会被日志查看器或终端当作断行、或能把光标带走的字符：C0 控制字符（含换行、回车、制表、退格）、删除符、
+// C1 控制字符（0x80 到 0x9F，其中 U+0085 是 NEL，很多查看器当换行）、U+2028 行分隔符与 U+2029 段分隔符。
+// 日志里的任何一行都不许由来路不明的文字决定在哪里结束，所以这些一律换成问号
+bool breaksLogLine(juce::juce_wchar c)
+{
+    return c < 0x20 || c == 0x7f || (c >= 0x80 && c <= 0x9f) || c == 0x2028 || c == 0x2029;
+}
+
+// urlForLog 与 asciiForLog 共用的整形：最多 maxChars 个字符，断行类字符换成问号。
+// asciiOnly 时再把所有非 ASCII 字符换成问号，两个函数的口径只差这一步
+juce::String shapeUntrusted(const juce::String& text, int maxChars, bool asciiOnly)
 {
     juce::String out;
     int kept = 0;
-    for (auto it = url.begin(); it != url.end() && kept < maxChars; ++it, ++kept)
+    for (auto it = text.begin(); it != text.end() && kept < maxChars; ++it, ++kept)
     {
         const auto c = *it;
-        const bool control = c < 0x20 || c == 0x7f;
-        out += juce::String::charToString(control ? static_cast<decltype(c)>('?') : c);
+        const bool replace = breaksLogLine(c) || (asciiOnly && c > 0x7e);
+        out += juce::String::charToString(replace ? static_cast<decltype(c)>('?') : c);
     }
     return out;
+}
+
+} // namespace
+
+juce::String ResourceProvider::urlForLog(const juce::String& url, int maxChars)
+{
+    return shapeUntrusted(url, maxChars, false);
+}
+
+juce::String ResourceProvider::asciiForLog(const juce::String& text, int maxChars)
+{
+    return shapeUntrusted(text, maxChars, true);
 }
 
 juce::String ResourceProvider::normalizePath(const juce::String& url)

@@ -22,11 +22,19 @@
 // 并发：Input、Output 与进程外的宿主进程（进程外的 AU 之类）共用同一份文件，而写是「读全文件、改一个键、整体重写」，
 // 两个进程各改不同的键会丢更新。所以每一次读或写都在一把有名的进程间锁里整段完成（打开、读写、落盘、关闭），
 // 不是只在 JUCE 读盘和写盘的那两小步里各拿一次：那样中间的空隙仍在。
-// 等锁有上限（kProcessLockWaitMs）：别的进程卡死时消息线程不能跟着卡死，等不到就不带锁照常做，代价是这一次可能丢更新。
+// 等锁有上限：别的进程卡死时消息线程不能跟着卡死，等不到就不带锁照常做，代价是这一次可能丢更新。
+// 上限分两档，且超时一次之后几秒内只等很短：状态快照每秒至少一帧、每帧都读这个文件，
+// 若每次都等满，别的进程卡住锁时每个打开的编辑器每帧都会顿一次。
+//   - 读比写等得短（kProcessLockReadWaitMs < kProcessLockWriteWaitMs）：JUCE 写盘是先写临时文件再整体替换，
+//     不带锁读到的要么是旧的整份、要么是新的整份，最坏读到默认值；写不带锁才会丢更新，值得多等；
+//   - 任何一次拿锁超时，就在 kProcessLockBackoffMs（单调时钟）里把等待降到 kProcessLockBackoff* 那两个很短的值，
+//     期间拿到锁就立刻恢复；窗口结束后下一次再等满一回，仍超时就再进入下一个窗口。窗口里再超时不顺延窗口，
+//     所以卡住的锁最多每个窗口让消息线程多等一次满时长，而不是每帧一次。
 // 一次状态快照要的标志用 readUiFlags 一次读回，只开一次文件、拿一次锁。
 
 #include <juce_core/juce_core.h>
 
+#include <cstdint>
 #include <functional>
 
 #include "BridgeBase.h"
@@ -34,9 +42,14 @@
 namespace rinne::uidefaults
 {
 
-// 进程间锁的名字（Rinne 前缀，与别的软件的锁不撞）和最长等待毫秒数
+// 进程间锁的名字（Rinne 前缀，与别的软件的锁不撞）和各档最长等待毫秒数
 inline constexpr const char* kProcessLockName = "RinneUiDefaults";
-inline constexpr int kProcessLockWaitMs = 500;
+inline constexpr int kProcessLockWriteWaitMs = 500;
+inline constexpr int kProcessLockReadWaitMs = 100;
+// 超时之后的避让窗口（毫秒，单调时钟）和窗口里的等待：读不等，写只等一小会儿
+inline constexpr int kProcessLockBackoffMs = 5000;
+inline constexpr int kProcessLockBackoffWriteWaitMs = 50;
+inline constexpr int kProcessLockBackoffReadWaitMs = 0;
 
 bool langChosenGlobal();
 void setLangChosenGlobal(bool chosen);
@@ -45,6 +58,9 @@ void setLangChosenGlobal(bool chosen);
 juce::String langGlobal();
 // 不在白名单里的语言码直接忽略，不写盘
 void setLangGlobal(const juce::String& lang);
+// 用户显式选了一种语言：语言值和「选过」位在同一次拿锁、同一次开文件里写完（别的进程拿锁时看不到只写了一半的状态）。
+// 不在白名单里的语言码两样都不写（只写「选过」不写语言，重载后就是「不再问、语言却回到默认」）
+void chooseLangGlobal(const juce::String& lang);
 
 // 用户已确认的规则页版本号；0 表示没确认过，负值与读不出来的值都按 0
 int rulesAckVersion();
@@ -81,7 +97,9 @@ void setStorageDirForTests(const juce::File& dir);
 
 // 仅供测试：用一对替身顶替真正的进程间锁，观察每次读写是不是整段都在锁里。
 // enter 收到最长等待毫秒数，返回是否拿到；exit 只在拿到之后调用，且每次 enter 返回真对应一次 exit。
-// 两个参数都传空函数恢复真锁。生产代码不得调用（同上，有用例扫描 src/）
-void setLockForTests(std::function<bool(int timeoutMs)> enter, std::function<void()> exit);
+// nowMs 顶替避让窗口用的单调毫秒时钟，空表示用真的单调时钟。
+// 每次调用都把避让状态清零。两个锁参数都传空函数恢复真锁。生产代码不得调用（同上，有用例扫描 src/）
+void setLockForTests(std::function<bool(int timeoutMs)> enter, std::function<void()> exit,
+                     std::function<std::int64_t()> nowMs = {});
 
 } // namespace rinne::uidefaults

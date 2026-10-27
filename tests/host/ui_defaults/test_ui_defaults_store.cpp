@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <utility>
@@ -302,7 +303,8 @@ namespace
 class LockProbe
 {
 public:
-    LockProbe()
+    // useFakeClock 为假时不装时钟替身，避让窗口走真的单调时钟
+    explicit LockProbe(bool useFakeClock = true)
     {
         store::setLockForTests(
             [this](int timeoutMs) {
@@ -325,7 +327,8 @@ public:
                 --depth;
                 if (atRelease)
                     atRelease();
-            });
+            },
+            useFakeClock ? std::function<std::int64_t()>([this] { return clockMs; }) : std::function<std::int64_t()>());
     }
 
     ~LockProbe() { store::setLockForTests({}, {}); }
@@ -338,6 +341,7 @@ public:
     int depth = 0;
     int maxDepth = 0;
     bool grant = true;
+    std::int64_t clockMs = 1000; // 假的单调时钟，测试自己拨
     std::vector<int> waits;
     std::function<void()> whileWaiting; // 拿到锁之后第一件事（只做一次）：别的进程在我们等锁期间写了盘
     std::function<void()> atRelease; // 放锁的那一刻：看盘上是不是已经是写完的样子
@@ -345,11 +349,22 @@ public:
 
 } // namespace
 
-TEST_CASE("ui defaults: the lock name and the wait are fixed and bounded", "[ui_defaults][lock]")
+TEST_CASE("ui defaults: the lock name and the waits are fixed and bounded", "[ui_defaults][lock]")
 {
     CHECK(juce::String(store::kProcessLockName).startsWith("Rinne"));
-    CHECK(store::kProcessLockWaitMs > 0);
-    CHECK(store::kProcessLockWaitMs <= 2000); // 别的进程卡死时，消息线程最多等这么久
+    CHECK(store::kProcessLockWriteWaitMs > 0);
+    CHECK(store::kProcessLockWriteWaitMs <= 2000); // 别的进程卡死时，消息线程最多等这么久
+    // 读比写等得短：不带锁的读最坏读到默认值，不带锁的写才会丢更新
+    CHECK(store::kProcessLockReadWaitMs > 0);
+    CHECK(store::kProcessLockReadWaitMs < store::kProcessLockWriteWaitMs);
+    // 超时之后的避让窗口：窗口里读和写都比平时短，读不比写长；窗口本身有限（过了要再试一回满额）
+    CHECK(store::kProcessLockBackoffReadWaitMs >= 0);
+    CHECK(store::kProcessLockBackoffReadWaitMs < store::kProcessLockReadWaitMs);
+    CHECK(store::kProcessLockBackoffWriteWaitMs < store::kProcessLockWriteWaitMs);
+    CHECK(store::kProcessLockBackoffReadWaitMs <= store::kProcessLockBackoffWriteWaitMs);
+    CHECK(store::kProcessLockBackoffWriteWaitMs <= 100); // 窗口里每次最多多等这么一点
+    CHECK(store::kProcessLockBackoffMs >= 1000);
+    CHECK(store::kProcessLockBackoffMs <= 60000);
 }
 
 TEST_CASE("ui defaults: every read and write takes the process lock exactly once, and gives it back",
@@ -358,43 +373,51 @@ TEST_CASE("ui defaults: every read and write takes the process lock exactly once
     ScratchStore scratch;
     LockProbe probe;
 
-    const std::vector<std::pair<const char*, std::function<void()>>> calls = {
-        {"langChosenGlobal", [] { (void)store::langChosenGlobal(); }},
-        {"setLangChosenGlobal", [] { store::setLangChosenGlobal(true); }},
-        {"langGlobal", [] { (void)store::langGlobal(); }},
-        {"setLangGlobal", [] { store::setLangGlobal("fr"); }},
-        {"rulesAckVersion", [] { (void)store::rulesAckVersion(); }},
-        {"setRulesAckVersion", [] { store::setRulesAckVersion(2); }},
-        {"guideSeenGlobalInput", [] { (void)store::guideSeenGlobalInput(); }},
-        {"setGuideSeenGlobalInput", [] { store::setGuideSeenGlobalInput(true); }},
-        {"guideSeenGlobalOutput", [] { (void)store::guideSeenGlobalOutput(); }},
-        {"setGuideSeenGlobalOutput", [] { store::setGuideSeenGlobalOutput(true); }},
-        {"uiScalePercentInput", [] { (void)store::uiScalePercentInput(); }},
-        {"setUiScalePercentInput", [] { store::setUiScalePercentInput(125); }},
-        {"uiScalePercentOutput", [] { (void)store::uiScalePercentOutput(); }},
-        {"setUiScalePercentOutput", [] { store::setUiScalePercentOutput(75); }},
-        {"diagLogEnabled", [] { (void)store::diagLogEnabled(); }},
-        {"setDiagLogEnabled", [] { store::setDiagLogEnabled(true); }},
-        {"guideSeenGlobal", [] { (void)store::guideSeenGlobal("input"); }},
-        {"setGuideSeenGlobal", [] { store::setGuideSeenGlobal("output", true); }},
-        {"uiScalePercent", [] { (void)store::uiScalePercent("input"); }},
-        {"setUiScalePercent", [] { store::setUiScalePercent("input", 65); }},
-        {"readUiFlags", [] { (void)store::readUiFlags("input"); }},
+    struct Call
+    {
+        const char* name;
+        bool write; // 写入类入口拿写锁的等待，读取类拿读锁的等待
+        std::function<void()> run;
+    };
+    const std::vector<Call> calls = {
+        {"langChosenGlobal", false, [] { (void)store::langChosenGlobal(); }},
+        {"setLangChosenGlobal", true, [] { store::setLangChosenGlobal(true); }},
+        {"langGlobal", false, [] { (void)store::langGlobal(); }},
+        {"setLangGlobal", true, [] { store::setLangGlobal("fr"); }},
+        {"rulesAckVersion", false, [] { (void)store::rulesAckVersion(); }},
+        {"setRulesAckVersion", true, [] { store::setRulesAckVersion(2); }},
+        {"guideSeenGlobalInput", false, [] { (void)store::guideSeenGlobalInput(); }},
+        {"setGuideSeenGlobalInput", true, [] { store::setGuideSeenGlobalInput(true); }},
+        {"guideSeenGlobalOutput", false, [] { (void)store::guideSeenGlobalOutput(); }},
+        {"setGuideSeenGlobalOutput", true, [] { store::setGuideSeenGlobalOutput(true); }},
+        {"uiScalePercentInput", false, [] { (void)store::uiScalePercentInput(); }},
+        {"setUiScalePercentInput", true, [] { store::setUiScalePercentInput(125); }},
+        {"uiScalePercentOutput", false, [] { (void)store::uiScalePercentOutput(); }},
+        {"setUiScalePercentOutput", true, [] { store::setUiScalePercentOutput(75); }},
+        {"diagLogEnabled", false, [] { (void)store::diagLogEnabled(); }},
+        {"setDiagLogEnabled", true, [] { store::setDiagLogEnabled(true); }},
+        {"guideSeenGlobal", false, [] { (void)store::guideSeenGlobal("input"); }},
+        {"setGuideSeenGlobal", true, [] { store::setGuideSeenGlobal("output", true); }},
+        {"uiScalePercent", false, [] { (void)store::uiScalePercent("input"); }},
+        {"setUiScalePercent", true, [] { store::setUiScalePercent("input", 65); }},
+        {"readUiFlags", false, [] { (void)store::readUiFlags("input"); }},
+        {"chooseLangGlobal", true, [] { store::chooseLangGlobal("en"); }},
     };
 
     for (const auto& call : calls)
     {
-        INFO(call.first);
+        INFO(call.name);
         const int enters = probe.enters;
         const int exits = probe.exits;
-        call.second();
+        call.run();
         CHECK(probe.enters == enters + 1);
         CHECK(probe.exits == exits + 1);
         CHECK(probe.depth == 0);
+        // 锁一直拿得到，所以每次都按满额等：读用读的上限，写用写的上限
+        REQUIRE(probe.waits.size() == static_cast<std::size_t>(enters) + 1);
+        CHECK(probe.waits.back() == (call.write ? store::kProcessLockWriteWaitMs : store::kProcessLockReadWaitMs));
     }
     CHECK(probe.maxDepth == 1); // 从不嵌套
-    for (const int wait : probe.waits)
-        CHECK(wait == store::kProcessLockWaitMs);
 }
 
 TEST_CASE("ui defaults: a write that is refused up front does not need the lock", "[ui_defaults][lock]")
@@ -472,6 +495,181 @@ TEST_CASE("ui defaults: when the lock cannot be taken the work still happens and
     CHECK(probe.enters == 4);
     CHECK(probe.exits == 0); // 没拿到就不放
     CHECK(probe.depth == 0);
+}
+
+TEST_CASE("ui defaults: after a timeout the next calls do not wait the full time again", "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    probe.grant = false; // 别的进程把锁卡住了
+
+    // 第一次读等满读的上限，超时
+    (void)store::readUiFlags("input");
+    REQUIRE(probe.waits.size() == 1);
+    CHECK(probe.waits[0] == store::kProcessLockReadWaitMs);
+
+    // 之后每一帧的读都只等避让窗口里那一点，不再等满
+    for (int frame = 0; frame < 25; ++frame)
+    {
+        probe.clockMs += 40;
+        (void)store::readUiFlags("input");
+        (void)store::langGlobal();
+    }
+    REQUIRE(probe.waits.size() == 51);
+    for (std::size_t i = 1; i < probe.waits.size(); ++i)
+    {
+        INFO("call " << i);
+        CHECK(probe.waits[i] == store::kProcessLockBackoffReadWaitMs);
+    }
+    // 累计等待：远小于「每次都等满」
+    int total = 0;
+    for (const int w : probe.waits)
+        total += w;
+    CHECK(total == store::kProcessLockReadWaitMs + 50 * store::kProcessLockBackoffReadWaitMs);
+    CHECK(total < 50 * store::kProcessLockReadWaitMs);
+
+    // 写也用避让窗口里的等待，且不比读短（写丢更新，读不会）
+    store::setUiScalePercentInput(125);
+    CHECK(probe.waits.back() == store::kProcessLockBackoffWriteWaitMs);
+
+    // 拿不到锁时活照做：避让只改等多久，不改做不做
+    CHECK(store::uiScalePercentInput() == 125);
+    CHECK(probe.exits == 0);
+}
+
+TEST_CASE("ui defaults: the back-off window ends and the next call waits the full time once more",
+          "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    probe.grant = false;
+
+    (void)store::langGlobal(); // 超时，窗口从这一刻起算
+    const auto start = probe.clockMs;
+
+    probe.clockMs = start + store::kProcessLockBackoffMs - 1; // 窗口最后一毫秒
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockBackoffReadWaitMs);
+
+    probe.clockMs = start + store::kProcessLockBackoffMs; // 窗口刚好结束
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockReadWaitMs);
+
+    // 这一次满额又超时了：开新窗口，随后的调用重新被缩短
+    probe.clockMs += 10;
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockBackoffReadWaitMs);
+
+    // 写也一样：窗口过后第一个写等满写的上限
+    probe.clockMs += store::kProcessLockBackoffMs;
+    store::setDiagLogEnabled(true);
+    CHECK(probe.waits.back() == store::kProcessLockWriteWaitMs);
+}
+
+TEST_CASE("ui defaults: a timeout inside the window does not stretch the window", "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    probe.grant = false;
+
+    (void)store::langGlobal();
+    const auto start = probe.clockMs;
+
+    // 窗口里不停地读（每次都超时）：如果每次超时都把窗口往后顺延，一个一直卡着的锁就永远不会再被满额地试一次
+    for (int i = 1; i <= 9; ++i)
+    {
+        probe.clockMs = start + i * (store::kProcessLockBackoffMs / 10);
+        (void)store::langGlobal();
+    }
+    probe.clockMs = start + store::kProcessLockBackoffMs;
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockReadWaitMs);
+}
+
+TEST_CASE("ui defaults: getting the lock ends the back-off at once", "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    probe.grant = false;
+    (void)store::langGlobal(); // 进入避让窗口
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockBackoffReadWaitMs);
+
+    probe.grant = true; // 别的进程放了锁
+    (void)store::langGlobal(); // 窗口里的这一次只等很短，但拿到了
+    CHECK(probe.waits.back() == store::kProcessLockBackoffReadWaitMs);
+    CHECK(probe.exits == 1);
+
+    // 不必等窗口走完：此后恢复满额
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockReadWaitMs);
+    store::setLangGlobal("fr");
+    CHECK(probe.waits.back() == store::kProcessLockWriteWaitMs);
+}
+
+TEST_CASE("ui defaults: without a stand-in clock the back-off window runs on the real monotonic clock",
+          "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe(false); // 不装时钟替身
+    probe.grant = false;
+
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockReadWaitMs);
+    // 紧接着的第二次一定还在窗口里（窗口是几秒，两次调用相隔微秒）
+    (void)store::langGlobal();
+    CHECK(probe.waits.back() == store::kProcessLockBackoffReadWaitMs);
+}
+
+TEST_CASE("ui defaults: swapping the stand-in starts a fresh back-off", "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    {
+        LockProbe probe;
+        probe.grant = false;
+        (void)store::langGlobal();
+        (void)store::langGlobal();
+        CHECK(probe.waits.back() == store::kProcessLockBackoffReadWaitMs);
+    }
+    LockProbe next; // 新的一局：上一局留下的窗口不能带过来
+    (void)store::langGlobal();
+    CHECK(next.waits.back() == store::kProcessLockReadWaitMs);
+}
+
+TEST_CASE("ui defaults: chooseLangGlobal writes the language and the chosen flag under one lock", "[ui_defaults][lock]")
+{
+    ScratchStore scratch;
+    LockProbe probe;
+    store::chooseLangGlobal("fr");
+    CHECK(probe.enters == 1); // 逐个写要拿两次
+    CHECK(probe.exits == 1);
+    CHECK(store::langGlobal() == "fr");
+    CHECK(store::langChosenGlobal());
+
+    // 白名单外的语言码两样都不写，也不拿锁
+    const int enters = probe.enters;
+    store::chooseLangGlobal("de");
+    store::chooseLangGlobal("");
+    store::chooseLangGlobal("FR");
+    CHECK(probe.enters == enters);
+    CHECK(store::langGlobal() == "fr");
+}
+
+TEST_CASE("ui defaults: chooseLangGlobal never leaves the chosen flag set without a language", "[ui_defaults]")
+{
+    ScratchStore scratch;
+    store::chooseLangGlobal("de");
+    CHECK_FALSE(store::langChosenGlobal());
+    CHECK(store::langGlobal().isEmpty());
+    CHECK_FALSE(scratch.settingsFile().existsAsFile());
+
+    store::chooseLangGlobal("en");
+    CHECK(store::langChosenGlobal());
+    CHECK(store::langGlobal() == "en");
+    // 两个键都落在盘上，用文档里的键名
+    const auto text = scratch.settingsFile().loadFileAsString();
+    CHECK(text.contains("name=\"lang_global\""));
+    CHECK(text.contains("name=\"lang_chosen_global\""));
 }
 
 TEST_CASE("ui defaults: with the stand-in removed the real lock is used and values still round-trip",

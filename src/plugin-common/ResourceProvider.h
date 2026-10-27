@@ -51,8 +51,16 @@ public:
     //   - 空白页只认 "about:blank" 这一个整串。
     static bool isRootNavigation(const juce::String& url, const juce::String& resourceRoot);
 
-    // 把来路不明的地址整理成能写进日志的一行：最多 maxChars 个字符，控制字符换成问号（防止伪造日志行）。
+    // 把来路不明的地址整理成能写进日志的一行：最多 maxChars 个字符，会被当作断行的字符换成问号（防止伪造日志行）。
+    // 换掉的有：C0 控制字符（含换行、回车、制表）、删除符 0x7F、C1 控制字符（0x80 到 0x9F，含 U+0085）、
+    // U+2028 与 U+2029。其余字符（含非 ASCII）原样保留，诊断同形字地址时要看得见它们。
     static juce::String urlForLog(const juce::String& url, int maxChars = 120);
+
+    // 把来路不明的文字（页面上报的启动失败、导航错误说明）整理成写进日志、也显示在兜底面板上的一行：
+    // 与 urlForLog 同一口径（上面那几类一律换成问号，最多 maxChars 个字符），再多一步：所有非 ASCII 字符也换成问号。
+    // 面板只显示纯 ASCII，是因为面板的字体不保证带得出别的字符，也是为了让截图转发的内容不夹带不可见字符。
+    // 同一份整形结果既存进成员、也写日志，日志与面板看到的是同一串。
+    static juce::String asciiForLog(const juce::String& text, int maxChars = 300);
 
     // url 形如 "/" 或 "/index.html"。命中返回数据与 MIME，否则 nullopt。
     // 源为空（没有可嵌入的资源）时恒 nullopt，不造假资源
