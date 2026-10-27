@@ -507,7 +507,9 @@ void WebViewHost::showFallback(FallbackReason reason)
     // 回到网页只有点重试这一条路，那是一次完整的重新加载入口页。有意不做「桥迟到就收回面板」：
     // 隐藏时已卸载的页面不会再发请求，收回时 JUCE 又会让它重新加载，两头都对不上。
     // 一个例外：WebView2 的控制器若在看门狗超时之后才建好，JUCE 建好后照常导航到入口地址，不看可见性，
-    // 页面可能在隐藏状态下加载完并发来桥请求。这种请求怎么处理，见 handleRequestInitialState
+    // 页面可能在隐藏状态下加载完并发来桥请求。四个通用桥函数在面板在场时各自在开头挡住这种请求：
+    // requestInitialState 只回执 ok；setLang、setUiScale、commitUiScale 回 not-ready，不改窗口、不写设置文件。
+    // 细节见 handleRequestInitialState 与它们各自的守卫
     webView_->setVisible(false);
 
     const bool missing = (reason == FallbackReason::MissingRuntime);
@@ -771,11 +773,13 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
     //   - 不计入活着的桥：热预算只认真正在用的桥；
     //   - 不发首帧：网页不可见，发不出去；也不收回面板，页面是否还活着这里无从知道。
     // 离开面板只有点重试一条路，重试会复位全部就绪状态并重新加载入口页。
-    // 回执仍给 ok：这个函数的回执里没有失败原因，不为这种情形新增一个；页面此刻也看不见。
+    // 回执仍给 ok：这个函数的回执形状是 { ok }，没有失败原因的位置；页面此刻也看不见。
+    // 会改窗口、改设置文件或改内存状态的另外三个桥函数（setLang、setUiScale、commitUiScale）在面板在场时回 not-ready，
+    // 守卫都在各自函数的开头，与这里同形。
     // 桥契约时序里「收到请求立刻发首帧」在这一种情形下不适用：网页不可见，首帧没有收件人
     if (fallback_ != nullptr)
     {
-        logDiag("bridge request ignored while the fallback panel is shown");
+        logDiag("bridge request ignored while the fallback panel is shown (requestInitialState)");
         complete(bridge::okResponse());
         return;
     }
@@ -795,6 +799,14 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
 
 void WebViewHost::handleSetLang(const juce::Array<juce::var>& args, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场时拒绝，先于参数校验：隐藏的页面选的语言用户没看见，不能写进设置文件，也不能改内存里的语言。
+    // 守卫分支里不碰设置文件、语言成员与状态发送；原因见 BridgeBase.h 的 Reason::NotReady
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (setLang)");
+        complete(bridge::respondNotReady());
+        return;
+    }
     bool accepted = false;
     complete(bridge::respondSetLang(args, [this, &accepted](const juce::String& code) {
         lang_ = code;
@@ -807,6 +819,15 @@ void WebViewHost::handleSetLang(const juce::Array<juce::var>& args, WBC::NativeF
 
 void WebViewHost::handleSetUiScale(const juce::Array<juce::var>& args, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场时拒绝，先于参数校验：窗口在切面板时被放大到不小于设计盒，这里不能再把它缩回去
+    // （固定像素布局的面板会被挤压或裁掉）；缩放档位也不能被隐藏的页面改动。
+    // 守卫分支里不碰缩放模型、窗口、设置文件与状态发送；重试时窗口按当前档位恢复
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (setUiScale)");
+        complete(bridge::respondNotReady());
+        return;
+    }
     bool windowChanged = false;
     auto response = bridge::respondSetUiScale(scale_, config_.role, args, windowChanged);
     if (windowChanged)
@@ -818,6 +839,14 @@ void WebViewHost::handleSetUiScale(const juce::Array<juce::var>& args, WBC::Nati
 
 void WebViewHost::handleCommitUiScale(const juce::Array<juce::var>&, WBC::NativeFunctionCompletion complete)
 {
+    // 兜底面板在场时拒绝，先于待确认与锁定的判断：用户没看见隐藏页面上的确认，不能把它落盘。
+    // 守卫分支里不碰缩放模型与设置文件
+    if (fallback_ != nullptr)
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (commitUiScale)");
+        complete(bridge::respondNotReady());
+        return;
+    }
     // 确认保留后才落盘；没有待确认的预览，或处于锁定时，回执里带原因，不落盘
     complete(bridge::respondCommitUiScale(scale_, [this](float scale) { persistUiScale(scale); }));
 }

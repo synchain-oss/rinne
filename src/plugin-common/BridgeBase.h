@@ -46,13 +46,16 @@ inline constexpr const char* Role = "role"; // "input" 或 "output"
 } // namespace Init
 
 // 失败回执里的 reason。名字与 docs/UI_BRIDGE.md 的函数表一致，预览里的 mock 回同样的原因：
-//   setLang 回 bad-lang；setUiScale 回 bad-scale、scale-locked；commitUiScale 回 no-pending、scale-locked
+//   setLang 回 bad-lang、not-ready；setUiScale 回 bad-scale、scale-locked、not-ready；
+//   commitUiScale 回 no-pending、scale-locked、not-ready
 namespace Reason
 {
 inline constexpr const char* BadScale = "bad-scale";
 inline constexpr const char* BadLang = "bad-lang";
 inline constexpr const char* NoPending = "no-pending";
 inline constexpr const char* ScaleLocked = "scale-locked";
+// 宿主此刻在显示兜底面板，网页是隐藏的，页面的请求不当真：不改窗口、不写设置文件、不改内存状态
+inline constexpr const char* NotReady = "not-ready";
 } // namespace Reason
 
 // 缩放的硬边界；可选档位的真源是设计盒的档位表
@@ -303,6 +306,11 @@ juce::var okResponse();
 juce::var okResponseWith(const juce::String& key, const juce::var& value);
 // {ok: false, reason}
 juce::var failResponse(const char* reason);
+
+// 兜底面板在场时，会改窗口、改设置文件或改宿主状态的桥函数（setLang、setUiScale、commitUiScale）的回执：
+// {ok: false, reason: "not-ready"}。宿主在函数开头先判面板在不在，在场就只写一行日志、回这个就返回，
+// 先于参数校验，所以回执与参数无关
+juce::var respondNotReady();
 
 // 桥函数的回执逻辑（纯逻辑）：宿主只负责在成功后把动作落到窗口与存储上。
 

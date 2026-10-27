@@ -568,6 +568,25 @@ TEST_CASE("generic receipts have the contract shape", "[webview][bridge][receipt
     CHECK(reasonOf(fail) == "some-reason");
 }
 
+TEST_CASE("the receipt for a request that arrives while the fallback panel is shown", "[webview][bridge][receipt]")
+{
+    // 兜底面板在场时，三个会改状态的桥函数回的就是这一份：失败、原因 not-ready，别的字段都没有，
+    // 免得页面把回执里的档位或语言当成已生效的值
+    const auto response = b::respondNotReady();
+    CHECK_FALSE(isOk(response));
+    CHECK(reasonOf(response) == "not-ready");
+    CHECK(reasonOf(response) == b::Reason::NotReady);
+    const auto* object = response.getDynamicObject();
+    REQUIRE(object != nullptr);
+    CHECK(object->getProperties().size() == 2); // 只有 ok 与 reason
+    CHECK_FALSE(response.hasProperty("scale"));
+    CHECK_FALSE(response.hasProperty("lang"));
+
+    // 不是别的任何一个原因
+    for (const char* other : {b::Reason::BadScale, b::Reason::BadLang, b::Reason::NoPending, b::Reason::ScaleLocked})
+        CHECK(reasonOf(response) != other);
+}
+
 TEST_CASE("common bridge names match the per-role api headers", "[webview][bridge][drift]")
 {
     CHECK(std::string(b::Fn::RequestInitialState) == rinne::input::bridge::kFnRequestInitialState);
@@ -593,4 +612,5 @@ TEST_CASE("snapshot role keys use the init key names the page reads", "[webview]
     CHECK(std::string(b::Reason::BadLang) == "bad-lang");
     CHECK(std::string(b::Reason::NoPending) == "no-pending");
     CHECK(std::string(b::Reason::ScaleLocked) == "scale-locked");
+    CHECK(std::string(b::Reason::NotReady) == "not-ready");
 }

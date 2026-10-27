@@ -12,7 +12,11 @@
 //     ?fresh=1 先清空；每实例的已关闭提示存 sessionStorage；
 //   - 缩放锁定（真桥在系统 WebKit 过旧时的行为）：全局位里的 scaleLocked 为真时，setUiScale 与 commitUiScale
 //     回 scale-locked，没确认的预览作废，窗口档位回到 1。scaleLocked 是预览专用的全局位，真桥没有这一项；
-//     每次调用现读，所以在预览页的控制台里改 localStorage 就能走到锁定态，改回去就解锁。
+//     每次调用现读，所以在预览页的控制台里改 localStorage 就能走到锁定态，改回去就解锁；
+//   - 兜底面板在场（真桥在运行时缺失、前端启动失败或加载超时后会换上兜底面板，网页隐藏）：全局位里的 fallbackShown 为真时，
+//     setLang、setUiScale、commitUiScale 在参数校验之前就回 not-ready，什么都不改（不写全局位、不动档位与预览、不排回声）；
+//     requestInitialState 只回 { ok: true }，不发首帧。
+//     fallbackShown 同样是预览专用的全局位，真桥没有这一项，每次调用现读。
 // 模块顶层不碰 window，存储与计时器都从外面注入，Node 里可以直接 import 和测试。
 
 import { DESIGN } from "../../web/shared/design-box.js";
@@ -42,7 +46,10 @@ export function memoryStorage() {
     };
 }
 
-/** 全局位的默认值。除 scaleLocked 外，键名与原生 UiDefaultsStore 对应；scaleLocked 只给预览走到缩放锁定态用。 */
+/**
+ * 全局位的默认值。除 scaleLocked 与 fallbackShown 外，键名与原生 UiDefaultsStore 对应；
+ * 这两项只给预览走到缩放锁定态与兜底面板在场态用，真桥没有。
+ */
 export function defaultUiDefaults() {
     return {
         langChosen: false,
@@ -54,6 +61,7 @@ export function defaultUiDefaults() {
         uiScaleOutput: 1,
         diagLog: false,
         scaleLocked: false,
+        fallbackShown: false,
     };
 }
 
@@ -262,15 +270,21 @@ export function commonFunctions(core, env) {
         lockSeen = locked;
         return locked ? { ok: false, reason: "scale-locked" } : null;
     };
+    // 兜底面板在场：与真桥同一套语义，守卫在 setLang、setUiScale、commitUiScale 的最前面，先于参数校验，回执与参数无关
+    const panelShown = () => defaults.get().fallbackShown === true;
+    const notReady = () => ({ ok: false, reason: "not-ready" });
     return {
-        requestInitialState: () => core.requestInitialState(),
+        // 面板在场时只回执：不发首帧，也不置就绪（真桥同样不把它当作桥已就绪）
+        requestInitialState: () => (panelShown() ? { ok: true } : core.requestInitialState()),
         setLang(code) {
+            if (panelShown()) return notReady();
             if (typeof code !== "string" || !LANG_CODES.includes(code)) return { ok: false, reason: "bad-lang" };
             defaults.set({ lang: code, langChosen: true });
             core.scheduleEcho();
             return { ok: true, lang: code };
         },
         setUiScale(f) {
+            if (panelShown()) return notReady();
             if (typeof f !== "number" || !box.presets.includes(f)) return { ok: false, reason: "bad-scale" };
             const locked = lockGuard();
             if (locked) return locked;
@@ -281,6 +295,7 @@ export function commonFunctions(core, env) {
             return { ok: true, scale: f };
         },
         commitUiScale() {
+            if (panelShown()) return notReady();
             const locked = lockGuard();
             if (locked) return locked;
             if (pendingScale === null) return { ok: false, reason: "no-pending" };

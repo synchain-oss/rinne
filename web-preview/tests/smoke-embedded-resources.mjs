@@ -19,7 +19,9 @@
 //   ⑦ 「首帧已绘」上行信号在场：事件名与 C++ 一致，武装是嵌套两层 requestAnimationFrame 且由 paint 记录接线，
 //      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后；
 //   ⑧ 桥回执的失败原因：C++ 的 BridgeBase.h 里有哪几个原因，docs/UI_BRIDGE.md 里能返回它的函数行就写哪几个，
-//      预览里的 mock 也真的回同样的原因（含缩放锁定：全局位 scaleLocked 为真时，选档与确认回 scale-locked，没确认的预览作废）。
+//      预览里的 mock 也真的回同样的原因（含缩放锁定：全局位 scaleLocked 为真时，选档与确认回 scale-locked，没确认的预览作废；
+//      含兜底面板在场：全局位 fallbackShown 为真时，setLang、setUiScale、commitUiScale 先于参数校验回 not-ready 且什么都不改，
+//      requestInitialState 只回 ok、不发首帧）。
 // C++ 侧文件（WebViewHost.h、PlatformWebView.h）都还没入库时，对拍项记「跳过」并说明原因；只要有一个入库，
 // 事件名、字段名、角度与色标表就必须抽得出来，抽不出来判红，不静默跳过。其余照常断言。
 //
@@ -436,6 +438,7 @@ const REASON_FUNCTIONS = {
     "bad-scale": ["setUiScale"],
     "scale-locked": ["setUiScale", "commitUiScale"],
     "no-pending": ["commitUiScale"],
+    "not-ready": ["setLang", "setUiScale", "commitUiScale"],
 };
 
 /** 从 BridgeBase.h 抽 namespace Reason 里的字符串值（先去注释）；抽不到 namespace 给 null。 */
@@ -493,7 +496,7 @@ function docFunctionRow(docText, fn) {
     // mock 的行为：同一批原因，同样的函数
     const u = (f) => pathToFileURL(path.join(ROOT, f)).href;
     const { createPreviewSession } = await import(u("web-preview/mock/state-driver.js"));
-    const { memoryStorage } = await import(u("web-preview/mock/bridge-common.js"));
+    const { memoryStorage, UI_DEFAULTS_KEY } = await import(u("web-preview/mock/bridge-common.js"));
     for (const role of roles) {
         const store = { local: memoryStorage(), session: memoryStorage() };
         const session = createPreviewSession({ role, params: "auto=0", storage: store });
@@ -523,6 +526,56 @@ function docFunctionRow(docText, fn) {
         session.core.defaults.set({ scaleLocked: false });
         run.eq(reasonOf(m.commitUiScale()), "no-pending", `${role}：⑧ 解锁后，锁定时作废的预览不能再确认`);
         run.eq(session.model.scale, confirmed, `${role}：⑧ 解锁后窗口档位应回到最近一次确认的 ${confirmed}`);
+
+        // 兜底面板在场：三个会改状态的函数先拒，先于参数校验，回执与参数无关，什么都不改；撤掉后一切照常
+        const keyScale = role === "input" ? "uiScaleInput" : "uiScaleOutput";
+        const stored = () => session.core.defaults.get();
+        run.eq(reasonOf(m.setLang("en")), "ok", `${role}：⑧ 面板不在场时 setLang 应成功`);
+        run.eq(reasonOf(m.setUiScale(preview)), "ok", `${role}：⑧ 面板出现前先放一个待确认的预览`);
+        const scaleBefore = session.model.scale;
+        session.core.defaults.set({ fallbackShown: true });
+        run.eq(reasonOf(m.setLang("fr")), "not-ready", `${role}：⑧ 面板在场时 setLang 应回 not-ready`);
+        run.eq(
+            reasonOf(m.setLang("de")),
+            "not-ready",
+            `${role}：⑧ 面板在场时，坏语言码也先回 not-ready（守卫先于参数校验）`,
+        );
+        run.eq(reasonOf(m.setUiScale(preset)), "not-ready", `${role}：⑧ 面板在场时 setUiScale 应回 not-ready`);
+        run.eq(
+            reasonOf(m.setUiScale(0.123)),
+            "not-ready",
+            `${role}：⑧ 面板在场时，坏档位也先回 not-ready（守卫先于参数校验）`,
+        );
+        run.eq(
+            reasonOf(m.commitUiScale()),
+            "not-ready",
+            `${role}：⑧ 面板在场时 commitUiScale 应回 not-ready，即使有待确认的预览`,
+        );
+        run.eq(stored().lang, "en", `${role}：⑧ 面板在场时 setLang 不能写全局位`);
+        run.eq(session.model.scale, scaleBefore, `${role}：⑧ 面板在场时 setUiScale 不能动窗口档位`);
+        run.eq(stored()[keyScale], confirmed, `${role}：⑧ 面板在场时 commitUiScale 不能落盘`);
+        session.core.defaults.set({ fallbackShown: false });
+        run.eq(reasonOf(m.setLang("de")), "bad-lang", `${role}：⑧ 面板撤掉后 setLang 照常校验参数`);
+        run.eq(reasonOf(m.setLang("fr")), "ok", `${role}：⑧ 面板撤掉后 setLang 应成功`);
+        run.eq(stored().lang, "fr", `${role}：⑧ 面板撤掉后 setLang 应写全局位`);
+        run.eq(
+            reasonOf(m.commitUiScale()),
+            "ok",
+            `${role}：⑧ 面板撤掉后，面板出现前的预览仍可确认（没被 not-ready 吃掉）`,
+        );
+        run.eq(stored()[keyScale], preview, `${role}：⑧ 面板撤掉后确认应把预览档位落盘`);
+
+        // 面板在场时的 requestInitialState：只回执，不发首帧，也不置就绪
+        const coldStore = { local: memoryStorage(), session: memoryStorage() };
+        coldStore.local.setItem(UI_DEFAULTS_KEY, JSON.stringify({ fallbackShown: true }));
+        const cold = createPreviewSession({ role, params: "auto=0", storage: coldStore });
+        run.eq(cold.mock.requestInitialState(), { ok: true }, `${role}：⑧ 面板在场时 requestInitialState 只回 ok`);
+        run.eq(cold.core.ready, false, `${role}：⑧ 面板在场时 requestInitialState 不置就绪`);
+        run.eq(cold.core.sent["rinne.state"] ?? 0, 0, `${role}：⑧ 面板在场时 requestInitialState 不发首帧`);
+        cold.core.defaults.set({ fallbackShown: false });
+        run.eq(cold.mock.requestInitialState(), { ok: true }, `${role}：⑧ 面板撤掉后 requestInitialState 照常`);
+        run.eq(cold.core.ready, true, `${role}：⑧ 面板撤掉后 requestInitialState 置就绪`);
+        run.check((cold.core.sent["rinne.state"] ?? 0) >= 1, `${role}：⑧ 面板撤掉后 requestInitialState 发首帧`);
     }
 }
 

@@ -82,6 +82,11 @@ juce::var failResponse(const char* reason)
     return juce::var(o);
 }
 
+juce::var respondNotReady()
+{
+    return failResponse(Reason::NotReady);
+}
+
 juce::var respondSetUiScale(UiScaleModel& model, const juce::String& role, const juce::Array<juce::var>& args,
                             bool& windowChanged)
 {

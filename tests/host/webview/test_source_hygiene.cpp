@@ -6,7 +6,9 @@
 //   3. 宿主类（不进宿主测试目标，编译不到这里）里靠调用点守的东西：导航闸必须走纯函数判定并在不放行时返回假，
 //      状态快照必须用一次读回，不能退回逐个读设置文件；页面和内核交上来的文字（启动失败、导航错误、地址）
 //      写日志和上面板之前必须先过整形函数；定时器必须在运行时三态分支之前启动；面板在场时迟到的桥请求
-//      只回执、不置位、不计数、不发首帧、不收回面板，离开面板只有点重试一条路；设置语言必须一次写完语言值与「选过」位。
+//      只回执、不置位、不计数、不发首帧、不收回面板，离开面板只有点重试一条路；注册进页面的每个桥函数，
+//      处理函数一开头就有面板在场的守卫，守卫分支只写日志、给回执、返回，会改状态的三个回 not-ready，
+//      分支里不碰窗口、设置文件、内存状态与状态发送；设置语言必须一次写完语言值与「选过」位。
 //
 // 第一条：网页宿主这一族源文件里，运行期字符串字面量只许 ASCII。
 // 原因：源文件按 UTF-8 存，字面量里一旦有中文，在中文代码页的机器上编译器会报字符集警告，
@@ -16,6 +18,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -441,30 +444,105 @@ std::size_t countOf(const std::string& text, const std::string& needle)
     return n;
 }
 
-// 面板在场时迟到的桥请求：写一行日志（真机上靠它看这条路径走没走到）、只回执就返回，且这个分支排在置位、计数与首帧之前；
-// 分支里不碰就绪位、不发状态、不收回面板、不动网页的可见性、不重新加载
-bool lateBridgeIsIgnoredWhilePanelShown(const std::string& initialState)
+// 守卫分支：函数体（去注释后，含外层花括号）的第一条语句必须是 `if (fallback_ != nullptr) { ... }`，
+// 返回那一对花括号连同里面的内容；不是这个形状（守卫排在别的语句之后、条件被收窄、没有花括号）给空串
+std::string panelGuardBranch(const std::string& body)
 {
-    const auto guard = initialState.find("if (fallback_ != nullptr)");
-    const auto ready = initialState.find("bridgeReady_ = true");
-    const auto counted = initialState.find("countedAsReady_ = true");
-    const auto emit = initialState.find("emitState()");
-    if (guard == std::string::npos || ready == std::string::npos || counted == std::string::npos ||
-        emit == std::string::npos)
+    if (body.empty() || body.front() != '{')
+        return {};
+    const std::string guard = "if (fallback_ != nullptr)";
+    auto skipSpaces = [&body](std::size_t at) {
+        while (at < body.size() && (body[at] == ' ' || body[at] == '\n' || body[at] == '\r' || body[at] == '\t'))
+            ++at;
+        return at;
+    };
+    auto at = skipSpaces(1);
+    if (body.compare(at, guard.size(), guard) != 0)
+        return {};
+    at = skipSpaces(at + guard.size());
+    if (at >= body.size() || body[at] != '{')
+        return {};
+    return functionBody(body.substr(at), "{");
+}
+
+// 面板在场时，桥函数一开头就拒绝或只回执：守卫是函数体的第一条语句，分支里依次是一行日志、一个回执、返回，
+// 且返回是分支的最后一句。reply 是分支里该有的回执调用：requestInitialState 的回执形状是 { ok }，给 ok；
+// 会改窗口、改设置文件或改内存状态的函数给 not-ready（给 ok 等于告诉隐藏的页面「已生效」）。
+// 分支里除了这个回执，不得出现任何桥函数的回执逻辑，也不得碰缩放模型、语言成员、设置文件、窗口大小、
+// 就绪位、活着的桥的计数、状态发送、面板、网页可见性与加载：这些都是「只回执、什么都不改」的反面
+bool bridgeHandlerRefusesWhilePanelShown(const std::string& body, const std::string& reply)
+{
+    const auto branch = panelGuardBranch(body);
+    if (branch.empty())
         return false;
-    if (!(guard < ready && guard < counted && guard < emit))
+    const std::string call = "complete(" + reply + ")";
+    const auto replyAt = branch.find(call);
+    const auto leave = branch.find("return;");
+    if (replyAt == std::string::npos || leave == std::string::npos)
         return false;
-    const auto leave = initialState.find("return;", guard);
-    if (leave == std::string::npos || leave > ready)
+    // 返回之后只剩分支的收尾花括号：返回是分支的最后一句，不是嵌在条件里的有条件返回，后面也没有别的语句；
+    // 回执若排在返回之后，也会在这里被挡下
+    if (branch.find_first_not_of(" \n\r\t", leave + 7) != branch.size() - 1)
         return false;
-    const auto branch = initialState.substr(guard, leave - guard);
-    if (!contains(branch, "complete(") || !contains(branch, "logDiag(")) // 页面的调用要有回执，也要留一行日志
+    // 真机上靠这一行看这条路径走没走到；日志在回执之前
+    const auto logAt = branch.find("logDiag(");
+    if (logAt == std::string::npos || !(logAt < replyAt) ||
+        !contains(branch, "bridge request ignored while the fallback panel is shown"))
         return false;
-    for (const char* forbidden : {"bridgeReady_", "countedAsReady_", "readyBridgeCount", "emitState(", "emitEvent(",
-                                  "fallback_.reset()", "setVisible(", "beginLoadAttempt(", "resizeToDesignBox("})
-        if (contains(branch, forbidden))
+    std::string rest = branch;
+    rest.erase(replyAt, call.size());
+    for (const char* forbidden :
+         {"bridge::",       "uidefaults::",       "persistUiScale(",   "scale_",        "lang_",
+          "bridgeReady_",   "countedAsReady_",    "readyBridgeCount",  "stateSeq_",     "emitState(",
+          "emitEvent(",     "fallback_",          "setVisible(",       "setSize(",      "setBounds(",
+          "resized(",       "resizeToDesignBox(", "beginLoadAttempt(", "retryWebView(", "showFallback(",
+          "setScaleLocked("})
+        if (contains(rest, forbidden))
             return false;
     return true;
+}
+
+// makeOptions 里每一处 withNativeFunction 交给哪个处理函数：取这一段里第一个整词的 handleXxx(。
+// 没有处理函数（内联的实现，核对不到守卫）给空串，调用方当作不合格
+std::vector<std::string> registeredBridgeHandlers(const std::string& makeOptionsBody)
+{
+    std::vector<std::string> names;
+    const std::string marker = "withNativeFunction(";
+    for (auto at = makeOptionsBody.find(marker); at != std::string::npos;)
+    {
+        auto next = makeOptionsBody.find(marker, at + marker.size());
+        auto end = next != std::string::npos ? next : makeOptionsBody.find("withEventListener(", at);
+        const auto segment = makeOptionsBody.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        std::string name;
+        for (auto h = segment.find("handle"); h != std::string::npos; h = segment.find("handle", h + 1))
+        {
+            if (h > 0 && isIdentChar(segment[h - 1]))
+                continue;
+            auto stop = h;
+            while (stop < segment.size() && isIdentChar(segment[stop]))
+                ++stop;
+            if (stop < segment.size() && segment[stop] == '(')
+                name = segment.substr(h, stop - h);
+            break;
+        }
+        names.push_back(name);
+        at = next;
+    }
+    return names;
+}
+
+// 注册进页面的桥函数里，处理函数开头没有合格守卫的那些（空名字也算）。text 是去注释后的整份源文件
+std::vector<std::string> unguardedBridgeHandlers(const std::string& text, const std::vector<std::string>& handlers)
+{
+    std::vector<std::string> bad;
+    for (const auto& name : handlers)
+    {
+        const auto body = name.empty() ? std::string{} : functionBody(text, "void WebViewHost::" + name + "(");
+        const bool initial = name == "handleRequestInitialState";
+        if (!bridgeHandlerRefusesWhilePanelShown(body, initial ? "bridge::okResponse()" : "bridge::respondNotReady()"))
+            bad.push_back(name);
+    }
+    return bad;
 }
 
 // 离开面板只有点重试一条路：销毁面板的动作全文件只在重试里出现一次，网页重新可见只在加载尝试的开头出现一次，
@@ -579,42 +657,140 @@ TEST_CASE("call-site scanners for the review fixes: good and bad samples", "[web
     CHECK_FALSE(
         timerStartsBeforeRuntimeBranches("{ if (missing) { showFallback(1); return; }\n go(); }")); // 根本不启动
 
-    // 面板在场时迟到的桥请求
+    // 面板在场时桥函数一开头就拒绝或只回执
+    const std::string logLine = "logDiag(\"bridge request ignored while the fallback panel is shown (fn)\");";
+    const std::string okReply = "bridge::okResponse()";
+    const std::string notReady = "bridge::respondNotReady()";
     const std::string tail = " bridgeReady_ = true;\n if (!countedAsReady_) { countedAsReady_ = true; }\n"
-                             " complete(ok());\n emitState(); }";
+                             " complete(bridge::okResponse());\n emitState(); }";
     const std::string goodInit =
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n return;\n }\n" + tail;
-    CHECK(lateBridgeIsIgnoredWhilePanelShown(goodInit));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown("{" + tail)); // 没有这个分支
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支排在置位之后
-        "{ bridgeReady_ = true;\n if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n return;\n }\n"
-        " if (!countedAsReady_) { countedAsReady_ = true; }\n emitState(); }"));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支排在计数之后
-        "{ if (!countedAsReady_) { countedAsReady_ = true; }\n if (fallback_ != nullptr)\n"
-        " { logDiag(\"x\");\n complete(ok());\n return;\n }\n bridgeReady_ = true;\n emitState(); }"));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支没有返回，一路落到置位
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n }\n" + tail));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里没有日志，真机上看不出这条路径走没走到
-        "{ if (fallback_ != nullptr)\n { complete(ok());\n return;\n }\n" + tail));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里没有回执，页面的调用悬空
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n return;\n }\n" + tail));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里置了就绪位
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n bridgeReady_ = true;\n complete(ok());\n return;\n }\n" +
-        tail));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里计入了活着的桥
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n readyBridgeCount().fetch_add(1);\n complete(ok());\n "
-        "return;\n }\n" +
-        tail));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里发了首帧
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n emitState();\n return;\n }\n" + tail));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里收回了面板
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n fallback_.reset();\n webView_->setVisible(true);\n "
-        "complete(ok());\n"
-        " return;\n }\n" +
-        tail));
-    CHECK_FALSE(lateBridgeIsIgnoredWhilePanelShown( // 分支里重新加载（等于替用户点了重试）
-        "{ if (fallback_ != nullptr)\n { logDiag(\"x\");\n complete(ok());\n beginLoadAttempt();\n return;\n }\n" +
-        tail));
+        "{ if (fallback_ != nullptr)\n { " + logLine + "\n complete(bridge::okResponse());\n return;\n }\n" + tail;
+    CHECK(bridgeHandlerRefusesWhilePanelShown(goodInit, okReply));
+    CHECK(panelGuardBranch(goodInit).front() == '{');
+    CHECK(panelGuardBranch(goodInit).back() == '}');
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown(goodInit, notReady)); // 给 ok 的分支不是 not-ready 的分支
+
+    const std::string work =
+        " bool accepted = false;\n complete(bridge::respondSetLang(args, [&](const juce::String& c) {"
+        " lang_ = c; uidefaults::chooseLangGlobal(c); accepted = true; }));\n"
+        " if (accepted) emitState(); }";
+    auto guarded = [&logLine](const std::string& inside, const std::string& cond = "if (fallback_ != nullptr)") {
+        return "{ " + cond + "\n { " + logLine + "\n" + inside + " }\n";
+    };
+    const std::string goodLang = guarded(" complete(bridge::respondNotReady());\n return;\n") + work;
+    CHECK(bridgeHandlerRefusesWhilePanelShown(goodLang, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown(goodLang, okReply)); // 会改状态的函数不得在面板在场时回 ok
+
+    // 形状：守卫必须是函数体的第一条语句，条件不能收窄，要有花括号
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown("{" + work, notReady)); // 没有这个分支
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 守卫排在别的语句之后（先改了东西才判面板）
+        "{ lang_ = c;\n" + guarded(" complete(bridge::respondNotReady());\n return;\n").substr(2) + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 条件收窄，只管一部分面板
+        guarded(" complete(bridge::respondNotReady());\n return;\n",
+                "if (fallback_ != nullptr && bootError_.isEmpty())") +
+            work,
+        notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 条件写反
+        guarded(" complete(bridge::respondNotReady());\n return;\n", "if (fallback_ == nullptr)") + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 没有花括号，守卫只管一句
+        "{ if (fallback_ != nullptr)\n return;\n" + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown("", notReady));
+    CHECK(panelGuardBranch("{ x = 1; }").empty());
+
+    // 分支的三件事：日志、回执、返回
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 分支不返回，一路落到真正的处理
+        guarded(" complete(bridge::respondNotReady());\n") + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 分支里不给回执，页面的调用悬空
+        guarded(" return;\n") + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 回执排在返回之后
+        guarded(" return;\n complete(bridge::respondNotReady());\n") + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 返回之后还有语句
+        guarded(" complete(bridge::respondNotReady());\n return;\n lang_ = c;\n") + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 返回之后还有无害的语句：返回不是分支的最后一句
+        guarded(" complete(bridge::respondNotReady());\n return;\n int unused = 0;\n") + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 有条件的返回：条件不成立时一路落到真正的处理
+        guarded(" complete(bridge::respondNotReady());\n if (c) { return; }\n") + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 回了两次
+        guarded(" complete(bridge::respondNotReady());\n complete(bridge::respondNotReady());\n return;\n") + work,
+        notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 分支里没有那一行日志，真机上看不出这条路径走没走到
+        "{ if (fallback_ != nullptr)\n { complete(bridge::respondNotReady());\n return;\n }\n" + work, notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 日志排在回执之后
+        "{ if (fallback_ != nullptr)\n { complete(bridge::respondNotReady());\n " + logLine + "\n return;\n }\n" + work,
+        notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 日志不是约定的那一行，grep 不到
+        "{ if (fallback_ != nullptr)\n { logDiag(\"ignored\");\n complete(bridge::respondNotReady());\n return;\n }\n" +
+            work,
+        notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // 回执调的是别的函数：把合格的回执换成了正常处理
+        guarded(" complete(bridge::respondSetLang(args, {}));\n return;\n") + work, notReady));
+
+    // 分支里不得改窗口、设置文件、内存状态，不得发状态、动面板与网页
+    for (const char* forbidden : {"resizeToDesignBox();",
+                                  "setSize(w, h);",
+                                  "setBounds(r);",
+                                  "resized();",
+                                  "emitState();",
+                                  "emitEvent(id, v);",
+                                  "uidefaults::chooseLangGlobal(c);",
+                                  "persistUiScale(s);",
+                                  "scale_.apply(s);",
+                                  "scale_.setLocked(true);",
+                                  "lang_ = c;",
+                                  "bridgeReady_ = true;",
+                                  "countedAsReady_ = true;",
+                                  "readyBridgeCount().fetch_add(1);",
+                                  "stateSeq_ = 0;",
+                                  "fallback_.reset();",
+                                  "webView_->setVisible(true);",
+                                  "beginLoadAttempt();",
+                                  "retryWebView();",
+                                  "showFallback(r);",
+                                  "setScaleLocked(true);",
+                                  "bridge::respondSetUiScale(scale_, r, a, w);"})
+        CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown(
+            guarded(std::string(" ") + forbidden + "\n complete(bridge::respondNotReady());\n return;\n") + work,
+            notReady));
+    CHECK_FALSE(bridgeHandlerRefusesWhilePanelShown( // requestInitialState 的分支里发首帧
+        "{ if (fallback_ != nullptr)\n { " + logLine +
+            "\n complete(bridge::okResponse());\n emitState();\n return;\n }\n" + tail,
+        okReply));
+
+    // 注册进页面的桥函数：每一个的处理函数开头都得有合格守卫
+    const std::string goodMake =
+        "{ options = options.withNativeFunction(juce::Identifier(bridge::Fn::A), [this](const auto& a, auto c) {"
+        " handleAlpha(a, std::move(c)); })\n.withNativeFunction(juce::Identifier(bridge::Fn::B), [this](const auto& a, "
+        "auto c) { handleBeta(a, std::move(c)); });\n options = options.withEventListener(id, [this](const juce::var& "
+        "p) { handleBootError(p); }); }";
+    const auto names = registeredBridgeHandlers(goodMake);
+    REQUIRE(names.size() == 2);
+    CHECK(names[0] == "handleAlpha");
+    CHECK(names[1] == "handleBeta"); // 事件监听里的 handleBootError 不是桥函数，不算
+    CHECK(registeredBridgeHandlers("{ x; }").empty());
+    const auto inlineNames = registeredBridgeHandlers( // 内联的实现：没有处理函数可核对，给空名字
+        "{ options.withNativeFunction(id, [](const auto&, auto c) { c(ok()); }); }");
+    REQUIRE(inlineNames.size() == 1);
+    CHECK(inlineNames[0].empty());
+    const auto wholeWord = registeredBridgeHandlers( // 整词：rehandle 之类不算
+        "{ options.withNativeFunction(id, [](const auto& a, auto c) { rehandle(a); handleX(a, c); }); }");
+    REQUIRE(wholeWord.size() == 1);
+    CHECK(wholeWord[0] == "handleX");
+
+    const std::string initOk =
+        "void WebViewHost::handleRequestInitialState(const A& a, C complete)\n" + goodInit + "\n";
+    const std::string betaOk = "void WebViewHost::handleBeta(const A& a, C complete)\n" + goodLang + "\n";
+    CHECK(unguardedBridgeHandlers(initOk + betaOk, {"handleRequestInitialState", "handleBeta"}).empty());
+    // requestInitialState 的回执是 ok，其余的是 not-ready：名字对错了就是不合格
+    CHECK(unguardedBridgeHandlers(initOk + betaOk, {"handleBeta", "handleRequestInitialState"}).empty());
+    const std::string betaWrongReply = "void WebViewHost::handleBeta(const A& a, C complete)\n" + goodInit + "\n";
+    CHECK(unguardedBridgeHandlers(initOk + betaWrongReply, {"handleBeta"}).size() == 1);
+    // 新加了第二个桥函数却忘了守卫：就是这一类
+    const std::string betaNoGuard = "void WebViewHost::handleBeta(const A& a, C complete)\n{" + work + "\n";
+    const auto missing = unguardedBridgeHandlers(initOk + betaNoGuard, {"handleRequestInitialState", "handleBeta"});
+    REQUIRE(missing.size() == 1);
+    CHECK(missing[0] == "handleBeta");
+    CHECK(unguardedBridgeHandlers(initOk, {"handleRequestInitialState", "handleGamma"}).size() == 1); // 没有函数体
+    CHECK(unguardedBridgeHandlers(initOk, {"handleRequestInitialState", ""}).size() == 1); // 内联的实现
 
     // 离开面板只有点重试一条路
     const std::string goodHost = "{ fallback_.reset(); }\n { webView_->setVisible(true); }";
@@ -658,7 +834,7 @@ TEST_CASE("call-site scanners for the review fixes: good and bad samples", "[web
     CHECK_FALSE(setLangWritesOnce("{ lang_ = c; }"));
 }
 
-TEST_CASE("the web host shapes page text, starts its timer early, ignores a late-bridge request while the panel is "
+TEST_CASE("the web host shapes page text, starts its timer early, guards every bridge function while the panel is "
           "shown and writes the language once",
           "[webview][hygiene]")
 {
@@ -698,8 +874,17 @@ TEST_CASE("the web host shapes page text, starts its timer early, ignores a late
     const auto retry = functionBody(text, "void WebViewHost::retryWebView()");
     REQUIRE_FALSE(initialState.empty());
     REQUIRE_FALSE(retry.empty());
-    CHECK(lateBridgeIsIgnoredWhilePanelShown(initialState));
+    CHECK(bridgeHandlerRefusesWhilePanelShown(initialState, "bridge::okResponse()"));
     CHECK(panelLeavesOnlyThroughRetry(text, retry, begin));
+
+    // 注册进页面的每个桥函数，处理函数一开头都有面板在场的守卫：四个通用桥函数一个不能少，将来再加的也逃不掉
+    const auto makeOptions = functionBody(text, "juce::WebBrowserComponent::Options WebViewHost::makeOptions()");
+    REQUIRE_FALSE(makeOptions.empty());
+    const auto handlers = registeredBridgeHandlers(makeOptions);
+    for (const char* expected :
+         {"handleRequestInitialState", "handleSetLang", "handleSetUiScale", "handleCommitUiScale"})
+        CHECK(std::count(handlers.begin(), handlers.end(), std::string(expected)) == 1); // 抽取没有失灵
+    CHECK(unguardedBridgeHandlers(text, handlers).empty());
 
     const auto timerCallback = functionBody(text, "void WebViewHost::timerCallback()");
     REQUIRE_FALSE(timerCallback.empty());
