@@ -1,0 +1,24 @@
+Design Export Runtime (LicenseRef-Design-Export-Runtime)
+
+This is a provenance statement for one file, docs/design/support.js. It is not
+a licence grant, and it does not name a licence or a copyright holder for that
+file, because none is known.
+
+1. What it is. The file is the preview runtime that Claude Design exports next
+   to a design file. The archived design file in docs/design/ loads it with a
+   script tag so that the design can be opened in a browser.
+
+2. Where it came from. It was exported by the maintainers' own account together
+   with the design file, and it is kept here exactly as exported, byte for byte
+   (SHA-256 8fe7df74405f3c55f49b7249c74ea1397e65d07dea2b1bd3b4a489bec2e28cbe).
+
+3. What it says about itself. The file carries no licence statement and no
+   copyright notice. Its only header line says that it is generated and must not
+   be edited. This repository therefore asserts nothing about who holds the
+   copyright in it (SPDX-FileCopyrightText: NOASSERTION), and the licence that
+   covers this repository's own source code does not cover it.
+
+4. What it is used for. It is used only to open the archived design in a
+   browser during design review. It is not part of either plugin, is not
+   compiled or linked into any binary, and is not included in any release
+   package.

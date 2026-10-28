@@ -324,7 +324,7 @@ export const SCENES = [
         role: "input",
         lang: "zh",
         title: "组冲突（复制轨道）",
-        state: { pair: "conflict", group: "A", band: ["conflict"], vals: { g: "A" }, peer: "empty" },
+        state: { pair: "conflict", group: "A", band: ["conflict"], vals: { g: "A" }, peer: "empty", dangerRing: true },
         mustShow: S(
             "I-01 I-02 I-03 I-05 I-06 I-07 I-08 I-09 I-10 I-11 I-14 I-15 I-16 I-17 I-18 I-19 I-20 I-21 I-22 I-23 I-25 I-26",
         ),
@@ -344,7 +344,7 @@ export const SCENES = [
         role: "input",
         lang: "zh",
         title: "两端版本不匹配",
-        state: { pair: "abiMismatch", band: ["abi"], vals: { a: "0.9.0", b: "0.10.0" } },
+        state: { pair: "abiMismatch", band: ["abi"], vals: { a: "0.9.0", b: "0.10.0" }, dangerRing: true },
         mustShow: S(
             "I-01 I-02 I-03 I-05 I-06 I-07 I-08 I-09 I-10 I-11 I-14 I-15 I-16 I-17 I-18 I-19 I-20 I-21 I-22 I-23 I-25 I-26",
         ),
@@ -638,6 +638,7 @@ export const SCENES = [
             vals: { g: "A" },
             send: "—",
             hint: "out.hint.conflict",
+            dangerRing: true,
         },
         mustShow: S("O-01 O-02 O-03 O-04 O-05 O-06 O-07 O-08 O-10"),
     },
@@ -654,7 +655,13 @@ export const SCENES = [
         role: "output",
         lang: "zh",
         title: "两端版本不匹配",
-        state: { pair: "abiMismatch", sub: "notice", msg: ["abi"], vals: { a: "0.10.0", b: "0.9.0" } },
+        state: {
+            pair: "abiMismatch",
+            sub: "notice",
+            msg: ["abi"],
+            vals: { a: "0.10.0", b: "0.9.0" },
+            dangerRing: true,
+        },
         mustShow: S("O-01 O-02 O-03 O-04 O-05 O-06 O-07 O-08 O-10"),
     },
     {
@@ -727,7 +734,8 @@ export const SCENES = [
         lang: "zh",
         title: "配对：两端 15 态 pill、对端行、核验徽标、声道徽标",
         state: {},
-        mustShow: S("I-06 I-07 I-08 O-05 O-06"),
+        // 组选择（I-06、O-05）的各态画在 cat-header，这一格不重画。
+        mustShow: S("I-07 I-08 O-06"),
     },
     {
         id: "cat-band",
@@ -786,9 +794,11 @@ export const SCENES = [
         lang: "zh",
         title: "Rinne 子标识（已选 mark-a）",
         state: {},
-        mustShow: S("I-02"),
+        // 这一格只画子标识本身，不画页眉（I-02 在 cat-header 里），所以没有必须出现的整件元件。
+        mustShow: [],
     },
-    { id: "cat-tokens", role: "catalog", lang: "zh", title: "token 与新增组合", state: {}, mustShow: S("I-01") },
+    // 这一格只列 token 与组合，不画外壳（I-01 在整窗场景里），所以没有必须出现的整件元件。
+    { id: "cat-tokens", role: "catalog", lang: "zh", title: "token 与新增组合", state: {}, mustShow: [] },
 ];
 
 export const SCENE_IDS = SCENES.map((s) => s.id);

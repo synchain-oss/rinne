@@ -27,6 +27,7 @@ export const NOTICE_SECTIONS = [
     "fonts",
     "catch2",
     "github-slugger",
+    "design-runtime",
     "scvb-derived",
 ];
 const PROJECT_LICENSE = "GPL-3.0-or-later";
