@@ -219,6 +219,11 @@ export function pathSpans(line, opts) {
                 all = false;
                 break;
             }
+            // 元素必须整个就是一个引号串：'M…' + '…' 这种拼接首尾也是引号，但不是 path 数组的元素
+            if (opts?.wholeElement !== false && here[here.length - 1].to !== it.end - 1) {
+                all = false;
+                break;
+            }
         }
         if (all) spans.push(...here);
         i = close + 1;
@@ -676,8 +681,9 @@ export const CASES = [
     [null, j('svg(d="M', '14 8a6 6 0 1 1-12 0")')],
     // 脚本对象里的 d: '…' 也是 d 属性（设计稿的图标表这样写）
     [null, j("icon({ d: 'M", "14 8a6 6 0 1 1-12 0' })")],
-    // T、M 是 path 命令：合法 path 数据里「T 加数字」这类坐标按设计放行；同样的形态写在普通文本的括号里照判（见下方普通文本几条）
-    [null, j("path('M", "0 0T", "12 3')")],
+    // T、M 是 path 命令：合法 path 数据里「T 加数字」这类坐标按设计放行；同样的形态写在普通文本的括号里照判（见下方普通文本几条）。
+    // moveto 后面先空一格，bracket-id 在开头的 M 上判不中，往后找到的正是「T 加数字」，这条才真测到 T（关掉 path 上下文它会变红）
+    [null, j("path('M", " 0 0 T", "12 3')")],
     [null, j("icon: ['M", "14 8a6 6 0 1 1-12 0a6 6 0 1 1 12 0', 'M3.8 3.8l8.4 8.4'],")],
     [null, j("icon: ['M", "3 8h10', 'M", "10 5l3 3-3 3'],")],
     [null, j("const MARK_URI = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAC/9/", "W", "3/dRA1tS/4XF3FAjRec'")],
@@ -702,6 +708,8 @@ export const CASES = [
     ["bracket-id", j("icon: ['M", "14 8", "l1 1".repeat(200), "', 'M", "4 4L6 6'],")],
     // 数组里只要有一个元素不是 path 数据，整段都不放行
     ["bracket-id", j("icon: ['M", "14 8a6 6 0 1 1-12 0', 'plain'],")],
+    // 元素是拼接出来的（首尾都是引号，中间不止一个引号串）：不算 path 数组，照判
+    ["bracket-id", j("icon: ['M", "14 8' + 'x'],")],
     // 数字开头的引号串不是 path，也不能因此出错
     [null, "const sizes = ['12 34', '56 78'];"],
     // 放行区间只管区间内：之前与之后同一行里的编号形态照判
@@ -839,6 +847,11 @@ export function mutationCheck() {
         ["放行上下文：path 不要求 moveto 开头", { contextSpans: (line) => contextSpans(line, { movetoFirst: false }) }],
         // d 属性的对象写法 d: '…'：不认它时设计稿图标表那种写法会被误判
         ["放行上下文：d 属性不认对象写法", { contextSpans: (line) => contextSpans(line, { dColon: false }) }],
+        // 路径数组的元素必须整个是一个引号串：放宽时拼接出来的元素会被当成 path
+        [
+            "放行上下文：数组元素不要求整个是引号串",
+            { contextSpans: (line) => contextSpans(line, { wholeElement: false }) },
+        ],
     );
     const survived = mutants.filter(([, opts]) => runCases(opts).every((c) => c.passed)).map(([name]) => name);
     return { total: mutants.length, survived };
