@@ -409,6 +409,58 @@ TEST_CASE("user presets: delete removes only user presets", "[presets][user][del
     CHECK(isUserPresetId("u-0123456789ab"));
 }
 
+TEST_CASE("user presets: delete does not read a file over the size limit, and still deletes it",
+          "[presets][user][delete]")
+{
+    Env e;
+    REQUIRE(e.dir.createDirectory().wasOk());
+    constexpr juce::int64 kLimit = 16 * 1024;
+
+    // 合法的用户预设 JSON，末尾用空白补到指定字节数：补完仍能解析出显示名，所以只有大小检查能让 name 为空
+    const auto put = [&e](const juce::String& id, const juce::String& name, juce::int64 bytes) {
+        UserPreset content;
+        content.id = id;
+        content.name = name;
+        content.values = kSample;
+        juce::String text = rinne::input::serialiseUserPreset(content);
+        REQUIRE(text.getNumBytesAsUTF8() < static_cast<std::size_t>(bytes));
+        text += repeat(" ", static_cast<int>(bytes - static_cast<juce::int64>(text.getNumBytesAsUTF8())));
+        const juce::File file = fileOf(e.dir, id);
+        REQUIRE(file.replaceWithText(text, false, false, "\n")); // 换行原样写，不转成 CRLF，字节数才对得上
+        REQUIRE(file.getSize() == bytes);
+        REQUIRE(rinne::input::parseUserPreset(file.loadFileAsString(), id).has_value()); // 读得进来，只是不该去读
+        return file;
+    };
+
+    // 恰好在上限：照常读出显示名
+    const juce::File atLimit = put("u-aaaaaaaaaaaa", "At limit", kLimit);
+    const auto small = e.store.remove("u-aaaaaaaaaaaa");
+    CHECK(small.ok());
+    CHECK(small.id == "u-aaaaaaaaaaaa");
+    CHECK(small.name == "At limit");
+    CHECK_FALSE(atLimit.exists());
+
+    // 超过上限一个字节：不读不解析，照样删掉，返回 id、name 为空
+    const juce::File over = put("u-bbbbbbbbbbbb", "Over limit", kLimit + 1);
+    const auto big = e.store.remove("u-bbbbbbbbbbbb");
+    CHECK(big.ok());
+    CHECK(big.error == PresetError::kNone);
+    CHECK(big.id == "u-bbbbbbbbbbbb");
+    CHECK(big.name.isEmpty());
+    CHECK_FALSE(over.exists());
+
+    // 远超上限也一样，目录里没有别的东西被碰
+    const auto kept = e.store.save("Keep", false, kOther);
+    REQUIRE(kept.ok());
+    const juce::File huge = put("u-dddddddddddd", "Huge", 20 * 1024);
+    const auto gone = e.store.remove("u-dddddddddddd");
+    CHECK(gone.ok());
+    CHECK(gone.name.isEmpty());
+    CHECK_FALSE(huge.exists());
+    CHECK(fileOf(e.dir, kept.id).existsAsFile());
+    CHECK(e.store.listUser().presets.size() == 1);
+}
+
 TEST_CASE("user presets: unreadable files are skipped and counted, never deleted", "[presets][user]")
 {
     Env e;

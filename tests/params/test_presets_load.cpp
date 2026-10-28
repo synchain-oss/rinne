@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 载入预设（PresetStore::load）：只改 8 个声音参数，每个参数恰好一对手势，成功后 presetSeq 恰好加一，
-// 失败什么都不改；loop_on、limiter、ceiling 在载入前后不变。
+// 载入预设（PresetStore::load）：只改 8 个声音参数，每个参数恰好一对手势，成功时 presetSeq 恰好加一，
+// 且先加序号、再写参数（第一个被写的参数的通知里序号已经加过一）；失败什么都不改、序号不动；
+// loop_on、limiter、ceiling 在载入前后不变。
 // 用真实的参数树（InputParams）和工厂预设；用户预设的载入与越界夹回在 test_presets_user.cpp。
 // 「预设前后组号不变」这一格：组号不在参数树里，PresetStore 也不接触它（载入只经参数树写 8 个声音参数），
 // 没有可以断言的地方；rig 里的载入预设场景只核引擎层（淡入原因、不解除锁存）。
@@ -249,6 +250,57 @@ TEST_CASE("load: presetSeq goes up by exactly one per successful load and stays 
     }
     CHECK(f.recorder.events.empty());
     CHECK(f.sound() == soundBefore);
+}
+
+namespace
+{
+
+// 参数通知里读到的 presetSeq：引擎每块先读序号、再读参数，序号先到才能让新参数落在降到 0 与淡入里
+struct SeqProbe final : juce::AudioProcessorParameter::Listener
+{
+    explicit SeqProbe(const PresetStore& s) : store(s) {}
+    void parameterValueChanged(int, float) override { seen.push_back(store.presetSeq()); }
+    void parameterGestureChanged(int, bool) override {}
+    const PresetStore& store;
+    std::vector<std::uint32_t> seen;
+};
+
+} // namespace
+
+TEST_CASE("load: presetSeq goes up before the first parameter is written", "[presets][load]")
+{
+    Fixture f;
+    REQUIRE(f.store.factoryPresetsValid());
+
+    // 第一个被写的参数（参数表里的第一个声音参数）的通知里，序号已经加过一；每次载入都是
+    const std::string first = rinne::input::presetParamId(0);
+    SeqProbe probe(f.store);
+    f.parameter(first).addListener(&probe);
+    REQUIRE(f.store.load("f-init", f.params.tree()).ok());
+    REQUIRE(f.store.load("f-edge-95", f.params.tree()).ok());
+    f.parameter(first).removeListener(&probe);
+    REQUIRE(probe.seen.size() == 2u);
+    CHECK(probe.seen[0] == 1u);
+    CHECK(probe.seen[1] == 2u);
+
+    // 8 个声音参数的通知里读到的序号都是加过之后的，没有哪个参数早于序号
+    SeqProbe all(f.store);
+    for (std::size_t i = 0; i < kPresetParamCount; ++i)
+        f.parameter(rinne::input::presetParamId(i)).addListener(&all);
+    REQUIRE(f.store.load("f-dub-quarter-dotted", f.params.tree()).ok());
+    for (std::size_t i = 0; i < kPresetParamCount; ++i)
+        f.parameter(rinne::input::presetParamId(i)).removeListener(&all);
+    REQUIRE(all.seen.size() == kPresetParamCount);
+    for (const std::uint32_t seq : all.seen)
+        CHECK(seq == 3u);
+
+    // 失败的载入没有任何通知，序号也不动
+    SeqProbe none(f.store);
+    f.parameter(first).addListener(&none);
+    CHECK_FALSE(f.store.load("f-no-such-preset", f.params.tree()).ok());
+    f.parameter(first).removeListener(&none);
+    CHECK(none.seen.empty());
+    CHECK(f.store.presetSeq() == 3u);
 }
 
 TEST_CASE("load: a tree missing a sound parameter is refused before anything changes", "[presets][load]")

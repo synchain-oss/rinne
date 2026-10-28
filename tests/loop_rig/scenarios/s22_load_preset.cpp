@@ -4,7 +4,8 @@
 // 锁存（跳闸）时载入预设不解除锁存、回送保持 0，Recover 之后照常淡入。
 //
 // 载入预设在引擎里就是「预设序号变了」加上 8 个声音参数的新值。参数的新值照常进引擎（这里随序号一起给），
-// 序号带来的是安全链的淡入请求。环路延迟 100 ms、混合 50 %、反馈 50 %、中间链是恒等；跑够 2 s 到 Run 之后：
+// 序号带来的是安全链的淡入请求（实际载入时序号先加、参数晚一两块才到的情形见一·乙）。环路延迟 100 ms、混合 50 %、反馈
+// 50 %、中间链是恒等；跑够 2 s 到 Run 之后：
 //
 // 一、运行中载入预设（两种）：
 //   甲 声音参数换成反馈 70 %、混合 30 %，延迟不变（读头不动）；
@@ -17,6 +18,17 @@
 //   - 淡完之后回到 Run，增益恰为 1；没有跳闸；除了乙里改 D 的交叉淡化（引擎记作一次「改 D」重同步）之外没有重同步；
 //     回送在淡入之后照常在响；
 //   - 输出与参照安全链逐位相同（参照用的是预设之后的参数）。
+//
+// 一·乙、序号先到、参数晚到：载入预设时先加预设序号、再逐个写参数（PresetStore::load 的顺序），音频线程可能先在
+//   某一块看到新序号，晚 1 块或晚 2 块才看到新参数。序号到的那一块起声音参数还是旧的，之后换成反馈 95 %、混合 50 %：
+//   · 同时改环路延迟（250 ms）与不改延迟（100 ms）各一种，晚 1 块与晚 2 块各一遍，共四种；
+//   · 引擎的行为与参数同块到达时一样，序号到的那一块起算：淡入原因恰好一次、只有 Preset；块末安全增益与同一个分段线性
+//     期望相差不超过 1e-5（10 ms 降到 0 的起点是序号到的那一块，不是参数到的那一块；500 ms 淡入的起点是首个有效读样本，
+//     参数晚到不会让淡入重新开始）；淡完之后回到 Run，增益恰为 1，没有跳闸；
+//   · 改 D 时重同步恰好一次、原因是「改 D」（发生在参数到的那一块，落在降到 0 或淡入里）；不改 D 时没有重同步；
+//   · 回送全程有界（|ret| < 1；限制器开着，实测峰值落在默认上限 −6 dBFS 上），相邻样本之差不超过「信号自身的最大
+//     斜率 + 10 ms 下行的一步 + ε」（同 S25 的判据；入口处硬切到 0 的同一段轨迹会超界，场景里一并核对）；
+//   · 输出与参照安全链逐位相同。
 //
 // 二、锁存时载入预设：先紧急切断（跳闸、锁存），冷却走完，再换一组新的声音参数并让预设序号加一：
 //   - 状态仍是 Tripped，Input 槽里仍是「跳闸 + 紧急切断」，跳闸计数不增，安全增益保持 0；
@@ -38,7 +50,8 @@
 //   ⛔ 锁存时预设请求不再被挡住（跳闸状态下也开始淡入）→ 状态离开 Tripped，回送回来；
 //   ⛔ 淡入不等首个有效读样本（一进淡入就上行）→ 第三格的增益轨迹与期望不符（增益提前 4000 多个样本开始上行）；
 //   ⛔ 预设请求报成 SetState（原因串线）→ 原因对不上；
-//   ⛔ 下行时长不是 10 ms，或上行时长不是 500 ms → 增益轨迹与分段线性的期望不符。
+//   ⛔ 下行时长不是 10 ms，或上行时长不是 500 ms → 增益轨迹与分段线性的期望不符；
+//   ⛔ 预设请求没有 10 ms 下行（一进淡入就从 0 起等首个有效读样本）→ 序号先到、参数晚到的几格增益轨迹与期望不符。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -120,11 +133,20 @@ public:
     // 把这一组声音参数当成「预设的内容」换进去，预设序号加一
     void loadPreset(float feedbackPercent, float mixPercent, float delayMs)
     {
+        applySound(feedbackPercent, mixPercent, delayMs);
+        ++params.presetSeq;
+    }
+
+    // 只换声音参数，不动序号（载入预设时序号先到、参数晚到的那一部分）
+    void applySound(float feedbackPercent, float mixPercent, float delayMs)
+    {
         params.feedbackPercent = feedbackPercent;
         params.mixPercent = mixPercent;
         params.delayMs = delayMs;
-        ++params.presetSeq;
     }
+
+    // 只把预设序号加一，声音参数不动
+    void requestPreset() { ++params.presetSeq; }
 
     void clearLogs()
     {
@@ -159,6 +181,11 @@ public:
         loadInRun(v, "same delay", 70.0f, 30.0f, 100.0f, 2 * kSecond);
         loadInRun(v, "longer delay", 65.0f, 50.0f, 250.0f, 2 * kSecond);
         loadInRun(v, "delay longer than the history", 65.0f, 50.0f, 1000.0f, 7 * kSecond / 10);
+        for (const int lag : {1, 2})
+        {
+            loadSeqBeforeParams(v, "feedback 95 % and a longer delay", lag, 95.0f, 50.0f, 250.0f);
+            loadSeqBeforeParams(v, "feedback 95 %, same delay", lag, 95.0f, 50.0f, 100.0f);
+        }
         loadBeforeFirstRead(v);
         loadWhileTripped(v);
         return v.ok();
@@ -235,6 +262,66 @@ private:
         RIG_EQ(v, track.host->inputStatus().delayEffective,
                static_cast<std::int64_t>(std::lround(static_cast<double>(delayMs) * kSr / 1000.0)));
         RIG_CHECK(v, !sameBits(track.rec->outLeft, track.rec->dryLeft, track.now() - kSecond, track.now()));
+        RIG_CHECK(v, track.rec->matchesReference());
+    }
+
+    // ---- 一·乙、序号先到、参数晚到 ----
+    // 载入预设时先加预设序号、再逐个写参数（见 PresetStore）：音频线程可能先在某一块看到新序号，晚一两块才看到新参数。
+    // 序号那一块起就是「10 ms 降到 0、再从首个有效读样本起 500 ms 淡入」，新参数落在降到 0 与淡入里：
+    // 增益轨迹与参数同块到达时一样（起点是序号到的那一块），淡入原因只有 Preset 且恰好一次，新的 D 在参数到的那一块
+    // 做一次「改 D」交叉淡化（恰好一次），回送始终有界、包络没有阶跃。
+    static void loadSeqBeforeParams(Verdict& v, const char* name, int lagBlocks, float feedback, float mix,
+                                    float delayMs)
+    {
+        INFO("preset request first: " << name << ", params " << lagBlocks << " block(s) late");
+        Track track;
+        track.run(2 * kSecond);
+        RIG_EQ(v, static_cast<int>(track.state()), static_cast<int>(SafetyState::Run));
+        RIG_EQ(v, track.gains.back(), 1.0f);
+        track.clearLogs();
+        const std::size_t s = track.now();
+        track.requestPreset();
+        for (int k = 0; k < lagBlocks; ++k)
+        {
+            RIG_EQ(v, track.step(), kBlock); // 这几块里只有序号变了，声音参数还是旧的
+        }
+        RIG_EQ(v, track.now(), s + static_cast<std::size_t>(lagBlocks) * kBlock);
+        track.applySound(feedback, mix, delayMs);
+        track.run(3 * kSecond);
+
+        RIG_CHECK(v, track.log.reasons == std::vector<FadeReason>{FadeReason::Preset});
+        RIG_CHECK(v, track.fadeReasons == std::set<FadeReason>{FadeReason::Preset});
+        RIG_EQ(v, gainShape(v, track, s, true), std::size_t{0});
+
+        RIG_EQ(v, track.host->inputSafetyDiag().trips, 0u);
+        const std::uint32_t expectDChange = delayMs != 100.0f ? 1u : 0u;
+        RIG_EQ(v, track.host->inputStatus().resyncCount, expectDChange);
+        RIG_EQ(v, track.host->inputStatus().resyncByReason[static_cast<std::size_t>(rinne::loop::SyncReason::kDChange)],
+               expectDChange);
+        RIG_EQ(v, track.host->inputStatus().delayEffective,
+               static_cast<std::int64_t>(std::lround(static_cast<double>(delayMs) * kSr / 1000.0)));
+        RIG_CHECK(v, !sameBits(track.rec->outLeft, track.rec->dryLeft, track.now() - kSecond, track.now()));
+
+        // 回送始终有界（|ret| < 1），相邻样本之差不超过「信号自身的最大斜率 + 10 ms 下行的一步 + ε」（同 S25 的判据）
+        for (const auto* ret : {&track.rec->reference.retLeft, &track.rec->reference.retRight})
+        {
+            RIG_CHECK(v, peakOf(*ret, 0, ret->size()) < 1.0f);
+        }
+        const auto& ret = track.rec->reference.retLeft;
+        const std::size_t from = s > 4800 ? s - 4800 : 0;
+        const float level = peakOf(ret, from, ret.size());
+        RIG_CHECK(v, level > 0.05f);
+        const float bound = slope(100.0, level) + level / static_cast<float>(kGateSamples) + 1.0e-6f;
+        const float worstStep = rinne::test::maxStep(ret, from, ret.size());
+        INFO("worst step = " << worstStep << ", bound = " << bound << ", level = " << level);
+        RIG_CHECK(v, worstStep <= bound);
+        // 反例：序号到的那一刻回送硬切到 0（不走 10 ms 下行）会超过这个界，证明判据对阶跃会变红
+        std::size_t loudest = s - static_cast<std::size_t>(kGateSamples);
+        for (std::size_t t = loudest; t < s; ++t)
+        {
+            loudest = std::fabs(ret[t]) > std::fabs(ret[loudest]) ? t : loudest;
+        }
+        RIG_CHECK(v, rinne::test::maxStep(hardCut(ret, loudest + 1), from, ret.size()) > bound);
         RIG_CHECK(v, track.rec->matchesReference());
     }
 

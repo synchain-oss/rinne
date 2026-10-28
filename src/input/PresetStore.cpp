@@ -663,7 +663,10 @@ PresetResult PresetStore::remove(const juce::String& id)
         return result;
     }
     const juce::File file = fileFor(id);
-    const std::optional<UserPreset> known = parseUserPreset(file.loadFileAsString(), id);
+    // 显示名只是回给调用方的信息：超过大小上限的文件不读不解析，照样删，name 留空
+    std::optional<UserPreset> known;
+    if (file.getSize() <= kMaxUserFileBytes)
+        known = parseUserPreset(file.loadFileAsString(), id);
     if (!file.deleteFile())
     {
         result.error = PresetError::kWriteFailed;
@@ -720,6 +723,11 @@ PresetResult PresetStore::load(const juce::String& id, juce::AudioProcessorValue
         }
     }
 
+    // 先加序号、再写参数（与 state 胶水的 setState 同序）：序号是给引擎的通知（走一遍淡出再淡入），先到先开始降到 0；
+    // 音频线程可能先看到新序号、晚一两块才看到新参数，新参数落在降到 0 与淡入里。反过来先写参数，音频线程就可能先拿到
+    // 部分新值（高反馈、新的 D）再看到序号，降到 0 比参数变化晚。载入失败的路径上面都已经返回，序号不动
+    presetSeq_.fetch_add(1, std::memory_order_release);
+
     // 每个参数一对手势，宿主据此把一次载入记成可撤销的改动。值夹回范围，convertTo0to1 再对齐到步进格
     for (std::size_t i = 0; i < kPresetParamCount; ++i)
     {
@@ -729,9 +737,6 @@ PresetResult PresetStore::load(const juce::String& id, juce::AudioProcessorValue
         parameter.setValueNotifyingHost(parameter.convertTo0to1(plain));
         parameter.endChangeGesture();
     }
-
-    // 参数写完之后才加序号：序号是给引擎的通知（走一遍淡出再淡入），载入失败的路径上面都已经返回，序号不动
-    presetSeq_.fetch_add(1, std::memory_order_release);
 
     result.id = id;
     result.name = name;

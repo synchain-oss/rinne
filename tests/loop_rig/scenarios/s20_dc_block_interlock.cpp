@@ -97,8 +97,10 @@ private:
         REQUIRE(host != nullptr);
         host->setBlockScripts(fixedBlocks(kBlock), fixedBlocks(kBlock));
         host->setChain(ChainKind::kIdentity);
-        const std::uint64_t dcLength = static_cast<std::uint64_t>(2 * kD);
-        const SourceFn dc = [dcLength](std::uint64_t first, float* left, float* right, int n) {
+        // static：lambda 不用捕获也能用它。const 局部常量显式捕获，clang 报 -Wunused-lambda-capture；
+        // 只声明 constexpr 不捕获，MSVC 又报无法隐式捕获
+        static constexpr std::uint64_t dcLength = static_cast<std::uint64_t>(2 * kD);
+        const SourceFn dc = [](std::uint64_t first, float* left, float* right, int n) {
             for (int i = 0; i < n; ++i)
             {
                 const float x = first + static_cast<std::uint64_t>(i) < dcLength ? 0.25f : 0.0f;

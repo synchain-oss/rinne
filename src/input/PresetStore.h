@@ -21,8 +21,11 @@
 //   · 只改 8 个声音参数；每个参数各做一遍 beginChangeGesture → setValueNotifyingHost(convertTo0to1(值)) →
 //     endChangeGesture，宿主据此把一次载入记成可撤销的手势；
 //   · 值夹回范围（NaN 取默认），预设里不认识的键忽略；
-//   · 8 个参数都写完之后 presetSeq 加一。接线的一方（处理器）每块把 presetSeq() 填进 EngineParams，引擎看到序号变了
-//     就走「10 ms 降到 0、再从首个有效读样本起 500 ms 淡入」，原因 Preset；
+//   · 校验都通过之后、写第一个参数之前，presetSeq 先加一，再逐个写 8 个参数（先加序号、再写参数，与 state 胶水的
+//     setState 同序）。接线的一方（处理器）每块把 presetSeq() 填进 EngineParams，引擎看到序号变了就走
+//     「10 ms 降到 0、再从首个有效读样本起 500 ms 淡入」，原因 Preset。音频线程可能先看到新序号、晚一两块才看到
+//     新参数，新参数落在降到 0 与淡入里；反过来先写参数，会有一两块已经拿到部分新值（高反馈、新的 D）却还没看到
+//     预设请求；
 //   · 载入失败（找不到、文件坏、参数树缺参数）什么都不改，序号不变；
 //   · 载入不碰安全状态：锁存（TRIPPED）时载入预设不会解除它，这一点由引擎层负责并有场景验证，本类不接触安全状态机。
 //
@@ -42,7 +45,8 @@
 //   · 重名：按去完空白的显示名不分大小写比较；重名且没允许覆盖返回 exists，允许覆盖时沿用原 id；
 //   · 写：先写同目录的临时文件，写完落盘，再整体替换目标；任何一步失败都返回 write-failed，清掉临时文件，原文件不动；
 //   · 读列表：解析失败的文件跳过并计数，不删除；与工厂预设同名的用户预设允许存在，靠 id 区分；
-//   · 删除：只删用户预设；工厂预设返回 factory，id 不存在返回 not-found。
+//   · 删除：只删用户预设；工厂预设返回 factory，id 不存在返回 not-found。文件超过大小上限（16 KiB，同读列表与载入）
+//     时不读不解析，照样删，返回的显示名为空。
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -180,7 +184,7 @@ public:
     PresetResult save(const juce::String& name, bool overwrite, const PresetValues& values);
     PresetResult save(const juce::String& name, bool overwrite, const juce::AudioProcessorValueTreeState& tree);
 
-    // 删除用户预设
+    // 删除用户预设。成功时 name 是文件里的显示名；文件超过大小上限则不解析、name 为空
     PresetResult remove(const juce::String& id);
 
     // 载入。只改 8 个声音参数，见文件头
