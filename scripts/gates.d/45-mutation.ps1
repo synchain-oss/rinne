@@ -80,9 +80,10 @@ function Invoke-MutationGate($Ctx) {
     Resolve-MutationResult $cov $mut
 }
 
-# workflow 里名字以 $Name 开头的那一步（从它的 `- name:` 行到下一步之前）的原文；找不到返回 $null。
+# workflow 里名字以 $Name 开头的那一步（从它的 `- name:` 行到下一步、下一个 job 或顶层键之前）的原文；找不到返回 $null。
+# 结束条件里的 `^ {0,4}\S`（缩进不超过 4 的非空行）让这一步是 job 的最后一步时，后面新 job 的 job 级 if 之类不算进这一步。
 function Get-WorkflowStep([string]$Yaml, [string]$Name) {
-    $m = [regex]::Match($Yaml, "(?ms)^ {6}- name: $([regex]::Escape($Name))[^\n]*\n(?<body>.*?)(?=^ {6}- |\z)")
+    $m = [regex]::Match($Yaml, "(?ms)^ {6}- name: $([regex]::Escape($Name))[^\n]*\n(?<body>.*?)(?=^ {6}- |^ {0,4}\S|\z)")
     if ($m.Success) { $m.Groups['body'].Value } else { $null }
 }
 
@@ -137,6 +138,11 @@ function Test-RinneGates([string]$Root) {
         '这一步整个没了'                      = & $swap '- name: Mutation check (all checks)' '- name: Something else'
     }
     [pscustomobject]@{ Label = 'compliance.yml 有 Mutation check 一步：覆盖清单核对与变异检查两行都在，没有 if / continue-on-error'; Bad = $false; Passed = Test-WorkflowMutationStep $yaml }
+    # 这一步是 job 的最后一步时，后面新 job 的 job 级 if 不算它的：仍判合格；这一步自己带 if 则照旧判红
+    $nextJob = "  other:`n    if: github.event_name == 'push'`n    runs-on: ubuntu-24.04`n    steps:`n      - run: 'true'`n"
+    [pscustomobject]@{ Label = 'compliance.yml 的 Mutation check 一步后面紧跟一个带 job 级 if 的新 job：仍判这一步合格'; Bad = $false; Passed = Test-WorkflowMutationStep ($yaml + $nextJob) }
+    [pscustomobject]@{ Label = '反例：后面有带 job 级 if 的新 job，这一步自己带 if 仍判红（结束条件没有把这一步截短）'; Bad = $true
+        Passed = $null -ne $variants['这一步加了 if'] -and -not (Test-WorkflowMutationStep ($variants['这一步加了 if'] + $nextJob)) }
     foreach ($k in $variants.Keys) {
         # 夹具没改成（原文里找不到要换的那段）时 $null：用例直接判红，不能空洞地通过
         [pscustomobject]@{ Label = "反例：compliance.yml 的 Mutation check 一步，$k"; Bad = $true; Passed = $null -ne $variants[$k] -and -not (Test-WorkflowMutationStep $variants[$k]) }
@@ -158,9 +164,24 @@ function Test-RinneGates([string]$Root) {
         $r = Invoke-MutationNative $exe @('-e', 'process.stdout.write(String(process.env.CI))') $Root
         [pscustomobject]@{ Label = 'gate 起检查时给子进程设 CI=true，起完恢复调用方原来的值'; Bad = $false
             Passed = ($r.Code -eq 0 -and ($r.Lines -join '') -ceq 'true' -and $env:CI -ceq $before) }
-        $noPy = Invoke-MutationNative $exe (@($script:MutationArgs) + '--only', 'probe-analysis') $Root @{ CI = 'true'; PATH = (Split-Path -Parent $exe) }
-        [pscustomobject]@{ Label = '反例：PATH 上没有 Python 3 时，probe-analysis 的变异检查在 gate 里判红，不当成跳过'; Bad = $true
-            Passed = ($noPy.Code -ne 0 -and ($noPy.Lines -join "`n") -match '找不到 Python 3') }
+        # PATH 指向新建的空目录（GUID 命名，只给这一条用例），node 用全路径起：不依赖 node 所在目录里有什么，也找不到任何 Python。
+        # 先在同一个 PATH 下，用 probe-analysis 找 Python 的同一组命令（python3 / python / py -3）探一次：探得到就是前提不成立，
+        # 这条反例证明不了什么，不记通过也不记红，只警告一句。空目录用完按非递归删。
+        $empty = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $empty
+        try {
+            $probe = "const { spawnSync } = require('node:child_process'); process.exit([['python3'], ['python'], ['py', '-3']].some((c) => spawnSync(c[0], [...c.slice(1), '-c', 'pass']).status === 0) ? 0 : 1)"
+            $found = Invoke-MutationNative $exe @('-e', $probe) $Root @{ PATH = $empty }
+            if ($found.Code -eq 0) {
+                Write-Warning "mutation 的自测：空 PATH 下仍探得到 Python，前提不成立，「没有 Python 3 判红」这条反例没有验证"
+            } else {
+                $noPy = Invoke-MutationNative $exe (@($script:MutationArgs) + '--only', 'probe-analysis') $Root @{ CI = 'true'; PATH = $empty }
+                [pscustomobject]@{ Label = '反例：PATH 上没有 Python 3 时，probe-analysis 的变异检查在 gate 里判红，不当成跳过'; Bad = $true
+                    Passed = ($noPy.Code -ne 0 -and ($noPy.Lines -join "`n") -match '找不到 Python 3') }
+            }
+        } finally {
+            try { Remove-Item -LiteralPath $empty -ErrorAction Stop } catch { Write-Warning "临时空目录没删掉：$($_.Exception.Message)" }
+        }
     } catch {
         [pscustomobject]@{ Label = "mutation 的真起进程用例抛错：$($_.Exception.Message)"; Bad = $true; Passed = $false }
     }

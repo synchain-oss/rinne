@@ -171,7 +171,8 @@ function Export-Head([string]$Root, [string]$Dir) {
     $tree
 }
 
-# 与 compliance.yml 里 run-checks 的 --only 一一对应，顺序也相同；Test-RinneGates 拿 workflow 原文核对。
+# 与 compliance.yml 里 run-checks 的 --only 一一对应，按它们在 workflow 里出现的顺序，包括最后 Mutation check 一步里的
+# mutation-coverage；Test-RinneGates 拿 workflow 原文核对。
 # mutation-coverage 是全仓变异检查的覆盖清单核对（很快）：慢的变异检查本体在 45-mutation.ps1（Full 档）；这一项让每一档
 # 都认得出「某个检查的 mutationCheck 被删」。
 $script:ComplianceOnly = 'spdx', 'reuse', 'licenses-closure', 'modules-closure', 'offline', 'recursive-delete', 'privacy', 'mutation-coverage'
