@@ -1,0 +1,18 @@
+{
+  "sources": {
+    "scvb-host-sched": {
+      "repo": "synchain-oss/scvb",
+      "ref": "feature/host-sched-hardening",
+      "sha": "78136105c0723f5ce766bb8e8f1a00164af650eb"
+    }
+  },
+  "files": [
+    {
+      "path": "tests/host/plugin_host/TransportMap.h",
+      "source": "scvb-host-sched",
+      "from": "tests/host/sched/SchedRig.h",
+      "fromBlob": "47b1854fe4291c0f70b10412f76d5b0fcdfe7f86",
+      "mode": "forked"
+    }
+  ]
+}
