@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 平台 WebView 的纯函数部分：占位渐变（色标、角度、几何）、用户数据目录、运行时版本判定、按引擎分支的文案与诊断行。
+// 平台 WebView 的纯函数部分：占位渐变（色标、角度、几何）、开窗占位（外圈色、圆角、缩放）、用户数据目录、
+// 运行时版本判定、按引擎分支的文案与诊断行。
 // 真实的 WebView2 实例化与运行时探测需要 loader 与真机，不在这里。
 
 #include <catch2/catch_approx.hpp>
@@ -122,6 +123,94 @@ TEST_CASE("backdrop gradient of an empty area degrades to the flat mid colour", 
     CHECK(g.getColour(0) == wv::shellBackdropMid());
     CHECK(g.getColour(g.getNumColours() - 1) == wv::shellBackdropMid());
     CHECK(g.point1 != g.point2); // 两端不重合，渐变线有长度
+}
+
+TEST_CASE("shell geometry constants are the agreed values", "[webview][platform][placeholder]")
+{
+    // 与 tokens.css 的 --r-shell、--page-backdrop 同值；页面侧由嵌入资源回归对拍，这里把 C++ 侧钉死
+    CHECK(wv::kShellCornerRadiusPx == 20.0f);
+    CHECK(wv::kShellRimRgb == 0x191820u);
+}
+
+TEST_CASE("shell fit zoom is the page formula", "[webview][platform][placeholder]")
+{
+    CHECK(wv::shellFitZoom(800.0f, 580.0f, 800.0f, 580.0f) == 1.0f);
+    CHECK(wv::shellFitZoom(1200.0f, 870.0f, 800.0f, 580.0f) == 1.5f);
+    // 取两维里小的那个
+    CHECK(wv::shellFitZoom(1600.0f, 580.0f, 800.0f, 580.0f) == 1.0f);
+    CHECK(wv::shellFitZoom(460.0f, 728.0f, 460.0f, 364.0f) == 1.0f);
+    // 向下量化到 1e-4：不会因为四舍五入把外壳放大出窗口
+    const float z = wv::shellFitZoom(1000.0f, 1000.0f, 3.0f * 1000.0f, 3.0f * 1000.0f);
+    CHECK(z <= 1.0f / 3.0f);
+    CHECK(z == Catch::Approx(0.3333).margin(1e-6));
+    // 任一维不是正数回落 1
+    CHECK(wv::shellFitZoom(0.0f, 580.0f, 800.0f, 580.0f) == 1.0f);
+    CHECK(wv::shellFitZoom(800.0f, -1.0f, 800.0f, 580.0f) == 1.0f);
+    CHECK(wv::shellFitZoom(800.0f, 580.0f, 0.0f, 580.0f) == 1.0f);
+    CHECK(wv::shellFitZoom(800.0f, 580.0f, 800.0f, std::nanf("")) == 1.0f);
+}
+
+TEST_CASE("shell placeholder bounds are the design box times the zoom, centred", "[webview][platform][placeholder]")
+{
+    const auto exact = wv::shellPlaceholderBounds({0.0f, 0.0f, 1200.0f, 870.0f}, 800.0f, 580.0f);
+    CHECK(exact.getWidth() == Catch::Approx(1200.0f).margin(0.01));
+    CHECK(exact.getHeight() == Catch::Approx(870.0f).margin(0.01));
+    CHECK(exact.getCentreX() == Catch::Approx(600.0f).margin(0.01));
+    CHECK(exact.getCentreY() == Catch::Approx(435.0f).margin(0.01));
+
+    // 窗口比设计盒宽：外壳按高缩放，左右留出外圈色
+    const auto wide = wv::shellPlaceholderBounds({0.0f, 0.0f, 1000.0f, 364.0f}, 460.0f, 364.0f);
+    CHECK(wide.getWidth() == Catch::Approx(460.0f).margin(0.01));
+    CHECK(wide.getX() == Catch::Approx(270.0f).margin(0.01));
+    CHECK(wide.getY() == Catch::Approx(0.0f).margin(0.01));
+}
+
+TEST_CASE("shell placeholder paints the rim outside the rounded corner and the gradient inside",
+          "[webview][platform][placeholder]")
+{
+    // 100% 档的输出端窗口：外壳铺满，圆角半径 20 像素
+    const int w = 460, h = 364;
+    juce::Image img(juce::Image::RGB, w, h, true, juce::SoftwareImageType());
+    {
+        juce::Graphics g(img);
+        wv::paintShellPlaceholder(g, {0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)}, 460.0f, 364.0f);
+    }
+    const auto rim = juce::Colour(0xff000000u | wv::kShellRimRgb);
+    // 四个角上的像素在圆角之外：外圈色
+    CHECK(img.getPixelAt(0, 0) == rim);
+    CHECK(img.getPixelAt(w - 1, 0) == rim);
+    CHECK(img.getPixelAt(0, h - 1) == rim);
+    CHECK(img.getPixelAt(w - 1, h - 1) == rim);
+    // 离角 3 像素的对角线点仍在 20 像素圆角之外（圆角在对角线上离角约 5.9 像素才开始）
+    CHECK(img.getPixelAt(3, 3) == rim);
+    // 边的中点与对角线上离角 8 像素处已在圆角之内：不是外圈色，是浅色渐变
+    for (const auto p : {juce::Point<int>(w / 2, 0), juce::Point<int>(0, h / 2), juce::Point<int>(8, 8),
+                         juce::Point<int>(w / 2, h / 2)})
+    {
+        const auto c = img.getPixelAt(p.x, p.y);
+        CHECK(c != rim);
+        CHECK(c.getBrightness() > 0.7f);
+    }
+    // 中心就是渐变的 50% 点
+    const auto centre = img.getPixelAt(w / 2, h / 2);
+    const auto mid = wv::shellBackdropMid();
+    CHECK(std::abs(centre.getRed() - mid.getRed()) <= 3);
+    CHECK(std::abs(centre.getGreen() - mid.getGreen()) <= 3);
+    CHECK(std::abs(centre.getBlue() - mid.getBlue()) <= 3);
+}
+
+TEST_CASE("shell placeholder radius follows the zoom", "[webview][platform][placeholder]")
+{
+    // 200% 档：半径 40 像素。离角 8 像素的对角线点在 20 像素圆角里会是渐变，在 40 像素圆角里仍是外圈色
+    const int w = 920, h = 728;
+    juce::Image img(juce::Image::RGB, w, h, true, juce::SoftwareImageType());
+    {
+        juce::Graphics g(img);
+        wv::paintShellPlaceholder(g, {0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)}, 460.0f, 364.0f);
+    }
+    const auto rim = juce::Colour(0xff000000u | wv::kShellRimRgb);
+    CHECK(img.getPixelAt(8, 8) == rim);
+    CHECK(img.getPixelAt(16, 16) != rim);
 }
 
 TEST_CASE("user data folder is shared by both roles and never used by system WebKit", "[webview][platform][udf]")

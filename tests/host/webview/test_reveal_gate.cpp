@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 开窗遮挡闸：什么时候挡住、什么时候放行、什么绝不放行。纯逻辑，时间由测试喂进去。
-// 守三件事：放行只认首帧信号（外加超时兜底），首帧信号到后要同时满足「tick 数」与「毫秒下界」，
-// 毫秒计数回绕时不会提前或永不放行。
+// 守四件事：放行只认首帧信号（外加超时兜底），首帧信号到后要同时满足「tick 数」与「毫秒下界」，
+// 毫秒计数回绕时不会提前或永不放行，导航开始之前就挡住的那一段不起算超时、只由兜底面板或导航开始接手。
+// 另带关窗诊断行的拼装。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -278,4 +279,163 @@ TEST_CASE("parked bounds keep the size and move the window out of the visible ar
     // 宽度为 0（还没定尺寸）时平移量仍然为正，不会原地不动
     const auto zero = parkedBounds({0, 0, 0, 0});
     CHECK(zero.getX() > 0);
+}
+
+TEST_CASE("reveal gate: holding before navigation parks at once and never times out on its own", "[webview][gate]")
+{
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    CHECK(gate.parked());
+    CHECK(gate.holdingBeforeNavigation());
+
+    // 导航开始之前没有超时：多久都不放行，这一段归看门狗管
+    gate.onTick(0);
+    gate.onTick(RevealGate::kRevealFallbackMs * 10u);
+    CHECK(gate.parked());
+    CHECK(reason(gate).empty());
+}
+
+TEST_CASE("reveal gate: navigation start after a hold keeps the park and starts the deadline there", "[webview][gate]")
+{
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    gate.onNavigationStarted(5000);
+    CHECK(gate.parked());
+    CHECK_FALSE(gate.holdingBeforeNavigation());
+
+    gate.onTick(5000 + RevealGate::kRevealFallbackMs - 1);
+    CHECK(gate.parked());
+    gate.onTick(5000 + RevealGate::kRevealFallbackMs);
+    CHECK_FALSE(gate.parked());
+    CHECK(reason(gate) == "timeout");
+}
+
+TEST_CASE("reveal gate: a second navigation start does not move the deadline", "[webview][gate]")
+{
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    gate.onNavigationStarted(1000);
+    gate.onNavigationStarted(2500); // 页面自己再导航一次：超时仍从第一次起算
+    gate.onTick(1000 + RevealGate::kRevealFallbackMs);
+    CHECK_FALSE(gate.parked());
+    CHECK(reason(gate) == "timeout");
+}
+
+TEST_CASE("reveal gate: bridge ready while still held starts the deadline like a navigation start", "[webview][gate]")
+{
+    // 纵深防御：导航开始没送到、桥却就绪了。闸门不能永远挪在外面，补记之后照常超时放行
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    CHECK(gate.onBridgeReady(4000));
+    CHECK(gate.parked());
+    CHECK_FALSE(gate.holdingBeforeNavigation());
+
+    gate.onTick(4000 + RevealGate::kRevealFallbackMs - 1);
+    CHECK(gate.parked());
+    gate.onTick(4000 + RevealGate::kRevealFallbackMs);
+    CHECK_FALSE(gate.parked());
+    CHECK(reason(gate) == "timeout");
+}
+
+TEST_CASE("reveal gate: bridge ready after a navigation start changes nothing", "[webview][gate]")
+{
+    // 正常顺序：导航开始先到。桥就绪不补记，超时仍从导航开始起算
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    gate.onNavigationStarted(1000);
+    CHECK_FALSE(gate.onBridgeReady(2500));
+    gate.onTick(1000 + RevealGate::kRevealFallbackMs);
+    CHECK_FALSE(gate.parked());
+    CHECK(reason(gate) == "timeout");
+
+    // 已经放行之后也不补记，不会再挪走
+    CHECK_FALSE(gate.onBridgeReady(9000));
+    CHECK_FALSE(gate.parked());
+
+    // 从没挡住过（系统 WebKit 上闸门不武装）
+    RevealGate idle;
+    CHECK_FALSE(idle.onBridgeReady(100));
+    CHECK_FALSE(idle.parked());
+}
+
+TEST_CASE("reveal gate: a first frame signal during the hold is ignored", "[webview][gate]")
+{
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    gate.onFirstFrame(100); // 这一次还没有文档，信号不属于它
+    gate.onTick(1000);
+    CHECK(gate.parked());
+
+    gate.onNavigationStarted(2000);
+    gate.onTick(2000 + RevealGate::kRevealSettleMs + 10);
+    CHECK(gate.parked()); // 被忽略的信号没有武装放行
+
+    gate.onFirstFrame(2100);
+    gate.onTick(2100 + RevealGate::kRevealSettleMs);
+    CHECK_FALSE(gate.parked());
+    CHECK(reason(gate) == "firstFrame");
+}
+
+TEST_CASE("reveal gate: the fallback panel releases a hold that never saw a navigation", "[webview][gate]")
+{
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    gate.onFallbackShown();
+    CHECK_FALSE(gate.parked());
+    CHECK_FALSE(gate.holdingBeforeNavigation());
+    CHECK(reason(gate) == "fallback");
+
+    // 放行过就不再挡：迟到的导航开始不会把面板后面的 WebView 再挪走
+    gate.onNavigationStarted(100);
+    CHECK_FALSE(gate.parked());
+}
+
+TEST_CASE("reveal gate: hold is a no-op once parked or released, and beginLoadAttempt clears it", "[webview][gate]")
+{
+    RevealGate parkedByNav;
+    parkedByNav.onNavigationStarted(1000);
+    parkedByNav.holdBeforeNavigation();
+    CHECK_FALSE(parkedByNav.holdingBeforeNavigation()); // 已经按导航挡住的，不改回「导航之前」
+    parkedByNav.onTick(1000 + RevealGate::kRevealFallbackMs);
+    CHECK(reason(parkedByNav) == "timeout"); // 超时照常
+
+    RevealGate released;
+    released.onNavigationStarted(0);
+    released.onFirstFrame(0);
+    released.onTick(100);
+    REQUIRE_FALSE(released.parked());
+    released.holdBeforeNavigation();
+    CHECK_FALSE(released.parked());
+
+    RevealGate retry;
+    retry.holdBeforeNavigation();
+    retry.beginLoadAttempt();
+    CHECK_FALSE(retry.parked());
+    CHECK_FALSE(retry.holdingBeforeNavigation());
+    retry.holdBeforeNavigation(); // 重试的加载尝试照样能再挡一次
+    CHECK(retry.holdingBeforeNavigation());
+}
+
+TEST_CASE("window closed line names the gate state and the elapsed time", "[webview][gate]")
+{
+    using rinne::webview::windowClosedLine;
+    RevealGate gate;
+    CHECK(windowClosedLine(1500, 1000, gate, true, false) == "window closed after 500 ms (revealed)");
+
+    gate.holdBeforeNavigation();
+    CHECK(windowClosedLine(1500, 1000, gate, true, false) == "window closed after 500 ms (parked before navigation)");
+    gate.onNavigationStarted(1200);
+    CHECK(windowClosedLine(1500, 1000, gate, true, false) == "window closed after 500 ms (parked)");
+
+    // 兜底面板在场时先报面板；闸门不启用的平台报 gate off，不管闸门对象里记着什么
+    CHECK(windowClosedLine(1500, 1000, gate, true, true) == "window closed after 500 ms (fallback)");
+    CHECK(windowClosedLine(1500, 1000, gate, false, false) == "window closed after 500 ms (reveal gate off)");
+
+    gate.onFirstFrame(1300);
+    gate.onTick(1300 + RevealGate::kRevealSettleMs);
+    REQUIRE_FALSE(gate.parked());
+    CHECK(windowClosedLine(1500, 1000, gate, true, false) == "window closed after 500 ms (revealed)");
+
+    // 毫秒计数回绕：起点在回绕前、关窗在回绕后，用时仍是正的小数
+    CHECK(windowClosedLine(100u, 0xFFFFFF00u, gate, true, false) == "window closed after 356 ms (revealed)");
 }

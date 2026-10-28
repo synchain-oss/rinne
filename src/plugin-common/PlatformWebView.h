@@ -102,6 +102,49 @@ inline juce::ColourGradient shellBackdropGradient(juce::Rectangle<float> area)
     return gradient;
 }
 
+// 成品外壳（base.css 的 .sc-shell）的几何。开窗占位与它同形：圆角之外铺外圈色，圆角之内铺占位渐变，
+// 占位切到内容时四个角不跳。两个值与 tokens.css 同值（--r-shell、--page-backdrop），C++ 侧以这里为准，
+// 嵌入资源回归逐项对拍。外圈色与占位色标是两个角色，取值不同（见色标表上面的注释）。
+// 半径是设计盒坐标（缩放前的 CSS px），画的时候乘外壳缩放，见 paintShellPlaceholder
+inline constexpr float kShellCornerRadiusPx = 20.0f;
+inline constexpr juce::uint32 kShellRimRgb = 0x191820;
+
+// 外壳装进窗口的缩放，与页面 shell-fit.js 的 fitFactor 同一条公式：min(宽 / 设计宽, 高 / 设计高)，向下量化到 1e-4。
+// 任一维不是正数时回落 1（还没定尺寸时不能把外壳缩成 0）
+inline float shellFitZoom(float width, float height, float designW, float designH) noexcept
+{
+    if (!(width > 0.0f) || !(height > 0.0f) || !(designW > 0.0f) || !(designH > 0.0f))
+        return 1.0f;
+    const double f = std::fmin(static_cast<double>(width) / designW, static_cast<double>(height) / designH);
+    if (!(f > 0.0) || !std::isfinite(f))
+        return 1.0f;
+    return static_cast<float>(std::floor(f * 1e4) / 1e4);
+}
+
+// 外壳在窗口里的矩形：设计盒乘缩放，在 area 里水平垂直居中（页面里 body 是 flex 居中）。
+// 窗口按「设计盒乘档位」定尺寸时，它与 area 只差量化留下的不到一个像素
+inline juce::Rectangle<float> shellPlaceholderBounds(juce::Rectangle<float> area, float designW, float designH)
+{
+    const float zoom = shellFitZoom(area.getWidth(), area.getHeight(), designW, designH);
+    return juce::Rectangle<float>(designW * zoom, designH * zoom).withCentre(area.getCentre());
+}
+
+// 开窗占位：先整块铺外圈色，再在外壳矩形上画同半径的圆角占位渐变（渐变线按外壳矩形算，与页面上
+// 渐变铺在外壳盒上同形）。两处 C++ paint（宿主组件与浏览器组件）都只经这一个函数画
+inline void paintShellPlaceholder(juce::Graphics& g, juce::Rectangle<float> area, float designW, float designH)
+{
+    g.setColour(juce::Colour(static_cast<juce::uint8>((kShellRimRgb >> 16) & 0xffu),
+                             static_cast<juce::uint8>((kShellRimRgb >> 8) & 0xffu),
+                             static_cast<juce::uint8>(kShellRimRgb & 0xffu)));
+    g.fillRect(area);
+    const auto shell = shellPlaceholderBounds(area, designW, designH);
+    if (shell.isEmpty())
+        return;
+    const float zoom = shellFitZoom(area.getWidth(), area.getHeight(), designW, designH);
+    g.setGradientFill(shellBackdropGradient(shell));
+    g.fillRoundedRectangle(shell, kShellCornerRadiusPx * zoom);
+}
+
 // 平台 WebView 的分支都集中在这里：
 //   Windows 用 WebView2（显式选后端、可写的用户数据目录、静态 loader 的运行时探测）；
 //   macOS 与 Linux 用系统 WebKit（JUCE 内建，不需要探测，恒可用）。
