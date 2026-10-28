@@ -10,6 +10,7 @@
 //      处理函数一开头就有面板在场的守卫，守卫分支只写日志、给回执、返回，会改状态的三个回 not-ready，
 //      分支里不碰窗口、设置文件、内存状态与状态发送；设置语言必须一次写完语言值与「选过」位；
 //      页面隐藏时 JUCE 借道的空白页，导航回调一开头就放行并返回，不记账、不写诊断；
+//      构造里按诊断日志开关装平台文件日志，条件不取反、早于第一行诊断；
 //      宿主之外若出现角色专属的桥函数（别处注册的原生函数、覆写 handleSetLang），处理函数开头同样要有面板守卫。
 //
 // 第一条：网页宿主这一族源文件里，运行期字符串字面量只许 ASCII。
@@ -612,6 +613,22 @@ std::string trimmed(const std::string& s)
     return s.substr(first, s.find_last_not_of(" \n\r\t") - first + 1);
 }
 
+// 构造里装平台文件日志：条件就是「诊断日志开关打开」（不取反、不省略），装日志排在构造里第一次写诊断之前。
+// 开窗过程的诊断从第一行起就要进文件；条件判反会让开关关着时写盘、开着时不写，单测与冒烟都碰不到这一行
+bool diagLogInstalledBeforeFirstDiag(const std::string& ctorBody)
+{
+    const std::string install = "platformlog::install(config_.role);";
+    const std::string guard = "if (uidefaults::diagLogEnabled())";
+    const auto at = ctorBody.find(install);
+    if (at == std::string::npos)
+        return false;
+    const auto before = trimmed(ctorBody.substr(0, at));
+    if (before.size() < guard.size() || before.compare(before.size() - guard.size(), guard.size(), guard) != 0)
+        return false;
+    const auto firstLog = ctorBody.find("logDiag(");
+    return firstLog == std::string::npos || at < firstLog;
+}
+
 // 空白页（页面隐藏时 JUCE 借道）的导航回调：函数体（去注释后）的第一条语句是
 // `if (...isBlankPage(url)) <退出语句>`，条件就是对纯函数的这一次调用（不取反、不并别的条件），
 // 分支（带不带花括号都行）里只有那条退出语句：没有记账、没有日志、没有成员访问。
@@ -1035,6 +1052,11 @@ TEST_CASE("the web host shapes page text, starts its timer early, guards every b
     const auto setLang = functionBody(text, "void WebViewHost::handleSetLang(");
     REQUIRE_FALSE(setLang.empty());
     CHECK(setLangWritesOnce(setLang));
+
+    // 诊断日志：构造里按开关装平台文件日志，早于第一行诊断
+    const auto ctor = functionBody(text, "WebViewHost::WebViewHost(");
+    REQUIRE_FALSE(ctor.empty());
+    CHECK(diagLogInstalledBeforeFirstDiag(ctor));
 }
 
 TEST_CASE("call-site scanners for the blank page and role-specific bridge functions: good and bad samples",
@@ -1138,6 +1160,20 @@ TEST_CASE("call-site scanners for the blank page and role-specific bridge functi
               " syncMirror(); }\n")});
     REQUIRE(overrideBad.size() == 1);
     CHECK(overrideBad[0] == "input/InputHost.cpp: handleSetLang");
+    // 别处只注册、定义在宿主里的同名函数：宿主那份合格的守卫不算，本文件和别的非宿主文件里找不到定义就是不合格
+    const auto decoy = unguardedRoleSpecificHandlers(
+        {file("plugin-common/WebViewHost.cpp", hostText),
+         file("input/InputHost.cpp",
+              "void augment(Options& o) { o = o.withNativeFunction(id, [this](const auto& a, auto c) {"
+              " handleSetLang(a, std::move(c)); }); }\n")});
+    REQUIRE(decoy.size() == 1);
+    CHECK(decoy[0] == "input/InputHost.cpp: handleSetLang");
+    // 宿主自己的文件不当角色代码查（它的注册和处理函数由宿主测试的另一条逐个核对）
+    const std::string hostUnguarded =
+        std::string("void makeOptions() { o.withNativeFunction(id, [this](const auto& a, auto c) {") +
+        " handleRequestInitialState(a, std::move(c)); }); }\n" +
+        "void WebViewHost::handleRequestInitialState(A a, C c)\n{ work(); }\n";
+    CHECK(unguardedRoleSpecificHandlers({file("plugin-common/WebViewHost.cpp", hostUnguarded)}).empty());
     // 守卫的条件写法不认别的：宿主之外既不是 fallback_ 也不是 panelShown() 就不算
     CHECK(unguardedRoleSpecificHandlers(
               {file("input/InputHost.cpp",
@@ -1160,6 +1196,26 @@ TEST_CASE("call-site scanners for the blank page and role-specific bridge functi
         "{ o.withNativeFunction(id, [](const auto&, auto c) { c(ok()); }); }\n void later() { handleLate(); }");
     REQUIRE(names.size() == 1);
     CHECK(names[0].empty());
+}
+
+TEST_CASE("call-site scanner for the diagnostic log install: good and bad samples", "[webview][hygiene]")
+{
+    const std::string good =
+        "{ setOpaque(true);\n if (uidefaults::diagLogEnabled())\n platformlog::install(config_.role);\n"
+        " logDiag(\"first\");\n }";
+    CHECK(diagLogInstalledBeforeFirstDiag(good));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 条件判反
+        "{ if (!uidefaults::diagLogEnabled())\n platformlog::install(config_.role);\n logDiag(\"first\"); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 不看开关，一律装
+        "{ platformlog::install(config_.role);\n logDiag(\"first\"); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 装在第一行诊断之后
+        "{ logDiag(\"first\");\n if (uidefaults::diagLogEnabled())\n platformlog::install(config_.role); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 条件不紧挨着安装
+        "{ if (uidefaults::diagLogEnabled())\n note();\n platformlog::install(config_.role); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 角色写死
+        "{ if (uidefaults::diagLogEnabled())\n platformlog::install(\"input\");\n logDiag(\"first\"); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag("{ logDiag(\"first\"); }")); // 根本不装
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag(""));
 }
 
 TEST_CASE("role-specific bridge functions outside the host, if there are any, guard the fallback panel too",
