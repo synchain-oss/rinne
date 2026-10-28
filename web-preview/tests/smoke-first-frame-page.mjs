@@ -10,6 +10,9 @@
 //   ④ rAF 永不回调（合成停摆，窗口最小化或被完全遮挡的情形）：2.5 s 的保险发信号，且只发一次；
 //   ⑤ 页面脚本报错：boot 守卫在首帧之前上报 __rinne__bootError，并且只报第一条。
 // 浏览器缺失时整套跳过（退出码 2）。本机同时只能有一个浏览器冒烟，gates 里持 gui 锁。
+// 浏览器开调试端口有界重试（lib/browser.mjs 的 withLaunchRetry）：这套曾因「10 秒内没开出调试端口」偶发失败。开头先不起浏览器，
+// 用假的启动与假时钟核对重试的次数、退避、总时长上界与「重试完仍失败照常抛错」；这几条没有浏览器也照跑，失败时不被整套跳过盖掉。
+// 起浏览器之后把「重试了几次」记进输出，便于与 CI 的偶发对拍。
 //
 // 用法：node web-preview/tests/smoke-first-frame-page.mjs [仓库根]
 
@@ -17,12 +20,75 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { cleanupTempDir, makeTempDir } from "../../scripts/lib/safe-rm.mjs";
-import { findBrowser, launchBrowser } from "./lib/browser.mjs";
+import { findBrowser, launchBrowser, LAUNCH_POLICY, withLaunchRetry } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("首帧信号（页面）");
-if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
+
+// 有界重试：attempt 第 okAt 次才「起来」（null 表示这次没开出端口），每次没起来按 waitMs 推进假时钟
+async function retryCase(okAt, policy) {
+    let t = 0;
+    const calls = [];
+    const pauses = [];
+    const attempt = async (k) => {
+        calls.push(k);
+        if (k === okAt) return 9222;
+        t += policy.waitMs;
+        return null;
+    };
+    const clock = { now: () => t, wait: async (ms) => void (pauses.push(ms), (t += ms)) };
+    try {
+        return { ok: await withLaunchRetry(attempt, policy, clock), calls, pauses };
+    } catch (e) {
+        return { err: e, calls, pauses };
+    }
+}
+{
+    // 下面三条用的就是真在用的 LAUNCH_POLICY：先钉住它是「重试 2 次、退避 1 秒与 2 秒、每次等 10 秒、总时长 45 秒封顶」
+    const policy = LAUNCH_POLICY;
+    let unitOk = run.eq(
+        [policy.attempts, policy.waitMs, policy.backoffMs, policy.totalMs],
+        [3, 10000, [1000, 2000], 45000],
+        "有界重试：LAUNCH_POLICY 是起 3 次、每次等 10 秒、退避 1 秒与 2 秒、总时长 45 秒封顶",
+    );
+    const first = await retryCase(1, policy);
+    unitOk =
+        run.eq(
+            [first.ok?.retries, first.calls, first.pauses],
+            [0, [1], []],
+            "有界重试：第一次就起来，不重试、不退避",
+        ) && unitOk;
+    const third = await retryCase(3, policy);
+    unitOk =
+        run.eq(
+            [third.ok?.value, third.ok?.retries, third.calls, third.pauses],
+            [9222, 2, [1, 2, 3], [1000, 2000]],
+            "有界重试：第三次才起来，重试 2 次、两次退避逐次加长",
+        ) && unitOk;
+    const never = await retryCase(0, policy);
+    unitOk =
+        run.check(
+            never.err &&
+                never.err.launchAttempts === 3 &&
+                /重试 2 次/.test(never.err.message) &&
+                never.calls.length === 3,
+            `有界重试：一直没起来，起满 3 次后抛错（写明重试了几次），不返回、不跳过；实得 ${never.err?.message ?? "没有抛错"}`,
+        ) && unitOk;
+    const capped = await retryCase(0, { attempts: 10, waitMs: 10000, backoffMs: [1000], totalMs: 25000 });
+    unitOk =
+        run.check(
+            capped.err && capped.calls.length === 2,
+            `有界重试：总时长上界 25 秒、每次等 10 秒时只起 2 次，不会起满 10 次；实得起了 ${capped.calls.length} 次`,
+        ) && unitOk;
+    if (!findBrowser()) {
+        if (!unitOk) {
+            run.finish();
+            process.exit();
+        }
+        run.skip("没有 Chromium 系浏览器");
+    }
+}
 
 /** 假的 JUCE 宿主：只收 postMessage，记到 window.__posted。 */
 const FAKE_HOST = `
@@ -31,7 +97,16 @@ const FAKE_HOST = `
 `;
 
 const server = await startStaticServer(ROOT);
-const browser = await launchBrowser();
+let browser;
+try {
+    browser = await launchBrowser();
+} catch (e) {
+    await server.close();
+    throw e; // 重试完仍没起来：照常判红（退出码 1），不跳过
+}
+run.log(
+    `  浏览器调试端口：第 ${browser.launch.attempts} 次启动开出（重试 ${browser.launch.retries} 次，${(browser.launch.ms / 1000).toFixed(1)} 秒）`,
+);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 开一个页面：在文档创建前注入 preamble，再打开 URL。 */
