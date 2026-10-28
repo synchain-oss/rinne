@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-ping-pong-eighth",
+  "name": {
+    "zh": "Ping-Pong 1/8",
+    "en": "Ping-Pong 1/8",
+    "fr": "Ping-pong 1/8"
+  },
+  "params": {
+    "feedback": 60,
+    "mix": 25,
+    "delay_mode": 1,
+    "delay_ms": 100,
+    "delay_note": 7,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}

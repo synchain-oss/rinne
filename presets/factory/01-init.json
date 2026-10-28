@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-init",
+  "name": {
+    "zh": "Init",
+    "en": "Init",
+    "fr": "Initialisation"
+  },
+  "params": {
+    "feedback": 0,
+    "mix": 25,
+    "delay_mode": 0,
+    "delay_ms": 100,
+    "delay_note": 10,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}

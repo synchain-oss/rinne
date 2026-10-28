@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-long-hold-92",
+  "name": {
+    "zh": "Long Hold 92 %",
+    "en": "Long Hold 92 %",
+    "fr": "Maintien long 92 %"
+  },
+  "params": {
+    "feedback": 92,
+    "mix": 50,
+    "delay_mode": 0,
+    "delay_ms": 100,
+    "delay_note": 10,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}
