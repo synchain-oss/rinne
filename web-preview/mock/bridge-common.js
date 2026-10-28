@@ -9,7 +9,14 @@
 //   - 回声默认异步：写函数先返回回执，rinne.state 在下一拍（250 ms 内）才到；
 //   - 每隔几拍在新帧之后补发一帧过期的全量快照（序号更小），页面必须按 seq 丢弃；
 //   - 全局位（语言、缩放、规则确认、引导已看）存 localStorage["rinne.uiDefaults"]，同源的两个页面共享；
-//     ?fresh=1 先清空；每实例的已关闭提示存 sessionStorage。
+//     ?fresh=1 先清空；每实例的已关闭提示存 sessionStorage；
+//   - 缩放锁定（真桥在系统 WebKit 过旧时的行为）：全局位里的 scaleLocked 为真时，setUiScale 与 commitUiScale
+//     回 scale-locked，没确认的预览作废，窗口档位回到 1。scaleLocked 是预览专用的全局位，真桥没有这一项；
+//     每次调用现读，所以在预览页的控制台里改 localStorage 就能走到锁定态，改回去就解锁；
+//   - 兜底面板在场（真桥在运行时缺失、前端启动失败或加载超时后会换上兜底面板，网页隐藏）：全局位里的 fallbackShown 为真时，
+//     setLang、setUiScale、commitUiScale 在参数校验之前就回 not-ready，什么都不改（不写全局位、不动档位与预览、不排回声）；
+//     requestInitialState 只回 { ok: true }，不发首帧。
+//     fallbackShown 同样是预览专用的全局位，真桥没有这一项，每次调用现读。
 // 模块顶层不碰 window，存储与计时器都从外面注入，Node 里可以直接 import 和测试。
 
 import { DESIGN } from "../../web/shared/design-box.js";
@@ -39,7 +46,10 @@ export function memoryStorage() {
     };
 }
 
-/** 全局位的默认值。键名与原生 UiDefaultsStore 对应。 */
+/**
+ * 全局位的默认值。除 scaleLocked 与 fallbackShown 外，键名与原生 UiDefaultsStore 对应；
+ * 这两项只给预览走到缩放锁定态与兜底面板在场态用，真桥没有。
+ */
 export function defaultUiDefaults() {
     return {
         langChosen: false,
@@ -50,6 +60,8 @@ export function defaultUiDefaults() {
         uiScaleInput: 1,
         uiScaleOutput: 1,
         diagLog: false,
+        scaleLocked: false,
+        fallbackShown: false,
     };
 }
 
@@ -239,22 +251,53 @@ export function commonFunctions(core, env) {
     const keyScale = role === "input" ? "uiScaleInput" : "uiScaleOutput";
     const keyGuide = role === "input" ? "guideSeenInput" : "guideSeenOutput";
     let pendingScale = null; // setUiScale 应用后、commitUiScale 之前的档位
+    // 缩放锁定：与真桥同一套语义。锁定时窗口钉在 100%，没确认的预览作废并退回最近一次确认的档位，选档与确认都回
+    // scale-locked；解锁后窗口回到那一档。全局位每次调用现读，所以解锁在下一次选档或确认时才落到窗口档位上。
+    let scaleBeforePreview = 1; // 当前这段待确认的预览开始前的档位（只在有待确认的预览时有意义）
+    let lockSeen = false; // 上一次调用时是否处于锁定
+    let settledScale = 1; // 锁定开始时的「最近一次确认的档位」，解锁时退回它
+    const lockGuard = () => {
+        const locked = defaults.get().scaleLocked === true;
+        if (locked && !lockSeen) {
+            settledScale = pendingScale !== null ? scaleBeforePreview : env.scale;
+            pendingScale = null;
+            env.scale = 1;
+            core.scheduleEcho();
+        } else if (!locked && lockSeen) {
+            env.scale = settledScale;
+            core.scheduleEcho();
+        }
+        lockSeen = locked;
+        return locked ? { ok: false, reason: "scale-locked" } : null;
+    };
+    // 兜底面板在场：与真桥同一套语义，守卫在 setLang、setUiScale、commitUiScale 的最前面，先于参数校验，回执与参数无关
+    const panelShown = () => defaults.get().fallbackShown === true;
+    const notReady = () => ({ ok: false, reason: "not-ready" });
     return {
-        requestInitialState: () => core.requestInitialState(),
+        // 面板在场时只回执：不发首帧，也不置就绪（真桥同样不把它当作桥已就绪）
+        requestInitialState: () => (panelShown() ? { ok: true } : core.requestInitialState()),
         setLang(code) {
+            if (panelShown()) return notReady();
             if (typeof code !== "string" || !LANG_CODES.includes(code)) return { ok: false, reason: "bad-lang" };
             defaults.set({ lang: code, langChosen: true });
             core.scheduleEcho();
             return { ok: true, lang: code };
         },
         setUiScale(f) {
+            if (panelShown()) return notReady();
             if (typeof f !== "number" || !box.presets.includes(f)) return { ok: false, reason: "bad-scale" };
+            const locked = lockGuard();
+            if (locked) return locked;
+            if (pendingScale === null) scaleBeforePreview = env.scale;
             pendingScale = f;
             env.scale = f;
             core.scheduleEcho();
             return { ok: true, scale: f };
         },
         commitUiScale() {
+            if (panelShown()) return notReady();
+            const locked = lockGuard();
+            if (locked) return locked;
             if (pendingScale === null) return { ok: false, reason: "no-pending" };
             defaults.set({ [keyScale]: pendingScale });
             pendingScale = null;

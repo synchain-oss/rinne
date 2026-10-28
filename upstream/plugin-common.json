@@ -1,0 +1,116 @@
+{
+  "sources": {
+    "scvb-macos-au": {
+      "repo": "synchain-oss/scvb",
+      "ref": "feature/macos-au",
+      "sha": "e8a956907203f2285e9f691ca56f09f700d0328a"
+    }
+  },
+  "files": [
+    {
+      "path": "cmake/RinneWebAssets.cmake",
+      "source": "scvb-macos-au",
+      "from": "cmake/ScvbWebAssets.cmake",
+      "fromBlob": "4e2ad5ce59540125aaffd3b7e3d8d4b223e416e0",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/BridgeBase.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/BridgeBase.h",
+      "fromBlob": "717aa1a6613efecf3231d9c55dc81c5c7bd7b37c",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/BridgeBase.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/BridgeBase.cpp",
+      "fromBlob": "c3f0784869f8dd18d3bfe0f4af7b980bd29100ac",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/FallbackPanel.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/FallbackPanel.h",
+      "fromBlob": "6006c7507552db45607b6b17a2e65ebaa086b5f3",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/FallbackPanel.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/FallbackPanel.cpp",
+      "fromBlob": "18ba8e1f758d87640f88f66c9e92332aed296e3a",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/PlatformWebView.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/PlatformWebView.h",
+      "fromBlob": "29b1481dcf9bb4c1961a82ee3027f5d67a4e3862",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/PlatformWebView.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/PlatformWebView.cpp",
+      "fromBlob": "f1db909142fa18ca8ae8db5554b1083800815870",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/PlatformWebViewRuntime.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/PlatformWebViewRuntime.cpp",
+      "fromBlob": "50a18cbc3a38ea2b69e67c2efe8da940985fb8e1",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/plugin-common/ResourceProvider.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/ResourceProvider.h",
+      "fromBlob": "2edfc80e547f22631ca657d6311a6e2acc7a81ea",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/ResourceProvider.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/ResourceProvider.cpp",
+      "fromBlob": "09db59a463257fdc0dc92dd15a040bcee9534f8a",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/UiDefaultsStore.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/UiDefaultsStore.h",
+      "fromBlob": "9b3fdc90914009eec1ed926f689f4f4c246a1e5c",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/plugin-common/UiDefaultsStore.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/UiDefaultsStore.cpp",
+      "fromBlob": "504c5f17aae90ea4e3b49488e71eb4ff9f301a7b",
+      "mode": "adapted"
+    },
+    {
+      "path": "src/plugin-common/WebViewHost.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/WebViewHost.h",
+      "fromBlob": "0571d96ae3bf56ab9e77c52d5da25748c05894c2",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/WebViewHost.cpp",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/WebViewHost.cpp",
+      "fromBlob": "4ca998aacfdcf03892cdda78d92906e453bfb935",
+      "mode": "forked"
+    },
+    {
+      "path": "src/plugin-common/WebViewRevealGate.h",
+      "source": "scvb-macos-au",
+      "from": "src/plugin-common/WebViewRevealGate.h",
+      "fromBlob": "3ddb27206c1ead76973476d7042ab2998d5c50fb",
+      "mode": "adapted"
+    }
+  ]
+}
