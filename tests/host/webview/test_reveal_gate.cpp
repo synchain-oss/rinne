@@ -321,6 +321,43 @@ TEST_CASE("reveal gate: a second navigation start does not move the deadline", "
     CHECK(reason(gate) == "timeout");
 }
 
+TEST_CASE("reveal gate: bridge ready while still held starts the deadline like a navigation start", "[webview][gate]")
+{
+    // 纵深防御：导航开始没送到、桥却就绪了。闸门不能永远挪在外面，补记之后照常超时放行
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    CHECK(gate.onBridgeReady(4000));
+    CHECK(gate.parked());
+    CHECK_FALSE(gate.holdingBeforeNavigation());
+
+    gate.onTick(4000 + RevealGate::kRevealFallbackMs - 1);
+    CHECK(gate.parked());
+    gate.onTick(4000 + RevealGate::kRevealFallbackMs);
+    CHECK_FALSE(gate.parked());
+    CHECK(reason(gate) == "timeout");
+}
+
+TEST_CASE("reveal gate: bridge ready after a navigation start changes nothing", "[webview][gate]")
+{
+    // 正常顺序：导航开始先到。桥就绪不补记，超时仍从导航开始起算
+    RevealGate gate;
+    gate.holdBeforeNavigation();
+    gate.onNavigationStarted(1000);
+    CHECK_FALSE(gate.onBridgeReady(2500));
+    gate.onTick(1000 + RevealGate::kRevealFallbackMs);
+    CHECK_FALSE(gate.parked());
+    CHECK(reason(gate) == "timeout");
+
+    // 已经放行之后也不补记，不会再挪走
+    CHECK_FALSE(gate.onBridgeReady(9000));
+    CHECK_FALSE(gate.parked());
+
+    // 从没挡住过（系统 WebKit 上闸门不武装）
+    RevealGate idle;
+    CHECK_FALSE(idle.onBridgeReady(100));
+    CHECK_FALSE(idle.parked());
+}
+
 TEST_CASE("reveal gate: a first frame signal during the hold is ignored", "[webview][gate]")
 {
     RevealGate gate;

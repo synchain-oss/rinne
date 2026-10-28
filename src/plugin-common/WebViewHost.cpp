@@ -149,11 +149,11 @@ public:
 
     // 挡住期间（本组件在可视区之外，JUCE 不再画它）代驱动上面那一句基类绘制：画进一张临时小图，屏上什么都不变，
     // 基类尾部那句「控制器没建起来就继续检查窗口关联」照样每个定时 tick 被调到一次。
-    // 调的是同一个基类函数，不是复刻件，理由见上。小图用软件渲染，免得每个 tick 建一次 GPU 绘制上下文
+    // 调的是同一个基类函数，不是复刻件，理由见上。小图用软件渲染，免得每个 tick 建一次 GPU 绘制上下文；
+    // 小图只建一次，挡住期间每个 tick 复用
     void pumpControllerCreation()
     {
-        juce::Image scratch(juce::Image::RGB, 1, 1, false, juce::SoftwareImageType());
-        juce::Graphics g(scratch);
+        juce::Graphics g(pumpScratch_);
         juce::WebBrowserComponent::paint(g);
     }
 
@@ -212,6 +212,8 @@ public:
 
 private:
     WebViewHost& owner_;
+    // pumpControllerCreation 画进去的 1×1 软件图：只建一次，挡住期间每个 tick 复用
+    juce::Image pumpScratch_{juce::Image::RGB, 1, 1, false, juce::SoftwareImageType()};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HostWebView)
 };
@@ -833,6 +835,9 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
         return;
     }
     bridgeReady_ = true; // 前端确认就绪，此后定时器才允许发送事件
+    // 看门狗从这里起就不管了；闸门如果还挡在导航之前，按导航开始补记，超时兜底照常生效（理由见 onBridgeReady）
+    if (revealGate_.onBridgeReady(juce::Time::getMillisecondCounter()))
+        logDiag("bridge ready while still held before navigation; reveal deadline starts now");
     // 本实例的桥活着，共享的 WebView2 进程组必在跑，其它编辑器可按热预算起看门狗。
     // requestInitialState 可能被同一页面多次调用（页面重载后要重来一次），故用标志防重复计数
     if (!countedAsReady_)
