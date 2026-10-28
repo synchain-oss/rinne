@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 参数表（src/input/ParamTable.h）与 tests/golden/params-input.json 的对拍。参数表是冻结前的草案：
+// 参数表（src/input/ParamTable.h）与 tests/golden/params-input.json 的对拍。参数表已冻结，规则见
+// docs/contracts/PARAMETERS.md：
 //   · 表自身：11 个 ID 与序号；类型、范围、默认与可自动化同契约字面量相等；ID 唯一；
 //     默认值在范围内；布尔与档位的形状；delay_note 16 档顺序，以及每一档的桥取值 id（与桥文档逐个对应、时值严格升序）；
 //   · 宿主参数 ID（vst3 / au 两列）：用纯 C++ 复算 JUCE 的散列，已知答案另算一份，不靠 golden 自证；
@@ -42,7 +43,7 @@ const std::vector<std::string> kContractIds = {"feedback", "loop_on",    "mix", 
 
 // 契约里每个参数的类型、范围、默认与可自动化，单独写一份字面量：
 // golden 是从表渲染的，表与 golden 一起改错时只有它能拦住。
-// 步进与刻度契约没给（ceiling 的 0.1 除外），不在这里钉。
+// 步进、刻度、单位与显示名不在这里重复：契约文档的参数表与 golden 逐格对拍（contract-static-params）。
 struct Contract
 {
     const char* id;
@@ -316,7 +317,7 @@ TEST_CASE("golden rows match the table field by field", "[params][golden]")
 {
     const Golden golden = loadGolden();
     REQUIRE(golden.loaded);
-    CHECK(golden.top.str("status") == std::optional<std::string>("draft"));
+    CHECK(golden.top.str("status") == std::optional<std::string>("frozen"));
     CHECK(golden.top.num("versionHint") == std::optional<double>(1.0));
     CHECK(golden.top.num("count") == std::optional<double>(static_cast<double>(table().size())));
 
