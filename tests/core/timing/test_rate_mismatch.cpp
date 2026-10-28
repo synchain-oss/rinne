@@ -9,6 +9,7 @@
 //   - 改回一致：新配对，从当前写头起读，D 之前一直是 0；之后读到的正是 D 个样本之前写下的那一帧；
 //   - 本端自己换采样率（prepare）造成的不一致同样处理；开机就不一致的也一样；不一致超过 250 ms 也一样；
 //   - 比较用的转换与 Output 发布采样率的转换相同（取整）。
+//   - 对端槽（错序证据的块序号与时间戳、对端报的违约）的读取与采样率比较无关，不一致的块照常读。
 //
 // 标 ⛔ 的是删除式验证点：把对应的实现改坏，本文件必须变红。
 //   ⛔ 不比较采样率（paired 只看写权）→ 不一致期间回送照读，本文件的大部分用例变红；
@@ -16,6 +17,7 @@
 //   ⛔ 采样率比较写成「环头值大于本端才算不一致」→ 反向（本端更高）那一例变红；
 //   ⛔ 本端采样率取整改成四舍五入 → 非整数采样率那一例变红；
 //   ⛔ 不一致期间仍算有对端（恢复一致不按新配对）→ 恢复时记一次格式变化重同步，「改回一致」一例变红。
+//   ⛔ 不一致的块不读对端槽 → 错序证据没有新块可判、对端在不一致期间报的违约不计，「对端槽照常读」一例变红。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -24,6 +26,7 @@
 #include <vector>
 
 #include "TimingKit.h"
+#include "loop/ExportLatch.h"
 
 namespace
 {
@@ -243,4 +246,58 @@ TEST_CASE("采样率不一致 比较用的转换与 Output 发布采样率的转
     CHECK(run.rig.status().peerSampleRate == 44100u);
     CHECK(run.rig.status().rateMismatch == 0u);
     CHECK(run.rig.status().paired == 1u);
+}
+
+TEST_CASE("采样率不一致 对端槽照常读：错序证据照常出票，对端报的违约照常计一次，恢复一致后不重复计")
+{
+    // 采样率不一致只改配对位；对端槽（块序号、宿主时间戳、违约标志）的读取与环头无关，每个块都读。
+    // ⛔ 删除式验证点：不一致的块不读对端槽 → 槽里的值停在旧的，错序证据没有新块可判，票数清零，结论定不下来；
+    //    对端在不一致期间报的违约也不会被计到，本用例变红。
+    Run run;
+    run.rig.enablePeerSlot();
+    TransportInfo transport;
+    transport.nonrealtime = true;
+    transport.hostNsValid = true;
+    std::uint64_t ns = 5000000;
+    constexpr std::uint64_t kStepNs = 256ull * 1000000000ull / 48000ull;
+    // 一个宿主周期：Output 先发布这个周期的时间戳（Output 在前的一票），Input 再读；环里的帧仍是 Input 先读、写方后写
+    const auto cycle = [&] {
+        transport.hostNs = ns;
+        run.rig.publishPeer(transport);
+        run.last = run.rig.feed(kBlock, run.params, transport);
+        run.rig.write(kBlock);
+        ns += kStepNs;
+    };
+
+    cycle(); // 第一次读到对端槽，只记块序号
+    cycle(); // 第一票
+    CHECK(run.rig.status().orderVotes == 1u);
+
+    run.republish(96000);
+    cycle(); // 不一致的第一块：第二票
+    CHECK(run.rig.status().rateMismatch == 1u);
+    CHECK(run.rig.status().orderVotes == 2u);
+    CHECK(run.rig.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kUnknown));
+    cycle(); // 第三票，在不一致期间定案
+    CHECK(run.rig.status().rateMismatch == 1u);
+    CHECK(run.rig.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+    CHECK(run.rig.status().exportEvents == 0u);
+
+    // 对端在不一致期间的一个新块带违约位：计一次（该块是离线块），原因只有对端违约
+    run.rig.setPeerOverMax(true);
+    cycle();
+    run.rig.setPeerOverMax(false);
+    CHECK(run.rig.status().exportEvents == 1u);
+    CHECK(run.rig.status().exportCauses == rinne::loop::kExportCausePeerOverMax);
+    cycle();
+    CHECK(run.rig.status().exportEvents == 1u);
+
+    // 改回一致：新配对不算导出不一致，对端那一次也不会再计
+    run.republish(48000);
+    for (int i = 0; i < 4; ++i)
+    {
+        cycle();
+    }
+    CHECK(run.rig.status().rateMismatch == 0u);
+    CHECK(run.rig.status().exportEvents == 1u);
 }
