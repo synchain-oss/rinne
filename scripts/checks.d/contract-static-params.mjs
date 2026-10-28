@@ -745,7 +745,15 @@ export function selfTest(root) {
                     4,
                     "1",
                 ),
-                goldenText: goldenWith((g) => Object.assign(g.ceiling, { kind: "choice" })),
+                // 档位参数在 golden 里多两栏，给空表让它仍是合法 JSON，golden 一侧的判据才真的跑到
+                goldenText: goldenWith((g) => Object.assign(g.ceiling, { kind: "choice", choices: [], bridgeIds: [] })),
+            }),
+        ],
+        [
+            "只在 golden 里改一个类型",
+            ["frozen-param"],
+            run({
+                goldenText: goldenWith((g) => Object.assign(g.ceiling, { kind: "choice", choices: [], bridgeIds: [] })),
             }),
         ],
         ["golden 的 versionHint 改成 2", ["frozen-hint"], run({ goldenText: goldenWith((g) => (g.versionHint = 2)) })],
