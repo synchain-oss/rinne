@@ -76,7 +76,7 @@ InputStateGlue::InputStateGlue(juce::AudioProcessorValueTreeState& tree)
     publishConfigsLocked();
 }
 
-void InputStateGlue::setState(const void* data, int sizeInBytes)
+InputStateGlue::SetStateResult InputStateGlue::setState(const void* data, int sizeInBytes)
 {
     std::lock_guard<std::mutex> serial(loadMutex_);
     const auto* bytes = static_cast<const std::uint8_t*>(data);
@@ -84,6 +84,7 @@ void InputStateGlue::setState(const void* data, int sizeInBytes)
 
     ParamValues values{};
     bool applyParams = false;
+    SetStateResult result;
     std::shared_ptr<const std::function<void()>> hook;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -98,9 +99,16 @@ void InputStateGlue::setState(const void* data, int sizeInBytes)
         }
         state::glue::mergeLoaded(document_, std::move(loaded), step.mode);
         if (step.mode == state::glue::ApplyMode::Full)
+        {
             publishConfigsLocked();
+            result.applied = document_.configs;
+        }
         else if (step.mode == state::glue::ApplyMode::ParamsOnly)
+        {
             stateSeq_.fetch_add(1u, std::memory_order_relaxed);
+        }
+        result.status = step.status;
+        result.mode = step.mode;
         lastLoad_.store(static_cast<std::uint8_t>(step.status), std::memory_order_relaxed);
         holding_.store(writeBack_.holding(), std::memory_order_relaxed);
         hook = confirmClaim_;
@@ -120,6 +128,7 @@ void InputStateGlue::setState(const void* data, int sizeInBytes)
         writeParams(values);
     }
     callHook(hook);
+    return result;
 }
 
 void InputStateGlue::getState(juce::MemoryBlock& destData)

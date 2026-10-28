@@ -51,8 +51,8 @@ struct InstanceHostConfig
     ipc::NameScope scope = ipc::NameScope::formal();
     ipc::ISegmentBackend* backend = nullptr; // 空 = 自带的平台后端；不拥有
     bool startTimer = true; // 假 = 不起 25 Hz 定时器，由调用方调 tick
-    // 单调纳秒时钟。空 = 挂起判定用 diag::probeMonoNs、会合用 util::monoNowMs（跨进程比心跳只能用同一个时钟）；
-    // 给了就两处都用它（会合取它除以 10^6 的毫秒）
+    // 单调纳秒时钟。空 = 挂起判定用本类的 monoNs（转调 diag::probeMonoNs，正式构建也用）、会合用 util::monoNowMs
+    // （跨进程比心跳只能用同一个时钟）；给了就两处都用它（会合取它除以 10^6 的毫秒）
     MonoNsClock clock = nullptr;
     void* clockContext = nullptr;
 };

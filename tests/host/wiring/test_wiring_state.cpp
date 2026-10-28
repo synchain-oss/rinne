@@ -329,3 +329,40 @@ TEST_CASE("before settling, each loaded project sets the tail mode the host is t
                                  [](state::StateDocument& d) { d.configs.tailMode = state::TailMode::Auto; }));
     CHECK(input->getTailMode() == RinneProcessorBase::TailMode::Auto);
 }
+
+TEST_CASE("the group and tail handed on are the ones this setState applied, even if settings change right after",
+          "[host][wiring][state]")
+{
+    formalOnly();
+    Rig rig;
+    auto input = rig.makeInput();
+    auto output = rig.makeOutput();
+    // 认领转正的回调在 setState 放开锁之后、返回之前调用：借它在两步之间改一次设置，模拟别的线程恰好在这时改了设置
+    int inputCalls = 0;
+    input->stateGlue()->setConfirmClaimHook([&] {
+        if (inputCalls++ == 0)
+            input->stateGlue()->editConfigs([](state::Configs& c) {
+                c.group = 7;
+                c.tailMode = state::TailMode::Auto;
+            });
+    });
+    int outputCalls = 0;
+    output->stateGlue()->setConfirmClaimHook([&] {
+        if (outputCalls++ == 0)
+            output->stateGlue()->editConfigs([](state::Configs& c) { c.group = 6; });
+    });
+
+    // ⛔ 壳在 setState 返回之后再读 configs()（不用胶水交回的这一次的副本）→ 会合拿到 7 与 6，tail 成了自动
+    loadState(*input, stateBytes(state::Role::Input, [](state::StateDocument& d) {
+        d.configs.group = 4;
+        d.configs.tailMode = state::TailMode::Infinite;
+    }));
+    loadState(*output, stateBytes(state::Role::Output, [](state::StateDocument& d) { d.configs.group = 5; }));
+    REQUIRE(inputCalls >= 1);
+    REQUIRE(outputCalls >= 1);
+    REQUIRE(input->stateGlue()->configs().group == 7); // 两步之间确实改过
+    REQUIRE(output->stateGlue()->configs().group == 6);
+    CHECK(input->instanceHost().group() == 4);
+    CHECK(input->getTailMode() == RinneProcessorBase::TailMode::Infinite);
+    CHECK(output->instanceHost().group() == 5);
+}

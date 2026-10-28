@@ -99,17 +99,15 @@ protected:
 
     // ---- 正式构建：两端胶水共用的两段接线（Glue 是 InputStateGlue 或 OutputStateGlue，两者的这几个接口同名） ----
     // 宿主 setState：胶水按定型规则应用。这一次是全量应用（定型前、成功读入）时，设置里的组号交给会合（意图是工程恢复，
-    // 不是智能默认），tail_mode 交给 setTailMode。是不是全量应用用胶水自己的那个判定（applyModeFor），不另写一份；
-    // 读定型状态与 setState 之间若另一个线程恰好定型，按读到的算（宿主与界面都在消息线程上时不会发生）。
+    // 不是智能默认），tail_mode 交给 setTailMode。是不是全量应用、换上的是哪份设置，都用胶水在锁里定下交回的这一次的
+    // 结果：不另读定型状态、不另判，也不在返回之后再读 configs()，别的线程在两步之间定型或改设置都不会让两边结论不一。
     // 写回保留、Corrupt 保持当前、编码失败交空块都在胶水里，这里不另做
     template<typename Glue>
     void loadHostState(Glue& glue, const void* data, int sizeInBytes)
     {
-        const bool settled = glue.isSettled();
-        glue.setState(data, sizeInBytes);
-        const std::optional<state::StateLoadStatus> status = glue.lastLoadStatus();
-        if (status.has_value() && state::glue::applyModeFor(*status, settled) == state::glue::ApplyMode::Full)
-            restoreConfigs(glue.configs());
+        const auto result = glue.setState(data, sizeInBytes);
+        if (result.mode == state::glue::ApplyMode::Full && result.applied.has_value())
+            restoreConfigs(*result.applied);
     }
 
     // 界面上手动选组（组号 0..8，0 = 离组）：写回设置（来源记为用户选的）、交给会合、定型、告诉宿主工程有改动。

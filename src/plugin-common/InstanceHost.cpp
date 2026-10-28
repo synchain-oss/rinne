@@ -52,6 +52,14 @@ private:
     int* saved_;
 };
 
+// 本类读单调纳秒都经这里：默认时钟（两端一起挂起的判定）与会合退避的种子。正式构建也靠它，不是探针专用。
+// 它和 util::monoNowMs 不是同一个时钟，不能拿去和共享内存里的心跳比（会合与心跳一律用 monoNowMs，见 nowMs）。
+// 转调的 diag::probeMonoNs 名字带 probe 是 core 里的历史命名：毫秒时钟不够细，纳秒读数当初是为探针日志写的
+std::uint64_t monoNs() noexcept
+{
+    return diag::probeMonoNs();
+}
+
 } // namespace
 
 // 一步换槽：两个实例在不同线程上同时构造时，后换的那个拿回来的是转发出口自己，不记，转发目标就不会指向自己
@@ -102,7 +110,7 @@ InstanceHost::InstanceHost(juce::AudioProcessor& processor, const InstanceHostCo
                                   static_cast<std::uint32_t>(build::kVersionPatch));
     rc.format = isAuWrapper() ? ipc::kFormatAu : ipc::kFormatVst3;
     rc.hostPpid = ipc::parentProcessId();
-    rc.seed = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this)) ^ diag::probeMonoNs();
+    rc.seed = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this)) ^ monoNs();
     rendezvous_ = std::make_unique<ipc::Rendezvous>(rc);
 
     if (config_.startTimer)
@@ -122,7 +130,7 @@ InstanceHost::~InstanceHost()
 
 std::uint64_t InstanceHost::nowNs() const noexcept
 {
-    return config_.clock != nullptr ? config_.clock(config_.clockContext) : diag::probeMonoNs();
+    return config_.clock != nullptr ? config_.clock(config_.clockContext) : monoNs();
 }
 
 std::uint64_t InstanceHost::nowMs() const noexcept

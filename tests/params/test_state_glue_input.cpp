@@ -5,7 +5,8 @@
 //   · Empty / Corrupt / IgnoredProbe 保持当前；RejectedNewer 原字节回写到下一次成功读入，期间的改动不进 state；
 //   · setState 与 prepare 的先后无关；limiter 与 ceiling 随工程保存、加载不复位；
 //   · 保存时先 set 已知参数再裁剪（245 / 246 个未知 id，长 id 的载荷上限），丢弃条数计进 droppedUnknownParams；
-//   · 编码失败交出空块；认领转正的回调在 getState、setState、定型三处被调用；markStateDirty 的两个标志。
+//   · 编码失败交出空块；认领转正的回调在 getState、setState、定型三处被调用；markStateDirty 的两个标志；
+//   · setState 交回这一次的读入结果、应用方式与换上的设置，口径与 applyModeFor 相同。
 // 分流与保存顺序的纯逻辑另在 tests/core/state/test_state_glue_common.cpp 里直接测。
 
 #include <catch2/catch_approx.hpp>
@@ -777,4 +778,47 @@ TEST_CASE("input glue: snapshot 只写命令序号与三个工程开关", "[para
     CHECK(out.feedbackPercent == 77.0f); // 参数字段归 InputParams::snapshot
     CHECK(out.presetSeq == 9u);
     CHECK(out.panicSeq == 4u);
+}
+
+TEST_CASE("input glue: setState 交回这一次的读入结果与应用方式，口径与 applyModeFor 相同", "[params][state-glue]")
+{
+    // 本构建的 abi 是 1，还没有更低的版本可迁，Migrated 造不出来；它的口径（与 Ok 相同）在 core 的分流用例里测
+    const Bytes ok = encodeOf(stateA());
+    const Bytes newer = newerState(1);
+    const Bytes probe = rinne::test::rawContainer(rinne::state::kProbeAbi, 1u, {});
+    struct Case
+    {
+        const char* name;
+        const void* data;
+        int size;
+        StateLoadStatus status;
+    };
+    const Case cases[] = {
+        {"成功读入", ok.data(), static_cast<int>(ok.size()), StateLoadStatus::Ok},
+        {"更高版本", newer.data(), static_cast<int>(newer.size()), StateLoadStatus::RejectedNewer},
+        {"空", nullptr, 0, StateLoadStatus::Empty},
+        {"坏字节", kCorrupt.data(), static_cast<int>(kCorrupt.size()), StateLoadStatus::Corrupt},
+        {"探针", probe.data(), static_cast<int>(probe.size()), StateLoadStatus::IgnoredProbe},
+    };
+    for (const bool settled : {false, true})
+    {
+        for (const auto& c : cases)
+        {
+            INFO(c.name << (settled ? "，定型后" : "，定型前"));
+            Rig rig;
+            if (settled)
+                REQUIRE(rig.glue.markUserAction());
+            const InputStateGlue::SetStateResult result = rig.glue.setState(c.data, c.size);
+            CHECK(result.status == c.status);
+            CHECK(rig.glue.lastLoadStatus() == result.status);
+            CHECK(result.mode == rinne::state::glue::applyModeFor(c.status, settled));
+            // 设置副本只在全量应用时交回，交回的就是这一次换上的那份
+            CHECK(result.applied.has_value() == (result.mode == rinne::state::glue::ApplyMode::Full));
+            if (result.applied.has_value())
+            {
+                CHECK(result.applied->group == 3);
+                CHECK(sameConfigs(*result.applied, rig.glue.configs()));
+            }
+        }
+    }
 }
