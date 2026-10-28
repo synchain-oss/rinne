@@ -62,15 +62,22 @@ function Get-MarkedLingerCommand([int]$Seconds, [string]$StopFile, [string]$Star
 # （300 秒的兜底时限只防本进程被杀之后它一直留着）。
 # 判据不比较墙钟秒数，只看因果：孙进程已经起来（它自己写启动标记）、还活着的时候，调用方读到 EOF 没有。
 #   Launched          孙进程写出了启动标记；没起来就什么也证明不了，不能算通过。
-#   EofBeforeRelease  EOF 在本函数写停止文件之前就读到了：EOF 不依赖孙进程退出，即孙进程没有拖住调用方。
-# 机器再忙，这两条的真假也不变，变的只是等多久。GraceSeconds 是「等不到就当它被拖住」的上限，不是通过的门槛：
+#   EofBeforeRelease  孙进程起来之后 GraceSeconds 之内、本函数写停止文件之前就读到了 EOF：EOF 不依赖孙进程退出，即孙进程没有
+#                     拖住调用方。正例看这一条。
+#   MiddleExited      本函数写停止文件之前，中间层已经退出。窗口里没读到 EOF 时先等中间层退出（最多 ExitSeconds），
+#                     上限内没退就记 false，不放走孙进程去赌。
+#   EofAtRelease      中间层退出之后又等了 SettleSeconds，写停止文件的那一刻 EOF 到了没有。孙进程拿着管道时，中间层都退出了
+#                     EOF 也来不了；没有泄漏时，中间层一退出 EOF 马上就到。
+# 机器再忙，这几条的真假也不变，变的只是等多久。GraceSeconds 是「等不到就当它被拖住」的上限，不是通过的门槛：
 # 孙进程还拿着管道时 EOF 来不了，泄漏必定表现为等满 GraceSeconds、写停止文件放走孙进程之后才读到 EOF，所以放宽这个上限
-# 不会漏掉泄漏，只会让泄漏的那次多等几秒。反例（故意不改句柄继承）只需证明被拖住，用较短的 GraceSeconds 少等几秒。
-# 返回 Seconds（读到 EOF 用的秒数，只用于显示）、Done（读到 EOF 且中间层跑完）、Launched、EofBeforeRelease，
-# 以及临时目录删掉了没有：量完写停止文件，孙进程退出、放开日志，临时目录才删得掉。临时目录经运行器导入的
+# 不会漏掉泄漏，只会让泄漏的那次多等几秒。
+# 反例（故意不改句柄继承）要的是拖住的直接证据，只看「窗口里没读到 EOF」不够：机器极忙时中间层自己可能还没退出，那时没有 EOF
+# 并不说明谁被拖住，没有泄漏也会放走孙进程之后才读到。所以反例用 Test-CallerHeld：中间层放走前已经退出、EOF 仍然没到。
+# 返回 Seconds（读到 EOF 用的秒数，只用于显示）、Done（读到 EOF 且中间层跑完）、Launched、EofBeforeRelease、MiddleExited、
+# EofAtRelease，以及临时目录删掉了没有：量完写停止文件，孙进程退出、放开日志，临时目录才删得掉。临时目录经运行器导入的
 # scripts/lib/TempDir.psm1 建与删（新建的、本进程的，删之前按真实路径核对）。
 # 30-plugin.ps1 的 G8 也在这里量（它没有自己的自测）。中间层像运行器那样先导入 scripts/lib/StdHandles.psm1。
-function Measure-CallerEof([string]$Root, [string]$File, [string]$Call, [double]$GraceSeconds = 60) {
+function Measure-CallerEof([string]$Root, [string]$File, [string]$Call, [double]$GraceSeconds = 60, [double]$ExitSeconds = 60, [double]$SettleSeconds = 8) {
     $pwsh = (Get-Process -Id $PID).Path
     $tmp = New-RinneTempDir -Prefix 'rinne-gates-eof-'
     $stop, $started = (Join-Path $tmp 'stop'), (Join-Path $tmp 'started')
@@ -93,17 +100,20 @@ function Measure-CallerEof([string]$Root, [string]$File, [string]$Call, [double]
         $until = [datetime]::UtcNow.AddSeconds(120)
         while (-not [IO.File]::Exists($started) -and [datetime]::UtcNow -lt $until) { Start-Sleep -Milliseconds 50 }
         $launched = [IO.File]::Exists($started)
-        # 孙进程还活着：读得到 EOF 就说明没被拖住；等满 GraceSeconds 读不到，才写停止文件放走孙进程，再等 EOF
+        # 孙进程还活着：读得到 EOF 就说明没被拖住（正例的判据）
         $before = [bool](& $waitEof $GraceSeconds)
-        $eof = $before
+        $eof, $exited, $eofAtRelease = $before, $before, $before
         if (-not $before) {
+            # 窗口里没读到 EOF：先等中间层自己退出，退出之后再给 EOF 一小段时间；上限内没退就如实记没退。然后才写停止文件放走孙进程，再等 EOF
+            $exited = $p.WaitForExit([int]($ExitSeconds * 1000))
+            $eofAtRelease = $exited -and [bool](& $waitEof $SettleSeconds)
             Set-Content -LiteralPath $stop -Value 'x'
-            $eof = [bool](& $waitEof 60)
+            $eof = $eofAtRelease -or [bool](& $waitEof 60)
         }
         $s = $sw.Elapsed.TotalSeconds
         # 放走之后 60 秒还读不到 EOF 就结束中间层（连同它的子孙）并判没跑完；没读完的 Result 不去碰，免得一直阻塞
         if (-not $eof) { try { $p.Kill($true) } catch [InvalidOperationException] { $null = $_ } }
-        $res = [pscustomobject]@{ Seconds = $s; Done = $eof -and $out.Result -match 'middle-done'; Launched = $launched; EofBeforeRelease = $before; Removed = $false }
+        $res = [pscustomobject]@{ Seconds = $s; Done = $eof -and $out.Result -match 'middle-done'; Launched = $launched; EofBeforeRelease = $before; MiddleExited = $exited; EofAtRelease = $eofAtRelease; Removed = $false }
     } finally {
         if ($p) { $p.Dispose() }
         # 孙进程收到停止信号就退出；等的时间比它的兜底时限短，没写停止文件就删不掉。20 秒只是等它退出的上限
@@ -113,6 +123,10 @@ function Measure-CallerEof([string]$Root, [string]$File, [string]$Call, [double]
     $res.Removed = -not $left -and -not (Test-Path -LiteralPath $tmp)
     $res
 }
+
+# 反例的判据（见 Measure-CallerEof）：孙进程起来过，中间层在写停止文件之前已经退出、EOF 仍然没到，放走孙进程之后才读到 EOF。
+# 中间层迟迟不退时，没读到 EOF 说明不了什么，不退出就判失败，不判通过。
+function Test-CallerHeld($M) { [bool]($M.Done -and $M.Launched -and $M.MiddleExited -and -not $M.EofAtRelease) }
 
 # 自测（运行器传入仓根）：build.ps1 的自测，退出码到 gate 结论的映射，以及运行器的管道不被构建留下的进程拖住。
 function Test-RinneGates([string]$Root) {
@@ -126,14 +140,40 @@ function Test-RinneGates([string]$Root) {
     # 桩靠 cmd.exe 留下孙进程，句柄继承也只在 Windows 上改：别的平台不量
     if ($IsWindows) {
         # 判据看因果，不比较秒数（见 Measure-CallerEof）：正例要在孙进程还活着时就读到 EOF；反例故意不改句柄继承，孙进程拿着
-        # 管道，EOF 必须等放走它之后才来。两边都要求孙进程确实起来过，否则用例形同虚设。
+        # 管道，中间层都退出了 EOF 还是不来，必须等放走它之后才来。两边都要求孙进程确实起来过，否则用例形同虚设。
+        # 反例的第一个窗口只留 1 秒：证明靠的是「中间层退出之后 EOF 仍没来」，不靠窗口多长。
         $fast = Measure-CallerEof $Root '20-build.ps1' 'Invoke-BuildScript $c @()'
-        $slow = Measure-CallerEof $Root '20-build.ps1' "@(& '$pwsh' -NoProfile -NonInteractive -File (Join-Path `$c.Root 'scripts/build.ps1') 2>&1)" -GraceSeconds 8
+        $slow = Measure-CallerEof $Root '20-build.ps1' "@(& '$pwsh' -NoProfile -NonInteractive -File (Join-Path `$c.Root 'scripts/build.ps1') 2>&1)" -GraceSeconds 1
         [pscustomobject]@{ Label = ('G6/G7 调 build.ps1：构建留下的进程不拖住运行器的调用方（孙进程还活着时读到 EOF，{0:N1} 秒）' -f $fast.Seconds); Bad = $false; Passed = $fast.Done -and $fast.Launched -and $fast.EofBeforeRelease }
-        [pscustomobject]@{ Label = ('反例：不改句柄继承时，孙进程不放走调用方就读不到 EOF（放走后才读到，{0:N1} 秒）' -f $slow.Seconds); Bad = $true; Passed = $slow.Done -and $slow.Launched -and -not $slow.EofBeforeRelease }
+        [pscustomobject]@{ Label = ('反例：不改句柄继承时，中间层退出了孙进程也不放走调用方，EOF 要放走之后才读到（{0:N1} 秒）' -f $slow.Seconds); Bad = $true; Passed = Test-CallerHeld $slow }
         $plug = Measure-CallerEof $Root '30-plugin.ps1' "Invoke-PluginvalGate `$c '-Validate' 'x'"
         [pscustomobject]@{ Label = ('G8 调 build.ps1：pluginval 留下的进程不拖住运行器的调用方（孙进程还活着时读到 EOF，{0:N1} 秒）' -f $plug.Seconds); Bad = $false; Passed = $plug.Done -and $plug.Launched -and $plug.EofBeforeRelease }
-        [pscustomobject]@{ Label = '三次测量量完都写停止文件，孙进程退出，临时目录都删掉了'; Bad = $false; Passed = $fast.Removed -and $slow.Removed -and $plug.Removed }
+        # 反例的判据不能空洞地通过：没有泄漏，只是中间层迟迟不退。只看「窗口里没读到 EOF」的老判据在这两种情形下都会通过，新判据都必须判
+        # 失败。中间层的退出时刻都由文件把住，不靠睡多久碰运气（孙进程要几秒才起来，睡的时间从哪算起，负载一重就不准）：
+        #   $late  中间层一直等到停止文件出现才退出（300 秒的兜底只防测量进程被杀），也就是放走孙进程之前它不可能退出：上限（2 秒）内必定
+        #          没退出，记没退，不判被拖住。
+        #   $idle  中间层等到孙进程的启动标记出现、再睡 6 秒才退出，比测量里的第一个窗口（1 秒）长，又在 ExitSeconds 之内：测量得等它
+        #          退出；退出之后不放走孙进程 EOF 也到了，所以不判被拖住。
+        $until = { param($name) "`$t = [datetime]::UtcNow.AddSeconds(300); while (-not [IO.File]::Exists((Join-Path `$c.Root '$name')) -and [datetime]::UtcNow -lt `$t) { Start-Sleep -Milliseconds 50 }" }
+        $late = Measure-CallerEof $Root '20-build.ps1' "Invoke-BuildScript `$c @(); $(& $until 'stop')" -GraceSeconds 1 -ExitSeconds 2
+        $idle = Measure-CallerEof $Root '20-build.ps1' "Invoke-BuildScript `$c @(); $(& $until 'started'); Start-Sleep -Seconds 6" -GraceSeconds 1
+        [pscustomobject]@{ Label = ('反例的判据不会空洞通过：没有泄漏、中间层在上限内没退出时判失败（{0:N1} 秒）' -f $late.Seconds); Bad = $true
+            Passed = $late.Done -and $late.Launched -and -not $late.MiddleExited -and -not $late.EofAtRelease -and -not (Test-CallerHeld $late) }
+        [pscustomobject]@{ Label = ('反例的判据不会空洞通过：没有泄漏、中间层迟迟才退时，退出后 EOF 不放走孙进程也到了，判失败（{0:N1} 秒）' -f $idle.Seconds); Bad = $true
+            Passed = $idle.Done -and $idle.Launched -and $idle.MiddleExited -and $idle.EofAtRelease -and -not (Test-CallerHeld $idle) }
+        [pscustomobject]@{ Label = '五次测量量完都写停止文件，孙进程退出，临时目录都删掉了'; Bad = $false; Passed = $fast.Removed -and $slow.Removed -and $plug.Removed -and $late.Removed -and $idle.Removed }
+    }
+    # 反例判据的纯函数用例：每一项缺了都不能判被拖住，尤其是中间层在上限内没退出
+    $held = [pscustomobject]@{ Done = $true; Launched = $true; MiddleExited = $true; EofAtRelease = $false }
+    [pscustomobject]@{ Label = '反例的判据：孙进程起来过、中间层放走前已退出、EOF 仍没到、放走后才读到，判被拖住'; Bad = $false; Passed = (Test-CallerHeld $held) }
+    foreach ($x in @(
+            @{ Why = '中间层在上限内没退出（机器太忙，没读到 EOF 说明不了什么）'; Set = @{ MiddleExited = $false } }
+            @{ Why = '中间层退出后 EOF 就到了（没有泄漏）'; Set = @{ EofAtRelease = $true } }
+            @{ Why = '孙进程没起来'; Set = @{ Launched = $false } }
+            @{ Why = '放走孙进程之后也没读到 EOF，或中间层没跑完'; Set = @{ Done = $false } })) {
+        $m = $held.PSObject.Copy()
+        foreach ($k in $x.Set.Keys) { $m.$k = $x.Set[$k] }
+        [pscustomobject]@{ Label = "反例的判据：$($x.Why)，不判被拖住"; Bad = $true; Passed = -not (Test-CallerHeld $m) }
     }
     $map = { param($c) (ConvertTo-GateResult ([pscustomobject]@{ Code = $c; Lines = @(); Last = '失败：x' }) 'ok').Status }
     [pscustomobject]@{ Label = 'build.ps1 退出 0 记 PASS'; Bad = $false; Passed = (& $map 0) -eq 'PASS' }
