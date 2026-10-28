@@ -2,8 +2,8 @@
 //
 // Rinne Input 的处理器：环路的返回端，全部调节都在这里。
 // 正式构建：参数层（InputParams）→ state 胶水（InputStateGlue，建在参数树上）→ 预设库（PresetStore）→
-// 接线（InstanceHost，基类持有），按这个顺序建。每块：参数快照 → 预设序号 → 胶水快照（stateSeq 与三个工程开关）
-// → InstanceHost（命令序号、走带、租约、引擎）。
+// 接线（InstanceHost，基类持有），按这个顺序建。每块：参数快照 → 胶水快照（stateSeq 与三个工程开关）→ 预设序号
+// （读序见 snapshotBlock）→ InstanceHost（命令序号、走带、租约、引擎）。
 // 探针构建：不建参数层与胶水，参数、state 与面板都在 probe::ProbeHost 里（见 RinneProcessorBase）。
 // 界面动作的入口在下面，消息线程调用；哪些算用户动作（让实例定型）以 InputStateGlue.h 文件头的清单为准，这里不另列。
 #pragma once
@@ -50,6 +50,19 @@ public:
     bool selectGroup(int group);
     // 界面上开始了一次参数手势（拖动或点击）：只定型，参数本身由手势照常写
     void userParamGestureBegan();
+
+    // ---- 每块的读序（音频线程）。模板只为让测试用包了一层的三样直接调用、钉住读序 ----
+    // 先参数快照，再读序号（胶水快照里的 stateSeq，最后是预设库的 presetSeq，acquire）。载入预设与 setState 都是
+    // 先加序号、再写参数；参数值是 seq_cst 原子量，读到任何一个新参数值，随后读到的序号必定已经加过。反过来先读序号，
+    // 可能读到旧序号却拿到部分新参数，这一块就没有淡入请求。
+    template<typename Params, typename Glue, typename Presets>
+    static void snapshotBlock(const Params& params, const Glue& glue, const Presets& presets,
+                              engine::EngineParams& out) noexcept
+    {
+        params.snapshot(out);
+        glue.snapshot(out);
+        out.presetSeq = presets.presetSeq();
+    }
 
     // ---- 读出（诊断与测试）。正式构建才有，探针构建里为空 ----
     input::InputParams* parameterLayer() noexcept { return wiring_.has_value() ? &wiring_->params : nullptr; }

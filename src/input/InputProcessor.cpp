@@ -44,10 +44,8 @@ void InputProcessor::process(juce::AudioBuffer<float>& buffer, bool bypassed) no
     else
     {
         engine::EngineParams params;
-        wiring_->params.snapshot(params);
-        // 先参数快照、再读预设序号：读到任何一个新参数值，随后读到的序号必定已经加过（见 PresetStore.h 的接线要求）
-        params.presetSeq = wiring_->presets.presetSeq();
-        wiring_->glue.snapshot(params);
+        // 先参数快照、再读 stateSeq 与 presetSeq：读到任何一个新参数值，随后读到的序号必定已经加过（见 snapshotBlock）
+        snapshotBlock(wiring_->params, wiring_->glue, wiring_->presets, params);
         instanceHost().process(buffer, params, bypassed);
     }
 }

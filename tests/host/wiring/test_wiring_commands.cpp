@@ -144,6 +144,8 @@ TEST_CASE("loading a factory preset asks the engine for one preset fade-in, and 
     run(rig, 10);
     constexpr auto preset = static_cast<std::size_t>(engine::FadeReason::Preset);
     const auto before = rig.input->instanceHost().counts();
+    // 构造时的命令基线取了预设库当时的序号：前面这些块里没有一次预设淡入
+    CHECK(before.fadeIns[preset] == 0);
 
     auto* store = rig.input->presetStore();
     REQUIRE(store != nullptr);
