@@ -860,6 +860,33 @@ TEST_CASE("引擎 写方回收：宿主块长 32768 时被挡满约 1 s 就回�
     CHECK(output.writtenFrames() == 2u * 8192u);
 }
 
+TEST_CASE("引擎 写方回收：小数采样率的门槛按发布的整数算（44055.944 Hz → 44056 帧）", "[engine]")
+{
+    // 回收门槛是「1 s 的音频」= 发布到环头的那个整数采样率的帧数；写方助手用的转换与会合层发布环头的是同一个函数。
+    // ⛔ 删除式验证点：process 里交给写方助手的采样率改回截断 → 门槛是 44055 帧，挡满 44055 帧就回收，本用例变红。
+    auto ring = stuckRing(kToken);
+    OutputEngine output;
+    output.prepare(44055.944, 1024);
+    EngineParams params;
+    const auto blocked = [&](int frames) {
+        HostBuffer host(frames);
+        std::fill(host.left.begin(), host.left.end(), 0.1f);
+        std::fill(host.right.begin(), host.right.end(), 0.1f);
+        return output.process(host.view(), params, TransportInfo{}, false, outputCtx(ring.get()));
+    };
+
+    for (int i = 0; i < 43; ++i)
+    {
+        CHECK_FALSE(blocked(1024)); // 累计 44032 帧
+    }
+    CHECK_FALSE(blocked(23)); // 累计 44055 帧：还差一帧，不回收
+    CHECK(output.reclaimCount() == 0u);
+    CHECK(LoopRing::writeHead(*ring) == 0u);
+    CHECK_FALSE(blocked(1)); // 累计 44056 帧：回收（写头推过卡住的那一段），这一帧本身仍是被挡住的那一次
+    CHECK(output.reclaimCount() == 1u);
+    CHECK(LoopRing::writeHead(*ring) == 4096u);
+}
+
 TEST_CASE("引擎 写方回收：换写方（token 变了）起一个新任期，上一任期被挡住的帧数不带过来", "[engine]")
 {
     // ⛔ 删除式验证点：token 变了不 reset 写方助手 → 新任期挡了不到 1 s 就回收，本用例变红。

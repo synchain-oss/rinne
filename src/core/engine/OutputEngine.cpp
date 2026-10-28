@@ -20,6 +20,7 @@
 #include "dsp/Sanitize.h"
 #include "ipc/LoopBinding.h"
 #include "loop/LoopEvents.h"
+#include "loop/LoopTiming.h"
 
 namespace rinne::engine
 {
@@ -42,7 +43,7 @@ void OutputEngine::prepare(double sampleRate, int maxBlock) noexcept
     if (changed)
     {
         // 换采样率：写方助手的回收门槛要重算（它按帧计 1 s）。下一块写环之前按新的采样率重新起一个任期。
-        writer_.reset(static_cast<std::uint32_t>(sr));
+        writer_.reset(loop::publishedSampleRate(sr));
         writerArmed_ = false;
     }
 
@@ -265,7 +266,7 @@ bool OutputEngine::process(const AudioView& buffer, const EngineParams& params, 
     }
 
     // 换写方、换段或换采样率：写方助手起一个新任期（reset）。它按采样率算回收门槛，按任期数「被挡住的帧数」。
-    armWriter(context, static_cast<std::uint32_t>(sampleRate_ > 0.0 ? sampleRate_ : 48000.0));
+    armWriter(context, loop::publishedSampleRate(sampleRate_));
 
     // 旁路的斜坡：目标是 0（旁路）或 1（不旁路）。斜坡按样本推进，在写块里逐样本取。
     bypassRamp_.setTargetValue(bypassed ? 0.0f : 1.0f);

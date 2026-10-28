@@ -31,6 +31,7 @@
 #include "loop/LoopEvents.h"
 #include "loop/LoopSession.h"
 #include "loop/LoopStatus.h"
+#include "loop/LoopTiming.h"
 
 namespace rinne::timing_test
 {
@@ -128,7 +129,7 @@ public:
     void attach(ipc::RingSegment& ring, std::uint64_t token)
     {
         ring_ = &ring;
-        ipc::LoopRing::publishWriter(ring, token, static_cast<std::uint32_t>(sampleRate_), 2);
+        ipc::LoopRing::publishWriter(ring, token, rinne::loop::publishedSampleRate(sampleRate_), 2);
     }
     ipc::RingSegment& ring() { return *ring_; }
 

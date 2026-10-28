@@ -34,3 +34,19 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   advances the timestamp baseline and the 1 s expiry.
 - Rinne Output now reaches its own out-of-order verdict from the same evidence, which agrees with the Input side;
   previously only Rinne Input judged.
+- The return is now 0 while the two ends run at different sample rates. When the sample rate that the writer publishes
+  in the ring header differs from Rinne Input's own, the loop layer treats the ring as having no writer: the read head
+  fades out over 10 ms through the existing no-peer path (the ring is not pulled on that first block, because the
+  writer is still writing at the new rate), the dry signal is unchanged, and no new safety transition is added. Both
+  ends round the sample rate to the nearest integer with one shared function before it is published or compared, so
+  44055.944 Hz and 44056 Hz count as the same rate. When the rates match again it counts as a new pairing: the read
+  head starts from the current write head, the return stays 0 for one loop delay and then fades in over 500 ms; frames
+  written while the rates differed are never read. Previously the ring was read as if the rates matched, so the
+  return played back pitch-shifted. The status snapshot reports `rateMismatch` and the writer's rate; the editor is not
+  wired to them yet.
+- A brief host report of "not playing" no longer counts as a play start. The host has to report a stop for at least
+  max(100 ms, 4 times the largest block), counted in samples, before the next playing block is a play start (5 ms
+  fade-out of the return and a reset of the local delay line). Cubase 15 occasionally reports three stopped blocks
+  (about 16 ms) in the middle of playback, which used to cut the echo tail. The first playing block after both ends
+  were suspended for more than 250 ms, or after a re-prepare while a stop report is in progress, is still a play
+  start, even if the host never reported a stop.

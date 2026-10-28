@@ -25,3 +25,4 @@ under 4 KB. Records marked "planned" are not written yet.
 | [0007](0007-licensing.md) | 许可与合规口径 | accepted |
 | [0008](0008-shared-code.md) | 与 SCVB 共享代码：复制并登记来源，不抽共享库 | accepted |
 | [0009](0009-loop-evidence.md) | 错序与导出不一致的判据：每块判一次、连续 3 次定案、容忍时间戳回退；离线块计数与已读值锁存 | accepted |
+| [0010](0010-host-quirks.md) | 宿主短暂报停不算起播沿（阈值 max(100 ms, 4 块)）；两端采样率不一致回送为 0 | accepted |

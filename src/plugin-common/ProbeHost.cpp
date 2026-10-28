@@ -13,6 +13,7 @@
 #include "ipc/LoopRing.h"
 #include "loop/LoopEvents.h"
 #include "loop/LoopStatus.h"
+#include "loop/LoopTiming.h"
 #include "ipc/PlatformSegmentBackend.h"
 #include "ipc/ProcessInfo.h"
 #include "ipc/SegmentLayout.h"
@@ -301,11 +302,11 @@ void ProbeHost::prepare(double sampleRate, int maxBlock)
         output_.prepare(sampleRate, maxBlock_);
     }
     const auto channels = static_cast<std::uint32_t>(std::max(processor_.getMainBusNumOutputChannels(), 1));
-    rendezvous_->prepare(
-        {static_cast<std::uint32_t>(std::llround(sampleRate)), static_cast<std::uint32_t>(maxBlock_), channels},
-        nowMs());
-    logEvent(diag::ProbeEventCode::kPrepare,
-             {static_cast<std::uint64_t>(std::llround(sampleRate)), static_cast<std::uint64_t>(maxBlock_), {}});
+    rendezvous_->prepare({loop::publishedSampleRate(sampleRate), static_cast<std::uint32_t>(maxBlock_), channels},
+                         nowMs());
+    logEvent(
+        diag::ProbeEventCode::kPrepare,
+        {static_cast<std::uint64_t>(loop::publishedSampleRate(sampleRate)), static_cast<std::uint64_t>(maxBlock_), {}});
     ready_.store(true, std::memory_order_release);
 }
 
@@ -866,7 +867,7 @@ ProbeStatus ProbeHost::statusLocked() const
         const std::uint64_t left = recordDeadlineNs_ > ns ? recordDeadlineNs_ - ns : 0;
         status.recordRemainingSeconds = static_cast<std::uint32_t>((left + 999'999'999u) / 1'000'000'000u);
     }
-    status.sampleRate = static_cast<std::uint32_t>(std::llround(std::max(sampleRate_, 0.0)));
+    status.sampleRate = sampleRate_ > 0.0 ? loop::publishedSampleRate(sampleRate_) : 0u;
     status.feedbackPercent = feedback_.load(std::memory_order_relaxed);
     status.delayMs = delayMs_.load(std::memory_order_relaxed);
     status.ceilingDb = ceilingDb_.load(std::memory_order_relaxed);

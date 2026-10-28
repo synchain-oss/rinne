@@ -174,6 +174,8 @@ LoopStatusFields LoopStatus::snapshot() const noexcept
     fields.stalled = stalled_.load(std::memory_order_relaxed) ? 1u : 0u;
     fields.tolerant = tolerant_.load(std::memory_order_relaxed) ? 1u : 0u;
     fields.paired = paired_.load(std::memory_order_relaxed) ? 1u : 0u;
+    fields.rateMismatch = rateMismatch_.load(std::memory_order_relaxed) ? 1u : 0u;
+    fields.peerSampleRate = peerSampleRate_.load(std::memory_order_relaxed);
 
     readGeometry(fields);
 

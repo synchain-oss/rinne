@@ -28,6 +28,7 @@
 //      与第二个 Input（复制体：默认不拿环也不拿槽，只出干声；setSecondInputReadsRing 让它读环）。
 //   8. 读两端引擎的状态对象、两端的端点槽、Input 的上一块结果与诊断安全段。
 //   9. 信号源脚本（静音、冲激、斜坡或场景自己的函数）。
+//  10. 只重新准备一端（prepareOutput / prepareInput）：两端采样率可以不同，写方按自己的采样率发布环头。
 //
 // 线程：只在非实时线程用（建段、prepare 都要分配）。引擎的 process 在这里同步调用，模拟音频线程。
 
@@ -80,6 +81,13 @@ public:
 
     // 非实时线程：按采样率与最大块长准备两端与中间链。可以分配。
     void prepare(double sampleRate, int maxBlock);
+
+    // 只重新准备一端（宿主只对一个插件停用再激活，可以换采样率）。另一端、中间链与信号源都不动。
+    // prepareOutput 同时按新的采样率重新发布写权（生产里由会合层做）并更新 Output 槽的最大块长：
+    // 环头里写方的采样率因此变成 sampleRate，Input 一侧据此判两端采样率是否一致。
+    // prepareInput 只动 Input（环头里没有 Input 的采样率）。
+    void prepareOutput(double sampleRate, int maxBlock);
+    void prepareInput(double sampleRate, int maxBlock);
 
     // 脚本：给宿主装上要走的样子。
     // setBlockScripts 会按脚本里最大的块长重新给宿主缓冲（超长块也要送得进去），所以它会分配。
@@ -210,6 +218,8 @@ private:
     // 段的映射代号（Output 判「换段」用）：每次 open 加一
     std::uint64_t ringGeneration_ = 0;
     double sampleRate_ = 48000.0;
+    // 写方发布的采样率：prepare 时等于 sampleRate_，prepareOutput 之后可以不同
+    double outputRate_ = 48000.0;
     int maxBlock_ = 1024;
     bool prepared_ = false;
 

@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "loop/LoopTiming.h"
@@ -228,4 +229,40 @@ TEST_CASE("loop timing 容忍模式：10 s 内第 3 次重同步就转容忍模�
     REQUIRE_FALSE(shouldEnterTolerant(times, 3, 0, 3, window, 1000 + window + 1));
     // 恰好在窗口的边上：转。
     REQUIRE(shouldEnterTolerant(times, 3, 0, 3, window, 1000 + window));
+}
+
+TEST_CASE("loop timing 发布的采样率：四舍五入成整数，无效输入当作 48 kHz，超出 u32 的钳住")
+{
+    // 写方发布到环头的整数与环路层拿来比的整数是同一个转换。
+    // ⛔ 删除式验证点：把四舍五入改回截断 → 44055.944 与 44100.7 两行变红。
+    struct Row
+    {
+        double in;
+        std::uint32_t expected;
+    };
+    const Row rows[] = {
+        {44055.944, 44056u}, // 44.1 kHz 的拉降：截断会得到 44055，与写方发布的 44056 永远对不上
+        {44100.4, 44100u}, // 小数部分不到一半：向下
+        {44100.5, 44101u}, // 恰好一半：向上
+        {44100.7, 44101u}, // 小数部分过半：向上
+        {44100.0, 44100u},
+        {48000.0, 48000u},
+        {96000.0, 96000u},
+        {192000.0, 192000u},
+        {0.3, 1u}, // 不会发布成 0（0 在环头里表示没有采样率）
+        {0.0, 48000u}, // 无效输入：与各处 prepare 的兜底一致
+        {-44100.0, 48000u},
+        {std::numeric_limits<double>::quiet_NaN(), 48000u},
+        {std::numeric_limits<double>::infinity(), 48000u},
+        {-std::numeric_limits<double>::infinity(), 48000u},
+        {4294967294.6, 4294967295u}, // u32 的最大值
+        {4294967295.0, 4294967295u},
+        {1.0e12, 4294967295u}, // 超出 u32：钳住，不回绕
+        {1.0e300, 4294967295u},
+    };
+    for (const Row& row : rows)
+    {
+        INFO("in = " << row.in);
+        CHECK(publishedSampleRate(row.in) == row.expected);
+    }
 }

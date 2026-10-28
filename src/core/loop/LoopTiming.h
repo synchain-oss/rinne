@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace rinne::loop
 {
@@ -30,6 +31,26 @@ using u64 = std::uint64_t;
 constexpr i64 frameDiff(u64 a, u64 b) noexcept
 {
     return static_cast<i64>(a - b);
+}
+
+// 采样率转成写进 IPC 的整数（环头与端点槽里的 sample_rate），环路层拿来与环头比的也是它。
+//
+// 全仓只有这一处做这个转换：写方发布（会合层、Output 引擎）与读方比较（LoopSession::prepare）取整口径不同，
+// 小数采样率（例如 44.1 kHz 的拉降 44055.944 Hz）就会两端永远判不一致、回送恒为 0。
+// 取整是四舍五入（llround）；两端各自 prepare 同一个 double，所以只要都调它，发布值就相同。
+// 非有限或 ≤ 0 的输入当作 48 kHz（与各处 prepare 的兜底一致）；结果落在 [1, 2^32 − 1]。
+// 全是定长运算，不分配、不加锁。
+inline std::uint32_t publishedSampleRate(double sampleRate) noexcept
+{
+    constexpr double kFallback = 48000.0;
+    constexpr double kMax = static_cast<double>(std::numeric_limits<std::uint32_t>::max());
+    const double sr = std::isfinite(sampleRate) && sampleRate > 0.0 ? sampleRate : kFallback;
+    if (sr >= kMax)
+    {
+        return std::numeric_limits<std::uint32_t>::max();
+    }
+    const long long rounded = std::llround(sr);
+    return rounded < 1 ? 1u : static_cast<std::uint32_t>(rounded);
 }
 
 // 环路延迟的范围：1–4000 ms（计划口径），默认 100 ms。

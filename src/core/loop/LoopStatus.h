@@ -80,7 +80,11 @@ struct LoopStatusFields
     std::uint32_t frozenMax = 0; // 连续最多几块写头没动（块数）
     std::uint32_t stalled = 0; // 当前是否断档
     std::uint32_t tolerant = 0; // 当前是否容忍模式
-    std::uint32_t paired = 0; // 当前是否有对端
+    std::uint32_t paired = 0; // 当前是否有对端（两端采样率不一致时为 0：回送为 0）
+    // 两端采样率不一致：写方在环头里发布的采样率与本端不同，回送为 0、干声照常。peerSampleRate 是环头里的值
+    // （没有写方时为 0），配合本端采样率显示「对端 x Hz，本端 y Hz」。
+    std::uint32_t rateMismatch = 0;
+    std::uint32_t peerSampleRate = 0;
 
     // ---- 当前的几何量（逐块刷新；探针与诊断要看「现在是多少」）----
     // 三个量出自同一块：音频线程按顺序锁（seqlock）一起发布，快照读到的三元组满足 m = w − R − off（R
@@ -115,6 +119,12 @@ public:
     // ---- 音频线程写 ----
 
     void setPaired(bool on) noexcept { paired_.store(on ? 1u : 0u, std::memory_order_relaxed); }
+    // 两端采样率是否不一致，以及环头里写方发布的采样率（没有写方为 0）
+    void setRate(bool mismatch, std::uint32_t peerSampleRate) noexcept
+    {
+        rateMismatch_.store(mismatch, std::memory_order_relaxed);
+        peerSampleRate_.store(peerSampleRate, std::memory_order_relaxed);
+    }
     void setStalled(bool on) noexcept { stalled_.store(on ? 1u : 0u, std::memory_order_relaxed); }
     void setTolerant(bool on) noexcept { tolerant_.store(on ? 1u : 0u, std::memory_order_relaxed); }
     void setUnstable(bool on) noexcept { unstable_.store(on ? 1u : 0u, std::memory_order_relaxed); }
@@ -150,6 +160,8 @@ private:
     void readGeometry(LoopStatusFields& fields) const noexcept;
 
     std::atomic<bool> paired_{false};
+    std::atomic<bool> rateMismatch_{false};
+    std::atomic<std::uint32_t> peerSampleRate_{0};
     std::atomic<bool> stalled_{false};
     std::atomic<bool> tolerant_{false};
     std::atomic<bool> unstable_{false};
