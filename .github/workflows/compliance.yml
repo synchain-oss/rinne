@@ -116,3 +116,12 @@ jobs:
           set -euo pipefail
           node scripts/check-privacy.mjs --commits --no-messages --needles "$NEEDLES" "$BEFORE..$AFTER"
           node scripts/check-commits.mjs commits --range "$BEFORE..$AFTER" --tier push --needles "$NEEDLES"
+      # 全仓变异检查：每个检查的 mutationCheck 逐条改坏判据，自测必须因此变红（约 1.5 分钟，所以单列一步，放在最后，
+      # 前面的扫描不被它拖慢）。只读仓内文件，用 node 与系统的 python3（probe-analysis 要它，找不到判红），不需要 secret，也不带它。
+      # 第一行核对「必须有 mutationCheck」的清单：run-checks 只跑导出了 mutationCheck 的检查，某项被删掉它就悄悄不跑、整遍照样全绿，
+      # 清单核对堵的是这个口子。两行与本机 gates 的 mutation 是同一对命令，45-mutation.ps1 的自测会对着本文件核对。
+      - name: Mutation check (all checks)
+        run: |
+          set -euo pipefail
+          node scripts/run-checks.mjs --group compliance --only mutation-coverage
+          node scripts/run-checks.mjs --mutation-check

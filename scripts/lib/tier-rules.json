@@ -88,6 +88,13 @@
       "by": "gates.d/40-stress.ps1",
       "requires": ["scripts/gates.d/40-stress.ps1"]
     },
+    {
+      "id": "mutation",
+      "tier": "Full",
+      "what": "全仓变异检查（run-checks --mutation-check）与 mutationCheck 覆盖清单核对",
+      "by": "gates.d/45-*.ps1",
+      "requires": ["scripts/gates.d/45-mutation.ps1"]
+    },
     { "id": "G9-web", "tier": "Full", "what": "页面冒烟", "by": "gates.d/50-*.ps1", "requires": ["web-preview"] },
     { "id": "G9-pkg", "tier": "Full", "what": "打包", "by": "gates.d/60-*.ps1", "requires": ["packaging"] }
   ],
@@ -169,6 +176,7 @@
     { "files": ["src/output/outputeditor.h"], "want": "Full" },
     { "files": ["packaging/INSTALL.txt"], "want": "Full" },
     { "files": ["scripts/gates.d/40-stress.ps1"], "want": "Full" },
+    { "files": ["scripts/gates.d/45-mutation.ps1"], "want": "Full" },
     { "files": ["scripts/package.ps1"], "want": "Full" },
     { "files": ["scripts/stress.ps1"], "want": "Full" },
     { "files": ["docs/a.md", "web/input/app.js"], "want": "Full" },
