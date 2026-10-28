@@ -8,6 +8,7 @@
 // 界面动作的入口在下面，消息线程调用；哪些算用户动作（让实例定型）以 InputStateGlue.h 文件头的清单为准，这里不另列。
 #pragma once
 
+#include <atomic>
 #include <optional>
 
 #include "InputParams.h"
@@ -51,15 +52,19 @@ public:
     // 界面上开始了一次参数手势（拖动或点击）：只定型，参数本身由手势照常写
     void userParamGestureBegan();
 
-    // ---- 每块的读序（音频线程）。模板只为让测试用包了一层的三样直接调用、钉住读序 ----
-    // 先参数快照，再读序号（胶水快照里的 stateSeq，最后是预设库的 presetSeq，acquire）。载入预设与 setState 都是
-    // 先加序号、再写参数；参数值是 seq_cst 原子量，读到任何一个新参数值，随后读到的序号必定已经加过。反过来先读序号，
-    // 可能读到旧序号却拿到部分新参数，这一块就没有淡入请求。
+    // ---- 每块的读序（音频线程）。模板只为让测试用包了一层的三样直接调用、钉住调用的先后 ----
+    // 先参数快照，再一道 acquire 栅栏，再读序号（胶水快照里的 stateSeq，最后是预设库的 presetSeq）。
+    // 载入预设与 setState 都是先加序号、再写参数。参数快照读的原子量（APVTS 交给参数层的那个）由 JUCE 用默认的
+    // seq_cst 写，带 release 语义；快照本身是 relaxed 读。读到任何一个新参数值之后，这道 acquire 栅栏就与那次写同步，
+    // 写方在它之前加的序号对栅栏之后的读必定可见。没有栅栏，relaxed 的参数读可以被编译器或 CPU（ARM64）挪到序号读之后，
+    // 拿到新参数、旧序号，这一块就没有淡入请求；presetSeq() 自己的 acquire 只和它自己的写配对，替代不了这道栅栏。
+    // 内存序单测钉不住，源码扫描用例（tests/host/wiring/test_wiring_source_order.cpp）钉住栅栏的位置
     template<typename Params, typename Glue, typename Presets>
     static void snapshotBlock(const Params& params, const Glue& glue, const Presets& presets,
                               engine::EngineParams& out) noexcept
     {
         params.snapshot(out);
+        std::atomic_thread_fence(std::memory_order_acquire);
         glue.snapshot(out);
         out.presetSeq = presets.presetSeq();
     }

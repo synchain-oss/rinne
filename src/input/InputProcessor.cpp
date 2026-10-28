@@ -44,7 +44,7 @@ void InputProcessor::process(juce::AudioBuffer<float>& buffer, bool bypassed) no
     else
     {
         engine::EngineParams params;
-        // 先参数快照、再读 stateSeq 与 presetSeq：读到任何一个新参数值，随后读到的序号必定已经加过（见 snapshotBlock）
+        // 先参数快照、再 acquire 栅栏、再读 stateSeq 与 presetSeq：读到新参数值时序号必定已经加过（见 snapshotBlock）
         snapshotBlock(wiring_->params, wiring_->glue, wiring_->presets, params);
         instanceHost().process(buffer, params, bypassed);
     }
