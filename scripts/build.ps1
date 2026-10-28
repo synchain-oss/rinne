@@ -50,6 +50,12 @@
 # 覆盖文件（rinne-showincludes-prefix.cmake）是持久的：-DCMAKE_PROJECT_INCLUDE 写进 cache 后一直有效，所以每次配置都显式表态
 # （文件在就传 -D、不在就传 -U），重配那一步固定传 -U（要真的重新探测），覆盖那一步才传 -D。cache 里记着覆盖文件而文件没了时，
 # 不带 -U 的 cmake 会在 project() 处报「could not find requested file」；带 -U 就把那条记录清掉，这里打印一行说明并照常往下走。
+# 缓存里的工具路径：配置时 RINNE_PWSH（tests/CMakeLists.txt 的 find_program）、CMAKE_MAKE_PROGRAM、CMAKE_COMMAND、CMAKE_CTEST_COMMAND
+# 的绝对路径烘进 CMakeCache.txt 与生成的 CTestTestfile.cmake。工具升级换了安装位置（pwsh 从商店自动更新，带版本号的目录随之消失）
+# 之后旧路径就不在了，find_program 的结果一旦进了缓存就不会再找，ctest 里用它的两条 TIMEOUT 门禁变成 Not Run。所以配置之前先查一遍：
+# 不在了的逐条打印；RINNE_PWSH 这次配置带 -U 清掉重找（tests/CMakeLists.txt 自己也会清），CMAKE_MAKE_PROGRAM 本来每次都由 -D 给，
+# 另外两条 cmake 每次配置按正在跑的那份重写。配置之后断言四条都记着、都是存在的文件（G6 经本脚本执行），-Test 跑 ctest 之前再断言一次
+# （-NoBuild 不重配，构建之后工具才换掉的情形在这里判红），对不上就判红并写明是哪一条，不让门禁悄悄变成 Not Run。
 # 退出码：0 通过；1 失败；2 -NoBuild 时构建目录里没有当前 HEAD 的构建；3 等构建槽超时。
 [CmdletBinding()]
 param(
@@ -68,6 +74,9 @@ $Root = Split-Path -Parent $PSScriptRoot
 # 全仓只有这一份：合并后构建（maintainer/lib/RinneGh.psm1）从主 clone 的这个文件里读这两条，起子进程之前就拿掉。
 $SecretEnv = '^(?:PRIVACY_NEEDLES|RINNE_PRIVACY_LOCAL|DOCKER_AUTH_CONFIG|.*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|APIKEY|API_KEY).*|.+_(?:KEY|PAT|AUTH|PWD|PASS|JWT))$'
 $SecretEnvValue = '^(?:[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|gh[pousr]_[A-Za-z0-9]{20}|github_pat_\w{20}|sk-[\w-]{20}|eyJ[\w-]{10,}\.[\w-]{10,}\.|xox[abprs]-[\w-]{10}|glpat-[\w-]{20}|npm_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16})'
+# 缓存里要核对的工具路径，值是失效时怎么恢复：unset = 配置时带 -U 清掉、让 find_program 重新找；arg = 本脚本每次配置都用 -D 显式给；
+# cmake = cmake 每次配置按正在跑的那份自己重写。
+$CacheTools = [ordered]@{ RINNE_PWSH = 'unset'; CMAKE_MAKE_PROGRAM = 'arg'; CMAKE_COMMAND = 'cmake'; CMAKE_CTEST_COMMAND = 'cmake' }
 $PluginvalEnv = '^(?:VALIDATE|VALIDATE_IN_PROCESS|STRICTNESS_LEVEL|TIMEOUT_MS|SKIP_GUI_TESTS|DISABLED_TESTS|REPEAT|RANDOMISE|RANDOM_SEED|SAMPLE_RATES|BLOCK_SIZES|DATA_FILE|VST3VALIDATOR|OUTPUT_DIR|OUTPUT_FILENAME|VERBOSE)$'
 
 class BuildStop : Exception {
@@ -176,6 +185,33 @@ function Find-Bundles([string]$Dir, [string]$Cfg) {
 function Get-CacheValue([string]$Text, [string]$Name) {
     $m = [regex]::Match($Text, "(?m)^$([regex]::Escape($Name)):[A-Z]+=(.*?)\r?$")
     $m.Success ? $m.Groups[1].Value : $null
+}
+
+# 缓存里记着、指向的文件却不在了的工具路径（$CacheTools 那几条）：返回 @{ Name; Path; Heal } 的数组。没记的不算，该不该有由配置后的断言管。
+function Get-StaleCacheTools([string]$CacheText) {
+    @(foreach ($n in $CacheTools.Keys) {
+            $p = Get-CacheValue $CacheText $n
+            if ($p -and -not (Test-Path -LiteralPath $p -PathType Leaf)) { [pscustomobject]@{ Name = $n; Path = $p; Heal = $CacheTools[$n] } }
+        })
+}
+
+# 配置时要带的 -U：只清 Heal = unset 的那几条（-D 给的与 cmake 自己重写的不用清）。
+function Get-StaleToolArgs($Stale) { @($Stale | Where-Object Heal -ceq 'unset' | ForEach-Object { "-U$($_.Name)" }) }
+
+# 这次配置有没有带上测试：tests/CMakeLists.txt 在、RINNE_BUILD_TESTS 不是假值。只有这时缓存里才该有 RINNE_PWSH。
+function Test-TestsConfigured([string]$CacheText) {
+    (Test-Path -LiteralPath (Join-Path $Root 'tests/CMakeLists.txt')) -and
+    "$(Get-CacheValue $CacheText 'RINNE_BUILD_TESTS')" -notmatch '^(?i:OFF|FALSE|NO|N|0|IGNORE|NOTFOUND|.*-NOTFOUND)$'
+}
+
+# 缓存里的工具路径都还能用：每条都记着（RINNE_PWSH 只在 $WantPwsh 时要求）、是绝对路径、指向存在的文件。返回错误文字，都对返回空。
+function Test-CacheToolPaths([string]$CacheText, [bool]$WantPwsh) {
+    @(foreach ($n in $CacheTools.Keys) {
+            $p = Get-CacheValue $CacheText $n
+            if (-not $p) { if ($n -cne 'RINNE_PWSH' -or $WantPwsh) { "CMakeCache.txt 里没有 $n" } }
+            elseif (-not [IO.Path]::IsPathRooted($p)) { "$n 不是绝对路径：$p" }
+            elseif (-not (Test-Path -LiteralPath $p -PathType Leaf)) { "$n 指向的文件不在了：$p" }
+        }) -join '；'
 }
 
 # ninja 记头文件依赖的前提：cl /showIncludes 每行输出的开头与 rules.ninja 里 msvc_deps_prefix 的字节逐字节相同（ninja 按字节比，
@@ -591,9 +627,14 @@ function Invoke-Build([string]$Flavor) {
     # cache 里还记着覆盖文件而文件没了：-U 把那条记录清掉（不清的话 cmake 在 project() 处报一个看不懂的错），这里说一声。
     $overrideFile = Join-Path $BuildDir 'rinne-showincludes-prefix.cmake'
     $cacheFile = Join-Path $BuildDir 'CMakeCache.txt'
-    $includeArg = Get-ProjectIncludeArg $overrideFile ((Test-Path -LiteralPath $cacheFile -PathType Leaf) ? (Get-Content -LiteralPath $cacheFile -Raw) : '')
+    $cacheText = (Test-Path -LiteralPath $cacheFile -PathType Leaf) ? (Get-Content -LiteralPath $cacheFile -Raw) : ''
+    $includeArg = Get-ProjectIncludeArg $overrideFile $cacheText
     if ($includeArg.Note) { Write-Host $includeArg.Note }
-    $null = Invoke-Step 'configure' 'cmake' ($cfg + $includeArg.Arg) 1800
+    # 缓存里的工具路径不在了：逐条说清楚，RINNE_PWSH 这次带 -U 清掉重找（见头部注释）；配置之后由下面的断言判
+    $stale = @(Get-StaleCacheTools $cacheText)
+    $healNote = @{ unset = '这次配置带 -U 清掉、重新查找'; arg = '这次配置照常用 -D 重新给'; cmake = 'cmake 这次配置会按正在跑的那份重写' }
+    foreach ($s in $stale) { Write-Host "构建目录缓存里的 $($s.Name) 指向的文件不在了（$($s.Path)）：$($healNote[$s.Heal])" }
+    $null = Invoke-Step 'configure' 'cmake' ($cfg + (Get-StaleToolArgs $stale) + $includeArg.Arg) 1800
     # 头文件依赖的前缀对不上：先清掉编译器探测结果重配（这一步不带覆盖，要真的重新探测），仍不行就用 cl 实测的前缀覆盖；
     # 旧目标文件没有依赖记录，clean 一次让它们全部重编。探针自己失败与前缀对不上分开报错。
     $probeStatus = {
@@ -629,6 +670,8 @@ function Invoke-Build([string]$Flavor) {
     $cache = Get-Content -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt') -Raw
     $got = Get-CacheValue $cache 'RINNE_SHM_PREFIX'
     if ($got -cne $prefix) { throw [BuildStop]::new("配置后的 RINNE_SHM_PREFIX 是 $got，本次应当是 $prefix", 1) }
+    $toolBad = Test-CacheToolPaths $cache (Test-TestsConfigured $cache)
+    if ($toolBad) { throw [BuildStop]::new("配置后缓存里的工具路径仍然不对：$toolBad（ctest 里用到它的用例会 Not Run）", 1) }
     Write-Host "段名前缀：$prefix"
     $b = @('--build', $BuildDir, '--config', $Config)
     if ($script:Jobs -gt 0) { $b += '--parallel', "$($script:Jobs)" }
@@ -1136,6 +1179,29 @@ function Invoke-SelfTest {
     & $check 'cache 断言：前缀是默认值' $false (-not (Test-CachePrefix (& $cache 'SynchainRinne' 'SynchainRinne')))
     & $check 'cache 断言：CI 覆盖成本机前缀' $true (Test-CachePrefix (& $cache 'SynchainRinneD' 'SynchainRinne'))
     & $check 'cache 断言：缺条目' $true (Test-CachePrefix 'RINNE_SHM_PREFIX:STRING=SynchainRinne')
+    # 缓存里的工具路径：一个在的文件（本脚本）、一个不在的；配置前探测、配置时的 -U、配置后与 ctest 前的断言各给正反例
+    $here, $gone = ($PSCommandPath -replace '\\', '/'), (Join-Path ([IO.Path]::GetTempPath()) "rinne-no-such-tool-$PID-$(Get-Random).exe")
+    $tools = { param($pwshPath, $ctest = $here, $make = $here)
+        "// x`r`nCMAKE_MAKE_PROGRAM:UNINITIALIZED=$make`r`nCMAKE_COMMAND:INTERNAL=$here`r`nCMAKE_CTEST_COMMAND:INTERNAL=$ctest`r`n" + ($pwshPath ? "RINNE_PWSH:FILEPATH=$pwshPath`r`n" : '') }
+    $stale = @(Get-StaleCacheTools (& $tools $gone $gone))
+    & $check '工具路径：配置前查出缓存里不在了的 RINNE_PWSH 与 CMAKE_CTEST_COMMAND，在的不报' $true ((@($stale.Name) -join ',') -ceq 'RINNE_PWSH,CMAKE_CTEST_COMMAND')
+    & $check '工具路径：都在时配置前一条也不报' $false ($stale.Count -eq 2 -and @(Get-StaleCacheTools (& $tools $here)).Count -eq 0)
+    & $check '工具路径：配置时只给 RINNE_PWSH 带 -U（MAKE_PROGRAM 由 -D 给、cmake 自己重写的两条不清）' $true ((@(Get-StaleToolArgs (Get-StaleCacheTools (& $tools $gone $gone $gone))) -join ',') -ceq '-URINNE_PWSH')
+    & $check '工具路径：配置后四条都在、都是存在的文件，断言通过' $false (-not (Test-CacheToolPaths (& $tools $here) $true))
+    & $check '工具路径：RINNE_PWSH 指向的文件不在了，判红并写明是哪一条' $true ((Test-CacheToolPaths (& $tools $gone) $true) -match '^RINNE_PWSH 指向的文件不在了')
+    & $check '工具路径：CMAKE_CTEST_COMMAND 不在了，判红' $true ((Test-CacheToolPaths (& $tools $here $gone) $true) -match 'CMAKE_CTEST_COMMAND 指向的文件不在了')
+    & $check '工具路径：配置了测试却没记 RINNE_PWSH，判红' $true ((Test-CacheToolPaths (& $tools $null) $true) -match 'CMakeCache.txt 里没有 RINNE_PWSH')
+    & $check '工具路径：没配置测试时不要求 RINNE_PWSH' $false (-not (Test-CacheToolPaths (& $tools $null) $false))
+    & $check '工具路径：记的不是绝对路径，判红' $true ((Test-CacheToolPaths (& $tools 'pwsh') $true) -match 'RINNE_PWSH 不是绝对路径')
+    & $check '工具路径：RINNE_BUILD_TESTS=OFF 时不算配置了测试，ON 时算' $false (-not (Test-TestsConfigured "RINNE_BUILD_TESTS:BOOL=OFF`r`n") -and (Test-TestsConfigured "RINNE_BUILD_TESTS:BOOL=ON`r`n"))
+    # 接线：配置那一步带着 -U，配置之后（Invoke-Build 里）与 ctest 之前（脚本主体里）各断言一次
+    $toolCalls = { param($ast, $name) @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq $name }, $true)) }
+    $buildAst = (Get-Command Invoke-Build).ScriptBlock.Ast
+    $configureStep = @(& $toolCalls $buildAst 'Invoke-Step' | Where-Object { "$($_.CommandElements[1])" -ceq "'configure'" })
+    & $check '工具路径接线：configure 那一步的参数里带着 Get-StaleToolArgs' $false ($configureStep.Count -eq 1 -and $configureStep[0].Extent.Text -match 'Get-StaleToolArgs')
+    $inBody = { param($n) for ($p = $n.Parent; $p; $p = $p.Parent) { if ($p -is [Management.Automation.Language.FunctionDefinitionAst]) { return $false } }; $true }
+    $bodyCalls = @(& $toolCalls $selfAst 'Test-CacheToolPaths' | Where-Object { & $inBody $_ })
+    & $check '工具路径接线：Invoke-Build 里配置后断言一次，脚本主体里 ctest 之前再断言一次' $false ((& $toolCalls $buildAst 'Test-CacheToolPaths').Count -eq 1 -and $bodyCalls.Count -eq 1)
     $f = Get-ShmPrefix 'ci'
     & $check '段名前缀从根 CMakeLists.txt 读：本机加 D、探针加 P' $false ($f -and (Get-ShmPrefix 'dev') -ceq "${f}D" -and (Get-ShmPrefix 'probe') -ceq "${f}P")
     # 凭据：按名字（*_PAT、*_CREDENTIALS、不带下划线的 *APIKEY*、*_PASSPHRASE）与按值（带口令的 URL、GitHub token）都删，别的留着。
@@ -1286,6 +1352,11 @@ try {
         $record = Get-BuildRecord $flavor
         if ($Test) {
             if (Test-Path -LiteralPath (Join-Path $Root 'tests/CMakeLists.txt')) {
+                # -NoBuild 不重配：构建之后工具才换了位置时，烘进 CTestTestfile.cmake 的旧路径会让门禁 Not Run，这里先判红说清楚
+                $cacheFile = Join-Path $BuildDir 'CMakeCache.txt'
+                $cacheNow = (Test-Path -LiteralPath $cacheFile -PathType Leaf) ? (Get-Content -LiteralPath $cacheFile -Raw) : ''
+                $toolBad = Test-CacheToolPaths $cacheNow (Test-TestsConfigured $cacheNow)
+                if ($toolBad) { throw [BuildStop]::new("构建目录缓存里的工具路径不对：$toolBad；ctest 里用到它的用例会 Not Run，先不带 -NoBuild 构建一次（配置时清掉重找）", 1) }
                 $null = Invoke-Step 'ctest' 'ctest' @('--test-dir', $BuildDir, '-C', $Config, '--output-on-failure', '--no-tests=error', '--timeout', '300') 1800
             } else { Write-Host '== ctest：还没有 tests/CMakeLists.txt，跳过' }
         }
