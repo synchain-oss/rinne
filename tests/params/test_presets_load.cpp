@@ -255,7 +255,8 @@ TEST_CASE("load: presetSeq goes up by exactly one per successful load and stays 
 namespace
 {
 
-// 参数通知里读到的 presetSeq：引擎每块先读序号、再读参数，序号先到才能让新参数落在降到 0 与淡入里
+// 参数通知里读到的 presetSeq：载入先加序号、再写参数，处理器每块先读参数快照、再读序号，所以只要看到新参数就一定
+// 看到新序号，新参数因此落在降到 0 与淡入里
 struct SeqProbe final : juce::AudioProcessorParameter::Listener
 {
     explicit SeqProbe(const PresetStore& s) : store(s) {}

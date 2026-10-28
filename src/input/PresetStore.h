@@ -30,6 +30,9 @@
 //   · 载入不碰安全状态：锁存（TRIPPED）时载入预设不会解除它，这一点由引擎层负责并有场景验证，本类不接触安全状态机。
 //
 // 接线要求（本类只管预设本身，下面这些由接线的一方做）：
+//   · 读取顺序：处理器每块先做参数快照，再读 presetSeq()（acquire）。先加序号只解决了写的一侧：若先读序号、
+//     再读参数，音频线程可能读到旧序号，消息线程随即加序号并写了几个参数，这一块就拿到部分新值却没有预设请求。
+//     按「先读参数、再读序号」，参数值是 seq_cst 原子量，只要读到任何一个新参数值，随后读到的序号必定已经加过；
 //   · 当前预设的 id 与显示名：load / save 成功后在返回值里交回调用方，由调用方写进工程状态里的 preset_name 等键，
 //     并在参数被手动改动后置脏标记；本类不记「当前预设」，也不碰工程状态；
 //   · 工厂预设的显示名在返回值里是 en（zh 与 en 相同）；界面要按语言显示时从 factoryPresets() 取三语名；
@@ -193,7 +196,8 @@ public:
     // 参数树里 8 个声音参数的当前明文值（取不到的参数取默认值）
     static PresetValues readValues(const juce::AudioProcessorValueTreeState& tree);
 
-    // 载入成功的次数（回绕）。音频线程可读：无锁原子量，每块填进 EngineParams::presetSeq
+    // 载入成功的次数（回绕）。音频线程可读：无锁原子量，每块在参数快照之后读（见文件头的读取顺序），
+    // 填进 EngineParams::presetSeq
     std::uint32_t presetSeq() const noexcept { return presetSeq_.load(std::memory_order_acquire); }
 
 private:
