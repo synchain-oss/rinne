@@ -93,6 +93,7 @@ void InputStateGlue::setState(const void* data, int sizeInBytes)
         if (step.mode != state::glue::ApplyMode::None)
         {
             values = paramValuesFrom(loaded.params);
+            applying_ = landedValues(values);
             applyParams = true;
         }
         state::glue::mergeLoaded(document_, std::move(loaded), step.mode);
@@ -105,21 +106,33 @@ void InputStateGlue::setState(const void* data, int sizeInBytes)
         hook = confirmClaim_;
     }
     if (applyParams)
+    {
+        // 写完或中途抛出都清掉，之后的 getState 回到读参数树
+        struct ClearApplying
+        {
+            InputStateGlue& glue;
+            ~ClearApplying()
+            {
+                std::lock_guard<std::mutex> lock(glue.mutex_);
+                glue.applying_.reset();
+            }
+        } clear{*this};
         writeParams(values);
+    }
     callHook(hook);
 }
 
 void InputStateGlue::getState(juce::MemoryBlock& destData)
 {
-    const ParamValues current = currentParamValues();
-    std::array<state::glue::KnownParam, kParamCount> known{};
-    for (std::size_t i = 0; i < kParamCount; ++i)
-        known[i] = {kStateSpecs[i].id, current[i]};
-
     std::vector<std::uint8_t> bytes;
     std::shared_ptr<const std::function<void()>> hook;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // 在锁里判：applying_ 在 setState 开始写之前置上、写完之后才清掉，没置上时参数树不会正被 setState 写到一半
+        const ParamValues current = applying_.has_value() ? *applying_ : currentParamValues();
+        std::array<state::glue::KnownParam, kParamCount> known{};
+        for (std::size_t i = 0; i < kParamCount; ++i)
+            known[i] = {kStateSpecs[i].id, current[i]};
         const state::glue::SaveResult saved =
             state::glue::bytesForSave(document_, writeBack_, known.data(), known.size(), bytes);
         if (saved.dropped != 0u)
@@ -220,6 +233,19 @@ InputStateGlue::ParamValues InputStateGlue::currentParamValues() const
         values[i] = parameter != nullptr ? parameter->convertFrom0to1(parameter->getValue()) : kStateSpecs[i].def;
     }
     return values;
+}
+
+// writeParams 写完之后参数树里的明文值：落在步进格上，与 writeParams 判「没变」用的是同一个换算
+InputStateGlue::ParamValues InputStateGlue::landedValues(const ParamValues& values) const
+{
+    ParamValues landed{};
+    for (std::size_t i = 0; i < kParamCount; ++i)
+    {
+        const auto* parameter = parameters_[i];
+        landed[i] =
+            parameter != nullptr ? parameter->convertFrom0to1(parameter->convertTo0to1(values[i])) : kStateSpecs[i].def;
+    }
+    return landed;
 }
 
 // 没变的参数不写，免得给宿主多发一串参数通知

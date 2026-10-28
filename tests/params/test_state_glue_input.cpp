@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -382,6 +383,75 @@ TEST_CASE("input glue: 定型后的 setState 先加 stateSeq 再写参数", "[pa
     rig.parameter("feedback").removeListener(&probe);
     REQUIRE(probe.seen.size() == 1u);
     CHECK(probe.seen[0] == 1u);
+}
+
+namespace
+{
+
+// 参数通知里回头调 getState（宿主收到参数通知时可能这么做），记下每次交出的字节；throwOnce 时第一次通知抛出
+struct SaveProbe final : juce::AudioProcessorParameter::Listener
+{
+    explicit SaveProbe(InputStateGlue& g, bool throwFirst = false) : glue(g), throwOnce(throwFirst) {}
+    void parameterValueChanged(int, float) override
+    {
+        if (throwOnce)
+        {
+            throwOnce = false;
+            throw std::runtime_error("listener");
+        }
+        juce::MemoryBlock block;
+        glue.getState(block);
+        const auto* data = static_cast<const std::uint8_t*>(block.getData());
+        saves.emplace_back(data, data + block.getSize());
+    }
+    void parameterGestureChanged(int, bool) override {}
+    InputStateGlue& glue;
+    bool throwOnce;
+    std::vector<Bytes> saves;
+};
+
+} // namespace
+
+TEST_CASE("input glue: setState 写参数树期间的 getState 交出这次要写的值，不交新旧混合的一份", "[params][state-glue]")
+{
+    // 未定型（全量应用）与定型后（只改参数）两条路各走一遍
+    for (const bool settled : {false, true})
+    {
+        INFO((settled ? "已定型" : "未定型"));
+        Rig rig;
+        if (settled)
+            REQUIRE(rig.glue.markUserAction());
+        SaveProbe probe(rig.glue);
+        rig.parameter("feedback").addListener(&probe);
+        // feedback 0 → 40 最先写；ceiling −6 → −10 最后写，通知到来时还没写。ceiling 与 delay_ms 给不在步进格上的值，
+        // 落进参数树时各自落到 −10 与 250
+        StateDocument incoming = stateA();
+        incoming.params.set("ceiling", -10.03f);
+        incoming.params.set("delay_ms", 250.0004f);
+        rig.load(encodeOf(incoming));
+        rig.parameter("feedback").removeListener(&probe);
+        REQUIRE(probe.saves.size() == 1u);
+
+        const StateDocument during = decodeOf(probe.saves[0]);
+        CHECK(savedValue(during, "feedback") == Approx(40.0f).margin(1.0e-4));
+        CHECK(savedValue(during, "ceiling") == Approx(-10.0f).margin(1.0e-4));
+        CHECK(savedValue(during, "delay_ms") == Approx(250.0f).margin(1.0e-3));
+        // 与写完之后保存的逐字节相同：交出的是落到步进格上的值，对数刻度的参数也一样
+        CHECK(probe.saves[0] == rig.save());
+    }
+}
+
+TEST_CASE("input glue: setState 写参数树时抛出，之后的 getState 回到读参数树", "[params][state-glue]")
+{
+    Rig rig;
+    SaveProbe probe(rig.glue, true);
+    rig.parameter("feedback").addListener(&probe);
+    CHECK_THROWS_AS(rig.load(encodeOf(stateA())), std::runtime_error); // feedback 已写成 40，其余没写
+    rig.parameter("feedback").removeListener(&probe);
+
+    const StateDocument saved = decodeOf(rig.save());
+    CHECK(savedValue(saved, "feedback") == Approx(40.0f).margin(1.0e-4));
+    CHECK(savedValue(saved, "ceiling") == Approx(-6.0f).margin(1.0e-4)); // 参数树里的值，不是这次没写完的 −10
 }
 
 TEST_CASE("input glue: Empty、Corrupt、IgnoredProbe 保持当前，不回到默认", "[params][state-glue]")

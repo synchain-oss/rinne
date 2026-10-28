@@ -18,6 +18,8 @@
 //   · 不依赖 setState 与 prepareToPlay 的先后：参数层不读采样率，setState 在 prepare 之前来，参数照样生效。
 // getState：正在保留原字节时原样交出；否则把参数树里 11 个参数的当前值写进文档、再裁剪、再编码。为压进上限丢掉的
 //   未知 id 条数累加进 droppedUnknownParams（处理器汇进诊断文本）；编码失败交出空块，并累加 encodeFailures。
+//   setState 正在锁外写参数树时（宿主收到参数通知可能回头调 getState），交出这次 setState 要写的值，不读写到一半的
+//   参数树：否则交出的是新旧参数混在一起的一份，旧值还会被 set 回文档。
 //
 // 定型（markUserAction）：只由界面上真实的用户点击或拖动触发，一次性，不可撤销。桥层处理下面「算定型」的调用时
 // 调用它；页面自己发起的调用不算（桥调用带一个「用户发起」标志，由页面在真实的点击或拖动处理里置位）。
@@ -38,7 +40,8 @@
 //   固定的非空名字，接线时在处理器里做。参数改动不走这里，宿主有参数自己的通知。
 //
 // 线程：setState、getState、markUserAction、editConfigs 可在任何非实时线程上调用，内部有锁；宿主不会并发调两次
-//   setState，胶水仍把整个 setState 串起来。参数树的写入在锁外做（宿主收到参数通知时可能回头调 getState）。
+//   setState，胶水仍把整个 setState 串起来。参数树的写入在锁外做（宿主收到参数通知时可能回头调 getState，
+//   这期间交出什么见上面 getState 一条）。
 //   音频线程只读这里的原子量（snapshot，或 stateSeq、guardOn、resetOnPlay、tailMode），不加锁、不分配。
 #pragma once
 
@@ -126,6 +129,7 @@ private:
 
     ParamValues paramValuesFrom(const state::Params& params) const noexcept;
     ParamValues currentParamValues() const;
+    ParamValues landedValues(const ParamValues& values) const;
     void writeParams(const ParamValues& values);
     void publishConfigsLocked() noexcept;
     static void callHook(const std::shared_ptr<const std::function<void()>>& hook);
@@ -136,11 +140,12 @@ private:
     std::array<juce::RangedAudioParameter*, kParamCount> parameters_{};
 
     std::mutex loadMutex_; // 串起整个 setState：两次 setState 的参数写入不会交错
-    mutable std::mutex mutex_; // 管下面四项；持锁时不调用参数树、宿主或回调
+    mutable std::mutex mutex_; // 管下面五项；持锁时不写参数树、不调用宿主或回调（读参数的当前值只是原子读，可以在锁里）
     state::StateDocument document_;
     state::RawWriteBack writeBack_;
     state::glue::Settlement settlement_;
     std::shared_ptr<const std::function<void()>> confirmClaim_;
+    std::optional<ParamValues> applying_; // setState 在锁外写参数树期间：写完后参数树里会是的值
 
     std::atomic<std::uint32_t> stateSeq_{0};
     std::atomic<bool> guardOn_{true};

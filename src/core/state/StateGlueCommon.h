@@ -53,6 +53,7 @@ struct LoadStep
 
 // setState 的前半：loadState，再按结果更新写回保留（RejectedNewer 接管、成功读入清掉、其余不动），最后定应用方式。
 // 只有 mode 不是 None 时 loaded 才是读入的文档；否则 loaded 保持调用前的样子。
+// 不会抛出：loadState 自己兜住内存不足（判 Corrupt，loaded 不动），onLoad 只做移动与清空，不分配。
 LoadStep loadForApply(const std::uint8_t* data, std::size_t size, Role role, bool settled, RawWriteBack& writeBack,
                       StateDocument& loaded) noexcept;
 
@@ -101,6 +102,8 @@ struct SaveResult
 //   3. 再 trimToDecodable：只从末尾丢未知 id，丢了几条记进 dropped；
 //   4. 编码进 out。
 // 第 2、3 步改的是实例自己的文档：丢掉的未知 id 本来就写不回去，下次保存不会再丢一次，也不会再计一次。
+// 第 4 步编码失败时这两步的改动照样留着：丢哪几条只取决于参数列表本身（已知参数的 id 固定、值定长），任何一次
+// 能成功的保存都会丢同样几条，所以留着不会多丢，计数也只计这一次。
 // 先 set 再 trim：反过来的话，trim 时列表里还没有补上的参数，补完又可能超出上限，整份编不出来。
 // 任何一步失败（含内存不足）：ok 为 false，out 为空。宿主存下空块，下次加载判 Empty，保持当前。
 // known 为空指针时 knownCount 必须为 0（Output 就这样调）；known 里的 id 不能为空指针。
