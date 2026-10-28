@@ -25,6 +25,7 @@
 //                    [--gap-ms 500] [--load <线程数>] [--fps 240] [--white 0.2] [--x 80] [--y 80]
 //                    [--max-seconds 115] [--frames-dir <目录>] [--capture dxgi|gdi] [--white-backdrop] [--no-gui-lock]
 //   --load    起若干条普通优先级的忙循环线程复现「机器忙」，跑完自己停，不碰别的进程。
+//   范围：--max-seconds 1…3600；三个毫秒参数不超过 600000，--max-open-ms 至少 500，另两个不小于 0。越界按参数错误退出。
 //   会在桌面上弹窗：默认先取本机 gates 的 GUI 锁（与 scripts/lib/Locks.psm1 的 gui 锁是同一个命名互斥体），排队等。
 // 退出码：0 跑完（有没有白帧看结果文件）；1 参数、加载或抓屏失败；3 等 GUI 锁超时；
 // 4 到了硬上限（--max-seconds 再加 5 秒）自己结束，已跑完的轮次只在标准输出里。
@@ -144,7 +145,10 @@ bool parseOptions(const juce::StringArray& args, Options& o, juce::String& error
     }
     if (o.plugin.isEmpty() || o.out.isEmpty())
         error = "--plugin and --out are required";
-    else if (o.opens < 1 || o.maxOpenMs < 500 || o.fps < 30 || o.load < 0 || o.white <= 0.0f || o.white > 1.0f ||
+    // 硬上限由 --max-seconds 算出：不许非正（换成无符号会绕成极大值，看门狗永不触发），也不许大到加 5 秒溢出
+    else if (o.opens < 1 || o.maxOpenMs < 500 || o.maxOpenMs > 600000 || o.afterRevealMs < 0 ||
+             o.afterRevealMs > 600000 || o.gapMs < 0 || o.gapMs > 600000 || o.maxSeconds < 1 || o.maxSeconds > 3600 ||
+             o.fps < 30 || o.load < 0 || o.white <= 0.0f || o.white > 1.0f ||
              (o.capture != "dxgi" && o.capture != "gdi"))
         error = "argument out of range";
     return error.isEmpty();
@@ -545,6 +549,7 @@ private:
         if (dxgi_)
         {
             bool first = true; // 本轮第一张带着上一轮以来攒下的合并数，不算
+            int lostInRow = 0;
             while (!stop_)
             {
                 double present = 0;
@@ -555,10 +560,19 @@ private:
                     sample(present, w);
                     coalesced_ += (!first && accumulated > 1) ? static_cast<int>(accumulated) - 1 : 0;
                     first = false;
+                    lostInRow = 0;
                 }
                 else if (got < 0)
                 {
+                    // 复制失效（切到安全桌面、UAC、锁屏、显示模式变化）：歇一下再重开。重开后一直取不到帧就放弃本轮抓屏，
+                    // 免得在最高优先级上反复重建、不让出 CPU；下一轮 begin 照常重开
                     ++lost_;
+                    if (++lostInRow > kMaxLostInRow)
+                    {
+                        note_ = "desktop duplication kept getting lost; capture stopped for this open";
+                        break;
+                    }
+                    Sleep(kLostRetryMs);
                     duplOpen_ = dupl_.open(screen_, duplNote_);
                     note_ = duplNote_;
                     first = true;
@@ -679,6 +693,9 @@ private:
     HBITMAP dib_ = nullptr;
     HGDIOBJ old_ = nullptr;
     void* bits_ = nullptr;
+    // 复制失效后的重开节奏：每次先歇 50 ms，连续 20 次（约 1 秒）一帧都没取到就停掉本轮抓屏
+    static constexpr int kLostRetryMs = 50;
+    static constexpr int kMaxLostInRow = 20;
     Dupl dupl_;
     bool dxgi_ = false;
     bool duplOpen_ = false;
@@ -998,12 +1015,21 @@ private:
     {
         capture_.end();
         const double tClose = nowMs();
+        releaseEditor();
+        results_.push_back(analyse(tClose));
+        ++index_;
+    }
+
+    // 收掉当前这一轮的窗口：抓屏先停，编辑器从窗口上摘下来再析构，然后才是窗口。插件实例必须比它的编辑器活得久，
+    // 所以 finish() 在析构实例之前也调这里：开窗中途失败（窗口没有面积、抓屏起不来）时编辑器和窗口都还在。
+    // 没有在开的一轮时是空操作
+    void releaseEditor()
+    {
+        capture_.end();
         if (holder_ != nullptr && editor_ != nullptr)
             holder_->removeChildComponent(editor_.get());
         editor_.reset(); // 插件侧的编辑器在这里析构，关窗诊断行随之写出
         holder_.reset();
-        results_.push_back(analyse(tClose));
-        ++index_;
     }
 
     OpenResult analyse(double tClose)
@@ -1223,6 +1249,7 @@ private:
     void finish()
     {
         stopTimer();
+        releaseEditor();
         load_.stop();
         backdrop_.reset();
         auto* o = new juce::DynamicObject();
