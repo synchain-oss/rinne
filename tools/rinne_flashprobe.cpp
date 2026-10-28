@@ -6,7 +6,8 @@
 // 加载一个本机构建出的 .vst3，把编辑器放进一个无边框的置顶窗口里开、关，重复 N 次。开窗期间另起一条抓屏线程，
 // 抓编辑器所在矩形合成之后的结果：WebView2 走 DirectComposition，PrintWindow 只抓得到窗口自己画的那层，
 // 抓不到它；只有从屏幕上抓合成之后的结果，才是用户真正看到的。默认走桌面复制（DXGI），合成器每出一张新桌面就取一张，
-// 两次取帧之间合成了不止一张会记成「合并」，合并为 0 就是一帧没漏；取不到桌面复制（或 --capture gdi）时
+// 两次取帧之间合成了不止一张会记成「合并」，取到了却读不出来的记成「丢弃」，两者都为 0 才是一帧没漏；
+// 复制反复失效、本轮抓屏中途停掉的开窗单独计数。取不到桌面复制（或 --capture gdi）时
 // 退回屏幕 DC 的 BitBlt 按 --fps 轮询，实际帧率记进结果。每帧按采样点归一类：
 //   backdrop     本工具铺在编辑器窗口后面的绿底：编辑器窗口还没上屏；我方首帧（占位或品红）之后再见到它记成「透底」
 //                （see-through），真宿主上那一刻露出的是宿主窗口后面的东西；我方首帧之前的绿底是宿主首次上屏的空档，
@@ -321,6 +322,7 @@ class Dupl
 public:
     bool open(RECT screen, juce::String& why)
     {
+        why.clear(); // 只在失败时写原因：先清掉，重开成功后不留上一次失败的旧文本
         close();
         using Microsoft::WRL::ComPtr;
         ComPtr<IDXGIFactory1> factory;
@@ -376,7 +378,8 @@ public:
         device_.Reset();
     }
 
-    // 1 取到一张新桌面并已拷进 out（BGRA，紧排）；0 这段时间里没有新合成；-1 复制失效（例如切了全屏或锁屏）
+    // 1 取到一张新桌面并已拷进 out（BGRA，紧排）；0 这段时间里没有新合成；
+    // 2 有新合成却没读出来（取纹理或映射失败），accumulated 照填，调用方记成丢弃；-1 复制失效（例如切了全屏或锁屏）
     int next(UINT timeoutMs, std::uint8_t* out, double& presentMs, UINT& accumulated)
     {
         using Microsoft::WRL::ComPtr;
@@ -388,24 +391,28 @@ public:
         if (FAILED(hr))
             return -1;
         int got = 0;
-        ComPtr<ID3D11Texture2D> texture;
-        if (info.LastPresentTime.QuadPart != 0 && SUCCEEDED(resource.As(&texture))) // 只动了鼠标的帧不算
+        if (info.LastPresentTime.QuadPart != 0) // 只动了鼠标的帧不算
         {
-            context_->CopySubresourceRegion(staging_.Get(), 0, 0, 0, 0, texture.Get(), 0, &box_);
-            D3D11_MAPPED_SUBRESOURCE map{};
-            if (SUCCEEDED(context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0, &map)))
+            accumulated = info.AccumulatedFrames;
+            got = 2; // 下面读出来了才改成 1
+            ComPtr<ID3D11Texture2D> texture;
+            if (SUCCEEDED(resource.As(&texture)))
             {
-                const UINT rowBytes = (box_.right - box_.left) * 4;
-                for (UINT y = 0; y < box_.bottom - box_.top; ++y)
-                    std::memcpy(out + y * rowBytes, static_cast<const std::uint8_t*>(map.pData) + y * map.RowPitch,
-                                rowBytes);
-                context_->Unmap(staging_.Get(), 0);
-                LARGE_INTEGER f;
-                QueryPerformanceFrequency(&f);
-                presentMs =
-                    static_cast<double>(info.LastPresentTime.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart);
-                accumulated = info.AccumulatedFrames;
-                got = 1;
+                context_->CopySubresourceRegion(staging_.Get(), 0, 0, 0, 0, texture.Get(), 0, &box_);
+                D3D11_MAPPED_SUBRESOURCE map{};
+                if (SUCCEEDED(context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0, &map)))
+                {
+                    const UINT rowBytes = (box_.right - box_.left) * 4;
+                    for (UINT y = 0; y < box_.bottom - box_.top; ++y)
+                        std::memcpy(out + y * rowBytes, static_cast<const std::uint8_t*>(map.pData) + y * map.RowPitch,
+                                    rowBytes);
+                    context_->Unmap(staging_.Get(), 0);
+                    LARGE_INTEGER f;
+                    QueryPerformanceFrequency(&f);
+                    presentMs =
+                        static_cast<double>(info.LastPresentTime.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart);
+                    got = 1;
+                }
             }
         }
         dup_->ReleaseFrame();
@@ -461,7 +468,9 @@ public:
         seenEditor_ = false;
         known_.clear();
         coalesced_ = 0;
+        dropped_ = 0;
         lost_ = 0;
+        stopped_ = false;
         note_.clear();
         const int w = screen.right - screen.left, h = screen.bottom - screen.top;
         dxgi_ = false;
@@ -536,9 +545,12 @@ public:
     const std::vector<WinEvent>& windows() const { return windows_; }
     const std::vector<Kept>& kept() const { return kept_; }
     const char* backend() const { return dxgi_ ? "dxgi" : "gdi"; }
-    // 桌面复制两次取帧之间多合成的张数之和（大于 0 说明有帧没看到）、复制失效次数、退回 GDI 的原因
+    // 桌面复制两次取帧之间多合成的张数之和、取到却没读出来的张数（两者大于 0 都说明有帧没看到）、复制失效次数、
+    // 本轮抓屏是否中途停掉、退回 GDI 或停掉的原因。这几项都由抓屏线程写，end() 汇合之后才读
     int coalesced() const { return coalesced_; }
+    int dropped() const { return dropped_; }
     int lost() const { return lost_; }
+    bool stopped() const { return stopped_; }
     const juce::String& note() const { return note_; }
 
 private:
@@ -555,21 +567,30 @@ private:
                 double present = 0;
                 UINT accumulated = 0;
                 const int got = dupl_.next(5, buffer_.data(), present, accumulated);
-                if (got > 0)
+                if (got == 1)
                 {
                     sample(present, w);
                     coalesced_ += (!first && accumulated > 1) ? static_cast<int>(accumulated) - 1 : 0;
                     first = false;
                     lostInRow = 0;
                 }
+                else if (got == 2)
+                {
+                    // 这一张没读出来：它盖住的合成张数都算丢弃（本轮第一张只算它自己，理由同上面的合并数）
+                    dropped_ += first ? 1 : static_cast<int>(std::max<UINT>(accumulated, 1));
+                    first = false;
+                }
                 else if (got < 0)
                 {
                     // 复制失效（切到安全桌面、UAC、锁屏、显示模式变化）：歇一下再重开。重开后一直取不到帧就放弃本轮抓屏，
-                    // 免得在最高优先级上反复重建、不让出 CPU；下一轮 begin 照常重开
+                    // 免得在最高优先级上反复重建、不让出 CPU；复制对象一并关掉，下一轮 begin 重开
                     ++lost_;
                     if (++lostInRow > kMaxLostInRow)
                     {
                         note_ = "desktop duplication kept getting lost; capture stopped for this open";
+                        dupl_.close();
+                        duplOpen_ = false;
+                        stopped_ = true;
                         break;
                     }
                     Sleep(kLostRetryMs);
@@ -577,7 +598,10 @@ private:
                     note_ = duplNote_;
                     first = true;
                     if (!duplOpen_)
+                    {
+                        stopped_ = true;
                         break;
+                    }
                 }
                 watchWindows(nowMs());
             }
@@ -702,7 +726,8 @@ private:
     RECT duplRect_{};
     juce::String duplNote_;
     std::vector<std::uint8_t> buffer_;
-    int coalesced_ = 0, lost_ = 0;
+    int coalesced_ = 0, dropped_ = 0, lost_ = 0;
+    bool stopped_ = false;
     juce::String note_;
     std::atomic<bool> stop_{false};
     std::thread thread_;
@@ -916,8 +941,8 @@ private:
     struct OpenResult
     {
         juce::var json;
-        bool whiteAfterOurs = false, whiteBeforeOurs = false, dxgi = false;
-        int whiteFrames = 0, coalesced = 0, seeThrough = 0;
+        bool whiteAfterOurs = false, whiteBeforeOurs = false, dxgi = false, captureStopped = false;
+        int whiteFrames = 0, coalesced = 0, dropped = 0, seeThrough = 0;
         double fps = 0;
     };
 
@@ -942,11 +967,12 @@ private:
             {
                 closeOne();
                 state_ = State::gap;
-                gapUntil_ = nowMs() + opts_.gapMs;
+                gapUntil_ = std::max(nowMs() + opts_.gapMs, tClose_ + kCloseLineMs);
             }
         }
         else if (t >= gapUntil_)
         {
+            analysePending();
             state_ = State::next;
         }
     }
@@ -970,11 +996,11 @@ private:
         if (backdrop_ == nullptr)
         {
             backdrop_ = std::make_unique<SolidWindow>(opts_.whiteBackdrop ? juce::Colours::white : kBackdropColour);
-            backdrop_->setBounds(holder_->getBounds().expanded(24));
             backdrop_->addToDesktop(juce::ComponentPeer::windowIsTemporary);
             backdrop_->setAlwaysOnTop(true);
             backdrop_->setVisible(true);
         }
+        backdrop_->setBounds(holder_->getBounds().expanded(24)); // 每轮跟着编辑器的尺寸走，底始终盖住编辑器外圈
         const auto hwnd = static_cast<HWND>(holder_->getPeer()->getNativeHandle());
         RECT client{};
         GetClientRect(hwnd, &client);
@@ -1011,12 +1037,23 @@ private:
         return true;
     }
 
+    // 关窗只收窗口，分析推到间隔结束：关窗诊断行在编辑器析构时才写，经 DBWIN 读者线程异步进来，
+    // 紧接着分析会漏掉它。间隔至少留 kCloseLineMs，分析取的诊断行也截到关窗后 kCloseLineMs
     void closeOne()
     {
         capture_.end();
-        const double tClose = nowMs();
+        tClose_ = nowMs();
         releaseEditor();
-        results_.push_back(analyse(tClose));
+        pending_ = true;
+    }
+
+    // 分析上一轮（抓到的帧与窗口时间线留在 capture_ 里，下一轮 begin 才清）。没有待分析的一轮时是空操作
+    void analysePending()
+    {
+        if (!pending_)
+            return;
+        pending_ = false;
+        results_.push_back(analyse(tClose_));
         ++index_;
     }
 
@@ -1042,12 +1079,12 @@ private:
         o->setProperty("visibleAtMs", tVisible_ - t0_);
         o->setProperty("closedAtMs", tClose - t0_);
 
-        // 诊断行：本次开窗起点之后、下一次之前（关窗行在关窗之后才到，这里多留一点余量）
+        // 诊断行：本次开窗起点之后、关窗后 kCloseLineMs 之内（关窗行在关窗之后才到）
         juce::Array<juce::var> diag;
         double revealT = -1, navT = -1;
         for (const auto& [t, text] : dbwin_.lines())
         {
-            if (t < t0_ - 5 || t > tClose + 300)
+            if (t < t0_ - 5 || t > tClose + kCloseLineMs)
                 continue;
             auto* d = new juce::DynamicObject();
             d->setProperty("t", juce::roundToInt(t - t0_));
@@ -1153,10 +1190,14 @@ private:
         o->setProperty("fps", juce::roundToInt(r.fps));
         o->setProperty("capture", juce::String(capture_.backend()));
         o->setProperty("coalescedFrames", capture_.coalesced());
+        o->setProperty("droppedFrames", capture_.dropped());
         o->setProperty("duplicationLost", capture_.lost());
+        o->setProperty("captureStopped", capture_.stopped());
         if (capture_.note().isNotEmpty())
             o->setProperty("captureNote", capture_.note());
         r.coalesced = capture_.coalesced();
+        r.dropped = capture_.dropped();
+        r.captureStopped = capture_.stopped();
         r.dxgi = std::strcmp(capture_.backend(), "dxgi") == 0;
 
         juce::Array<juce::var> wins;
@@ -1196,11 +1237,13 @@ private:
         r.whiteAfterOurs = whiteAfter > 0;
         r.whiteFrames = counts[3];
         r.seeThrough = seeThrough;
-        std::printf("open %d: %s %d frames %.0f fps coalesced %d | white %d (before ours %d, after ours %d) "
-                    "see-through %d black %d placeholder %d content %d magenta %d other %d | nav %d ms reveal %d ms\n",
-                    index_, capture_.backend(), static_cast<int>(frames.size()), r.fps, r.coalesced, counts[3],
-                    whiteBefore, whiteAfter, seeThrough, counts[1], counts[4], counts[5], counts[2], counts[6],
-                    juce::roundToInt(navT), juce::roundToInt(revealT));
+        std::printf("open %d: %s %d frames %.0f fps coalesced %d dropped %d%s | white %d (before ours %d, after ours "
+                    "%d) see-through %d black %d placeholder %d content %d magenta %d other %d | nav %d ms reveal %d "
+                    "ms\n",
+                    index_, capture_.backend(), static_cast<int>(frames.size()), r.fps, r.coalesced, r.dropped,
+                    r.captureStopped ? " capture stopped" : "", counts[3], whiteBefore, whiteAfter, seeThrough,
+                    counts[1], counts[4], counts[5], counts[2], counts[6], juce::roundToInt(navT),
+                    juce::roundToInt(revealT));
         std::fflush(stdout);
         return r;
     }
@@ -1250,6 +1293,7 @@ private:
     {
         stopTimer();
         releaseEditor();
+        analysePending(); // 正常路径上间隔结束时已经分析过；这里只兜住还没分析的最后一轮
         load_.stop();
         backdrop_.reset();
         auto* o = new juce::DynamicObject();
@@ -1272,7 +1316,7 @@ private:
         o->setProperty("seconds", (nowMs() - runStart_) / 1000.0);
         o->setProperty("error", fatal_);
         int opens = 0, withWhite = 0, withWhiteBefore = 0, withWhiteAfter = 0, whiteFrames = 0, coalesced = 0,
-            dxgiOpens = 0, withSeeThrough = 0, seeThroughFrames = 0;
+            dropped = 0, captureStopped = 0, dxgiOpens = 0, withSeeThrough = 0, seeThroughFrames = 0;
         double fpsSum = 0, fpsMin = 1e9;
         juce::Array<juce::var> list;
         for (const auto& r : results_)
@@ -1283,6 +1327,8 @@ private:
             withWhiteAfter += r.whiteAfterOurs;
             whiteFrames += r.whiteFrames;
             coalesced += r.coalesced;
+            dropped += r.dropped;
+            captureStopped += r.captureStopped;
             dxgiOpens += r.dxgi;
             withSeeThrough += r.seeThrough > 0;
             seeThroughFrames += r.seeThrough;
@@ -1300,6 +1346,9 @@ private:
         s->setProperty("fpsMin", opens > 0 ? juce::roundToInt(fpsMin) : 0);
         s->setProperty("opensCapturedByDuplication", dxgiOpens);
         s->setProperty("coalescedFrames", coalesced);
+        s->setProperty("droppedFrames", dropped);
+        // 抓屏中途停掉的开窗：这几轮的白帧与透底统计只覆盖停掉之前，读汇总时要把它们扣出来看
+        s->setProperty("opensCaptureStopped", captureStopped);
         s->setProperty("opensWithSeeThrough", withSeeThrough);
         s->setProperty("seeThroughFrames", seeThroughFrames);
         o->setProperty("summary", juce::var(s));
@@ -1309,10 +1358,11 @@ private:
         out.getParentDirectory().createDirectory();
         if (!out.replaceWithText(juce::JSON::toString(json, false)))
             fatal_ = fatal_.isNotEmpty() ? fatal_ : juce::String("cannot write the result file");
-        std::printf("summary: %d opens (%d by duplication, %d coalesced frames), white in %d (before ours %d, after "
-                    "ours %d), %d white frames, see-through in %d (%d frames), fps mean %d min %d%s%s\n",
-                    opens, dxgiOpens, coalesced, withWhite, withWhiteBefore, withWhiteAfter, whiteFrames,
-                    withSeeThrough, seeThroughFrames, opens > 0 ? juce::roundToInt(fpsSum / opens) : 0,
+        std::printf("summary: %d opens (%d by duplication, %d coalesced frames, %d dropped frames, capture stopped "
+                    "in %d), white in %d (before ours %d, after ours %d), %d white frames, see-through in %d (%d "
+                    "frames), fps mean %d min %d%s%s\n",
+                    opens, dxgiOpens, coalesced, dropped, captureStopped, withWhite, withWhiteBefore, withWhiteAfter,
+                    whiteFrames, withSeeThrough, seeThroughFrames, opens > 0 ? juce::roundToInt(fpsSum / opens) : 0,
                     opens > 0 ? juce::roundToInt(fpsMin) : 0, fatal_.isNotEmpty() ? " | error: " : "",
                     fatal_.toRawUTF8());
         std::fflush(stdout);
@@ -1324,6 +1374,8 @@ private:
 
     // 采样平均差不超过它就算「相符」（逐通道 0 到 255）：两份 JUCE 的渲染差与抗锯齿都在这之内
     static constexpr double kMatch = 6.0;
+    // 关窗诊断行经 DBWIN 异步进来的等待：间隔至少这么长，分析取的诊断行也截到关窗后这么久
+    static constexpr double kCloseLineMs = 300.0;
 
     Options opts_;
     juce::AudioPluginFormatManager manager_;
@@ -1341,8 +1393,8 @@ private:
     State state_ = State::next;
     int index_ = 0, refreshHz_ = 0, exitCode_ = kExitOk;
     float designW_ = 0, designH_ = 0, logicalW_ = 0, logicalH_ = 0;
-    double dpi_ = 1.0, t0_ = 0, tVisible_ = 0, gapUntil_ = 0, runStart_ = 0;
-    bool dbwinOk_ = false;
+    double dpi_ = 1.0, t0_ = 0, tVisible_ = 0, tClose_ = 0, gapUntil_ = 0, runStart_ = 0;
+    bool dbwinOk_ = false, pending_ = false;
     juce::String fatal_;
 };
 
