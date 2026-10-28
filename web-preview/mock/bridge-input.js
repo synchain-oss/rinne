@@ -4,7 +4,14 @@
 // 名表与 docs/UI_BRIDGE.md、src/input/InputBridgeApi.h、web/shared/bridge.js 逐名相等，由 check-bridge-parity 对拍。
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据，不模拟 DSP。
 
-import { buildDiagnostics, commonFunctions, createCore, memoryStorage } from "./bridge-common.js";
+import {
+    buildDiagnostics,
+    commonFunctions,
+    createCore,
+    memoryStorage,
+    previewDiagEvents,
+    previewDiagValues,
+} from "./bridge-common.js";
 import {
     CUT_REASONS,
     FACTORY_PRESETS,
@@ -161,22 +168,42 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         licenseShown: false,
         clipboard: null,
         opened: null,
-        diagnostics: () =>
-            buildDiagnostics({
-                "diag.format": "rinne-diag v1",
-                "diag.version": model.version,
-                "diag.role": "input",
-                "diag.os": "preview",
-                "diag.host": model.host,
-                "diag.sample_rate": model.sampleRate,
-                "diag.block_size": model.blockSize,
-                "diag.group": model.group,
-                "diag.pair_state": model.pair.state,
-                "diag.track_relation": model.pair.verify,
-                "diag.lang": model.lang ?? core.ui.lang,
-                "diag.ui_scale": model.scale,
-                "diag.webview": "preview",
-            }),
+        diagnostics: () => {
+            const sr = model.sampleRate;
+            const sync = model.values.delay_mode === "sync";
+            return buildDiagnostics(
+                "input",
+                {
+                    ...previewDiagValues("input", model, core),
+                    "loop.d_user_ms": model.values.delay_ms.toFixed(3),
+                    "loop.d_eff": Math.round((model.delay.actualMs * sr) / 1000),
+                    "loop.d_min": Math.round((model.delay.minMs * sr) / 1000),
+                    "loop.mode": model.values.delay_mode,
+                    "loop.bpm": "120.0",
+                    "loop.bpm_src": sync ? "manual" : "none",
+                    "loop.taps_active": 0,
+                    "loop.tap_drop": 0,
+                    "sync.resync": 0,
+                    "sync.overflow": 0,
+                    "sync.torn": 0,
+                    "sync.overrun": 0,
+                    "sync.w_cas_fail": 0,
+                    "sync.unstable": 0,
+                    "sync.off_drift_blocks": 0,
+                    "sync.frozen_max": 0,
+                    "order.verdict": model.pair.state === "connected" ? "correct" : "unknown",
+                    "order.votes": "0.00",
+                    "order.host_ns": "valid",
+                    "safety.state": model.cut ? "TRIPPED" : "RUN",
+                    "safety.trips": model.cut ? 1 : 0,
+                    "safety.tail_peak_max_db": "-96.0",
+                    "safety.limiter_gr_max_db": "0.0",
+                    "safety.nonfinite_ring": model.meters.lamps.nonfiniteCount,
+                    "safety.clamp_ring": 0,
+                },
+                previewDiagEvents(model),
+            );
+        },
     };
     const common = commonFunctions(core, env);
 
