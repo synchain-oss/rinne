@@ -45,6 +45,225 @@ const sectionAllowed = (m, line, ctx) =>
 const warnLevelAllowed = (m, line) =>
     /^W[0-4]$/.test(m[0]) && /(?:^|[\s"'(=])[/-]$/.test(line.slice(Math.max(0, m.index - 2), m.index));
 
+// ---- 放行上下文 ------------------------------------------------------------------------
+//
+// 两处编号形态不是编号，是编码的巧合：SVG path 数据里的坐标与 base64 载荷里的字节。
+// 放行只在这两种语法上下文里生效，别处照判。
+//
+// 放行范围要窄，四个条件都收紧：
+//   path 数据：引号里的整段，且整段是合法的 SVG path —— 首命令是 moveto、每个命令的参数个数合法、
+//     只由命令字母与数字组成。J、D、U、R、W、E 不是 path 命令，「真的像编号」的形态在合法 path 里站不住。
+//     引号只在三种语法位置里算数：d 属性、path(…) 函数、路径数组（每个元素都得是 path 数据）。
+//   base64：data URI 里 ;base64, 之后连续的 base64 字符。
+//   两种上下文都不跨行：跨行的形态一律不放行。
+
+// SVG path 的命令字母与各自的参数个数（弧的 7 个参数、闭合命令不要参数）
+const PATH_CMD = "MmZzLlHhVvCcSsQqTtAa";
+const PATH_ARITY = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7, Z: 0 };
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+const MAX_PATH_LEN = 512; // path 数据很短；上限挡住引号配对错位时把整段文件当 path 的情形
+
+/**
+ * 一段文本是不是 SVG path 数据：命令字母开头、参数个数合法、只由命令字母与数字组成。
+ * 首命令必须是 moveto（SVG 规范要求路径以 moveto 开头）：这样「T04 12」这类以别的命令开头的
+ * 形态站不住，不会被当成 path 放行。参数个数不对（只有一个数的）不算 path —— 那是编号。
+ * movetoFirst 是可关的判据，变异检查要能单独把它关掉（见 mutationCheck）。
+ */
+function isPathData(text, { movetoFirst = true } = {}) {
+    const s = text.trim();
+    if (!s || s.length > MAX_PATH_LEN) return false;
+    if (movetoFirst && s[0] !== "M" && s[0] !== "m") return false;
+    if (!PATH_CMD.includes(s[0])) return false;
+    const num = /[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/y;
+    const toks = [];
+    let i = 0;
+    while (i < s.length) {
+        const c = s[i];
+        if (c === "," || /\s/.test(c)) {
+            i++;
+            continue;
+        }
+        if (PATH_CMD.includes(c)) {
+            toks.push(c);
+            i++;
+            continue;
+        }
+        num.lastIndex = i;
+        const m = num.exec(s);
+        if (!m) return false;
+        toks.push(0); // 参数
+        i += m[0].length;
+    }
+    let k = 0;
+    while (k < toks.length) {
+        const cmd = toks[k];
+        if (!cmd) return false; // 数字开头，不是 path
+        const arity = PATH_ARITY[cmd.toUpperCase()];
+        k++;
+        let n = 0;
+        while (k < toks.length && toks[k] === 0) {
+            n++;
+            k++;
+        }
+        if (arity === 0 ? n !== 0 : n === 0 || n % arity !== 0) return false;
+    }
+    return true;
+}
+
+/** 下一个同种引号（跳过被转义的那个）；没有就是 -1。 */
+const nextQuote = (text, i) => {
+    const q = text[i];
+    for (let k = i + 1; k < text.length; k++) {
+        if (text[k] === "\\") {
+            k++;
+            continue;
+        }
+        if (text[k] === q) return k;
+    }
+    return -1;
+};
+
+/** 与 text[i] 处的方括号配对的右括号；引号里的括号不算；没有就是 -1。 */
+const closeBracket = (text, i) => {
+    let depth = 0;
+    for (let k = i; k < text.length; k++) {
+        const c = text[k];
+        if (c === "'" || c === '"') {
+            const q = nextQuote(text, k);
+            if (q < 0) return -1;
+            k = q;
+            continue;
+        }
+        if (c === "[") depth++;
+        else if (c === "]" && --depth === 0) return k;
+    }
+    return -1;
+};
+
+/** 数组里按顶层逗号切开的元素；每项记下去掉空白后的起止（含引号）。 */
+const arrayItems = (text, from, to) => {
+    const items = [];
+    let depth = 0;
+    let start = from;
+    for (let k = from; k <= to; k++) {
+        const c = text[k];
+        if (c === "'" || c === '"') {
+            const q = nextQuote(text, k);
+            if (q < 0) return items;
+            k = q;
+            continue;
+        }
+        if (c === "(" || c === "[") depth++;
+        else if (c === ")" || c === "]") depth--;
+        else if (c === "," && depth === 0) {
+            items.push({ start, end: k });
+            start = k + 1;
+        }
+    }
+    items.push({ start, end: to + 1 });
+    // 去掉元素两头的空白，剩下的才是引号包的整段
+    return items
+        .map((it) => {
+            let s = it.start;
+            let e = it.end;
+            while (s < e && /\s/.test(text[s])) s++;
+            while (e > s && /\s/.test(text[e - 1])) e--;
+            return { start: s, end: e };
+        })
+        .filter((it) => it.end > it.start);
+};
+
+/** 引号里的内容是不是 path 数据；是就把内容区间记进 spans。 */
+const quotedPathSpan = (text, quotePos, spans, opts) => {
+    const close = nextQuote(text, quotePos);
+    if (close < 0) return false;
+    if (!isPathData(text.slice(quotePos + 1, close), opts)) return false;
+    spans.push({ from: quotePos + 1, to: close });
+    return true;
+};
+
+/**
+ * 一行里 SVG path 上下文的字符区间（下标相对这一行）。
+ * 只认三种语法位置：d 属性（HTML 的 d="…" 与脚本对象里的 d: '…'）、path(…) 函数、路径数组（每个元素都得是 path 数据）。
+ * dColon 是可关的判据（对象写法 d: '…'），变异检查要能单独把它关掉（见 mutationCheck）。
+ */
+export function pathSpans(line, opts) {
+    const spans = [];
+    if (!line.includes("'") && !line.includes('"')) return spans;
+    const dAttr = opts?.dColon === false ? /\bd[ \t]*=[ \t]*(['"])/g : /\bd[ \t]*[=:][ \t]*(['"])/g;
+    // d 属性与 path(…) 函数：引号里的内容必须是 path 数据
+    for (const re of [dAttr, /\bpath[ \t]*\([ \t]*(['"])/g]) {
+        for (const m of line.matchAll(re)) {
+            quotedPathSpan(line, m.index + m[0].length - 1, spans, opts);
+        }
+    }
+    // 路径数组：['M…', 'M…']，每个元素都得是 path 数据，否则整段不放行
+    let i = 0;
+    while (i < line.length) {
+        if (line[i] !== "[") {
+            i++;
+            continue;
+        }
+        const close = closeBracket(line, i);
+        if (close < 0) break;
+        const here = [];
+        let all = true;
+        for (const it of arrayItems(line, i + 1, close - 1)) {
+            const raw = line.slice(it.start, it.end);
+            const q = raw[0];
+            if ((q !== "'" && q !== '"') || raw[raw.length - 1] !== q) {
+                all = false;
+                break;
+            }
+            if (!quotedPathSpan(line, it.start, here, opts)) {
+                all = false;
+                break;
+            }
+            // 元素必须整个就是一个引号串：'M…' + '…' 这种拼接首尾也是引号，但不是 path 数组的元素
+            if (opts?.wholeElement !== false && here[here.length - 1].to !== it.end - 1) {
+                all = false;
+                break;
+            }
+        }
+        if (all) spans.push(...here);
+        i = close + 1;
+    }
+    return spans;
+}
+
+/** 一行里 base64 上下文的字符区间：data URI 里 ;base64, 之后连续的 base64 字符。 */
+export function base64Spans(line) {
+    const spans = [];
+    for (const m of line.matchAll(/data:[^\s"'<>]*?;base64,/gi)) {
+        let end = m.index + m[0].length;
+        while (end < line.length && BASE64_CHARS.includes(line[end])) end++;
+        spans.push({ from: m.index + m[0].length, to: end });
+    }
+    return spans;
+}
+
+/** 一行里放行上下文的字符区间：path 数据与 base64 载荷。 */
+export const contextSpans = (line, opts) => [...pathSpans(line, opts), ...base64Spans(line)];
+
+// 编号形态在命中串的末尾（bracket-id 的命中是「括号 + 编号」，编号在末尾）
+const NUM_FORM = /[A-Z]\d{1,3}[a-z]?$/i;
+
+/**
+ * 规则命中落在放行上下文里就放行。判据是整个编号形态都在区间里：区间起点紧跟引号或分号，
+ * 而编号形态不含引号与分号，所以形态的起点也在区间内。
+ */
+const contextAllowed = (m, line, ctx, env) => {
+    const { spans = [] } = env || {};
+    const f = NUM_FORM.exec(m[0]);
+    if (!f) return false;
+    const start = m.index + f.index;
+    const end = start + f[0].length;
+    return spans.some((s) => start >= s.from && end <= s.to);
+};
+
+// 告警等级开关照旧；path 与 base64 上下文里的编号形态另放行
+const upstreamWAllowed = (m, line, ctx, env) => warnLevelAllowed(m, line) || contextAllowed(m, line, ctx, env);
+
 // 规则的旗标：verbatimOk 逐字第三方目录里豁免；commentsOnly C/C++ 里只看注释与字符串；
 // binary 二进制文件也扫（只放与格式无关、误报极低的规则）；group "ai" 在 fork 档只告警。
 const rule = (id, src, flags, extra = {}) => ({ id, re: new RegExp(src, `g${flags}`), ...extra });
@@ -65,7 +284,7 @@ export const RULES = [
     // 任务号与里程碑号；后面紧跟数字时不算（SVG 路径数据里满是 M12 2 这种形态）
     rule("upstream-tm", j(L, "[TM]", "\\d{2}", R, "(?![\\s,.]*-?\\d)"), "", VC),
     rule("upstream-adr", j(L, "AD", "R-?\\d{3}", R), "", V),
-    rule("upstream-w", j(L, "W", "\\d{1,2}", R), "", { ...V, allow: warnLevelAllowed }),
+    rule("upstream-w", j(L, "W", "\\d{1,2}", R), "", { ...V, contextAware: true, allow: upstreamWAllowed }),
     rule("erratum", j(L, "E", "-\\d{2}", R), "", V),
     // 括号里的私有编号；字母只取计划包实际用到的几个。仓内公开的编号都放行：场景号 S01、冻结条件 F1、
     // 音名 A4，以及本机 gates 的档名 G1–G9（会写成「Quick（G1–G5）」「[G1] 预检通过」）
@@ -73,7 +292,7 @@ export const RULES = [
         "bracket-id",
         j("[\\[(（][^\\])）\\n]{0,10}?", L, "[JDURWTM]\\d{1,3}", "[a-z]?(?=[\\s、,，/–\\-\\])）])"),
         "",
-        VC,
+        { ...VC, contextAware: true, allow: contextAllowed },
     ),
     rule("section", j("§", "\\s?\\d+(?:\\.\\d+)*"), "", { ...V, allow: sectionAllowed }),
     rule("plan-section", j("\\b\\d{2}\\s?", "§\\s?\\d"), "", V),
@@ -213,18 +432,37 @@ export const headingsOf = (text) =>
  * 否则按 PR / 提交文本处理，没有任何路径豁免。返回 [{ rule, line, col, match }]。
  */
 export function scan(text, ctx = {}, opts = {}) {
-    const { rules = RULES, personal = [], verbatimDirs = VERBATIM_DIRS, codeFile = CODE_FILE } = opts;
+    const {
+        rules = RULES,
+        personal = [],
+        verbatimDirs = VERBATIM_DIRS,
+        codeFile = CODE_FILE,
+        contextSpans: spansOf = contextSpans,
+    } = opts;
     const p = ctx.path || "";
     const verbatim = !!ctx.path && verbatimDirs.some((d) => p.startsWith(d));
     const visible = ctx.path && codeFile.test(p) ? cVisible(text) : null;
     const all = personal.length ? [...rules, personalRule(personal)] : rules;
+    const aware = all.some((r) => r.contextAware);
     const out = [];
     text.split(/\r?\n/).forEach((line, i) => {
+        // 放行上下文按行算，一行只算一次：C/C++ 里算的是保留注释与字符串后的那份，行长与原行一致
+        const spanCache = new Map();
+        const envFor = (src) => {
+            if (!aware) return undefined;
+            let spans = spanCache.get(src);
+            if (spans === undefined) {
+                spans = spansOf(src);
+                spanCache.set(src, spans);
+            }
+            return { spans };
+        };
         for (const r of all) {
             if (r.verbatimOk && verbatim) continue;
             const src = r.commentsOnly && visible ? visible[i] : line;
+            const env = envFor(src);
             for (const m of src.matchAll(r.re)) {
-                if (r.allow?.(m, src, ctx)) continue;
+                if (r.allow?.(m, src, ctx, env)) continue;
                 out.push({ rule: r, line: i + 1, col: m.index + 1, match: m[0] });
             }
         }
@@ -435,6 +673,57 @@ export const CASES = [
     [null, 'Write-Host "[G1] 预检通过"\n# Quick (G1-G5): 预检与静态检查', "scripts/gates.ps1"],
     ["bracket-id", j('const char* k = "失控保护（D', '4）";'), "src/core/dsp/Guard.cpp"],
     [null, j("return biquad(B0, B1, A1) + gain(D", "1, D", "2);"), "src/core/dsp/Biquad.h"],
+    // SVG path 与 base64 上下文：坐标与字节碰巧长得像编号时放行；上下文之外、以及「真的像编号」的
+    // path 形态照判（放行范围窄，漏判要看得见）
+    [null, j('<path d="M', '14 8a6 6 0 1 1-12 0a6 6 0 1 1 12 0" />')],
+    [null, j("path('M", "4.5 6.5L8 10l3.5-3.5')")],
+    [null, j("path('M", "14 8a6 6 0 1 1-12 0')")],
+    [null, j('svg(d="M', '14 8a6 6 0 1 1-12 0")')],
+    // 脚本对象里的 d: '…' 也是 d 属性（设计稿的图标表这样写）
+    [null, j("icon({ d: 'M", "14 8a6 6 0 1 1-12 0' })")],
+    // T、M 是 path 命令：合法 path 数据里「T 加数字」这类坐标按设计放行；同样的形态写在普通文本的括号里照判（见下方普通文本几条）。
+    // moveto 后面先空一格，bracket-id 在开头的 M 上判不中，往后找到的正是「T 加数字」，这条才真测到 T（关掉 path 上下文它会变红）
+    [null, j("path('M", " 0 0 T", "12 3')")],
+    [null, j("icon: ['M", "14 8a6 6 0 1 1-12 0a6 6 0 1 1 12 0', 'M3.8 3.8l8.4 8.4'],")],
+    [null, j("icon: ['M", "3 8h10', 'M", "10 5l3 3-3 3'],")],
+    [null, j("const MARK_URI = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAC/9/", "W", "3/dRA1tS/4XF3FAjRec'")],
+    // 真的像内部编号的 path 形态：J、W 不是 path 命令，那段路径也不是合法 path，照判
+    ["bracket-id", j("icon: ['M", "3 5 J", "12 ', 'M", "4 4L6 6'],")],
+    ["bracket-id", j("path('M", "3 5 J", "12 ')")],
+    ["bracket-id", j("icon({ d: 'M", "3 5 J", "12 ' })")],
+    // 路径不以 moveto 开头就不是 path（SVG 规范如此）：T、D、R 这些命令开头的编号形态照判
+    ["bracket-id", j("icon: ['T", "4 12 ', 'M", "4 4L6 6'],")],
+    ["upstream-w", j("icon: ['W", "3 12 ', 'M", "4 4L6 6'],")],
+    // 数组里混了一个非 path 元素：整段不放行，数组里的编号照判
+    ["upstream-j", j("icon: ['M", "4 4L6 6', 'J", "12', 'M", "8 8L9 9'],")],
+    // path 判据逐条守住：下面每一条删掉对应的判据就会漏判（删除式验证见 mutationCheck 与维护记录）
+    // 参数个数不对：moveto 要 2 个参数，只有 1 个；直线命令没有参数；多出半个参数；闭合命令不带参数
+    ["bracket-id", j("icon: ['M", "14 ', 'M", "4 4L6 6'],")],
+    ["bracket-id", j("icon: ['M", "14 8L', 'M", "4 4L6 6'],")],
+    ["bracket-id", j("icon: ['M", "14 8 3', 'M", "4 4L6 6'],")],
+    ["bracket-id", j("icon: ['M", "14 8Z 5', 'M", "4 4L6 6'],")],
+    // 参数个数凑得合法、中间却夹着 J：命令字母表里没有 J，整段不是 path
+    ["bracket-id", j("icon: ['M", "3 5 J", "12 6', 'M", "4 4L6 6'],")],
+    // 长度上限：合法的 path 数据也不能无限长（引号配对错位时挡住把整段文件当 path）
+    ["bracket-id", j("icon: ['M", "14 8", "l1 1".repeat(200), "', 'M", "4 4L6 6'],")],
+    // 数组里只要有一个元素不是 path 数据，整段都不放行
+    ["bracket-id", j("icon: ['M", "14 8a6 6 0 1 1-12 0', 'plain'],")],
+    // 元素是拼接出来的（首尾都是引号，中间不止一个引号串）：不算 path 数组，照判
+    ["bracket-id", j("icon: ['M", "14 8' + 'x'],")],
+    // 数字开头的引号串不是 path，也不能因此出错
+    [null, "const sizes = ['12 34', '56 78'];"],
+    // 放行区间只管区间内：之前与之后同一行里的编号形态照判
+    [["bracket-id", "upstream-j"], j("普通文本里的 (J", '12) 之后才是 <path d="M4 4L6 6" />')],
+    [["bracket-id", "upstream-j"], j('<path d="M', '4 4L6 6" /> 之后的 (J', "12) 照判")],
+    // base64 判据逐条守住：必须在 data URI 里、只算 base64 字符集、到引号为止
+    ["upstream-w", j("const raw = 'image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAC/9/", "W", "3/dRA1tS'")],
+    ["upstream-w", j("const u = 'data:image/png;base64,iVBORw0KGgo=.", "W", "3 tail';")],
+    ["upstream-w", j("const u = 'data:image/png;base64,iVBORw0KGgo=' + 'x ", "W", "3 y';")],
+    // 普通文本里的编号形态照判
+    ["upstream-w", j("普通文本里的 W", "3 不是 base64")],
+    [["bracket-id", "upstream-j"], j("普通文本里的 (J", "12) 不是 path")],
+    [["bracket-id", "upstream-tm"], j("普通文本里的 (T", "12) 不是 path")],
+    [["bracket-id", "upstream-w"], j("普通文本里的 (W", "3) 不是 base64")],
     // 章节号与文件名
     [null, "按 GPLv3 §6(d) 提供对应源码；JUCE 部分适用 AGPLv3（GPLv3 §13）；IEC 61672 §5.2"],
     [null, j("## §", "3 分支\n见 §", "3 的说明"), "CLAUDE.md"],
@@ -547,6 +836,22 @@ export function mutationCheck() {
         ["逐字目录：不豁免", { verbatimDirs: [] }],
         ["C/C++ 范围：所有文件都当代码", { codeFile: /./ }],
         ["C/C++ 范围：不区分代码", { codeFile: /(?!)/ }],
+        // 放行上下文的判据：path 上下文与 base64 上下文各自失效都要有夹具变红
+        ["放行上下文：path 上下文失效", { contextSpans: () => [] }],
+        ["放行上下文：base64 上下文失效", { contextSpans: (line) => pathSpans(line) }],
+        [
+            "放行上下文：path 上下文放宽到整行",
+            { contextSpans: (line) => base64Spans(line).concat([{ from: 0, to: line.length }]) },
+        ],
+        // path 判据：首命令必须是 moveto，不要求时那些「以别的命令开头的编号」会漏判
+        ["放行上下文：path 不要求 moveto 开头", { contextSpans: (line) => contextSpans(line, { movetoFirst: false }) }],
+        // d 属性的对象写法 d: '…'：不认它时设计稿图标表那种写法会被误判
+        ["放行上下文：d 属性不认对象写法", { contextSpans: (line) => contextSpans(line, { dColon: false }) }],
+        // 路径数组的元素必须整个是一个引号串：放宽时拼接出来的元素会被当成 path
+        [
+            "放行上下文：数组元素不要求整个是引号串",
+            { contextSpans: (line) => contextSpans(line, { wholeElement: false }) },
+        ],
     );
     const survived = mutants.filter(([, opts]) => runCases(opts).every((c) => c.passed)).map(([name]) => name);
     return { total: mutants.length, survived };
