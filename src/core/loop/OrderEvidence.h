@@ -11,8 +11,10 @@
 // 判据：
 //   - 每块判一次。连续 3 次「Output 在前」定为 kOutputFirst；连续 3 次「Input 在前」定为 kCorrect（清除错序）。
 //   - 判不了的块清零连续计数，但不改已有的结论：宿主没给时间戳、对端没发布过时间戳、对端自上次检查起没有处理
-//     新块（槽里还是旧值，不是证据）、本端或对端的时间戳没有前进（回退或原地不动）、本端的时间戳比按样本推进的
-//     预期多跳了很多。
+//     新块（槽里还是旧值，不是证据；第一次读到、或对端消失后重新出现时读到的槽也只记块序号，可能是上一个会话
+//     留下的）、本端或对端的时间戳没有前进（回退或原地不动）、本端的时间戳比按样本推进的预期多跳了很多。
+//   - 超长块（环路不走的块）不投票、不打断连续票，但宿主时间戳与样本数照样在走：advance 只让本端的时间戳基线
+//     与失效计时跟上，不然下一个正常块会被当成跳变。
 //   - 时间戳回退与跳变是真宿主的行为：Cubase 提前处理开关切换时，时间戳会回退数秒再跳回来，两端取到同一串值。
 //     这种块不投票、不重置结论，只计数（glitches），诊断看得见。
 //   - 1 s（按样本计，不读墙钟）没有有效检查，结论回到 unknown。
@@ -143,40 +145,31 @@ public:
         sinceCheck_ = std::min<std::int64_t>(sinceCheck_ + n, kSinceCap);
 
         const bool own = ownValid && ownNs != 0;
-        hostNsValid_ = own;
         bool comparable = own;
         bool glitch = false;
 
         // 本端的时间戳必须往前走，而且不能比按样本推进的预期多跳很多：回退、原地不动、大跳变都不可信。
         // 无论这一块能不能比较，都以它为下一块的基准（回退之后的下一块要和回退后的值比，不是和回退前的）。
-        if (own)
+        if (own && havePrevOwn_)
         {
-            if (havePrevOwn_)
+            if (ownNs <= prevOwnNs_)
             {
-                if (ownNs <= prevOwnNs_)
-                {
-                    glitch = true;
-                }
-                else if (ownNs - prevOwnNs_ > expectedNs(prevN_) + jumpSlackNs_)
-                {
-                    glitch = true;
-                }
+                glitch = true;
             }
-            prevOwnNs_ = ownNs;
-            prevN_ = n;
-            havePrevOwn_ = true;
+            else if (ownNs - prevOwnNs_ > expectedNs(prevN_) + jumpSlackNs_)
+            {
+                glitch = true;
+            }
         }
-        else
-        {
-            havePrevOwn_ = false;
-        }
+        rebase(n, own, ownNs);
 
         // 对端：槽里的块序号没动 = 对端自上次检查起没有处理新块，里面是旧值，不是证据；
         // 新块的时间戳没有比它自己的上一块大 = 对端回退，同样不可信。
+        // 第一次读到、或对端消失之后重新出现时读到的槽，只记块序号，不当新块：那可能是上一个会话留下的旧值。
         bool peerFresh = false;
         if (peerPresent)
         {
-            peerFresh = !havePeerSeq_ || peerSeq != lastPeerSeq_;
+            peerFresh = havePeerSeq_ && peerSeq != lastPeerSeq_;
             havePeerSeq_ = true;
             lastPeerSeq_ = peerSeq;
             if (peerFresh)
@@ -230,6 +223,32 @@ public:
         }
     }
 
+    // 音频线程，超长块（环路不走的块）每块一次：不投票、不计异常、不打断连续票，只让本端的时间戳基线与失效计时
+    // 跟上这一块的样本数。不跟上的话，下一个正常块的时间戳会比基线多出整块超长块的时长，被当成跳变清掉连续票。
+    // 计时到了 1 s 仍然没有有效检查，结论照常回到 unknown（连续票一并作废）。
+    void advance(std::int64_t n, bool ownValid, std::uint64_t ownNs) noexcept
+    {
+        if (n <= 0)
+        {
+            return;
+        }
+        sinceCheck_ = std::min<std::int64_t>(sinceCheck_ + n, kSinceCap);
+        rebase(n, ownValid && ownNs != 0, ownNs);
+        if (sinceCheck_ >= expirySamples_)
+        {
+            verdict_ = OrderVerdict::kUnknown;
+            direction_ = OrderDirection::kNone;
+            votes_ = 0;
+        }
+    }
+
+    // 对端的槽换了（换组）：旧槽的块序号与时间戳作废，下一次读到的槽只记块序号。
+    void forgetPeer() noexcept
+    {
+        havePeerSeq_ = false;
+        havePrevPeer_ = false;
+    }
+
     OrderSnapshot snapshot() const noexcept
     {
         OrderSnapshot s;
@@ -245,6 +264,18 @@ public:
 private:
     // 累加的上限：够装下任何一个合法的失效门槛，又不会溢出。
     static constexpr std::int64_t kSinceCap = static_cast<std::int64_t>(1) << 40;
+
+    // 以这一块为下一块的时间戳基准（没有有效时间戳就没有基准）。
+    void rebase(std::int64_t n, bool own, std::uint64_t ownNs) noexcept
+    {
+        hostNsValid_ = own;
+        havePrevOwn_ = own;
+        if (own)
+        {
+            prevOwnNs_ = ownNs;
+            prevN_ = n;
+        }
+    }
 
     std::uint64_t expectedNs(std::int64_t samples) const noexcept
     {

@@ -143,6 +143,7 @@ private:
     void publishToSlot(const EngineContext& context, const TransportInfo& transport, bool bypassed, WriteState state,
                        std::uint32_t n) noexcept;
     // 错序证据：块首读 Input 槽的块序号与宿主时间戳，每个支持块判一次，结果发布到 orderPacked_。
+    // 超长块只让时间戳基线与失效计时前进，不投票。
     void judgeOrder(const EngineContext& context, const TransportInfo& transport, std::uint32_t n) noexcept;
     // 写一段（不超过 kMaxWriteChunk 帧）。返回这一段的结果。
     ipc::RingWriteResult writeChunk(ipc::RingSegment& seg, const AudioView& buffer, std::uint32_t offset,
@@ -174,6 +175,7 @@ private:
     loop::OrderEvidence order_;
     std::atomic<std::uint64_t> orderPacked_{0};
     std::atomic<std::uint32_t> orderGlitches_{0};
+    std::uint32_t peerGroup_ = 0; // 上一块读 Input 槽用的组号（变了就是换组）
 
     // 写方助手的任期（只有音频线程读写，不是原子量；prepare 在宿主保证不与 process 并发时调用）：
     // 上一次写环时的写权 token、段的映射代号与采样率。任一变了就 reset 写方助手。

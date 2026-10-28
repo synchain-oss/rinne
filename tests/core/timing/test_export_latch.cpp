@@ -8,6 +8,8 @@
 //   - 0 样本的调用不推进任何计数；只算账不出样本的块（快速路径）照样计数，计数与出样本的运行相同。
 //   - 已读值在消息线程一侧：确认之后不再锁存，之后再有新事件又会锁存。
 //   - 重同步叠重同步（槽满收读头）的块照常每块计一次，实时块里不计。
+//   - 对端块序号的记账：读不到对端槽、换组、换绑定（换段、域重置）之后，再读到的槽算第一次，只记块序号；
+//     超长块也读对端槽、看对端的违约标志，原因位并进同一个掩码，同一块仍只计一次。
 //
 // 用 Rig 驱动：Input 在前、写方在后，会合段里替 Output 端发布一个槽（块序号每块 +1）。
 
@@ -667,5 +669,135 @@ TEST_CASE("导出锁存 重同步叠重同步：槽满收读头的那一块照�
         {
             CHECK(rig.status().exportEvents == 0u);
         }
+    }
+}
+
+TEST_CASE("导出锁存 超长块也读对端槽、看对端的违约标志：原因位并进同一个掩码，同一块只计一次，不记到后面的块上")
+{
+    // ⛔ 删除式验证点：超长块路径不读对端槽 / 不看违约标志 → 对端的违约被记到后面的正常块上（共计两次），本用例变红；
+    //    超长块路径看了标志但不并进掩码、另计一次 → 这一块计两次，本用例变红。
+    Rig rig(48000.0, kDeclared);
+    rig.enablePeerSlot();
+    const EngineParams params = timeParams(kSafeDelay);
+    rig.step(1024, params, offline());
+    rig.step(1024, params, offline());
+    REQUIRE(rig.status().exportEvents == 0u);
+
+    // 对端发布了一个带违约位的新块，Input 这一块是超长块（离线）：违约位和超长块的原因一起，这一块计一次
+    rig.setPeerOverMax(true);
+    rig.publishPeer(offline());
+    const BlockResult huge = rig.feed(40000, params, offline(), false);
+    REQUIRE(huge.unsupportedBlock);
+    CHECK(rig.status().exportEvents == 1u);
+    CHECK(rig.status().exportCauses == (kExportCauseViolation | kExportCausePeerOverMax));
+
+    // 之后的正常块读到的还是这个对端块（对端没有再发布）：已经看过了，不再计到这一块上
+    rig.feed(1024, params, offline());
+    rig.write(1024);
+    CHECK(rig.status().exportEvents == 1u);
+    // 对端的下一个带违约位的新块照常计
+    rig.publishPeer(offline());
+    rig.feed(1024, params, offline());
+    rig.write(1024);
+    CHECK(rig.status().exportEvents == 2u);
+    CHECK(rig.status().exportCauses == kExportCausePeerOverMax);
+
+    // 实时的超长块：什么都不计（但对端的块序号照样记账：它带的违约位之后不会再被离线块补计）
+    rig.publishPeer(realtime());
+    rig.feed(40000, params, realtime(), false);
+    CHECK(rig.status().exportEvents == 2u);
+    rig.feed(1024, params, offline());
+    rig.write(1024);
+    CHECK(rig.status().exportEvents == 2u);
+}
+
+TEST_CASE("导出锁存 读不到对端槽的块清掉块序号记账：再读到的槽算第一次，只记块序号，不计旧标志")
+{
+    // ⛔ 删除式验证点：读不到对端槽时不清块序号记账 → 重新读到的带违约位的块被计一次，本用例变红。
+    Rig rig(48000.0, kDeclared);
+    rig.enablePeerSlot();
+    const EngineParams params = timeParams(kSafeDelay);
+    rig.setPeerOverMax(true);
+    rig.step(1024, params, offline()); // 第一次读到：只记块序号
+    rig.step(1024, params, offline());
+    REQUIRE(rig.status().exportEvents == 1u);
+
+    // 一块读不到会合段（组号没变）：什么都不计；对端这期间照常发布带违约位的块
+    rig.hidePeerSlot(true);
+    rig.step(1024, params, offline());
+    CHECK(rig.status().exportEvents == 1u);
+    // 又读到了：槽里的块序号和之前记下的不同，但这是读不到之后的第一次，只记块序号
+    rig.hidePeerSlot(false);
+    rig.step(1024, params, offline());
+    CHECK(rig.status().exportEvents == 1u);
+    // 之后对端的新块才计
+    rig.step(1024, params, offline());
+    CHECK(rig.status().exportEvents == 2u);
+    CHECK(rig.status().exportCauses == kExportCausePeerOverMax);
+}
+
+TEST_CASE("导出锁存 换组：新组的槽第一次读到只记块序号，槽里上一个会话留下的违约标志不计")
+{
+    // ⛔ 删除式验证点：换组时不清块序号记账（组号从 1 直接换到 2，中间没有读不到槽的块）→ 新组槽里的旧标志被计一次，
+    //    本用例变红。
+    Rig rig(48000.0, kDeclared);
+    rig.enablePeerSlot();
+    const EngineParams params = timeParams(kSafeDelay);
+    for (int i = 0; i < 3; ++i)
+    {
+        rig.step(1024, params, offline()); // 组 1 的对端没有违约
+    }
+    REQUIRE(rig.status().exportEvents == 0u);
+
+    // 组 2 的槽里是上一个会话留下的块：块序号和组 1 的不同，带着违约位
+    rinne::ipc::RoleSlot& stale = rig.outputSlot(2);
+    stale.rt_flags.store(rinne::ipc::kRtOverMax, std::memory_order_relaxed);
+    stale.block_seq.store(40, std::memory_order_release);
+    rig.setGroup(2);
+    rig.feed(1024, params, offline());
+    rig.write(1024);
+    CHECK(rig.status().exportEvents == 0u);
+    // 组 2 的对端发布了新块（带违约位）：这才计
+    stale.block_seq.fetch_add(1, std::memory_order_release);
+    rig.feed(1024, params, offline());
+    rig.write(1024);
+    CHECK(rig.status().exportEvents == 1u);
+    CHECK(rig.status().exportCauses == kExportCausePeerOverMax);
+}
+
+TEST_CASE("导出锁存 换绑定（换段、域重置）：换绑定那一块读到的槽只记块序号，不计带违约位的新块；之后的新块照常计")
+{
+    // ⛔ 删除式验证点：换段时不清块序号记账 → 换段那一块把对端的违约位计一次，本用例变红；
+    //    域重置时不清 → 同上（域重置那一遍变红）。
+    for (const bool domainReset : {false, true})
+    {
+        CAPTURE(domainReset);
+        Rig rig(48000.0, kDeclared);
+        rig.enablePeerSlot();
+        const EngineParams params = timeParams(kSafeDelay);
+        rig.setPeerOverMax(true);
+        rig.step(1024, params, offline());
+        rig.step(1024, params, offline());
+        REQUIRE(rig.status().exportEvents == 1u);
+
+        // 换到另一条环：换段（新段的写头不比已拉到的位置小）或域重置（写头倒退）。
+        // 上一步末尾对端发布的带违约位的新块，正好由换绑定的这一块第一次读到
+        auto other = Rig::makeRing();
+        rig.attach(*other, 2);
+        if (!domainReset)
+        {
+            rig.write(30000);
+        }
+        rig.feed(1024, params, offline());
+        rig.write(1024);
+        CHECK(rig.status().resyncByReason[static_cast<std::size_t>(SyncReason::kBindSwitch)] == 1u);
+        CHECK(rig.status().exportEvents == 1u);
+
+        // 对端的下一个新块（带违约位）：照常计
+        rig.publishPeer(offline());
+        rig.feed(1024, params, offline());
+        rig.write(1024);
+        CHECK(rig.status().exportEvents == 2u);
+        CHECK(rig.status().exportCauses == kExportCausePeerOverMax);
     }
 }

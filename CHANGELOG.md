@@ -11,10 +11,12 @@ All notable user-facing changes to Rinne are recorded here. The format follows
 
 - Export mismatch counting. In an offline render, each block that can make the export differ from live playback counts
   one event: the host calls with a block longer than declared, the main read head has to be zero-filled, the peer
-  reports an over-long block, or the loop resynchronises (play start, first alignment and binding changes do not
-  count). A clean export, with blocks no longer than the maximum, counts nothing. The audio thread only increments a
-  counter and the acknowledged value lives on the message thread, so a hint can be acknowledged and comes back on the
-  next new event. The count is in the status snapshot; the editor is not wired to it yet.
+  reports an over-long block, or the loop resynchronises (play start, first alignment and binding changes do not count).
+  The peer's flag is read once per peer block; the first read after the slot was lost, the group changed or the binding
+  changed only records the block number. A clean export, with blocks no longer than the maximum, counts nothing. The
+  audio thread only increments a counter and the acknowledged value lives on the message thread, so a hint can be
+  acknowledged and comes back on the next new event. The count is in the status snapshot; the editor is not wired to it
+  yet.
 
 ### Compatibility
 
@@ -26,6 +28,9 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   Input-first blocks instead of the first correct one. A block that cannot be judged (no host timestamp, no new block
   from the peer, or a host timestamp that goes backwards, stands still or jumps ahead by more than 0.25 s) no longer
   drops the verdict to unknown at once: it resets the streak and keeps the verdict for at most 1 s, counted in samples.
-  Host timestamps that run backwards, as seen around an ASIO-Guard switch in Cubase, never vote.
+  Host timestamps that run backwards, as seen around an ASIO-Guard switch in Cubase, never vote. The first read of the
+  peer's slot, and the first after the peer reappears or the group changes, only records its block number, so the
+  first vote comes one block later. A block longer than 32768 frames neither votes nor breaks the streak, but still
+  advances the timestamp baseline and the 1 s expiry.
 - Rinne Output now reaches its own out-of-order verdict from the same evidence, which agrees with the Input side;
   previously only Rinne Input judged.

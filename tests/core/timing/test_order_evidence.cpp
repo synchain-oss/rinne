@@ -102,15 +102,20 @@ TEST_CASE("错序证据 连续 3 次 Output 在前才定案，两端一致")
 {
     OrderPair pair;
     std::uint64_t ns = kBase;
-    // Output 先跑：Input 端同周期就读到 Output 刚发布的值，第 1 个周期起每个周期一票；
-    // Output 端第 1 个周期读到的 Input 槽是空的，第 2 个周期起才有票，所以它比 Input 端晚一个周期定案。
+    // Output 先跑：每端第 1 个周期读到的对端槽只记块序号，不当新块（可能是上一个会话留下的旧值），没有票；
+    // 第 2 个周期起每个周期一票，两端在第 4 个周期同时定案。
+    ns = run(pair, ns, 1, true);
+    CHECK(pair.input.snapshot().votes == 0u);
+    CHECK(pair.input.snapshot().checks == 0u);
+    CHECK(pair.output.snapshot().votes == 0u);
+    CHECK(pair.input.snapshot().glitches == 0u);
     ns = run(pair, ns, 2, true);
     CHECK(pair.input.snapshot().votes == 2u);
+    CHECK(pair.output.snapshot().votes == 2u);
     CHECK(verdictOf(pair.input) == OrderVerdict::kUnknown);
+    CHECK(verdictOf(pair.output) == OrderVerdict::kUnknown);
     ns = run(pair, ns, 1, true);
     CHECK(verdictOf(pair.input) == OrderVerdict::kOutputFirst);
-    CHECK(verdictOf(pair.output) == OrderVerdict::kUnknown); // 镜像端晚一个周期
-    ns = run(pair, ns, 1, true);
     CHECK(verdictOf(pair.output) == OrderVerdict::kOutputFirst);
     CHECK(pair.input.snapshot().direction == OrderDirection::kOutputFirst);
     CHECK(pair.input.snapshot().votes == OrderEvidence::kVotesToJudge);
@@ -626,4 +631,229 @@ TEST_CASE("错序证据 真 Cubase 记录回放：真的 Output 在前时回退�
     }
     CHECK(verdictOf(pair.input) == OrderVerdict::kOutputFirst);
     CHECK(verdictOf(pair.output) == OrderVerdict::kOutputFirst);
+}
+
+// ---- 第一次读到的槽、超长块 ----
+
+namespace
+{
+
+// n 个样本 @ 48 kHz 对应的纳秒数（取整）。
+std::uint64_t samplesToNs(std::int64_t n)
+{
+    return static_cast<std::uint64_t>(n) * 1000000000ull / 48000ull;
+}
+
+// 手动喂的 Input 端：每个正常块对端都是新块（块序号 +1），对端时间戳与本块相同（Output 在前，每块一票）。
+// huge 是超长块：环路不走，只走 advance；对端这个周期照样发布了一个块。
+struct OutputFirstFeed
+{
+    OrderEvidence e;
+    std::uint64_t ns = kBase;
+    std::uint64_t seq = 100;
+
+    OutputFirstFeed() { e.prepare(48000.0); }
+
+    void block(std::int64_t n = kBlock)
+    {
+        e.observe(OrderSide::kInput, n, true, ns, true, ++seq, ns);
+        ns += samplesToNs(n);
+    }
+    void huge(std::int64_t n, bool withAdvance = true)
+    {
+        if (withAdvance)
+        {
+            e.advance(n, true, ns);
+        }
+        ++seq;
+        ns += samplesToNs(n);
+    }
+};
+
+} // namespace
+
+TEST_CASE("错序证据 第一次读到的槽、对端消失后重新出现的槽、换组后的槽：只记块序号，不当新块")
+{
+    // ⛔ 删除式验证点：第一次读到就当新块 → 旧值投了一票，本用例变红；
+    //    第一次读到的旧值记成对端的时间戳基线 → 下一个真新块被当成对端回退，本用例变红；
+    //    对端消失时不清对端记账 → 重新出现的旧值被当成新块，本用例变红；
+    //    forgetPeer 不清对端记账 → 换组后的旧值被当成新块，本用例变红。
+    OrderEvidence e;
+    e.prepare(48000.0);
+    std::uint64_t ns = kBase;
+    constexpr std::uint64_t kStale = 10ull * 1000000000ull; // 旧会话留下的时间戳比本块大 10 s
+
+    const auto step = [&](bool present, std::uint64_t seq, std::uint64_t peerNs) {
+        e.observe(OrderSide::kInput, kBlock, true, ns, present, seq, peerNs);
+        ns += kStepNs;
+    };
+
+    // 第一次读到：槽里是旧值（块序号 7，时间戳远大于本块）。不当新块：没有票，也不记异常
+    step(true, 7, ns + kStale);
+    CHECK(e.snapshot().votes == 0u);
+    CHECK(e.snapshot().checks == 0u);
+    CHECK(e.snapshot().glitches == 0u);
+    // 对端的第一个真新块（时间戳与本块相同）：旧值没有被记成基线，所以不是回退；这一票才是第一票
+    step(true, 8, ns);
+    CHECK(e.snapshot().votes == 1u);
+    CHECK(e.snapshot().checks == 1u);
+    CHECK(e.snapshot().glitches == 0u);
+
+    // 对端消失（读不到槽）：连续票清零，对端记账清掉
+    step(false, 0, 0);
+    CHECK(e.snapshot().votes == 0u);
+    // 重新出现：槽里是别的会话留下的旧值（块序号 50）：只记块序号
+    step(true, 50, ns + kStale);
+    CHECK(e.snapshot().votes == 0u);
+    CHECK(e.snapshot().checks == 1u);
+    CHECK(e.snapshot().glitches == 0u);
+    step(true, 51, ns);
+    CHECK(e.snapshot().votes == 1u);
+    CHECK(e.snapshot().checks == 2u);
+    CHECK(e.snapshot().glitches == 0u);
+
+    // 旧组的槽里时间戳很靠前（比本块大 10 s）：它是旧组真发布的新块，照常一票
+    step(true, 52, ns + kStale);
+    CHECK(e.snapshot().votes == 2u);
+    CHECK(e.snapshot().checks == 3u);
+    CHECK(e.snapshot().glitches == 0u);
+
+    // 换组（对端的槽直接换成另一个，中间没有读不到的块）：forgetPeer 之后同样只记块序号
+    e.forgetPeer();
+    step(true, 900, ns + kStale);
+    CHECK(e.snapshot().votes == 0u);
+    CHECK(e.snapshot().checks == 3u);
+    // 新组的第一个真新块：时间戳比旧组最后一个值小得多，但旧组的对端基线已经作废，不是对端回退
+    step(true, 901, ns);
+    CHECK(e.snapshot().votes == 1u);
+    CHECK(e.snapshot().checks == 4u);
+    CHECK(e.snapshot().glitches == 0u);
+}
+
+TEST_CASE("错序证据 超长块只推进本端的时间戳基线：下一个正常块不记异常、不清连续票")
+{
+    // ⛔ 删除式验证点：advance 不推进时间戳基线 → 下一个正常块被记成跳变，glitches 加 1、连续票清零，本用例变红；
+    //    advance 清掉连续票 → 第三票接不上，本用例变红；advance 自己投票或计检查 → checks 对不上，本用例变红。
+    constexpr std::int64_t kHuge = 40000; // 约 0.83 s，超过支持上限 32768
+    OutputFirstFeed f;
+    f.block(); // 第一次读到：只记块序号
+    f.block();
+    f.block();
+    REQUIRE(f.e.snapshot().votes == 2u);
+    REQUIRE(f.e.snapshot().checks == 2u);
+
+    f.huge(kHuge);
+    CHECK(f.e.snapshot().votes == 2u); // 不打断连续票
+    CHECK(f.e.snapshot().checks == 2u); // 自己不投票
+    CHECK(f.e.snapshot().glitches == 0u);
+    CHECK(verdictOf(f.e) == OrderVerdict::kUnknown);
+
+    f.block(); // 约 40000 帧的超长块之后接 256 帧的正常块
+    CHECK(f.e.snapshot().glitches == 0u);
+    CHECK(f.e.snapshot().votes == 3u);
+    CHECK(f.e.snapshot().checks == 3u);
+    CHECK(verdictOf(f.e) == OrderVerdict::kOutputFirst);
+
+    // 对照：超长块完全不经证据（没有 advance），下一个正常块的时间戳比基线多出整块超长块的时长，
+    // 被记成跳变，连续票清零——这正是 advance 要避免的。
+    OutputFirstFeed g;
+    g.block();
+    g.block();
+    g.block();
+    g.huge(kHuge, false);
+    g.block();
+    CHECK(g.e.snapshot().glitches == 1u);
+    CHECK(g.e.snapshot().votes == 0u);
+    CHECK(verdictOf(g.e) == OrderVerdict::kUnknown);
+}
+
+TEST_CASE("错序证据 超长块的样本数计入失效计时，到 1 s 结论回到 unknown；0 样本与负数的 advance 什么都不做")
+{
+    // ⛔ 删除式验证点：advance 不累加失效计时 → 结论永远不失效，本用例变红；
+    //    失效门槛差一个样本（> 换成 >=）→ 恰好 48000 个样本那一档变红；
+    //    advance 不挡 n <= 0 → 0 样本的调用推动基线，下一个正常块被记成回退，本用例变红。
+    OutputFirstFeed f;
+    for (int i = 0; i < 4; ++i)
+    {
+        f.block();
+    }
+    REQUIRE(verdictOf(f.e) == OrderVerdict::kOutputFirst);
+    REQUIRE(f.e.snapshot().votes == 3u);
+
+    // 47999 个样本：还没到 1 s；再多 1 个样本，恰好 48000：回到 unknown，连续票一并作废
+    f.e.advance(47999, true, f.ns);
+    CHECK(verdictOf(f.e) == OrderVerdict::kOutputFirst);
+    CHECK(f.e.snapshot().votes == 3u);
+    f.e.advance(1, true, f.ns);
+    CHECK(verdictOf(f.e) == OrderVerdict::kUnknown);
+    CHECK(f.e.snapshot().votes == 0u);
+    CHECK(f.e.snapshot().direction == OrderDirection::kNone);
+
+    // 分几块超长块累加，与一块超长块一样
+    OutputFirstFeed g;
+    for (int i = 0; i < 4; ++i)
+    {
+        g.block();
+    }
+    g.huge(30000);
+    CHECK(verdictOf(g.e) == OrderVerdict::kOutputFirst);
+    g.huge(30000);
+    CHECK(verdictOf(g.e) == OrderVerdict::kUnknown);
+
+    // 0 样本与负数：状态一个字节都不变，基线也不动（之后的正常块不记回退）
+    OutputFirstFeed h;
+    for (int i = 0; i < 3; ++i)
+    {
+        h.block();
+    }
+    const OrderSnapshot before = h.e.snapshot();
+    for (int i = 0; i < 1000; ++i)
+    {
+        h.e.advance(0, true, h.ns + 1000000000000ull);
+        h.e.advance(-5, true, 1);
+    }
+    CHECK(h.e.snapshot().pack() == before.pack());
+    CHECK(h.e.snapshot().glitches == before.glitches);
+    h.block();
+    CHECK(h.e.snapshot().glitches == 0u);
+    CHECK(h.e.snapshot().votes == 3u);
+}
+
+TEST_CASE("错序证据 超长块自己的时间戳回退或原地不动：不计异常，下一块和它比")
+{
+    // ⛔ 删除式验证点：advance 也做回退 / 跳变检查并计异常 → glitches 对不上，本用例变红。
+    OutputFirstFeed f;
+    f.block();
+    f.block();
+    f.block();
+    REQUIRE(f.e.snapshot().votes == 2u);
+
+    const std::uint64_t lastBlockNs = f.ns - samplesToNs(kBlock);
+    // 时间戳原地不动（等于上一块的）：普通块会被记成异常，超长块不计
+    f.e.advance(1000, true, lastBlockNs);
+    CHECK(f.e.snapshot().glitches == 0u);
+    // 时间戳回退了 5 s：同样不计异常，连续票不动
+    f.e.advance(1000, true, lastBlockNs - 5ull * 1000000000ull);
+    CHECK(f.e.snapshot().glitches == 0u);
+    CHECK(f.e.snapshot().votes == 2u);
+    CHECK(f.e.snapshot().checks == 2u);
+}
+
+TEST_CASE("错序证据 没有时间戳的超长块：本端基线作废（和普通块一样），下一块照常，不记异常")
+{
+    // ⛔ 删除式验证点：advance 在没有时间戳时仍保留旧基线 → 下一块和很早以前的基线比，被记成跳变，本用例变红。
+    OutputFirstFeed f;
+    f.block();
+    f.block();
+    f.block();
+    REQUIRE(f.e.snapshot().votes == 2u);
+    f.e.advance(40000, false, 0);
+    CHECK_FALSE(f.e.snapshot().hostNsValid);
+    CHECK(f.e.snapshot().votes == 2u);
+    ++f.seq;
+    f.ns += 100ull * 1000000000ull; // 宿主在这期间时间戳跳了很远：没有基线可比，不算跳变
+    f.block();
+    CHECK(f.e.snapshot().glitches == 0u);
+    CHECK(f.e.snapshot().votes == 3u);
+    CHECK(f.e.snapshot().hostNsValid);
 }

@@ -549,6 +549,14 @@ void LoopSession::readPeerSlot(const BlockContext& ctx) noexcept
     peerRtFlags_ = 0;
     peerMaxBlock_ = 0;
 
+    // 换组：旧组的槽记下的块序号与时间戳作废。新组的槽里可能是上一个会话留下的旧值，第一次读到只记块序号。
+    if (ctx.group != peerGroup_)
+    {
+        peerGroup_ = ctx.group;
+        haveExportPeerSeq_ = false;
+        order_.forgetPeer();
+    }
+
     if (ctx.rendezvous == nullptr || ctx.group == 0 || ctx.group > ipc::kGroupCount)
     {
         return;
@@ -575,12 +583,23 @@ void LoopSession::judgeOrder(const BlockContext& ctx) noexcept
     status_.setOrder(order_.snapshot());
 }
 
+// 超长块（环路这一块不走）：错序证据不投票，但宿主时间戳与样本数照样在走，基线与失效计时要跟上
+// （口径见 OrderEvidence::advance），不然下一个正常块会被当成时间戳跳变。
+void LoopSession::advanceOrder(const BlockContext& ctx) noexcept
+{
+    const engine::TransportInfo& transport = ctx.transport;
+    order_.advance(ctx.blockLength, transport.hostNsValid, transport.hostNs);
+    status_.setOrder(order_.snapshot());
+}
+
 // 对端槽的违约标志：只在对端的一个新块上看一次（同一块的标志不重复计）。
-// 第一次读到只记下块序号，不计：那是上一个会话留在槽里的旧标志也说不定。读不到对端槽的块什么都不记。
+// 第一次读到只记下块序号，不计：那是上一个会话留在槽里的旧标志也说不定。
+// 读不到对端槽的块清掉记账（再读到时算第一次）；换组与换绑定的清法见 readPeerSlot 和 process。
 bool LoopSession::peerOverMaxOnNewBlock() noexcept
 {
     if (!havePeerSlot_)
     {
+        haveExportPeerSeq_ = false;
         return false;
     }
     const bool known = haveExportPeerSeq_;
@@ -618,10 +637,16 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
                        eventUnits256(static_cast<std::int64_t>(ipc::kMaxSupportedBlock)), sync_.processed());
         }
         lastUnsupported_ = true;
-        // 离线渲染里的超长块：导出与播放不会一致（环路这一块不走），计一次
+        // 对端槽照样读一次：错序证据不投票，但时间戳基线与失效计时照样前进；对端的违约标志也在这里看，
+        // 块序号的记账才跟得上
+        readPeerSlot(ctx);
+        advanceOrder(ctx);
+        // 离线渲染里的超长块：导出与播放不会一致（环路这一块不走），计一次；对端违约的原因位并进同一个掩码，
+        // 这一块仍只计一次
         ExportBlockFacts unsupportedFacts;
         unsupportedFacts.nonrealtime = ctx.transport.nonrealtime;
         unsupportedFacts.unsupportedBlock = true;
+        unsupportedFacts.peerOverMax = peerOverMaxOnNewBlock();
         status_.noteExport(exportCauses(unsupportedFacts));
         const std::int64_t faded = fadeOutUnsupportedBlock(ctx);
         result.returnLeft = ctx.returnLeft;
@@ -709,6 +734,11 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     // 两边都配着、但换了段（换组、重新映射）：读头重建（原因：换绑定）。新段的写头不比已拉到的位置小时
     // 走这一条；比它小时上面已经按写头倒退整个域重来。
     const bool ringSwitched = paired && wasPaired && !sameRing && !domainReset;
+    // 换绑定（换段、域重置）：对端槽的块序号记账也从头来，换绑定之后第一次读到的槽只记块序号，不计超限标志
+    if (domainReset || ringSwitched)
+    {
+        haveExportPeerSeq_ = false;
+    }
 
     // 本块拉环之后本地延迟线里有数据的上界。同一个段还在、而且这一块配着或上一块还配着（对端刚走）时，
     // 本块照常把环拉到 W：对端走之前发布的帧都是它写完了的真数据，旧读头的淡出要读到它们。
