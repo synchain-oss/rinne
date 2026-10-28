@@ -9,9 +9,14 @@
 //   - 两端一起被挂起超过 250 ms（Input 两块之间隔了这么久、环的写头也没走）→ 请求清空本地延迟线；
 //   - 命令序号：Panic 与恢复各一个计数，块首填进引擎参数；基线在构造后、第一次 prepare 前由调用方给一次；
 //   - 后端失败的错误码经全进程唯一的 IpcDiag 槽转发：装一个转发出口，把错误码记给正在调会合的那个实例。
+//   - 配对层（只在 config.pairing 为真时，即正式构建）：智能默认与 Output 等待中的重评、认领转正、轨道标签、每拍折出的
+//     配对状态、诊断文本的各项。智能默认要在组号 0 上做，会合在组号 0 时不开段，所以本类另持一份会合段的只读映射
+//     （对端视图）：只开已存在的段、只校验段头、绝不写，自带观察者扫 16 个槽与标签。规则以 ipc/PairingPolicy.h 为准。
 // 线程：process 在音频线程，不分配、不加锁、不做 I/O，只读单调时钟（挂起判定要两块之间的间隔；不是墙钟）；reset 可能在
-// 任意线程，只记数；panic、recover 只加原子计数；其余（prepare、release、tick、改组、读出）在非实时线程，共用一把锁。
-// 走带只在音频线程读（宿主只许在处理回调里读播放头）。
+// 任意线程，只记数；panic、recover 只加原子计数；其余（prepare、release、tick、改组、转正、标签、读出）在非实时线程，
+// 共用一把锁。走带只在音频线程读（宿主只许在处理回调里读播放头）。
+// 锁序：胶水的 setState 锁 → 本类的锁 → 胶水的设置锁，反过来的顺序不出现（胶水在自己的锁外调转正回调，本类在锁内调
+// 写设置的回调，那个回调只取胶水的设置锁）。
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -19,9 +24,14 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 
+#include "diag/DiagCounters.h"
+#include "diag/DiagReport.h"
 #include "diag/EventQueue.h"
 #include "engine/AudioView.h"
 #include "engine/EngineContext.h"
@@ -32,9 +42,13 @@
 #include "engine/TransportInfo.h"
 #include "ipc/ISegmentBackend.h"
 #include "ipc/IpcDiag.h"
+#include "ipc/LabelSeqlock.h"
 #include "ipc/LoopBinding.h"
 #include "ipc/Naming.h"
+#include "ipc/PairingPolicy.h"
 #include "ipc/Rendezvous.h"
+#include "ipc/SlotObserver.h"
+#include "pairing/PairStateModel.h"
 
 namespace rinne
 {
@@ -42,11 +56,12 @@ namespace rinne
 // 单调纳秒时钟（与探针日志的时钟同一种签名）
 using MonoNsClock = std::uint64_t (*)(void* context) noexcept;
 
-// 默认值就是插件里的行为；测试只改注入项。role 与 validationHost 由处理器基类填
+// 默认值就是插件里的行为；测试只改注入项。role、validationHost 与 pairing 由处理器基类填
 struct InstanceHostConfig
 {
     ipc::Role role = ipc::Role::kInput;
     bool validationHost = false; // 验证宿主：不开共享内存段
+    bool pairing = false; // 配对层（见文件头）：正式构建为真，探针构建为假（探针有自己的选组与轨道信息）
     // ---- 测试注入 ----
     ipc::NameScope scope = ipc::NameScope::formal();
     ipc::ISegmentBackend* backend = nullptr; // 空 = 自带的平台后端；不拥有
@@ -55,6 +70,15 @@ struct InstanceHostConfig
     // （跨进程比心跳只能用同一个时钟）；给了就两处都用它（会合取它除以 10^6 的毫秒）
     MonoNsClock clock = nullptr;
     void* clockContext = nullptr;
+    // 诊断与日志的出口，空 = 插件里的行为：
+    //   hostDescription  诊断里的宿主名；空 = juce::PluginHostType 的固定名字表（不读可执行文件的路径）
+    //   logLine          写一行诊断日志；空 = platformlog::write（没装日志时什么都不做）
+    //   installLog       装诊断日志（处理器基类用）；空 = platformlog::install
+    //   copyToClipboard  复制诊断（处理器基类用）；空 = juce::SystemClipboard
+    const char* hostDescription = nullptr;
+    void (*logLine)(const juce::String& line) = nullptr;
+    bool (*installLog)(const juce::String& role) = nullptr;
+    void (*copyToClipboard)(const juce::String& text) = nullptr;
 };
 
 class InstanceHost : private juce::Timer
@@ -80,8 +104,34 @@ public:
     // 25 Hz 的非实时工作：会合、引擎事件，再加派生类的扩展点。定时器调它，测试直接调
     void tick();
 
-    // 组号 0..8（0 = 不在任何组）。工程恢复给 kRestore，手动选组给 kManual
+    // 组号 0..8（0 = 不在任何组）。手动选组给 kManual，一键修复给 kManual 或 kManualConfirmed：这两种都记为
+    // 「本会话手选过」，之后不再自动认领或迁组。工程恢复走 restoreGroup
     void setGroup(std::uint32_t group, ipc::ClaimIntent intent);
+
+    // ---- 配对层（config.pairing 为假时都是空操作，读出是默认值） ----
+    // 宿主的 setState 从头到尾包在这一对里（任何非实时线程；处理器基类用 StateLoadScope 保证成对）：期间不做智能默认
+    // 与重评，胶水的全量应用与 restoreGroup 之间不会插进一次智能认领去改胶水的设置。begin 另记诊断的「setState 早于
+    // 首次 prepare」
+    void beginStateLoad();
+    void endStateLoad();
+    // 工程恢复（全量应用）：组号交给会合（kRestore，抢得动别人的 provisional 认领）。decided = 这份 state 的组号已定
+    // （非 0，或来源是用户选的）：定了就不再做智能默认；没定就清掉「已做过智能决定」，条件满足时重新决定
+    void restoreGroup(std::uint32_t group, bool decided);
+    // 智能认领（含重评迁组）之后在锁内调用：处理器把组号写进胶水的设置（来源 Smart，不定型、不标脏）。传空就是不接；
+    // 处理器析构时先撤下
+    void setSmartGroupSink(std::function<void(std::uint32_t group)> sink);
+    // 认领转正：胶水的转正回调转到这里（任何非实时线程，同步做完，见 .cpp）。没有 provisional 认领时是空操作
+    void confirmClaim();
+    // 宿主的轨道信息（JUCE 规定在消息线程）：名字与颜色写进本端的标签。名字没给就是未知，不写空串冒充
+    void setTrackProperties(const juce::AudioProcessor::TrackProperties& properties);
+    // 一键修复要去的组：只在会合处于冲突时有，否则 group 为 0。消息线程
+    ipc::RepairPlan planRepair() const;
+    // 上一拍折出的配对状态（一份拷贝，会分配；消息线程）
+    pairing::PairModel pairState() const;
+    // 诊断文本的各项（state 一段除外，由处理器从胶水填）。消息线程
+    void fillDiagnostics(diag::DiagInputs& in) const;
+    // 本端轨道名的散列（0 = 未知）。测试与诊断用
+    std::uint32_t trackNameHash() const;
 
     // 构造后、第一次 prepare 前调一次：调用方当时的 presetSeq 与 stateSeq 加上本实例当时的 Panic / 恢复计数，作为引擎的
     // 命令基线。之后的变化（包括第一块之前的）才执行，旧命令不重放
@@ -184,6 +234,24 @@ private:
                              std::uint64_t startNs) noexcept;
     static void onFade(void* context, engine::FadeReason reason) noexcept;
 
+    // ---- 配对层（锁内） ----
+    bool pairingOn() const noexcept { return config_.pairing && !config_.validationHost; }
+    void noteGroupIntent(ipc::ClaimIntent intent) noexcept;
+    void refreshView(std::uint64_t ms);
+    void readLabels() noexcept;
+    bool viewUsable() const noexcept;
+    const ipc::RvSegment* viewSegment() const noexcept;
+    ipc::EndView endView(std::uint32_t group, ipc::Role role, std::uint64_t ms) const noexcept;
+    ipc::GroupViews groupViews(std::uint64_t ms) const noexcept;
+    std::uint32_t labelHash(std::uint32_t group, ipc::Role role) const noexcept;
+    std::string labelName(std::uint32_t group, ipc::Role role) const;
+    void smartTick(std::uint64_t ms);
+    void claimSmart(std::uint32_t group, std::uint64_t ms);
+    void foldPairState(std::uint64_t ns, std::uint64_t ms);
+    bool loopSilent(std::uint64_t ns) const noexcept;
+    void queueLog(juce::String line);
+    void flushLog();
+
     InstanceHostConfig config_;
     std::unique_ptr<ipc::ISegmentBackend> ownBackend_;
     std::unique_ptr<ipc::Rendezvous> rendezvous_;
@@ -215,6 +283,50 @@ private:
     std::uint64_t lastBlockNs_ = 0;
     std::uint64_t lastHead_ = 0;
     const ipc::SegmentHandle* lastRing_ = nullptr; // 上一块用的环（只比地址）；空 = 没拿到环，lastHead_ 无效
+
+    // ---- 配对层：对端视图（锁内）。view_.base 为空 = 没映射 ----
+    struct LabelCache
+    {
+        std::uint64_t ctl = 0; // 读到这份标签时槽的 ctl
+        bool known = false; // 连续两次读到同一份
+        ipc::LabelPayload label;
+    };
+    ipc::ISegmentBackend* backend_ = nullptr; // 不拥有（自带的或注入的）
+    std::string viewName_; // 会合段的平台段名；空 = 名字不合法
+    ipc::SegmentView view_;
+    ipc::InitResult viewResult_ = ipc::InitResult::kFailed; // 上一次打开的结果
+    std::uint32_t viewMisses_ = 0; // 连续几次「段不存在」（kFailed）：两次以上才按全空算，见 viewUsable
+    bool viewPermanent_ = false; // 后端拒绝或名字不合法：不再试
+    std::uint64_t viewRetryMs_ = 0;
+    ipc::SlotObserver viewObserver_;
+    std::array<std::array<LabelCache, 2>, ipc::kGroupCount> labels_{};
+
+    // ---- 配对层：智能默认与状态（锁内） ----
+    std::uint32_t version_ = 0; // 本构建的 packVersion
+    std::uint32_t channels_ = 0; // prepare 时发布的声道数
+    bool firstPrepared_ = false;
+    std::uint64_t firstPrepareMs_ = 0;
+    bool savedGroup_ = false; // 最近一次全量应用的 state 里组号已定
+    bool userPicked_ = false; // 本会话手选过组（或一键修复过）
+    bool smartDecided_ = false; // 已做过一次智能决定
+    bool smartWaiting_ = false; // Output 进了空组在等对端：每 kPairingReevalMs 重评
+    std::uint64_t nextReevalMs_ = 0;
+    bool allGroupsFull_ = false; // 智能默认找不到组；之后任何改组都清掉
+    diag::DiagOrigin groupOrigin_ = diag::DiagOrigin::kNone;
+    std::uint32_t nameHash_ = 0; // 本端轨道名的 FNV-1a；0 = 未知
+    bool setStateBeforePrepare_ = false;
+    std::uint32_t stateLoads_ = 0; // 正在进行的宿主 setState（beginStateLoad 与 endStateLoad 之间）
+    pairing::PairModel pairModel_;
+    std::function<void(std::uint32_t)> smartSink_;
+    std::vector<juce::String> pendingLog_; // 锁内攒下、锁外写的日志行
+
+    // ---- 配对层：音频线程写（relaxed），tick 与诊断读 ----
+    diag::DiagCounters blockCounters_;
+    std::atomic<std::uint32_t> realtimeBlocks_{0}; // 非离线的块数（触发条件）
+    std::atomic<bool> lastBypassed_{false};
+    std::atomic<bool> lastLoopOn_{true};
+    std::atomic<std::uint64_t> lastAudioNs_{0}; // 上一块的块首单调纳秒；0 = 还没有过
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 };
 
 } // namespace rinne

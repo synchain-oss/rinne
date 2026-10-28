@@ -14,6 +14,15 @@ OutputProcessor::OutputProcessor(const InstanceHostConfig& config)
     if constexpr (!build::kProbeBuild)
         glue_.emplace(*this);
     attachHost(Side::Output, config);
+    if constexpr (!build::kProbeBuild)
+        wirePairing(*glue_);
+}
+
+// 胶水先于 InstanceHost 析构：先撤下智能认领写胶水的回调
+OutputProcessor::~OutputProcessor()
+{
+    if constexpr (!build::kProbeBuild)
+        unwirePairing();
 }
 
 // Output 永远不改宿主的缓冲：输入与输出声道数相同，引擎只读缓冲、写环
@@ -66,6 +75,41 @@ bool OutputProcessor::selectGroup(int group)
     {
         return pickGroup(*glue_, group);
     }
+}
+
+RinneProcessorBase::RepairOutcome OutputProcessor::repairGroup(bool confirmTakeover)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        juce::ignoreUnused(confirmTakeover);
+        return {};
+    }
+    else
+    {
+        return repairWith(*glue_, confirmTakeover);
+    }
+}
+
+std::string OutputProcessor::diagnosticsText() const
+{
+    if constexpr (build::kProbeBuild)
+    {
+        return {};
+    }
+    else
+    {
+        diag::DiagState section;
+        section.lastLoad = loadStatusOf(glue_->lastLoadStatus());
+        section.encodeFailures = glue_->encodeFailures();
+        section.holdingNewer = glue_->holdingNewerState();
+        return diagnosticsWith(section);
+    }
+}
+
+void OutputProcessor::copyDiagnosticsToClipboard() const
+{
+    if constexpr (!build::kProbeBuild)
+        copyText(diagnosticsText());
 }
 
 } // namespace rinne

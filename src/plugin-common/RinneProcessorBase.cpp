@@ -5,7 +5,9 @@
 #include <limits>
 #include <utility>
 
+#include "PlatformLog.h"
 #include "ProbeHost.h"
+#include "UiDefaultsStore.h"
 #include "engine/EngineParams.h"
 #include "util/RinneVersion.h"
 
@@ -56,12 +58,13 @@ void RinneProcessorBase::reset()
     host_->reset();
 }
 
+// JUCE 规定只在消息线程调。正式构建写进本端的标签（InstanceHost），探针构建照旧转给探针
 void RinneProcessorBase::updateTrackProperties(const TrackProperties& properties)
 {
     if constexpr (build::kProbeBuild)
         static_cast<probe::ProbeHost&>(*host_).trackProperties(properties);
     else
-        juce::ignoreUnused(properties);
+        host_->setTrackProperties(properties);
 }
 
 bool RinneProcessorBase::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -138,6 +141,10 @@ void RinneProcessorBase::attachHost(Side side, const InstanceHostConfig& config)
     InstanceHostConfig wiring = config;
     wiring.role = side == Side::Input ? ipc::Role::kInput : ipc::Role::kOutput;
     wiring.validationHost = validationHost_;
+    wiring.pairing = !build::kProbeBuild;
+    role_ = wiring.role;
+    installLog_ = config.installLog;
+    copyToClipboard_ = config.copyToClipboard;
     if constexpr (build::kProbeBuild)
     {
         probe::ProbeHostConfig probeConfig;
@@ -146,13 +153,91 @@ void RinneProcessorBase::attachHost(Side side, const InstanceHostConfig& config)
     }
     else
     {
+        // 日志先于 InstanceHost：它的构造把 IPC 诊断的转发出口装在最上面，转发给日志的出口，链不断
+        if (!validationHost_ && uidefaults::diagLogEnabled())
+            installDiagLog();
         host_ = std::make_unique<InstanceHost>(*this, wiring);
     }
 }
 
+const char* RinneProcessorBase::roleName() const noexcept
+{
+    return role_ == ipc::Role::kInput ? "input" : "output";
+}
+
+// 每个插件二进制只装一次：已经装过（同一宿主里的另一个实例先装了）时 install 返回假，什么都不用做
+void RinneProcessorBase::installDiagLog()
+{
+    const bool installed = installLog_ != nullptr ? installLog_(roleName()) : platformlog::install(roleName());
+    if (installed && host_ != nullptr)
+        InstanceHost::installIpcDiagSink();
+}
+
+void RinneProcessorBase::unwirePairing()
+{
+    host_->setSmartGroupSink({});
+}
+
+pairing::PairModel RinneProcessorBase::pairState() const
+{
+    return host_->pairState();
+}
+
+// 只写本机的全局设置，不进工程、不定型。探针构建有自己的日志：只写设置，不装文件日志
+void RinneProcessorBase::setDiagLogEnabled(bool enabled)
+{
+    uidefaults::setDiagLogEnabled(enabled);
+    if constexpr (!build::kProbeBuild)
+    {
+        if (enabled && !validationHost_)
+            installDiagLog();
+    }
+}
+
+std::string RinneProcessorBase::diagnosticsWith(const diag::DiagState& stateSection) const
+{
+    diag::DiagInputs in;
+    host_->fillDiagnostics(in);
+    in.state = stateSection;
+    return diag::buildDiagReport(in);
+}
+
+void RinneProcessorBase::copyText(const std::string& text) const
+{
+    const juce::String copied = juce::String::fromUTF8(text.data(), static_cast<int>(text.size()));
+    if (copyToClipboard_ != nullptr)
+        copyToClipboard_(copied);
+    else
+        juce::SystemClipboard::copyTextToClipboard(copied);
+}
+
+diag::DiagLoadStatus RinneProcessorBase::loadStatusOf(const std::optional<state::StateLoadStatus>& status) noexcept
+{
+    if (!status.has_value())
+        return diag::DiagLoadStatus::kNone;
+    switch (*status)
+    {
+    case state::StateLoadStatus::Ok:
+        return diag::DiagLoadStatus::kOk;
+    case state::StateLoadStatus::Migrated:
+        return diag::DiagLoadStatus::kMigrated;
+    case state::StateLoadStatus::Empty:
+        return diag::DiagLoadStatus::kEmpty;
+    case state::StateLoadStatus::IgnoredProbe:
+        return diag::DiagLoadStatus::kIgnoredProbe;
+    case state::StateLoadStatus::RejectedNewer:
+        return diag::DiagLoadStatus::kRejectedNewer;
+    case state::StateLoadStatus::Corrupt:
+        return diag::DiagLoadStatus::kCorrupt;
+    }
+    return diag::DiagLoadStatus::kNone;
+}
+
+// 组号已定 = 非 0，或来源是用户选的（用户明确离组也算表过态）：已定的不再做智能默认
 void RinneProcessorBase::restoreConfigs(const state::Configs& configs)
 {
-    host_->setGroup(configs.group, ipc::ClaimIntent::kRestore);
+    const bool decided = configs.group != 0 || configs.groupOrigin == state::GroupOrigin::User;
+    host_->restoreGroup(configs.group, decided);
     switch (configs.tailMode)
     {
     case state::TailMode::Infinite:
