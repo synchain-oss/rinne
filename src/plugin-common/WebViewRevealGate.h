@@ -12,8 +12,8 @@ namespace rinne::webview
 // 开窗遮挡闸：「WebView 子窗口此刻该不该待在可视区之外」的唯一判定处。纯逻辑，不碰任何组件，宿主测试直接编它。
 //
 // 要解决的事：WebView2 的宿主窗口一旦上屏，在合成出页面首帧之前画什么，插件侧没有任何接口管得到，
-// 实际表现是白、黑、白、内容的闪烁。所以不让它上屏：从导航开始到页面首帧已绘之间，把 WebView 子窗口
-// 挪到本组件可视区之外，那块地方由 WebViewHost::paint 铺与外壳渐变同组色标的占位渐变。
+// 实际表现是白、黑、白、内容的闪烁。所以不让它上屏：从加载尝试开始（发起导航之前）到页面首帧已绘之间，
+// 把 WebView 子窗口挪到本组件可视区之外，那块地方由 WebViewHost::paint 铺占位（与外壳同几何的圆角渐变）。
 //
 // 为什么挪走，不用 setVisible(false) 或零尺寸：
 //   - JUCE 在组件被隐藏时会把页面导航到空白页（Options 里 keepPageLoadedWhenBrowserIsHidden 默认 false），
@@ -26,9 +26,15 @@ namespace rinne::webview
 // 页内首帧信号随之不到，每次开窗都吃满兜底时长。命中时是静默降级（多占位几秒），不是崩溃或卡死，
 // 所以首帧信号到达要留诊断行，兜底放行也要留诊断行，两行合起来才能看出是哪一条路。
 //
-// 为什么要等导航开始才挪：控制器创建完成之前的重试泵挂在 HostWebView::paint 上，挪出可视区后不再重绘，
-// 泵就停了。导航开始说明控制器已建好，此后泵本来就是空调用。控制器建好之前一直可见，既保住了泵，
-// 屏上那一段也是我方铺的占位，不会露白。
+// 为什么从加载尝试一开始就挪，而不是等导航开始：JUCE 在控制器建好的那个回调里，先按组件当前的可见性与边界
+// 摆好 WebView2 的宿主窗口（可见、落在可视区里），再发起导航；导航开始事件要等这次导航真的发出去才回来。
+// 只在导航开始时才挪的话，中间这一段宿主窗口已经在屏上、画的是它自己首帧之前的底，机器一忙这一段就拉长，
+// 用户看到的是「占位之后又闪一下白」。所以加载尝试一开头就挪走（holdBeforeNavigation），控制器建好时
+// JUCE 拿到的已经是可视区之外的边界，宿主窗口从出生起就不在屏上。
+// 这一段不起算超时：导航开始之前的时长归看门狗管（冷或热预算），到点切兜底面板，面板那条路照常放行。
+// 代价落在控制器创建的重试泵上：它挂在 HostWebView::paint 里，挪出可视区后 JUCE 不再画它，泵就停了。
+// 所以挡住期间由宿主的定时器代为调一次同一个基类绘制（画进一张临时小图，屏上什么都不变），
+// 泵的条件与实现仍一字不动留在 JUCE 里。
 //
 // 放行只认首帧：
 //   页面加载完成回调只说明文档下载完、load 事件发了，不保证任何一帧已经合成。两个回调谁先到不稳定，
@@ -63,6 +69,7 @@ public:
     void beginLoadAttempt() noexcept
     {
         parked_ = false;
+        holding_ = false;
         revealed_ = false;
         settling_ = false;
         settleTicksSeen_ = 0;
@@ -71,20 +78,34 @@ public:
         revealReason_ = "";
     }
 
-    // 导航开始（控制器已建好）。已经放行过就不再挪：页面自己再导航一次时重新遮一下比那点底色更难看
-    void onNavigationStarted(std::uint32_t nowMs) noexcept
+    // 发起导航之前先挪走（加载尝试开头调）。理由见文件头。这一段不起算超时，超时从导航开始算
+    void holdBeforeNavigation() noexcept
     {
         if (revealed_ || parked_)
             return;
         parked_ = true;
+        holding_ = true;
+    }
+
+    // 导航开始（控制器已建好）。已经放行过就不再挪：页面自己再导航一次时重新遮一下比那点底色更难看。
+    // 导航之前已经挪走的，位置不动，只把超时的起点落在此刻
+    void onNavigationStarted(std::uint32_t nowMs) noexcept
+    {
+        if (revealed_ || (parked_ && !holding_))
+            return;
+        parked_ = true;
+        holding_ = false;
         parkedAtMs_ = nowMs;
     }
 
     // 前端的首帧已绘信号。这里不放行，只武装；真正放行在 onTick 上。
     // 还没挪走时也要记账：记成已放行之后，后面那次导航开始就不会再把已经画好的页面挪走。
+    // 导航开始之前到的信号不属于这一次加载（这一次还没有文档），不记账。
     // 取 nowMs 是为了那条毫秒下界：信号到达的时刻只有调用方知道，它在消息线程上，与 tick 不同相。
     void onFirstFrame(std::uint32_t nowMs) noexcept
     {
+        if (holding_)
+            return;
         if (!parked_)
         {
             revealed_ = true;
@@ -107,7 +128,7 @@ public:
     // 或者反过来永不放行。
     void onTick(std::uint32_t nowMs) noexcept
     {
-        if (!parked_)
+        if (!parked_ || holding_)
             return;
         if (settling_)
         {
@@ -126,6 +147,8 @@ public:
     void onFallbackShown() noexcept { reveal("fallback"); }
 
     bool parked() const noexcept { return parked_; }
+    // 挡住了、但导航还没开始：这一段由宿主代驱动控制器创建的重试泵
+    bool holdingBeforeNavigation() const noexcept { return holding_; }
     // 最近一次放行的原因（诊断行用；从未放行过是空串）
     const char* lastRevealReason() const noexcept { return revealReason_; }
     // 加载完成回调到过没有。与放行无关，只进超时那一行诊断
@@ -136,6 +159,7 @@ private:
     {
         revealed_ = true;
         settling_ = false;
+        holding_ = false;
         if (!parked_)
             return;
         parked_ = false;
@@ -143,6 +167,7 @@ private:
     }
 
     bool parked_ = false;
+    bool holding_ = false; // 导航开始之前就挪走了（此时 parked_ 同为真）
     bool revealed_ = false;
     bool settling_ = false; // 首帧信号已到、正在压那一拍
     bool navFinishedSeen_ = false;
@@ -165,6 +190,22 @@ inline juce::Rectangle<int> parkedBounds(juce::Rectangle<int> visible) noexcept
 {
     const int step = juce::jmax(1, visible.getWidth());
     return visible.withX(visible.getX() + step * 2);
+}
+
+// 关窗诊断行：本次加载尝试从起点到关窗用了多久，关窗那一刻停在哪一档。放行行只在放行时写，
+// 「内容出来之前就关了窗」或「开窗卡在占位上」在日志里原本一个字都没有，这一行补的就是这一类。
+// 档位：fallback（兜底面板在场）、reveal gate off（闸门不启用的平台）、parked before navigation（挡着、导航还没开始）、
+// parked（挡着、导航已开始、首帧还没放行）、revealed（已放行）。
+// 用时从加载尝试起点算，与其余诊断行同一个起点；差值走 uint32 到 int32，理由同 onTick
+inline juce::String windowClosedLine(std::uint32_t nowMs, std::uint32_t startMs, const RevealGate& gate,
+                                     bool gateEnabled, bool fallbackShown)
+{
+    const char* state = fallbackShown                    ? "fallback"
+                        : !gateEnabled                   ? "reveal gate off"
+                        : gate.holdingBeforeNavigation() ? "parked before navigation"
+                        : gate.parked()                  ? "parked"
+                                                         : "revealed";
+    return "window closed after " + juce::String(static_cast<std::int32_t>(nowMs - startMs)) + " ms (" + state + ")";
 }
 
 } // namespace rinne::webview
