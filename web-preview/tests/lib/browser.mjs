@@ -199,7 +199,9 @@ async function launchOnce(exe, waitMs) {
     });
     let port = 0;
     const portFile = path.join(profile, "DevToolsActivePort");
-    for (let i = 0; i < waitMs / 100 && !port && !spawnError; i++) {
+    // 按墙钟截止而不是按轮询次数：机器负载高时 100 ms 的 sleep 会拉长，数满 100 次可能远超 waitMs
+    const deadline = Date.now() + waitMs;
+    while (!port && !spawnError && Date.now() < deadline) {
         await sleep(100);
         try {
             port = Number(fs.readFileSync(portFile, "utf8").split("\n")[0]);
