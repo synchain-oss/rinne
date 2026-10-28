@@ -59,8 +59,8 @@ bool LoopSession::prepare(double sampleRate) noexcept
 {
     const bool changed = !prepared_ || sampleRate_ != sampleRate;
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
-    // Output 发布到环头的采样率是同一个转换（取整），两边相等才算一致
-    ownRate_ = static_cast<std::uint32_t>(sampleRate_);
+    // 写方发布到环头的采样率与这里比较的是同一个转换（publishedSampleRate），两边相等才算一致
+    ownRate_ = publishedSampleRate(sampleRate);
 
     if (changed)
     {

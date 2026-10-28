@@ -272,7 +272,7 @@ private:
     DelayMinReason delayMinReason_ = DelayMinReason::kNone; // 下限从哪来
     std::int64_t maxBlockSeen_ = 0; // 本会话见过的最大块长（引擎给的 N_obs 与本块 n 取大；prepare 换采样率清零）
     PlayDebounce play_; // 起播沿：宿主短暂报停不算停走带（口径见 PlayDebounce.h 与 ADR-0010）
-    std::uint32_t ownRate_ = 0; // 本端采样率（取整，与 Output 发布到环头的那个数同一个转换），和环头里的比
+    std::uint32_t ownRate_ = 0; // 本端采样率（publishedSampleRate：写方发布到环头的就是这个转换），和环头里的比
     std::uint64_t lastWriterToken_ = 0;
     std::uint64_t lastEpoch_ = 0;
     bool havePeer_ = false;

@@ -11,6 +11,7 @@
 #include <cmath>
 
 #include "ipc/LoopRing.h"
+#include "loop/LoopTiming.h"
 
 namespace rinne::rig
 {
@@ -67,7 +68,7 @@ bool EngineHost::open(std::uint32_t group)
     {
         return false;
     }
-    ipc::LoopRing::publishWriter(*ring, outputToken_, static_cast<std::uint32_t>(outputRate_), 2);
+    ipc::LoopRing::publishWriter(*ring, outputToken_, loop::publishedSampleRate(outputRate_), 2);
     writerIsSecond_ = false;
     return true;
 }
@@ -100,7 +101,7 @@ void EngineHost::prepare(double sampleRate, int maxBlock)
     if (auto* ring = segments_.ring(group_))
     {
         ipc::LoopRing::publishWriter(*ring, writerIsSecond_ ? secondOutputToken_ : outputToken_,
-                                     static_cast<std::uint32_t>(outputRate_), 2);
+                                     loop::publishedSampleRate(outputRate_), 2);
     }
     if (auto* rv = segments_.rv())
     {
@@ -123,7 +124,7 @@ void EngineHost::prepareOutput(double sampleRate, int maxBlock)
     if (auto* ring = segments_.ring(group_))
     {
         ipc::LoopRing::publishWriter(*ring, writerIsSecond_ ? secondOutputToken_ : outputToken_,
-                                     static_cast<std::uint32_t>(outputRate_), 2);
+                                     loop::publishedSampleRate(outputRate_), 2);
     }
     if (auto* rv = segments_.rv())
     {
@@ -223,7 +224,7 @@ void EngineHost::switchWriter(bool toSecond)
     if (auto* ring = segments_.ring(group_))
     {
         ipc::LoopRing::publishWriter(*ring, toSecond ? secondOutputToken_ : outputToken_,
-                                     static_cast<std::uint32_t>(outputRate_), 2);
+                                     loop::publishedSampleRate(outputRate_), 2);
     }
 }
 

@@ -8,14 +8,16 @@
 //   - 回送在 10 ms 内线性淡到 0，逐样本的跳变不超过淡出的斜率，之后一直是 0、逐样本无效；
 //   - 改回一致：新配对，从当前写头起读，D 之前一直是 0；之后读到的正是 D 个样本之前写下的那一帧；
 //   - 本端自己换采样率（prepare）造成的不一致同样处理；开机就不一致的也一样；不一致超过 250 ms 也一样；
-//   - 比较用的转换与 Output 发布采样率的转换相同（取整）。
+//   - 比较用的转换与写方发布采样率的转换是同一个函数（publishedSampleRate，四舍五入），小数采样率
+//     （44055.944 Hz）两端一致；一端 44055.944、另一端 44056，发布值相同，也算一致；
 //   - 对端槽（错序证据的块序号与时间戳、对端报的违约）的读取与采样率比较无关，不一致的块照常读。
 //
 // 标 ⛔ 的是删除式验证点：把对应的实现改坏，本文件必须变红。
 //   ⛔ 不比较采样率（paired 只看写权）→ 不一致期间回送照读，本文件的大部分用例变红；
 //   ⛔ 不一致时直接把回送截成 0 而不走淡出 → 淡出那一例的阶跃判据变红；
 //   ⛔ 采样率比较写成「环头值大于本端才算不一致」→ 反向（本端更高）那一例变红；
-//   ⛔ 本端采样率取整改成四舍五入 → 非整数采样率那一例变红；
+//   ⛔ publishedSampleRate 改回截断 → 一端小数、另一端取整的两例变红（单元用例的逐值也变红）；
+//   ⛔ LoopSession::prepare 里本端采样率改回 static_cast 截断 → 两端同为 44055.944 的一例变红；
 //   ⛔ 不一致期间仍算有对端（恢复一致不按新配对）→ 恢复时记一次格式变化重同步，「改回一致」一例变红。
 //   ⛔ 不一致的块不读对端槽 → 错序证据没有新块可判、对端在不一致期间报的违约不计，「对端槽照常读」一例变红。
 
@@ -48,7 +50,10 @@ void constantSignal(Rig& rig)
 
 struct Run
 {
-    explicit Run(double rate = 48000.0) : rig(rate, 1024), params(timeParams(kDelay, rate)) {}
+    explicit Run(double rate = 48000.0, std::int64_t declaredBlock = 1024)
+        : rig(rate, declaredBlock), params(timeParams(kDelay, rate))
+    {
+    }
 
     BlockResult step(int n = kBlock)
     {
@@ -64,6 +69,8 @@ struct Run
     }
     // 写方（第一个 Output）以 rate 重新发布自己
     void republish(std::uint32_t rate) { rinne::ipc::LoopRing::publishWriter(rig.ring(), 1, rate, 2); }
+    // 写方以 rate（Hz，可以是小数）重新 prepare：发布值经 publishedSampleRate，与生产里写方发布的转换相同
+    void republishRate(double rate) { republish(publishedSampleRate(rate)); }
     std::size_t now() const { return rig.trace.size(); }
 
     Rig rig;
@@ -236,14 +243,70 @@ TEST_CASE("采样率不一致 超过 250 ms 的不一致：停用清空之后恢
     }
 }
 
-TEST_CASE("采样率不一致 比较用的转换与 Output 发布采样率的转换相同（取整）")
+TEST_CASE("采样率不一致 小数采样率：两端同为 44055.944 Hz，发布与比较是同一个转换，不判不一致，回送照常")
 {
-    // Output 发布的是 static_cast<uint32_t>(采样率)：44100.7 发布成 44100，本端也必须当作 44100，否则永远配不上
+    // 44.1 kHz 的拉降是 44055.944 Hz：写方发布的整数是 44056。本端若按截断算成 44055，两边永远对不上，回送恒为 0。
+    // ⛔ 删除式验证点：LoopSession::prepare 里本端采样率改回 static_cast 截断 → 本用例变红。
+    Run run(44055.944);
+    constantSignal(run.rig);
+    run.steps(60);
+    const LoopStatusFields s = run.rig.status();
+    CHECK(s.peerSampleRate == 44056u);
+    CHECK(s.rateMismatch == 0u);
+    CHECK(s.paired == 1u);
+    CHECK(run.rig.trace.back() == kLevel); // 回送照常
+    // 其余小数部分过半的采样率同理（试验台用同一个转换发布）
+    for (const double rate : {44100.7, 47999.6, 88199.9})
+    {
+        Run other(rate);
+        constantSignal(other.rig);
+        other.steps(60);
+        INFO("rate = " << rate);
+        CHECK(other.rig.status().rateMismatch == 0u);
+        CHECK(other.rig.status().paired == 1u);
+        CHECK(other.rig.status().peerSampleRate == publishedSampleRate(rate));
+        CHECK(other.rig.trace.back() == kLevel);
+    }
+}
+
+TEST_CASE("采样率不一致 一端 44055.944、另一端 44056：发布值相同，算一致")
+{
+    // 口径：比较的是两边各自取整之后发布的整数，不是原始的小数采样率。
+    // ⛔ 删除式验证点：publishedSampleRate 改回截断 → 44055.944 取成 44055，与另一端的 44056 对不上，本用例变红。
+    SECTION("本端 44055.944，写方发布 44056")
+    {
+        Run run(44055.944);
+        constantSignal(run.rig);
+        run.steps(30);
+        run.republish(44056u); // 值没变：不抬 epoch，也不重同步
+        run.steps(30);
+        CHECK(run.rig.status().rateMismatch == 0u);
+        CHECK(run.rig.status().paired == 1u);
+        CHECK(run.rig.status().resyncCount == 0u);
+        CHECK(run.rig.trace.back() == kLevel);
+    }
+    SECTION("本端 44056，写方以 44055.944 发布")
+    {
+        Run run(44056.0);
+        constantSignal(run.rig);
+        run.steps(30);
+        run.republishRate(44055.944); // 发布值是 44056，与原来相同
+        run.steps(30);
+        CHECK(run.rig.status().rateMismatch == 0u);
+        CHECK(run.rig.status().paired == 1u);
+        CHECK(run.rig.status().peerSampleRate == 44056u);
+        CHECK(run.rig.status().resyncCount == 0u);
+        CHECK(run.rig.trace.back() == kLevel);
+    }
+}
+
+TEST_CASE("采样率不一致 比较用的转换与写方发布采样率的转换相同（四舍五入）")
+{
+    // 写方与本端用同一个转换：44100.7 发布成 44101，本端也必须当作 44101，否则永远配不上
     Run run(44100.7);
     constantSignal(run.rig);
-    // Rig 构造时按 static_cast<uint32_t>(44100.7) 发布
     run.steps(60);
-    CHECK(run.rig.status().peerSampleRate == 44100u);
+    CHECK(run.rig.status().peerSampleRate == 44101u);
     CHECK(run.rig.status().rateMismatch == 0u);
     CHECK(run.rig.status().paired == 1u);
 }

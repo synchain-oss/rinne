@@ -315,6 +315,36 @@ TEST_CASE("rig L5-01 框架自检：冲激经真实共享内存的闭环，恰�
     CHECK(host.ringFrames() == 65536u);
 }
 
+TEST_CASE("rig 小数采样率：试验台发布环头的采样率与 Input 比较的是同一个转换，44055.944 Hz 两端一致", "[rig][rate]")
+{
+    // 44.1 kHz 的拉降是 44055.944 Hz：写方发布的整数是 44056。试验台若按截断发布成 44055，Input 按 44056 比，
+    // 永远判不一致。
+    // ⛔ 删除式验证点：EngineHost 里发布环头采样率的转换改回截断 → 判不一致，本用例变红。
+    EngineHost host;
+    REQUIRE(host.open(1));
+    host.prepare(44055.944, 256);
+    host.setBlockScripts(fixedScript(256, 1), fixedScript(256, 1));
+    host.setChain(ChainKind::kIdentity);
+    host.setSource(rampSource());
+    host.setParamsScript(paramsOf(unityLoop(10.0f)));
+    host.runCycles(40);
+    CHECK(host.inputStatus().peerSampleRate == 44056u);
+    CHECK(host.inputStatus().rateMismatch == 0u);
+    CHECK(host.inputStatus().paired == 1u);
+
+    // 只重新准备 Output，采样率取整数 44056：发布值相同，仍然一致
+    host.prepareOutput(44056.0, 256);
+    host.runCycles(40, 40);
+    CHECK(host.inputStatus().peerSampleRate == 44056u);
+    CHECK(host.inputStatus().rateMismatch == 0u);
+    CHECK(host.inputStatus().paired == 1u);
+    // 只重新准备 Input，也取整数 44056
+    host.prepareInput(44056.0, 256);
+    host.runCycles(40, 80);
+    CHECK(host.inputStatus().rateMismatch == 0u);
+    CHECK(host.inputStatus().paired == 1u);
+}
+
 TEST_CASE("rig 严格模式：两端块长同一次运行里 512 / 480 交替不重同步、输出与恒定块长逐位相同；Output 丢一块才重同步",
           "[rig][script]")
 {
