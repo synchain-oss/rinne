@@ -759,8 +759,11 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     // 本块拉环之后本地延迟线里有数据的上界。同一个段还在、而且这一块配着或上一块还配着（对端刚走）时，
     // 本块照常把环拉到 W：对端走之前发布的帧都是它写完了的真数据，旧读头的淡出要读到它们。
     // 环不在、或换了段时，旧读头只剩已经拉进来的那部分（新段的帧不进旧读头的淡出）。
+    // 采样率不一致的块同样不拉：对端刚走时写方已经停写，这里写方还在写，而且已经按另一个速率写，
+    // 上一块拉到的位置之后的帧可能是新速率的，旧读头的淡出不读它们。数据不够时淡出自己缩短到恰好用完
+    // （StreamSync::startFade），块首就读不到的交给末值保持。
     // 判据在拉环之前跑，淡出的读上界用的就是这个值（不是上一块拉到的位置）。
-    const bool pullThisBlock = ctx.ring != nullptr && (paired || (wasPaired && sameRing));
+    const bool pullThisBlock = ctx.ring != nullptr && (paired || (wasPaired && sameRing && !rateMismatch));
     const i64 dataEnd = pullThisBlock && !ringSwitched ? std::max(line_.pulled(), writeHead) : line_.pulled();
 
     // 判据。R 只有一份：判据那一半持有它，这里把同一个值传进去。
@@ -802,7 +805,8 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         line_.rebaseKeepingTail(writeHead);
     }
 
-    // 拉环：pulled 追到 W（对端刚走的那一块也拉：见 dataEnd）。延迟线被清空的那一块不拉（清空锚在 W，没有可拉的）。
+    // 拉环：pulled 追到 W（对端刚走的那一块也拉：见 dataEnd；采样率不一致的块不拉）。
+    // 延迟线被清空的那一块不拉（清空锚在 W，没有可拉的）。
     if (pullThisBlock && !outcome.lineCleared)
     {
         pullRing(*ctx.ring, writeHead, in.peerMaxBlock);

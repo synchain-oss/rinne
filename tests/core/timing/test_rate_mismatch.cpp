@@ -10,6 +10,7 @@
 //   - 本端自己换采样率（prepare）造成的不一致同样处理；开机就不一致的也一样；不一致超过 250 ms 也一样；
 //   - 比较用的转换与写方发布采样率的转换是同一个函数（publishedSampleRate，四舍五入），小数采样率
 //     （44055.944 Hz）两端一致；一端 44055.944、另一端 44056，发布值相同，也算一致；
+//   - 不一致的第一块不拉环：写方这时已经按新速率在写，旧读头的淡出只读之前已经拉进来的帧；
 //   - 对端槽（错序证据的块序号与时间戳、对端报的违约）的读取与采样率比较无关，不一致的块照常读。
 //
 // 标 ⛔ 的是删除式验证点：把对应的实现改坏，本文件必须变红。
@@ -18,6 +19,7 @@
 //   ⛔ 采样率比较写成「环头值大于本端才算不一致」→ 反向（本端更高）那一例变红；
 //   ⛔ publishedSampleRate 改回截断 → 一端小数、另一端取整的两例变红（单元用例的逐值也变红）；
 //   ⛔ LoopSession::prepare 里本端采样率改回 static_cast 截断 → 两端同为 44055.944 的一例变红；
+//   ⛔ 不一致的第一块仍把环拉到当前写头 → 「第一块不拉环」一例变红（淡出读到了新速率的帧）；
 //   ⛔ 不一致期间仍算有对端（恢复一致不按新配对）→ 恢复时记一次格式变化重同步，「改回一致」一例变红。
 //   ⛔ 不一致的块不读对端槽 → 错序证据没有新块可判、对端在不一致期间报的违约不计，「对端槽照常读」一例变红。
 
@@ -363,4 +365,68 @@ TEST_CASE("采样率不一致 对端槽照常读：错序证据照常出票，�
     }
     CHECK(run.rig.status().rateMismatch == 0u);
     CHECK(run.rig.status().exportEvents == 1u);
+}
+
+TEST_CASE("采样率不一致 第一块不拉环：写方已按新速率写下的帧不进旧读头的淡出（D 接近块长）")
+{
+    // 写方在两个 Input 块之间换了采样率并写下一整块：这块帧是新速率的。Input 在下一块看到不一致时，写方没有停写，
+    // 不能像「对端刚走」那样把环拉到当前写头；旧读头的淡出只读之前拉进来的帧。
+    // D 取块长 + 44：淡出要读的位置离写头只有 300 帧，拉了环就会读到新速率的那 256 帧（特征值 kMarker）。
+    // ⛔ 删除式验证点：不一致的第一块仍把环拉到当前写头 → 淡出读到 kMarker，本用例变红。
+    constexpr std::int64_t kNear = 300;
+    constexpr float kMarker = 0.9f;
+    constexpr std::int64_t kSwitch = 100 * kBlock; // 写方换采样率时的写头
+    constexpr std::int64_t kRecover = kSwitch + 40 * kBlock; // 改回一致时的写头
+    Run run(48000.0, kBlock);
+    run.params = timeParams(kNear);
+    run.rig.setSignal([=](std::int64_t p) {
+        if (p < kSwitch)
+        {
+            return kLevel;
+        }
+        return p < kRecover ? kMarker : noiseAt(p);
+    });
+    run.steps(100);
+    REQUIRE(run.rig.trace.back() == kLevel);
+    REQUIRE(run.rig.status().delayEffective == kNear);
+
+    // Input 读完这一块之后，写方换采样率，再写下一整块（新速率的帧，值是 kMarker）
+    run.last = run.rig.feed(kBlock, run.params);
+    run.republish(96000);
+    run.rig.write(kBlock);
+    REQUIRE(run.rig.status().paired == 1u); // 上一块还配着，不一致要到下一块才被看到
+    const std::size_t at = run.now();
+
+    run.step(kBlock); // 看到不一致的第一块
+    CHECK(run.rig.status().rateMismatch == 1u);
+    CHECK(run.rig.status().paired == 0u);
+    run.steps(10);
+
+    // 淡出读的全是不一致之前的帧：没有一个样本超过原来的电平，更不会出现 kMarker 的幅度
+    float peak = 0.0f;
+    for (std::size_t t = at; t < run.now(); ++t)
+    {
+        peak = std::max(peak, std::fabs(run.rig.trace[t]));
+    }
+    CHECK(peak <= kLevel);
+    CHECK(run.rig.trace[at] == kLevel); // 淡出从满增益起步
+    // 能用的帧只有 D − 块长 = 44 个：淡出缩短到恰好用完的那一点走到 0，之后一直是 0；不阶跃
+    constexpr std::int64_t kAvailable = kNear - kBlock;
+    CHECK(run.rig.trace[at + static_cast<std::size_t>(kAvailable)] == 0.0f);
+    CHECK(allZeroFrom(run.rig.trace, at + static_cast<std::size_t>(kAvailable), run.now()));
+    CHECK(maxStep(std::vector<float>(run.rig.trace.begin() + static_cast<std::ptrdiff_t>(at) - 1,
+                                     run.rig.trace.end())) <= kLevel / static_cast<float>(kAvailable) + 1.0e-6f);
+
+    // 改回一致：新配对，从当前写头起读，不读不一致期间写下的 kMarker；D 之后读到的是改回之后写下的帧
+    run.steps(static_cast<int>((kRecover - static_cast<std::int64_t>(run.now())) / kBlock));
+    REQUIRE(static_cast<std::int64_t>(run.now()) == kRecover);
+    run.republish(48000);
+    run.steps(40);
+    CHECK(run.rig.status().paired == 1u);
+    CHECK(run.rig.status().rateMismatch == 0u);
+    CHECK(allZeroFrom(run.rig.trace, static_cast<std::size_t>(kRecover), static_cast<std::size_t>(kRecover + kNear)));
+    for (std::size_t t = static_cast<std::size_t>(kRecover + kNear + kOnset); t < run.now(); ++t)
+    {
+        REQUIRE(run.rig.trace[t] == noiseAt(static_cast<std::int64_t>(t) - kNear));
+    }
 }
