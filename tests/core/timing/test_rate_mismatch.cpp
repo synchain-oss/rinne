@@ -11,6 +11,7 @@
 //   - 比较用的转换与写方发布采样率的转换是同一个函数（publishedSampleRate，四舍五入），小数采样率
 //     （44055.944 Hz）两端一致；一端 44055.944、另一端 44056，发布值相同，也算一致；
 //   - 不一致的第一块不拉环：写方这时已经按新速率在写，旧读头的淡出只读之前已经拉进来的帧；
+//   - 写方改了又改回、本端一块都没跑：采样率一致，仍是一次格式变化重同步，不走不一致路径；
 //   - 对端槽（错序证据的块序号与时间戳、对端报的违约）的读取与采样率比较无关，不一致的块照常读。
 //
 // 标 ⛔ 的是删除式验证点：把对应的实现改坏，本文件必须变红。
@@ -429,4 +430,36 @@ TEST_CASE("采样率不一致 第一块不拉环：写方已按新速率写下�
     {
         REQUIRE(run.rig.trace[t] == noiseAt(static_cast<std::int64_t>(t) - kNear));
     }
+}
+
+TEST_CASE("采样率不一致 写方改了又改回、本端一块都没跑：采样率一致，仍是一次格式变化重同步，不走不一致路径")
+{
+    // 环头 epoch 只在采样率改变时抬。写方在两个 Input 块之间 48 → 96 → 48 kHz，Input 看到的采样率与本端一致、
+    // epoch 变了：这是一次格式变化重同步（旧读头 5 ms 淡出，新读头从当前写头起读），不是不一致，回送不被置 0。
+    // 单端换采样率之后，生产里只有这一种情形还走得到这条重同步；单端停在另一个采样率上走的是上面的不一致路径。
+    Run run;
+    constantSignal(run.rig);
+    run.steps(60);
+    REQUIRE(run.rig.trace.back() == kLevel);
+    REQUIRE(run.rig.status().resyncByReason[static_cast<std::size_t>(SyncReason::kFormat)] == 0u);
+    const std::size_t at = run.now();
+
+    run.republish(96000);
+    run.republish(48000);
+    run.steps(60);
+
+    const LoopStatusFields s = run.rig.status();
+    CHECK(s.rateMismatch == 0u);
+    CHECK(s.paired == 1u);
+    CHECK(s.resyncByReason[static_cast<std::size_t>(SyncReason::kFormat)] == 1u);
+    CHECK(s.resyncCount == 1u);
+
+    // 旧读头 5 ms（240 个样本）线性淡出，之后到新读头的第一个样本（D 之后）是 0；再 20 ms onset 回到满电平
+    constexpr std::int64_t kResyncFade = 240;
+    CHECK(run.rig.trace[at] == kLevel);
+    CHECK(run.rig.trace[at + kResyncFade] == 0.0f);
+    CHECK(allZeroFrom(run.rig.trace, at + kResyncFade, at + static_cast<std::size_t>(kDelay)));
+    CHECK(maxStep(std::vector<float>(run.rig.trace.begin() + static_cast<std::ptrdiff_t>(at) - 1,
+                                     run.rig.trace.end())) <= kLevel / static_cast<float>(kResyncFade) + 1.0e-6f);
+    CHECK(run.rig.trace.back() == kLevel);
 }
