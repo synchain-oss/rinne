@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-edge-95",
+  "name": {
+    "zh": "Edge 95 %",
+    "en": "Edge 95 %",
+    "fr": "Bord d'oscillation 95 %"
+  },
+  "params": {
+    "feedback": 95,
+    "mix": 50,
+    "delay_mode": 0,
+    "delay_ms": 100,
+    "delay_note": 10,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}

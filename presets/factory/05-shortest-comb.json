@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-shortest-comb",
+  "name": {
+    "zh": "Shortest Comb",
+    "en": "Shortest Comb",
+    "fr": "Peigne minimal"
+  },
+  "params": {
+    "feedback": 80,
+    "mix": 50,
+    "delay_mode": 0,
+    "delay_ms": 1,
+    "delay_note": 10,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}
