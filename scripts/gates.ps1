@@ -13,8 +13,11 @@
 # 是各档必须有的 gate，注册的档位必须与它一致；没有模块注册时，requires 在工作树或基线上存在就判 FAIL，否则记 SKIP。
 # 锁见 lib/Locks.psm1：build 先等可用内存 ≥ 6000 MB（等满 -MemWaitMinutes 降为 -j2）再取构建槽，gui、ipc 各一把；等锁
 # 超时记资源超时。USER_TESTING 标记（主 clone 上一级的 _logs/USER_TESTING，RINNE_USER_TESTING_MARKER 可再加一处）存在时
-# Standard 及以上直接 DEFER。开跑与收尾各读一次 HEAD 与工作区，中途变了判 FAIL。结果 json 写到 -ResultJson，缺省
-# <LogDir>/gates-<sha40>.json（LogDir 缺省 RINNE_LOG_DIR，再缺省仓内被忽略的 build/gates），完整输出写同名 .log。
+# Standard 及以上直接 DEFER。开跑与收尾各读一次 HEAD 与工作区，中途变了判 FAIL。结果 json 缺省写进 LogDir（缺省
+# RINNE_LOG_DIR，再缺省仓内被忽略的 build/gates），完整输出写同名 .log。同一个 sha 每跑一次另存一份 gates-<sha40>.<n>.json
+# （n 从 1 递增，已有的一份都不覆盖，失败那次的证据留着），写完再拷成别名 gates-<sha40>.json，别名永远是最新一份；读结果的
+# pr-merge 在别名与各份序号文件里取 finished 最晚的那份（拷别名之前被打断时也读不到旧的）。给了 -ResultJson 就只写那一个
+# 文件，不编号：文件名是调用方定的。
 # json 是自报的：pr-merge 只能把它与 head 绑定，证明不了它出自本脚本，所以合并时会用主 clone 的 Tiers.psm1 按 PR 的
 # 文件清单重算最低档。字体检查要用的 Python：RINNE_PYTHON 没设时取 git config rinne.python（bootstrap-tools 建的 venv）
 # 设进本进程的 RINNE_PYTHON，交给各 gate 起的检查。最后一行固定为 `PASS n / FAIL n / SKIP n / FLAKY n  EXIT=x  @<sha7>  <档>  <耗时>`，不含路径。
@@ -71,6 +74,19 @@ function Format-Redacted([string]$Text) {
 
 function Get-ExitCode($Count, [bool]$Dirty, [bool]$Resource, [bool]$Deferred) {
     if ($Deferred) { 4 } elseif ($Count.FAIL -gt 0 -or $Dirty) { 1 } elseif ($Resource) { 3 } else { 0 }
+}
+
+# 同一个 sha 的下一份结果：LogDir 里 gates-<sha40>.<n>.json 的最大序号加一，用 CreateNew 占住这个文件名再返回，
+# 两份 gates 同时往同一个目录写也拿不到同一个号。返回 @{ Run; Json }。
+function New-HistoryResult([string]$Dir, [string]$Sha) {
+    $null = New-Item -ItemType Directory -Force -Path $Dir
+    $re = '^gates-' + [regex]::Escape($Sha) + '\.(\d{1,9})\.json$'
+    $taken = @(Get-ChildItem -LiteralPath $Dir -File | Where-Object Name -Match $re | ForEach-Object { [int]($_.Name -replace $re, '$1') })
+    for ($n = 1 + [int]($taken | Measure-Object -Maximum).Maximum; ; $n++) {
+        $p = Join-Path $Dir "gates-$Sha.$n.json"
+        try { [IO.File]::Open($p, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write).Dispose(); return [pscustomobject]@{ Run = $n; Json = $p } }
+        catch [IO.IOException] { if (-not (Test-Path -LiteralPath $p)) { throw } }
+    }
 }
 
 function New-Result([string]$Id, [string]$Name, [string]$Status, [string]$Reason, $Lines = @(), [bool]$Resource = $false, [double]$Seconds = 0) {
@@ -225,7 +241,19 @@ function Register-RinneGates {
         Set-Content -LiteralPath (Join-Path $repo 'stray.txt') -Value 'x'
         $r = & $run
         & $Check '工作区不干净：dirty=true、EXIT=1' $true ($r.Exit -eq 1 -and $r.J.exit -eq 1 -and $r.J.dirty -eq $true)
+        # 不给 -ResultJson：同一个 sha 先脏后净跑两次，两份结果都留在 LogDir 里，别名 gates-<sha40>.json 是后一份
+        $logs = Join-Path $tmp 'logs'
+        $runLog = { $null = @(& $pwsh -NoProfile -NonInteractive -File (Join-Path $repo 'scripts/gates.ps1') -LogDir $logs -MemWaitMinutes 0 -LockWaitMinutes 0.02 *>&1); $LASTEXITCODE }
+        $e1 = & $runLog
         Remove-Item -LiteralPath (Join-Path $repo 'stray.txt')
+        $e2 = & $runLog
+        $sha = "$(git -C $repo rev-parse HEAD)".Trim()
+        $read = { param($n) $p = Join-Path $logs "gates-$sha$n.json"; (Test-Path -LiteralPath $p) ? (Get-Content -LiteralPath $p -Raw | ConvertFrom-Json) : $null }
+        $j1, $j2, $alias = (& $read '.1'), (& $read '.2'), (& $read '')
+        $logsKept = @('.1', '.2', '' | Where-Object { Test-Path -LiteralPath (Join-Path $logs "gates-$sha$_.log") }).Count -eq 3
+        & $Check '同一个 sha 跑两次：两份结果都在（失败那份 exit=1 还在），别名与 .log 是后一份' $true ($e1 -eq 1 -and $e2 -eq 0 -and $logsKept -and
+            $j1 -and $j1.exit -eq 1 -and $j1.dirty -and $j1.run -eq 1 -and $j2 -and $j2.exit -eq 0 -and $j2.run -eq 2 -and
+            $alias -and $alias.exit -eq 0 -and $alias.run -eq 2 -and $alias.finished -ceq $j2.finished)
         # RINNE_PYTHON 没设时取 git config rinne.python，交给各 gate
         & $git config rinne.python rinne-selftest-python
         $savedPy, $env:RINNE_PYTHON, $env:RINNE_FX = $env:RINNE_PYTHON, $null, 'py'
@@ -301,15 +329,22 @@ foreach ($r in $results) { $count[$r.Status]++ }
 $dirty = $s0.Dirty -or $s1.Dirty
 $exit = Get-ExitCode $count $dirty (@($results | Where-Object Resource).Count -gt 0) $deferred
 if (-not $LogDir) { $LogDir = Join-Path $Root 'build/gates' }
-if (-not $ResultJson) { $ResultJson = Join-Path $LogDir "gates-$($s0.Sha).json" }
-$null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent ([IO.Path]::GetFullPath($ResultJson)))
+# 缺省：先占下这个 sha 的下一个序号写进去，再拷成别名；给了 -ResultJson 就只写它（run 记 0）
+$history = $ResultJson ? $null : (New-HistoryResult ([IO.Path]::GetFullPath($LogDir)) $s0.Sha)
+$target = $history ? $history.Json : $ResultJson
+$null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent ([IO.Path]::GetFullPath($target)))
 [ordered]@{
     sha40 = $s0.Sha; tier = $t.Run; pass = $count.PASS; fail = $count.FAIL; skip = $count.SKIP; flaky = $count.FLAKY; exit = $exit; dirty = $dirty
     started = $started.ToUniversalTime().ToString('o'); finished = $finished.ToUniversalTime().ToString('o')
-    base = $Base; baseSha = $d.BaseSha; autoTier = $t.Auto; minTier = $t.Min
+    base = $Base; baseSha = $d.BaseSha; autoTier = $t.Auto; minTier = $t.Min; run = $history ? $history.Run : 0
     gates = @($results | ForEach-Object { [ordered]@{ id = $_.Id; status = $_.Status; reason = (Format-Redacted $_.Reason); seconds = $_.Seconds } })
-} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultJson -Encoding utf8
-$results | ForEach-Object { "=== [$($_.Status)] $($_.Id) $($_.Reason)"; $_.Lines } | Set-Content -LiteralPath ([IO.Path]::ChangeExtension($ResultJson, '.log')) -Encoding utf8
-Write-Host "结果：$(Format-Redacted ([IO.Path]::GetFullPath($ResultJson)))"
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $target -Encoding utf8
+$results | ForEach-Object { "=== [$($_.Status)] $($_.Id) $($_.Reason)"; $_.Lines } | Set-Content -LiteralPath ([IO.Path]::ChangeExtension($target, '.log')) -Encoding utf8
+if ($history) {
+    $ResultJson = Join-Path ([IO.Path]::GetFullPath($LogDir)) "gates-$($s0.Sha).json"
+    Copy-Item -LiteralPath ([IO.Path]::ChangeExtension($target, '.log')) -Destination ([IO.Path]::ChangeExtension($ResultJson, '.log')) -Force
+    Copy-Item -LiteralPath $target -Destination $ResultJson -Force
+    Write-Host "结果：$(Format-Redacted $ResultJson)（这个 sha 的第 $($history.Run) 份，另存为 $(Split-Path -Leaf $target)）"
+} else { Write-Host "结果：$(Format-Redacted ([IO.Path]::GetFullPath($ResultJson)))" }
 Write-Output (Format-Summary $count $exit $s0.Sha $t.Run ($finished - $started))
 exit $exit

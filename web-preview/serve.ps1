@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Derived from synchain-oss/scvb; see upstream/web-preview.json
 #
-# web-preview 的本地静态服务器：端口固定 8833，只监听 127.0.0.1，纯本地，不发任何网络请求。
-#   pwsh web-preview/serve.ps1 [-Port 8833] [-Open]
-#   pwsh web-preview/serve.ps1 -SmokeTest      起服、自己发几条请求、核对后停服，退出码 0 或 1
+# web-preview 的本地静态服务器：首选端口 8833，只监听 127.0.0.1，纯本地，不发任何网络请求。
+#   pwsh web-preview/serve.ps1 [-Port 8833] [-Open] [-StrictPort]
+#   pwsh web-preview/serve.ps1 -SmokeTest [-Port 8833] [-StrictPort]   起服、自己发几条请求、核对后停服
 # 站点根是仓库根而不是 web-preview/：壳页用 ../web/<角色>/index.html 引用真源，两棵目录要在同一个源下，
 # mock 才能经同源 iframe 注入。不能用 file:// 直开：ES module 在 file:// 下被 CORS 拒绝，iframe 也会变跨源。
-# 所有响应都带 no-store，页面永远拿最新的 web/ 真源。端口被占用时直接报错退出，不静默换端口：
-# 地址要能写进文档当固定入口。
+# 所有响应都带 no-store，页面永远拿最新的 web/ 真源。
+# 端口：8833 是写进文档的固定入口。它被别的进程占着时（本机的出站连接也可能随机拿到它当源端口），先把占用者的 PID 与进程名
+# 打出来，再挑一个空闲端口照常起服，实际地址照常打印；不杀任何进程，也不改系统的端口设置。-StrictPort 不换端口：被占就退出 3
+# （gates 的「固定端口自检」用它）。机读的两行：`serve.ps1 端口 <n> 被占：<占用者>` 与 `serve.ps1 端口：<实际端口>`。
+# 退出码：0 正常（-SmokeTest 全部请求符合预期）；1 失败；3 -StrictPort 下端口被占。
 param(
     [int]$Port = 8833,
     [switch]$Open,
-    [switch]$SmokeTest
+    [switch]$SmokeTest,
+    [switch]$StrictPort
 )
 
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$BaseUrl = "http://127.0.0.1:$Port"
 $EntryPath = '/web-preview/input.html'
 
 # 只列预览页会取到的类型，缺项回落 octet-stream。.js 必须是 text/javascript，否则 module script 会被拒。
@@ -97,15 +100,87 @@ function Send-StaticFile([System.Net.HttpListenerContext]$Context, [string]$Root
     return $status
 }
 
-$listener = [System.Net.HttpListener]::new()
-$listener.Prefixes.Add("$BaseUrl/")
-try {
-    $listener.Start()
-} catch {
-    Write-Host ("serve.ps1: 端口 {0} 起不来：{1}" -f $Port, $_.Exception.Message) -ForegroundColor Red
-    Write-Host '  端口固定是有意的。占用方多半是上一次没停掉的 serve.ps1。' -ForegroundColor Red
-    exit 1
+# 在 127.0.0.1:<P> 上起 HttpListener。返回 @{ Listener; Error }：起来了 Error 为空，起不来 Listener 为空、Error 是异常。
+function Start-PreviewListener([int]$P) {
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://127.0.0.1:$P/")
+    try {
+        $l.Start()
+        return @{ Listener = $l; Error = $null }
+    } catch {
+        $l.Close()
+        $e = $_.Exception
+        while ($e.InnerException -and $e -isnot [System.Net.HttpListenerException]) { $e = $e.InnerException }
+        return @{ Listener = $null; Error = $e }
+    }
 }
+
+# 占着这个 TCP 端口的进程，逐个写成「PID <n> <进程名>（<本地地址>:<端口> <状态>）」。状态不限：只绑了端口、还没连上或不在监听的
+# 出站连接（Bound）也占着它，netstat 的 LISTENING 里看不到。PID 4 是 System，端口在 http.sys 手里，是另一个 HttpListener 服务
+# （多半是上一次没停掉的 serve.ps1）。TimeWait 不算：那是已经关掉的连接留下的记录（属主是 PID 0），不占着端口，写进说明只会误导。
+# 这里只给说明，被不被占由 Test-PortTaken 按错误码判。查不到时返回 $null。
+function Get-PortOwner([int]$P) {
+    if (-not (Get-Command Get-NetTCPConnection -ErrorAction Ignore)) { return $null }
+    $conns = @(Get-NetTCPConnection -LocalPort $P -ErrorAction Ignore | Where-Object { "$($_.State)" -cne 'TimeWait' } | Sort-Object OwningProcess, State -Unique)
+    if (-not $conns.Count) { return $null }
+    @($conns | ForEach-Object {
+            $name = (Get-Process -Id $_.OwningProcess -ErrorAction Ignore).ProcessName
+            $sys = ($_.OwningProcess -eq 4) ? '，http.sys：另一个 HttpListener 服务，多半是没停掉的 serve.ps1' : ''
+            "PID $($_.OwningProcess) $($name ? $name : '?')（$($_.LocalAddress):$P $($_.State)$sys）"
+        }) -join '；'
+}
+
+# 端口被占只认两种证据：HttpListener 报的就是「被另一个进程占着」（32）/「这个地址已经有人注册」（183）；或者在 127.0.0.1 的这个
+# 端口上连普通的 TCP 监听也绑不上，而且报的是地址已被使用（没有 Get-NetTCPConnection 的平台也靠这一条）。查到的占用者只用来说明
+# 是谁占着，不当作被占的证据：别的本地地址上的连接未必挡得住 127.0.0.1。别的起不来（例如没有权限、端口在系统保留段里、探测时
+# 报了别的套接字错误）都不算被占：换端口也不会好，照常判失败，-StrictPort 也就不会把它记成跳过。
+# $Address 只给自测换探测地址用（换成本机没有的地址，探测就会报别的套接字错误）；serve.ps1 自己一律探测 127.0.0.1。
+function Test-PortTaken($Err, [int]$P, [System.Net.IPAddress]$Address = [System.Net.IPAddress]::Loopback) {
+    if ($Err -is [System.Net.HttpListenerException] -and $Err.ErrorCode -in 32, 183) { return $true }
+    $probe = [System.Net.Sockets.TcpListener]::new($Address, $P)
+    try { $probe.Start(); $false } catch { Test-AddressInUse $_.Exception } finally { $probe.Stop() }
+}
+
+# 探测绑不上时报的是不是「地址已被使用」：剥掉 PowerShell 包的外层异常找到套接字异常再看错误码；不是套接字异常、或是别的错误码都不算。
+function Test-AddressInUse($Exception) {
+    $e = $Exception
+    while ($e.InnerException -and $e -isnot [System.Net.Sockets.SocketException]) { $e = $e.InnerException }
+    $e -is [System.Net.Sockets.SocketException] -and $e.SocketErrorCode -eq [System.Net.Sockets.SocketError]::AddressAlreadyInUse
+}
+
+# 本机挑一个空闲端口：让系统给 127.0.0.1 分配一个，记下号码就放开，紧接着在它上面起服（中间被别人抢走就再挑）。
+function Get-FreePort {
+    $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $l.Start()
+    try { $l.LocalEndpoint.Port } finally { $l.Stop() }
+}
+
+$started = Start-PreviewListener $Port
+if (-not $started.Listener) {
+    $owner = Get-PortOwner $Port
+    if (-not (Test-PortTaken $started.Error $Port)) {
+        Write-Host ("serve.ps1: 端口 {0} 起不来：{1}" -f $Port, $started.Error.Message) -ForegroundColor Red
+        exit 1
+    }
+    Write-Host ("serve.ps1 端口 {0} 被占：{1}" -f $Port, ($owner ? $owner : "查不到占用者（{0}）" -f $started.Error.Message)) -ForegroundColor Yellow
+    if ($StrictPort) {
+        Write-Host '  -StrictPort：不换端口，退出 3。不杀占用者、不改系统端口设置；它放开之后再跑。' -ForegroundColor Yellow
+        exit 3
+    }
+    $wanted = $Port
+    for ($i = 0; $i -lt 5 -and -not $started.Listener; $i++) {
+        $Port = Get-FreePort
+        $started = Start-PreviewListener $Port
+    }
+    if (-not $started.Listener) {
+        Write-Host ("serve.ps1: 换了 5 个空闲端口也起不来：{0}" -f $started.Error.Message) -ForegroundColor Red
+        exit 1
+    }
+    Write-Host ("  改用空闲端口 {0}：这次的地址以它为准（{1} 放开之后再起就回到它）" -f $Port, $wanted) -ForegroundColor Yellow
+}
+$listener = $started.Listener
+$BaseUrl = "http://127.0.0.1:$Port"
+Write-Host ("serve.ps1 端口：{0}" -f $Port)
 
 Write-Host ''
 Write-Host 'Rinne web-preview：本地静态服务器已启动' -ForegroundColor Green

@@ -30,6 +30,42 @@ export function findBrowser() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 开调试端口的有界重试。无头浏览器偶尔在负载下 10 秒内写不出 DevToolsActivePort（CI 与本机都见过），这一次没起来不等于页面坏了，
+ * 所以换一个新 profile 重起；但次数与总时长都有上界，重试完仍没起来照常抛错判红，不改成跳过：页面冒烟是 required check。
+ * attempts：最多起几次（含第一次）；waitMs：每次等端口文件多久；backoffMs：第 k 次失败后等多久再起（不够长就重复最后一项）；
+ * totalMs：从第一次起算的总时长上界，下一次起不完就不再起。
+ */
+export const LAUNCH_POLICY = Object.freeze({ attempts: 3, waitMs: 10000, backoffMs: [1000, 2000], totalMs: 45000 });
+
+/**
+ * 按 policy 有界重试 attempt(k)（k 从 1 起）：返回非 null 就算起来了，返回 null 就退避再起。返回 { value, attempts, retries, ms }；
+ * 次数用完或总时长不够再起一次时抛错，错误里写明起了几次、重试了几次、用了多久（err.launchAttempts 是起的次数）。
+ * onRetry(k, pauseMs) 在每次退避之前调用（打日志用）；now、wait 可以注入假时钟（自测用）。
+ */
+export async function withLaunchRetry(
+    attempt,
+    policy = LAUNCH_POLICY,
+    { now = Date.now, wait = sleep, onRetry = () => {} } = {},
+) {
+    const t0 = now();
+    for (let k = 1; ; k++) {
+        const value = await attempt(k);
+        if (value != null) return { value, attempts: k, retries: k - 1, ms: now() - t0 };
+        const pause = policy.backoffMs[Math.min(k - 1, policy.backoffMs.length - 1)] ?? 0;
+        const spent = now() - t0;
+        if (k >= policy.attempts || spent + pause + policy.waitMs > policy.totalMs) {
+            const err = new Error(
+                `浏览器起了 ${k} 次，每次都没在 ${policy.waitMs / 1000} 秒内开出调试端口（重试 ${k - 1} 次，共 ${(spent / 1000).toFixed(1)} 秒）`,
+            );
+            err.launchAttempts = k;
+            throw err;
+        }
+        onRetry(k, pause);
+        await wait(pause);
+    }
+}
+
 /** 一个页面：eval、goto、等条件、收集错误。 */
 class Page {
     constructor(ws, targetId, port) {
@@ -136,12 +172,10 @@ class Page {
 }
 
 /**
- * 启动无头浏览器。返回 { newPage(), close() }。
- * @param {object} [o] width、height：初始视口。
+ * 起一次浏览器：新的临时 profile，等 waitMs 看它写不写出调试端口。写出来了返回 { port, cleanup }；没写出来就收掉这一次的进程树与
+ * profile，返回 null（由 withLaunchRetry 决定还起不起）。
  */
-export async function launchBrowser({ width = 1280, height = 900 } = {}) {
-    const exe = findBrowser();
-    if (!exe) throw new Error("找不到 Chromium 系浏览器（可用环境变量 RINNE_BROWSER 指定）");
+async function launchOnce(exe, waitMs) {
     const profile = makeTempDir("rinne-pv-");
     const proc = spawn(
         exe,
@@ -158,9 +192,16 @@ export async function launchBrowser({ width = 1280, height = 900 } = {}) {
         ],
         { stdio: "ignore" },
     );
+    // 起不起来（可执行文件坏了之类）不让未处理的 error 事件打崩进程：这一次算没开出端口，不再干等
+    let spawnError = null;
+    proc.once("error", (e) => {
+        spawnError = e;
+    });
     let port = 0;
     const portFile = path.join(profile, "DevToolsActivePort");
-    for (let i = 0; i < 100 && !port; i++) {
+    // 按墙钟截止而不是按轮询次数：机器负载高时 100 ms 的 sleep 会拉长，数满 100 次可能远超 waitMs
+    const deadline = Date.now() + waitMs;
+    while (!port && !spawnError && Date.now() < deadline) {
         await sleep(100);
         try {
             port = Number(fs.readFileSync(portFile, "utf8").split("\n")[0]);
@@ -192,10 +233,36 @@ export async function launchBrowser({ width = 1280, height = 900 } = {}) {
     });
     if (!port) {
         await cleanup();
-        throw new Error("浏览器没有在 10 秒内开出调试端口");
+        if (spawnError) console.error(`[浏览器] 这一次没起来：${spawnError.message}`);
+        return null;
     }
+    return { port, cleanup };
+}
+
+/**
+ * 启动无头浏览器。返回 { newPage(), close(), launch }；launch 是 { attempts, retries, ms }：第几次起来的、重试了几次、用了多久。
+ * 开调试端口按 LAUNCH_POLICY 有界重试，每次重试与「重试之后才起来」都往标准错误写一行（run-all 会把它当作这一套的最后一行显示），
+ * 便于与 CI 上的偶发对拍；重试完仍没起来照常抛错。
+ * @param {object} [o] width、height：初始视口。
+ */
+export async function launchBrowser({ width = 1280, height = 900 } = {}) {
+    const exe = findBrowser();
+    if (!exe) throw new Error("找不到 Chromium 系浏览器（可用环境变量 RINNE_BROWSER 指定）");
+    const got = await withLaunchRetry(() => launchOnce(exe, LAUNCH_POLICY.waitMs), LAUNCH_POLICY, {
+        onRetry: (k, pause) =>
+            console.error(
+                `[浏览器] 第 ${k} 次启动没在 ${LAUNCH_POLICY.waitMs / 1000} 秒内开出调试端口，${pause / 1000} 秒后重起（最多起 ${LAUNCH_POLICY.attempts} 次）`,
+            ),
+    });
+    const { port, cleanup } = got.value;
+    const launch = { attempts: got.attempts, retries: got.retries, ms: got.ms };
+    if (launch.retries)
+        console.error(
+            `[浏览器] 调试端口第 ${launch.attempts} 次启动才开出（重试 ${launch.retries} 次，共 ${(launch.ms / 1000).toFixed(1)} 秒）`,
+        );
     const pages = [];
     return {
+        launch,
         async newPage() {
             const t = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
             const ws = new WebSocket(t.webSocketDebuggerUrl);

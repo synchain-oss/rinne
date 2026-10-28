@@ -136,6 +136,28 @@ function Test-ContractGuard {
     } finally { Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue }
 }
 
+<#
+  这个 head 的 gates 结果（最新一份）。gates.ps1 每跑一次另存一份 gates-<head>.<n>.json，写完再拷成别名 gates-<head>.json；
+  这里在别名与各份序号文件里取 finished 最晚的那份：别名正常就是最后一份序号文件，拷别名之前被打断时它还是上一次的结果，
+  只读别名会读到旧的。没有 finished 的（老版本 gates 写的）当作最早。一份都没有返回 $null；有文件读不出来照常抛错，
+  坏文件不当作没跑过。0 字节的序号文件是 gates 占了号、还没写完就停了，不算一份结果。
+#>
+function Read-GatesResult {
+    param([Parameter(Mandatory)][string]$Dir, [AllowEmptyString()][string]$Head)
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return $null }
+    $re = '^gates-' + [regex]::Escape($Head) + '(?:\.\d{1,9})?\.json$'
+    $all = @(Get-ChildItem -LiteralPath $Dir -File | Where-Object { $_.Name -match $re -and $_.Length -gt 0 } |
+            ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json })
+    $when = {
+        $f = Get-RinneProp $_ 'finished'
+        if ($f -is [datetime]) { $f.ToUniversalTime() }
+        elseif ($f) { [datetime]::Parse([string]$f, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+        else { [datetime]::MinValue }
+    }
+    if (-not $all.Count) { return $null }
+    $all | Sort-Object $when | Select-Object -Last 1
+}
+
 function Get-MergeFacts {
     param([Parameter(Mandatory)][int]$Pr, [Parameter(Mandatory)][string]$CardId)
     $repo = Get-RinneRepo
@@ -167,8 +189,7 @@ function Get-MergeFacts {
         }
     }
     $files = Get-RinneApi "repos/$repo/pulls/$Pr/files?per_page=100" -Paginate
-    $gatesPath = Join-Path (Get-RinneRoot) "_logs/$CardId/gates-$head.json"
-    $gates = if (Test-Path -LiteralPath $gatesPath) { Get-Content -Raw -LiteralPath $gatesPath | ConvertFrom-Json } else { $null }
+    $gates = Read-GatesResult (Join-Path (Get-RinneRoot) "_logs/$CardId") $head
     $needsDispatch = Test-NeedsDispatch $card @($files)
     $dispatchRuns = if ($needsDispatch) {
         $p = "repos/$repo/actions/workflows/build.yml/runs?event=workflow_dispatch&head_sha=$head&per_page=20"
@@ -1027,6 +1048,25 @@ function Invoke-SelfTest {
         $gates = @{ sha40 = $head; tier = 'Quick'; pass = 9; fail = 0; skip = 2; flaky = 0; exit = 0; dirty = $false; base = 'origin/feature/v1'; baseSha = $tipSha; autoTier = 'Quick' }
         $writeGates = { $gates | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tmp "_logs/$cid/gates-$head.json") }
         & $writeGates
+        # gates json 留史：别名 gates-<head>.json 与各份 gates-<head>.<n>.json 里取 finished 最晚的一份
+        $gd = Join-Path $tmp 'gates-read'
+        $null = New-Item -ItemType Directory -Path $gd
+        $putRun = { param($name, $run, $exit, $when) @{ sha40 = $head; exit = $exit; run = $run; finished = $when } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $gd $name) }
+        & $putRun "gates-$head.json" 0 0 $null
+        Add-RinneCase $cases 'gates 结果：只有别名（老版本 gates 写的、没有 finished）时照读别名' $false (-not ((Read-GatesResult $gd $head).exit -eq 0))
+        & $putRun "gates-$head.1.json" 1 1 '2026-10-27T01:00:00.0000000Z'
+        & $putRun "gates-$head.2.json" 2 0 '2026-10-27T02:00:00.0000000Z'
+        & $putRun "gates-$head.json" 2 0 '2026-10-27T02:00:00.0000000Z'
+        $r2 = Read-GatesResult $gd $head
+        Add-RinneCase $cases 'gates 结果：失败的第 1 份留着，读的是最新的第 2 份' $false (-not ($r2.run -eq 2 -and $r2.exit -eq 0))
+        & $putRun "gates-$head.3.json" 3 1 '2026-10-27T03:00:00.0000000Z'
+        $r3 = Read-GatesResult $gd $head
+        Add-RinneCase $cases 'gates 结果：第 3 份（失败）写完、别名还没拷就停了：读第 3 份，不读别名里旧的通过' $true ($r3.run -eq 3 -and $r3.exit -eq 1)
+        $null = New-Item -ItemType Directory -Path (Join-Path $gd 'other')
+        & $putRun "other/gates-$('e' * 40).json" 0 0 '2026-10-27T09:00:00.0000000Z'
+        & $putRun "other/gates-$head.r1.json" 0 0 '2026-10-27T09:00:00.0000000Z'
+        [IO.File]::WriteAllBytes((Join-Path $gd "other/gates-$head.4.json"), [byte[]]@())
+        Add-RinneCase $cases 'gates 结果：别的 sha、手工改名的 .r1.json、0 字节的占号文件都不算一份结果' $false ($null -ne (Read-GatesResult (Join-Path $gd 'other') $head))
         $log = [System.Collections.Generic.List[string]]::new()
         $builds = [System.Collections.Generic.List[object]]::new()
         $tipOps = [System.Collections.Generic.List[object]]::new()
@@ -2009,6 +2049,13 @@ function Invoke-SelfTest {
             $vc = Invoke-MergeCheck 3 $cid
             Add-RinneCase $cases '合并后构建：别的判据没过时不跑 PR 里的代码' $true ($vc.Code -eq 'not-ready' -and $builds.Count -eq $n)
             $gates.exit = 0; & $writeGates
+            # 同一个 head 又跑了一次、没通过，别名却还是上一次的通过（拷别名之前被打断）：-Check 读的是新的那份
+            $newer = $gates.Clone(); $newer.exit = 1; $newer.fail = 1; $newer.run = 2; $newer.finished = '2099-01-01T00:00:00.0000000Z'
+            $histFile = Join-Path $tmp "_logs/$cid/gates-$head.2.json"
+            $newer | ConvertTo-Json | Set-Content -LiteralPath $histFile
+            $vc = Invoke-MergeCheck 3 $cid
+            Remove-Item -LiteralPath $histFile
+            Add-RinneCase $cases '-Check 读 gates 结果：同一个 head 的序号文件比别名新、没通过：判红' $true ($vc.Code -eq 'not-ready' -and @($vc.Failures | Where-Object { $_ -match 'gates 没有通过（exit=1' }).Count -eq 1)
             $files = @([pscustomobject]@{ filename = 'scripts/review-bot.mjs'; status = 'modified' })
             $card.owns = @('scripts/review-bot.mjs'); & $writeCard
             Set-Content -LiteralPath $recordsFile -Value (ConvertTo-Json -Depth 10 @{ approvals = @{ '3' = @(@{ head = $head; by = 'user'; note = '已批准' }) } })
@@ -2210,7 +2257,9 @@ function Invoke-SelfTest {
     Complete-RinneSelfTest $cases 'pr-merge'
 }
 
-if ($SelfTest) { exit (Invoke-SelfTest) }
+# 退出码只取 Complete-RinneSelfTest 返回的最后一个值：自测途中别的调用往管道里多吐一个对象时，exit 收到的是数组，
+# 退出码会变成 0，用例没过也报成通过
+if ($SelfTest) { exit [int]@(Invoke-SelfTest)[-1] }
 if (@($Check, $Merge, $After | Where-Object { $_ }).Count -ne 1) { throw '用法：-Check | -Merge | -After，三选一（或 -SelfTest）' }
 if ($Pr -le 0 -or $Card -notmatch $CardPattern) { throw '需要 -Pr <n> 与 -Card <卡号>' }
 # 锁存标记在任何 git 与 gh 之前看（导入 RinneGh 时已经看过一次，这里再明说一遍）
