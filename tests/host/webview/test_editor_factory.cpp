@@ -166,3 +166,102 @@ TEST_CASE("editor factory: no seam and no browser component builds nothing, it d
     CHECK(editor::createEditor(processor, o, editor::Identity::formal) == nullptr);
 #endif
 }
+
+TEST_CASE("editor factory: the shell entry returns the factory result when there is one", "[webview][editor][entry]")
+{
+    NullProcessor processor;
+    Calls calls;
+    const auto o = makeOptions("input", calls, processor);
+
+    std::unique_ptr<juce::AudioProcessorEditor> web(
+        editor::createEditorOrGeneric(processor, o, editor::Identity::formal));
+    REQUIRE(web != nullptr);
+    CHECK(std::string(tagOf(web.get())) == "web");
+
+    std::unique_ptr<juce::AudioProcessorEditor> probe(
+        editor::createEditorOrGeneric(processor, o, editor::Identity::probe));
+    REQUIRE(probe != nullptr);
+    CHECK(std::string(tagOf(probe.get())) == "probe");
+
+    CHECK(calls.web == 1);
+    CHECK(calls.probe == 1);
+}
+
+TEST_CASE("editor factory: the shell entry falls back to the generic editor, never to nothing",
+          "[webview][editor][entry]")
+{
+    NullProcessor processor;
+    Calls calls;
+
+    const auto isGeneric = [](juce::AudioProcessorEditor* e) {
+        return dynamic_cast<juce::GenericAudioProcessorEditor*>(e) != nullptr;
+    };
+
+    // 角色不认识：两种身份都退回通用编辑器，两个工厂缝一个都没被调用
+    {
+        const auto o = makeOptions("send", calls, processor);
+        for (const auto identity : {editor::Identity::formal, editor::Identity::probe})
+        {
+            std::unique_ptr<juce::AudioProcessorEditor> e(editor::createEditorOrGeneric(processor, o, identity));
+            REQUIRE(e != nullptr);
+            CHECK(isGeneric(e.get()));
+        }
+        CHECK(calls.web == 0);
+        CHECK(calls.probe == 0);
+    }
+
+    // 探针身份却没有注入探针工厂
+    {
+        auto o = makeOptions("input", calls, processor);
+        o.probeEditorFactory = nullptr;
+        std::unique_ptr<juce::AudioProcessorEditor> e(
+            editor::createEditorOrGeneric(processor, o, editor::Identity::probe));
+        REQUIRE(e != nullptr);
+        CHECK(isGeneric(e.get()));
+        CHECK(calls.web == 0); // 不会退回去造网页编辑器
+    }
+
+    // 探针工厂返回空（处理器没有探针宿主）
+    {
+        auto o = makeOptions("output", calls, processor);
+        o.probeEditorFactory = [] { return static_cast<juce::AudioProcessorEditor*>(nullptr); };
+        std::unique_ptr<juce::AudioProcessorEditor> e(
+            editor::createEditorOrGeneric(processor, o, editor::Identity::probe));
+        REQUIRE(e != nullptr);
+        CHECK(isGeneric(e.get()));
+    }
+
+    // 网页编辑器造不出来
+    {
+        auto o = makeOptions("output", calls, processor);
+        o.webViewEditorMaker = [](juce::AudioProcessor&) { return static_cast<juce::AudioProcessorEditor*>(nullptr); };
+        std::unique_ptr<juce::AudioProcessorEditor> e(
+            editor::createEditorOrGeneric(processor, o, editor::Identity::formal));
+        REQUIRE(e != nullptr);
+        CHECK(isGeneric(e.get()));
+    }
+}
+
+TEST_CASE("editor factory: the probe path never reads the page resources", "[webview][editor][entry]")
+{
+    // 探针构建也嵌了页面资源（入口代码对两种身份是同一份），但探针路径不许碰它：
+    // 取资源的函数一旦被调用，说明探针构建里开始加载网页了
+    static int resourceReads = 0;
+    resourceReads = 0;
+    const auto reader = [](const char*, int& size) -> const char* {
+        ++resourceReads;
+        size = 0;
+        return nullptr;
+    };
+
+    NullProcessor processor;
+    Calls calls;
+    auto o = makeOptions("input", calls, processor);
+    const char* const names[] = {"index.html"};
+    o.resources = {1, names, names, reader};
+
+    std::unique_ptr<juce::AudioProcessorEditor> e(editor::createEditorOrGeneric(processor, o, editor::Identity::probe));
+    REQUIRE(e != nullptr);
+    CHECK(std::string(tagOf(e.get())) == "probe");
+    CHECK(resourceReads == 0);
+}

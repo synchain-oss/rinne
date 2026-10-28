@@ -157,9 +157,14 @@ public:
     // 两个平台的回调都走这里：WebView2 的导航开始事件（主框架），WKWebView 的导航策略回调（含子框架）。
     // 判定是纯函数（ResourceProvider::isRootNavigation），放不放行的全部用例在宿主测试里；
     // 拦下的导航不算「导航开始」，不起算看门狗的导航后预算。
+    // 页面隐藏时（切兜底面板、宿主藏起窗口）JUCE 自己把页面导航到空白页，这一次也会走进这里。它不是页面加载：
+    // 放行（拦了页面就卸不掉），但排在最前面直接返回，不记账、不写诊断。否则它会把导航状态改回「已开始」、
+    // 清掉上一次导航错误的说明，再写一行误导的「navigation started」，兜底面板之后的日志就读不懂了。
     // 这里要写全名：在 WebBrowserComponent 的派生类里，裸写 ResourceProvider 指的是基类里的同名函数类型
     bool pageAboutToLoad(const juce::String& url) override
     {
+        if (rinne::webview::ResourceProvider::isBlankPage(url))
+            return true;
         if (!rinne::webview::ResourceProvider::isRootNavigation(url, WBC::getResourceProviderRoot()))
         {
             owner_.logDiag("blocked navigation: " + rinne::webview::ResourceProvider::urlForLog(url));
@@ -169,7 +174,14 @@ public:
         return true;
     }
 
-    void pageFinishedLoading(const juce::String& url) override { owner_.onNavigationFinished(url); }
+    // 空白页的加载完成同样不记账（理由见 pageAboutToLoad）：
+    // 否则切兜底面板之后，导航状态会被它改成「已完成」，日志里多一行误导的完成
+    void pageFinishedLoading(const juce::String& url) override
+    {
+        if (rinne::webview::ResourceProvider::isBlankPage(url))
+            return;
+        owner_.onNavigationFinished(url);
+    }
 
     // 页面里的新窗口请求（window.open、target=_blank）走这里。JUCE 的 WebView2 后端把新窗口请求接到本虚函数，
     // 并已标记为已处理，不重写它外链就是死的。
@@ -207,6 +219,11 @@ WebViewHost::WebViewHost(juce::AudioProcessor& processor, Config config)
     // 声明本组件完全不透明：JUCE 因此不会去画它下面的东西（宿主给的编辑器容器）。
     // 这一句挡不住开窗白闪，白闪那一段本组件的 paint 根本不执行（见 HostWebView::paint），它管的是兜底面板路径下这块底
     setOpaque(true);
+
+    // 诊断日志开关打开时装上平台文件日志，早于本构造里的第一行诊断。这个类只在正式身份下构造，
+    // 探针构建有它自己的日志；每个插件二进制只装一次，同一宿主里的其余实例走到这里是空操作
+    if (uidefaults::diagLogEnabled())
+        platformlog::install(config_.role);
 
     // 开窗按显示器可用区夹取档位：只影响本次开窗，已保存的值不动，也不产生待确认的预览
     const auto area = openAreaForNewWindow();

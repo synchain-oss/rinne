@@ -52,4 +52,12 @@ juce::AudioProcessorEditor* createEditor(juce::AudioProcessor& processor, const 
     return makeWebViewEditor(processor, options);
 }
 
+juce::AudioProcessorEditor* createEditorOrGeneric(juce::AudioProcessor& processor, const Options& options,
+                                                  Identity identity)
+{
+    if (auto* editor = createEditor(processor, options, identity))
+        return editor;
+    return new juce::GenericAudioProcessorEditor(processor);
+}
+
 } // namespace rinne::editor

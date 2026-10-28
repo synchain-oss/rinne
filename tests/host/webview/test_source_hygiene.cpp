@@ -8,7 +8,10 @@
 //      写日志和上面板之前必须先过整形函数；定时器必须在运行时三态分支之前启动；面板在场时迟到的桥请求
 //      只回执、不置位、不计数、不发首帧、不收回面板，离开面板只有点重试一条路；注册进页面的每个桥函数，
 //      处理函数一开头就有面板在场的守卫，守卫分支只写日志、给回执、返回，会改状态的三个回 not-ready，
-//      分支里不碰窗口、设置文件、内存状态与状态发送；设置语言必须一次写完语言值与「选过」位。
+//      分支里不碰窗口、设置文件、内存状态与状态发送；设置语言必须一次写完语言值与「选过」位；
+//      页面隐藏时 JUCE 借道的空白页，导航回调一开头就放行并返回，不记账、不写诊断；
+//      构造里按诊断日志开关装平台文件日志，条件不取反、早于第一行诊断；
+//      宿主之外若出现角色专属的桥函数（别处注册的原生函数、覆写 handleSetLang），处理函数开头同样要有面板守卫。
 //
 // 第一条：网页宿主这一族源文件里，运行期字符串字面量只许 ASCII。
 // 原因：源文件按 UTF-8 存，字面量里一旦有中文，在中文代码页的机器上编译器会报字符集警告，
@@ -19,6 +22,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -219,9 +223,23 @@ TEST_CASE("web host sources carry no non-ASCII string literals", "[webview][asci
         "WebViewRevealGate.h",
     };
 
-    for (const char* name : names)
+    // 两个插件壳的入口文件也在这一族里：createEditor 的接线写在那里
+    struct Target
     {
-        const juce::File file = dir.getChildFile(name);
+        std::string name;
+        juce::File file;
+    };
+    std::vector<Target> targets;
+    for (const char* name : names)
+        targets.push_back({name, dir.getChildFile(name)});
+    const juce::File src = dir.getParentDirectory();
+    targets.push_back({"InputPluginEntry.cpp", src.getChildFile("input").getChildFile("InputPluginEntry.cpp")});
+    targets.push_back({"OutputPluginEntry.cpp", src.getChildFile("output").getChildFile("OutputPluginEntry.cpp")});
+
+    for (const auto& target : targets)
+    {
+        const std::string& name = target.name;
+        const juce::File& file = target.file;
         INFO(name);
         REQUIRE(file.existsAsFile());
         juce::MemoryBlock bytes;
@@ -445,24 +463,30 @@ std::size_t countOf(const std::string& text, const std::string& needle)
 }
 
 // 守卫分支：函数体（去注释后，含外层花括号）的第一条语句必须是 `if (fallback_ != nullptr) { ... }`，
-// 返回那一对花括号连同里面的内容；不是这个形状（守卫排在别的语句之后、条件被收窄、没有花括号）给空串
+// 返回那一对花括号连同里面的内容；不是这个形状（守卫排在别的语句之后、条件被收窄、没有花括号）给空串。
+// 宿主类自己用私有成员 fallback_；宿主之外的角色代码拿不到它，要先给宿主加一个受保护的 panelShown() 访问器，
+// 守卫写成 `if (panelShown()) { ... }`，这里两种写法都认，别的写法一律不认
 std::string panelGuardBranch(const std::string& body)
 {
     if (body.empty() || body.front() != '{')
         return {};
-    const std::string guard = "if (fallback_ != nullptr)";
     auto skipSpaces = [&body](std::size_t at) {
         while (at < body.size() && (body[at] == ' ' || body[at] == '\n' || body[at] == '\r' || body[at] == '\t'))
             ++at;
         return at;
     };
-    auto at = skipSpaces(1);
-    if (body.compare(at, guard.size(), guard) != 0)
-        return {};
-    at = skipSpaces(at + guard.size());
-    if (at >= body.size() || body[at] != '{')
-        return {};
-    return functionBody(body.substr(at), "{");
+    const auto first = skipSpaces(1);
+    for (const char* guard : {"if (fallback_ != nullptr)", "if (panelShown())"})
+    {
+        const std::string g = guard;
+        if (body.compare(first, g.size(), g) != 0)
+            continue;
+        const auto open = skipSpaces(first + g.size());
+        if (open >= body.size() || body[open] != '{')
+            return {};
+        return functionBody(body.substr(open), "{");
+    }
+    return {};
 }
 
 // 面板在场时，桥函数一开头就拒绝或只回执：守卫是函数体的第一条语句，分支里依次是一行日志、一个回执、返回，
@@ -511,8 +535,20 @@ std::vector<std::string> registeredBridgeHandlers(const std::string& makeOptions
     for (auto at = makeOptionsBody.find(marker); at != std::string::npos;)
     {
         auto next = makeOptionsBody.find(marker, at + marker.size());
-        auto end = next != std::string::npos ? next : makeOptionsBody.find("withEventListener(", at);
-        const auto segment = makeOptionsBody.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        // 这一处注册到配对的右括号为止：整份源文件里找也不会把后面别的函数里的 handleXxx( 算到它头上
+        std::size_t end = makeOptionsBody.size();
+        int depth = 0;
+        for (std::size_t i = at + marker.size() - 1; i < makeOptionsBody.size(); ++i)
+        {
+            if (makeOptionsBody[i] == '(')
+                ++depth;
+            else if (makeOptionsBody[i] == ')' && --depth == 0)
+            {
+                end = i + 1;
+                break;
+            }
+        }
+        const auto segment = makeOptionsBody.substr(at, end - at);
         std::string name;
         for (auto h = segment.find("handle"); h != std::string::npos; h = segment.find("handle", h + 1))
         {
@@ -570,6 +606,212 @@ bool setLangWritesOnce(const std::string& body)
            !contains(body, "setLangChosenGlobal(");
 }
 
+std::string trimmed(const std::string& s)
+{
+    const auto first = s.find_first_not_of(" \n\r\t");
+    if (first == std::string::npos)
+        return {};
+    return s.substr(first, s.find_last_not_of(" \n\r\t") - first + 1);
+}
+
+// 取构造函数「参数表左括号之后」到函数体结尾的文本：参数表、成员初始化列表和花括号函数体（在去注释后的源文件上用）。
+// signature 写到参数表的左括号为止，如 "WebViewHost::WebViewHost("。函数体的起点取签名之后的第一个花括号，
+// 所以成员初始化列表里不能用花括号初始化（会把成员的花括号当成函数体）：那种写法下找不到安装语句，扫描判红，不会悄悄放过
+std::string constructorAfterParameters(const std::string& text, const std::string& signature)
+{
+    const auto body = functionBody(text, signature);
+    if (body.empty())
+        return {};
+    const auto at = text.find(signature) + signature.size();
+    const auto open = text.find('{', at);
+    return text.substr(at, open - at) + body;
+}
+
+// 一段代码（已去注释）里每一处「名字后紧跟（可隔空白）左圆括号」的被调名，按出现顺序。
+// 名字向左取到标识符、作用域符 ::、成员访问符 . 与 -> 为止，所以 owner_.logDiag、platformlog::write 都带着前缀；
+// 模板调用（名字前是 >）与括号表达式取不到名字，给空串。
+// 字符串和字符字面量里的括号不算（数字分隔符 1'000 不是字符字面量）。
+// 构造函数的成员初始化列表里 member_(...) 在语法上也是这个形状，一并算调用：初始化列表的求值同样先于函数体
+std::vector<std::string> calledNames(const std::string& code)
+{
+    auto isIdentChar = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+    auto isSpace = [](char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; };
+    std::vector<std::string> names;
+    for (std::size_t i = 0; i < code.size(); ++i)
+    {
+        const char c = code[i];
+        if (c == '"' || (c == '\'' && !(i > 0 && isIdentChar(code[i - 1]))))
+        {
+            for (++i; i < code.size() && code[i] != c; ++i)
+                if (code[i] == '\\')
+                    ++i;
+            continue;
+        }
+        if (c != '(')
+            continue;
+        std::size_t end = i;
+        while (end > 0 && isSpace(code[end - 1]))
+            --end;
+        std::size_t begin = end;
+        while (begin > 0)
+        {
+            const char p = code[begin - 1];
+            if (isIdentChar(p) || p == ':' || p == '.')
+                --begin;
+            else if (p == '>' && begin >= 2 && code[begin - 2] == '-')
+                begin -= 2;
+            else
+                break;
+        }
+        names.push_back(code.substr(begin, end - begin));
+    }
+    return names;
+}
+
+// 装日志语句之前，构造函数（成员初始化列表加函数体）里允许出现的调用，按现有代码逐项核对过：
+//   juce::AudioProcessorEditor            基类构造
+//   config_ provider_ scale_ lang_        成员初始化列表里的成员构造（括号的形状同调用）
+//   std::move                             搬走配置
+//   bridge::scaleFromStoredPercent        已存档位换算成缩放值，纯计算
+//   uidefaults::uiScalePercent            读已存档位；设置文件的读写层，不写诊断
+//   initialLang                           本文件匿名命名空间里的自由函数，读已存语言（现在的函数体只读设置，不写日志）
+//   setOpaque                             组件的一个标志位
+// 这张表是「谁在装日志之前加了调用」的闸：出现不在表里的调用就判红，要加就得来这里登记，登记时顺带核对被调函数此刻不写诊断。
+// logDiag 不在表里，所以第一行诊断排在安装之前（含写在初始化列表里）同样判红
+const std::vector<std::string>& callsAllowedBeforeDiagLogInstall()
+{
+    static const std::vector<std::string> allowed = {"juce::AudioProcessorEditor",
+                                                     "config_",
+                                                     "provider_",
+                                                     "scale_",
+                                                     "lang_",
+                                                     "std::move",
+                                                     "bridge::scaleFromStoredPercent",
+                                                     "uidefaults::uiScalePercent",
+                                                     "initialLang",
+                                                     "setOpaque"};
+    return allowed;
+}
+
+// 构造里装平台文件日志：条件就是「诊断日志开关打开」（不取反、不省略），紧挨着安装语句；
+// 安装之前（成员初始化列表和函数体里）只许出现上面白名单里的调用。
+// 开窗过程的诊断从第一行起就要进文件；条件判反会让开关关着时写盘、开着时不写，单测与冒烟都碰不到这一行。
+// ctor 要含成员初始化列表，用 constructorAfterParameters 取。
+// 这条扫描仍然管不到的情况：
+//   - 白名单里的被调函数以后自己写诊断：扫描只看名字，不看函数体，登记时的核对是人工的；
+//   - 不以名字出现的执行：基类与成员类型的构造函数（含头文件里的默认成员初始值）、隐式转换、运算符重载、
+//     T{...} 花括号构造，它们在 .cpp 里的构造函数文本中看不见
+bool diagLogInstalledBeforeFirstDiag(const std::string& ctor)
+{
+    const std::string install = "platformlog::install(config_.role);";
+    const std::string guard = "if (uidefaults::diagLogEnabled())";
+    const auto at = ctor.find(install);
+    if (at == std::string::npos)
+        return false;
+    const auto before = trimmed(ctor.substr(0, at));
+    if (before.size() < guard.size() || before.compare(before.size() - guard.size(), guard.size(), guard) != 0)
+        return false;
+    const auto& allowed = callsAllowedBeforeDiagLogInstall();
+    for (const auto& name : calledNames(before.substr(0, before.size() - guard.size())))
+        if (std::find(allowed.begin(), allowed.end(), name) == allowed.end())
+            return false;
+    return true;
+}
+
+// 空白页（页面隐藏时 JUCE 借道）的导航回调：函数体（去注释后）的第一条语句是
+// `if (...isBlankPage(url)) <退出语句>`，条件就是对纯函数的这一次调用（不取反、不并别的条件），
+// 分支（带不带花括号都行）里只有那条退出语句：没有记账、没有日志、没有成员访问。
+// 退出语句：pageAboutToLoad 放行，给 "return true;"；pageFinishedLoading 是 void，给 "return;"。
+// 这个分支必须排在第一条：排在别的语句之后，空白页会先落进那些语句（拦截判定、记账、日志）
+bool blankPageSkippedFirst(const std::string& body, const std::string& exitStatement)
+{
+    if (body.empty() || body.front() != '{')
+        return false;
+    auto skipSpaces = [&body](std::size_t at) {
+        while (at < body.size() && (body[at] == ' ' || body[at] == '\n' || body[at] == '\r' || body[at] == '\t'))
+            ++at;
+        return at;
+    };
+    const std::string head = "if (";
+    const auto first = skipSpaces(1);
+    if (body.compare(first, head.size(), head) != 0)
+        return false;
+    int depth = 1;
+    std::size_t i = first + head.size();
+    for (; i < body.size() && depth > 0; ++i)
+    {
+        if (body[i] == '(')
+            ++depth;
+        else if (body[i] == ')')
+            --depth;
+    }
+    if (depth != 0)
+        return false;
+    const auto condition = trimmed(body.substr(first + head.size(), i - 1 - (first + head.size())));
+    if (condition != "ResourceProvider::isBlankPage(url)" &&
+        condition != "rinne::webview::ResourceProvider::isBlankPage(url)")
+        return false;
+    const auto open = skipSpaces(i);
+    if (open >= body.size())
+        return false;
+    if (body[open] != '{') // 不带花括号：分支就是紧跟着的那一条语句
+    {
+        const auto semicolon = body.find(';', open);
+        return semicolon != std::string::npos && trimmed(body.substr(open, semicolon - open + 1)) == exitStatement;
+    }
+    const auto branch = functionBody(body.substr(open), "{");
+    return branch.size() >= 2 && trimmed(branch.substr(1, branch.size() - 2)) == exitStatement;
+}
+
+// 一份已去注释的源文件。name 是相对 src 的路径（正斜杠）
+struct SourceText
+{
+    std::string name;
+    std::string text;
+};
+
+bool isHostFile(const std::string& name)
+{
+    return name == "plugin-common/WebViewHost.cpp" || name == "plugin-common/WebViewHost.h";
+}
+
+// 宿主之外的「角色专属的桥函数」有两类：
+//   - 别处注册的原生函数（出现 withNativeFunction( 的文件，即经 augmentOptions 追加的那些）；
+//   - 覆写通用的 handleSetLang（出现 ::handleSetLang( 的定义）。
+// 每一处涉及的处理函数都要在开头有合格的面板守卫、给 not-ready（它们都会改状态）。
+// 返回不合格的，形如「文件: 处理函数」；没有处理函数可核对（内联实现）也算不合格。
+// 处理函数的函数体先在本文件找、再在别的非宿主文件找；宿主自己的文件不在查找范围里：
+// 否则覆写者忘了守卫，也会因为宿主基类那份守着而被判合格
+std::vector<std::string> unguardedRoleSpecificHandlers(const std::vector<SourceText>& files)
+{
+    std::vector<std::string> bad;
+    for (const auto& site : files)
+    {
+        if (isHostFile(site.name))
+            continue;
+        std::vector<std::string> names;
+        if (contains(site.text, "withNativeFunction("))
+            names = registeredBridgeHandlers(site.text);
+        if (contains(site.text, "::handleSetLang("))
+            names.push_back("handleSetLang");
+        for (const auto& name : names)
+        {
+            std::string body;
+            if (!name.empty())
+            {
+                const std::string signature = "::" + name + "(";
+                body = functionBody(site.text, signature);
+                for (const auto& other : files)
+                    if (body.empty() && !isHostFile(other.name))
+                        body = functionBody(other.text, signature);
+            }
+            if (!bridgeHandlerRefusesWhilePanelShown(body, "bridge::respondNotReady()"))
+                bad.push_back(site.name + ": " + (name.empty() ? std::string("<inline>") : name));
+        }
+    }
+    return bad;
+}
+
 } // namespace
 
 TEST_CASE("call-site scanners: good and bad samples", "[webview][hygiene]")
@@ -613,11 +855,16 @@ TEST_CASE("the web host gates navigation through the pure function and reads sto
     const juce::File file =
         repoRoot().getChildFile("src").getChildFile("plugin-common").getChildFile("WebViewHost.cpp");
     REQUIRE(file.existsAsFile()); // 路径推不出来就是红，不静默跳过
-    const std::string text = file.loadFileAsString().toStdString();
+    const std::string text = stripComments(file.loadFileAsString().toStdString());
 
     const auto gate = functionBody(text, "bool pageAboutToLoad(");
     REQUIRE_FALSE(gate.empty());
     CHECK(navigationGateWellFormed(gate));
+    // 空白页（页面隐藏时 JUCE 借道）放行但不记账：回调一开头就判、直接返回
+    CHECK(blankPageSkippedFirst(gate, "return true;"));
+    const auto finished = functionBody(text, "void pageFinishedLoading(");
+    REQUIRE_FALSE(finished.empty());
+    CHECK(blankPageSkippedFirst(finished, "return;"));
 
     const auto snapshot = functionBody(text, "juce::var WebViewHost::buildSnapshot()");
     REQUIRE_FALSE(snapshot.empty());
@@ -894,4 +1141,236 @@ TEST_CASE("the web host shapes page text, starts its timer early, guards every b
     const auto setLang = functionBody(text, "void WebViewHost::handleSetLang(");
     REQUIRE_FALSE(setLang.empty());
     CHECK(setLangWritesOnce(setLang));
+
+    // 诊断日志：构造里按开关装平台文件日志，早于第一行诊断；安装之前（含成员初始化列表）只许白名单里的调用
+    const auto ctor = constructorAfterParameters(text, "WebViewHost::WebViewHost(");
+    REQUIRE_FALSE(ctor.empty());
+    REQUIRE(contains(ctor, "juce::AudioProcessorEditor(")); // 成员初始化列表在取出的范围里，不是只取了函数体
+    CHECK(diagLogInstalledBeforeFirstDiag(ctor));
+}
+
+TEST_CASE("call-site scanners for the blank page and role-specific bridge functions: good and bad samples",
+          "[webview][hygiene]")
+{
+    // 空白页：放行但不记账，分支排在第一条，里面只有退出语句
+    const std::string goodGate =
+        "{ if (rinne::webview::ResourceProvider::isBlankPage(url))\n return true;\n"
+        " if (!rinne::webview::ResourceProvider::isRootNavigation(url, root)) { return false; }\n"
+        " owner_.onNavigationStarted(url);\n return true; }";
+    CHECK(blankPageSkippedFirst(goodGate, "return true;"));
+    CHECK(blankPageSkippedFirst( // 带花括号和短名都行
+        "{ if (ResourceProvider::isBlankPage(url)) { return true; } go(); }", "return true;"));
+    CHECK(blankPageSkippedFirst("{ if (ResourceProvider::isBlankPage(url))\n { return; }\n owner_.done(url); }",
+                                "return;"));
+    CHECK_FALSE(blankPageSkippedFirst(goodGate, "return;")); // 退出语句不对：void 的回调不能返回真
+    CHECK_FALSE(blankPageSkippedFirst("{ owner_.onNavigationStarted(url); }", "return true;")); // 根本没有
+    CHECK_FALSE(blankPageSkippedFirst( // 排在拦截判定之后
+        "{ if (!isRootNavigation(url, root)) { return false; }\n if (ResourceProvider::isBlankPage(url)) return true;\n"
+        " owner_.onNavigationStarted(url); return true; }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 条件取反：非空白页反而直接放行
+        "{ if (!ResourceProvider::isBlankPage(url)) return true; owner_.onNavigationStarted(url); return true; }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 条件并了别的
+        "{ if (ResourceProvider::isBlankPage(url) && owner_.isHidden()) return true; go(); }", "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 自己比字符串，不走纯函数
+        "{ if (url == \"about:blank\") return true; go(); }", "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 分支里先记账再返回
+        "{ if (ResourceProvider::isBlankPage(url)) { owner_.onNavigationStarted(url); return true; } go(); }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 分支里写诊断
+        "{ if (ResourceProvider::isBlankPage(url)) { owner_.logDiag(\"blank\"); return true; } go(); }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 分支拦下空白页：页面就卸不掉
+        "{ if (ResourceProvider::isBlankPage(url)) { return false; } go(); }", "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst("", "return true;"));
+
+    // 角色专属的桥函数。守卫的写法：宿主之外用受保护的访问器
+    const std::string logLine = "logDiag(\"bridge request ignored while the fallback panel is shown (fn)\");";
+    const std::string guardedBody = "{ if (panelShown())\n { " + logLine +
+                                    "\n complete(bridge::respondNotReady());\n return;\n }\n doWork(args, complete); }";
+    const std::string unguardedBody = "{ doWork(args, complete); }";
+    const std::string hostText = "void WebViewHost::handleSetLang(const A& args, C complete)\n"
+                                 "{ if (fallback_ != nullptr)\n { " +
+                                 logLine + "\n complete(bridge::respondNotReady());\n return;\n }\n work(); }\n";
+    auto file = [](const std::string& name, const std::string& text) { return SourceText{name, text}; };
+    const std::string registerGamma = "void augment(Options& o) { o = o.withNativeFunction(juce::Identifier(\"gamma\"),"
+                                      " [this](const auto& a, auto c) { handleGamma(a, std::move(c)); }); }\n";
+
+    // 没有角色专属的桥函数（现状）：什么都不报
+    CHECK(unguardedRoleSpecificHandlers({file("plugin-common/WebViewHost.cpp", hostText),
+                                         file("input/InputPluginEntry.cpp", "void InputProcessor::createEditor() {}")})
+              .empty());
+    CHECK(unguardedRoleSpecificHandlers({}).empty());
+
+    // 别处注册了原生函数，处理函数有守卫、给 not-ready：合格；处理函数定义在另一个文件里也找得到
+    const std::string gammaDef = "void InputHost::handleGamma(const A& args, C complete)\n" + guardedBody + "\n";
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("plugin-common/WebViewHost.cpp", hostText), file("input/InputHost.cpp", registerGamma + gammaDef)})
+              .empty());
+    CHECK(unguardedRoleSpecificHandlers({file("plugin-common/WebViewHost.cpp", hostText),
+                                         file("input/InputPluginEntry.cpp", registerGamma),
+                                         file("input/InputHost.cpp", gammaDef)})
+              .empty());
+
+    // 忘了守卫：就是这一类
+    const auto missing = unguardedRoleSpecificHandlers(
+        {file("plugin-common/WebViewHost.cpp", hostText),
+         file("input/InputHost.cpp",
+              registerGamma + "void InputHost::handleGamma(const A& args, C complete)\n" + unguardedBody + "\n")});
+    REQUIRE(missing.size() == 1);
+    CHECK(missing[0] == "input/InputHost.cpp: handleGamma");
+    // 处理函数找不到（定义不在任何文件里）
+    CHECK(unguardedRoleSpecificHandlers({file("input/InputHost.cpp", registerGamma)}).size() == 1);
+    // 内联实现，没有处理函数可核对
+    const auto inlineImpl = unguardedRoleSpecificHandlers(
+        {file("input/InputHost.cpp",
+              "void augment(Options& o) { o.withNativeFunction(id, [](const auto&, auto c) { c(ok()); }); }")});
+    REQUIRE(inlineImpl.size() == 1);
+    CHECK(inlineImpl[0] == "input/InputHost.cpp: <inline>");
+    // 回执给 ok：会改状态的函数在面板在场时不得回 ok
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("input/InputHost.cpp",
+                    registerGamma + "void InputHost::handleGamma(const A& args, C complete)\n{ if (panelShown())\n { " +
+                        logLine + "\n complete(bridge::okResponse());\n return;\n }\n doWork(); }\n")})
+              .size() == 1);
+
+    // 覆写 handleSetLang 的子类
+    const std::string overrideGuarded =
+        "void InputHost::handleSetLang(const A& args, C complete)\n" + guardedBody + "\n";
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("plugin-common/WebViewHost.cpp", hostText), file("input/InputHost.cpp", overrideGuarded)})
+              .empty());
+    // 覆写者忘了守卫，只是接着调基类：基类那份守卫救不了覆写者在它前后多做的事。
+    // 宿主自己的文件不在查找范围里，所以宿主基类那份合格的守卫不会让覆写者蒙混过关
+    const auto overrideBad = unguardedRoleSpecificHandlers(
+        {file("plugin-common/WebViewHost.cpp", hostText),
+         file("input/InputHost.cpp",
+              "void InputHost::handleSetLang(const A& args, C complete)\n{ WebViewHost::handleSetLang(args, complete);"
+              " syncMirror(); }\n")});
+    REQUIRE(overrideBad.size() == 1);
+    CHECK(overrideBad[0] == "input/InputHost.cpp: handleSetLang");
+    // 别处只注册、定义在宿主里的同名函数：宿主那份合格的守卫不算，本文件和别的非宿主文件里找不到定义就是不合格
+    const auto decoy = unguardedRoleSpecificHandlers(
+        {file("plugin-common/WebViewHost.cpp", hostText),
+         file("input/InputHost.cpp",
+              "void augment(Options& o) { o = o.withNativeFunction(id, [this](const auto& a, auto c) {"
+              " handleSetLang(a, std::move(c)); }); }\n")});
+    REQUIRE(decoy.size() == 1);
+    CHECK(decoy[0] == "input/InputHost.cpp: handleSetLang");
+    // 宿主自己的文件不当角色代码查（它的注册和处理函数由宿主测试的另一条逐个核对）
+    const std::string hostUnguarded =
+        std::string("void makeOptions() { o.withNativeFunction(id, [this](const auto& a, auto c) {") +
+        " handleRequestInitialState(a, std::move(c)); }); }\n" +
+        "void WebViewHost::handleRequestInitialState(A a, C c)\n{ work(); }\n";
+    CHECK(unguardedRoleSpecificHandlers({file("plugin-common/WebViewHost.cpp", hostUnguarded)}).empty());
+    // 守卫的条件写法不认别的：宿主之外既不是 fallback_ 也不是 panelShown() 就不算
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("input/InputHost.cpp",
+                    "void InputHost::handleSetLang(const A& args, C complete)\n{ if (panelOpen_)\n { " + logLine +
+                        "\n complete(bridge::respondNotReady());\n return;\n }\n work(); }\n")})
+              .size() == 1);
+
+    // 一份文件里先后注册两个，一个合格一个不合格：只报不合格的
+    const std::string twoDefs = registerGamma +
+                                "void augment2(Options& o) { o = o.withNativeFunction(id, "
+                                "[this](const auto& a, auto c) { handleDelta(a, std::move(c)); }); }\n" +
+                                gammaDef + "void InputHost::handleDelta(const A& args, C complete)\n" + unguardedBody +
+                                "\n";
+    const auto one = unguardedRoleSpecificHandlers({file("input/InputHost.cpp", twoDefs)});
+    REQUIRE(one.size() == 1);
+    CHECK(one[0] == "input/InputHost.cpp: handleDelta");
+
+    // 注册段到配对的右括号为止：后面别的函数里的 handleXxx( 不算到它头上
+    const auto names = registeredBridgeHandlers(
+        "{ o.withNativeFunction(id, [](const auto&, auto c) { c(ok()); }); }\n void later() { handleLate(); }");
+    REQUIRE(names.size() == 1);
+    CHECK(names[0].empty());
+}
+
+TEST_CASE("call-site scanner for the diagnostic log install: good and bad samples", "[webview][hygiene]")
+{
+    const std::string good =
+        "{ setOpaque(true);\n if (uidefaults::diagLogEnabled())\n platformlog::install(config_.role);\n"
+        " logDiag(\"first\");\n }";
+    CHECK(diagLogInstalledBeforeFirstDiag(good));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 条件判反
+        "{ if (!uidefaults::diagLogEnabled())\n platformlog::install(config_.role);\n logDiag(\"first\"); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 不看开关，一律装
+        "{ platformlog::install(config_.role);\n logDiag(\"first\"); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 装在第一行诊断之后
+        "{ logDiag(\"first\");\n if (uidefaults::diagLogEnabled())\n platformlog::install(config_.role); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 条件不紧挨着安装
+        "{ if (uidefaults::diagLogEnabled())\n note();\n platformlog::install(config_.role); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 角色写死
+        "{ if (uidefaults::diagLogEnabled())\n platformlog::install(\"input\");\n logDiag(\"first\"); }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag("{ logDiag(\"first\"); }")); // 根本不装
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag(""));
+
+    // 安装之前只许白名单里的调用：成员初始化列表在内，它的求值先于函数体
+    const std::string guardAndInstall = "if (uidefaults::diagLogEnabled())\n platformlog::install(config_.role);\n";
+    const std::string goodWithInitList =
+        "processor, Config config)\n : juce::AudioProcessorEditor(&processor), config_(std::move(config)),\n"
+        " provider_(config_.resourceSource), scale_(config_.role, bridge::scaleFromStoredPercent(config_.role,\n"
+        " uidefaults::uiScalePercent(config_.role))), lang_(initialLang())\n{ setOpaque(true);\n" +
+        guardAndInstall + " const auto area = openAreaForNewWindow();\n logDiag(\"first\");\n }";
+    CHECK(diagLogInstalledBeforeFirstDiag(goodWithInitList)); // 白名单内的调用为好例；安装之后什么调用都行
+    CHECK(diagLogInstalledBeforeFirstDiag( // 字符串里长得像调用的文字不算调用
+        "{ setOpaque(true);\n title_ = \"see openAreaForNewWindow(x) \\\" and logDiag(\";\n" + guardAndInstall + " }"));
+    const std::string initHead = "Config config)\n : config_(std::move(config)), ";
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 初始化列表里调 logDiag
+        initHead + "lang_(logDiag(\"early\"), initialLang())\n{ setOpaque(true);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 初始化列表里调一个新辅助函数
+        initHead + "lang_(initialLangFromProfile())\n{ setOpaque(true);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 安装前调一个新辅助函数
+        "{ setOpaque(true);\n const auto area = openAreaForNewWindow();\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 安装前调带作用域的辅助函数
+        "{ issue_ = PlatformWebView::probeUserDataFolder(folder_);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 对别的对象调同名函数不算本类自己的
+        "{ other.setOpaque(true);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 模板调用取不到名字，按不在白名单处理
+        "{ webView_ = std::make_unique<HostWebView>(*this);\n" + guardAndInstall + " }"));
+
+    // 取名字的小函数：带前缀的名字、模板调用与括号表达式给空串、字面量里的括号不算
+    CHECK(calledNames("a(b(c), d::e (f), g.h->i(1))") == std::vector<std::string>{"a", "b", "d::e", "g.h->i"});
+    CHECK(calledNames("f(\"g(h)\", '(', \"\\\"k(\")") == std::vector<std::string>{"f"});
+    CHECK(calledNames("f(1'000); g(')')") == std::vector<std::string>{"f", "g"});
+    CHECK(calledNames("std::make_unique<T>(x); (y + z) * w") == std::vector<std::string>{"", ""});
+
+    // 取构造函数：参数表之后连同成员初始化列表与函数体，到函数体的右花括号为止；只取函数体会看不到初始化列表
+    const std::string source = "Other::Other() { x(); }\n"
+                               "Host::Host(Config c)\n : lang_(logDiag(\"early\"))\n{ " +
+                               guardAndInstall + " }\nvoid Host::later() { y(); }";
+    const auto ctor = constructorAfterParameters(source, "Host::Host(");
+    CHECK(ctor == "Config c)\n : lang_(logDiag(\"early\"))\n{ " + guardAndInstall + " }");
+    CHECK(constructorAfterParameters(source, "Host::Missing(").empty());
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag(ctor));
+    CHECK(diagLogInstalledBeforeFirstDiag(functionBody(source, "Host::Host("))); // 旧的只取函数体的盲区
+}
+
+TEST_CASE("role-specific bridge functions outside the host, if there are any, guard the fallback panel too",
+          "[webview][hygiene]")
+{
+    // 目前宿主之外没有任何角色专属的桥函数（没有 augmentOptions 的使用者，也没有 handleSetLang 的覆写者），这条是绊线：
+    // 将来谁在别处注册了原生函数、或覆写了 handleSetLang，处理函数开头没有面板守卫就在这里变红
+    const juce::File src = repoRoot().getChildFile("src");
+    REQUIRE(src.isDirectory()); // 路径推不出来就是红，不静默跳过
+    juce::Array<juce::File> files;
+    src.findChildFiles(files, juce::File::findFiles, true, "*.h;*.hpp;*.cpp;*.mm");
+    REQUIRE(files.size() > 20); // 扫得到足够多的文件才算数
+
+    std::vector<SourceText> texts;
+    bool sawHost = false;
+    for (const auto& f : files)
+    {
+        const auto name = f.getRelativePathFrom(src).replaceCharacter('\\', '/').toStdString();
+        sawHost = sawHost || name == "plugin-common/WebViewHost.cpp";
+        texts.push_back({name, stripComments(f.loadFileAsString().toStdString())});
+    }
+    REQUIRE(sawHost); // 宿主文件的相对路径推对了，宿主自己的注册才会被排除在外
+
+    const auto bad = unguardedRoleSpecificHandlers(texts);
+    for (const auto& entry : bad)
+        FAIL_CHECK("role-specific bridge function without a panel guard: " << entry);
+    CHECK(bad.empty());
 }

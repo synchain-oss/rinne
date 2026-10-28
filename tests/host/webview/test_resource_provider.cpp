@@ -238,6 +238,46 @@ TEST_CASE("navigation gate lets the blank page through, exactly that string", "[
     CHECK_FALSE(allowed("about:blank/https://juce.backend/"));
 }
 
+TEST_CASE("the blank page predicate agrees with the gate and is exactly that string", "[webview][navigation]")
+{
+    // 宿主的导航回调靠它认出 JUCE 隐藏页面时借道的空白页（放行但不记账、不写诊断），所以它只认整串：
+    // 任何别的地址，哪怕放行判定也放行（资源根下面的地址），都不能被当成空白页，否则真页面加载会漏记账
+    CHECK(ResourceProvider::isBlankPage("about:blank"));
+
+    for (const juce::String url : {"about:blank#x",
+                                   "about:blank?x",
+                                   "about:blank ",
+                                   " about:blank",
+                                   "ABOUT:BLANK",
+                                   "About:Blank",
+                                   "about:srcdoc",
+                                   "about:",
+                                   "about",
+                                   "",
+                                   "blank",
+                                   "about:blank\n",
+                                   "about:blank\t",
+                                   "about:blank/",
+                                   "about:blank/https://juce.backend/",
+                                   "https://juce.backend/",
+                                   "https://juce.backend/input/index.html",
+                                   "juce://juce.backend/input/index.html",
+                                   "https://example.com/",
+                                   "javascript:void(0)",
+                                   "data:text/html,about:blank",
+                                   "file:///about:blank"})
+    {
+        INFO(url.toStdString());
+        CHECK_FALSE(ResourceProvider::isBlankPage(url));
+    }
+
+    // 与放行判定一致：空白页在任何根下都放行（含根未知）；放行判定之外的地址不是空白页
+    for (const juce::String& root : {kWinRoot, kMacRoot, juce::String()})
+        CHECK(allowed("about:blank", root) == ResourceProvider::isBlankPage("about:blank"));
+    CHECK(allowed("https://juce.backend/input/index.html"));
+    CHECK_FALSE(ResourceProvider::isBlankPage("https://juce.backend/input/index.html"));
+}
+
 TEST_CASE("navigation gate blocks other sites, including look-alike hosts", "[webview][navigation]")
 {
     CHECK_FALSE(allowed("https://example.com/"));
