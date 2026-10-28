@@ -247,8 +247,8 @@ bool InputParamHandles::bind(juce::AudioProcessorValueTreeState& tree)
     for (std::size_t i = 0; i < kParamCount; ++i)
     {
         std::atomic<float>* handle = tree.getRawParameterValue(kSpecs[i].id);
-        // 参数树和参数表对不上是接线错误，不能静默带过
-        jassert(handle != nullptr);
+        // 参数树和参数表对不上是接线错误：这里只返回 false，断言放在调用方（InputParams 的构造函数），
+        // 这样用例能在调试器下走到失败路径
         if (handle == nullptr)
             return false;
         found[i] = handle;

@@ -55,7 +55,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeInputLayout();
 class InputParamHandles
 {
 public:
-    // 按 ID 在参数树里取 11 个原子量。任何一个取不到就断言失败、返回 false，并保持未绑定（句柄全部清空）。
+    // 按 ID 在参数树里取 11 个原子量。任何一个取不到就返回 false，并保持未绑定（句柄全部清空）；
+    // 生产里的调用方（InputParams 的构造函数）对返回值断言，接线错误不会静默带过。
     // 只能在音频线程启动之前调用。
     bool bind(juce::AudioProcessorValueTreeState& tree);
 
@@ -101,10 +102,10 @@ private:
 // 把毫秒写回参数时要再过一道步进（0.001 ms）和 float 归一化值：在 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz 下，这两道
 // 造成的误差都小于半个样本，所以按样本数设的值换成毫秒存进参数、再读出来换回样本，仍是同一个样本数（用例逐个样本数核对）。
 // 余量在 4000 ms 附近最小：192 kHz 下最远偏出 0.48 个样本。限制精度的是 float 归一化值，不是步进，采样率再高就不够了。
-// 非正的采样率、非正或非有限的输入一律返回 0。
+// 毫秒值或采样率非正、非有限（NaN、±inf）一律返回 0；有限但大得离谱的值夹在 10^15，不溢出。
 inline std::int64_t delayMsToSamples(double ms, double sampleRate) noexcept
 {
-    if (!(ms > 0.0) || !(sampleRate > 0.0))
+    if (!(ms > 0.0) || !(sampleRate > 0.0) || !std::isfinite(ms) || !std::isfinite(sampleRate))
         return 0;
     const double samples = ms * sampleRate / 1000.0;
     // 远大于任何合法的 D（4000 ms × 192 kHz 不到 10^6），上限只为挡住 llround 的溢出

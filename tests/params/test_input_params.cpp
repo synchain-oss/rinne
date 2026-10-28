@@ -23,6 +23,7 @@
 #include <string>
 
 #include "../../src/input/InputParams.h"
+#include "params/ParamsTestProcessor.h"
 #include "core/params/ParamsGolden.h"
 #include "engine/EngineParams.h"
 #include "engine/SafetyMachine.h"
@@ -40,35 +41,6 @@ using rinne::engine::SafetyControls;
 using rinne::engine::TailMode;
 using rinne::input::InputParamHandles;
 using rinne::input::InputParams;
-
-// 最小的处理器：只为承载参数树
-struct ParamsTestProcessor final : juce::AudioProcessor
-{
-    ParamsTestProcessor()
-        : juce::AudioProcessor(BusesProperties()
-                                   .withInput("In", juce::AudioChannelSet::stereo(), true)
-                                   .withOutput("Out", juce::AudioChannelSet::stereo(), true))
-    {
-    }
-
-    void prepareToPlay(double, int) override {}
-    void releaseResources() override {}
-    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
-    bool hasEditor() const override { return false; }
-    const juce::String getName() const override { return "ParamsTest"; }
-    bool acceptsMidi() const override { return false; }
-    bool producesMidi() const override { return false; }
-    bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram(int) override {}
-    const juce::String getProgramName(int) override { return {}; }
-    void changeProgramName(int, const juce::String&) override {}
-    void getStateInformation(juce::MemoryBlock&) override {}
-    void setStateInformation(const void*, int) override {}
-};
 
 // 处理器加上被测的参数层，和生产里的用法一样：参数层在处理器的构造里建
 struct Fixture

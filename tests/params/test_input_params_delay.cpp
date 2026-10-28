@@ -20,6 +20,7 @@
 #include <limits>
 
 #include "../../src/input/InputParams.h"
+#include "params/ParamsTestProcessor.h"
 
 namespace
 {
@@ -27,6 +28,7 @@ namespace
 using Catch::Approx;
 using rinne::input::delayMsToSamples;
 using rinne::input::delaySamplesToMs;
+using rinne::test::params::ParamsTestProcessor;
 
 constexpr double kRates[] = {44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0};
 constexpr double kMinDelayMs = 1.0;
@@ -51,35 +53,6 @@ float throughParameter(const juce::RangedAudioParameter& param, double ms)
     const float stored = param.convertFrom0to1(param.convertTo0to1(static_cast<float>(ms)));
     return param.convertFrom0to1(param.convertTo0to1(stored));
 }
-
-// 最小的处理器：只为承载参数树
-struct ParamsTestProcessor final : juce::AudioProcessor
-{
-    ParamsTestProcessor()
-        : juce::AudioProcessor(BusesProperties()
-                                   .withInput("In", juce::AudioChannelSet::stereo(), true)
-                                   .withOutput("Out", juce::AudioChannelSet::stereo(), true))
-    {
-    }
-
-    void prepareToPlay(double, int) override {}
-    void releaseResources() override {}
-    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
-    bool hasEditor() const override { return false; }
-    const juce::String getName() const override { return "ParamsTest"; }
-    bool acceptsMidi() const override { return false; }
-    bool producesMidi() const override { return false; }
-    bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram(int) override {}
-    const juce::String getProgramName(int) override { return {}; }
-    void changeProgramName(int, const juce::String&) override {}
-    void getStateInformation(juce::MemoryBlock&) override {}
-    void setStateInformation(const void*, int) override {}
-};
 
 } // namespace
 
@@ -190,7 +163,9 @@ TEST_CASE("changing the sample rate keeps the milliseconds and recounts the samp
     const double ms = static_cast<double>(before.delayMs);
     CHECK(delayMsToSamples(ms, 48000.0) == 4800);
 
-    // 宿主把采样率换成 96 kHz：参数不动，样本数翻倍
+    // 宿主把采样率换成 96 kHz：参数层不看采样率，快照里的毫秒值不动，样本数翻倍
+    processor.setRateAndBufferSizeDetails(96000.0, 512);
+    REQUIRE(processor.getSampleRate() == 96000.0);
     rinne::engine::EngineParams after;
     params.snapshot(after);
     CHECK(after.delayMs == before.delayMs);
@@ -219,7 +194,11 @@ TEST_CASE("degenerate inputs convert to zero instead of garbage", "[params][inpu
     CHECK(delayMsToSamples(0.0, 48000.0) == 0);
     CHECK(delayMsToSamples(-5.0, 48000.0) == 0);
     CHECK(delayMsToSamples(nan, 48000.0) == 0);
-    CHECK(delayMsToSamples(inf, 48000.0) > 0); // 夹在一个很大的有限值上，不溢出
+    CHECK(delayMsToSamples(inf, 48000.0) == 0);
+    CHECK(delayMsToSamples(-inf, 48000.0) == 0);
+    CHECK(delayMsToSamples(100.0, inf) == 0);
+    // 有限但大得离谱：夹在 10^15，不溢出
+    CHECK(delayMsToSamples(1.0e300, 48000.0) == static_cast<std::int64_t>(1.0e15));
     CHECK(delaySamplesToMs(0, 48000.0) == 0.0);
     CHECK(delaySamplesToMs(-10, 48000.0) == 0.0);
     CHECK(delaySamplesToMs(4800, 0.0) == 0.0);
