@@ -283,17 +283,30 @@ inline std::string hexDump(const Bytes& bytes)
 }
 
 // ---- golden 的两份示例 state ----
-// 参数取计划中的 11 个参数 ID，值都能精确表示（示例值只为钉住线格式，单位与范围以参数表为准）；每个 CFGS 键都取
-// 与默认不同的值；另带一个未知参数、一个未知 CFGS 键和一个未知块，钉住「原样保留回写」。
+// 参数表（src/input/ParamTable.h）的 11 个参数，按表里的序号、取表里的默认值（明文值）。
+inline std::vector<rinne::state::ParamValue> paramTableDefaults()
+{
+    return {
+#define RINNE_PARAM(id, index, kind, lo, hi, def, step, skew, automatable, unit, name) {#id, static_cast<float>(def)},
+#include "../../../src/input/ParamTable.h"
+    };
+}
+
+// Input 的 PRMS 从参数表生成：11 个参数按序号排、取默认值，再把其中五个改成非默认值（反馈、混合、环路延迟、
+// 限制器关、限制器上限），值都能精确表示；这样基线证明参数表的 11 个 ID 都在 PRMS 里，也钉住限制器与上限随工程保存。
+// 每个 CFGS 键都取与默认不同的值；另带一个未知参数、一个未知 CFGS 键和一个未知块，钉住「原样保留回写」。
 inline rinne::state::StateDocument sampleInputDocument()
 {
     using namespace rinne::state;
     StateDocument document = makeDefaultDocument(Role::Input);
-    document.params.entries = {
-        {"feedback", 75.0f}, {"loop_on", 1.0f},     {"mix", 25.0f},     {"delay_mode", 1.0f},
-        {"delay_ms", 90.0f}, {"delay_note", 10.0f}, {"low_cut", 20.0f}, {"high_cut", 8000.0f},
-        {"polarity", 0.0f},  {"limiter", 1.0f},     {"ceiling", -6.0f}, {"future_param", 0.5f},
-    };
+    document.params.entries = paramTableDefaults();
+    // set 在 ID 不存在时追加到末尾：参数表改了 ID，基线的字节就变了，golden 用例会变红
+    document.params.set("feedback", 75.0f);
+    document.params.set("mix", 50.0f);
+    document.params.set("delay_ms", 90.0f);
+    document.params.set("limiter", 0.0f);
+    document.params.set("ceiling", -12.0f);
+    document.params.entries.push_back({"future_param", 0.5f});
     Configs& configs = document.configs;
     configs.group = 2;
     configs.groupOrigin = GroupOrigin::User;
