@@ -22,6 +22,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -613,20 +614,108 @@ std::string trimmed(const std::string& s)
     return s.substr(first, s.find_last_not_of(" \n\r\t") - first + 1);
 }
 
-// 构造里装平台文件日志：条件就是「诊断日志开关打开」（不取反、不省略），装日志排在构造里第一次写诊断之前。
-// 开窗过程的诊断从第一行起就要进文件；条件判反会让开关关着时写盘、开着时不写，单测与冒烟都碰不到这一行
-bool diagLogInstalledBeforeFirstDiag(const std::string& ctorBody)
+// 取构造函数「参数表左括号之后」到函数体结尾的文本：参数表、成员初始化列表和花括号函数体（在去注释后的源文件上用）。
+// signature 写到参数表的左括号为止，如 "WebViewHost::WebViewHost("。函数体的起点取签名之后的第一个花括号，
+// 所以成员初始化列表里不能用花括号初始化（会把成员的花括号当成函数体）：那种写法下找不到安装语句，扫描判红，不会悄悄放过
+std::string constructorAfterParameters(const std::string& text, const std::string& signature)
+{
+    const auto body = functionBody(text, signature);
+    if (body.empty())
+        return {};
+    const auto at = text.find(signature) + signature.size();
+    const auto open = text.find('{', at);
+    return text.substr(at, open - at) + body;
+}
+
+// 一段代码（已去注释）里每一处「名字后紧跟（可隔空白）左圆括号」的被调名，按出现顺序。
+// 名字向左取到标识符、作用域符 ::、成员访问符 . 与 -> 为止，所以 owner_.logDiag、platformlog::write 都带着前缀；
+// 模板调用（名字前是 >）与括号表达式取不到名字，给空串。
+// 字符串和字符字面量里的括号不算（数字分隔符 1'000 不是字符字面量）。
+// 构造函数的成员初始化列表里 member_(...) 在语法上也是这个形状，一并算调用：初始化列表的求值同样先于函数体
+std::vector<std::string> calledNames(const std::string& code)
+{
+    auto isIdentChar = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; };
+    auto isSpace = [](char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; };
+    std::vector<std::string> names;
+    for (std::size_t i = 0; i < code.size(); ++i)
+    {
+        const char c = code[i];
+        if (c == '"' || (c == '\'' && !(i > 0 && isIdentChar(code[i - 1]))))
+        {
+            for (++i; i < code.size() && code[i] != c; ++i)
+                if (code[i] == '\\')
+                    ++i;
+            continue;
+        }
+        if (c != '(')
+            continue;
+        std::size_t end = i;
+        while (end > 0 && isSpace(code[end - 1]))
+            --end;
+        std::size_t begin = end;
+        while (begin > 0)
+        {
+            const char p = code[begin - 1];
+            if (isIdentChar(p) || p == ':' || p == '.')
+                --begin;
+            else if (p == '>' && begin >= 2 && code[begin - 2] == '-')
+                begin -= 2;
+            else
+                break;
+        }
+        names.push_back(code.substr(begin, end - begin));
+    }
+    return names;
+}
+
+// 装日志语句之前，构造函数（成员初始化列表加函数体）里允许出现的调用，按现有代码逐项核对过：
+//   juce::AudioProcessorEditor            基类构造
+//   config_ provider_ scale_ lang_        成员初始化列表里的成员构造（括号的形状同调用）
+//   std::move                             搬走配置
+//   bridge::scaleFromStoredPercent        已存档位换算成缩放值，纯计算
+//   uidefaults::uiScalePercent            读已存档位；设置文件的读写层，不写诊断
+//   initialLang                           本文件匿名命名空间里的自由函数，读已存语言（现在的函数体只读设置，不写日志）
+//   setOpaque                             组件的一个标志位
+// 这张表是「谁在装日志之前加了调用」的闸：出现不在表里的调用就判红，要加就得来这里登记，登记时顺带核对被调函数此刻不写诊断。
+// logDiag 不在表里，所以第一行诊断排在安装之前（含写在初始化列表里）同样判红
+const std::vector<std::string>& callsAllowedBeforeDiagLogInstall()
+{
+    static const std::vector<std::string> allowed = {"juce::AudioProcessorEditor",
+                                                     "config_",
+                                                     "provider_",
+                                                     "scale_",
+                                                     "lang_",
+                                                     "std::move",
+                                                     "bridge::scaleFromStoredPercent",
+                                                     "uidefaults::uiScalePercent",
+                                                     "initialLang",
+                                                     "setOpaque"};
+    return allowed;
+}
+
+// 构造里装平台文件日志：条件就是「诊断日志开关打开」（不取反、不省略），紧挨着安装语句；
+// 安装之前（成员初始化列表和函数体里）只许出现上面白名单里的调用。
+// 开窗过程的诊断从第一行起就要进文件；条件判反会让开关关着时写盘、开着时不写，单测与冒烟都碰不到这一行。
+// ctor 要含成员初始化列表，用 constructorAfterParameters 取。
+// 这条扫描仍然管不到的情况：
+//   - 白名单里的被调函数以后自己写诊断：扫描只看名字，不看函数体，登记时的核对是人工的；
+//   - 不以名字出现的执行：基类与成员类型的构造函数（含头文件里的默认成员初始值）、隐式转换、运算符重载、
+//     T{...} 花括号构造，它们在 .cpp 里的构造函数文本中看不见
+bool diagLogInstalledBeforeFirstDiag(const std::string& ctor)
 {
     const std::string install = "platformlog::install(config_.role);";
     const std::string guard = "if (uidefaults::diagLogEnabled())";
-    const auto at = ctorBody.find(install);
+    const auto at = ctor.find(install);
     if (at == std::string::npos)
         return false;
-    const auto before = trimmed(ctorBody.substr(0, at));
+    const auto before = trimmed(ctor.substr(0, at));
     if (before.size() < guard.size() || before.compare(before.size() - guard.size(), guard.size(), guard) != 0)
         return false;
-    const auto firstLog = ctorBody.find("logDiag(");
-    return firstLog == std::string::npos || at < firstLog;
+    const auto& allowed = callsAllowedBeforeDiagLogInstall();
+    for (const auto& name : calledNames(before.substr(0, before.size() - guard.size())))
+        if (std::find(allowed.begin(), allowed.end(), name) == allowed.end())
+            return false;
+    return true;
 }
 
 // 空白页（页面隐藏时 JUCE 借道）的导航回调：函数体（去注释后）的第一条语句是
@@ -1053,9 +1142,10 @@ TEST_CASE("the web host shapes page text, starts its timer early, guards every b
     REQUIRE_FALSE(setLang.empty());
     CHECK(setLangWritesOnce(setLang));
 
-    // 诊断日志：构造里按开关装平台文件日志，早于第一行诊断
-    const auto ctor = functionBody(text, "WebViewHost::WebViewHost(");
+    // 诊断日志：构造里按开关装平台文件日志，早于第一行诊断；安装之前（含成员初始化列表）只许白名单里的调用
+    const auto ctor = constructorAfterParameters(text, "WebViewHost::WebViewHost(");
     REQUIRE_FALSE(ctor.empty());
+    REQUIRE(contains(ctor, "juce::AudioProcessorEditor(")); // 成员初始化列表在取出的范围里，不是只取了函数体
     CHECK(diagLogInstalledBeforeFirstDiag(ctor));
 }
 
@@ -1216,6 +1306,46 @@ TEST_CASE("call-site scanner for the diagnostic log install: good and bad sample
         "{ if (uidefaults::diagLogEnabled())\n platformlog::install(\"input\");\n logDiag(\"first\"); }"));
     CHECK_FALSE(diagLogInstalledBeforeFirstDiag("{ logDiag(\"first\"); }")); // 根本不装
     CHECK_FALSE(diagLogInstalledBeforeFirstDiag(""));
+
+    // 安装之前只许白名单里的调用：成员初始化列表在内，它的求值先于函数体
+    const std::string guardAndInstall = "if (uidefaults::diagLogEnabled())\n platformlog::install(config_.role);\n";
+    const std::string goodWithInitList =
+        "processor, Config config)\n : juce::AudioProcessorEditor(&processor), config_(std::move(config)),\n"
+        " provider_(config_.resourceSource), scale_(config_.role, bridge::scaleFromStoredPercent(config_.role,\n"
+        " uidefaults::uiScalePercent(config_.role))), lang_(initialLang())\n{ setOpaque(true);\n" +
+        guardAndInstall + " const auto area = openAreaForNewWindow();\n logDiag(\"first\");\n }";
+    CHECK(diagLogInstalledBeforeFirstDiag(goodWithInitList)); // 白名单内的调用为好例；安装之后什么调用都行
+    CHECK(diagLogInstalledBeforeFirstDiag( // 字符串里长得像调用的文字不算调用
+        "{ setOpaque(true);\n title_ = \"see openAreaForNewWindow(x) \\\" and logDiag(\";\n" + guardAndInstall + " }"));
+    const std::string initHead = "Config config)\n : config_(std::move(config)), ";
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 初始化列表里调 logDiag
+        initHead + "lang_(logDiag(\"early\"), initialLang())\n{ setOpaque(true);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 初始化列表里调一个新辅助函数
+        initHead + "lang_(initialLangFromProfile())\n{ setOpaque(true);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 安装前调一个新辅助函数
+        "{ setOpaque(true);\n const auto area = openAreaForNewWindow();\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 安装前调带作用域的辅助函数
+        "{ issue_ = PlatformWebView::probeUserDataFolder(folder_);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 对别的对象调同名函数不算本类自己的
+        "{ other.setOpaque(true);\n" + guardAndInstall + " }"));
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag( // 模板调用取不到名字，按不在白名单处理
+        "{ webView_ = std::make_unique<HostWebView>(*this);\n" + guardAndInstall + " }"));
+
+    // 取名字的小函数：带前缀的名字、模板调用与括号表达式给空串、字面量里的括号不算
+    CHECK(calledNames("a(b(c), d::e (f), g.h->i(1))") == std::vector<std::string>{"a", "b", "d::e", "g.h->i"});
+    CHECK(calledNames("f(\"g(h)\", '(', \"\\\"k(\")") == std::vector<std::string>{"f"});
+    CHECK(calledNames("f(1'000); g(')')") == std::vector<std::string>{"f", "g"});
+    CHECK(calledNames("std::make_unique<T>(x); (y + z) * w") == std::vector<std::string>{"", ""});
+
+    // 取构造函数：参数表之后连同成员初始化列表与函数体，到函数体的右花括号为止；只取函数体会看不到初始化列表
+    const std::string source = "Other::Other() { x(); }\n"
+                               "Host::Host(Config c)\n : lang_(logDiag(\"early\"))\n{ " +
+                               guardAndInstall + " }\nvoid Host::later() { y(); }";
+    const auto ctor = constructorAfterParameters(source, "Host::Host(");
+    CHECK(ctor == "Config c)\n : lang_(logDiag(\"early\"))\n{ " + guardAndInstall + " }");
+    CHECK(constructorAfterParameters(source, "Host::Missing(").empty());
+    CHECK_FALSE(diagLogInstalledBeforeFirstDiag(ctor));
+    CHECK(diagLogInstalledBeforeFirstDiag(functionBody(source, "Host::Host("))); // 旧的只取函数体的盲区
 }
 
 TEST_CASE("role-specific bridge functions outside the host, if there are any, guard the fallback panel too",

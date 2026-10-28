@@ -272,7 +272,7 @@ TEST_CASE("the blank page predicate agrees with the gate and is exactly that str
     }
 
     // 与放行判定一致：空白页在任何根下都放行（含根未知）；放行判定之外的地址不是空白页
-    for (const juce::String root : {kWinRoot, kMacRoot, juce::String()})
+    for (const juce::String& root : {kWinRoot, kMacRoot, juce::String()})
         CHECK(allowed("about:blank", root) == ResourceProvider::isBlankPage("about:blank"));
     CHECK(allowed("https://juce.backend/input/index.html"));
     CHECK_FALSE(ResourceProvider::isBlankPage("https://juce.backend/input/index.html"));
