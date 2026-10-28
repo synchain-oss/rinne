@@ -178,7 +178,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
                     "loop.d_user_ms": model.values.delay_ms.toFixed(3),
                     "loop.d_eff": Math.round((model.delay.actualMs * sr) / 1000),
                     "loop.d_min": Math.round((model.delay.minMs * sr) / 1000),
-                    "loop.mode": model.values.delay_mode,
+                    "loop.mode": sync ? "sync" : "ms", // core 的写法：time 档写成 ms
                     "loop.bpm": "120.0",
                     "loop.bpm_src": sync ? "manual" : "none",
                     "loop.taps_active": 0,

@@ -118,7 +118,7 @@ for (const role of ["input", "output"]) {
     const stray = names.filter((k) => !DIAG_KEYS.includes(k));
     run.check(names.length > 0 && stray.length === 0, `诊断（${role}）：只含白名单字段，越界的有 ${stray.join("、")}`);
     run.eq(new Set(names).size, names.length, `诊断（${role}）：名字不重复`);
-    run.check(!/[A-Za-z]:[\/]|@|\bUsers\b/.test(peek.text), `诊断（${role}）：不含路径、邮箱和用户目录`);
+    run.check(!/[A-Za-z]:[\\/]|@|\bUsers\b/.test(peek.text), `诊断（${role}）：不含路径、邮箱和用户目录`);
     run.check(peek.text.startsWith("rinne-diag v1\n"), `诊断（${role}）：第一行是格式标识`);
     const lines = peek.text.trimEnd().split("\n");
     run.check(/^ui: webview=\S+ scale=\S+ lang=\S+$/.test(lines[lines.length - 1]), `诊断（${role}）：末行是 ui 段`);
@@ -141,6 +141,14 @@ for (const role of ["input", "output"]) {
         expected,
         `诊断（${role}）：有对端时名字与白名单（${role === "input" ? "全集" : "子集"}）逐项一致、顺序相同`,
     );
+    if (role === "input") {
+        // 取值与 core 的生成器一致：time 档写成 ms，不照抄 delay_mode 参数的取值
+        const modes = ["time", "sync"].map((m) => {
+            s.model.values.delay_mode = m;
+            return /\bloop: [^\n]*\bmode=(\S+)/.exec(s.mock.copyDiagnostics(false).text)?.[1];
+        });
+        run.eq(modes, ["ms", "sync"], "诊断（input）：loop.mode 的取值是 ms 或 sync");
+    }
     run.check(s.mock.copyDiagnostics(true).copied === true, `诊断（${role}）：确认后才写剪贴板`);
     s.model.pair.state = "searching";
     run.check(

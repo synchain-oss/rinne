@@ -119,7 +119,7 @@ The bridge between the web UI and the native plugin: function names, event names
 
 - 第 1 行是固定文本 `rinne-diag v1`。
 - 之后每节一行，字段是空格分隔的 `key=value`，例如 `track: relation=same hash=1a2b3c4d`。`product`、`backend` 两行没有冒号，节名取该行的第一个键（`product=Rinne Input version=…`）。没有对端时 `peer` 一行整行写 `peer: none`，不产生字段。
-- 然后是最近事件段：标题行 `events(last N of M):`，其后每条事件一行，行首缩进两格（`  t+<秒>.<毫秒> <事件名>[ <参数>]`）。
+- 然后是最近事件段：标题行 `events(last N of M):`，其后每条事件一行，行首缩进两格（`  t+<秒>.<毫秒> <事件名>[ <参数>]`，参数是一个整数，或用斜杠连起来的两个整数，例如 `prepare 48000/512`）。
 - 末行是 `ui:` 段（`ui: webview=… scale=… lang=…`）。它不在 core 生成的文本里，由承载网页的原生界面层补在最后（WebView 版本、缩放档位、语言都在它手里），所以回执的 `text` 和写进剪贴板的内容都含这一行，页面不自己拼。补的字段只用固定名字表，或过与 core 同一套清洗。
 - Output 只输出字段子集：没有 `loop`、`sync`、`order`、`safety` 四节，即下表「角色」一栏写「仅 Input」的那些。
 
@@ -172,7 +172,7 @@ The bridge between the web UI and the native plugin: function names, event names
 | `loop.d_user_ms` | 仅 Input | 用户设定的环路延迟 D，毫秒。 |
 | `loop.d_eff` | 仅 Input | 实际使用的 D，样本。 |
 | `loop.d_min` | 仅 Input | D 的下限（随实测块长抬升），样本。 |
-| `loop.mode` | 仅 Input | 延迟模式：`time` 或 `sync`。 |
+| `loop.mode` | 仅 Input | 延迟模式：`ms`（按时间）或 `sync`（按拍）；`delay_mode` 参数的 `time` 在诊断文本里写成 `ms`。 |
 | `loop.bpm` | 仅 Input | 速度，拍/分钟。 |
 | `loop.bpm_src` | 仅 Input | 速度来源：`none`、`host` 或 `manual`。 |
 | `loop.taps_active` | 仅 Input | 当前活跃的读头数。 |
