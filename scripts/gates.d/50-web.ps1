@@ -145,6 +145,26 @@ function Test-RinneGates([string]$Root) {
     [pscustomobject]@{ Label = '固定端口被占：SKIP（不是 PASS），Reason 写明占用者'; Bad = $true; Passed = $taken.Status -ceq 'SKIP' -and $taken.Reason -match 'PID 9632 SomeDaemon' }
     [pscustomobject]@{ Label = '退出 3 却没写占用者：FAIL'; Bad = $true; Passed = (& $port 3 @('x')).Status -ceq 'FAIL' }
     [pscustomobject]@{ Label = '固定端口起服后请求不符合预期（退出 1）：FAIL'; Bad = $true; Passed = (& $port 1 @('serve.ps1 端口：8833')).Status -ceq 'FAIL' }
+    # 「被占」只按错误码判：从 serve.ps1 里取出 Test-PortTaken 与 Test-AddressInUse 两个函数单独测。没有权限之类的起不来不算被占
+    # （否则 -StrictPort 会把它记成 SKIP），探测报的是别的套接字错误也不算；HttpListener 报 32 / 183、或环回地址上确实绑不上才算
+    $serveAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'web-preview/serve.ps1'), [ref]$null, [ref]$null)
+    foreach ($fn in @($serveAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in 'Test-PortTaken', 'Test-AddressInUse' }, $true))) {
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+    $sock = { param($code) [System.Net.Sockets.SocketException]::new([int]$code) }
+    $wrapped = [Management.Automation.MethodInvocationException]::new('x', (& $sock 10048))
+    [pscustomobject]@{ Label = '探测报「地址已被使用」（含被 PowerShell 包了一层）才算被占'; Bad = $false; Passed = (Test-AddressInUse (& $sock 10048)) -and (Test-AddressInUse $wrapped) }
+    [pscustomobject]@{ Label = '探测报没有权限（10013）或不是套接字异常：不算被占'; Bad = $true; Passed = -not (Test-AddressInUse (& $sock 10013)) -and -not (Test-AddressInUse ([InvalidOperationException]::new('x'))) }
+    $idle = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $idle.Start(); $ip = $idle.LocalEndpoint.Port; $idle.Stop()
+    [pscustomobject]@{ Label = 'HttpListener 报没有权限（5）、端口其实空着：不算被占'; Bad = $true; Passed = -not (Test-PortTaken ([System.Net.HttpListenerException]::new(5)) $ip) }
+    [pscustomobject]@{ Label = 'HttpListener 报 32 / 183：算被占'; Bad = $false; Passed = (Test-PortTaken ([System.Net.HttpListenerException]::new(32)) $ip) -and (Test-PortTaken ([System.Net.HttpListenerException]::new(183)) $ip) }
+    # 探测在本机没有的地址（文档保留段 192.0.2.1）上绑不上，报的是「地址不可用」而不是「已被使用」：不算被占
+    [pscustomobject]@{ Label = '探测绑不上但不是地址已被使用（地址不可用）：不算被占'; Bad = $true; Passed = -not (Test-PortTaken ([System.Net.HttpListenerException]::new(5)) $ip ([System.Net.IPAddress]::Parse('192.0.2.1'))) }
+    $hold = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $hold.Start()
+    try { $heldBusy = Test-PortTaken ([System.Net.HttpListenerException]::new(5)) $hold.LocalEndpoint.Port } finally { $hold.Stop() }
+    [pscustomobject]@{ Label = '环回地址上的端口确实被占着：探测绑不上，算被占'; Bad = $false; Passed = $heldBusy }
     # 真起 serve.ps1：本进程占住一个临时端口，冒烟要换空闲端口跑完并写明占用者（本进程），-StrictPort 要退出 3 记 SKIP；放开之后照常 PASS
     $held = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $held.Start()

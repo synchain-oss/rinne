@@ -117,8 +117,8 @@ function Start-PreviewListener([int]$P) {
 
 # 占着这个 TCP 端口的进程，逐个写成「PID <n> <进程名>（<本地地址>:<端口> <状态>）」。状态不限：只绑了端口、还没连上或不在监听的
 # 出站连接（Bound）也占着它，netstat 的 LISTENING 里看不到。PID 4 是 System，端口在 http.sys 手里，是另一个 HttpListener 服务
-# （多半是上一次没停掉的 serve.ps1）。TimeWait 不算：那是已经关掉的连接留下的记录（属主是 PID 0），不占着端口，把它当成占用者
-# 会让「起不来又不是被占」被说成被占。查不到时返回 $null。
+# （多半是上一次没停掉的 serve.ps1）。TimeWait 不算：那是已经关掉的连接留下的记录（属主是 PID 0），不占着端口，写进说明只会误导。
+# 这里只给说明，被不被占由 Test-PortTaken 按错误码判。查不到时返回 $null。
 function Get-PortOwner([int]$P) {
     if (-not (Get-Command Get-NetTCPConnection -ErrorAction Ignore)) { return $null }
     $conns = @(Get-NetTCPConnection -LocalPort $P -ErrorAction Ignore | Where-Object { "$($_.State)" -cne 'TimeWait' } | Sort-Object OwningProcess, State -Unique)
@@ -130,12 +130,22 @@ function Get-PortOwner([int]$P) {
         }) -join '；'
 }
 
-# 端口被占：查得到占用者；或者 HttpListener 报的就是「被另一个进程占着」（32）/「这个地址已经有人注册」（183）；或者在这个端口上
-# 连普通的 TCP 监听也绑不上（没有 Get-NetTCPConnection 的平台靠这一条）。别的起不来（例如没有权限）不算被占：换端口也不会好，照常判失败。
-function Test-PortTaken($Err, $Owner, [int]$P) {
-    if ($Owner -or ($Err -is [System.Net.HttpListenerException] -and $Err.ErrorCode -in 32, 183)) { return $true }
-    $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $P)
-    try { $probe.Start(); $false } catch { $true } finally { $probe.Stop() }
+# 端口被占只认两种证据：HttpListener 报的就是「被另一个进程占着」（32）/「这个地址已经有人注册」（183）；或者在 127.0.0.1 的这个
+# 端口上连普通的 TCP 监听也绑不上，而且报的是地址已被使用（没有 Get-NetTCPConnection 的平台也靠这一条）。查到的占用者只用来说明
+# 是谁占着，不当作被占的证据：别的本地地址上的连接未必挡得住 127.0.0.1。别的起不来（例如没有权限、端口在系统保留段里、探测时
+# 报了别的套接字错误）都不算被占：换端口也不会好，照常判失败，-StrictPort 也就不会把它记成跳过。
+# $Address 只给自测换探测地址用（换成本机没有的地址，探测就会报别的套接字错误）；serve.ps1 自己一律探测 127.0.0.1。
+function Test-PortTaken($Err, [int]$P, [System.Net.IPAddress]$Address = [System.Net.IPAddress]::Loopback) {
+    if ($Err -is [System.Net.HttpListenerException] -and $Err.ErrorCode -in 32, 183) { return $true }
+    $probe = [System.Net.Sockets.TcpListener]::new($Address, $P)
+    try { $probe.Start(); $false } catch { Test-AddressInUse $_.Exception } finally { $probe.Stop() }
+}
+
+# 探测绑不上时报的是不是「地址已被使用」：剥掉 PowerShell 包的外层异常找到套接字异常再看错误码；不是套接字异常、或是别的错误码都不算。
+function Test-AddressInUse($Exception) {
+    $e = $Exception
+    while ($e.InnerException -and $e -isnot [System.Net.Sockets.SocketException]) { $e = $e.InnerException }
+    $e -is [System.Net.Sockets.SocketException] -and $e.SocketErrorCode -eq [System.Net.Sockets.SocketError]::AddressAlreadyInUse
 }
 
 # 本机挑一个空闲端口：让系统给 127.0.0.1 分配一个，记下号码就放开，紧接着在它上面起服（中间被别人抢走就再挑）。
@@ -148,7 +158,7 @@ function Get-FreePort {
 $started = Start-PreviewListener $Port
 if (-not $started.Listener) {
     $owner = Get-PortOwner $Port
-    if (-not (Test-PortTaken $started.Error $owner $Port)) {
+    if (-not (Test-PortTaken $started.Error $Port)) {
         Write-Host ("serve.ps1: 端口 {0} 起不来：{1}" -f $Port, $started.Error.Message) -ForegroundColor Red
         exit 1
     }
