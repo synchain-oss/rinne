@@ -8,7 +8,9 @@
 //      写日志和上面板之前必须先过整形函数；定时器必须在运行时三态分支之前启动；面板在场时迟到的桥请求
 //      只回执、不置位、不计数、不发首帧、不收回面板，离开面板只有点重试一条路；注册进页面的每个桥函数，
 //      处理函数一开头就有面板在场的守卫，守卫分支只写日志、给回执、返回，会改状态的三个回 not-ready，
-//      分支里不碰窗口、设置文件、内存状态与状态发送；设置语言必须一次写完语言值与「选过」位。
+//      分支里不碰窗口、设置文件、内存状态与状态发送；设置语言必须一次写完语言值与「选过」位；
+//      页面隐藏时 JUCE 借道的空白页，导航回调一开头就放行并返回，不记账、不写诊断；
+//      宿主之外若出现角色专属的桥函数（别处注册的原生函数、覆写 handleSetLang），处理函数开头同样要有面板守卫。
 //
 // 第一条：网页宿主这一族源文件里，运行期字符串字面量只许 ASCII。
 // 原因：源文件按 UTF-8 存，字面量里一旦有中文，在中文代码页的机器上编译器会报字符集警告，
@@ -459,24 +461,30 @@ std::size_t countOf(const std::string& text, const std::string& needle)
 }
 
 // 守卫分支：函数体（去注释后，含外层花括号）的第一条语句必须是 `if (fallback_ != nullptr) { ... }`，
-// 返回那一对花括号连同里面的内容；不是这个形状（守卫排在别的语句之后、条件被收窄、没有花括号）给空串
+// 返回那一对花括号连同里面的内容；不是这个形状（守卫排在别的语句之后、条件被收窄、没有花括号）给空串。
+// 宿主类自己用私有成员 fallback_；宿主之外的角色代码拿不到它，要先给宿主加一个受保护的 panelShown() 访问器，
+// 守卫写成 `if (panelShown()) { ... }`，这里两种写法都认，别的写法一律不认
 std::string panelGuardBranch(const std::string& body)
 {
     if (body.empty() || body.front() != '{')
         return {};
-    const std::string guard = "if (fallback_ != nullptr)";
     auto skipSpaces = [&body](std::size_t at) {
         while (at < body.size() && (body[at] == ' ' || body[at] == '\n' || body[at] == '\r' || body[at] == '\t'))
             ++at;
         return at;
     };
-    auto at = skipSpaces(1);
-    if (body.compare(at, guard.size(), guard) != 0)
-        return {};
-    at = skipSpaces(at + guard.size());
-    if (at >= body.size() || body[at] != '{')
-        return {};
-    return functionBody(body.substr(at), "{");
+    const auto first = skipSpaces(1);
+    for (const char* guard : {"if (fallback_ != nullptr)", "if (panelShown())"})
+    {
+        const std::string g = guard;
+        if (body.compare(first, g.size(), g) != 0)
+            continue;
+        const auto open = skipSpaces(first + g.size());
+        if (open >= body.size() || body[open] != '{')
+            return {};
+        return functionBody(body.substr(open), "{");
+    }
+    return {};
 }
 
 // 面板在场时，桥函数一开头就拒绝或只回执：守卫是函数体的第一条语句，分支里依次是一行日志、一个回执、返回，
@@ -525,8 +533,20 @@ std::vector<std::string> registeredBridgeHandlers(const std::string& makeOptions
     for (auto at = makeOptionsBody.find(marker); at != std::string::npos;)
     {
         auto next = makeOptionsBody.find(marker, at + marker.size());
-        auto end = next != std::string::npos ? next : makeOptionsBody.find("withEventListener(", at);
-        const auto segment = makeOptionsBody.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        // 这一处注册到配对的右括号为止：整份源文件里找也不会把后面别的函数里的 handleXxx( 算到它头上
+        std::size_t end = makeOptionsBody.size();
+        int depth = 0;
+        for (std::size_t i = at + marker.size() - 1; i < makeOptionsBody.size(); ++i)
+        {
+            if (makeOptionsBody[i] == '(')
+                ++depth;
+            else if (makeOptionsBody[i] == ')' && --depth == 0)
+            {
+                end = i + 1;
+                break;
+            }
+        }
+        const auto segment = makeOptionsBody.substr(at, end - at);
         std::string name;
         for (auto h = segment.find("handle"); h != std::string::npos; h = segment.find("handle", h + 1))
         {
@@ -584,6 +604,108 @@ bool setLangWritesOnce(const std::string& body)
            !contains(body, "setLangChosenGlobal(");
 }
 
+std::string trimmed(const std::string& s)
+{
+    const auto first = s.find_first_not_of(" \n\r\t");
+    if (first == std::string::npos)
+        return {};
+    return s.substr(first, s.find_last_not_of(" \n\r\t") - first + 1);
+}
+
+// 空白页（页面隐藏时 JUCE 借道）的导航回调：函数体（去注释后）的第一条语句是
+// `if (...isBlankPage(url)) <退出语句>`，条件就是对纯函数的这一次调用（不取反、不并别的条件），
+// 分支（带不带花括号都行）里只有那条退出语句：没有记账、没有日志、没有成员访问。
+// 退出语句：pageAboutToLoad 放行，给 "return true;"；pageFinishedLoading 是 void，给 "return;"。
+// 这个分支必须排在第一条：排在别的语句之后，空白页会先落进那些语句（拦截判定、记账、日志）
+bool blankPageSkippedFirst(const std::string& body, const std::string& exitStatement)
+{
+    if (body.empty() || body.front() != '{')
+        return false;
+    auto skipSpaces = [&body](std::size_t at) {
+        while (at < body.size() && (body[at] == ' ' || body[at] == '\n' || body[at] == '\r' || body[at] == '\t'))
+            ++at;
+        return at;
+    };
+    const std::string head = "if (";
+    const auto first = skipSpaces(1);
+    if (body.compare(first, head.size(), head) != 0)
+        return false;
+    int depth = 1;
+    std::size_t i = first + head.size();
+    for (; i < body.size() && depth > 0; ++i)
+    {
+        if (body[i] == '(')
+            ++depth;
+        else if (body[i] == ')')
+            --depth;
+    }
+    if (depth != 0)
+        return false;
+    const auto condition = trimmed(body.substr(first + head.size(), i - 1 - (first + head.size())));
+    if (condition != "ResourceProvider::isBlankPage(url)" &&
+        condition != "rinne::webview::ResourceProvider::isBlankPage(url)")
+        return false;
+    const auto open = skipSpaces(i);
+    if (open >= body.size())
+        return false;
+    if (body[open] != '{') // 不带花括号：分支就是紧跟着的那一条语句
+    {
+        const auto semicolon = body.find(';', open);
+        return semicolon != std::string::npos && trimmed(body.substr(open, semicolon - open + 1)) == exitStatement;
+    }
+    const auto branch = functionBody(body.substr(open), "{");
+    return branch.size() >= 2 && trimmed(branch.substr(1, branch.size() - 2)) == exitStatement;
+}
+
+// 一份已去注释的源文件。name 是相对 src 的路径（正斜杠）
+struct SourceText
+{
+    std::string name;
+    std::string text;
+};
+
+bool isHostFile(const std::string& name)
+{
+    return name == "plugin-common/WebViewHost.cpp" || name == "plugin-common/WebViewHost.h";
+}
+
+// 宿主之外的「角色专属的桥函数」有两类：
+//   - 别处注册的原生函数（出现 withNativeFunction( 的文件，即经 augmentOptions 追加的那些）；
+//   - 覆写通用的 handleSetLang（出现 ::handleSetLang( 的定义）。
+// 每一处涉及的处理函数都要在开头有合格的面板守卫、给 not-ready（它们都会改状态）。
+// 返回不合格的，形如「文件: 处理函数」；没有处理函数可核对（内联实现）也算不合格。
+// 处理函数的函数体先在本文件找、再在别的非宿主文件找；宿主自己的文件不在查找范围里：
+// 否则覆写者忘了守卫，也会因为宿主基类那份守着而被判合格
+std::vector<std::string> unguardedRoleSpecificHandlers(const std::vector<SourceText>& files)
+{
+    std::vector<std::string> bad;
+    for (const auto& site : files)
+    {
+        if (isHostFile(site.name))
+            continue;
+        std::vector<std::string> names;
+        if (contains(site.text, "withNativeFunction("))
+            names = registeredBridgeHandlers(site.text);
+        if (contains(site.text, "::handleSetLang("))
+            names.push_back("handleSetLang");
+        for (const auto& name : names)
+        {
+            std::string body;
+            if (!name.empty())
+            {
+                const std::string signature = "::" + name + "(";
+                body = functionBody(site.text, signature);
+                for (const auto& other : files)
+                    if (body.empty() && !isHostFile(other.name))
+                        body = functionBody(other.text, signature);
+            }
+            if (!bridgeHandlerRefusesWhilePanelShown(body, "bridge::respondNotReady()"))
+                bad.push_back(site.name + ": " + (name.empty() ? std::string("<inline>") : name));
+        }
+    }
+    return bad;
+}
+
 } // namespace
 
 TEST_CASE("call-site scanners: good and bad samples", "[webview][hygiene]")
@@ -627,11 +749,16 @@ TEST_CASE("the web host gates navigation through the pure function and reads sto
     const juce::File file =
         repoRoot().getChildFile("src").getChildFile("plugin-common").getChildFile("WebViewHost.cpp");
     REQUIRE(file.existsAsFile()); // 路径推不出来就是红，不静默跳过
-    const std::string text = file.loadFileAsString().toStdString();
+    const std::string text = stripComments(file.loadFileAsString().toStdString());
 
     const auto gate = functionBody(text, "bool pageAboutToLoad(");
     REQUIRE_FALSE(gate.empty());
     CHECK(navigationGateWellFormed(gate));
+    // 空白页（页面隐藏时 JUCE 借道）放行但不记账：回调一开头就判、直接返回
+    CHECK(blankPageSkippedFirst(gate, "return true;"));
+    const auto finished = functionBody(text, "void pageFinishedLoading(");
+    REQUIRE_FALSE(finished.empty());
+    CHECK(blankPageSkippedFirst(finished, "return;"));
 
     const auto snapshot = functionBody(text, "juce::var WebViewHost::buildSnapshot()");
     REQUIRE_FALSE(snapshot.empty());
@@ -908,4 +1035,156 @@ TEST_CASE("the web host shapes page text, starts its timer early, guards every b
     const auto setLang = functionBody(text, "void WebViewHost::handleSetLang(");
     REQUIRE_FALSE(setLang.empty());
     CHECK(setLangWritesOnce(setLang));
+}
+
+TEST_CASE("call-site scanners for the blank page and role-specific bridge functions: good and bad samples",
+          "[webview][hygiene]")
+{
+    // 空白页：放行但不记账，分支排在第一条，里面只有退出语句
+    const std::string goodGate =
+        "{ if (rinne::webview::ResourceProvider::isBlankPage(url))\n return true;\n"
+        " if (!rinne::webview::ResourceProvider::isRootNavigation(url, root)) { return false; }\n"
+        " owner_.onNavigationStarted(url);\n return true; }";
+    CHECK(blankPageSkippedFirst(goodGate, "return true;"));
+    CHECK(blankPageSkippedFirst( // 带花括号和短名都行
+        "{ if (ResourceProvider::isBlankPage(url)) { return true; } go(); }", "return true;"));
+    CHECK(blankPageSkippedFirst("{ if (ResourceProvider::isBlankPage(url))\n { return; }\n owner_.done(url); }",
+                                "return;"));
+    CHECK_FALSE(blankPageSkippedFirst(goodGate, "return;")); // 退出语句不对：void 的回调不能返回真
+    CHECK_FALSE(blankPageSkippedFirst("{ owner_.onNavigationStarted(url); }", "return true;")); // 根本没有
+    CHECK_FALSE(blankPageSkippedFirst( // 排在拦截判定之后
+        "{ if (!isRootNavigation(url, root)) { return false; }\n if (ResourceProvider::isBlankPage(url)) return true;\n"
+        " owner_.onNavigationStarted(url); return true; }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 条件取反：非空白页反而直接放行
+        "{ if (!ResourceProvider::isBlankPage(url)) return true; owner_.onNavigationStarted(url); return true; }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 条件并了别的
+        "{ if (ResourceProvider::isBlankPage(url) && owner_.isHidden()) return true; go(); }", "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 自己比字符串，不走纯函数
+        "{ if (url == \"about:blank\") return true; go(); }", "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 分支里先记账再返回
+        "{ if (ResourceProvider::isBlankPage(url)) { owner_.onNavigationStarted(url); return true; } go(); }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 分支里写诊断
+        "{ if (ResourceProvider::isBlankPage(url)) { owner_.logDiag(\"blank\"); return true; } go(); }",
+        "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst( // 分支拦下空白页：页面就卸不掉
+        "{ if (ResourceProvider::isBlankPage(url)) { return false; } go(); }", "return true;"));
+    CHECK_FALSE(blankPageSkippedFirst("", "return true;"));
+
+    // 角色专属的桥函数。守卫的写法：宿主之外用受保护的访问器
+    const std::string logLine = "logDiag(\"bridge request ignored while the fallback panel is shown (fn)\");";
+    const std::string guardedBody = "{ if (panelShown())\n { " + logLine +
+                                    "\n complete(bridge::respondNotReady());\n return;\n }\n doWork(args, complete); }";
+    const std::string unguardedBody = "{ doWork(args, complete); }";
+    const std::string hostText = "void WebViewHost::handleSetLang(const A& args, C complete)\n"
+                                 "{ if (fallback_ != nullptr)\n { " +
+                                 logLine + "\n complete(bridge::respondNotReady());\n return;\n }\n work(); }\n";
+    auto file = [](const std::string& name, const std::string& text) { return SourceText{name, text}; };
+    const std::string registerGamma = "void augment(Options& o) { o = o.withNativeFunction(juce::Identifier(\"gamma\"),"
+                                      " [this](const auto& a, auto c) { handleGamma(a, std::move(c)); }); }\n";
+
+    // 没有角色专属的桥函数（现状）：什么都不报
+    CHECK(unguardedRoleSpecificHandlers({file("plugin-common/WebViewHost.cpp", hostText),
+                                         file("input/InputPluginEntry.cpp", "void InputProcessor::createEditor() {}")})
+              .empty());
+    CHECK(unguardedRoleSpecificHandlers({}).empty());
+
+    // 别处注册了原生函数，处理函数有守卫、给 not-ready：合格；处理函数定义在另一个文件里也找得到
+    const std::string gammaDef = "void InputHost::handleGamma(const A& args, C complete)\n" + guardedBody + "\n";
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("plugin-common/WebViewHost.cpp", hostText), file("input/InputHost.cpp", registerGamma + gammaDef)})
+              .empty());
+    CHECK(unguardedRoleSpecificHandlers({file("plugin-common/WebViewHost.cpp", hostText),
+                                         file("input/InputPluginEntry.cpp", registerGamma),
+                                         file("input/InputHost.cpp", gammaDef)})
+              .empty());
+
+    // 忘了守卫：就是这一类
+    const auto missing = unguardedRoleSpecificHandlers(
+        {file("plugin-common/WebViewHost.cpp", hostText),
+         file("input/InputHost.cpp",
+              registerGamma + "void InputHost::handleGamma(const A& args, C complete)\n" + unguardedBody + "\n")});
+    REQUIRE(missing.size() == 1);
+    CHECK(missing[0] == "input/InputHost.cpp: handleGamma");
+    // 处理函数找不到（定义不在任何文件里）
+    CHECK(unguardedRoleSpecificHandlers({file("input/InputHost.cpp", registerGamma)}).size() == 1);
+    // 内联实现，没有处理函数可核对
+    const auto inlineImpl = unguardedRoleSpecificHandlers(
+        {file("input/InputHost.cpp",
+              "void augment(Options& o) { o.withNativeFunction(id, [](const auto&, auto c) { c(ok()); }); }")});
+    REQUIRE(inlineImpl.size() == 1);
+    CHECK(inlineImpl[0] == "input/InputHost.cpp: <inline>");
+    // 回执给 ok：会改状态的函数在面板在场时不得回 ok
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("input/InputHost.cpp",
+                    registerGamma + "void InputHost::handleGamma(const A& args, C complete)\n{ if (panelShown())\n { " +
+                        logLine + "\n complete(bridge::okResponse());\n return;\n }\n doWork(); }\n")})
+              .size() == 1);
+
+    // 覆写 handleSetLang 的子类
+    const std::string overrideGuarded =
+        "void InputHost::handleSetLang(const A& args, C complete)\n" + guardedBody + "\n";
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("plugin-common/WebViewHost.cpp", hostText), file("input/InputHost.cpp", overrideGuarded)})
+              .empty());
+    // 覆写者忘了守卫，只是接着调基类：基类那份守卫救不了覆写者在它前后多做的事。
+    // 宿主自己的文件不在查找范围里，所以宿主基类那份合格的守卫不会让覆写者蒙混过关
+    const auto overrideBad = unguardedRoleSpecificHandlers(
+        {file("plugin-common/WebViewHost.cpp", hostText),
+         file("input/InputHost.cpp",
+              "void InputHost::handleSetLang(const A& args, C complete)\n{ WebViewHost::handleSetLang(args, complete);"
+              " syncMirror(); }\n")});
+    REQUIRE(overrideBad.size() == 1);
+    CHECK(overrideBad[0] == "input/InputHost.cpp: handleSetLang");
+    // 守卫的条件写法不认别的：宿主之外既不是 fallback_ 也不是 panelShown() 就不算
+    CHECK(unguardedRoleSpecificHandlers(
+              {file("input/InputHost.cpp",
+                    "void InputHost::handleSetLang(const A& args, C complete)\n{ if (panelOpen_)\n { " + logLine +
+                        "\n complete(bridge::respondNotReady());\n return;\n }\n work(); }\n")})
+              .size() == 1);
+
+    // 一份文件里先后注册两个，一个合格一个不合格：只报不合格的
+    const std::string twoDefs = registerGamma +
+                                "void augment2(Options& o) { o = o.withNativeFunction(id, "
+                                "[this](const auto& a, auto c) { handleDelta(a, std::move(c)); }); }\n" +
+                                gammaDef + "void InputHost::handleDelta(const A& args, C complete)\n" + unguardedBody +
+                                "\n";
+    const auto one = unguardedRoleSpecificHandlers({file("input/InputHost.cpp", twoDefs)});
+    REQUIRE(one.size() == 1);
+    CHECK(one[0] == "input/InputHost.cpp: handleDelta");
+
+    // 注册段到配对的右括号为止：后面别的函数里的 handleXxx( 不算到它头上
+    const auto names = registeredBridgeHandlers(
+        "{ o.withNativeFunction(id, [](const auto&, auto c) { c(ok()); }); }\n void later() { handleLate(); }");
+    REQUIRE(names.size() == 1);
+    CHECK(names[0].empty());
+}
+
+TEST_CASE("role-specific bridge functions outside the host, if there are any, guard the fallback panel too",
+          "[webview][hygiene]")
+{
+    // 目前宿主之外没有任何角色专属的桥函数（没有 augmentOptions 的使用者，也没有 handleSetLang 的覆写者），这条是绊线：
+    // 将来谁在别处注册了原生函数、或覆写了 handleSetLang，处理函数开头没有面板守卫就在这里变红
+    const juce::File src = repoRoot().getChildFile("src");
+    REQUIRE(src.isDirectory()); // 路径推不出来就是红，不静默跳过
+    juce::Array<juce::File> files;
+    src.findChildFiles(files, juce::File::findFiles, true, "*.h;*.hpp;*.cpp;*.mm");
+    REQUIRE(files.size() > 20); // 扫得到足够多的文件才算数
+
+    std::vector<SourceText> texts;
+    bool sawHost = false;
+    for (const auto& f : files)
+    {
+        const auto name = f.getRelativePathFrom(src).replaceCharacter('\\', '/').toStdString();
+        sawHost = sawHost || name == "plugin-common/WebViewHost.cpp";
+        texts.push_back({name, stripComments(f.loadFileAsString().toStdString())});
+    }
+    REQUIRE(sawHost); // 宿主文件的相对路径推对了，宿主自己的注册才会被排除在外
+
+    const auto bad = unguardedRoleSpecificHandlers(texts);
+    for (const auto& entry : bad)
+        FAIL_CHECK("role-specific bridge function without a panel guard: " << entry);
+    CHECK(bad.empty());
 }

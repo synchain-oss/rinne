@@ -48,8 +48,13 @@ public:
     //     （浏览器交上来的本来就是规范化后的小写，大小写不同的写法指向同一个地方，拦下没有好处）；
     //   - 一切别的都拦：形似的主机（多一段、少一段、末尾带点、非 ASCII 的同形字符）、用户信息（host@evil）、
     //     端口、反斜杠、别的协议（http 降级、file、javascript、data、ftp）、带控制字符或空白的地址、空串；
-    //   - 空白页只认 "about:blank" 这一个整串。
+    //   - 空白页只认 "about:blank" 这一个整串（判定见 isBlankPage）。
     static bool isRootNavigation(const juce::String& url, const juce::String& resourceRoot);
+
+    // 页面隐藏时 JUCE 借道的空白页：只认 "about:blank" 这一个整串，带后缀、大小写不同、前后有空白的都不算。
+    // 这一次导航不是页面加载：isRootNavigation 对它放行，宿主的导航回调也放行，但不当作「导航开始」或「导航完成」去记账
+    // （不改导航状态、不清错误说明、不动遮挡闸与看门狗预算），也不写诊断行。纯函数，与 isRootNavigation 共用同一处判定
+    static bool isBlankPage(const juce::String& url);
 
     // 把来路不明的地址整理成能写进日志的一行：最多 maxChars 个字符，会被当作断行的字符换成问号（防止伪造日志行）。
     // 换掉的有：C0 控制字符（含换行、回车、制表）、删除符 0x7F、C1 控制字符（0x80 到 0x9F，含 U+0085）、

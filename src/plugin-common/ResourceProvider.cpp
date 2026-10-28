@@ -77,11 +77,17 @@ std::optional<Origin> parseOrigin(const std::string& text)
 
 ResourceProvider::ResourceProvider(Source source) : source_(source) {}
 
+bool ResourceProvider::isBlankPage(const juce::String& url)
+{
+    return url.toStdString() == "about:blank";
+}
+
 bool ResourceProvider::isRootNavigation(const juce::String& url, const juce::String& resourceRoot)
 {
-    const std::string target = url.toStdString();
-    if (target == "about:blank")
+    if (isBlankPage(url))
         return true;
+
+    const std::string target = url.toStdString();
 
     const auto root = parseOrigin(resourceRoot.toStdString());
     const auto wanted = parseOrigin(target);

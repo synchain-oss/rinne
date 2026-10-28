@@ -36,12 +36,15 @@ namespace rinne::webview
 // 面板在场时迟到的桥请求只回执，不当作就绪：不置位、不计入活着的桥、不发首帧（见 handleRequestInitialState）。
 // 会改窗口、改设置文件或改内存状态的桥函数（setLang、setUiScale、commitUiScale）在面板在场时回 not-ready：
 // 不改窗口、不落盘、不改语言与缩放、不发状态。守卫写在每个桥函数的开头，源码扫描逐个核对（见宿主测试的源码卫生用例）；
-// 新增桥函数或覆写 handleSetLang 的子类，也要在开头加同样的守卫。
+// 新增桥函数（含经 augmentOptions 追加的角色专属函数）或覆写 handleSetLang 的子类，也要在开头加同样的守卫：
+// 日志一行、回 not-ready、返回。宿主之外拿不到私有的面板成员，要先给宿主加一个受保护的 panelShown() 访问器，
+// 守卫写成 if (panelShown())；源码扫描认这个写法，找不到合格守卫的角色专属桥函数会让宿主测试变红。
 // 面板在场期间定时器照跑，面板上的环路开关与恢复冷却靠它刷新。
 // 页面和内核交上来的文字（启动失败的阶段与细节、导航错误说明、地址）写日志、上面板之前一律先整形成一行，
 // 面板只显示纯 ASCII，见 ResourceProvider::asciiForLog 与 urlForLog。
 // 导航：页面带着原生桥，所以只放行资源提供者的根下面的地址（和页面隐藏时的空白页），其余导航一律拦下并写日志，
-// 判定见 ResourceProvider::isRootNavigation；新窗口请求同样一律拦下。
+// 判定见 ResourceProvider::isRootNavigation；新窗口请求同样一律拦下。页面隐藏时 JUCE 自己导航到空白页，
+// 这一次放行但不当作页面加载（不改导航状态、不写诊断，判定见 ResourceProvider::isBlankPage）。
 // 全部在消息线程上，没有任何一行跑在音频线程。
 class WebViewHost : public juce::AudioProcessorEditor, private juce::Timer
 {
