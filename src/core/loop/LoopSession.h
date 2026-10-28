@@ -225,6 +225,8 @@ private:
     void readPeerSlot(const BlockContext& ctx) noexcept;
     // 错序证据（口径见 OrderEvidence.h 与 ADR-0009）：每个 n > 0 的支持块判一次，结果发布到状态里。
     void judgeOrder(const BlockContext& ctx) noexcept;
+    // 超长块：错序证据不投票，只让时间戳基线与失效计时跟上（口径见 OrderEvidence::advance）。
+    void advanceOrder(const BlockContext& ctx) noexcept;
     // 导出不一致锁存（口径见 ExportLatch.h）用的对端事实：对端槽的 kRtOverMax 只在对端的一个新块上看一次。
     // 每个读了对端槽的块都要调（不管是不是离线块），块序号的记账才跟得上。
     bool peerOverMaxOnNewBlock() noexcept;
@@ -286,9 +288,11 @@ private:
     // 错序证据（每块一次，口径见 OrderEvidence.h）
     OrderEvidence order_;
 
-    // 导出不一致：对端槽的块序号只在新块上看一次它的 kRtOverMax（第一次只记下序号，不计）
+    // 导出不一致：对端槽的块序号只在新块上看一次它的 kRtOverMax（第一次只记下序号，不计）。
+    // 读不到对端槽、换组、换绑定、域重置时清掉，再读到的槽算第一次。
     bool haveExportPeerSeq_ = false;
     std::uint64_t lastExportPeerSeq_ = 0;
+    std::uint32_t peerGroup_ = 0; // 上一块读对端槽用的组号（变了就是换组）
 
     // 速度：宿主给的有效值、来源
     std::uint32_t bpmCenti_ = 12000u;

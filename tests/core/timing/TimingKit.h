@@ -142,8 +142,8 @@ public:
         ctx.ring = ring_;
         if (rv_ != nullptr)
         {
-            ctx.rendezvous = rv_.get();
-            ctx.group = 1;
+            ctx.rendezvous = peerHidden_ ? nullptr : rv_.get();
+            ctx.group = group_;
             ctx.role = ipc::Role::kInput;
         }
         ctx.declaredBlock = declaredBlock_;
@@ -189,7 +189,12 @@ public:
         }
     }
     bool hasPeerSlot() const { return rv_ != nullptr; }
-    ipc::RoleSlot& outputSlot() { return ipc::roleSlot(*rv_, 1, ipc::Role::kOutput); }
+    ipc::RvSegment& rendezvous() { return *rv_; }
+    ipc::RoleSlot& outputSlot(std::uint32_t group = 1) { return ipc::roleSlot(*rv_, group, ipc::Role::kOutput); }
+    // Input 读对端槽用的组号（默认 1）。publishPeer 仍然只发布到组 1 的槽，别的组的槽由用例自己摆。
+    void setGroup(std::uint32_t group) { group_ = group; }
+    // 读不到对端槽（组号不变，只是这一块没有会合段）：模拟对端槽暂时读不到。
+    void hidePeerSlot(bool hidden) { peerHidden_ = hidden; }
     // 对端报告违约（kRtOverMax）：之后发布的槽带上这一位
     void setPeerOverMax(bool on) { peerOverMax_ = on; }
 
@@ -200,7 +205,7 @@ public:
         {
             return;
         }
-        ipc::RoleSlot& slot = outputSlot();
+        ipc::RoleSlot& slot = outputSlot(1);
         slot.last_host_ns.store(transport.hostNsValid ? transport.hostNs : 0u, std::memory_order_relaxed);
         std::uint32_t flags = transport.nonrealtime ? ipc::kRtNonrealtime : 0u;
         if (peerOverMax_)
@@ -286,6 +291,8 @@ private:
     std::int64_t declaredBlock_;
     LoopSession session_;
     std::unique_ptr<ipc::RvSegment> rv_;
+    std::uint32_t group_ = 1;
+    bool peerHidden_ = false;
     bool peerOverMax_ = false;
     std::unique_ptr<ipc::RingSegment> ownRing_;
     ipc::RingSegment* ring_ = nullptr;

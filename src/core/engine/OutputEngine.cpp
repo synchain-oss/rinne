@@ -141,20 +141,34 @@ ipc::RingWriteResult OutputEngine::writeChunk(ipc::RingSegment& seg, const Audio
 
 // 错序证据的 Output 一侧：块首读 Input 槽（块序号 acquire，再读时间戳），与本块的宿主时间戳比。
 // 只读对端的槽，不写；会合段没给或组号越界时当没有对端槽（读会越界）。
+// 超长块（n > 32768）不读槽、不投票，但时间戳基线与失效计时照样前进（OrderEvidence::advance）。
+// 换组时旧组的块序号与时间戳作废，新组的槽第一次读到只记块序号。
 void OutputEngine::judgeOrder(const EngineContext& context, const TransportInfo& transport, std::uint32_t n) noexcept
 {
-    bool present = false;
-    std::uint64_t peerSeq = 0;
-    std::uint64_t peerNs = 0;
-    if (context.rendezvous != nullptr && context.group != 0 && context.group <= ipc::kGroupCount)
+    if (context.group != peerGroup_)
     {
-        const ipc::RoleSlot& peer = ipc::roleSlot(*context.rendezvous, context.group, ipc::Role::kInput);
-        peerSeq = peer.block_seq.load(std::memory_order_acquire);
-        peerNs = peer.last_host_ns.load(std::memory_order_acquire);
-        present = true;
+        peerGroup_ = context.group;
+        order_.forgetPeer();
     }
-    order_.observe(loop::OrderSide::kOutput, static_cast<std::int64_t>(n), transport.hostNsValid, transport.hostNs,
-                   present, peerSeq, peerNs);
+    if (n > ipc::kMaxSupportedBlock)
+    {
+        order_.advance(static_cast<std::int64_t>(n), transport.hostNsValid, transport.hostNs);
+    }
+    else
+    {
+        bool present = false;
+        std::uint64_t peerSeq = 0;
+        std::uint64_t peerNs = 0;
+        if (context.rendezvous != nullptr && context.group != 0 && context.group <= ipc::kGroupCount)
+        {
+            const ipc::RoleSlot& peer = ipc::roleSlot(*context.rendezvous, context.group, ipc::Role::kInput);
+            peerSeq = peer.block_seq.load(std::memory_order_acquire);
+            peerNs = peer.last_host_ns.load(std::memory_order_acquire);
+            present = true;
+        }
+        order_.observe(loop::OrderSide::kOutput, static_cast<std::int64_t>(n), transport.hostNsValid, transport.hostNs,
+                       present, peerSeq, peerNs);
+    }
     const loop::OrderSnapshot snapshot = order_.snapshot();
     orderPacked_.store(snapshot.pack(), std::memory_order_relaxed);
     orderGlitches_.store(snapshot.glitches, std::memory_order_relaxed);
@@ -215,10 +229,8 @@ bool OutputEngine::process(const AudioView& buffer, const EngineParams& params, 
     maxBlockSeen_ = std::max(maxBlockSeen_, n);
 
     // 错序证据：每个支持块判一次，在发布本端的槽之前读 Input 槽（没有段、没有写权的块也判：错序与写环无关）。
-    if (n <= ipc::kMaxSupportedBlock)
-    {
-        judgeOrder(context, transport, n);
-    }
+    // 超长块不投票，但时间戳基线与失效计时照样前进。
+    judgeOrder(context, transport, n);
 
     ipc::RingSegment* seg = context.ring;
     const std::uint64_t token = context.token;
