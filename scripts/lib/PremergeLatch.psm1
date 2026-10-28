@@ -340,19 +340,26 @@ function Test-PremergeLatch {
         # 本进程自己的标记被动过、改写成已篡改、没清除就放开，都拒绝；后三种之后一直拒绝，标记删掉、改回原样也不放行
         $refusal = { Get-RinneLatchRefusal -RepoRoot $main }
         $allowed = { (& $thrown { Assert-RinneGitAllowed -RepoRoot $main }) -eq '' }
+        $newProcess = '换一个新的 pwsh 进程再试'
         & $check '外部命令前：没有标记时放行' $false (-not ((& $allowed) -and $null -eq (& $refusal)))
         Set-Content -LiteralPath $want -Value '{}'
         & $check '外部命令前：本进程没握标记、位置上有东西（在途时别的进程写下的）就拒绝' $true (-not (& $allowed) -and (& $refusal) -match '^已锁存')
+        # 这种拒绝来自磁盘上的标记，不是本进程记住的：标记还在，换进程照样被拒，不能叫人换进程再试
+        & $check '外部命令前：来自磁盘上标记的拒绝不叫人换进程（换了照样被拒）' $false ((& $refusal) -match $newProcess)
         Remove-Item -LiteralPath $want
         $script:Hold = $false
         $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
         & $check '外部命令前：本进程握着的进行中标记原样还在时放行' $false (-not (& $allowed))
         Set-Content -LiteralPath $want -Value ($held.Text -replace '"nonce":"[0-9a-f]+"', '"nonce":"0"') -NoNewline
-        $r1 = & $allowed
+        # 本进程记住的拒绝（Tainted）有两种出口：记下的那一次（Get-RinneLatchRefusal 里 Own 被动过的分支）和之后每一次（Tainted
+        # 已有的分支）；原因文字则来自三处（被动过、改写成已篡改、没清除就放开）。每一处出来的消息都要写明「换一个新的 pwsh 进程
+        # 再试」，只查其中一处，改回旧消息（不带这句）的另一处就漏过去了。
+        $m1 = & $thrown { Assert-RinneGitAllowed -RepoRoot $main }
         Set-Content -LiteralPath $want -Value $held.Text -NoNewline
-        $r2 = & $allowed
-        & $check '外部命令前：本进程握着的标记被动过就拒绝，改回原样也不再放行' $true (-not $r1 -and -not $r2 -and (& $refusal) -match '^已锁存（本进程）.*被动过')
-        & $check '外部命令前：本进程记住的拒绝写明换一个新进程再试' $true ((& $refusal) -match '换一个新的 pwsh 进程再试')
+        $m2 = & $thrown { Assert-RinneGitAllowed -RepoRoot $main }
+        & $check '外部命令前：本进程握着的标记被动过就拒绝，改回原样也不再放行' $true ($m1 -and $m2 -and (& $refusal) -match '^已锁存（本进程）.*被动过')
+        & $check '外部命令前：本进程头一次撞上被动过的标记时的拒绝写明换一个新进程再试' $true ($m1 -match '^已锁存（本进程）.*被动过' -and $m1 -match $newProcess)
+        & $check '外部命令前：本进程记住的拒绝（改回原样之后的那次、再之后的每次）写明换一个新进程再试' $true ($m2 -match $newProcess -and (& $refusal) -match $newProcess)
         Remove-Item -LiteralPath $want
         Reset-RinneLatchProcess
         & $check '外部命令前：换一个进程（这里是还原状态）、没有标记时放行' $false (-not (& $allowed))
@@ -360,11 +367,13 @@ function Test-PremergeLatch {
         $null = Set-RinneLatchTampered -Latch $held -Changed @('x')
         Remove-Item -LiteralPath $want
         & $check '外部命令前：改写成已篡改之后，标记被删掉也不再放行' $true (-not (& $allowed) -and (& $refusal) -match '^已锁存（本进程）.*判据变了')
+        & $check '外部命令前：改写成已篡改之后的拒绝写明换一个新进程再试' $true ((& $refusal) -match ("判据变了.*$newProcess"))
         Reset-RinneLatchProcess
         $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
         Close-RinneLatch $held
         Remove-Item -LiteralPath $want
         & $check '外部命令前：没清除就放开（核对没走完）之后，标记被删掉也不再放行' $true (-not (& $allowed) -and (& $refusal) -match '^已锁存（本进程）.*没有走完核对')
+        & $check '外部命令前：没清除就放开之后的拒绝写明换一个新进程再试' $true ((& $refusal) -match ("没有走完核对.*$newProcess"))
         Reset-RinneLatchProcess
         $held = New-RinneLatch -Pr 7 -Digest 'abc' -RepoRoot $main
         $cleared = Clear-RinneLatch $held
