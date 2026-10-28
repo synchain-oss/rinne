@@ -20,8 +20,8 @@ juce::AudioProcessorEditor* OutputProcessor::createEditor()
     // 探针构建也嵌了这份资源（入口代码两种身份同一份、不为身份另起编译定义），但探针路径从不读它
     options.resources = {RinneOutputWebData::namedResourceListSize, RinneOutputWebData::originalFilenames,
                          RinneOutputWebData::namedResourceList, &RinneOutputWebData::getNamedResource};
-    // 兜底面板的急停、恢复、环路开关钩子暂时留空，面板上这三个按钮是禁用的。回送与安全链只在 Input 端，
-    // Output 端要不要接、接什么，留到安全链接入时再定
+    // 兜底面板的急停、恢复、环路开关钩子留空，面板上这三个按钮是禁用的：这是设计。回送、安全链与环路开关都在 Input 端，
+    // Output 没有可以急停或恢复的东西
     options.controls = {};
     options.probeEditorFactory = [this] { return createProbeEditor(); };
     return editor::createEditorOrGeneric(*this, options);

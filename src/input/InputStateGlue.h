@@ -74,7 +74,15 @@ public:
     explicit InputStateGlue(juce::AudioProcessorValueTreeState& tree);
 
     // ---- 宿主 ----
-    void setState(const void* data, int sizeInBytes);
+    // setState 这一次的结果，都在锁里定下。接线方（处理器）直接用它：是不是全量应用看 mode，交给会合与外壳的组号与
+    // tail 取 applied，不另读 isSettled、不另判，也不在返回之后再读 configs()（那时别的线程可能已经定型或改过设置）。
+    struct SetStateResult
+    {
+        state::StateLoadStatus status = state::StateLoadStatus::Empty; // 这一次的读入结果（同时写进 lastLoadStatus）
+        state::glue::ApplyMode mode = state::glue::ApplyMode::None; // 这一次实际的应用方式（applyModeFor 的口径）
+        std::optional<state::Configs> applied; // 只在 mode 是 Full 时有：这一次换上的那份设置的副本
+    };
+    SetStateResult setState(const void* data, int sizeInBytes);
     void getState(juce::MemoryBlock& destData);
 
     // ---- 界面（桥层） ----
