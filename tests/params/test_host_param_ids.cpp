@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 宿主参数 ID 的实测：照参数表（src/input/ParamTable.h）真建 JUCE 的参数对象，挂进名为 PARAMS 的参数树，
-// 用 JUCE 自己的函数取宿主看到的 ID，再与 tests/golden/params-input.json 的 vst3 / au 两列对拍。
+// 宿主参数 ID：照参数表（src/input/ParamTable.h）真建 JUCE 的参数对象，挂进名为 PARAMS 的参数树，
+// 取宿主看到的 ID，再与 tests/golden/params-input.json 的 vst3 / au 两列对拍。VST3 一列是实测的（调 JUCE 自己的
+// 函数）；AU 一列和 AU 列表顺序是复算的（本文件照 JUCE 的 AU 包装层的写法重写了一遍，没有调用那个包装层），见下。
 // 宿主在工程里按这个数记自动化：它一变，用户已存的工程与自动化就对不上。
 //
 // JUCE 8.0.8 的两个包装层按两个开关算宿主 ID：JUCE_FORCE_USE_LEGACY_PARAM_IDS 为 1 时一律用参数下标；为 0 时
 //   · 先取参数的 ID 字符串：参数派生自 HostedAudioProcessorParameter 时是 getParameterID()，否则退成参数下标；
-//   · VST3：VST3ClientExtensions::convertJuceParameterId(ID, 开关)，即 String::hashCode()，
+//   · VST3（实测）：VST3ClientExtensions::convertJuceParameterId(ID, 开关)，即 String::hashCode()，
 //     JUCE_USE_STUDIO_ONE_COMPATIBLE_PARAMETERS 为 1 时再清最高位；
-//   · AU：同一个 hashCode()，同一个开关决定清不清最高位（AU 包装层里的 generateAUParameterID，不对外导出，这里按它的
-//     式子算）。
+//   · AU（复算）：同一个 hashCode()，同一个开关决定清不清最高位。这是 juce_audio_plugin_client_AU_1.mm 里
+//     JuceAU::generateAUParameterID 的式子，该函数不对外导出，本套件也不链 AU 包装层，所以只能照它的写法算；
+//     列表顺序同理，复刻的是同一个文件里 JuceAU::GetParameterList 的两步排序（见 auListOrder）。
+//     升级 JUCE 时必须人工复核这两处源码：复算的用例只证明复算与 golden 一致，不证明 JUCE 现在还是这样算。
 // 两个开关的值从 tests/golden/identity.json 读（见下文 HostIdSwitches），用例先钉住它们是 0 与 1。
 // 本文件钉住：ID 字符串就是参数表里的 id，不带 versionHint；versionHint 是 1；两列都等于 golden；
-// 同一个 id 换个 versionHint，宿主 ID 不变（versionHint 不进散列）；AU 列参数的先后按 versionHint 再按宿主 ID 排。
+// 同一个 id 换个 versionHint，宿主 ID 不变（versionHint 不进散列）；
+// AU 列参数的先后按 versionHint 再按宿主 ID 排（复算）。
+// 这里建的是用例自己的参数布局（makeLayout，versionHint 用常量 1），不是生产代码里的参数树，
+// 也没有读 golden 的 versionHint。生产布局落地的那个 PR 要在真实参数树上加用例：
+// 每个参数的 versionHint 都等于 golden 的值。
 // 参数对象的刻度与步进不影响 ID，这里一律用线性范围；完整的参数树布局与刻度由参数层自己的用例核对。
 // 不链 JUCE 的另一条路径（纯 C++ 复算散列）在 tests/core/params 里，不编译的一条是 contract-static-params：三条要一致。
+// 补一次真实 AU 实例的参数列表核对留给 mac 宿主测试。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -179,7 +187,8 @@ std::uint32_t vst3Id(const juce::AudioProcessorParameter& param, const HostIdSwi
     return juce::VST3ClientExtensions::convertJuceParameterId(wrapperParamId(param), *s.studioOne);
 }
 
-// AU 包装层（generateAUParameterID）：强制旧式 ID 时是参数下标，否则散列 ID 字符串，再按开关清最高位
+// AU 的宿主 ID，复算而非实测：照 JUCE 8.0.8 的 JuceAU::generateAUParameterID 重写（强制旧式 ID 时是参数下标，
+// 否则散列 ID 字符串，再按开关清最高位），没有调用 JUCE 的 AU 包装层。升级 JUCE 时要人工复核那个函数。
 std::uint32_t auId(const juce::AudioProcessorParameter& param, const HostIdSwitches& s)
 {
     if (*s.legacyIds)
@@ -194,7 +203,9 @@ std::uint32_t auId(const juce::AudioProcessorParameter& param, const HostIdSwitc
     return id;
 }
 
-// AU 宿主看到的参数列表顺序：先按宿主 ID 排，再按 versionHint 稳定排序（JUCE 的 AU 包装层就是这两步）
+// AU 宿主看到的参数列表顺序，复算而非实测：照 JUCE 8.0.8 的 JuceAU::GetParameterList 重写（先按宿主 ID 排，
+// 再按 versionHint 稳定排序），没有调用 JUCE 的 AU 包装层。升级 JUCE 时要人工复核那个函数；
+// 真实 AU 实例的列表核对在 mac 宿主测试里补。
 std::vector<std::string> auListOrder(const juce::Array<juce::AudioProcessorParameter*>& params, const HostIdSwitches& s)
 {
     struct Entry
@@ -272,7 +283,7 @@ TEST_CASE("the plugin build hashes the id string and clears the top bit", "[para
     CHECK(*s.studioOne);
 }
 
-TEST_CASE("host ids computed by juce equal the golden columns", "[params][host-id][golden]")
+TEST_CASE("host ids equal the golden columns: vst3 via juce, au recomputed", "[params][host-id][golden]")
 {
     const HostIdSwitches& s = requireSwitches();
     LayoutUnderTest layout;
@@ -287,7 +298,7 @@ TEST_CASE("host ids computed by juce equal the golden columns", "[params][host-i
         const Line* row = golden.row(id);
         REQUIRE(row != nullptr);
         const std::uint32_t vst3 = vst3Id(*param, s);
-        const std::uint32_t au = auId(*param, s);
+        const std::uint32_t au = auId(*param, s); // 复算，见文件头
         CHECK(row->num("vst3") == std::optional<double>(static_cast<double>(vst3)));
         CHECK(row->num("au") == std::optional<double>(static_cast<double>(au)));
         // 不链 JUCE 的那条复算路径给出同一个数
@@ -318,11 +329,11 @@ TEST_CASE("the version hint does not enter the host id", "[params][host-id]")
     CHECK(juce::VST3ClientExtensions::convertJuceParameterId("feedback,1", true) != hostParamId("feedback"));
 }
 
-TEST_CASE("au lists the parameters by version hint and then by host id", "[params][host-id][au]")
+TEST_CASE("au list order recomputed from the juce wrapper: version hint, then host id", "[params][host-id][au]")
 {
     const HostIdSwitches& s = requireSwitches();
     LayoutUnderTest layout;
-    // 契约文档写明的 AU 列表顺序：11 个都是 versionHint 1，所以只按宿主 ID 升序，与序号无关
+    // 契约文档写明的 AU 列表顺序（复算的，见文件头）：11 个都是 versionHint 1，所以只按宿主 ID 升序，与序号无关
     const std::vector<std::string> expected = {"mix",      "limiter",    "loop_on",    "low_cut",
                                                "high_cut", "delay_mode", "delay_note", "polarity",
                                                "ceiling",  "delay_ms",   "feedback"};

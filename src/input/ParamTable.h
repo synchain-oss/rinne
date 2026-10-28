@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Input 的参数表，参数契约 docs/contracts/PARAMETERS.md 在源码里的镜像。契约已冻结：冻结面（下文标明的几项）正式发布
-// 之后永不改，之前改也要走变更流程；其余改了要带变更文档；细则以契约文档为准。tests/golden/params-input.json 与本表
-// 逐字段对拍（编译的一遍在单测里，不编译的一遍是 contract-static-params，后者另把冻结面写死在检查里，golden 跟着
-// 一起改也拦得住）。
+// Input 的参数表，参数契约 docs/contracts/PARAMETERS.md 在源码里的镜像。契约已冻结：参数 ID 任何时候都不改；冻结面的
+// 其余几项（下文标明）正式发布之后永不改，之前改也要走变更流程；其余改了要带变更文档；细则以契约文档为准。
+// tests/golden/params-input.json 与本表逐字段对拍（编译的一遍在单测里，不编译的一遍是 contract-static-params，
+// 后者另把冻结面写死在检查里，golden 跟着一起改也拦得住）。
 //
 // 这是一张 X-macro 表，只有宏行，没有 include 保护（同一张表要按需展开几次）。用法：先定义 RINNE_PARAM
 // （要选项文字时再定义 RINNE_CHOICE），再 #include 本文件；本文件末尾会把它们 #undef。
 //
 //   RINNE_PARAM(id, index, kind, lo, hi, def, step, skew, automatable, unit, name)
-//     id           参数 ID（ASCII 小写加下划线），宿主按它记自动化与工程；冻结面
+//     id           参数 ID（ASCII 小写加下划线），宿主按它记自动化与工程；任何时候都不改
 //     index        0 起的序号，与 id 同序；冻结面，新参数只能追加在末尾
 //     kind         F 连续、B 布尔、C 档位；冻结面
 //     lo hi def    范围与默认，一律是明文值（% / ms / Hz / dB，与 state 里存的一致）；B 与 C 取 0…档数−1

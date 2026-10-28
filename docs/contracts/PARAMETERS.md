@@ -6,20 +6,20 @@ status: frozen
 
 - **What**: the 11 host parameters of Rinne Input: IDs, order, types, ranges, defaults, steps, scales, automation, and the numbers hosts save them under. Rinne Output has no parameters of its own; a VST3 host sees only the bypass parameter the JUCE wrapper adds (AU bypass is a host property, not a parameter).
 - **Frozen surface**: the 11 IDs, their order and their types; version hint 1 for all of them; the bridge IDs and order of existing choice steps (new steps may only be appended); the range and scale of every automatable parameter, which also never becomes non-automatable; no parameter is ever removed. `contract-static-params` hard-codes these, so regenerating the golden does not get past it.
-- **Two stages**: until the official release (beta and preview builds) the frozen surface may still change, but only through the contract-change process: a change document and a CHANGELOG entry in the same PR, plus an update of the hard-coded list in `contract-static-params`, which is infrastructure the maintainer approves; projects and automation saved with a beta may then no longer match. From the first public release candidate on, the frozen surface never changes.
+- **Two stages**: the 11 parameter IDs never change, at any stage, beta and preview builds included: hosts save projects and automation under the ID, and projects saved with a beta or preview build are real projects too. The rest of the frozen surface has two stages. Until the official release (beta and preview builds) it may still change, but only through the contract-change process: a change document and a CHANGELOG entry in the same PR, plus an update of the hard-coded list in `contract-static-params`, which is infrastructure the maintainer approves; projects and automation saved with a beta may then no longer match. From the first public release candidate on, the whole frozen surface never changes.
 - **Needs a contract-change document**: defaults, host-facing names and step labels, units, steps, the range and scale of a non-automatable parameter, making a non-automatable parameter automatable, appending a parameter (version hint 2 or higher) or a choice step. Changing a safety default (feedback 0, limiter on, ceiling −6 dB) is also a compatibility event for CHANGELOG.
-- **Host IDs**: VST3 and AU both use JUCE's hash of the ID string with the top bit cleared; the version hint is not part of the hash (measured in the unit tests on real JUCE parameter objects). AU hosts list the parameters by version hint and then by that number, not by index.
+- **Host IDs**: VST3 and AU both use JUCE's hash of the ID string with the top bit cleared; the version hint is not part of the hash. The VST3 column is measured: the unit tests build real JUCE parameter objects and read the ID through JUCE's own conversion function. The AU column and the AU list order are recomputed, not measured: the tests do not link JUCE's AU wrapper and redo what its code does in JUCE 8.0.8 (`generateAUParameterID` and `GetParameterList`), so that source must be re-checked by hand whenever JUCE is upgraded. AU hosts list the parameters by version hint and then by that number, not by index.
 - **Values**: state, presets and the UI bridge carry plain values (%, ms, Hz, dB, step index); only the host sees normalised 0…1 values, mapped linearly or logarithmically as listed here.
-- **Truth**: `src/input/ParamTable.h` mirrors this document; `tests/golden/params-input.json` is checked against it twice (compiled in the unit tests, uncompiled by `contract-static-params`), and the tables and the status line below are checked against the golden.
+- **Truth**: `src/input/ParamTable.h` mirrors this document; `tests/golden/params-input.json` is checked against it twice (compiled in the unit tests, uncompiled by `contract-static-params`), and the tables and the status line below are checked against the golden. The version hint is machine-checked only as the one top-level golden value (plus the parameters the unit tests build themselves); the check on every parameter of the production parameter tree comes with the PR that adds that tree.
 - **Status**: frozen. From now on a PR that touches this document, the golden or the `RINNE_PARAM` lines carries a contract-change document or a `contract-neutral:` line.
 
 ## 范围
 
-宿主按参数 ID 保存自动化与工程里的参数值。版本发出之后，ID、顺序或可自动化参数的范围一改，用户已存的工程与自动化就对不上，所以这些在这里冻结：正式发布之前改要走变更流程，正式发布之后永不改（见「冻结规则」）。本契约规定：
+宿主按参数 ID 保存自动化与工程里的参数值。版本发出之后，ID、顺序或可自动化参数的范围一改，用户已存的工程与自动化就对不上，所以这些在这里冻结：参数 ID 任何时候都不改；顺序、范围等其余冻结面正式发布之前改要走变更流程，正式发布之后永不改（见「冻结规则」）。本契约规定：
 
 - Input 的 11 个宿主参数：ID、序号、类型、范围、默认、步进、刻度、可否自动化，以及宿主保存它们用的参数 ID；
 - 明文值与宿主归一化值之间怎么换算；
-- 冻结之后哪些在正式发布后永不改、哪些改了要带变更文档。
+- 冻结之后哪些任何时候都不改、哪些在正式发布后永不改、哪些改了要带变更文档。
 
 不在本契约里的：非参数的工程状态（组号、`reset_on_play`、`tail_mode`、显示单位等，见 [STATE_SCHEMA.md](STATE_SCHEMA.md)）；界面上的中文名与三语文案（归界面词条）；Panic、恢复回送、分组与修复按钮（界面动作，不是参数）。
 
@@ -103,8 +103,10 @@ T 是三连音（时值的 2/3），D 是附点（时值的 1.5 倍）。
 ## 宿主参数 ID
 
 - 两个 JUCE 宏钉在根 CMakeLists.txt 里（`tests/golden/identity.json` 记着）：`JUCE_FORCE_USE_LEGACY_PARAM_IDS=0`（ID 由字符串散列，不用下标），`JUCE_USE_STUDIO_ONE_COMPATIBLE_PARAMETERS=1`（清掉最高位）。
-- VST3 与 AU 的参数 ID 都是 `String::hashCode(id)`（乘子 31，32 位回绕）再清最高位，参数表最后一栏就是这个数。散列的输入是不带 versionHint 的 ID 字符串：单测照参数表真建 JUCE 参数对象，用 JUCE 的函数取 ID，两列与 golden 相等；同一个 ID 换个 versionHint，算出的数不变。11 个数互不相同。
-- 11 个参数的 versionHint 都是 1。AU 宿主拿到的参数列表先按 versionHint、再按这个数升序排，与序号无关：`mix`、`limiter`、`loop_on`、`low_cut`、`high_cut`、`delay_mode`、`delay_note`、`polarity`、`ceiling`、`delay_ms`、`feedback`。插件自己的界面不受影响；宿主的通用参数列表在 AU 下按这个顺序显示。
+- VST3 与 AU 的参数 ID 都是 `String::hashCode(id)`（乘子 31，32 位回绕）再清最高位，参数表最后一栏就是这个数。散列的输入是不带 versionHint 的 ID 字符串。11 个数互不相同。
+  - VST3 一列是实测的：单测照参数表真建 JUCE 参数对象，经 JUCE 的 `VST3ClientExtensions::convertJuceParameterId` 取 ID，与 golden 相等；同一个 ID 换个 versionHint，算出的数不变。
+  - AU 一列是复算的，不是实测的：`rinne_params_tests` 不链 JUCE 的 AU 包装层，用例照 JUCE 8.0.8 的 `juce_audio_plugin_client_AU_1.mm` 里 `generateAUParameterID`（ID 的散列与清最高位）的写法重算。升级 JUCE 时要人工复核这段源码；在 mac 宿主测试里核对一次真实 AU 实例的参数列表之前，AU 一列以复算为准。
+- 11 个参数的 versionHint 都是 1。AU 宿主拿到的参数列表先按 versionHint、再按这个数升序排，与序号无关：`mix`、`limiter`、`loop_on`、`low_cut`、`high_cut`、`delay_mode`、`delay_note`、`polarity`、`ceiling`、`delay_ms`、`feedback`。这个顺序同样是复算的，不是实测的：用例照同一个文件里 `GetParameterList` 的两步（先按 ID 排，再按 versionHint 稳定排序）重排参数；升级 JUCE 时与上面那段一起人工复核。插件自己的界面不受影响；宿主的通用参数列表在 AU 下按这个顺序显示。
 - 以后追加的参数 versionHint 必须大于此前任何版本里的最大值（第二次加参数用 2，再下一次用 3）：它们才会排在原有参数之后。versionHint 同为 1 的新参数会按散列插进原有参数中间，部分宿主里已存的自动化随之错位。
 - Output：没有参数树，也不自建参数。VST3 宿主只看到 JUCE 包装层加的旁路参数（`byps`）；AU 的旁路是宿主的旁路属性，不是参数。Input 在 VST3 下同样另有这个旁路参数，它不在上面的参数表里。两个插件都只有一个 program，VST3 包装层因此不建 program 参数。
 
@@ -112,15 +114,21 @@ T 是三连音（时值的 2/3），D 是附点（时值的 1.5 倍）。
 
 本契约在建立它的同一个 PR 里冻结。契约守卫按 base 上的 status 判，所以冻结那一次不需要变更文档；此后的 PR 只要碰到本文档、`tests/golden/params-input.json` 或 `ParamTable.h` 的 `RINNE_PARAM` 行，同一个 PR 要新增 `docs/contract-changes/<YYYYMMDD>-<slug>.md`，或在正文写 `contract-neutral: <理由>`。
 
-冻结面分两段生效。「正式发布」从第一个公开 rc（正式版的候选包）算起，测试版与预览包都在它之前：
+**11 个参数的 ID 任何时候都不改**，不分正式发布之前还是之后（插件身份与参数 ID 永不改，是仓内 `CLAUDE.md` 的冻结契约一节写明的）。理由：宿主按 ID 存工程与自动化，测试版与预览包也会被人存进工程，ID 一改旧工程就对不上。这一条没有变更流程可走，下面的两段都管不到它。
 
-- **正式发布之前**：下面的冻结面仍可调整，但照冻结流程走：同一个 PR 附变更文档、CHANGELOG 写明，并改 `contract-static-params` 里写死的冻结面（基础设施，由维护者批准）。测试版存下的工程与自动化可能因此对不上，变更文档与 CHANGELOG 要写清对不上的是哪些。
-- **正式发布之后**：冻结面永不改。碰到冻结面的 PR 另加 `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。
+冻结面的其余部分分两段生效。「正式发布」从第一个公开 rc（正式版的候选包）算起，测试版与预览包都在它之前：
 
-**冻结面**（`contract-static-params` 写死核对，宏表与 golden 各核一遍）：
+- **正式发布之前**：下面「冻结面的其余部分」仍可调整，但照冻结流程走：同一个 PR 附变更文档、CHANGELOG 写明，并改 `contract-static-params` 里写死的冻结面（基础设施，由维护者批准）。测试版存下的工程与自动化可能因此对不上，变更文档与 CHANGELOG 要写清对不上的是哪些。
+- **正式发布之后**：冻结面（含参数 ID）永不改。碰到冻结面的 PR 另加 `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。
 
-- 11 个参数的 ID、序号与类型；不删参数，新参数只追加在末尾；
-- versionHint 是 1；追加的参数用更大的 versionHint；
+**永不改的冻结面：参数 ID**（`contract-static-params` 写死核对，宏表与 golden 各核一遍）：
+
+- 11 个参数的 ID。不改 ID、不删参数，新参数只追加在末尾。
+
+**冻结面的其余部分**（正式发布之后永不改，之前照上面的流程可调；同样由 `contract-static-params` 写死核对，宏表与 golden 各核一遍）：
+
+- 11 个参数的序号与类型；
+- versionHint 对全部参数都是 1；追加的参数用更大的 versionHint。机检现在只到哪一步见「真源与检查」；
 - 两个档位参数已有档位的桥 id 与先后；新档只追加在末尾；
 - 可自动化的 6 个参数（`feedback`、`loop_on`、`mix`、`low_cut`、`high_cut`、`polarity`）仍可自动化，连续的 4 个范围与刻度不变：宿主按归一化值记自动化，范围或刻度一变，已录的自动化就走样。
 
@@ -138,5 +146,6 @@ T 是三连音（时值的 2/3），D 是附点（时值的 1.5 倍）。
 ## 真源与检查
 
 - [`src/input/ParamTable.h`](../../src/input/ParamTable.h)：宏表，参数层与测试都从它展开。
-- [`tests/golden/params-input.json`](../../tests/golden/params-input.json)：每个参数一行、键序固定；顶层的 `status` 与本文档的 status 行一致。`rinne_core_tests` 把宏表渲染成规范文本与它逐字节比（设 `RINNE_PARAMS_GOLDEN_REGEN=1` 跑 `[golden]` 用例重新生成）；`rinne_params_tests` 真建 JUCE 参数对象取宿主 ID 与它比。
+- [`tests/golden/params-input.json`](../../tests/golden/params-input.json)：每个参数一行、键序固定；顶层的 `status` 与本文档的 status 行一致。`rinne_core_tests` 把宏表渲染成规范文本与它逐字节比（设 `RINNE_PARAMS_GOLDEN_REGEN=1` 跑 `[golden]` 用例重新生成）；`rinne_params_tests` 真建 JUCE 参数对象：VST3 一列经 JUCE 的函数实测后与它比，AU 一列与 AU 列表顺序按 JUCE 8.0.8 的 AU 包装层复算后与它比（复算，升级 JUCE 时人工复核，见「宿主参数 ID」）。
 - `contract-static-params`（`node scripts/run-checks.mjs --only contract-static-params`）：不编译，读宏行比 golden，读本文档的两种表与 status 行比 golden，另核写死的冻结面。每条判据有名字，`--self-test` 的每个坏样例写明要触发哪几条并核对每条判据都被点名；`--mutation-check` 证明改一个默认值、改一个 ID、调换两档时值、golden 与本文档的 status 不一致都会变红。
+- versionHint 现在机检到的范围：golden 顶层只有一个 `versionHint` 值，`contract-static-params` 核它等于 1，`rinne_core_tests` 核同一个值；`rinne_params_tests` 里的参数是用例自己建的，用常量 1 作 versionHint 并核对每个参数的 `getVersionHint()`，不是读 golden 的值，也不是生产代码里的参数布局（宏表与 golden 都没有逐参数的 versionHint 一栏）。生产代码的参数树布局（`InputParams`）还没有写，落地的那个 PR 要加用例：真实参数树里每个参数的 `ParameterID` 的 versionHint 都等于 golden 的值。在那之前，「versionHint 对全部参数都是 1」只有上述范围内有机检，逐参数没有。

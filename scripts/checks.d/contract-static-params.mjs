@@ -12,8 +12,10 @@
 //   - 契约文档：status 行读得出，且与 golden 顶层的 status 相同；参数表（<!-- table:params --> 之后那张）与每个
 //     档位参数的档位表（<!-- table:choices:<id> --> 之后那张）逐行等于 golden；
 //   - 冻结面（写死在本文件的 FROZEN 里，不随 golden 改，宏表与 golden 各核一遍）：11 个参数的 ID、序号与类型，
-//     versionHint 是 1，两个档位参数已有档位的桥 id 与先后（只能在末尾追加），可自动化参数仍可自动化、范围与刻度不变。
-//     正式发布之后冻结面永不改；之前要改，同一个 PR 改 FROZEN（本文件是基础设施，维护者批准）并附变更文档。
+//     golden 顶层的 versionHint 是 1（逐参数的 versionHint 这里没有核：宏表与 golden 没有这一栏，真实参数树的核对
+//     由参数树布局落地的那个 PR 加用例），两个档位参数已有档位的桥 id 与先后（只能在末尾追加），可自动化参数仍可自动化、
+//     范围与刻度不变。参数 ID 任何时候都不改；其余冻结面正式发布之后永不改，之前要改，同一个 PR 改 FROZEN
+//     （本文件是基础设施，维护者批准）并附变更文档。
 //     其余字段（默认、显示名、步进、单位、不可自动化参数的范围与刻度）改了不在这里拦：冻结之后改它们由契约守卫要求
 //     同一个 PR 带变更文档。
 // 每条判据有一个名字（RULES），报错行以 [名字] 开头。--self-test 的每个坏样例写明它必须触发哪几条判据，并核对每条
@@ -72,7 +74,7 @@ const NOTES = [
     "n1",
 ];
 /**
- * 冻结面（正式发布之后永不改；之前要改，同一个 PR 改这里并附变更文档）。序号就是数组下标；choices 是已有档位的桥 id（新档只能接在后面）；写了 lo / hi / skew 的是可自动化参数
+ * 冻结面。参数 ID 任何时候都不改；其余各项正式发布之后永不改，之前要改，同一个 PR 改这里并附变更文档。序号就是数组下标；choices 是已有档位的桥 id（新档只能接在后面）；写了 lo / hi / skew 的是可自动化参数
  * （宿主按归一化值记自动化，范围或刻度一变，已录的自动化就走样），它们也不许改成不可自动化。
  */
 const FROZEN = [
@@ -130,8 +132,8 @@ export const RULES = {
     "golden-status-doc": "golden 的 status 等于契约文档的 status 行",
     "doc-table": "契约文档的参数表逐行等于 golden",
     "doc-choices": "契约文档每个档位参数的档位表逐行等于 golden",
-    "frozen-param": "冻结面上的参数：ID、序号与类型不变",
-    "frozen-hint": "versionHint 是 1",
+    "frozen-param": "冻结面上的参数：ID（任何时候都不改）、序号与类型不变",
+    "frozen-hint": "golden 顶层的 versionHint 是 1（逐参数的 versionHint 没有这一栏，不在这里核）",
     "frozen-choice": "档位参数已有档位的桥 id 与先后不变，新档只能追加在末尾",
     "frozen-automation": "可自动化的参数仍可自动化，范围与刻度不变",
 };
@@ -850,7 +852,7 @@ export default {
         const errors = checkParams(inputsOf(ctx.root));
         if (errors.some((e) => e.startsWith("[frozen-")))
             errors.push(
-                `冻结面写死在 ${SELF} 的 FROZEN 里：正式发布之前确要改，同一个 PR 改 FROZEN 并附变更文档，见 ${DOC} 的冻结规则`,
+                `冻结面写死在 ${SELF} 的 FROZEN 里。参数 ID 任何时候都不改；其余各项正式发布之前确要改，同一个 PR 改 FROZEN 并附变更文档，见 ${DOC} 的冻结规则`,
             );
         return { ok: errors.length === 0, lines: errors };
     },
