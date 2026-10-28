@@ -4,7 +4,8 @@
 //   全局位    语言、规则确认、引导已看、缩放档位存同一份存储，Input 与 Output 两个会话共享；?fresh=1 先清空；
 //             存储里被写坏的值（类型不对、未知键）读出来时被丢掉，不会带进状态；每实例的已关闭提示不进全局位；
 //   外链      openExternal 只放行 https 的 synchain.ca 与本项目的 github.com 路径；
-//   诊断      copyDiagnostics(false) 只给预览不写剪贴板，输出只含白名单字段，不含路径、邮箱和主机名；
+//   诊断      copyDiagnostics(false) 只给预览不写剪贴板；文本是 rinne-diag v1 的分节形态（第一行格式标识、每节一行、
+//             最近事件段、末行 ui 段），用到的名字都在白名单里，Output 只有字段子集，不含路径、邮箱和主机名；
 //   参数      setParam 夹取与校验（越界夹到边界、类型不符拒绝、未知 ID 拒绝，步进量化），setLimiter 等价于 limiter 参数；
 //   预设      工厂预设 8 个，载入不改 loop_on、limiter、ceiling；保存名去控制字符、限 24 个字符、重名要 overwrite；
 //   场景      ?scenario= 不走原型链，未知场景、窗口不符、目录格都只告警，按默认态打开；
@@ -21,9 +22,12 @@ const run = createRun("mock 行为");
 const u = (p) => pathToFileURL(path.join(ROOT, p)).href;
 
 const { createPreviewSession } = await import(u("web-preview/mock/state-driver.js"));
-const { memoryStorage, isAllowedExternal, UI_DEFAULTS_KEY } = await import(u("web-preview/mock/bridge-common.js"));
+const { buildDiagnostics, diagNamesOf, memoryStorage, isAllowedExternal, previewDiagValues, UI_DEFAULTS_KEY } =
+    await import(u("web-preview/mock/bridge-common.js"));
 const { cleanPresetName, coerceParam } = await import(u("web-preview/mock/bridge-input.js"));
-const { DIAG_KEYS, FACTORY_PRESETS, PARAM_DEFS, PRESET_NAME_MAX } = await import(u("web-preview/mock/contract.js"));
+const { DIAG_INPUT_ONLY_SECTIONS, DIAG_KEYS, FACTORY_PRESETS, PARAM_DEFS, PRESET_NAME_MAX } = await import(
+    u("web-preview/mock/contract.js")
+);
 const { DESIGN } = await import(u("web/shared/design-box.js"));
 
 const stores = () => ({ local: memoryStorage(), session: memoryStorage() });
@@ -104,19 +108,109 @@ for (const [url, want] of [
 }
 
 // ---- 诊断 ----
-{
-    const s = open("input", "auto=0", stores());
+const sectionOf = (name) => name.slice(0, name.indexOf("."));
+for (const role of ["input", "output"]) {
+    const s = open(role, "auto=0", stores());
+    s.model.pair.state = "connected"; // 有对端时 peer 一节才有字段
     const peek = s.mock.copyDiagnostics(false);
-    run.check(peek.ok && peek.copied === false, "诊断：预览不写剪贴板");
-    const keys = peek.text.split("\n").map((l) => l.split("=")[0]);
+    run.check(peek.ok && peek.copied === false, `诊断（${role}）：预览不写剪贴板`);
+    const names = diagNamesOf(peek.text);
+    const stray = names.filter((k) => !DIAG_KEYS.includes(k));
+    run.check(names.length > 0 && stray.length === 0, `诊断（${role}）：只含白名单字段，越界的有 ${stray.join("、")}`);
+    run.eq(new Set(names).size, names.length, `诊断（${role}）：名字不重复`);
+    run.check(!/[A-Za-z]:[\\/]|@|\bUsers\b/.test(peek.text), `诊断（${role}）：不含路径、邮箱和用户目录`);
+    run.check(peek.text.startsWith("rinne-diag v1\n"), `诊断（${role}）：第一行是格式标识`);
+    const lines = peek.text.trimEnd().split("\n");
+    run.check(/^ui: webview=\S+ scale=\S+ lang=\S+$/.test(lines[lines.length - 1]), `诊断（${role}）：末行是 ui 段`);
+    const head = lines.findIndex((l) => /^events\(last \d+ of \d+\):$/.test(l));
+    const shown = head < 0 ? -1 : Number(/last (\d+)/.exec(lines[head])[1]);
     run.check(
-        keys.length > 0 && keys.every((k) => DIAG_KEYS.includes(k)),
-        `诊断：只含白名单字段，实得 ${keys.join("、")}`,
+        head >= 0 &&
+            shown <= 64 &&
+            lines.slice(head + 1, -1).every((l) => l.startsWith("  t+")) &&
+            lines.length === head + shown + 2,
+        `诊断（${role}）：事件段的条数与标题一致且不超过 64 条`,
     );
-    run.check(!/[A-Za-z]:[\\/]|@|\bUsers\b/.test(peek.text), "诊断：不含路径、邮箱和用户目录");
-    run.check(peek.text.startsWith("diag.format=rinne-diag v1"), "诊断：第一行是格式标识");
-    run.check(s.mock.copyDiagnostics(true).copied === true, "诊断：确认后才写剪贴板");
+    const allInputOnly = DIAG_KEYS.filter((k) => DIAG_INPUT_ONLY_SECTIONS.includes(sectionOf(k)));
+    const inputOnly = names.filter((k) => DIAG_INPUT_ONLY_SECTIONS.includes(sectionOf(k)));
+    if (role === "input") run.eq(inputOnly, allInputOnly, "诊断（input）：loop、sync、order、safety 四节齐全");
+    else run.eq(inputOnly, [], "诊断（output）：只有字段子集，没有 loop、sync、order、safety");
+    const expected = DIAG_KEYS.filter((k) => role === "input" || !allInputOnly.includes(k));
+    run.eq(
+        names,
+        expected,
+        `诊断（${role}）：有对端时名字与白名单（${role === "input" ? "全集" : "子集"}）逐项一致、顺序相同`,
+    );
+    if (role === "input") {
+        // 取值与 core 的生成器一致：time 档写成 ms，不照抄 delay_mode 参数的取值
+        const modes = ["time", "sync"].map((m) => {
+            s.model.values.delay_mode = m;
+            return /\bloop: [^\n]*\bmode=(\S+)/.exec(s.mock.copyDiagnostics(false).text)?.[1];
+        });
+        run.eq(modes, ["ms", "sync"], "诊断（input）：loop.mode 的取值是 ms 或 sync");
+    }
+    run.check(s.mock.copyDiagnostics(true).copied === true, `诊断（${role}）：确认后才写剪贴板`);
+    s.model.pair.state = "searching";
+    run.check(
+        s.mock.copyDiagnostics(false).text.includes("\npeer: none\n"),
+        `诊断（${role}）：没有对端时 peer 一行写 none`,
+    );
+    // track.relation 与 core 的 buildDiagReport 一致：有对端按核验结果写，没有对端固定写 unknown（核验结果不作数）
+    const relationOf = () => /\btrack: relation=(\S+)/.exec(s.mock.copyDiagnostics(false).text)?.[1];
+    const relations = [];
+    for (const verify of ["match", "diff"]) {
+        s.model.pair.verify = verify;
+        s.model.pair.state = "connected";
+        relations.push(relationOf());
+        s.model.pair.state = "searching"; // 切到没有对端的场景，verify 还留着上一次的结果
+        relations.push(relationOf());
+    }
+    run.eq(
+        relations,
+        ["same", "unknown", "different", "unknown"],
+        `诊断（${role}）：没有对端时 track.relation 写 unknown，不沿用上一次的核验结果`,
+    );
     s.stop();
+}
+
+// 诊断值里的换行、等号和路径字符会被清洗：不能另起一行、冒充键，也不会带出路径或邮箱
+{
+    const o = open("output", "auto=0", stores());
+    const base = previewDiagValues("output", o.model, o.core);
+    const dirty = buildDiagnostics("output", {
+        ...base,
+        "product.host": "D:\\work\\x user=evil",
+        "product.os": "Jane Doe D:\\Projects\\Jane Doe\\Cubase\\x",
+        "backend.group": "A\nfake: x=1",
+        "backend.prefix": "Snch Rinne$#",
+        "backend.pid": "1\n evil=2",
+        "blocks.zero_len": " \n ",
+        "track.relation": "me@example.invalid",
+    });
+    o.stop();
+    const stray = diagNamesOf(dirty).filter((k) => !DIAG_KEYS.includes(k));
+    run.eq(stray, [], "诊断：值里的换行与等号不能另起一行或冒充键");
+    run.check(!/[A-Za-z]:[\\/]|@/.test(dirty), "诊断：值里的路径和邮箱字符被清洗");
+    // 与 core 的 sanitizeText 同一规则：任何片段带 / \ : @ ~ % 就整串写 none，目录名与前面的词都不留在文本里
+    const fieldOf = (text, key) => new RegExp(`(?:^| )${key}=([^\n]*?)(?= [a-z][a-z0-9_]*=|$)`, "m").exec(text)?.[1];
+    const field = (key) => fieldOf(dirty, key);
+    run.eq(
+        ["host", "os", "group", "relation"].map(field),
+        ["none", "none", "none", "none"],
+        "诊断：带路径、冒号或 @ 的值整串写 none",
+    );
+    // 六个拒收字符各自单独就够：片段里只有这一个字符，也整串写 none
+    for (const c of ["/", "\\", ":", "@", "~", "%"]) {
+        const one = buildDiagnostics("output", { ...base, "product.host": `Jane Doe${c}x` });
+        run.eq([fieldOf(one, "host"), /Jane|Doe/.test(one)], ["none", false], `诊断：值里有 ${c} 整串写 none`);
+    }
+    run.check(!/work|Jane|Doe|Projects|Cubase|fake|example/.test(dirty), "诊断：路径里的目录名与前面的词不留在文本里");
+    // 没有拒收字符时才逐字符替换：不合规字符与等号写 _，空白（含换行）折成单个空格
+    run.eq(
+        [field("prefix"), field("pid"), field("zero_len")],
+        ["Snch Rinne__", "1 evil_2", "none"],
+        "诊断：不带拒收字符的值逐字符清洗，等号写成下划线；清空了写 none",
+    );
 }
 
 // ---- 参数 ----

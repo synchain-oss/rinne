@@ -5,7 +5,14 @@
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据。
 
 import { GROUPS } from "./contract.js";
-import { buildDiagnostics, commonFunctions, createCore, memoryStorage } from "./bridge-common.js";
+import {
+    buildDiagnostics,
+    commonFunctions,
+    createCore,
+    memoryStorage,
+    previewDiagEvents,
+    previewDiagValues,
+} from "./bridge-common.js";
 
 export const FUNCTIONS = [
     "requestInitialState",
@@ -88,22 +95,9 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         licenseShown: false,
         clipboard: null,
         opened: null,
+        // Output 只输出字段子集：没有 loop、sync、order、safety 四节
         diagnostics: () =>
-            buildDiagnostics({
-                "diag.format": "rinne-diag v1",
-                "diag.version": model.version,
-                "diag.role": "output",
-                "diag.os": "preview",
-                "diag.host": model.host,
-                "diag.sample_rate": model.sampleRate,
-                "diag.block_size": model.blockSize,
-                "diag.group": model.group,
-                "diag.pair_state": model.pair.state,
-                "diag.track_relation": model.pair.verify,
-                "diag.lang": model.lang ?? core.ui.lang,
-                "diag.ui_scale": model.scale,
-                "diag.webview": "preview",
-            }),
+            buildDiagnostics("output", previewDiagValues("output", model, core), previewDiagEvents(model)),
     };
     const common = commonFunctions(core, env);
 

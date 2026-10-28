@@ -97,8 +97,11 @@ const NETWORK_CALLS = /\b(?:fetch|sendBeacon|XMLHttpRequest|WebSocket|EventSourc
 
 /**
  * 协议相对地址（//host/…）：属性、url()、@import、srcset 多地址、meta refresh 与 JS 字符串里的形态。
- * 盲区：反斜杠写法、HTML 实体写法、运行时拼出来的名字或地址，静态扫描不处理，由页面冒烟里
- * Network.requestWillBeSent 的同源断言兜底。
+ * 盲区，静态扫描不处理，由页面冒烟里 Network.requestWillBeSent 的同源断言兜底：
+ *   - 反斜杠写法、HTML 实体写法、运行时拼出来的名字或地址；
+ *   - 多行写法里地址落在行首（srcset 换行后的第二个地址、url( 换行后的地址）：textProblems 先剥掉整行 // 注释，
+ *     这样的行会被当成注释吃掉，下面的判据看不到它；
+ *   - 不带引号的 srcset（第二个及之后的地址）和不带引号的 meta content：判据里这两条都要求引号。
  */
 const PROTOCOL_RELATIVE = [
     /\b(?:src|href|action|poster|formaction|srcset|data)\s*=\s*["']?\s*\/\//i,

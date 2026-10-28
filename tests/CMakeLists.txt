@@ -107,6 +107,12 @@ endif()
 # ctest 的 TIMEOUT 门禁：自测加实扫，都在 ctest 里跑，本机 gates、CI 的 build-win 与 core-sanitizers 因此同吃一份。
 # 实扫向 ctest 要它真正会跑的测试全集（--show-only=json-v1），含 discover_tests 之类后注册的，逐条要求 TIMEOUT 为正数。
 # 本机 gates 与两种 CI runner 都有 pwsh；找不到就是环境坏了，直接停下，不让门禁悄悄消失。
+# find_program 的结果进了缓存就不再找：pwsh 升级换了目录（商店版每次更新都换），缓存里的旧路径会让这两条变成 Not Run。
+# 记着的路径已经不在了就清掉重找（scripts/build.ps1 配置前也会清，并在配置后断言它指向存在的文件）。
+if(RINNE_PWSH AND NOT EXISTS "${RINNE_PWSH}")
+  message(STATUS "缓存里的 RINNE_PWSH（${RINNE_PWSH}）已经不在了，重新查找 pwsh")
+  unset(RINNE_PWSH CACHE)
+endif()
 find_program(RINNE_PWSH NAMES pwsh)
 if(NOT RINNE_PWSH)
   message(FATAL_ERROR "找不到 pwsh：ctest 的 TIMEOUT 门禁（scripts/check-ctest-timeouts.ps1）跑不起来。装 PowerShell 7 再配置")

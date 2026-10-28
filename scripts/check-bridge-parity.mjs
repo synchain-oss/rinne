@@ -2,12 +2,15 @@
 //
 // 桥契约四方对拍：docs/UI_BRIDGE.md、src/{input,output}/*BridgeApi.h、web/shared/bridge.js 的名表、
 // web-preview/mock 逐名相等。比的是名字集合：函数、事件、Input 参数 ID、配对状态、诊断字段白名单，
-// 另外对拍参数默认值与可自动化标记、配对状态的颜色分组。
+// 另外对拍参数默认值与可自动化标记、配对状态的颜色分组与产生者（仅 Output 的状态）、诊断字段的角色（仅 Input 的节）
+// 与顺序，以及 delay_note 的 16 档顺序（文档、mock、src/input/ParamTable.h 三方逐档相同，且按拍数严格升序）。
 //   - 文档里带 `<!-- names:<类> -->` 标记的表是机读真源（类：fn、ev、param、pair、diag），第一列的反引号名字就是名字；
 //   - 头文件按变量名前缀分类：kFn 函数、kEv 事件、kParam 参数、kPair 配对状态；变量名与字面量也要对得上；
 //   - bridge.js 读 BRIDGE_FUNCTIONS 与 BRIDGE_EVENTS 两张名表（纯字面量，不执行）；
 //   - mock 读 bridge-{input,output}.js 的 FUNCTIONS / EVENTS 与 contract.js 的常量，另外实例化一遍后端，
-//     查每个函数真的存在、每个事件在初始状态请求之后真的会发。
+//     查每个函数真的存在、每个事件在初始状态请求之后真的会发；两个角色的诊断文本真的只用文档名字表里的名字
+//     （Output 是子集），Input 的预览场景真的不会把配对态设成只属于 Output 的状态。
+// 诊断名字是「节名.键名」，另有 rinne-diag 与 events 两个整行名字，写法见 UI_BRIDGE.md 的诊断一节。
 // 任何一方多一项或少一项都是差异。
 //   node scripts/check-bridge-parity.mjs [--self-test]
 
@@ -24,6 +27,7 @@ const FILES = {
     mockInput: "web-preview/mock/bridge-input.js",
     mockOutput: "web-preview/mock/bridge-output.js",
     contract: "web-preview/mock/contract.js",
+    paramTable: "src/input/ParamTable.h",
 };
 
 const KINDS = ["fn", "ev", "param", "pair", "diag"];
@@ -126,8 +130,34 @@ export function parseContract(text) {
         param: arrayLiteral(text, "PARAM_IDS"),
         pair: arrayLiteral(text, "PAIR_STATES"),
         diag: arrayLiteral(text, "DIAG_KEYS"),
+        diagInputOnly: arrayLiteral(text, "DIAG_INPUT_ONLY_SECTIONS"),
+        pairOutputOnly: arrayLiteral(text, "PAIR_OUTPUT_ONLY"),
         colors,
     };
+}
+
+/** ParamTable.h：delay_note 的档位 ID，按索引排好；一条都读不到或索引不是 0..n-1 连续时返回 null。 */
+export function parseNoteTable(text) {
+    const rows = [...text.matchAll(/^\s*RINNE_CHOICE\(\s*delay_note\s*,\s*(\d+)\s*,\s*(\w+)\s*,/gm)].map((m) => [
+        Number(m[1]),
+        m[2],
+    ]);
+    if (rows.length === 0) return null;
+    rows.sort((a, b) => a[0] - b[0]);
+    return rows.every(([index], k) => index === k) ? rows.map((r) => r[1]) : null;
+}
+
+/** 文档参数表里 delay_note 一行写的档位顺序；没有这一行返回 null。 */
+function docNoteOrder(rows) {
+    const row = rows.find((r) => /^`delay_note`$/.test(r[0] || ""));
+    return row ? [...(row[1] || "").matchAll(/`(n\d+[td]?)`/g)].map((m) => m[1]) : null;
+}
+
+/** 档位 ID 的拍数：n<N> 是 1/N 音符，t 三连音乘 2/3，d 附点乘 3/2；一拍是四分音符。 */
+function noteBeats(id) {
+    const m = /^n(\d+)([td]?)$/.exec(id);
+    if (!m) return Number.NaN;
+    return (4 / Number(m[1])) * (m[2] === "t" ? 2 / 3 : m[2] === "d" ? 1.5 : 1);
 }
 
 // ---------------------------------------------------------------- 对拍
@@ -146,6 +176,120 @@ function diffSets(label, a, aName, b, bName, out) {
 }
 
 const uniq = (a) => [...new Set(a)];
+const nameOf = (cell) => /^`([^`]+)`$/.exec(cell || "")?.[1];
+
+/** delay_note 的 16 档顺序：文档、mock、ParamTable.h 三方逐档相同，且每一方都按拍数严格升序。 */
+export function delayNoteProblems(doc, mock, table) {
+    const out = [];
+    const lists = [
+        ["UI_BRIDGE.md", doc],
+        ["mock PARAM_DEFS", mock],
+        ["ParamTable.h", table],
+    ];
+    for (const [name, list] of lists) {
+        if (!list || list.length === 0) {
+            out.push(`delay_note 档位顺序：读不到 ${name} 里的档位表`);
+            continue;
+        }
+        for (let i = 1; i < list.length; i++) {
+            if (!(noteBeats(list[i - 1]) < noteBeats(list[i]))) {
+                out.push(
+                    `delay_note 档位顺序：${name} 的第 ${i} 档 ${list[i - 1]} 与第 ${i + 1} 档 ${list[i]} 不是按拍数严格升序`,
+                );
+                break;
+            }
+        }
+        if (table && list !== table && list.join() !== table.join()) {
+            out.push(`delay_note 档位顺序：${name} 是 ${list.join("、")}，ParamTable.h 是 ${table.join("、")}`);
+        }
+    }
+    return out;
+}
+
+/** 配对状态表的「产生者」栏：只能写「两端」或「仅 Output」，写「仅 Output」的集合要等于 mock 的 PAIR_OUTPUT_ONLY。 */
+export function pairProducerProblems(rows, mockOutputOnly, out) {
+    const docOutputOnly = [];
+    for (const r of rows) {
+        const id = nameOf(r[0]);
+        if (!id) continue;
+        if (r[2] === "仅 Output") docOutputOnly.push(id);
+        else if (r[2] !== "两端")
+            out.push(`配对状态 ${id} 的产生者栏要写「两端」或「仅 Output」，实得 ${r[2] ?? "（空）"}`);
+    }
+    diffSets("仅 Output 的配对状态", docOutputOnly, "UI_BRIDGE.md", mockOutputOnly, "mock/contract.js", out);
+}
+
+const DIAG_NAME = /^(?:rinne-diag|events|[a-z]+\.[a-z][a-z0-9_]*)$/;
+const diagSection = (name) => (name.includes(".") ? name.slice(0, name.indexOf(".")) : null);
+
+/**
+ * 诊断名字表的写法与角色栏：名字写成「节名.键名」（整行名字只有 rinne-diag 与 events）；角色栏只能写「两端」或「仅 Input」，
+ * 写「仅 Input」的集合要等于 mock 里属于 DIAG_INPUT_ONLY_SECTIONS 各节的名字；两边的顺序（文本里的出现顺序）相同。
+ */
+export function diagDocProblems(rows, mockNames, mockInputOnlySections, out) {
+    const docNames = [];
+    const docInputOnly = [];
+    for (const r of rows) {
+        const id = nameOf(r[0]);
+        if (!id) continue;
+        docNames.push(id);
+        if (!DIAG_NAME.test(id))
+            out.push(`诊断字段 ${id} 不是「节名.键名」的写法（整行名字只有 rinne-diag 与 events）`);
+        if (r[1] === "仅 Input") docInputOnly.push(id);
+        else if (r[1] !== "两端")
+            out.push(`诊断字段 ${id} 的角色栏要写「两端」或「仅 Input」，实得 ${r[1] ?? "（空）"}`);
+    }
+    if (!mockInputOnlySections) out.push("诊断字段：读不到 mock/contract.js 里的 DIAG_INPUT_ONLY_SECTIONS");
+    if (!mockNames || !mockInputOnlySections) return;
+    diffSets(
+        "仅 Input 的诊断字段",
+        docInputOnly,
+        "UI_BRIDGE.md",
+        mockNames.filter((n) => mockInputOnlySections.includes(diagSection(n))),
+        "mock/contract.js（DIAG_INPUT_ONLY_SECTIONS 各节）",
+        out,
+    );
+    if (
+        docNames.length === mockNames.length &&
+        sorted(docNames).join() === sorted(mockNames).join() &&
+        docNames.join() !== mockNames.join()
+    ) {
+        out.push("诊断字段：UI_BRIDGE.md 与 mock/contract.js 的名字相同，顺序不同（顺序即文本里的出现顺序）");
+    }
+}
+
+/**
+ * 一份 mock 诊断文本相对文档名字表的问题。namesOf 是 bridge-common.js 的 diagNamesOf。
+ * 文本里出现表外的名字、Output 出现仅 Input 的名字、（有对端的状态下）缺了本角色该有的名字，
+ * 或不是以 rinne-diag v1 开头、以 ui 段收尾，都算问题。
+ */
+export function diagTextProblems(role, text, rows, namesOf, label = `mock ${role} 后端`) {
+    const out = [];
+    const want = rows.filter((r) => nameOf(r[0]) && (role === "input" || r[1] !== "仅 Input")).map((r) => nameOf(r[0]));
+    const got = namesOf(text);
+    for (const n of uniq(got)) if (!want.includes(n)) out.push(`${label}的诊断文本里有名字表之外的 ${n}`);
+    for (const n of want) if (!got.includes(n)) out.push(`${label}的诊断文本（有对端时）缺 ${n}`);
+    if (!text.startsWith("rinne-diag v1\n")) out.push(`${label}的诊断文本第一行不是 rinne-diag v1`);
+    if (!/(?:^|\n)ui: [^\n]*\n$/.test(text)) out.push(`${label}的诊断文本末行不是 ui 段`);
+    return out;
+}
+
+/**
+ * Input 的预览场景不得把配对态设成只属于 Output 的状态。items：{ id, pair } 数组（pair 是场景套用后的配对态）。
+ * 没有可查的对象（一个 Input 场景都没有，或 mock 没导出 PAIR_OUTPUT_ONLY 数组）也算问题，免得判据空跑通过。
+ */
+export function outputOnlyPairProblems(items, outputOnly) {
+    const out = [];
+    if (!items.length) out.push("预览场景里没有一个 Input 场景，Output 专有配对态的检查没有对象");
+    if (!Array.isArray(outputOnly)) {
+        out.push("mock/contract.js 没有导出 PAIR_OUTPUT_ONLY 数组");
+        return out;
+    }
+    for (const { id, pair } of items) {
+        if (outputOnly.includes(pair)) out.push(`Input 场景 ${id} 的配对态是只属于 Output 的 ${pair}`);
+    }
+    return out;
+}
 
 /**
  * 纯文本对拍。src：{ doc, headerInput, headerOutput, bridge, mockInput, mockOutput, contract } 都是文件内容；
@@ -190,6 +334,15 @@ export function compare(src, defs) {
     // 与角色无关的集合：配对状态、诊断字段、Input 参数
     diffSets("配对状态", get("common", "pair").names, "UI_BRIDGE.md", contract.pair, "mock/contract.js", out);
     diffSets("诊断字段", get("common", "diag").names, "UI_BRIDGE.md", contract.diag, "mock/contract.js", out);
+    diagDocProblems(get("common", "diag").rows, contract.diag, contract.diagInputOnly, out);
+    pairProducerProblems(get("common", "pair").rows, contract.pairOutputOnly, out);
+    out.push(
+        ...delayNoteProblems(
+            docNoteOrder(get("input", "param").rows),
+            defs?.delay_note?.values ?? null,
+            parseNoteTable(src.paramTable),
+        ),
+    );
     diffSets("Input 参数", get("input", "param").names, "UI_BRIDGE.md", contract.param, "mock/contract.js", out);
     diffSets(
         "Input 参数",
@@ -227,8 +380,11 @@ export async function runtimeProblems(root = ROOT) {
     const url = (p) => pathToFileURL(path.join(root, p)).href;
     const { createInputBackend, FUNCTIONS: inFn, EVENTS: inEv, coerceParam } = await import(url(FILES.mockInput));
     const { createOutputBackend, FUNCTIONS: outFn, EVENTS: outEv } = await import(url(FILES.mockOutput));
-    const { PARAM_DEFS, PARAM_IDS } = await import(url(FILES.contract));
+    const { PARAM_DEFS, PARAM_IDS, PAIR_OUTPUT_ONLY } = await import(url(FILES.contract));
     const { createPreviewSession } = await import(url("web-preview/mock/state-driver.js"));
+    const { diagNamesOf } = await import(url("web-preview/mock/bridge-common.js"));
+    const { SCENES } = await import(url("web-preview/mock/scenarios.js"));
+    const diagRows = parseDoc(fs.readFileSync(path.join(root, FILES.doc), "utf8")).common?.diag?.rows ?? [];
 
     for (const [role, make, fns, evs] of [
         ["input", createInputBackend, inFn, inEv],
@@ -244,7 +400,16 @@ export async function runtimeProblems(root = ROOT) {
         }
         if (JSON.stringify(sorted(b.core.events)) !== JSON.stringify(sorted(evs)))
             out.push(`mock ${role} 后端的事件表与导出不一致`);
+        // 诊断文本：有对端的状态下，名字与文档名字表里本角色的名字逐项相同（Output 是子集）
+        b.model.pair.state = "connected";
+        out.push(...diagTextProblems(role, b.mock.copyDiagnostics(false).text, diagRows, diagNamesOf));
     }
+    // Input 的预览场景套用后，配对态不得是只属于 Output 的状态
+    const inputScenes = SCENES.filter((sc) => sc.role === "input").map((sc) => {
+        const sess = createPreviewSession({ role: "input", params: `scenario=${sc.id}` });
+        return { id: sc.id, pair: sess.model.pair.state };
+    });
+    out.push(...outputOnlyPairProblems(inputScenes, PAIR_OUTPUT_ONLY));
     for (const id of PARAM_IDS) {
         const d = PARAM_DEFS[id];
         if (!d || coerceParam(id, d.def) !== d.def) out.push(`参数 ${id} 的默认值过不了自己的夹取`);
@@ -282,6 +447,12 @@ function drop(text, needle) {
     return text.slice(0, i) + text.slice(i + needle.length);
 }
 
+const swap = (list, i, j) => {
+    const out = [...list];
+    [out[i], out[j]] = [out[j], out[i]];
+    return out;
+};
+
 export async function selfTest(root = ROOT) {
     const src = loadSources(root);
     const { PARAM_DEFS } = await import(pathToFileURL(path.join(root, FILES.contract)).href);
@@ -302,7 +473,7 @@ export async function selfTest(root = ROOT) {
     add("文档删一个事件", true, (s) => dropRow(s, "rinne\\.pair"));
     add("文档删一个参数", true, (s) => dropRow(s, "polarity"));
     add("文档删一个配对状态", true, (s) => dropRow(s, "stale"));
-    add("文档删一个诊断字段", true, (s) => dropRow(s, "diag\\.os"));
+    add("文档删一个诊断字段", true, (s) => dropRow(s, "product\\.os"));
     add(
         "文档里 unassigned 的颜色改成琥珀",
         true,
@@ -353,7 +524,7 @@ export async function selfTest(root = ROOT) {
     add("mock 的 Input 后端少一个事件", true, (s) => (s.mockInput = drop(s.mockInput, '"rinne.presets"')));
     add("mock 少一个参数 ID", true, (s) => (s.contract = drop(s.contract, '"high_cut",')));
     add("mock 少一个配对状态", true, (s) => (s.contract = drop(s.contract, '"connectedStill",')));
-    add("mock 少一个诊断字段", true, (s) => (s.contract = drop(s.contract, '"diag.webview",')));
+    add("mock 少一个诊断字段", true, (s) => (s.contract = drop(s.contract, '"ui.webview",')));
     add(
         "mock 里 unassigned 的颜色改了",
         true,
@@ -367,6 +538,157 @@ export async function selfTest(root = ROOT) {
         ...PARAM_DEFS,
         delay_ms: { ...PARAM_DEFS.delay_ms, auto: true },
     });
+
+    // ---- 诊断名字表：写法、角色栏、顺序 ----
+    const docRow = (s, name) => new RegExp(`\\| \`${name}\` \\|[^\\n]*\\n`).exec(s.doc)[0];
+    add("文档多一个诊断字段", true, (s) => {
+        s.doc = s.doc.replace(docRow(s, "track\\.hash"), (r) => `${r}| \`track.extra\` | 两端 | 多出来的。 |\n`);
+    });
+    // 文档与 mock 同改：名字集合仍然相等，只有写法判据能查出来
+    add("文档与 mock 里诊断名字都没有节名", true, (s) => {
+        s.doc = s.doc.replace("| `track.hash` |", "| `track_hash` |");
+        s.contract = s.contract.replace('"track.hash",', '"track_hash",');
+    });
+    add("文档与 mock 里整行名字 events 都改成别的无点名字", true, (s) => {
+        s.doc = s.doc.replace("| `events` |", "| `event` |");
+        s.contract = s.contract.replace('"events",', '"event",');
+    });
+    add("文档里 loop.mode 的角色栏改成两端", true, (s) => {
+        s.doc = s.doc.replace(/(\| `loop\.mode` \| )仅 Input/, "$1两端");
+    });
+    add("文档里 track.hash 的角色栏改成仅 Input", true, (s) => {
+        s.doc = s.doc.replace(/(\| `track\.hash` \| )两端/, "$1仅 Input");
+    });
+    add("文档里诊断角色栏写了别的", true, (s) => {
+        s.doc = s.doc.replace(/(\| `track\.hash` \| )两端/, "$1仅 Output");
+    });
+    add("文档里诊断名字顺序与 mock 不同", true, (s) => {
+        const a = docRow(s, "track\\.relation");
+        const b = docRow(s, "track\\.hash");
+        s.doc = s.doc.replace(a + b, b + a);
+    });
+    add("mock 的仅 Input 节表少一节", true, (s) => (s.contract = drop(s.contract, '"order", ')));
+    add("mock 的仅 Input 节表多一节", true, (s) => {
+        s.contract = s.contract.replace(
+            '["loop", "sync", "order", "safety"]',
+            '["loop", "sync", "order", "safety", "peer"]',
+        );
+    });
+
+    // ---- 配对状态的产生者 ----
+    add("文档里 bypassed 的产生者改成两端", true, (s) => {
+        s.doc = s.doc.replace("| `bypassed` | gray | 仅 Output |", "| `bypassed` | gray | 两端 |");
+    });
+    add("文档里 connected 的产生者改成仅 Output", true, (s) => {
+        s.doc = s.doc.replace("| `connected` | green | 两端 |", "| `connected` | green | 仅 Output |");
+    });
+    add("文档里配对状态的产生者栏写了别的", true, (s) => {
+        s.doc = s.doc.replace("| `connected` | green | 两端 |", "| `connected` | green | Input |");
+    });
+    add("mock 的 PAIR_OUTPUT_ONLY 空了", true, (s) => {
+        s.contract = s.contract.replace('PAIR_OUTPUT_ONLY = ["bypassed"]', "PAIR_OUTPUT_ONLY = []");
+    });
+
+    // ---- delay_note 的 16 档顺序 ----
+    const OLD_NOTES = "n64,n32t,n32,n16t,n16,n16d,n8t,n8,n8d,n4t,n4,n4d,n2t,n2,n2d,n1".split(",");
+    const NEW_NOTES = PARAM_DEFS.delay_note.values;
+    const docOrderOf = (list) => list.map((n) => `\`${n}\``).join("、");
+    add("三方顺序一致且按拍数升序", false, () => {});
+    add("文档的 delay_note 换回音符族分组顺序", true, (s) => {
+        s.doc = s.doc.replace(docOrderOf(NEW_NOTES), docOrderOf(OLD_NOTES));
+    });
+    add("文档的 delay_note 少一档", true, (s) => {
+        s.doc = s.doc.replace(docOrderOf(NEW_NOTES), docOrderOf(NEW_NOTES.slice(0, -1)));
+    });
+    add("mock 的 delay_note 换回音符族分组顺序", true, () => {}, {
+        ...PARAM_DEFS,
+        delay_note: { ...PARAM_DEFS.delay_note, values: OLD_NOTES },
+    });
+    add("mock 的 delay_note 两档对调", true, () => {}, {
+        ...PARAM_DEFS,
+        delay_note: { ...PARAM_DEFS.delay_note, values: swap(NEW_NOTES, 5, 6) },
+    });
+    add("ParamTable.h 的 delay_note 两档对调", true, (s) => {
+        s.paramTable = s.paramTable
+            .replace("RINNE_CHOICE(delay_note, 5, n8t,", "RINNE_CHOICE(delay_note, 5, n16d,")
+            .replace("RINNE_CHOICE(delay_note, 6, n16d,", "RINNE_CHOICE(delay_note, 6, n8t,");
+    });
+    add("ParamTable.h 里读不到 delay_note", true, (s) => {
+        s.paramTable = s.paramTable.replace(/RINNE_CHOICE\(delay_note,/g, "RINNE_CHOICE(delay_notes,");
+    });
+    add("ParamTable.h 的 delay_note 索引有空档（末档的索引 15 改成 16，顺序不变）", true, (s) => {
+        s.paramTable = s.paramTable.replace("RINNE_CHOICE(delay_note, 15, n1,", "RINNE_CHOICE(delay_note, 16, n1,");
+    });
+    add(
+        "三方都改回音符族分组顺序（彼此一致，但不是按拍数严格升序）",
+        true,
+        (s) => {
+            s.doc = s.doc.replace(docOrderOf(NEW_NOTES), docOrderOf(OLD_NOTES));
+            let k = 0;
+            s.paramTable = s.paramTable.replace(
+                /RINNE_CHOICE\(delay_note, (\d+), (\w+),/g,
+                (_m, i) => `RINNE_CHOICE(delay_note, ${i}, ${OLD_NOTES[k++]},`,
+            );
+        },
+        { ...PARAM_DEFS, delay_note: { ...PARAM_DEFS.delay_note, values: OLD_NOTES } },
+    );
+
+    // ---- 运行期的两个纯判据：诊断文本、Input 场景的配对态 ----
+    const { diagNamesOf } = await import(pathToFileURL(path.join(root, "web-preview/mock/bridge-common.js")).href);
+    const { createInputBackend } = await import(pathToFileURL(path.join(root, FILES.mockInput)).href);
+    const { createOutputBackend } = await import(pathToFileURL(path.join(root, FILES.mockOutput)).href);
+    const diagRows = parseDoc(src.doc).common.diag.rows;
+    const textOf = (make) => {
+        const b = make({ opts: { autoInitial: false } });
+        b.model.pair.state = "connected";
+        return b.mock.copyDiagnostics(false).text;
+    };
+    const inText = textOf(createInputBackend);
+    const outText = textOf(createOutputBackend);
+    const addText = (label, bad, role, text) => {
+        const problems = diagTextProblems(role, text, diagRows, diagNamesOf);
+        cases.push({ label, bad, passed: bad ? problems.length > 0 : problems.length === 0 });
+    };
+    addText("Input 的诊断文本与名字表一致", false, "input", inText);
+    addText("Output 的诊断文本与名字表一致（子集）", false, "output", outText);
+    addText("Input 的诊断文本多一行表外的节", true, "input", inText.replace("\nui: ", "\nextra: x=1\nui: "));
+    addText("Input 的诊断文本多一个表外的键", true, "input", inText.replace(" hash=none", " hash=none user=x"));
+    addText("Input 的诊断文本少一节", true, "input", inText.replace(/\nsafety: [^\n]*/, ""));
+    addText(
+        "Output 的诊断文本里出现 loop 节",
+        true,
+        "output",
+        outText.replace("\nprepare: ", "\nloop: d_user_ms=100.000\nprepare: "),
+    );
+    // 名字一个不少，只是位置不对：格式标识不在第一行、ui 段不在末行
+    addText(
+        "诊断文本的格式标识不在第一行",
+        true,
+        "input",
+        inText.replace(/^rinne-diag v1\n([^\n]*\n)/, "$1rinne-diag v1\n"),
+    );
+    addText("诊断文本缺格式标识", true, "input", inText.replace("rinne-diag v1\n", ""));
+    addText(
+        "诊断文本的 ui 段不在末行",
+        true,
+        "input",
+        inText.replace(/(ui: [^\n]*\n)$/, "").replace("events(", `${/ui: [^\n]*\n$/.exec(inText)[0]}events(`),
+    );
+    addText("诊断文本缺 ui 段", true, "input", inText.replace(/ui: [^\n]*\n$/, ""));
+    addText("诊断文本把事件段标题写成别的样子", true, "input", inText.replace("events(last 4 of 4):", "events:"));
+    // opts.outputOnly 显式给 undefined 表示「没导出」，所以按键是否存在取默认值，不用解构默认值
+    const sceneCase = (label, bad, pair, opts = {}) => {
+        const list = opts.items ?? [
+            { id: "in-a", pair: "connected" },
+            { id: "in-b", pair },
+        ];
+        const problems = outputOnlyPairProblems(list, "outputOnly" in opts ? opts.outputOnly : ["bypassed"]);
+        cases.push({ label, bad, passed: bad ? problems.length > 0 : problems.length === 0 });
+    };
+    sceneCase("Input 场景的配对态都不是 Output 专有的", false, "connectedStill");
+    sceneCase("Input 场景的配对态是 bypassed", true, "bypassed");
+    sceneCase("一个 Input 场景都没有", true, null, { items: [] });
+    sceneCase("mock 没导出 PAIR_OUTPUT_ONLY", true, "connectedStill", { outputOnly: undefined });
     return caseResult(cases);
 }
 
