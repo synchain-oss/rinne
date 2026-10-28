@@ -274,9 +274,17 @@ export function diagTextProblems(role, text, rows, namesOf, label = `mock ${role
     return out;
 }
 
-/** Input 的预览场景不得把配对态设成只属于 Output 的状态。items：{ id, pair } 数组（pair 是场景套用后的配对态）。 */
+/**
+ * Input 的预览场景不得把配对态设成只属于 Output 的状态。items：{ id, pair } 数组（pair 是场景套用后的配对态）。
+ * 没有可查的对象（一个 Input 场景都没有，或 mock 没导出 PAIR_OUTPUT_ONLY 数组）也算问题，免得判据空跑通过。
+ */
 export function outputOnlyPairProblems(items, outputOnly) {
     const out = [];
+    if (!items.length) out.push("预览场景里没有一个 Input 场景，Output 专有配对态的检查没有对象");
+    if (!Array.isArray(outputOnly)) {
+        out.push("mock/contract.js 没有导出 PAIR_OUTPUT_ONLY 数组");
+        return out;
+    }
     for (const { id, pair } of items) {
         if (outputOnly.includes(pair)) out.push(`Input 场景 ${id} 的配对态是只属于 Output 的 ${pair}`);
     }
@@ -401,7 +409,7 @@ export async function runtimeProblems(root = ROOT) {
         const sess = createPreviewSession({ role: "input", params: `scenario=${sc.id}` });
         return { id: sc.id, pair: sess.model.pair.state };
     });
-    out.push(...outputOnlyPairProblems(inputScenes, PAIR_OUTPUT_ONLY ?? []));
+    out.push(...outputOnlyPairProblems(inputScenes, PAIR_OUTPUT_ONLY));
     for (const id of PARAM_IDS) {
         const d = PARAM_DEFS[id];
         if (!d || coerceParam(id, d.def) !== d.def) out.push(`参数 ${id} 的默认值过不了自己的夹取`);
@@ -668,16 +676,19 @@ export async function selfTest(root = ROOT) {
     );
     addText("诊断文本缺 ui 段", true, "input", inText.replace(/ui: [^\n]*\n$/, ""));
     addText("诊断文本把事件段标题写成别的样子", true, "input", inText.replace("events(last 4 of 4):", "events:"));
-    const sceneCase = (label, bad, pair) => {
-        const items = [
+    // opts.outputOnly 显式给 undefined 表示「没导出」，所以按键是否存在取默认值，不用解构默认值
+    const sceneCase = (label, bad, pair, opts = {}) => {
+        const list = opts.items ?? [
             { id: "in-a", pair: "connected" },
             { id: "in-b", pair },
         ];
-        const problems = outputOnlyPairProblems(items, ["bypassed"]);
+        const problems = outputOnlyPairProblems(list, "outputOnly" in opts ? opts.outputOnly : ["bypassed"]);
         cases.push({ label, bad, passed: bad ? problems.length > 0 : problems.length === 0 });
     };
     sceneCase("Input 场景的配对态都不是 Output 专有的", false, "connectedStill");
     sceneCase("Input 场景的配对态是 bypassed", true, "bypassed");
+    sceneCase("一个 Input 场景都没有", true, null, { items: [] });
+    sceneCase("mock 没导出 PAIR_OUTPUT_ONLY", true, "connectedStill", { outputOnly: undefined });
     return caseResult(cases);
 }
 
