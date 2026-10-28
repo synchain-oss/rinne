@@ -2,7 +2,8 @@
 //
 // 参数表测试的公用件：把 src/input/ParamTable.h 展开成可比较的表；读 tests/golden/params-input.json（规范排版：每个
 // 参数一行、键序固定，所以按行读，不需要完整的 JSON 解析器）；复算宿主参数 ID 的散列；按表渲染出 golden 的规范文本。
-// 参数表是草案，本文件不假定哪一项冻结：表和 golden 谁变了，对拍用例就变红。
+// 参数表已冻结，规则见 docs/contracts/PARAMETERS.md：表和 golden 谁变了，对拍用例就变红；冻结面另由
+// contract-static-params 写死核对。
 #pragma once
 
 #include <cmath>
@@ -172,11 +173,12 @@ inline std::string rowText(const Param& p)
     return row + " }";
 }
 
-// 表渲染成的 golden 全文（LF 换行）。versionHint 是 ParameterID 的版本号，目前所有参数都是 1
+// 表渲染成的 golden 全文（LF 换行）。status 与契约文档的 status 行一致（contract-static-params 核对）；
+// versionHint 是 ParameterID 的版本号，目前所有参数都是 1
 inline std::string renderGolden()
 {
     std::string text =
-        "{\n  \"status\": \"draft\",\n  \"versionHint\": 1,\n  \"count\": " + std::to_string(table().size()) + ",\n";
+        "{\n  \"status\": \"frozen\",\n  \"versionHint\": 1,\n  \"count\": " + std::to_string(table().size()) + ",\n";
     for (std::size_t i = 0; i < table().size(); ++i)
     {
         text += rowText(table()[i]) + (i + 1 < table().size() ? ",\n" : "\n");
