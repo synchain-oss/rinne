@@ -509,6 +509,18 @@ function docFunctionRow(docText, fn) {
         }
     }
 
+    // 反向：文档行里写的每个失败原因，登记表里也得有。表里漏登记一个，上面的正向核对就永远核对不到它
+    for (const fn of new Set(Object.values(REASON_FUNCTIONS).flat())) {
+        const row = docFunctionRow(doc, fn);
+        if (row === null) continue; // 上面已判红
+        const inDoc = [...new Set([...row.matchAll(/reason:\s*"([^"]+)"/g)].map((m) => m[1]))].sort();
+        const registered = Object.entries(REASON_FUNCTIONS)
+            .filter(([, fns]) => fns.includes(fn))
+            .map(([reason]) => reason)
+            .sort();
+        run.eq(inDoc, registered, `⑧ UI_BRIDGE.md 里 ${fn} 一行写的失败原因与本断言登记的不一致`);
+    }
+
     // mock 的行为：同一批原因，同样的函数
     const u = (f) => pathToFileURL(path.join(ROOT, f)).href;
     const { createPreviewSession } = await import(u("web-preview/mock/state-driver.js"));
@@ -594,7 +606,6 @@ function docFunctionRow(docText, fn) {
         run.check((cold.core.sent["rinne.state"] ?? 0) >= 1, `${role}：⑧ 面板撤掉后 requestInitialState 发首帧`);
     }
 }
-
 
 // ---------------------------------------------------------------- ⑨ 打包与接线
 // 嵌入、入口、工厂这三处都在插件目标里编，宿主测试编不到，写错了的症状是空白窗口加看门狗超时，
