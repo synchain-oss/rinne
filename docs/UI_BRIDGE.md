@@ -40,7 +40,7 @@ The bridge between the web UI and the native plugin: function names, event names
 | `setRulesAck` | `version`：非负整数 | `{ ok }` | 记下已确认的规则页版本，写全局位。 |
 | `setGuideSeen` | `true` | `{ ok }` | 记下本角色的引导已看，写全局位；Output 据此判断是否跳过自己的引导。 |
 | `setGroup` | `g`：`A` 到 `H` | `{ ok, group }` | 手动选组，之后永不自动迁组；`groupOrigin` 变为 `manual`。 |
-| `copyDiagnostics` | `commit`：布尔 | `{ ok, copied, text }` | `false` 只返回预览文本，`true` 才写剪贴板。文本只含下面的白名单字段。 |
+| `copyDiagnostics` | `commit`：布尔 | `{ ok, copied, text }` | `false` 只返回预览文本，`true` 才写剪贴板。文本是 `rinne-diag v1`，只含下面「诊断文本」一节名字表里的字段，末行 `ui:` 段已包含在 `text` 里。 |
 | `openExternal` | `url` | `{ ok }` | 原生侧解析后精确匹配：scheme 为 `https`，host 为 `synchain.ca`，或 host 为 `github.com` 且路径等于 `/synchain-oss/rinne` 或以 `/synchain-oss/rinne/` 开头。其余一律回 `{ ok: false, reason: "not-allowed" }`。 |
 | `setDiagLog` | `on`：布尔 | `{ ok, value }` | 诊断日志开关，本机设置，写全局位，不进工程。 |
 | `resolveTakeover` | `accept`：布尔 | `{ ok, accepted }` | 休眠实例占着本组时的确认条：`true` 接管，`false` 取消。没有待确认的接管回 `{ ok: false, reason: "no-pending" }`。 |
@@ -89,50 +89,115 @@ The bridge between the web UI and the native plugin: function names, event names
 
 ### 配对状态
 
-颜色分组：红是回送已停、被拒或不可用，需要用户动作；琥珀是仍在工作但有风险；灰是主动关闭、宿主暂停或离线；绿是已连接。`connectedStill` 表示已连接但回送静音，绿点不脉冲。`unassigned` 是 8 组已满，灯为红色，文案「未分组」，消息「没有空闲组，请手动选择」。`bypassed` 由 Output 的宿主旁路产生，Input 被宿主旁路时界面按 `bypassed` 显示。
+颜色分组：红是回送已停、被拒或不可用，需要用户动作；琥珀是仍在工作但有风险；灰是主动关闭、宿主暂停或离线；绿是已连接。`connectedStill` 表示已连接但回送静音，绿点不脉冲。`unassigned` 是 8 组已满，灯为红色，文案「未分组」，消息「没有空闲组，请手动选择」。`bypassed` 只由 Output 的宿主旁路产生（Output 写静音，回送为零），Input 的 `rinne.pair` 里不会出现它：Input 被宿主旁路时没有自己的配对状态，壳把旁路并入回送静音（`loopSilent`）：判定上已连接（`connected`）因此落在 `connectedStill`；`connectedUnverified` 不看回送静音，配对态保持 `connectedUnverified`，界面按回送静音停止脉冲；其余状态不受旁路影响。宿主旁路的提示走界面的消息条，不借用 `bypassed`。
 
 <!-- names:pair -->
 
-| 状态 | 颜色 | 含义 |
-|---|---|---|
-| `ipcUnavailable` | red | 共享内存不可用（宿主沙盒限制）。 |
-| `abiMismatch` | red | 两端版本不兼容。 |
-| `srMismatch` | red | 两端采样率不一致。 |
-| `conflict` | red | 组里已有另一个同角色实例（复制轨道造成）。Input 给「移到空闲组」，Output 给「重新配对」。 |
-| `unassigned` | red | 8 组已满，没有空闲组。 |
-| `stale` | amber | 失联：心跳陈旧超过 2 s 且 block_seq 静止 2 s 以上；离线导出期间不报。 |
-| `crossProcess` | amber | 对端在另一个进程里。 |
-| `crossTrack` | amber | 两端不在同一条轨道上。 |
-| `searching` | gray | 还没找到对端。 |
-| `waitingAudio` | gray | 宿主还没送实时音频（例如 Smart Plug-in Processing 挂起）。 |
-| `validator` | gray | 验证工具中，只出干声。 |
-| `bypassed` | gray | 宿主旁路。 |
-| `connectedUnverified` | green | 已连接，但宿主不给轨道名，无法核验。 |
-| `connected` | green | 已连接。 |
-| `connectedStill` | green | 已连接，回送静音。 |
+| 状态 | 颜色 | 产生者 | 含义 |
+|---|---|---|---|
+| `ipcUnavailable` | red | 两端 | 共享内存不可用（宿主沙盒限制）。 |
+| `abiMismatch` | red | 两端 | 两端版本不兼容。 |
+| `srMismatch` | red | 两端 | 两端采样率不一致。 |
+| `conflict` | red | 两端 | 组里已有另一个同角色实例（复制轨道造成）。Input 给「移到空闲组」，Output 给「重新配对」。 |
+| `unassigned` | red | 两端 | 8 组已满，没有空闲组。 |
+| `stale` | amber | 两端 | 失联：心跳陈旧超过 2 s 且 block_seq 静止 2 s 以上；离线导出期间不报。 |
+| `crossProcess` | amber | 两端 | 对端在另一个进程里。 |
+| `crossTrack` | amber | 两端 | 两端不在同一条轨道上。 |
+| `searching` | gray | 两端 | 还没找到对端。 |
+| `waitingAudio` | gray | 两端 | 宿主还没送实时音频（例如 Smart Plug-in Processing 挂起）。 |
+| `validator` | gray | 两端 | 验证工具中，只出干声。 |
+| `bypassed` | gray | 仅 Output | Output 被宿主旁路：写静音，回送为零。 |
+| `connectedUnverified` | green | 两端 | 已连接，但宿主不给轨道名，无法核验。 |
+| `connected` | green | 两端 | 已连接。 |
+| `connectedStill` | green | 两端 | 已连接，回送静音。 |
 
 ### 诊断文本（rinne-diag v1）
 
-`key=value` 逐行。下面是白名单，不在表里的字段一律不输出；文本不含路径、用户名和主机名，轨道名只以「相同 / 不同 / 未知」加 8 位散列出现。界面先用 `copyDiagnostics(false)` 取文本放进可滚动的预览区，用户确认后才调 `copyDiagnostics(true)`。
+文本由 core 的生成器（`src/core/diag/DiagReport.cpp`）一次生成，两个插件共用；格式以它和 `tests/core/diag` 的快照为准，这里登记的是名字表：不在表里的字段一律不输出。文本不含路径、用户名和主机名，轨道名只以 `same` / `different` / `unknown` 加自己这一端的 8 位散列出现。散列是指纹，不是匿名化，所以界面先用 `copyDiagnostics(false)` 取文本放进可滚动的预览区，用户确认后才调 `copyDiagnostics(true)`。
+
+文本的形态：
+
+- 第 1 行是固定文本 `rinne-diag v1`。
+- 之后每节一行，字段是空格分隔的 `key=value`，例如 `track: relation=same hash=1a2b3c4d`。`product`、`backend` 两行没有冒号，节名取该行的第一个键（`product=Rinne Input version=…`）。没有对端时 `peer` 一行整行写 `peer: none`，不产生字段。
+- 然后是最近事件段：标题行 `events(last N of M):`，其后每条事件一行，行首缩进两格（`  t+<秒>.<毫秒> <事件名>[ <参数>]`，参数是一个整数，或用斜杠连起来的两个整数，例如 `prepare 48000/512`）。
+- 末行是 `ui:` 段（`ui: webview=… scale=… lang=…`）。它不在 core 生成的文本里，由承载网页的原生界面层补在最后（WebView 版本、缩放档位、语言都在它手里），所以回执的 `text` 和写进剪贴板的内容都含这一行，页面不自己拼。补的字段只用固定名字表，或过与 core 同一套清洗。
+- Output 只输出字段子集：没有 `loop`、`sync`、`order`、`safety` 四节，即下表「角色」一栏写「仅 Input」的那些。
+
+名字的写法是 `<节名>.<键名>`，节名按上面的规则取（`track.hash`、`backend.group`、`product.product`），顺序与文本里的出现顺序一致。整行的名字有两个，不带点：`rinne-diag`（第一行）和 `events`（标题行加事件行合起来算一个）。
 
 <!-- names:diag -->
 
-| 字段 | 含义 |
-|---|---|
-| `diag.format` | 固定为 `rinne-diag v1`。 |
-| `diag.version` | 插件版本。 |
-| `diag.role` | `input` 或 `output`。 |
-| `diag.os` | 操作系统与版本。 |
-| `diag.host` | 宿主名与版本。 |
-| `diag.sample_rate` | 采样率。 |
-| `diag.block_size` | 当前块长。 |
-| `diag.group` | 组号。 |
-| `diag.pair_state` | 配对状态。 |
-| `diag.track_relation` | 两端轨道关系：相同、不同或未知。 |
-| `diag.track_hash` | 轨道名的 8 位散列。 |
-| `diag.lang` | 界面语言。 |
-| `diag.ui_scale` | 缩放档位。 |
-| `diag.webview` | WebView 版本。 |
+| 名字 | 角色 | 含义 |
+|---|---|---|
+| `rinne-diag` | 两端 | 第一行，固定文本 `rinne-diag v1`。 |
+| `product.product` | 两端 | 产品名：`Rinne Input` 或 `Rinne Output`（据此区分角色）。 |
+| `product.version` | 两端 | 插件版本。 |
+| `product.build` | 两端 | 构建标签。 |
+| `product.format` | 两端 | 插件格式：`VST3` 或 `AU`。 |
+| `product.host` | 两端 | 宿主名与版本，不是主机名。 |
+| `product.os` | 两端 | 操作系统与版本。 |
+| `product.arch` | 两端 | 处理器架构。 |
+| `backend.backend` | 两端 | 共享内存后端。 |
+| `backend.ipc_abi` | 两端 | 会合布局的 abi 版本号。 |
+| `backend.prefix` | 两端 | 共享内存段名前缀。 |
+| `backend.group` | 两端 | 组字母 `A` 到 `H`，没有组时为 `-`。 |
+| `backend.origin` | 两端 | 组号的来源：`none`、`smart`、`restore` 或 `manual`。 |
+| `backend.pid` | 两端 | 本进程号。 |
+| `backend.pair` | 两端 | 配对状态的机读标识，取值与 `rinne.pair` 的 `state` 是同一张表。 |
+| `track.relation` | 两端 | 两端轨道关系：`same`、`different` 或 `unknown`。 |
+| `track.hash` | 两端 | 本端轨道名的 8 位十六进制散列，宿主没给轨道名时为 `none`。散列是指纹，不是匿名化。 |
+| `peer.role` | 两端 | 对端角色：`input` 或 `output`。 |
+| `peer.state` | 两端 | 对端槽的状态：`active` 或 `dormant`。 |
+| `peer.same_pid` | 两端 | 对端是否在本进程：`1` 或 `0`。 |
+| `peer.version` | 两端 | 对端版本，`主.次.修`。 |
+| `peer.sr` | 两端 | 对端采样率。 |
+| `peer.max_block` | 两端 | 对端声明的最大块长。 |
+| `peer.ch` | 两端 | 对端声道数。 |
+| `peer.name` | 两端 | 对端轨道名关系：`same`、`different` 或 `unknown`。 |
+| `peer.hb_age_ms` | 两端 | 对端心跳的年龄，毫秒。 |
+| `prepare.count` | 两端 | prepare 调用次数。 |
+| `prepare.sr` | 两端 | 最近一次 prepare 的采样率。 |
+| `prepare.max` | 两端 | 最近一次 prepare 声明的最大块长。 |
+| `prepare.nonrealtime_seen` | 两端 | 是否见过离线渲染：`1` 或 `0`。 |
+| `prepare.setstate_before_prepare` | 两端 | setState 是否先于 prepare：`1` 或 `0`。 |
+| `prepare.reset_calls` | 两端 | reset 调用次数。 |
+| `blocks.total` | 两端 | 处理过的块数。 |
+| `blocks.zero_len` | 两端 | 0 样本的块数。 |
+| `blocks.over_max` | 两端 | 超过声明最大块长的块数。 |
+| `blocks.bypassed` | 两端 | 宿主旁路期间的块数。 |
+| `blocks.max_n_seen` | 两端 | 本次 prepare 以来见到的最大块长。 |
+| `nsamples.min` | 两端 | 最小块长。 |
+| `nsamples.max` | 两端 | 最大块长（终身）。 |
+| `nsamples.hist` | 两端 | 块长直方图，8 档计数，逗号分隔。 |
+| `loop.d_user_ms` | 仅 Input | 用户设定的环路延迟 D，毫秒。 |
+| `loop.d_eff` | 仅 Input | 实际使用的 D，样本。 |
+| `loop.d_min` | 仅 Input | D 的下限（随实测块长抬升），样本。 |
+| `loop.mode` | 仅 Input | 延迟模式：`ms`（按时间）或 `sync`（按拍）；`delay_mode` 参数的 `time` 在诊断文本里写成 `ms`。 |
+| `loop.bpm` | 仅 Input | 速度，拍/分钟。 |
+| `loop.bpm_src` | 仅 Input | 速度来源：`none`、`host` 或 `manual`。 |
+| `loop.taps_active` | 仅 Input | 当前活跃的读头数。 |
+| `loop.tap_drop` | 仅 Input | 累计丢掉的读头数。 |
+| `sync.resync` | 仅 Input | 累计重同步次数。 |
+| `sync.overflow` | 仅 Input | 被环覆盖而丢掉的帧数。 |
+| `sync.torn` | 仅 Input | 撕裂的帧数。 |
+| `sync.overrun` | 仅 Input | 补 0 的样本数。 |
+| `sync.w_cas_fail` | 仅 Input | 写头 CAS 失败次数。 |
+| `sync.unstable` | 仅 Input | 是否进过时序容忍模式：`0` 或 `1`，进过就不再清零。 |
+| `sync.off_drift_blocks` | 仅 Input | 漂移被吸收的检查次数。 |
+| `sync.frozen_max` | 仅 Input | 写头连续没动的最多块数。 |
+| `order.verdict` | 仅 Input | 两端处理顺序的判断：`unknown`、`correct` 或 `wrong`。 |
+| `order.votes` | 仅 Input | 顺序判断的票数。 |
+| `order.host_ns` | 仅 Input | 宿主时间戳是否可用：`valid` 或 `invalid`。 |
+| `safety.state` | 仅 Input | 安全状态机的名字，如 `RUN`、`TRIPPED`。 |
+| `safety.trips` | 仅 Input | 累计跳闸次数。 |
+| `safety.tail_peak_max_db` | 仅 Input | 读头输出（未经安全链）本会话的最大峰值，dBFS。 |
+| `safety.limiter_gr_max_db` | 仅 Input | 限制器增益缩减的最大值，dB。 |
+| `safety.nonfinite_ring` | 仅 Input | 写方写环前清洗掉的非有限样本数。 |
+| `safety.clamp_ring` | 仅 Input | 写方写环前被钳位的样本数。 |
+| `events` | 两端 | 最近事件段：标题行 `events(last N of M):`，N 不超过 64，之后每条事件一行。 |
+| `ui.webview` | 两端 | WebView 版本（`ui:` 段，界面补）。 |
+| `ui.scale` | 两端 | 缩放档位（`ui:` 段，界面补）。 |
+| `ui.lang` | 两端 | 界面语言（`ui:` 段，界面补）。 |
 
 ### 全局位
 
@@ -194,7 +259,7 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | `mix` | 0–100 %，g_dry = min(1, 2(1 − m))，g_ret = min(1, 2m) | `25` | 是 |
 | `delay_mode` | `time` 或 `sync` | `time` | 否 |
 | `delay_ms` | 1–4000 ms，连续 | `100` | 否 |
-| `delay_note` | 16 档 1/64 到 1/1，含三连音与附点；取值 `n64`、`n32t`、`n32`、`n16t`、`n16`、`n16d`、`n8t`、`n8`、`n8d`、`n4t`、`n4`、`n4d`、`n2t`、`n2`、`n2d`、`n1`，顺序以参数文档为准 | `n4` | 否 |
+| `delay_note` | 16 档 1/64 到 1/1，含三连音与附点；取值 `n64`、`n32t`、`n32`、`n16t`、`n16`、`n8t`、`n16d`、`n8`、`n4t`、`n8d`、`n4`、`n2t`、`n4d`、`n2`、`n2d`、`n1`，顺序按拍数严格升序（1/8 三连音是 1/3 拍，附点 1/16 是 3/8 拍，依此类推），与 `src/input/ParamTable.h` 的档位表逐档一致 | `n4` | 否 |
 | `low_cut` | 20（关）–2000 Hz | `20` | 是 |
 | `high_cut` | 1000–20000（关）Hz | `20000` | 是 |
 | `polarity` | 极性反转 | `false` | 是 |

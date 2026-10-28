@@ -63,6 +63,7 @@ good(
     "web/a.html",
     '<script type="module" src="./a.js"></script><link href="../shared/x.css" rel="stylesheet">',
 );
+good("srcset 全是同源地址（相对、根相对）", "web/a.html", '<img srcset="a.png 1x, /img/b.png 2x, ./c.png 3x">');
 good("meta refresh 只刷新不跳转", "web/a.html", '<meta http-equiv="refresh" content="5">');
 good("meta refresh 跳相对地址", "web/a.html", '<meta http-equiv="refresh" content="0; url=web-preview/input.html">');
 good("普通 import", "web/a.js", 'import { a } from "./a.js";');

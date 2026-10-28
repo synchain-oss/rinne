@@ -20,7 +20,7 @@
 // 模块顶层不碰 window，存储与计时器都从外面注入，Node 里可以直接 import 和测试。
 
 import { DESIGN } from "../../web/shared/design-box.js";
-import { DIAG_KEYS, GROUPS, LANG_CODES } from "./contract.js";
+import { DIAG_INPUT_ONLY_SECTIONS, DIAG_KEYS, GROUPS, LANG_CODES, PAIR_STATES } from "./contract.js";
 
 export const UI_DEFAULTS_KEY = "rinne.uiDefaults";
 export const DISMISSED_KEY = "rinne.dismissedHints";
@@ -233,13 +233,160 @@ export function createCore({ role, events, storage, timers = globalThis, opts = 
     return core;
 }
 
-/** 构造诊断文本（rinne-diag v1）：只含白名单 key，不含路径、用户名和主机名。 */
-export function buildDiagnostics(fields) {
-    const lines = [];
-    for (const key of DIAG_KEYS) {
-        if (has(fields, key)) lines.push(`${key}=${String(fields[key]).replace(/[\r\n]+/g, " ")}`);
+/** core 的 sanitizeText 拒收的字符：路径分隔符、冒号、@、~、%。 */
+const DIAG_REJECTED = /[/\\:@~%]/;
+
+/**
+ * 诊断值的清洗，与 core 的 sanitizeText 同一规则：按空白切成片段，任何一个片段带拒收字符，整串不要，写 none
+ * （路径里的目录名可以带空格，只丢带分隔符的那一段，会把目录名留在文本里）；否则逐字符清洗，只留 ASCII 字母数字与
+ * . _ + - ( ) 和单个空格，其余写 _（含 =，值不会冒充下一个键）。清空了也写 none。
+ * 与 core 有两处不同：多留逗号（nsamples.hist 的直方图要用，core 里那个字段走数字格式化，不过清洗）；不做 48 字符
+ * 封顶（预览值都很短）。
+ */
+const diagValue = (v) => {
+    const fragments = String(v)
+        .split(/[ \t\n\r\v\f]+/)
+        .filter((f) => f !== "");
+    if (fragments.some((f) => DIAG_REJECTED.test(f))) return "none";
+    return fragments.join(" ").replace(/[^A-Za-z0-9 .,_+()-]/g, "_") || "none";
+};
+
+/** 事件行：`  t+<秒>.<毫秒> <码名>[ <a>[/<b>]]`，与 core 的 appendEvent 同形。 */
+function diagEventLine(e) {
+    const t = `${Math.floor(e.tMs / 1000)}.${String(e.tMs % 1000).padStart(3, "0")}`;
+    const args = e.a === undefined ? "" : ` ${e.a}${e.b === undefined ? "" : `/${e.b}`}`;
+    return `  t+${t} ${e.code}${args}`;
+}
+
+/**
+ * 构造诊断文本（rinne-diag v1），形态与 core 的生成器一致：第一行格式标识，之后每节一行（product、backend 两行
+ * 没有冒号，其余是「节名: key=value …」），然后是最近事件段，末行 ui 段。
+ * values 的键是 DIAG_KEYS 里「节名.键名」形式的名字，不在表里的名字一律不输出；Output 不写 Input 专有的节；
+ * 没有对端时 peer 一行写 `peer: none`。events 是 { tMs, code, a?, b? } 的数组。
+ */
+export function buildDiagnostics(role, values, events = []) {
+    const lines = ["rinne-diag v1"];
+    const done = new Set();
+    for (const name of DIAG_KEYS) {
+        if (name === "rinne-diag") continue; // 第一行已写
+        if (name === "events") {
+            const shown = events.slice(-64);
+            lines.push(`events(last ${shown.length} of ${events.length}):`, ...shown.map(diagEventLine));
+            continue;
+        }
+        const section = name.slice(0, name.indexOf("."));
+        if (done.has(section)) continue;
+        done.add(section);
+        if (role !== "input" && DIAG_INPUT_ONLY_SECTIONS.includes(section)) continue;
+        const pairs = DIAG_KEYS.filter((k) => k.startsWith(`${section}.`) && has(values, k)).map(
+            (k) => `${k.slice(section.length + 1)}=${diagValue(values[k])}`,
+        );
+        if (section === "product" || section === "backend") lines.push(pairs.join(" "));
+        else lines.push(`${section}: ${pairs.length ? pairs.join(" ") : "none"}`);
     }
-    return lines.join("\n");
+    return `${lines.join("\n")}\n`;
+}
+
+/** 配对核验结果（rinne.pair 的 verify）到诊断文本里「相同 / 不同 / 未知」的映射。 */
+const TRACK_RELATION = { match: "same", diff: "different", unknown: "unknown" };
+/** groupOrigin 到诊断文本里 origin 的映射（与 core 的来源名字表一一对应）。 */
+const ORIGIN_NAME = { auto: "smart", manual: "manual", project: "restore" };
+/** 配对状态里「有对端」的那些：诊断文本的 peer 一行只在这些状态下写字段，其余写 none。 */
+const PEER_PRESENT = ["stale", "crossProcess", "crossTrack", "connectedUnverified", "connected", "connectedStill"];
+
+/**
+ * 预览用的诊断字段（两个角色共有的那几节）：值是预览里能给出的合理数字，不是真实环境；os、host 等写 preview。
+ * model 是角色后端的模型（version、host、sampleRate、blockSize、group、groupOrigin、restored、scale、lang、pair）。
+ */
+export function previewDiagValues(role, model, core) {
+    const pair = model.pair;
+    const present = PEER_PRESENT.includes(pair.state);
+    // 没有对端时核验结果不作数：track.relation 固定写 unknown（core 的 buildDiagReport：present ? relation : unknown）
+    const relation = present ? (TRACK_RELATION[pair.verify] ?? "unknown") : "unknown";
+    const v = {
+        "product.product": role === "input" ? "Rinne Input" : "Rinne Output",
+        "product.version": model.version,
+        "product.build": "preview",
+        "product.format": "preview",
+        "product.host": model.host,
+        "product.os": "preview",
+        "product.arch": "preview",
+        "backend.backend": "preview",
+        "backend.ipc_abi": 1,
+        "backend.prefix": "SnchRinne",
+        "backend.group": model.group ?? "-",
+        "backend.origin": model.group ? (ORIGIN_NAME[model.groupOrigin] ?? "none") : "none",
+        "backend.pid": 0,
+        "backend.pair": pair.state,
+        "track.relation": relation,
+        "track.hash": "none",
+        "prepare.count": 1,
+        "prepare.sr": model.sampleRate,
+        "prepare.max": model.blockSize,
+        "prepare.nonrealtime_seen": 0,
+        "prepare.setstate_before_prepare": model.restored ? 1 : 0,
+        "prepare.reset_calls": 0,
+        "blocks.total": 4096,
+        "blocks.zero_len": 0,
+        "blocks.over_max": 0,
+        "blocks.bypassed": 0,
+        "blocks.max_n_seen": model.blockSize,
+        "nsamples.min": model.blockSize,
+        "nsamples.max": model.blockSize,
+        "nsamples.hist": "0,0,0,0,4096,0,0,0",
+        "ui.webview": "preview",
+        "ui.scale": model.scale,
+        "ui.lang": model.lang ?? core.ui.lang,
+    };
+    if (present) {
+        Object.assign(v, {
+            "peer.role": role === "input" ? "output" : "input",
+            "peer.state": pair.state === "stale" ? "dormant" : "active",
+            "peer.same_pid": pair.state === "crossProcess" ? 0 : 1,
+            "peer.version": "0.0.0",
+            "peer.sr": model.sampleRate,
+            "peer.max_block": model.blockSize,
+            "peer.ch": pair.peer.channels ?? 2,
+            "peer.name": relation,
+            "peer.hb_age_ms": pair.state === "stale" ? 2400 : 12,
+        });
+    }
+    return v;
+}
+
+/** 预览用的最近事件：构造、prepare、选组、当前配对状态，参数含义见 core 的事件名字表。 */
+export function previewDiagEvents(model) {
+    const origin = { auto: 1, project: 2, manual: 3 }[model.groupOrigin] ?? 0;
+    return [
+        { tMs: 0, code: "construct" },
+        { tMs: 12, code: "prepare", a: model.sampleRate, b: model.blockSize },
+        { tMs: 15, code: "group_set", a: model.group ? GROUPS.indexOf(model.group) + 1 : 0, b: origin },
+        { tMs: 480, code: "pair_state", a: PAIR_STATES.indexOf(model.pair.state) },
+    ];
+}
+
+/**
+ * 从诊断文本里抽出它用到的名字（「节名.键名」，另有 rinne-diag 与 events 两个整行名字），顺序同文本。
+ * 认不出的行以 `?<行首>` 的形式混进结果，让白名单断言判红；`peer: none`（没有对端）不产生名字，别的节写 none 一概认不出。
+ */
+export function diagNamesOf(text) {
+    const names = [];
+    for (const line of String(text).split("\n")) {
+        if (line === "") continue;
+        if (line === "rinne-diag v1") names.push("rinne-diag");
+        else if (/^events\(last \d+ of \d+\):$/.test(line)) names.push("events");
+        else if (/^ {2}t\+\d+\.\d{3} [a-z_]+(?: \d+(?:\/\d+)?)?$/.test(line))
+            continue; // 事件行
+        else {
+            const m = /^([a-z]+): (.*)$/.exec(line); // 带冒号的节；product、backend 两行没有冒号，节名取第一个键
+            const body = m ? m[2] : line;
+            if (m && m[1] === "peer" && body === "none") continue; // 只有 peer 一节有「没有对端」的写法
+            const keys = [...body.matchAll(/(?:^| )([a-z][a-z0-9_]*)=/g)].map((x) => x[1]);
+            if (keys.length === 0) names.push(`?${line.slice(0, 24)}`);
+            else for (const k of keys) names.push(`${m ? m[1] : keys[0]}.${k}`);
+        }
+    }
+    return names;
 }
 
 /**
