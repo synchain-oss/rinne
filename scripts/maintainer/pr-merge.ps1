@@ -2257,7 +2257,9 @@ function Invoke-SelfTest {
     Complete-RinneSelfTest $cases 'pr-merge'
 }
 
-if ($SelfTest) { exit (Invoke-SelfTest) }
+# 退出码只取 Complete-RinneSelfTest 返回的最后一个值：自测途中别的调用往管道里多吐一个对象时，exit 收到的是数组，
+# 退出码会变成 0，用例没过也报成通过
+if ($SelfTest) { exit [int]@(Invoke-SelfTest)[-1] }
 if (@($Check, $Merge, $After | Where-Object { $_ }).Count -ne 1) { throw '用法：-Check | -Merge | -After，三选一（或 -SelfTest）' }
 if ($Pr -le 0 -or $Card -notmatch $CardPattern) { throw '需要 -Pr <n> 与 -Card <卡号>' }
 # 锁存标记在任何 git 与 gh 之前看（导入 RinneGh 时已经看过一次，这里再明说一遍）
