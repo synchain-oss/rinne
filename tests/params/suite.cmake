@@ -10,3 +10,10 @@ target_link_libraries(rinne_params_tests PRIVATE juce::juce_audio_processors)
 target_compile_definitions(rinne_params_tests PRIVATE
   JUCE_WEB_BROWSER=0
   JUCE_USE_CURL=0)
+
+# 其余的套件片段放在同目录的 suite-<名字>.cmake 里，按文件名顺序 include：以后各部分往里加自己的片段，不必再改本文件。
+file(GLOB _rinne_params_parts CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/suite-*.cmake")
+list(SORT _rinne_params_parts)
+foreach(_part IN LISTS _rinne_params_parts)
+  include("${_part}")
+endforeach()
