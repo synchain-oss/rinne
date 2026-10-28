@@ -155,22 +155,62 @@ for (const role of ["input", "output"]) {
         s.mock.copyDiagnostics(false).text.includes("\npeer: none\n"),
         `诊断（${role}）：没有对端时 peer 一行写 none`,
     );
+    // track.relation 与 core 的 buildDiagReport 一致：有对端按核验结果写，没有对端固定写 unknown（核验结果不作数）
+    const relationOf = () => /\btrack: relation=(\S+)/.exec(s.mock.copyDiagnostics(false).text)?.[1];
+    const relations = [];
+    for (const verify of ["match", "diff"]) {
+        s.model.pair.verify = verify;
+        s.model.pair.state = "connected";
+        relations.push(relationOf());
+        s.model.pair.state = "searching"; // 切到没有对端的场景，verify 还留着上一次的结果
+        relations.push(relationOf());
+    }
+    run.eq(
+        relations,
+        ["same", "unknown", "different", "unknown"],
+        `诊断（${role}）：没有对端时 track.relation 写 unknown，不沿用上一次的核验结果`,
+    );
     s.stop();
 }
 
 // 诊断值里的换行、等号和路径字符会被清洗：不能另起一行、冒充键，也不会带出路径或邮箱
 {
     const o = open("output", "auto=0", stores());
+    const base = previewDiagValues("output", o.model, o.core);
     const dirty = buildDiagnostics("output", {
-        ...previewDiagValues("output", o.model, o.core),
+        ...base,
         "product.host": "D:\\work\\x user=evil",
+        "product.os": "Jane Doe D:\\Projects\\Jane Doe\\Cubase\\x",
         "backend.group": "A\nfake: x=1",
+        "backend.prefix": "Snch Rinne$#",
+        "backend.pid": "1\n evil=2",
+        "blocks.zero_len": " \n ",
         "track.relation": "me@example.invalid",
     });
     o.stop();
     const stray = diagNamesOf(dirty).filter((k) => !DIAG_KEYS.includes(k));
     run.eq(stray, [], "诊断：值里的换行与等号不能另起一行或冒充键");
     run.check(!/[A-Za-z]:[\\/]|@/.test(dirty), "诊断：值里的路径和邮箱字符被清洗");
+    // 与 core 的 sanitizeText 同一规则：任何片段带 / \ : @ ~ % 就整串写 none，目录名与前面的词都不留在文本里
+    const fieldOf = (text, key) => new RegExp(`(?:^| )${key}=([^\n]*?)(?= [a-z][a-z0-9_]*=|$)`, "m").exec(text)?.[1];
+    const field = (key) => fieldOf(dirty, key);
+    run.eq(
+        ["host", "os", "group", "relation"].map(field),
+        ["none", "none", "none", "none"],
+        "诊断：带路径、冒号或 @ 的值整串写 none",
+    );
+    // 六个拒收字符各自单独就够：片段里只有这一个字符，也整串写 none
+    for (const c of ["/", "\\", ":", "@", "~", "%"]) {
+        const one = buildDiagnostics("output", { ...base, "product.host": `Jane Doe${c}x` });
+        run.eq([fieldOf(one, "host"), /Jane|Doe/.test(one)], ["none", false], `诊断：值里有 ${c} 整串写 none`);
+    }
+    run.check(!/work|Jane|Doe|Projects|Cubase|fake|example/.test(dirty), "诊断：路径里的目录名与前面的词不留在文本里");
+    // 没有拒收字符时才逐字符替换：不合规字符与等号写 _，空白（含换行）折成单个空格
+    run.eq(
+        [field("prefix"), field("pid"), field("zero_len")],
+        ["Snch Rinne__", "1 evil_2", "none"],
+        "诊断：不带拒收字符的值逐字符清洗，等号写成下划线；清空了写 none",
+    );
 }
 
 // ---- 参数 ----

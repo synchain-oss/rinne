@@ -233,8 +233,23 @@ export function createCore({ role, events, storage, timers = globalThis, opts = 
     return core;
 }
 
-/** 诊断值只留 ASCII 字母数字与 . , _ + - ( ) 和空格（core 清洗自由文本留的字符，加上直方图要用的逗号）：不含 =，值不会冒充下一个键。 */
-const diagValue = (v) => String(v).replace(/[^A-Za-z0-9 .,_+()-]/g, "_");
+/** core 的 sanitizeText 拒收的字符：路径分隔符、冒号、@、~、%。 */
+const DIAG_REJECTED = /[/\\:@~%]/;
+
+/**
+ * 诊断值的清洗，与 core 的 sanitizeText 同一规则：按空白切成片段，任何一个片段带拒收字符，整串不要，写 none
+ * （路径里的目录名可以带空格，只丢带分隔符的那一段，会把目录名留在文本里）；否则逐字符清洗，只留 ASCII 字母数字与
+ * . _ + - ( ) 和单个空格，其余写 _（含 =，值不会冒充下一个键）。清空了也写 none。
+ * 与 core 有两处不同：多留逗号（nsamples.hist 的直方图要用，core 里那个字段走数字格式化，不过清洗）；不做 48 字符
+ * 封顶（预览值都很短）。
+ */
+const diagValue = (v) => {
+    const fragments = String(v)
+        .split(/[ \t\n\r\v\f]+/)
+        .filter((f) => f !== "");
+    if (fragments.some((f) => DIAG_REJECTED.test(f))) return "none";
+    return fragments.join(" ").replace(/[^A-Za-z0-9 .,_+()-]/g, "_") || "none";
+};
 
 /** 事件行：`  t+<秒>.<毫秒> <码名>[ <a>[/<b>]]`，与 core 的 appendEvent 同形。 */
 function diagEventLine(e) {
@@ -285,8 +300,9 @@ const PEER_PRESENT = ["stale", "crossProcess", "crossTrack", "connectedUnverifie
  */
 export function previewDiagValues(role, model, core) {
     const pair = model.pair;
-    const relation = TRACK_RELATION[pair.verify] ?? "unknown";
     const present = PEER_PRESENT.includes(pair.state);
+    // 没有对端时核验结果不作数：track.relation 固定写 unknown（core 的 buildDiagReport：present ? relation : unknown）
+    const relation = present ? (TRACK_RELATION[pair.verify] ?? "unknown") : "unknown";
     const v = {
         "product.product": role === "input" ? "Rinne Input" : "Rinne Output",
         "product.version": model.version,

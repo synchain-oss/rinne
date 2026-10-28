@@ -89,7 +89,7 @@ The bridge between the web UI and the native plugin: function names, event names
 
 ### 配对状态
 
-颜色分组：红是回送已停、被拒或不可用，需要用户动作；琥珀是仍在工作但有风险；灰是主动关闭、宿主暂停或离线；绿是已连接。`connectedStill` 表示已连接但回送静音，绿点不脉冲。`unassigned` 是 8 组已满，灯为红色，文案「未分组」，消息「没有空闲组，请手动选择」。`bypassed` 只由 Output 的宿主旁路产生（Output 写静音，回送为零），Input 的 `rinne.pair` 里不会出现它：Input 被宿主旁路时没有自己的配对状态，配对态保持原值（已连接时落在 `connectedStill`），宿主旁路的提示走界面的消息条，不借用 `bypassed`。
+颜色分组：红是回送已停、被拒或不可用，需要用户动作；琥珀是仍在工作但有风险；灰是主动关闭、宿主暂停或离线；绿是已连接。`connectedStill` 表示已连接但回送静音，绿点不脉冲。`unassigned` 是 8 组已满，灯为红色，文案「未分组」，消息「没有空闲组，请手动选择」。`bypassed` 只由 Output 的宿主旁路产生（Output 写静音，回送为零），Input 的 `rinne.pair` 里不会出现它：Input 被宿主旁路时没有自己的配对状态，壳把旁路并入回送静音（`loopSilent`）：判定上已连接（`connected`）因此落在 `connectedStill`；`connectedUnverified` 不看回送静音，配对态保持 `connectedUnverified`，界面按回送静音停止脉冲；其余状态不受旁路影响。宿主旁路的提示走界面的消息条，不借用 `bypassed`。
 
 <!-- names:pair -->
 
