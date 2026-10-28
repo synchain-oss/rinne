@@ -2,7 +2,8 @@
 //
 // 「复制诊断」的文本生成：rinne-diag v1。key=value 的若干行，加最近 64 条事件；末尾的 ui 段（WebView 版本、缩放、
 // 语言）由界面补，这里不写。由 core 单一生成，两个插件共用，Output 只输出字段子集（没有 loop / sync / order /
-// safety）。
+// safety，state 一行里没有 dropped_unknown）。
+// state 一行是 v1 之后追加的一段，排在事件之前：已有各行的名字、顺序与格式都不变，读旧报告的一方不认识这一行就跳过。
 //
 // 格式以本文件与 tests/core/diag 的快照为准。docs/UI_BRIDGE.md 的诊断白名单（diag.* 键）与此尚未对齐：对齐要改
 // 桥契约的检查脚本，另行处理，在那之前复制诊断接不到桥上。
@@ -221,6 +222,28 @@ struct DiagSafety
     std::uint32_t clampRing = 0;
 };
 
+// 最近一次宿主 setState 的读入结果：kNone = 还没有过 setState，其余与 state 层的读入结果一一对应。
+// 名字表（loadStatusName）写进报告，属于 rinne-diag v1，只许在末尾追加
+enum class DiagLoadStatus : std::uint8_t
+{
+    kNone,
+    kOk,
+    kMigrated,
+    kEmpty,
+    kIgnoredProbe,
+    kRejectedNewer,
+    kCorrupt,
+};
+
+// state 一段：两端都输出。droppedUnknownParams 只有 Input 有（Output 的 state 里没有参数），Output 不输出这一项
+struct DiagState
+{
+    DiagLoadStatus lastLoad = DiagLoadStatus::kNone;
+    std::uint32_t droppedUnknownParams = 0; // 保存时为压进上限丢掉的未知参数 id，累计条数
+    std::uint32_t encodeFailures = 0; // 保存时编码失败（交出空块）的累计次数
+    bool holdingNewer = false; // 正在原样回写更高版本的 state
+};
+
 struct DiagInputs
 {
     DiagRole role = DiagRole::kInput;
@@ -248,6 +271,7 @@ struct DiagInputs
     DiagSync sync;
     DiagOrder order;
     DiagSafety safety;
+    DiagState state;
     const DiagEventLog* events = nullptr; // 可空
 };
 
