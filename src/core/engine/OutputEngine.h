@@ -40,6 +40,8 @@
 //
 // 端点槽：给了会合段时，每块发布本端（Output）槽的块序号、宿主时间戳与实时标志。
 // Input 靠 Output 槽的宿主时间戳判「Output 在不在 Input 之前」（错序判据），靠块序号判对端是否还活着。
+// Output 一侧有镜像的判断：块首读 Input 槽的块序号与宿主时间戳，用同一套证据（loop::OrderEvidence）自己判，
+// 结果经 orderStatus() 交出。两端对同一个现场给出同一个结论；这一侧只读 Input 槽，不改会合段的任何布局。
 //
 // 线程：
 //   - prepare（非实时线程）：换采样率时重算常数。
@@ -63,6 +65,7 @@
 #include "engine/EngineParams.h"
 #include "engine/TransportInfo.h"
 #include "ipc/LoopRing.h"
+#include "loop/OrderEvidence.h"
 
 namespace rinne::engine
 {
@@ -117,6 +120,14 @@ public:
     // 本引擎，这里读的是那份拷贝（最近一块看到的值）。没有段之后保持最后的值，不再去读段。
     std::uint32_t wCasFailCount() const noexcept { return wCasFail_.load(std::memory_order_relaxed); }
 
+    // 错序证据的快照（Output 一侧的镜像判断）：结论、方向、票数、有效位、有效检查数出自同一块。
+    // 消息线程读的是音频线程每块发布的一个 64 位整数，不碰段。
+    loop::OrderSnapshot orderStatus() const noexcept
+    {
+        return loop::OrderSnapshot::unpack(orderPacked_.load(std::memory_order_relaxed),
+                                           orderGlitches_.load(std::memory_order_relaxed));
+    }
+
     // 采样率与最大块长（诊断用）
     double sampleRate() const noexcept { return sampleRate_; }
     int maxBlock() const noexcept { return maxBlock_; }
@@ -131,6 +142,9 @@ private:
     // 发布本端（Output）的会合槽：块序号、宿主时间戳、实时标志、本会话最大块长。
     void publishToSlot(const EngineContext& context, const TransportInfo& transport, bool bypassed, WriteState state,
                        std::uint32_t n) noexcept;
+    // 错序证据：块首读 Input 槽的块序号与宿主时间戳，每个支持块判一次，结果发布到 orderPacked_。
+    // 超长块只让时间戳基线与失效计时前进，不投票。
+    void judgeOrder(const EngineContext& context, const TransportInfo& transport, std::uint32_t n) noexcept;
     // 写一段（不超过 kMaxWriteChunk 帧）。返回这一段的结果。
     ipc::RingWriteResult writeChunk(ipc::RingSegment& seg, const AudioView& buffer, std::uint32_t offset,
                                     std::uint32_t frames) noexcept;
@@ -156,6 +170,12 @@ private:
     std::atomic<std::uint32_t> unsupported_{0};
     // 环头里的写头 CAS 失败次数的拷贝：音频线程每块在租约之内拷进来，消息线程只读这一份。
     std::atomic<std::uint32_t> wCasFail_{0};
+
+    // 错序证据（Output 一侧）：状态只有音频线程碰，发布给消息线程的是 OrderSnapshot::pack() 的一个整数。
+    loop::OrderEvidence order_;
+    std::atomic<std::uint64_t> orderPacked_{0};
+    std::atomic<std::uint32_t> orderGlitches_{0};
+    std::uint32_t peerGroup_ = 0; // 上一块读 Input 槽用的组号（变了就是换组）
 
     // 写方助手的任期（只有音频线程读写，不是原子量；prepare 在宿主保证不与 process 并发时调用）：
     // 上一次写环时的写权 token、段的映射代号与采样率。任一变了就 reset 写方助手。

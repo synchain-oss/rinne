@@ -7,7 +7,7 @@
 //   - 参数与走带整体下传：D 的目标值（时间 / 节拍、毫秒与节拍到样本的换算、钳位与抬升）全在环路层算，
 //     引擎不预先把 delay_ms 换算成样本。节拍同步因此只需要改环路层，不必改引擎。
 //   - 读头归环路层：读头槽、每个读头的包络、读头混合都在环路层。引擎只拿走混好的回送。
-//   - 违约路径在环路层：「块长超过声明值 → 补 0 并抬升 D 下限」在环路层实现，导出锁存将来也挂在同一处。
+//   - 违约路径在环路层：「块长超过声明值 → 补 0 并抬升 D 下限」在环路层实现，导出锁存的计数也挂在同一处。
 //   - 拉环归环路层：每块把环里 [pulled, W) 的帧全部搬进本地延迟线（一圈之内），pulled 每块追到 W。
 //   - 状态对象归环路层：诊断与界面要的量都落在一个结构里，引擎原样交出去。
 //   - 对端槽归环路层读：宿主时间戳、块序号与实时标志是「谁在谁前面」的证据，判据也在环路层。
@@ -27,10 +27,12 @@
 #include "ipc/LoopBinding.h"
 #include "loop/BeatSync.h"
 #include "loop/DelayRetarget.h"
+#include "loop/ExportLatch.h"
 #include "loop/LocalLine.h"
 #include "loop/LoopEvents.h"
 #include "loop/LoopStatus.h"
 #include "loop/LoopTiming.h"
+#include "loop/OrderEvidence.h"
 #include "loop/StreamSync.h"
 #include "loop/Taps.h"
 
@@ -219,8 +221,13 @@ private:
     std::int64_t fadeOutUnsupportedBlock(const BlockContext& ctx) noexcept;
     // 对端槽的事实：宿主时间戳、块序号、实时标志。没有会合段或组号不合法时什么都不读。
     void readPeerSlot(const BlockContext& ctx) noexcept;
-    // 错序判据（口径见 ADR-0002）：对端的时间戳更小 = 对端那一端的块首更早被处理。
+    // 错序证据（口径见 OrderEvidence.h 与 ADR-0009）：每个 n > 0 的支持块判一次，结果发布到状态里。
     void judgeOrder(const BlockContext& ctx) noexcept;
+    // 超长块：错序证据不投票，只让时间戳基线与失效计时跟上（口径见 OrderEvidence::advance）。
+    void advanceOrder(const BlockContext& ctx) noexcept;
+    // 导出不一致锁存（口径见 ExportLatch.h）用的对端事实：对端槽的 kRtOverMax 只在对端的一个新块上看一次。
+    // 每个读了对端槽的块都要调（不管是不是离线块），块序号的记账才跟得上。
+    bool peerOverMaxOnNewBlock() noexcept;
 
     LocalLine line_;
     TapSet taps_;
@@ -275,9 +282,14 @@ private:
     std::uint32_t peerRtFlags_ = 0;
     std::uint32_t peerMaxBlock_ = 0;
 
-    // 错序判据的账
-    std::uint32_t orderVotes_ = 0; // 连续判为「Output 在 Input 之前」的次数
-    std::uint8_t orderVerdict_ = static_cast<std::uint8_t>(OrderVerdict::kUnknown);
+    // 错序证据（每块一次，口径见 OrderEvidence.h）
+    OrderEvidence order_;
+
+    // 导出不一致：对端槽的块序号只在新块上看一次它的 kRtOverMax（第一次只记下序号，不计）。
+    // 读不到对端槽、换组、换绑定、域重置时清掉，再读到的槽算第一次。
+    bool haveExportPeerSeq_ = false;
+    std::uint64_t lastExportPeerSeq_ = 0;
+    std::uint32_t peerGroup_ = 0; // 上一块读对端槽用的组号（变了就是换组）
 
     // 速度：宿主给的有效值、来源
     std::uint32_t bpmCenti_ = 12000u;

@@ -48,6 +48,9 @@ void OutputEngine::prepare(double sampleRate, int maxBlock) noexcept
 
     // 旁路斜坡的长度按采样率算（10 ms）。不旁路时增益是 1；当前值不动（同采样率重新 prepare 不跳）。
     bypassRamp_.reset(sampleRate_, kBypassRampSeconds);
+
+    // 错序证据：换采样率才清，同采样率重新 prepare 证据保持连续
+    order_.prepare(sampleRate_);
 }
 
 void OutputEngine::publishState(WriteState state, std::uint32_t n) noexcept
@@ -136,6 +139,41 @@ ipc::RingWriteResult OutputEngine::writeChunk(ipc::RingSegment& seg, const Audio
     return result;
 }
 
+// 错序证据的 Output 一侧：块首读 Input 槽（块序号 acquire，再读时间戳），与本块的宿主时间戳比。
+// 只读对端的槽，不写；会合段没给或组号越界时当没有对端槽（读会越界）。
+// 超长块（n > 32768）不读槽、不投票，但时间戳基线与失效计时照样前进（OrderEvidence::advance）。
+// 换组时旧组的块序号与时间戳作废，新组的槽第一次读到只记块序号。
+void OutputEngine::judgeOrder(const EngineContext& context, const TransportInfo& transport, std::uint32_t n) noexcept
+{
+    if (context.group != peerGroup_)
+    {
+        peerGroup_ = context.group;
+        order_.forgetPeer();
+    }
+    if (n > ipc::kMaxSupportedBlock)
+    {
+        order_.advance(static_cast<std::int64_t>(n), transport.hostNsValid, transport.hostNs);
+    }
+    else
+    {
+        bool present = false;
+        std::uint64_t peerSeq = 0;
+        std::uint64_t peerNs = 0;
+        if (context.rendezvous != nullptr && context.group != 0 && context.group <= ipc::kGroupCount)
+        {
+            const ipc::RoleSlot& peer = ipc::roleSlot(*context.rendezvous, context.group, ipc::Role::kInput);
+            peerSeq = peer.block_seq.load(std::memory_order_acquire);
+            peerNs = peer.last_host_ns.load(std::memory_order_acquire);
+            present = true;
+        }
+        order_.observe(loop::OrderSide::kOutput, static_cast<std::int64_t>(n), transport.hostNsValid, transport.hostNs,
+                       present, peerSeq, peerNs);
+    }
+    const loop::OrderSnapshot snapshot = order_.snapshot();
+    orderPacked_.store(snapshot.pack(), std::memory_order_relaxed);
+    orderGlitches_.store(snapshot.glitches, std::memory_order_relaxed);
+}
+
 // 发布本端（Output）的会合槽。写的是自己的槽（安全不变量 9），角色固定为 Output。
 void OutputEngine::publishToSlot(const EngineContext& context, const TransportInfo& transport, bool bypassed,
                                  WriteState state, std::uint32_t n) noexcept
@@ -189,6 +227,11 @@ bool OutputEngine::process(const AudioView& buffer, const EngineParams& params, 
 
     const auto n = static_cast<std::uint32_t>(buffer.length);
     maxBlockSeen_ = std::max(maxBlockSeen_, n);
+
+    // 错序证据：每个支持块判一次，在发布本端的槽之前读 Input 槽（没有段、没有写权的块也判：错序与写环无关）。
+    // 超长块不投票，但时间戳基线与失效计时照样前进。
+    judgeOrder(context, transport, n);
+
     ipc::RingSegment* seg = context.ring;
     const std::uint64_t token = context.token;
 

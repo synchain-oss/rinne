@@ -125,11 +125,20 @@ void LoopStatus::readGeometry(LoopStatusFields& fields) const noexcept
     fields.geometryConsistent = 0;
 }
 
-void LoopStatus::setOrder(std::uint8_t verdict, std::uint32_t votes, bool hostNsValid) noexcept
+void LoopStatus::setOrder(const OrderSnapshot& snapshot) noexcept
 {
-    orderVerdict_.store(verdict, std::memory_order_relaxed);
-    orderVotes_.store(votes, std::memory_order_relaxed);
-    hostNsValid_.store(hostNsValid, std::memory_order_relaxed);
+    orderPacked_.store(snapshot.pack(), std::memory_order_relaxed);
+    orderGlitches_.store(snapshot.glitches, std::memory_order_relaxed);
+}
+
+void LoopStatus::noteExport(std::uint32_t causes) noexcept
+{
+    if (causes == 0)
+    {
+        return;
+    }
+    exportCauses_.store(causes, std::memory_order_relaxed);
+    exportEvents_.fetch_add(1, std::memory_order_relaxed);
 }
 
 LoopStatusFields LoopStatus::snapshot() const noexcept
@@ -168,9 +177,18 @@ LoopStatusFields LoopStatus::snapshot() const noexcept
 
     readGeometry(fields);
 
-    fields.orderVerdict = orderVerdict_.load(std::memory_order_relaxed);
-    fields.orderVotes = orderVotes_.load(std::memory_order_relaxed);
-    fields.hostNsValid = hostNsValid_.load(std::memory_order_relaxed) ? 1u : 0u;
+    const OrderSnapshot order = OrderSnapshot::unpack(orderPacked_.load(std::memory_order_relaxed),
+                                                      orderGlitches_.load(std::memory_order_relaxed));
+    fields.orderVerdict = static_cast<std::uint8_t>(order.verdict);
+    fields.orderDirection = static_cast<std::uint8_t>(order.direction);
+    fields.orderVotes = order.votes;
+    fields.hostNsValid = order.hostNsValid ? 1u : 0u;
+    fields.orderChecks = order.checks;
+    fields.orderGlitches = order.glitches;
+
+    // 原因位与计数各是一个原子量，不保证出自同一次事件（显示允许前后差一个事件）。
+    fields.exportCauses = exportCauses_.load(std::memory_order_relaxed);
+    fields.exportEvents = exportEvents_.load(std::memory_order_relaxed);
     return fields;
 }
 

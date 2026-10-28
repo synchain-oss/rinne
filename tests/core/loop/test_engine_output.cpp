@@ -1243,40 +1243,256 @@ TEST_CASE("引擎 闭环：起播复位按样本定位，从 s0 起与宿主怎�
     CHECK(out[kEdge + 100 + 480] == 0.0f); // 沿后 T 帧之内写下的冲激被跳过
 }
 
-TEST_CASE("引擎 闭环：错序判据——Input 在前判为正确，Output 在前连续 3 块后判为错序", "[engine][loop]")
+TEST_CASE("引擎 闭环：错序判据——Input 在前判为正确，Output 在前连续 3 块后判为错序，Output 端镜像同一结论",
+          "[engine][loop]")
 {
     // ⛔ 删除式验证点：把判据写反（对端时间戳小于本块就记一票）→ 本用例变红。
-    auto transportAt = [](int at) {
+    // 宿主时间戳随绝对样本号单调前进（run 每次从 0 起数，offset 把它接成连续的一条）。
+    std::uint64_t offset = 0;
+    auto transportAt = [&offset](int at) {
         TransportInfo t;
-        t.hostNs = 1000000u + static_cast<std::uint64_t>(at) * 1000u;
+        t.hostNs = 1000000000u + (offset + static_cast<std::uint64_t>(at)) * 20000u;
         t.hostNsValid = true;
         return t;
     };
+    const auto silence = [](int) { return 0.0f; };
     const EngineParams params = unityLoopParams(10.0f);
+    namespace loop = rinne::loop;
 
     Loop correct(256);
-    correct.run(params, 256, 256 * 8, [](int) { return 0.0f; }, transportAt);
+    correct.run(params, 256, 256 * 8, silence, transportAt);
     auto status = correct.input.loopStatus();
     CHECK(status.hostNsValid == 1u);
-    CHECK(status.orderVerdict == static_cast<std::uint8_t>(rinne::loop::OrderVerdict::kCorrect));
+    CHECK(status.orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kCorrect));
+    CHECK(status.orderDirection == static_cast<std::uint8_t>(loop::OrderDirection::kInputFirst));
+    CHECK(status.orderVotes == 3u);
+    CHECK(status.orderGlitches == 0u);
+    // Output 端对同一个现场给出同一个结论
+    auto mirror = correct.output.orderStatus();
+    CHECK(mirror.verdict == loop::OrderVerdict::kCorrect);
+    CHECK(mirror.hostNsValid);
+    CHECK(mirror.glitches == 0u);
+
+    offset = 0;
+    Loop wrong(256);
+    wrong.outputFirst = true;
+    // 第一块：两端第一次读到对端槽，只记块序号，没有票
+    wrong.run(params, 256, 256, silence, transportAt);
+    offset += 256;
+    status = wrong.input.loopStatus();
     CHECK(status.orderVotes == 0u);
+    CHECK(status.orderChecks == 0u);
+    CHECK(wrong.output.orderStatus().votes == 0u);
+    wrong.run(params, 256, 256 * 2, silence, transportAt);
+    offset += 256 * 2;
+    status = wrong.input.loopStatus();
+    CHECK(status.orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kUnknown)); // 2 票还不够
+    CHECK(status.orderVotes == 2u);
+    wrong.run(params, 256, 256, silence, transportAt);
+    offset += 256;
+    status = wrong.input.loopStatus();
+    CHECK(status.orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kOutputFirst));
+    CHECK(status.orderVotes == 3u);
+    CHECK(status.orderDirection == static_cast<std::uint8_t>(loop::OrderDirection::kOutputFirst));
+    // Output 端在同一块定案
+    mirror = wrong.output.orderStatus();
+    CHECK(mirror.verdict == loop::OrderVerdict::kOutputFirst);
+    CHECK(mirror.direction == loop::OrderDirection::kOutputFirst);
+
+    // 宿主不给时间戳：这些块判不了，连续票数清零，结论不动（不是立刻回到 unknown）。
+    wrong.run(params, 256, 256, silence);
+    status = wrong.input.loopStatus();
+    CHECK(status.orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kOutputFirst));
+    CHECK(status.orderVotes == 0u);
+    CHECK(status.hostNsValid == 0u);
+    CHECK_FALSE(wrong.output.orderStatus().hostNsValid);
+    CHECK(wrong.output.orderStatus().verdict == loop::OrderVerdict::kOutputFirst);
+
+    // 一直没有时间戳，累计到 1 s（48000 样本）之后两端都回到 unknown
+    wrong.run(params, 256, 256 * 190, silence);
+    CHECK(wrong.input.loopStatus().orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kUnknown));
+    CHECK(wrong.output.orderStatus().verdict == loop::OrderVerdict::kUnknown);
+}
+
+TEST_CASE("引擎 Output 端错序镜像：没有会合段、组号越界、0 样本调用都不读对端槽、不推进计数", "[engine][loop]")
+{
+    OutputEngine output;
+    output.prepare(kSr, 256);
+    auto ring = makeRing();
+    LoopRing::publishWriter(*ring, kToken, static_cast<std::uint32_t>(kSr), 2);
+    HostBuffer host(256);
+    TransportInfo t;
+    t.hostNs = 5000000000u;
+    t.hostNsValid = true;
+    const EngineParams params = unityLoopParams(10.0f);
+
+    // 没有会合段：读不到 Input 槽，判不了
+    for (int i = 0; i < 10; ++i)
+    {
+        t.hostNs += 5000000u;
+        output.process(host.view(), params, t, false, outputCtx(ring.get(), kToken, nullptr));
+    }
+    CHECK(output.orderStatus().verdict == rinne::loop::OrderVerdict::kUnknown);
+    CHECK(output.orderStatus().checks == 0u);
+    CHECK(output.orderStatus().hostNsValid); // 宿主给了时间戳，只是读不到对端
+
+    // 组号越界：会合段给了，组号 9 不去读（读会越界）。9 号组块的位置还在段内（段比 8 个组块大），
+    // 在那里放一个每块都是新块、时间戳比本块小的诱饵：要是读了它，就会投 Output 在前的票。
+    auto rv = makeRv();
+    static_assert(rinne::ipc::roleSlotOffset(9, false) + sizeof(RoleSlot) <= rinne::ipc::kRvBytes,
+                  "诱饵要落在会合段之内");
+    auto* bait =
+        reinterpret_cast<RoleSlot*>(reinterpret_cast<unsigned char*>(rv.get()) + rinne::ipc::roleSlotOffset(9, false));
+    EngineContext badGroup = outputCtx(ring.get(), kToken, rv.get());
+    badGroup.group = 9;
+    for (int i = 0; i < 10; ++i)
+    {
+        t.hostNs += 5000000u;
+        bait->last_host_ns.store(t.hostNs - 1000u);
+        bait->block_seq.fetch_add(1);
+        output.process(host.view(), params, t, false, badGroup);
+    }
+    CHECK(output.orderStatus().verdict == rinne::loop::OrderVerdict::kUnknown);
+    CHECK(output.orderStatus().checks == 0u);
+
+    // 超长块（超过支持上限）：环路不走，错序证据也不判（对端是新块、时间戳比本块小，正常块会投一票）
+    RoleSlot& peer = roleSlot(*rv, 1, Role::kInput);
+    const EngineContext good = outputCtx(ring.get(), kToken, rv.get());
+    for (int i = 0; i < 4; ++i)
+    {
+        t.hostNs += 5000000u;
+        peer.last_host_ns.store(t.hostNs - 1000u);
+        peer.block_seq.fetch_add(1);
+        output.process(host.view(), params, t, false, good);
+    }
+    REQUIRE(output.orderStatus().verdict == rinne::loop::OrderVerdict::kOutputFirst);
+    const auto beforeHuge = output.orderStatus().pack();
+    HostBuffer huge(40000);
+    t.hostNs += 5000000u;
+    peer.last_host_ns.store(t.hostNs - 1000u);
+    peer.block_seq.fetch_add(1);
+    output.process(huge.view(), params, t, false, good);
+    CHECK(output.orderStatus().pack() == beforeHuge);
+
+    // 0 样本的调用：立刻返回，不推进任何计数
+    HostBuffer empty(0);
+    const auto before = output.orderStatus().pack();
+    for (int i = 0; i < 1000; ++i)
+    {
+        output.process(empty.view(), params, t, false, outputCtx(ring.get(), kToken, rv.get()));
+    }
+    CHECK(output.orderStatus().pack() == before);
+}
+
+TEST_CASE("引擎 闭环：超长块不投票，但两端的时间戳基线与失效计时照样前进——下一个正常块不记异常、不清连续票",
+          "[engine][loop]")
+{
+    // ⛔ 删除式验证点：Input 的超长块路径不推进错序证据 → Input 端下一个 256 帧块被记成跳变，本用例变红；
+    //    Output 的超长块不推进错序证据 → Output 端同样，本用例变红；
+    //    超长块的样本数不计入失效计时 → 两块超长块之后结论还在，本用例变红。
+    namespace loop = rinne::loop;
+    std::uint64_t offset = 0;
+    auto transportAt = [&offset](int at) {
+        TransportInfo t;
+        t.hostNs = 1000000000u + (offset + static_cast<std::uint64_t>(at)) * 20000u;
+        t.hostNsValid = true;
+        return t;
+    };
+    const auto silence = [](int) { return 0.0f; };
+    const EngineParams params = unityLoopParams(10.0f);
 
     Loop wrong(256);
     wrong.outputFirst = true;
-    wrong.run(params, 256, 256 * 2, [](int) { return 0.0f; }, transportAt);
-    status = wrong.input.loopStatus();
-    CHECK(status.orderVerdict == static_cast<std::uint8_t>(rinne::loop::OrderVerdict::kUnknown)); // 2 票还不够
-    wrong.run(params, 256, 256 * 2, [](int) { return 0.0f; }, transportAt);
-    status = wrong.input.loopStatus();
-    CHECK(status.orderVerdict == static_cast<std::uint8_t>(rinne::loop::OrderVerdict::kOutputFirst));
-    CHECK(status.orderVotes == 3u);
+    wrong.run(params, 256, 256 * 3, silence, transportAt); // 第一块只记块序号，之后每块一票：2 票
+    offset += 256 * 3;
+    REQUIRE(wrong.input.loopStatus().orderVotes == 2u);
+    REQUIRE(wrong.output.orderStatus().votes == 2u);
 
-    // 宿主不给时间戳：恒为 unknown，票数清零。
-    wrong.run(params, 256, 256, [](int) { return 0.0f; });
+    // 一块约 40000 帧的离线块（超过支持上限 32768）：环路不走，错序证据不投票
+    wrong.run(params, 40000, 40000, silence, transportAt);
+    offset += 40000;
+    CHECK(wrong.input.lastBlockResult().unsupportedBlock);
+    auto status = wrong.input.loopStatus();
+    auto mirror = wrong.output.orderStatus();
+    CHECK(status.orderVotes == 2u);
+    CHECK(status.orderChecks == 2u);
+    CHECK(mirror.votes == 2u);
+    CHECK(mirror.checks == 2u);
+
+    // 接一块 256 帧的正常块：时间戳比上一个正常块多跳了约 0.8 s，但基线跟着超长块走了——两端都不记异常，
+    // 连续票接着数，第三票定案
+    wrong.run(params, 256, 256, silence, transportAt);
+    offset += 256;
     status = wrong.input.loopStatus();
-    CHECK(status.orderVerdict == static_cast<std::uint8_t>(rinne::loop::OrderVerdict::kUnknown));
-    CHECK(status.orderVotes == 0u);
-    CHECK(status.hostNsValid == 0u);
+    mirror = wrong.output.orderStatus();
+    CHECK(status.orderGlitches == 0u);
+    CHECK(mirror.glitches == 0u);
+    CHECK(status.orderVotes == 3u);
+    CHECK(mirror.votes == 3u);
+    CHECK(status.orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kOutputFirst));
+    CHECK(mirror.verdict == loop::OrderVerdict::kOutputFirst);
+
+    // 失效计时按样本走：一块超长块（40000 < 48000）结论还在，第二块（累计 80000）两端都回到 unknown
+    wrong.run(params, 40000, 40000, silence, transportAt);
+    offset += 40000;
+    CHECK(wrong.input.loopStatus().orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kOutputFirst));
+    CHECK(wrong.output.orderStatus().verdict == loop::OrderVerdict::kOutputFirst);
+    wrong.run(params, 40000, 40000, silence, transportAt);
+    offset += 40000;
+    CHECK(wrong.input.loopStatus().orderVerdict == static_cast<std::uint8_t>(loop::OrderVerdict::kUnknown));
+    CHECK(wrong.output.orderStatus().verdict == loop::OrderVerdict::kUnknown);
+    CHECK(wrong.input.loopStatus().orderGlitches == 0u);
+    CHECK(wrong.output.orderStatus().glitches == 0u);
+}
+
+TEST_CASE("引擎 Output 端错序镜像：换组之后第一次读到的 Input 槽只记块序号，不当新块", "[engine][loop]")
+{
+    // ⛔ 删除式验证点：Output 换组时不清对端记账 → 新组槽里的旧值被当成新块投一票，本用例变红。
+    namespace loop = rinne::loop;
+    OutputEngine output;
+    output.prepare(kSr, 256);
+    auto ring = makeRing();
+    LoopRing::publishWriter(*ring, kToken, static_cast<std::uint32_t>(kSr), 2);
+    auto rv = makeRv();
+    HostBuffer host(256);
+    TransportInfo t;
+    t.hostNs = 5000000000u;
+    t.hostNsValid = true;
+    const EngineParams params = unityLoopParams(10.0f);
+    RoleSlot& group1 = roleSlot(*rv, 1, Role::kInput);
+    RoleSlot& group2 = roleSlot(*rv, 2, Role::kInput);
+
+    // 组 1：Input 在前（Input 槽里的时间戳不小于本块的），第一块只记块序号，之后每块一票，第 4 块定案
+    EngineContext ctx = outputCtx(ring.get(), kToken, rv.get());
+    for (int i = 0; i < 4; ++i)
+    {
+        t.hostNs += 5000000u;
+        group1.last_host_ns.store(t.hostNs);
+        group1.block_seq.fetch_add(1);
+        output.process(host.view(), params, t, false, ctx);
+    }
+    REQUIRE(output.orderStatus().verdict == loop::OrderVerdict::kCorrect);
+    const std::uint32_t checks = output.orderStatus().checks;
+
+    // 换到组 2：槽里是上一个会话留下的旧值（块序号不同，时间戳比本块小——当成新块会投 Output 在前的一票）
+    ctx.group = 2;
+    t.hostNs += 5000000u;
+    group2.last_host_ns.store(t.hostNs - 1000u);
+    group2.block_seq.store(40);
+    output.process(host.view(), params, t, false, ctx);
+    CHECK(output.orderStatus().checks == checks);
+    CHECK(output.orderStatus().votes == 0u);
+    CHECK(output.orderStatus().direction == loop::OrderDirection::kNone);
+    CHECK(output.orderStatus().verdict == loop::OrderVerdict::kCorrect);
+    // 新组的对端发布了真的新块（Input 在前）：这才是第一票
+    t.hostNs += 5000000u;
+    group2.last_host_ns.store(t.hostNs);
+    group2.block_seq.fetch_add(1);
+    output.process(host.view(), params, t, false, ctx);
+    CHECK(output.orderStatus().checks == checks + 1u);
+    CHECK(output.orderStatus().votes == 1u);
+    CHECK(output.orderStatus().direction == loop::OrderDirection::kInputFirst);
+    CHECK(output.orderStatus().glitches == 0u);
 }
 
 TEST_CASE("引擎 端点槽：两端各自发布自己的槽（块序号、时间戳、实时标志），d_eff 在 Input 槽", "[engine][loop]")

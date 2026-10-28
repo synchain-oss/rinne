@@ -5,7 +5,8 @@
 //   - W ≈ 2^40：配对时锚在写头，读头读到的正是 D 帧之前写下的那一帧，漂移量为 0。
 //   - from > pulled：读位置超出已拉取区间时读成 0，按补 0 计数，逐样本有效位为 0。
 //   - 宿主违约：块长超过声明值时 D 下限立即抬到块长，原因记成宿主违约。
-//   - 错序判据：宿主时间戳有效时连续 3 次判为「Output 在前」才定案；无效时恒为 unknown。
+//   - 错序判据：宿主时间戳有效、对端有新块时连续 3 次判为「Output 在前」才定案，连续 3 次「Input 在前」才清除；
+//     判不了的块结论不动，1 s（按样本计）没有有效检查才回到 unknown；时间戳回退不重置结论。
 //   - 对端没了：读头 10 ms 淡出，读位照常前进，之后回送为 0。
 //   - 起播沿的复位点：给的是绝对样本号。
 //
@@ -71,7 +72,7 @@ public:
         BlockContext ctx(params, transport);
         ctx.ring = ring_;
         ctx.rendezvous = rv_;
-        ctx.group = rv_ != nullptr ? 1u : 0u;
+        ctx.group = rv_ != nullptr ? group_ : 0u;
         ctx.role = ipc::Role::kInput;
         ctx.declaredBlock = declaredBlock_;
         ctx.observedBlock = declaredBlock_;
@@ -89,6 +90,8 @@ public:
         ipc::LoopRing::publishWriter(*ring_, token, static_cast<std::uint32_t>(kSr), 2);
     }
     void attachRendezvous(ipc::RvSegment& rv) { rv_ = &rv; }
+    // 读对端槽用的组号（默认 1）：中途改它就是换组。
+    void setGroup(std::uint32_t group) { group_ = group; }
     // 段没了（换组、断开）：之后的块不给环。
     void detachRing() { ring_ = nullptr; }
     // 本端声明的最大块长（N_prep）。默认 1024。
@@ -103,6 +106,7 @@ private:
     LoopSession session_;
     ipc::RingSegment* ring_ = nullptr;
     ipc::RvSegment* rv_ = nullptr;
+    std::uint32_t group_ = 1;
     std::int64_t declaredBlock_ = 1024;
     std::vector<float> mixLeft_;
     std::vector<float> mixRight_;
@@ -269,7 +273,17 @@ TEST_CASE("环路 错序判据：读不到对端槽时不猜，恒为 unknown")
     CHECK(s.status().hostNsValid == 1u); // 宿主给了时间戳，只是对端槽读不到
 }
 
-TEST_CASE("环路 错序判据：对端时间戳不小于本块的连续 3 次才定案，判对一次就清零")
+namespace
+{
+// 替 Output 端发布它的槽：宿主时间戳、块序号 +1（最后 release），和真引擎的发布次序一致。
+void publishOutput(ipc::RoleSlot& output, std::uint64_t hostNs)
+{
+    output.last_host_ns.store(hostNs, std::memory_order_relaxed);
+    output.block_seq.fetch_add(1, std::memory_order_release);
+}
+} // namespace
+
+TEST_CASE("环路 错序判据：对端时间戳不小于本块的连续 3 次才定案，连续 3 次 Input 在前才清除")
 {
     // ⛔ 删除式验证点：把判据写反（对端时间戳更小就记一票）→ 本用例变红。
     auto rv = std::make_unique<ipc::RvSegment>();
@@ -279,31 +293,132 @@ TEST_CASE("环路 错序判据：对端时间戳不小于本块的连续 3 次�
 
     TransportInfo transport;
     transport.hostNsValid = true;
-    std::uint64_t ns = 5000;
+    std::uint64_t ns = 5000000;
+    constexpr std::uint64_t kStep = 1000000; // 64 样本 @ 48 kHz ≈ 1.33 ms：步长取 1 ms，在预期之内
 
-    // Output 已经处理过本块（它的时间戳等于本块的）：一票、两票、三票才定案。
+    // 一个宿主周期，Output 先：Output 先发布这个周期的时间戳，Input 再读到它（等于本块的）→ Output 在前的一票。
+    const auto outputFirstCycle = [&] {
+        transport.hostNs = ns;
+        publishOutput(output, ns);
+        s.feed(64, transport);
+        ns += kStep;
+    };
+    // 一个宿主周期，Input 先：Input 读到的是 Output 上个周期发布的（更小）→ Input 在前的一票；Output 随后发布。
+    const auto inputFirstCycle = [&] {
+        transport.hostNs = ns;
+        s.feed(64, transport);
+        publishOutput(output, ns);
+        ns += kStep;
+    };
+
+    // 第一次读到对端槽只记块序号，不当新块（槽里可能是上一个会话留下的旧值）：没有票，也不算异常。
+    outputFirstCycle();
+    CHECK(s.status().orderVotes == 0u);
+    CHECK(s.status().orderChecks == 0u);
+    CHECK(s.status().orderGlitches == 0u);
+
+    // 一票、两票、三票才定案。
     for (int vote = 1; vote <= 3; ++vote)
     {
-        transport.hostNs = ns;
-        output.last_host_ns.store(ns);
-        s.feed(64, transport);
+        outputFirstCycle();
         CHECK(s.status().orderVotes == static_cast<std::uint32_t>(vote));
+        CHECK(s.status().orderDirection == static_cast<std::uint8_t>(OrderDirection::kOutputFirst));
         CHECK(s.status().orderVerdict == (vote < 3 ? static_cast<std::uint8_t>(OrderVerdict::kUnknown)
                                                    : static_cast<std::uint8_t>(OrderVerdict::kOutputFirst)));
-        ns += 1000;
     }
+    CHECK(s.status().orderChecks == 3u);
 
-    // Output 还停在上一块（它的时间戳更小）：本块里 Input 先被处理 → 判为正确，票数清零。
-    transport.hostNs = ns;
-    output.last_host_ns.store(ns - 1000);
-    s.feed(64, transport);
-    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kCorrect));
+    // 翻成 Input 在前：第一个周期 Input 读到的 Output 槽还是上个周期读过的（块序号没动），判不了；
+    // 之后一周期一票，一票两票不够，第三票才清除。
+    inputFirstCycle();
+    CHECK(s.status().orderVotes == 0u);
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+    for (int vote = 1; vote <= 3; ++vote)
+    {
+        inputFirstCycle();
+        CHECK(s.status().orderVotes == static_cast<std::uint32_t>(vote));
+        CHECK(s.status().orderDirection == static_cast<std::uint8_t>(OrderDirection::kInputFirst));
+        CHECK(s.status().orderVerdict == (vote < 3 ? static_cast<std::uint8_t>(OrderVerdict::kOutputFirst)
+                                                   : static_cast<std::uint8_t>(OrderVerdict::kCorrect)));
+    }
+    CHECK(s.status().orderChecks == 6u);
+}
+
+TEST_CASE("环路 错序判据：对端没有新块、没发布过时间戳都判不了，结论不动，1 s 后才回到 unknown")
+{
+    auto rv = std::make_unique<ipc::RvSegment>();
+    Session s;
+    s.attachRendezvous(*rv);
+    ipc::RoleSlot& output = ipc::roleSlot(*rv, 1, ipc::Role::kOutput);
+
+    TransportInfo transport;
+    transport.hostNsValid = true;
+    std::uint64_t ns = 5000000;
+    for (int i = 0; i < 4; ++i)
+    {
+        transport.hostNs = ns;
+        publishOutput(output, ns);
+        s.feed(64, transport);
+        ns += 1000000;
+    }
+    REQUIRE(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+
+    // 对端不再发布（块序号不动）：时间戳往前走，但对端槽里是旧值，不是证据。结论不动，连续计数清零。
+    for (int i = 0; i < 100; ++i)
+    {
+        transport.hostNs = ns;
+        s.feed(64, transport);
+        ns += 1000000;
+    }
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
     CHECK(s.status().orderVotes == 0u);
 
-    // 对端还没发布过时间戳（0）：不猜。
-    output.last_host_ns.store(0);
+    // 对端的时间戳是 0（对端宿主没给）：同样判不了
+    publishOutput(output, 0);
+    transport.hostNs = ns;
     s.feed(64, transport);
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+
+    // 累计到 1 s（48000 样本）没有有效检查：回到 unknown。最后一次有效检查之后已经过了 101 块 × 64 = 6464 样本；
+    // 再喂 40 块 × 1024 = 40960 样本是 47424，还差一点；再一块越过 48000。
+    for (int i = 0; i < 40; ++i)
+    {
+        transport.hostNs = ns;
+        s.feed(1024, transport);
+        ns += 20000000;
+    }
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+    transport.hostNs = ns;
+    s.feed(1024, transport);
     CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kUnknown));
+}
+
+TEST_CASE("环路 错序判据：宿主时间戳回退数秒不重置结论、不投票")
+{
+    auto rv = std::make_unique<ipc::RvSegment>();
+    Session s;
+    s.attachRendezvous(*rv);
+    ipc::RoleSlot& output = ipc::roleSlot(*rv, 1, ipc::Role::kOutput);
+
+    TransportInfo transport;
+    transport.hostNsValid = true;
+    std::uint64_t ns = 20000000000ull;
+    for (int i = 0; i < 5; ++i)
+    {
+        transport.hostNs = ns;
+        publishOutput(output, ns);
+        s.feed(64, transport);
+        ns += 1000000;
+    }
+    REQUIRE(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+
+    // 回退 7 秒：这一块判不了（不是 Input 在前的证据），结论还在
+    transport.hostNs = ns - 7000000000ull;
+    publishOutput(output, transport.hostNs);
+    s.feed(64, transport);
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+    CHECK(s.status().orderVotes == 0u);
+    CHECK(s.status().orderGlitches == 1u);
 }
 
 TEST_CASE("环路 当前的几何量：m / w / off 逐块发布，用的是块首的读位")
@@ -1247,4 +1362,109 @@ TEST_CASE("环路 超长块落在改 D 的交叉淡化中间：淡出长度取�
     CHECK(std::fabs(s.left()[0] - 0.5f) < 1.0e-5f);
     // 时间线不走：交叉淡化的剩余不变，下一块从同一个位置接着淡
     CHECK(s.status().delayXfadeLeft == left);
+}
+
+TEST_CASE(
+    "环路 超长块（n > 32768）的错序证据：不投票、不打断连续票，时间戳基线与失效计时照样前进；下一个正常块不记异常")
+{
+    // ⛔ 删除式验证点：超长块路径不推进错序证据（回到只 return）→ 约 40000 帧之后的 64 帧块被记成跳变，
+    //    orderGlitches 加 1、连续票清零，本用例变红；超长块路径清掉连续票 → 第三票接不上，本用例变红；
+    //    失效计时不累加超长块的样本 → 两块超长块之后结论仍是 Output 在前，本用例变红。
+    auto rv = std::make_unique<ipc::RvSegment>();
+    Session s;
+    s.attachRendezvous(*rv);
+    ipc::RoleSlot& output = ipc::roleSlot(*rv, 1, ipc::Role::kOutput);
+
+    TransportInfo transport;
+    transport.hostNsValid = true;
+    std::uint64_t ns = 5000000;
+    constexpr std::uint64_t kStep = 1000000; // 64 样本 @ 48 kHz ≈ 1.33 ms：步长取 1 ms，在预期之内
+    constexpr std::uint64_t kHugeNs = 833333333; // 40000 样本 @ 48 kHz
+    const auto outputFirstCycle = [&] {
+        transport.hostNs = ns;
+        publishOutput(output, ns);
+        s.feed(64, transport);
+        ns += kStep;
+    };
+    const auto hugeCycle = [&] {
+        transport.hostNs = ns;
+        publishOutput(output, ns);
+        const BlockResult r = s.feed(40000, transport);
+        REQUIRE(r.unsupportedBlock);
+        ns += kHugeNs;
+    };
+
+    outputFirstCycle(); // 第一次读到：只记块序号
+    outputFirstCycle();
+    outputFirstCycle();
+    REQUIRE(s.status().orderVotes == 2u);
+    REQUIRE(s.status().orderChecks == 2u);
+
+    hugeCycle();
+    CHECK(s.status().orderVotes == 2u); // 连续票不打断
+    CHECK(s.status().orderChecks == 2u); // 超长块不投票
+    CHECK(s.status().orderGlitches == 0u);
+    CHECK(s.status().hostNsValid == 1u);
+
+    outputFirstCycle(); // 超长块之后的 64 帧块：时间戳多跳了 0.83 s，但基线跟着超长块走了，不是跳变
+    CHECK(s.status().orderGlitches == 0u);
+    CHECK(s.status().orderVotes == 3u);
+    CHECK(s.status().orderChecks == 3u);
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+
+    // 失效计时按样本走：一块超长块（40000 < 48000）结论还在，第二块（累计 80000 ≥ 48000）回到 unknown
+    hugeCycle();
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kOutputFirst));
+    hugeCycle();
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kUnknown));
+    CHECK(s.status().orderVotes == 0u);
+    CHECK(s.status().orderGlitches == 0u);
+}
+
+TEST_CASE("环路 换组：旧组的块序号与时间戳作废，新组的槽第一次读到只记块序号，不当新块")
+{
+    // ⛔ 删除式验证点：换组时不清错序证据的对端记账 → 新组槽里的旧值被当成新块投一票，本用例变红。
+    auto rv = std::make_unique<ipc::RvSegment>();
+    Session s;
+    s.attachRendezvous(*rv);
+    ipc::RoleSlot& group1 = ipc::roleSlot(*rv, 1, ipc::Role::kOutput);
+    ipc::RoleSlot& group2 = ipc::roleSlot(*rv, 2, ipc::Role::kOutput);
+
+    TransportInfo transport;
+    transport.hostNsValid = true;
+    std::uint64_t ns = 5000000;
+    constexpr std::uint64_t kStep = 1000000;
+    // 组 1：Input 在前（Input 读到的是 Output 上个周期发布的，更小），连续 3 票定案
+    for (int i = 0; i < 5; ++i)
+    {
+        transport.hostNs = ns;
+        s.feed(64, transport);
+        publishOutput(group1, ns);
+        ns += kStep;
+    }
+    REQUIRE(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kCorrect));
+    const std::uint32_t checks = s.status().orderChecks;
+
+    // 换到组 2：槽里是上一个会话留下的旧值（块序号与组 1 的不同，时间戳比本块大——当成新块会投 Output 在前的一票，
+    // 记成基线又会让下一个真新块显得是回退）
+    group2.last_host_ns.store(ns + 500000, std::memory_order_relaxed);
+    group2.block_seq.store(40, std::memory_order_release);
+    s.setGroup(2);
+    transport.hostNs = ns;
+    s.feed(64, transport);
+    ns += kStep;
+    CHECK(s.status().orderChecks == checks);
+    CHECK(s.status().orderVotes == 0u);
+    CHECK(s.status().orderDirection == static_cast<std::uint8_t>(OrderDirection::kNone));
+    CHECK(s.status().orderGlitches == 0u);
+    CHECK(s.status().orderVerdict == static_cast<std::uint8_t>(OrderVerdict::kCorrect)); // 结论不动
+
+    // 新组的对端发布了真的新块：这才是第一票（Input 在前：槽里的时间戳比本块小），不是回退
+    publishOutput(group2, ns - kStep);
+    transport.hostNs = ns;
+    s.feed(64, transport);
+    CHECK(s.status().orderChecks == checks + 1u);
+    CHECK(s.status().orderVotes == 1u);
+    CHECK(s.status().orderDirection == static_cast<std::uint8_t>(OrderDirection::kInputFirst));
+    CHECK(s.status().orderGlitches == 0u);
 }
