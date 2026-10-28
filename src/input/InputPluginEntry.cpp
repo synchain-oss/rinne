@@ -20,9 +20,12 @@ juce::AudioProcessorEditor* InputProcessor::createEditor()
     // 探针构建也嵌了这份资源（入口代码两种身份同一份、不为身份另起编译定义），但探针路径从不读它
     options.resources = {RinneInputWebData::namedResourceListSize, RinneInputWebData::originalFilenames,
                          RinneInputWebData::namedResourceList, &RinneInputWebData::getNamedResource};
-    // 兜底面板的急停、恢复、环路开关钩子暂时留空，面板上这三个按钮是禁用的。现在没有可以急停的回送；
-    // 命令序号与恢复冷却接上之后，钩子在这里填
-    options.controls = {};
+    // 兜底面板的急停、恢复、环路开关接到处理器的界面入口（消息线程）；恢复的冷却由安全链判，按钮的可点态跟着它
+    options.controls.onPanic = [this] { panic(); };
+    options.controls.onResume = [this] { resumeLoop(); };
+    options.controls.resumeEnabled = [this] { return canResumeLoop(); };
+    options.controls.onLoopToggle = [this](bool on) { setLoopOnFromUi(on); };
+    options.controls.loopOn = [this] { return isLoopOn(); };
     options.probeEditorFactory = [this] { return createProbeEditor(); };
     return editor::createEditorOrGeneric(*this, options);
 }

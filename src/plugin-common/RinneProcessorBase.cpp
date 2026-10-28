@@ -6,10 +6,22 @@
 #include <utility>
 
 #include "ProbeHost.h"
+#include "engine/EngineParams.h"
 #include "util/RinneVersion.h"
 
 namespace rinne
 {
+
+// 外壳的 TailMode、state 里的 tail_mode、引擎的 TailMode 三份数值必须逐个相同（state 是线格式，只能追加）
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Auto) == static_cast<int>(state::TailMode::Auto));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Infinite) == static_cast<int>(state::TailMode::Infinite));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::ThirtySeconds) ==
+              static_cast<int>(state::TailMode::ThirtySeconds));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Auto) == static_cast<int>(engine::TailMode::kAuto));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Infinite) ==
+              static_cast<int>(engine::TailMode::kInfinite));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::ThirtySeconds) ==
+              static_cast<int>(engine::TailMode::kThirtySeconds));
 
 RinneProcessorBase::RinneProcessorBase()
     : juce::AudioProcessor(BusesProperties()
@@ -20,6 +32,9 @@ RinneProcessorBase::RinneProcessorBase()
     setLatencySamples(0);
 }
 
+// 子类的成员（参数层、胶水）先于这里析构；InstanceHost 的定时器回调只碰它自己的成员，不碰子类
+RinneProcessorBase::~RinneProcessorBase() = default;
+
 bool RinneProcessorBase::detectValidationHost()
 {
     const juce::PluginHostType host;
@@ -28,46 +43,25 @@ bool RinneProcessorBase::detectValidationHost()
 
 void RinneProcessorBase::prepareToPlay(double sampleRate, int maximumExpectedSamplesPerBlock)
 {
-    if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->prepare(sampleRate, maximumExpectedSamplesPerBlock);
-    }
-    else
-    {
-        juce::ignoreUnused(sampleRate, maximumExpectedSamplesPerBlock);
-    }
+    host_->prepare(sampleRate, maximumExpectedSamplesPerBlock);
 }
 
 void RinneProcessorBase::releaseResources()
 {
-    if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->release();
-    }
+    host_->release();
 }
 
 void RinneProcessorBase::reset()
 {
-    if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->reset();
-    }
+    host_->reset();
 }
 
 void RinneProcessorBase::updateTrackProperties(const TrackProperties& properties)
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->trackProperties(properties);
-    }
+        static_cast<probe::ProbeHost&>(*host_).trackProperties(properties);
     else
-    {
         juce::ignoreUnused(properties);
-    }
 }
 
 bool RinneProcessorBase::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -108,31 +102,21 @@ const juce::String RinneProcessorBase::getName() const
     return JucePlugin_Name;
 }
 
-// 外壳阶段没有任何状态要存；state 容器接上之前，存出空块、读入时忽略（探针构建里存取的是探针 state）
+// 探针构建存取探针 state。正式构建里两个子类经各自的胶水重写，这两个只在子类没有接线时兜底：存出空块、读入时忽略
 void RinneProcessorBase::getStateInformation(juce::MemoryBlock& destData)
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-        {
-            probe_->getState(destData);
-            return;
-        }
-    }
-    destData.reset();
+        static_cast<probe::ProbeHost&>(*host_).getState(destData);
+    else
+        destData.reset();
 }
 
 void RinneProcessorBase::setStateInformation(const void* data, int sizeInBytes)
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->setState(data, sizeInBytes);
-    }
+        static_cast<probe::ProbeHost&>(*host_).setState(data, sizeInBytes);
     else
-    {
         juce::ignoreUnused(data, sizeInBytes);
-    }
 }
 
 std::int64_t RinneProcessorBase::getProcessedSamples() const noexcept
@@ -149,50 +133,55 @@ bool RinneProcessorBase::beginBlock(int numSamples) noexcept
     return true;
 }
 
-void RinneProcessorBase::attachProbe(Side side)
+void RinneProcessorBase::attachHost(Side side, const InstanceHostConfig& config)
 {
+    InstanceHostConfig wiring = config;
+    wiring.role = side == Side::Input ? ipc::Role::kInput : ipc::Role::kOutput;
+    wiring.validationHost = validationHost_;
     if constexpr (build::kProbeBuild)
     {
-        probe::ProbeHostConfig config;
-        config.role = side == Side::Input ? ipc::Role::kInput : ipc::Role::kOutput;
-        config.validationHost = validationHost_;
-        probe_.reset(new probe::ProbeHost(*this, std::move(config)));
+        probe::ProbeHostConfig probeConfig;
+        static_cast<InstanceHostConfig&>(probeConfig) = wiring;
+        host_.reset(new probe::ProbeHost(*this, std::move(probeConfig)));
     }
     else
     {
-        juce::ignoreUnused(side);
+        host_ = std::make_unique<InstanceHost>(*this, wiring);
     }
+}
+
+void RinneProcessorBase::restoreConfigs(const state::Configs& configs)
+{
+    host_->setGroup(configs.group, ipc::ClaimIntent::kRestore);
+    switch (configs.tailMode)
+    {
+    case state::TailMode::Infinite:
+        setTailMode(TailMode::Infinite);
+        return;
+    case state::TailMode::ThirtySeconds:
+        setTailMode(TailMode::ThirtySeconds);
+        return;
+    case state::TailMode::Auto:
+        break;
+    }
+    // 解码已把越界值换成默认值；这里再兜一次，不认识的一律按自动
+    setTailMode(TailMode::Auto);
 }
 
 void RinneProcessorBase::processProbe(juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->process(buffer, bypassed);
-    }
+        static_cast<probe::ProbeHost&>(*host_).process(buffer, bypassed);
     else
-    {
         juce::ignoreUnused(buffer, bypassed);
-    }
 }
 
 juce::AudioProcessorEditor* RinneProcessorBase::createProbeEditor()
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            return probe_->createEditor();
-    }
-    return nullptr;
-}
-
-void RinneProcessorBase::destroyProbe(probe::ProbeHost* host) noexcept
-{
-    if constexpr (build::kProbeBuild)
-        delete host;
+        return static_cast<probe::ProbeHost&>(*host_).createEditor();
     else
-        juce::ignoreUnused(host);
+        return nullptr;
 }
 
 } // namespace rinne
