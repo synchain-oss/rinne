@@ -184,13 +184,15 @@ const quotedPathSpan = (text, quotePos, spans, opts) => {
 
 /**
  * 一行里 SVG path 上下文的字符区间（下标相对这一行）。
- * 只认三种语法位置：d 属性、path(…) 函数、路径数组（每个元素都得是 path 数据）。
+ * 只认三种语法位置：d 属性（HTML 的 d="…" 与脚本对象里的 d: '…'）、path(…) 函数、路径数组（每个元素都得是 path 数据）。
+ * dColon 是可关的判据（对象写法 d: '…'），变异检查要能单独把它关掉（见 mutationCheck）。
  */
 export function pathSpans(line, opts) {
     const spans = [];
     if (!line.includes("'") && !line.includes('"')) return spans;
+    const dAttr = opts?.dColon === false ? /\bd[ \t]*=[ \t]*(['"])/g : /\bd[ \t]*[=:][ \t]*(['"])/g;
     // d 属性与 path(…) 函数：引号里的内容必须是 path 数据
-    for (const re of [/\bd[ \t]*[=:][ \t]*(['"])/g, /\bpath[ \t]*\([ \t]*(['"])/g]) {
+    for (const re of [dAttr, /\bpath[ \t]*\([ \t]*(['"])/g]) {
         for (const m of line.matchAll(re)) {
             quotedPathSpan(line, m.index + m[0].length - 1, spans, opts);
         }
@@ -672,12 +674,17 @@ export const CASES = [
     [null, j("path('M", "4.5 6.5L8 10l3.5-3.5')")],
     [null, j("path('M", "14 8a6 6 0 1 1-12 0')")],
     [null, j('svg(d="M', '14 8a6 6 0 1 1-12 0")')],
+    // 脚本对象里的 d: '…' 也是 d 属性（设计稿的图标表这样写）
+    [null, j("icon({ d: 'M", "14 8a6 6 0 1 1-12 0' })")],
+    // T、M 是 path 命令：合法 path 数据里「T 加数字」这类坐标按设计放行；同样的形态写在普通文本的括号里照判（见下方普通文本几条）
+    [null, j("path('M", "0 0T", "12 3')")],
     [null, j("icon: ['M", "14 8a6 6 0 1 1-12 0a6 6 0 1 1 12 0', 'M3.8 3.8l8.4 8.4'],")],
     [null, j("icon: ['M", "3 8h10', 'M", "10 5l3 3-3 3'],")],
     [null, j("const MARK_URI = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAC/9/", "W", "3/dRA1tS/4XF3FAjRec'")],
     // 真的像内部编号的 path 形态：J、W 不是 path 命令，那段路径也不是合法 path，照判
     ["bracket-id", j("icon: ['M", "3 5 J", "12 ', 'M", "4 4L6 6'],")],
     ["bracket-id", j("path('M", "3 5 J", "12 ')")],
+    ["bracket-id", j("icon({ d: 'M", "3 5 J", "12 ' })")],
     // 路径不以 moveto 开头就不是 path（SVG 规范如此）：T、D、R 这些命令开头的编号形态照判
     ["bracket-id", j("icon: ['T", "4 12 ', 'M", "4 4L6 6'],")],
     ["upstream-w", j("icon: ['W", "3 12 ', 'M", "4 4L6 6'],")],
@@ -707,6 +714,7 @@ export const CASES = [
     // 普通文本里的编号形态照判
     ["upstream-w", j("普通文本里的 W", "3 不是 base64")],
     [["bracket-id", "upstream-j"], j("普通文本里的 (J", "12) 不是 path")],
+    [["bracket-id", "upstream-tm"], j("普通文本里的 (T", "12) 不是 path")],
     [["bracket-id", "upstream-w"], j("普通文本里的 (W", "3) 不是 base64")],
     // 章节号与文件名
     [null, "按 GPLv3 §6(d) 提供对应源码；JUCE 部分适用 AGPLv3（GPLv3 §13）；IEC 61672 §5.2"],
@@ -829,6 +837,8 @@ export function mutationCheck() {
         ],
         // path 判据：首命令必须是 moveto，不要求时那些「以别的命令开头的编号」会漏判
         ["放行上下文：path 不要求 moveto 开头", { contextSpans: (line) => contextSpans(line, { movetoFirst: false }) }],
+        // d 属性的对象写法 d: '…'：不认它时设计稿图标表那种写法会被误判
+        ["放行上下文：d 属性不认对象写法", { contextSpans: (line) => contextSpans(line, { dColon: false }) }],
     );
     const survived = mutants.filter(([, opts]) => runCases(opts).every((c) => c.passed)).map(([name]) => name);
     return { total: mutants.length, survived };
