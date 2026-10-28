@@ -160,6 +160,10 @@ function Test-RinneGates([string]$Root) {
     $sr = Resolve-PortResult $strict.Code $strict.Lines $p
     [pscustomobject]@{ Label = 'serve.ps1 -StrictPort：端口被占时不换端口、退出 3，记 SKIP 并写明占用者'; Bad = $true; Passed = $strict.Code -eq 3 -and $sr.Status -ceq 'SKIP' -and $sr.Reason -match "PID $PID " }
     [pscustomobject]@{ Label = 'serve.ps1 -StrictPort：端口放开之后照常 PASS'; Bad = $false; Passed = (Resolve-PortResult $free.Code $free.Lines $p).Status -ceq 'PASS' -and (Get-ServePortInfo $free.Lines).Port -eq $p }
+    # 固定端口自检是单列的一项：少注册了它，8833 被占时就只剩 G9-web 里的一句说明，固定入口坏了也没有一道 gate 会报
+    $regs = @(Register-RinneGates)
+    $reg = { param($id) @($regs | Where-Object { $_.Id -ceq $id -and $_.Tier -ceq 'Full' -and $_.Lock -ceq 'gui' -and $_.Run -is [scriptblock] }).Count -eq 1 }
+    [pscustomobject]@{ Label = '注册了 G9-web 与 G9-web-port 两道，都是 Full 档、持 gui 锁'; Bad = $false; Passed = $regs.Count -eq 2 -and (& $reg 'G9-web') -and (& $reg 'G9-web-port') }
 }
 
 function Register-RinneGates {
