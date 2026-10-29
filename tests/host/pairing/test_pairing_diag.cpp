@@ -46,10 +46,15 @@ std::vector<std::string> machineNames()
 {
     std::vector<std::string> names;
     const juce::File exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    // 程序名取完整文件名，只去掉结尾的 .exe：不用 getFileNameWithoutExtension，它从最后一个点截断，mac 上的换名副本
+    // com.apple.audio.InfoHelper-rinne-host-tests 会只剩 com.apple.audio，撞上 JUCE 给这个宿主的固定描述
+    juce::String exeName = exe.getFileName();
+    if (exeName.endsWithIgnoreCase(".exe"))
+        exeName = exeName.dropLastCharacters(4);
     for (const juce::String& name :
          {juce::SystemStats::getComputerName(), juce::SystemStats::getLogonName(), juce::SystemStats::getFullUserName(),
-          juce::File::getSpecialLocation(juce::File::userHomeDirectory).getFullPathName(),
-          exe.getFileNameWithoutExtension(), exe.getParentDirectory().getFullPathName()})
+          juce::File::getSpecialLocation(juce::File::userHomeDirectory).getFullPathName(), exeName,
+          exe.getParentDirectory().getFullPathName()})
     {
         if (name.trim().length() > 2)
             names.push_back(name.trim().toStdString());

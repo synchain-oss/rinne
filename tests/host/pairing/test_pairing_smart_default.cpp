@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 智能默认：插入顺序（Input 先 / Output 先）、同名轨优先、两个 Input 一个 Output、同一拍里看见前一个刚建的段、
-// 不做决定的拍子按扫描间隔重开只读视图、state 读入期间不认领、8 组全满、五项触发条件各缺一次、Output 等待中每秒重评、
-// 手选之后永不迁组。
+// 不做决定的拍子按扫描间隔重开只读视图、卡在初始化一半的段做决定时也按扫描间隔重开、state 读入期间不认领、8 组全满、
+// 五项触发条件各缺一次、Output 等待中每秒重评、手选之后永不迁组。
 // 规则以 ipc/PairingPolicy.h 与 ADR 0004 为准，这里只验接线。
 #include <catch2/catch_test_macros.hpp>
 
@@ -198,6 +198,43 @@ TEST_CASE("pairing: while no smart decision is due an unopenable view is retried
     input.prepareToPlay(kRate, kBlock);
     bench.run(400);
     CHECK(holds(input, 1));
+}
+
+// 别的实例建了会合段、初始化到一半就停住（段头一直没发布）：快照一直不能用，五项齐了之后每一拍都要做决定、都做不成。
+// 强制重开只对「段不存在」生效，这时照样按扫描间隔：1 s 里 25 拍只开 4 次左右，不是每拍一次打开、校验、解映射
+TEST_CASE("pairing: a rendezvous segment stuck mid-initialisation is reopened at the scan interval while a decision is "
+          "due",
+          "[host][pairing][smart]")
+{
+    formalOnly();
+    needsSharedMemory();
+    CountingBackend backend;
+    Bench bench;
+    rinne::InstanceHostConfig config = bench.config();
+    config.backend = &backend;
+
+    // 与实例的会合同一个作用域的会合段：只建、不初始化（magic 一直是 0）。比 Bench 后建、先拆
+    struct StuckSegment
+    {
+        ipc::PlatformSegmentBackend backend;
+        ipc::SegmentView view;
+        ~StuckSegment()
+        {
+            if (view.base != nullptr)
+                backend.unmap(view);
+        }
+    } stuck;
+    std::string name;
+    REQUIRE(ipc::Naming(config.scope).name(ipc::SegmentId::rendezvous(), name) == ipc::NameStatus::kOk);
+    REQUIRE(stuck.backend.createOrOpen(name, ipc::kRvBytes, stuck.view) == ipc::InitResult::kOk);
+
+    InputProcessor& input = bench.add(std::make_unique<InputProcessor>(config), true);
+    bench.run(400); // 过了 300 ms、实时块也够了：从这里起每一拍都要做决定
+    const int before = backend.readOnlyOpens;
+    bench.run(1000);
+    CHECK(backend.readOnlyOpens - before >= 3);
+    CHECK(backend.readOnlyOpens - before <= 5);
+    CHECK(groupOf(input) == 0); // 快照一直不能用：不决定、不认领
 }
 
 // 工程 state 读入的过程中（胶水已经换上设置、正在写参数树）来了一拍：这一拍不做智能认领，否则智能组会写进刚换上的

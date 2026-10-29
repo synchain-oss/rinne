@@ -2,9 +2,9 @@
 //
 // 会合段的只读快照（pairing::PairingSnapshot），用进程内后端：另一个后端实例扮「别的实例」建段、写槽，快照经计数
 // 后端去读。覆盖：段不存在时全空、要连着两次打不开才信；打开的节奏（平时按扫描间隔、force 时强制再试、时钟倒退立刻
-// 再试、ABI 不同的段按冲突重试间隔且不受 force 影响、后端拒绝之后不再试）；还没发布完、几何不对与 ABI 不同的段都当
-// 没有数据；每端带 pid，别的进程的端点照样算占着；标签两次读到同一份才信、撕裂时留着上一份、换了主人又撕裂就当未知、
-// 显示名不是合法 UTF-8 就不要；整个过程不建段、不写段。
+// 再试、force 只对段不存在生效：卡在初始化一半的段做决定的拍子也按扫描间隔、ABI 不同的段按冲突重试间隔、后端拒绝之后
+// 不再试）；还没发布完、几何不对与 ABI 不同的段都当没有数据；每端带 pid，别的进程的端点照样算占着；标签两次读到同一份
+// 才信、撕裂时留着上一份、换了主人又撕裂就当未知、显示名不是合法 UTF-8 就不要；整个过程不建段、不写段。
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstring>
@@ -146,14 +146,12 @@ TEST_CASE("snapshot: a segment still being initialised, of the wrong geometry or
         world.view = createView(world.writer, world.naming, SegmentId::rendezvous(), kRvBytes); // magic 还是 0
         PairingSnapshot snapshot(&backend, world.scope);
         snapshot.refresh(kT0, true);
-        snapshot.refresh(kT0 + 40, true);
-        snapshot.refresh(kT0 + 80, true);
-        CHECK(backend.openExistingReadOnlyCalls == 3u);
-        CHECK(backend.unmapCalls == 3u); // 每次都立刻放下
+        CHECK(backend.openExistingReadOnlyCalls == 1u);
+        CHECK(backend.unmapCalls == 1u); // 立刻放下
         CHECK_FALSE(snapshot.mapped());
         CHECK_FALSE(snapshot.usable()); // 段在、只是还没发布完：不能当全空
         publishRv(world.writer, world.view);
-        snapshot.refresh(kT0 + 120, true);
+        snapshot.refresh(kT0 + PairingSnapshot::kRetryMs, false);
         CHECK(snapshot.mapped());
     }
     SECTION("published with the wrong geometry")
@@ -162,7 +160,8 @@ TEST_CASE("snapshot: a segment still being initialised, of the wrong geometry or
         rv.header.groups.store(kGroupCount - 1u);
         PairingSnapshot snapshot(&backend, world.scope);
         snapshot.refresh(kT0, true);
-        snapshot.refresh(kT0 + 40, true);
+        snapshot.refresh(kT0 + PairingSnapshot::kRetryMs, true);
+        CHECK(backend.openExistingReadOnlyCalls == 2u);
         CHECK_FALSE(snapshot.mapped());
         CHECK_FALSE(snapshot.usable());
     }
@@ -181,6 +180,43 @@ TEST_CASE("snapshot: a segment still being initialised, of the wrong geometry or
         CHECK(backend.openExistingReadOnlyCalls == 2u);
         CHECK(snapshot.abiMismatch());
     }
+}
+
+// 别的进程建了段、初始化到一半就崩了，段一直停在「还没发布完」：快照一直不能用，调用方的决定一直做不成、
+// 每一拍都传 force。force 只对「段不存在」生效，这时照样按扫描间隔打开，不变成每拍一次打开、校验、解映射；
+// 段没了之后又能强制再试
+TEST_CASE("snapshot: a segment stuck mid-initialisation is retried at the scan interval even on deciding ticks",
+          "[pairing][snapshot]")
+{
+    World world;
+    world.view = createView(world.writer, world.naming, SegmentId::rendezvous(), kRvBytes); // magic 一直是 0
+    CountingBackend backend;
+    PairingSnapshot snapshot(&backend, world.scope);
+    u64 t = kT0;
+    for (; t < kT0 + 1000; t += 40)
+        snapshot.refresh(t, true);
+    // 40 ms 一拍、25 拍：只在 kT0、+280、+560、+840 各开一次
+    CHECK(backend.openExistingReadOnlyCalls == 4u);
+    CHECK(backend.unmapCalls == 4u);
+    CHECK_FALSE(snapshot.mapped());
+    CHECK_FALSE(snapshot.usable());
+
+    // 残段被收掉了：到了间隔那一次看到段不存在，下一个要做决定的拍子不等间隔再试，两次打不开就当全空
+    backend.forced = InitResult::kFailed;
+    for (int i = 0; i < 10 && backend.openExistingReadOnlyCalls == 4u; ++i, t += 40)
+        snapshot.refresh(t, true);
+    REQUIRE(backend.openExistingReadOnlyCalls == 5u);
+    CHECK_FALSE(snapshot.usable());
+    snapshot.refresh(t, true);
+    CHECK(backend.openExistingReadOnlyCalls == 6u);
+    CHECK(snapshot.usable());
+
+    // 有人重新建好了段：做决定的拍子当场看见
+    backend.forced = InitResult::kOk;
+    publishRv(world.writer, world.view);
+    snapshot.refresh(t + 40, true);
+    CHECK(backend.openExistingReadOnlyCalls == 7u);
+    CHECK(snapshot.mapped());
 }
 
 TEST_CASE("snapshot: once the backend refuses it is never asked again", "[pairing][snapshot]")

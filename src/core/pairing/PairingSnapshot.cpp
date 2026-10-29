@@ -127,16 +127,15 @@ void PairingSnapshot::refresh(u64 nowMs, bool force)
     open(nowMs);
 }
 
-// 从没试过就试；ABI 不同的段每 kAbiRetryMs 看一次，不受 force 影响；其余按 kRetryMs，force 时不看间隔。
-// 时钟倒退时立刻再试，不拿旧时间卡住（与观察者的 due 同一个口径）
+// 从没试过就试；force 只在上一次是「段不存在」（kFailed）时不看间隔。还没发布完（kBusy）按 kRetryMs、ABI 不同的段按
+// kAbiRetryMs，都不受 force 影响。时钟倒退时立刻再试，不拿旧时间卡住（与观察者的 due 同一个口径）
 bool PairingSnapshot::dueToOpen(u64 nowMs, bool force) const noexcept
 {
     if (!attempted_)
         return true;
-    const bool abi = lastResult_ == ipc::InitResult::kAbiMismatch;
-    if (force && !abi)
+    if (force && lastResult_ == ipc::InitResult::kFailed)
         return true;
-    const u64 interval = abi ? kAbiRetryMs : kRetryMs;
+    const u64 interval = lastResult_ == ipc::InitResult::kAbiMismatch ? kAbiRetryMs : kRetryMs;
     return nowMs < lastAttemptMs_ || nowMs - lastAttemptMs_ >= interval;
 }
 

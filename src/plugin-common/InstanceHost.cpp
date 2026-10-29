@@ -403,8 +403,8 @@ void InstanceHost::tickLocked(std::uint64_t ns, std::uint64_t ms)
     if (pairingOn())
     {
         const bool deciding = smartDue(ms);
-        // 本端的会合正持有会合段（持有槽、休眠、冲突）时段一定在：快照还没映射就不等扫描间隔，这一次一定打得开，
-        // 不会变成每拍一次失败的打开
+        // 本端的会合正持有会合段（持有槽、休眠、冲突）时段一定在：快照上一次看到段不存在就不等扫描间隔再开。
+        // 两种强制都只对「段不存在」生效，还没发布完的段照样按扫描间隔（见 PairingSnapshot 文件头）
         const ipc::RendezvousState state = rendezvous_->state();
         const bool segmentHeld = state == ipc::RendezvousState::kActive || state == ipc::RendezvousState::kDormant ||
                                  state == ipc::RendezvousState::kConflict;
@@ -622,7 +622,7 @@ std::uint32_t InstanceHost::trackNameHash() const
 // ---- 配对层：智能默认与重评 ----
 
 // 这一拍要不要做智能决定（含 Output 等待中的重评）：没决定过、或在等而且到了重评的点；没在读工程 state；五项触发
-// 条件齐了。为真时 tick 先强制重开一次快照，再交给 smartTick
+// 条件齐了。为真时 tick 先让快照强制再试一次打开（上一次是段不存在时），再交给 smartTick
 bool InstanceHost::smartDue(std::uint64_t ms) const noexcept
 {
     if ((smartDecided_ && !smartWaiting_) || stateLoads_ > 0)
