@@ -17,7 +17,17 @@ InputProcessor::InputProcessor(const InstanceHostConfig& config)
     attachHost(Side::Input, config);
     // 新实例的命令计数都从 0 起，基线就是当时的值
     if constexpr (!build::kProbeBuild)
+    {
         instanceHost().setCommandBaseline(wiring_->presets.presetSeq(), wiring_->glue.stateSeq());
+        wirePairing(wiring_->glue);
+    }
+}
+
+// 胶水先于 InstanceHost 析构：先撤下智能认领写胶水的回调
+InputProcessor::~InputProcessor()
+{
+    if constexpr (!build::kProbeBuild)
+        unwirePairing();
 }
 
 // 输入与输出声道数相同（isBusesLayoutSupported 保证），宿主给的缓冲本身就是干声，引擎在上面就地加回送
@@ -130,6 +140,43 @@ void InputProcessor::userParamGestureBegan()
 {
     if constexpr (!build::kProbeBuild)
         wiring_->glue.markUserAction();
+}
+
+RinneProcessorBase::RepairOutcome InputProcessor::repairGroup(bool confirmTakeover)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        juce::ignoreUnused(confirmTakeover);
+        return {};
+    }
+    else
+    {
+        return repairWith(wiring_->glue, confirmTakeover);
+    }
+}
+
+std::string InputProcessor::diagnosticsText() const
+{
+    if constexpr (build::kProbeBuild)
+    {
+        return {};
+    }
+    else
+    {
+        const input::InputStateGlue& glue = wiring_->glue;
+        diag::DiagState section;
+        section.lastLoad = loadStatusOf(glue.lastLoadStatus());
+        section.droppedUnknownParams = glue.droppedUnknownParams();
+        section.encodeFailures = glue.encodeFailures();
+        section.holdingNewer = glue.holdingNewerState();
+        return diagnosticsWith(section);
+    }
+}
+
+void InputProcessor::copyDiagnosticsToClipboard() const
+{
+    if constexpr (!build::kProbeBuild)
+        copyText(diagnosticsText());
 }
 
 } // namespace rinne

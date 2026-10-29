@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <optional>
+#include <string>
 
 #include "InputParams.h"
 #include "InputStateGlue.h"
@@ -23,8 +24,9 @@ class InputProcessor final : public RinneProcessorBase
 {
 public:
     InputProcessor();
-    // 测试注入（命名作用域、后端、时钟、定时器）；role 与验证宿主由基类填
+    // 测试注入（命名作用域、后端、时钟、定时器、诊断与日志的出口）；role、验证宿主与配对层由基类填
     explicit InputProcessor(const InstanceHostConfig& config);
+    ~InputProcessor() override;
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
     // 旁路：干声逐位直通；引擎照常拉环、回送 10 ms 淡出，延迟线不清
@@ -51,6 +53,11 @@ public:
     bool selectGroup(int group);
     // 界面上开始了一次参数手势（拖动或点击）：只定型，参数本身由手势照常写
     void userParamGestureBegan();
+    // 冲突的一键修复「移到空闲组」：定型并标脏（见 RinneProcessorBase::repairWith）。目标是休眠槽时要带确认再调一次
+    RepairOutcome repairGroup(bool confirmTakeover = false);
+    // 诊断文本（rinne-diag v1，不含末尾的 ui 段）与复制诊断。探针构建里是空串、什么都不复制
+    std::string diagnosticsText() const;
+    void copyDiagnosticsToClipboard() const;
 
     // ---- 每块的读序（音频线程）。模板只为让测试用包了一层的三样直接调用、钉住调用的先后 ----
     // 先参数快照，再一道 acquire 栅栏，再读序号（胶水快照里的 stateSeq，最后是预设库的 presetSeq）。
