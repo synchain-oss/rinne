@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 智能默认：插入顺序（Input 先 / Output 先）、同名轨优先、两个 Input 一个 Output、同一拍里看见前一个刚建的段、
-// state 读入期间不认领、8 组全满、五项触发条件各缺一次、Output 等待中每秒重评、手选之后永不迁组。
+// 不做决定的拍子按扫描间隔重开只读视图、state 读入期间不认领、8 组全满、五项触发条件各缺一次、Output 等待中每秒重评、
+// 手选之后永不迁组。
 // 规则以 ipc/PairingPolicy.h 与 ADR 0004 为准，这里只验接线。
 #include <catch2/catch_test_macros.hpp>
 
@@ -157,8 +158,8 @@ TEST_CASE("pairing: two Inputs deciding in the same tick never pick the same gro
     CHECK(holds(second, 2));
 }
 
-// 前一个实例这一拍刚建了会合段、认领了组，后一个实例同一拍做决定时必须看见它：段不存在时视图每拍重开，
-// 不能沿用上一次「段不存在」的结论。两个实例的拍子错开（建的时间不同），做决定却落在同一拍
+// 前一个实例这一拍刚建了会合段、认领了组，后一个实例同一拍做决定时必须看见它：要做决定的那一拍强制重开只读视图，
+// 不能沿用上一次「段不存在」的结论。两个实例重开视图的节拍错开（建的时间不同），做决定却落在同一拍
 TEST_CASE("pairing: an instance deciding in the same tick sees a segment created earlier in that tick",
           "[host][pairing][smart]")
 {
@@ -174,6 +175,29 @@ TEST_CASE("pairing: an instance deciding in the same tick sees a segment created
     bench.run(400);
     CHECK(holds(first, 1));
     CHECK(holds(second, 2));
+}
+
+// 只读视图打不开（这里是段还不存在）时，不做决定的拍子按观察者的扫描间隔（250 ms）再试，不是每拍都试：
+// 从没 prepare 过的实例 1 s 里 25 拍，只该试 4 次左右。做决定的拍子强制再试，见上一条用例
+TEST_CASE("pairing: while no smart decision is due an unopenable view is retried at the scan interval, not every tick",
+          "[host][pairing][smart]")
+{
+    formalOnly();
+    needsSharedMemory();
+    CountingBackend backend;
+    Bench bench;
+    rinne::InstanceHostConfig config = bench.config();
+    config.backend = &backend;
+    InputProcessor& input = bench.add(std::make_unique<InputProcessor>(config), false);
+    bench.run(1000);
+    CHECK(backend.readOnlyOpens >= 2);
+    CHECK(backend.readOnlyOpens <= 5);
+    CHECK(groupOf(input) == 0);
+
+    // prepare 之后五项一齐就决定，照常认领（段由它自己的会合建）
+    input.prepareToPlay(kRate, kBlock);
+    bench.run(400);
+    CHECK(holds(input, 1));
 }
 
 // 工程 state 读入的过程中（胶水已经换上设置、正在写参数树）来了一拍：这一拍不做智能认领，否则智能组会写进刚换上的

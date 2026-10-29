@@ -64,14 +64,6 @@ std::uint64_t monoNs() noexcept
     return diag::probeMonoNs();
 }
 
-// 对端视图的段头规格：与会合打开会合段时用的同一套（magic、abi、本 abi 的段大小）
-constexpr ipc::SegmentHeaderSpec kViewSpec{ipc::kRvMagic, ipc::kIpcAbi, ipc::kRvBytes, ipc::kRvHeaderBytes};
-
-std::size_t roleIndex(ipc::Role role) noexcept
-{
-    return role == ipc::Role::kOutput ? 1u : 0u;
-}
-
 const char* reasonName(ipc::PairingReason reason) noexcept
 {
     switch (reason)
@@ -172,17 +164,10 @@ InstanceHost::InstanceHost(juce::AudioProcessor& processor, const InstanceHostCo
     rc.hostPpid = ipc::parentProcessId();
     rc.seed = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this)) ^ monoNs();
     rendezvous_ = std::make_unique<ipc::Rendezvous>(rc);
+    // 只读快照只在 pairingOn() 时刷新（验证宿主与探针构建里从不打开）
+    snapshot_ = std::make_unique<pairing::PairingSnapshot>(backend, config_.scope);
 
-    backend_ = backend;
     version_ = rc.version;
-    if (pairingOn())
-    {
-        std::string name;
-        if (ipc::Naming(config_.scope).name(ipc::SegmentId::rendezvous(), name) == ipc::NameStatus::kOk)
-            viewName_ = std::move(name);
-        else
-            viewPermanent_ = true; // 名字不合法：会合自己也开不了，配对状态显示 IPC 不可用
-    }
     if (config_.pairing)
         foldPairState(nowNs(), nowMs()); // 第一拍之前就有一份（验证宿主下一开始就是 validator）
 
@@ -199,8 +184,7 @@ InstanceHost::~InstanceHost()
     ready_.store(false, std::memory_order_release);
     rendezvous_->bindings().clear();
     rendezvous_.reset();
-    if (view_.base != nullptr)
-        backend_->unmap(view_);
+    snapshot_->close();
 }
 
 std::uint64_t InstanceHost::nowNs() const noexcept
@@ -404,8 +388,9 @@ void InstanceHost::tick()
     flushLog();
 }
 
-// 配对层的位置：先扫对端视图、做智能默认或重评，再走会合。决定落在会合这一拍之前，已 prepare 时同一拍就认领了，
-// 同一线程上紧接着 tick 的下一个实例扫视图时就看得见这次认领，两个实例不会选中同一个空组。配对状态在会合之后折
+// 配对层的位置：先刷新只读快照、做智能默认或重评，再走会合。决定落在会合这一拍之前，已 prepare 时同一拍就认领了，
+// 同一线程上紧接着 tick 的下一个实例刷新快照时就看得见这次认领，两个实例不会选中同一个空组：快照打不开时平时按扫描
+// 间隔再试，这一拍要做决定就强制再试一次（见 pairing/PairingSnapshot.h）。配对状态在会合之后折
 void InstanceHost::tickLocked(std::uint64_t ns, std::uint64_t ms)
 {
     const bool nonrealtime = processor_.isNonRealtime();
@@ -417,8 +402,19 @@ void InstanceHost::tickLocked(std::uint64_t ns, std::uint64_t ms)
     }
     if (pairingOn())
     {
-        refreshView(ms);
-        smartTick(ms);
+        const bool deciding = smartDue(ms);
+        // 本端的会合正持有会合段（持有槽、休眠、冲突）时段一定在：快照还没映射就不等扫描间隔，这一次一定打得开，
+        // 不会变成每拍一次失败的打开
+        const ipc::RendezvousState state = rendezvous_->state();
+        const bool segmentHeld = state == ipc::RendezvousState::kActive || state == ipc::RendezvousState::kDormant ||
+                                 state == ipc::RendezvousState::kConflict;
+        {
+            // 打开快照时后端在本线程上报出的错误码同样记给本实例
+            const IpcErrorCapture capture(ipcError_);
+            snapshot_->refresh(ms, deciding || segmentHeld);
+        }
+        if (deciding)
+            smartTick(ms);
     }
     {
         // 打开段只发生在会合的 tick 里；这一拍里后端在本线程上报出的错误码记给本实例
@@ -602,11 +598,12 @@ void InstanceHost::setTrackProperties(const juce::AudioProcessor::TrackPropertie
 ipc::RepairPlan InstanceHost::planRepair() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (!pairingOn() || rendezvous_->state() != ipc::RendezvousState::kConflict || !viewUsable())
+    // 冲突说明段在：快照要真的映射着，不拿「段不存在」的旧结论当全空
+    if (!pairingOn() || rendezvous_->state() != ipc::RendezvousState::kConflict || !snapshot_->mapped())
         return {};
     // 冲突里本实例并不占着请求的那一组，修复按「要离开的组」把它排除
     const ipc::PairingSelf self{config_.role, ipc::currentProcessId(), nameHash_, rendezvous_->group()};
-    const ipc::GroupViews groups = groupViews(nowMs());
+    const ipc::GroupViews groups = snapshot_->groupViews(nowMs());
     return isInput() ? ipc::repairInput(self, groups) : ipc::repairOutput(self, groups);
 }
 
@@ -622,176 +619,30 @@ std::uint32_t InstanceHost::trackNameHash() const
     return nameHash_;
 }
 
-// ---- 配对层：对端视图 ----
-
-// 会合段的只读映射：只开已存在的段（不建）、只读校验段头（绝不写）。段不存在时每拍再试（同一线程上前一个实例这一拍
-// 刚建了段、认领了组，后一个实例这一拍就要看见，否则两个都会挑中同一个空组）；ABI 不同的段每个冲突重试间隔看一次
-// （与会合同一个口径）；后端拒绝或名字不合法就不再试。映射上之后一直留着，析构时放下。
-// 映射着的段不会被删：Windows 上句柄让它活着，POSIX 后端的只读映射同样持着段锁文件的共享锁
-void InstanceHost::refreshView(std::uint64_t ms)
-{
-    if (view_.base != nullptr)
-    {
-        viewObserver_.scan(*viewSegment(), ms);
-        readLabels();
-        return;
-    }
-    if (viewPermanent_ || backend_ == nullptr || viewName_.empty())
-        return;
-    // 没到重试的点就不试；时钟倒退得比一个间隔还多时不卡住
-    if (viewRetryMs_ != 0 && ms < viewRetryMs_ && viewRetryMs_ - ms <= ipc::RendezvousTiming::kConflictRetryMs)
-        return;
-    ipc::SegmentView view;
-    ipc::InitResult result = ipc::InitResult::kFailed;
-    {
-        const IpcErrorCapture capture(ipcError_);
-        result = backend_->openExistingReadOnly(viewName_, view);
-        if (result == ipc::InitResult::kOk)
-        {
-            const auto* rv = static_cast<const ipc::RvSegment*>(view.base);
-            result = backend_->checkHeaderReadOnly(view, rv->header.magic, rv->header.abi, kViewSpec);
-            // 几何不对的段当作没有（会合自己也不用它）
-            if (result == ipc::InitResult::kOk &&
-                (rv->header.groups.load(std::memory_order_relaxed) != ipc::kGroupCount ||
-                 rv->header.group_stride.load(std::memory_order_relaxed) != ipc::kGroupStride ||
-                 rv->header.layout_bytes.load(std::memory_order_relaxed) < ipc::kRvBytes))
-                result = ipc::InitResult::kBusy;
-        }
-    }
-    viewResult_ = result;
-    if (result == ipc::InitResult::kOk)
-    {
-        view_ = std::move(view);
-        viewMisses_ = 0;
-        viewObserver_.reset();
-        labels_ = {};
-        viewObserver_.scan(*viewSegment(), ms);
-        readLabels();
-        return;
-    }
-    if (view.base != nullptr)
-        backend_->unmap(view);
-    viewMisses_ = result == ipc::InitResult::kFailed ? viewMisses_ + 1u : 0u;
-    viewPermanent_ = result == ipc::InitResult::kFailedDenied || result == ipc::InitResult::kFailedBadName;
-    viewRetryMs_ = result == ipc::InitResult::kAbiMismatch ? ms + ipc::RendezvousTiming::kConflictRetryMs : 0u;
-}
-
-// 标签是跨进程的不可信数据：连续两次读到同一份才信它（散列只拿来比较两端相同与否）；读不稳的一拍留着上一次的，
-// 槽换了主人（ctl 变了）又读不稳就当未知
-void InstanceHost::readLabels() noexcept
-{
-    const ipc::RvSegment* rv = viewSegment();
-    if (rv == nullptr)
-        return;
-    for (std::uint32_t group = 1; group <= ipc::kGroupCount; ++group)
-    {
-        for (const ipc::Role role : {ipc::Role::kInput, ipc::Role::kOutput})
-        {
-            LabelCache& cache = labels_[group - 1u][roleIndex(role)];
-            const ipc::SlotSample& sample = viewObserver_.sample(group, role);
-            if (!sample.stable)
-                continue;
-            if (ipc::ctlPhase(sample.ctl) == ipc::kCtlPhaseFree)
-            {
-                cache = LabelCache{};
-                continue;
-            }
-            const ipc::RoleSlot& slot = ipc::roleSlot(*rv, group, role);
-            ipc::LabelPayload first;
-            ipc::LabelPayload second;
-            if (ipc::readLabel(slot, first) && ipc::readLabel(slot, second) && first == second)
-            {
-                cache.ctl = sample.ctl;
-                cache.known = true;
-                cache.label = first;
-            }
-            else if (cache.ctl != sample.ctl)
-            {
-                cache = LabelCache{};
-                cache.ctl = sample.ctl;
-            }
-        }
-    }
-}
-
-// 能拿来做决定的快照：映射着，或者已经连着两拍确认段不存在（没有任何认领者，全空）。
-// 只打不开一次不算：POSIX 后端在生命周期锁正被别人拿着时同样返回 kFailed
-bool InstanceHost::viewUsable() const noexcept
-{
-    return view_.base != nullptr || (!viewPermanent_ && viewResult_ == ipc::InitResult::kFailed && viewMisses_ >= 2u);
-}
-
-const ipc::RvSegment* InstanceHost::viewSegment() const noexcept
-{
-    return static_cast<const ipc::RvSegment*>(view_.base);
-}
-
-// 一个端点槽的快照。不稳定的样本按「正在认领」算：既不是空位也不是活端，这一拍谁都不拿它当空组
-ipc::EndView InstanceHost::endView(std::uint32_t group, ipc::Role role, std::uint64_t ms) const noexcept
-{
-    ipc::EndView view;
-    if (view_.base == nullptr)
-        return view;
-    const ipc::SlotSample& sample = viewObserver_.sample(group, role);
-    if (!sample.stable)
-    {
-        view.phase = ipc::kCtlPhaseClaiming;
-        return view;
-    }
-    view.phase = ipc::ctlPhase(sample.ctl);
-    view.fresh = ipc::ageMs(ms, sample.heartbeatMs) < ipc::RendezvousTiming::kLostHeartbeatMs;
-    view.pid = sample.pid;
-    view.claimMs = sample.claimMs;
-    view.nameHash = labelHash(group, role);
-    view.neverPaired = (sample.cfgFlags & ipc::kCfgNeverPaired) != 0u;
-    return view;
-}
-
-ipc::GroupViews InstanceHost::groupViews(std::uint64_t ms) const noexcept
-{
-    ipc::GroupViews groups{};
-    for (std::uint32_t group = 1; group <= ipc::kGroupCount; ++group)
-    {
-        groups[group - 1u].input = endView(group, ipc::Role::kInput, ms);
-        groups[group - 1u].output = endView(group, ipc::Role::kOutput, ms);
-    }
-    return groups;
-}
-
-std::uint32_t InstanceHost::labelHash(std::uint32_t group, ipc::Role role) const noexcept
-{
-    const LabelCache& cache = labels_[group - 1u][roleIndex(role)];
-    return cache.known && cache.label.nameLen != 0u ? cache.label.nameHash : 0u;
-}
-
-// 显示前缀：不是合法 UTF-8 就不要（对端可能是别的版本，或者读到的是混写的一份）
-std::string InstanceHost::labelName(std::uint32_t group, ipc::Role role) const
-{
-    const LabelCache& cache = labels_[group - 1u][roleIndex(role)];
-    if (!cache.known || cache.label.nameLen == 0u)
-        return {};
-    std::string name = ipc::labelDisplayName(cache.label);
-    if (!juce::CharPointer_UTF8::isValidString(name.data(), static_cast<int>(name.size())))
-        return {};
-    return name;
-}
-
 // ---- 配对层：智能默认与重评 ----
 
-void InstanceHost::smartTick(std::uint64_t ms)
+// 这一拍要不要做智能决定（含 Output 等待中的重评）：没决定过、或在等而且到了重评的点；没在读工程 state；五项触发
+// 条件齐了。为真时 tick 先强制重开一次快照，再交给 smartTick
+bool InstanceHost::smartDue(std::uint64_t ms) const noexcept
 {
     if ((smartDecided_ && !smartWaiting_) || stateLoads_ > 0)
-        return;
+        return false;
     // 等待中每 kPairingReevalMs 重评一次；时钟倒退得比一个间隔还多时不卡住
     if (smartWaiting_ && ms < nextReevalMs_ && nextReevalMs_ - ms <= ipc::kPairingReevalMs)
-        return;
+        return false;
     ipc::PairingTrigger trigger;
     trigger.prepared = firstPrepared_;
     trigger.realtimeBlocks = realtimeBlocks_.load(std::memory_order_relaxed);
     trigger.sincePrepareMs = firstPrepared_ && ms > firstPrepareMs_ ? ms - firstPrepareMs_ : 0u;
     trigger.hasSavedGroup = savedGroup_;
     trigger.userPicked = userPicked_;
-    if (!ipc::pairingTriggered(trigger) || !viewUsable())
+    return ipc::pairingTriggered(trigger);
+}
+
+// 快照还不能用（段不存在只确认过一次、正在初始化、ABI 不同）就这一拍不决定，下一拍再看
+void InstanceHost::smartTick(std::uint64_t ms)
+{
+    if (!snapshot_->usable())
         return;
 
     ipc::PairingSelf self{config_.role, ipc::currentProcessId(), nameHash_, 0u};
@@ -799,12 +650,14 @@ void InstanceHost::smartTick(std::uint64_t ms)
     {
         nextReevalMs_ = ms + ipc::kPairingReevalMs;
         // 冲突里不重评（复制轨道一类的冲突只给一键修复）；
-        // 还没持有槽（在开段、在退避、没 prepare）就不知道自己在等哪一组
-        if (rendezvous_->state() == ipc::RendezvousState::kConflict || rendezvous_->myCtl() == 0u)
+        // 还没持有槽（在开段、在退避、没 prepare）就不知道自己在等哪一组；
+        // 持有槽说明段在，快照这时还没映射上就是还看不见它，不拿「段不存在」的旧结论当全空
+        if (rendezvous_->state() == ipc::RendezvousState::kConflict || rendezvous_->myCtl() == 0u ||
+            !snapshot_->mapped())
             return;
         self.heldGroup = rendezvous_->group();
     }
-    const ipc::GroupViews groups = groupViews(ms);
+    const ipc::GroupViews groups = snapshot_->groupViews(ms);
     const ipc::PairingDecision decision = isInput() ? ipc::decideInput(self, groups) : ipc::decideOutput(self, groups);
 
     if (!smartDecided_)
@@ -857,57 +710,37 @@ void InstanceHost::foldPairState(std::uint64_t ns, std::uint64_t ms)
     const ipc::RendezvousState state = rendezvous_->state();
     in.group = rendezvous_->group();
     in.validator = config_.validationHost || state == ipc::RendezvousState::kValidator;
-    in.ipcUnavailable = state == ipc::RendezvousState::kIpcUnavailable || viewPermanent_;
-    in.abiMismatch = state == ipc::RendezvousState::kAbiMismatch || viewResult_ == ipc::InitResult::kAbiMismatch;
+    in.ipcUnavailable = state == ipc::RendezvousState::kIpcUnavailable || snapshot_->unavailable();
+    in.abiMismatch = state == ipc::RendezvousState::kAbiMismatch || snapshot_->abiMismatch();
     in.conflict = state == ipc::RendezvousState::kConflict;
     in.allGroupsFull = allGroupsFull_;
     in.realtimeAudioSeen = realtimeBlocks_.load(std::memory_order_relaxed) > 0u;
     in.selfBypassed = lastBypassed_.load(std::memory_order_relaxed);
-    in.loopSilent = loopSilent(ns);
-    if (in.group >= 1u && in.group <= ipc::kGroupCount && view_.base != nullptr)
-    {
-        const ipc::Role peerRole = ipc::peerOf(config_.role);
-        const ipc::SlotSample& peer = viewObserver_.sample(in.group, peerRole);
-        in.peer.present = peer.stable && ipc::ctlPhase(peer.ctl) == ipc::kCtlPhaseActive;
-        if (in.peer.present)
-        {
-            in.peer.lost = rendezvous_->peerLost(ms);
-            in.peer.pid = peer.pid;
-            in.peer.version = peer.version;
-            in.peer.sampleRate = peer.sampleRate;
-            in.peer.channels = peer.channels;
-            in.peer.nameHash = labelHash(in.group, peerRole);
-            in.peer.name = labelName(in.group, peerRole);
-            const LabelCache& label = labels_[in.group - 1u][roleIndex(peerRole)];
-            in.peer.colourArgb = label.known ? label.label.colourArgb : 0u;
-        }
-        if (in.conflict)
-            in.occupantName = labelName(in.group, config_.role);
-    }
-    pairModel_ = pairing::buildPairModel(in, groupViews(ms));
+    // 本组对端那一端（没组、没映射时是空的快照）
+    const pairing::EndFacts peer = snapshot_->end(in.group, ipc::peerOf(config_.role));
+    in.loopSilent = loopSilent(ns, peer);
+    in.peer = pairing::peerFactsOf(peer);
+    if (in.peer.present)
+        in.peer.lost = rendezvous_->peerLost(ms);
+    if (in.conflict)
+        in.occupantName = snapshot_->end(in.group, config_.role).name;
+    pairModel_ = pairing::buildPairModel(in, snapshot_->groupViews(ms));
 }
 
 // 回送静音（PairStateModel 的 loopSilent）。Input：本端被宿主旁路（Input 没有自己的旁路状态，并进这里）、环路关、
 // 安全链跳闸或断档、对端 Output 旁路；Output：对端 Input 旁路、断档或跳闸。两端都算「宿主停了音频回调超过 250 ms」。
 // Output 看不到 Input 的环路开关（槽里没有这一位）
-bool InstanceHost::loopSilent(std::uint64_t ns) const noexcept
+bool InstanceHost::loopSilent(std::uint64_t ns, const pairing::EndFacts& peer) const noexcept
 {
     const std::uint64_t last = lastAudioNs_.load(std::memory_order_relaxed);
     const bool stopped = last != 0u && ns > last && ns - last > kSuspendFlushNs;
     std::uint32_t peerFlags = 0;
     bool peerTripped = false;
-    const std::uint32_t group = rendezvous_->group();
-    if (group >= 1u && group <= ipc::kGroupCount && view_.base != nullptr)
+    if (peer.stable && peer.phase == ipc::kCtlPhaseActive)
     {
-        const ipc::Role peerRole = ipc::peerOf(config_.role);
-        const ipc::SlotSample& sample = viewObserver_.sample(group, peerRole);
-        if (sample.stable && ipc::ctlPhase(sample.ctl) == ipc::kCtlPhaseActive)
-        {
-            peerFlags = sample.rtFlags;
-            const std::uint32_t safety =
-                ipc::roleSlot(*viewSegment(), group, peerRole).safety_state.load(std::memory_order_relaxed);
-            peerTripped = peerRole == ipc::Role::kInput && (safety & 0xffu) == ipc::kSafetyTripped;
-        }
+        peerFlags = peer.rtFlags;
+        // 安全状态只有 Input 端有：对端是 Input（本端是 Output）才看它跳没跳闸
+        peerTripped = !isInput() && (peer.safetyState & 0xffu) == ipc::kSafetyTripped;
     }
     if (isInput())
     {
@@ -948,21 +781,19 @@ void InstanceHost::fillDiagnostics(diag::DiagInputs& in) const
     in.pairState = pairing::idOf(pairModel_.state);
     in.trackHash = nameHash_;
 
-    const bool inGroup = in.group >= 1u && in.group <= ipc::kGroupCount && view_.base != nullptr;
+    const bool inGroup = in.group >= 1u && in.group <= ipc::kGroupCount && snapshot_->mapped();
     if (inGroup)
     {
-        const ipc::Role peerRole = ipc::peerOf(config_.role);
-        const ipc::SlotSample& peer = viewObserver_.sample(in.group, peerRole);
-        const std::uint32_t phase = ipc::ctlPhase(peer.ctl);
-        in.peer.present = peer.stable && (phase == ipc::kCtlPhaseActive || phase == ipc::kCtlPhaseDormant);
+        const pairing::EndFacts peer = snapshot_->end(in.group, ipc::peerOf(config_.role));
+        in.peer.present = peer.stable && (peer.phase == ipc::kCtlPhaseActive || peer.phase == ipc::kCtlPhaseDormant);
         in.peer.role = isInput() ? diag::DiagRole::kOutput : diag::DiagRole::kInput;
-        in.peer.active = phase == ipc::kCtlPhaseActive;
+        in.peer.active = peer.phase == ipc::kCtlPhaseActive;
         in.peer.samePid = peer.pid == in.pid;
         in.peer.version = peer.version;
         in.peer.sampleRate = peer.sampleRate;
         in.peer.maxBlock = peer.maxBlock;
         in.peer.channels = peer.channels;
-        in.peer.name = relationOf(pairing::checkNames(nameHash_, labelHash(in.group, peerRole)));
+        in.peer.name = relationOf(pairing::checkNames(nameHash_, peer.nameHash));
         in.peer.heartbeatAgeMs = ipc::ageMs(ms, peer.heartbeatMs);
     }
 
@@ -974,8 +805,7 @@ void InstanceHost::fillDiagnostics(diag::DiagInputs& in) const
     in.prepare.resetCalls = resets_.load(std::memory_order_relaxed);
     // 本次 prepare 以来的最大块长在自己的槽里（音频线程写）：持有槽时才有
     if (inGroup && rendezvous_->myCtl() != 0u)
-        in.prepare.maxNSeen =
-            ipc::roleSlot(*viewSegment(), in.group, config_.role).max_n_seen.load(std::memory_order_relaxed);
+        in.prepare.maxNSeen = snapshot_->end(in.group, config_.role).maxNSeen;
     in.blocks = blockCounters_.snapshot();
 
     if (isInput())

@@ -10,8 +10,9 @@
 //   - 命令序号：Panic 与恢复各一个计数，块首填进引擎参数；基线在构造后、第一次 prepare 前由调用方给一次；
 //   - 后端失败的错误码经全进程唯一的 IpcDiag 槽转发：装一个转发出口，把错误码记给正在调会合的那个实例。
 //   - 配对层（只在 config.pairing 为真时，即正式构建）：智能默认与 Output 等待中的重评、认领转正、轨道标签、每拍折出的
-//     配对状态、诊断文本的各项。智能默认要在组号 0 上做，会合在组号 0 时不开段，所以本类另持一份会合段的只读映射
-//     （对端视图）：只开已存在的段、只校验段头、绝不写，自带观察者扫 16 个槽与标签。规则以 ipc/PairingPolicy.h 为准。
+//     配对状态、诊断文本的各项。智能默认要在组号 0 上做，会合在组号 0 时不开段，所以本类另持一份会合段的只读快照
+//     （core 的 pairing::PairingSnapshot：只开已存在的段、只读、自带观察者与标签读取），本类只持有它、每拍调它。
+//     规则以 ipc/PairingPolicy.h 为准。
 // 线程：process 在音频线程，不分配、不加锁、不做 I/O，只读单调时钟（挂起判定要两块之间的间隔；不是墙钟）；reset 可能在
 // 任意线程，只记数；panic、recover 只加原子计数；其余（prepare、release、tick、改组、转正、标签、读出）在非实时线程，
 // 共用一把锁。走带只在音频线程读（宿主只许在处理回调里读播放头）。
@@ -42,13 +43,12 @@
 #include "engine/TransportInfo.h"
 #include "ipc/ISegmentBackend.h"
 #include "ipc/IpcDiag.h"
-#include "ipc/LabelSeqlock.h"
 #include "ipc/LoopBinding.h"
 #include "ipc/Naming.h"
 #include "ipc/PairingPolicy.h"
 #include "ipc/Rendezvous.h"
-#include "ipc/SlotObserver.h"
 #include "pairing/PairStateModel.h"
+#include "pairing/PairingSnapshot.h"
 
 namespace rinne
 {
@@ -237,18 +237,11 @@ private:
     // ---- 配对层（锁内） ----
     bool pairingOn() const noexcept { return config_.pairing && !config_.validationHost; }
     void noteGroupIntent(ipc::ClaimIntent intent) noexcept;
-    void refreshView(std::uint64_t ms);
-    void readLabels() noexcept;
-    bool viewUsable() const noexcept;
-    const ipc::RvSegment* viewSegment() const noexcept;
-    ipc::EndView endView(std::uint32_t group, ipc::Role role, std::uint64_t ms) const noexcept;
-    ipc::GroupViews groupViews(std::uint64_t ms) const noexcept;
-    std::uint32_t labelHash(std::uint32_t group, ipc::Role role) const noexcept;
-    std::string labelName(std::uint32_t group, ipc::Role role) const;
+    bool smartDue(std::uint64_t ms) const noexcept;
     void smartTick(std::uint64_t ms);
     void claimSmart(std::uint32_t group, std::uint64_t ms);
     void foldPairState(std::uint64_t ns, std::uint64_t ms);
-    bool loopSilent(std::uint64_t ns) const noexcept;
+    bool loopSilent(std::uint64_t ns, const pairing::EndFacts& peer) const noexcept;
     void queueLog(juce::String line);
     void flushLog();
 
@@ -284,22 +277,8 @@ private:
     std::uint64_t lastHead_ = 0;
     const ipc::SegmentHandle* lastRing_ = nullptr; // 上一块用的环（只比地址）；空 = 没拿到环，lastHead_ 无效
 
-    // ---- 配对层：对端视图（锁内）。view_.base 为空 = 没映射 ----
-    struct LabelCache
-    {
-        std::uint64_t ctl = 0; // 读到这份标签时槽的 ctl
-        bool known = false; // 连续两次读到同一份
-        ipc::LabelPayload label;
-    };
-    ipc::ISegmentBackend* backend_ = nullptr; // 不拥有（自带的或注入的）
-    std::string viewName_; // 会合段的平台段名；空 = 名字不合法
-    ipc::SegmentView view_;
-    ipc::InitResult viewResult_ = ipc::InitResult::kFailed; // 上一次打开的结果
-    std::uint32_t viewMisses_ = 0; // 连续几次「段不存在」（kFailed）：两次以上才按全空算，见 viewUsable
-    bool viewPermanent_ = false; // 后端拒绝或名字不合法：不再试
-    std::uint64_t viewRetryMs_ = 0;
-    ipc::SlotObserver viewObserver_;
-    std::array<std::array<LabelCache, 2>, ipc::kGroupCount> labels_{};
+    // ---- 配对层：对端视图（锁内）。会合段的只读快照，用的是本类的后端（自带的或注入的）；析构时先于后端放下 ----
+    std::unique_ptr<pairing::PairingSnapshot> snapshot_;
 
     // ---- 配对层：智能默认与状态（锁内） ----
     std::uint32_t version_ = 0; // 本构建的 packVersion

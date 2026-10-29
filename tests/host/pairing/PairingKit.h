@@ -19,7 +19,9 @@
 #include "../wiring/WiringTestKit.h"
 #include "InputProcessor.h"
 #include "OutputProcessor.h"
+#include "ipc/ISegmentBackend.h"
 #include "ipc/LabelSeqlock.h"
+#include "ipc/PlatformSegmentBackend.h"
 #include "ipc/Rendezvous.h"
 #include "ipc/SegmentLayout.h"
 #include "pairing/PairStateModel.h"
@@ -68,6 +70,36 @@ inline void captureClipboard(const juce::String& text)
 {
     captured().clipboard.push_back(text);
 }
+
+// 包一层平台后端，数只读打开（对端视图）的次数；会合照常经它走真后端。它要比用它的处理器活得久：用例里先声明它、
+// 再声明 Bench（Bench 先拆，它后拆）
+class CountingBackend final : public ipc::ISegmentBackend
+{
+public:
+    ~CountingBackend() override { forgetRetired(); }
+
+    ipc::InitResult createOrOpen(const std::string& name, std::size_t size, ipc::SegmentView& view) override
+    {
+        return inner_.createOrOpen(name, size, view);
+    }
+    ipc::InitResult openExisting(const std::string& name, ipc::SegmentView& view) override
+    {
+        return inner_.openExisting(name, view);
+    }
+    ipc::InitResult openExistingReadOnly(const std::string& name, ipc::SegmentView& view) override
+    {
+        ++readOnlyOpens;
+        return inner_.openExistingReadOnly(name, view);
+    }
+    void unmap(ipc::SegmentView& view) noexcept override { inner_.unmap(view); }
+    ipc::OrphanUnmap orphanUnmapper() const noexcept override { return inner_.orphanUnmapper(); }
+    void tryLock(const ipc::SegmentView& view) override { inner_.tryLock(view); }
+
+    int readOnlyOpens = 0;
+
+private:
+    ipc::PlatformSegmentBackend inner_;
+};
 
 class Bench
 {
