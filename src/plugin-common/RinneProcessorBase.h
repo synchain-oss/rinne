@@ -14,7 +14,8 @@
 // 不引用 ProbeHost 的定义。正式构建的参数层与 state 胶水由两个子类持有。
 // 正式构建的配对层（智能默认、转正、标签、配对状态、诊断）在 InstanceHost 里，这里只做接线：胶水的转正回调与智能认领写
 // 设置的回调、工程恢复把组号交给会合、一键修复、诊断文本与复制诊断。诊断日志是本机全局设置（UiDefaultsStore）：
-// 构造时开关开着、又不在验证宿主里，就在建 InstanceHost 之前装上（之后 InstanceHost 把 IPC 诊断的转发出口装在它上面）。
+// 每个实例第一次 prepareToPlay 时开关开着、又不在验证宿主里才装上。不在构造时装：扫描插件、生成 moduleinfo 这类只构造、
+// 不处理音频的宿主不该写日志；代价是 prepare 之前的事件不进文件日志。装上之后把 IPC 诊断的转发出口放回最上面。
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -87,8 +88,8 @@ public:
     // ---- 配对与诊断（消息线程；桥不接，界面卡接）。探针构建里是默认值或空操作 ----
     // 上一拍折出的配对状态（一份拷贝）
     pairing::PairModel pairState() const;
-    // 诊断日志开关（本机全局设置，不进工程，不定型）：写设置；打开而且不在验证宿主里就当场装上。关掉之后本进程继续写
-    // 到退出：PlatformLog 没有生产可用的停写
+    // 诊断日志开关（本机全局设置，不进工程，不定型）：写设置；打开而且不在验证宿主里就当场装上（不等 prepare）。
+    // 关掉之后本进程继续写到退出：PlatformLog 没有生产可用的停写
     void setDiagLogEnabled(bool enabled);
 
     // 一键修复的结果。group 为 0 = 现在不在冲突里或没有可去的组；needsConfirm 而没确认时什么都不动（applied 为假），
@@ -217,13 +218,18 @@ private:
     void restoreConfigs(const state::Configs& configs);
     // 装诊断日志（正式构建、不在验证宿主里才调）。这次真的装上了就把 IPC 诊断的转发出口放回最上面
     void installDiagLog();
+    // 第一次 prepare：开关开着、不在验证宿主里、本插件二进制还没装过日志就装（见文件头）
+    void installDiagLogOnFirstPrepare();
     const char* roleName() const noexcept;
 
+    static_assert(std::atomic<bool>::is_always_lock_free);
     static_assert(std::atomic<int>::is_always_lock_free);
     static_assert(std::atomic<std::int64_t>::is_always_lock_free);
 
     std::atomic<int> tailMode_{static_cast<int>(TailMode::Auto)};
     std::atomic<std::int64_t> processedSamples_{0};
+    // 第一次 prepare 已经看过诊断日志开关：之后的 prepare 不再读设置文件。宿主可能在不同线程上先后 prepare
+    std::atomic<bool> diagLogChecked_{false};
     const bool validationHost_;
     ipc::Role role_ = ipc::Role::kInput;
     bool (*installLog_)(const juce::String& role) = nullptr; // 空 = platformlog::install

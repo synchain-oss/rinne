@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 诊断日志的接线：开关（本机全局设置）开着、又不在验证宿主里，构造时就装；setDiagLogEnabled 写设置，打开时当场装；
-// 装上之后 IPC 诊断的转发出口回到最上面，后端的错误照样先记到实例、再转给日志。这里的「装」是记录用的替身
-// （PairingKit），不碰真的日志文件；开关落在 UiDefaultsSandbox 指的临时目录里。
+// 诊断日志的接线：开关（本机全局设置）开着、又不在验证宿主里，每个实例第一次 prepare 时装；只构造、不 prepare 不装
+// （扫描插件、生成 moduleinfo 的宿主就是这样）；setDiagLogEnabled 写设置，打开时当场装；装上之后 IPC 诊断的转发出口
+// 回到最上面，后端的错误照样先记到实例、再转给日志。这里的「装」是记录用的替身（PairingKit），不碰真的日志文件；
+// 开关落在 UiDefaultsSandbox 指的临时目录里。
 #include <catch2/catch_test_macros.hpp>
 
 #include <vector>
@@ -59,15 +60,56 @@ private:
 
 } // namespace
 
-TEST_CASE("pairing: with the switch on the diagnostics log is installed at construction outside validation hosts",
+TEST_CASE("pairing: constructing an instance without a prepare never installs the diagnostics log",
           "[host][pairing][diag_log]")
 {
     formalOnly();
     uidefaults::setDiagLogEnabled(true);
     Bench bench;
-    bench.addInput();
+    bench.addInput(false);
+    bench.addOutput(false);
+    bench.idle(1000); // 定时器照常走，只是宿主从不 prepare
+    CHECK(captured().installs.empty());
+}
+
+TEST_CASE("pairing: with the switch on the first prepare installs the diagnostics log outside validation hosts",
+          "[host][pairing][diag_log]")
+{
+    formalOnly();
+    uidefaults::setDiagLogEnabled(true);
+    Bench bench;
+    InputProcessor& input = bench.addInput(false);
+    REQUIRE(captured().installs.empty());
+    input.prepareToPlay(kRate, kBlock);
+    CHECK(captured().installs == expectedInstalls({"input"}));
+
+    // 之后的 prepare 不再看开关（宿主挂起再恢复是 release → prepare）
+    input.releaseResources();
+    input.prepareToPlay(kRate, kBlock);
+    CHECK(captured().installs == expectedInstalls({"input"}));
+
+    // Output 是另一个插件二进制：它第一次 prepare 时装它自己的
     bench.addOutput();
     CHECK(captured().installs == expectedInstalls({"input", "output"}));
+}
+
+TEST_CASE("pairing: inside a validation host neither a prepare nor the switch installs the diagnostics log",
+          "[host][pairing][diag_log]")
+{
+    formalOnly();
+    if (!runningAsValidationHost())
+        SKIP("only the validation-host copy of the test binary runs as a validation host");
+    uidefaults::setDiagLogEnabled(true);
+    Bench bench;
+    InputProcessor& input = bench.addInput();
+    OutputProcessor& output = bench.addOutput();
+    bench.run(500);
+    CHECK(captured().installs.empty());
+
+    input.setDiagLogEnabled(true);
+    output.setDiagLogEnabled(true);
+    CHECK(uidefaults::diagLogEnabled()); // 设置照写，只是不装
+    CHECK(captured().installs.empty());
 }
 
 TEST_CASE("pairing: with the switch off nothing is installed", "[host][pairing][diag_log]")
@@ -114,7 +156,7 @@ TEST_CASE("pairing: once the log is installed the IPC diagnostics still reach th
     rinne::InstanceHostConfig config = bench.config();
     config.installLog = &installWithSink;
 
-    SECTION("installed at construction")
+    SECTION("installed at the first prepare")
     {
         uidefaults::setDiagLogEnabled(true);
         bench.add(std::make_unique<InputProcessor>(config), true);

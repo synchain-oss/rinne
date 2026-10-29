@@ -45,6 +45,7 @@ bool RinneProcessorBase::detectValidationHost()
 
 void RinneProcessorBase::prepareToPlay(double sampleRate, int maximumExpectedSamplesPerBlock)
 {
+    installDiagLogOnFirstPrepare();
     host_->prepare(sampleRate, maximumExpectedSamplesPerBlock);
 }
 
@@ -153,9 +154,6 @@ void RinneProcessorBase::attachHost(Side side, const InstanceHostConfig& config)
     }
     else
     {
-        // 日志先于 InstanceHost：它的构造把 IPC 诊断的转发出口装在最上面，转发给日志的出口，链不断
-        if (!validationHost_ && uidefaults::diagLogEnabled())
-            installDiagLog();
         host_ = std::make_unique<InstanceHost>(*this, wiring);
     }
 }
@@ -165,12 +163,27 @@ const char* RinneProcessorBase::roleName() const noexcept
     return role_ == ipc::Role::kInput ? "input" : "output";
 }
 
-// 每个插件二进制只装一次：已经装过（同一宿主里的另一个实例先装了）时 install 返回假，什么都不用做
+// 每个插件二进制只装一次：已经装过（同一宿主里的另一个实例先装了）时 install 返回假，什么都不用做。
+// 装日志会把日志的出口放进 IpcDiag 唯一的槽、挤掉 InstanceHost 的转发出口：真的装上了就把转发出口放回最上面，
+// 它再转发给日志的出口，链不断
 void RinneProcessorBase::installDiagLog()
 {
     const bool installed = installLog_ != nullptr ? installLog_(roleName()) : platformlog::install(roleName());
-    if (installed && host_ != nullptr)
+    if (installed)
         InstanceHost::installIpcDiagSink();
+}
+
+// prepare 可能在非消息线程上：读一次设置文件（一次文件 I/O 与有上限的进程间锁）可以接受，不进任何音频回调。
+// 每个实例只在第一次 prepare 看开关；本插件二进制已经装过日志（别的实例、或开窗时装的）就连设置也不读
+void RinneProcessorBase::installDiagLogOnFirstPrepare()
+{
+    if constexpr (!build::kProbeBuild)
+    {
+        if (diagLogChecked_.exchange(true, std::memory_order_relaxed) || validationHost_ || platformlog::isInstalled())
+            return;
+        if (uidefaults::diagLogEnabled())
+            installDiagLog();
+    }
 }
 
 void RinneProcessorBase::unwirePairing()
