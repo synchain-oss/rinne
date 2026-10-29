@@ -212,10 +212,11 @@ TEST_CASE("plugin_host: the real 25 Hz timer reaches tick; with the timer runnin
         juce::Timer::callPendingTimersSynchronously();
         juce::Thread::sleep(5);
     }
-    REQUIRE(host.active());
+    // 只判「泵了就到 kActive」，不拿墙钟耗时当判据：负载高、Debug 或 sanitizer 档下泵到 kActive 可能比对照的等待长，
+    // 「不泵就不动」已由上面的对照证明。实测耗时只打进 INFO 供排查
     const double toActive = juce::Time::getMillisecondCounterHiRes() - start;
     INFO("active after " << toActive << " ms of pumping");
-    CHECK(toActive < waitMs);
+    REQUIRE(host.active());
     for (int i = 0; i < 400 && !host.paired(); ++i)
     {
         host.cycle(480);

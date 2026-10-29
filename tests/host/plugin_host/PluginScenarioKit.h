@@ -57,6 +57,11 @@ public:
         host.onInputBlock = [this](const InputBlock& block) { record(block); };
     }
 
+    // 回调捕获了 this：析构时摘掉，宿主活得比记录器久也不会留下悬空回调；拷贝或赋值会让两份共用一个回调，禁掉
+    ~TapRecorder() { host_.onInputBlock = nullptr; }
+    TapRecorder(const TapRecorder&) = delete;
+    TapRecorder& operator=(const TapRecorder&) = delete;
+
     std::size_t now() const { return tap.size(); }
 
     s14::TapTrace tap;
