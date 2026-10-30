@@ -154,6 +154,11 @@ public:
     // 每周期 frames 帧，跑到轨道走过 samples 个样本（末块不截）
     void run(std::int64_t samples, int frames);
 
+    // 工程重载：存下 Input 的 state，销毁这个 Input，新建一个实例并用存下的 state 全量恢复（含组号），再按原来的
+    // 块长 prepare。次序与宿主重开工程一致：Output 一直留着；新实例没有任何历史，要靠 tick 重新配上。
+    // 播放头游标与轨道位置不动
+    void reloadInput();
+
     // 两端 tick 一拍（会合与引擎事件）
     void tick();
     // 逻辑时钟走 ns，途中每满 40 ms tick 一次（不调音频回调时就是宿主把两端挂起）。真定时器一档只记时间，不 tick
