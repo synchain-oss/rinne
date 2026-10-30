@@ -1,0 +1,166 @@
+{
+  "page": "output",
+  "note": "fr 为初译，待抽检；定稿后从这里删掉对应项，全部抽检完后本文件清空。",
+  "entries": {
+    "out.pair.searching": {
+      "fr": "AUCUN INPUT",
+      "status": "待抽检"
+    },
+    "out.pair.bypassed": {
+      "fr": "CONTOURNÉ",
+      "status": "待抽检"
+    },
+    "out.brand.eyebrow": {
+      "fr": "SYNCHAIN · RINNE · FIN CHAÎNE",
+      "status": "待抽检"
+    },
+    "out.place": {
+      "fr": "Placez-le après le dernier plug-in voulu dans la boucle, au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader).",
+      "status": "待抽检"
+    },
+    "out.group.autoTip": {
+      "fr": "Suit le dernier Rinne Input non appairé (groupe {g}) ; cliquez sur un groupe pour choisir à la main.",
+      "status": "待抽检"
+    },
+    "out.group.autoFallback": {
+      "fr": "Aucun Rinne Input non appairé pour l’instant ; groupe {g} utilisé provisoirement, nouvelle recherche chaque seconde.",
+      "status": "待抽检"
+    },
+    "out.group.peerDotTip": {
+      "fr": "Groupe {g} : un Rinne Input non appairé est en ligne",
+      "status": "待抽检"
+    },
+    "out.pair.eyebrow": {
+      "fr": "APPAIRAGE",
+      "status": "待抽检"
+    },
+    "out.pair.sub.searching": {
+      "fr": "Insérez Rinne Input dans le premier slot d’insert de cette piste et choisissez le même groupe.",
+      "status": "待抽检"
+    },
+    "out.pair.sub.connected": {
+      "fr": "Le signal de fin de boucle est renvoyé vers Rinne Input, dans le premier slot d’insert de cette piste.",
+      "status": "待抽检"
+    },
+    "out.pair.sub.connectedUnverified": {
+      "fr": "Connecté, mais sans noms de piste de l’hôte, Rinne ne peut pas vérifier que les deux extrémités sont sur la même piste ; sans incidence.",
+      "status": "待抽检"
+    },
+    "out.pair.sub.inputMuted": {
+      "fr": "Rinne Input a coupé le retour (coupure d’urgence, protection contre les valeurs invalides ou boucle désactivée).",
+      "status": "待抽检"
+    },
+    "out.pair.sub.stale": {
+      "fr": "Rinne Input ne répond pas ; ce plug-in continue d’émettre.",
+      "status": "待抽检"
+    },
+    "out.pair.sub.bypassed": {
+      "fr": "L’hôte a contourné ce plug-in : il émet du silence, le retour est donc muet.",
+      "status": "待抽检"
+    },
+    "out.pair.sub.notice": {
+      "fr": "Voir l’avis ci-dessous.",
+      "status": "待抽检"
+    },
+    "out.pair.thisTrack": {
+      "fr": "Cette piste",
+      "status": "待抽检"
+    },
+    "out.pair.inputTrack": {
+      "fr": "Piste d’Input",
+      "status": "待抽检"
+    },
+    "out.pair.noName": {
+      "fr": "(sans nom de piste)",
+      "status": "待抽检"
+    },
+    "out.send.ok": {
+      "fr": "ENVOI · {ch} · {sr} kHz",
+      "status": "待抽检"
+    },
+    "out.send.bypassed": {
+      "fr": "CONTOURNÉ : ÉCRIT DU SILENCE",
+      "status": "待抽检"
+    },
+    "out.send.idle": {
+      "fr": "HÔTE INACTIF : EN PAUSE",
+      "status": "待抽检"
+    },
+    "out.hint.idle": {
+      "fr": "La réinjection, le délai, le timbre et la sécurité se règlent tous dans le Rinne Input de cette piste.",
+      "status": "待抽检"
+    },
+    "out.hint.unpaired": {
+      "fr": "Insérez d’abord Rinne Input en premier slot d’insert",
+      "status": "待抽检"
+    },
+    "out.hint.connected": {
+      "fr": "Tous les réglages sont dans Rinne Input",
+      "status": "待抽检"
+    },
+    "out.hint.conflict": {
+      "fr": "Changez de groupe, ou retirez l’instance en trop",
+      "status": "待抽检"
+    },
+    "band.out.conflict": {
+      "fr": "Groupe {g} pris par un autre Output.",
+      "status": "待抽检"
+    },
+    "band.out.unassigned": {
+      "fr": "Les 8 groupes sont pris : libérez-en un.",
+      "status": "待抽检"
+    },
+    "band.out.abi": {
+      "fr": "Versions différentes (Out {a} / In {b}).",
+      "status": "待抽检"
+    },
+    "band.out.srMismatch": {
+      "fr": "Fréquences différentes ({a} / {b} Hz) : arrêt.",
+      "status": "待抽检"
+    },
+    "band.out.ipc": {
+      "fr": "Pas de mémoire partagée : audio direct seul.",
+      "status": "待抽检"
+    },
+    "band.out.ipcSandbox": {
+      "fr": "Hôte en bac à sable : non pris en charge.",
+      "status": "待抽检"
+    },
+    "band.out.newerProject": {
+      "fr": "Projet plus récent ({a} / {b}) : défauts.",
+      "status": "待抽检"
+    },
+    "band.out.stateDecodeFailed": {
+      "fr": "Réglages illisibles : valeurs par défaut.",
+      "status": "待抽检"
+    },
+    "band.out.stale": {
+      "fr": "Rinne Input muet depuis 2 s ; envoi maintenu.",
+      "status": "待抽检"
+    },
+    "band.out.crossProcess": {
+      "fr": "Processus différents : délai variable.",
+      "status": "待抽检"
+    },
+    "band.out.crossTrack": {
+      "fr": "Noms de piste différents : délai variable.",
+      "status": "待抽检"
+    },
+    "band.out.outOfOrder": {
+      "fr": "Ordre inversé : déplacez ce plug-in plus bas.",
+      "status": "待抽检"
+    },
+    "band.out.waitingAudio": {
+      "fr": "En attente d’audio : lisez ou choisissez un groupe.",
+      "status": "待抽检"
+    },
+    "band.out.validator": {
+      "fr": "Outil de validation : boucle désactivée.",
+      "status": "待抽检"
+    },
+    "band.out.takeover": {
+      "fr": "Groupe {g} tenu par une instance inactive.",
+      "status": "待抽检"
+    }
+  }
+}

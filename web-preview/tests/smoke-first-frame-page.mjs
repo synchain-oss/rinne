@@ -8,7 +8,13 @@
 //   ② 没有 PerformanceObserver：回落到 DOMContentLoaded 触发，不许变成永不放行；
 //   ③ 没有 requestAnimationFrame：直接发信号；
 //   ④ rAF 永不回调（合成停摆，窗口最小化或被完全遮挡的情形）：2.5 s 的保险发信号，且只发一次；
-//   ⑤ 页面脚本报错：boot 守卫在首帧之前上报 __rinne__bootError，并且只报第一条。
+//   ⑤ 页面脚本报错：boot 守卫在首帧之前上报 __rinne__bootError，并且只报第一条；
+//   ⑥ 只有 postMessage 的假 __JUCE__、没有 mock（纯浏览器直接打开、真宿主桥没接上的情形）：页面要么干净地起来
+//      （首帧恰好一次、__rinneBooted 置位、没有 boot 错误），要么响亮地失败（boot 错误上报），不许既没起来也不吭声；
+//   ⑦ 主模块一上来就抛错（注入一个残缺的 __RINNE_MOCK__，createBridge 会抛）：boot 守卫上报恰好一条，__rinneBooted 不置位。
+//      占位页没有主模块，这一项自动跳过，页面接入主模块后自动生效。
+// ①–⑤ 的启动环境是「假宿主 + 一个最小的 __RINNE_MOCK__」：真页面要调 createBridge()，没有桥就抛错，这几项测的是首帧信号，
+// 不该因为页面没桥而红；没有 mock 的那条路由 ⑥ 单独覆盖。
 // 浏览器缺失时整套跳过（退出码 2）。本机同时只能有一个浏览器冒烟，gates 里持 gui 锁。
 // 浏览器开调试端口有界重试（lib/browser.mjs 的 withLaunchRetry）：这套曾因「10 秒内没开出调试端口」偶发失败。开头先不起浏览器，
 // 用假的启动与假时钟核对重试的次数、退避、总时长上界与「重试完仍失败照常抛错」；这几条没有浏览器也照跑，失败时不被整套跳过盖掉。
@@ -96,6 +102,13 @@ const FAKE_HOST = `
     window.__JUCE__ = { postMessage(text) { window.__posted.push(JSON.parse(text)); } };
 `;
 
+/** 最小的 mock 后端：addEventListener 是空操作，其余任何名字都是回「没准备好」的异步函数（createBridge 只校名，不校行为）。 */
+const MOCK = `
+    window.__RINNE_MOCK__ = new Proxy({ addEventListener() {} }, {
+        get: (target, key) => (key in target ? target[key] : async () => ({ ok: false, reason: "not-ready" })),
+    });
+`;
+
 const server = await startStaticServer(ROOT);
 let browser;
 try {
@@ -109,10 +122,10 @@ run.log(
 );
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 开一个页面：在文档创建前注入 preamble，再打开 URL。 */
-async function open(url, preamble) {
+/** 开一个页面：在文档创建前注入假宿主（可选再加最小 mock）与 preamble，再打开 URL。 */
+async function open(url, preamble, { mock = true } = {}) {
     const page = await browser.newPage();
-    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_HOST + preamble });
+    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_HOST + (mock ? MOCK : "") + preamble });
     page.requestLog = await page.recordRequests();
     await page.goto(url);
     return page;
@@ -217,6 +230,52 @@ try {
                 `${role}（脚本报错）：阶段与细节应来自第一条错误`,
             );
             await page.close();
+        }
+
+        // ⑥ 只有 postMessage 的假 __JUCE__、没有 mock：要么干净起来，要么响亮失败，不许悄无声息
+        {
+            const page = await open(url, "", { mock: false });
+            await page
+                .waitFor(
+                    `window.__rinneBooted === true || window.__posted.some((m) => m.eventId === "__rinne__bootError")`,
+                    { timeout: 4000, label: `${role}：没有 mock 时页面既没起来也没上报` },
+                )
+                .catch(() => {});
+            await sleep(300);
+            const booted = await page.eval("window.__rinneBooted === true");
+            const errs = await posted(page, "__rinne__bootError");
+            const firsts = await posted(page, "__rinne__firstFrame");
+            run.check(
+                (booted && errs.length === 0 && firsts.length === 1) || errs.length >= 1,
+                `${role}（没有 mock）：要么干净起来（首帧一次、__rinneBooted 置位、无 boot 错误），要么上报 boot 错误；实得 booted=${booted}、boot 错误 ${errs.length} 条、首帧 ${firsts.length} 次`,
+            );
+            await page.close();
+        }
+
+        // ⑦ 主模块一上来就抛错：残缺的 __RINNE_MOCK__（没有 addEventListener）让 createBridge 抛错
+        {
+            const html = fs.readFileSync(path.join(ROOT, "web", role, "index.html"), "utf8");
+            if (!/<script[^>]+type="module"/.test(html)) {
+                // 占位页没有主模块，没有可抛的东西；这里只打一行记录（不用跳过项：套内跳过会让 gates 的 G9-web 变 SKIP），页面接入主模块后这一项自动生效
+                run.log(`  ${role}（主模块抛错）：占位页没有主模块，本项不适用`);
+            } else {
+                const page = await open(url, "window.__RINNE_MOCK__ = {};", { mock: false });
+                await page
+                    .waitFor(`window.__posted.some((m) => m.eventId === "__rinne__bootError")`, {
+                        timeout: 4000,
+                        label: `${role}：主模块抛错应被 boot 守卫上报`,
+                    })
+                    .catch(() => {});
+                await sleep(300);
+                const errs = await posted(page, "__rinne__bootError");
+                run.eq(errs.length, 1, `${role}（主模块抛错）：boot 守卫恰好上报一条`);
+                run.eq(
+                    await page.eval("window.__rinneBooted === true"),
+                    false,
+                    `${role}（主模块抛错）：__rinneBooted 不应置位`,
+                );
+                await page.close();
+            }
         }
     }
 
