@@ -1,0 +1,364 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+/* Rinne 自己的样式层：.rn-* 规则，以及对 base.css 里 .sc-* 件的局部覆盖。
+   规则只由 tokens.css 已有的 token 组合而成；下面三个组合变量是唯一新增的值，
+   各自写明由哪些已有颜色拼成。页面里不写裸色值。 */
+:root {
+    /* 反馈大旋钮外弧的线宽 */
+    --rn-arc-w: 6px;
+    /* 限制器关闭时，旋钮上 100% 之后一段铺的琥珀斜纹（--sem-amber 的 .22 透明度） */
+    --rn-hatch: repeating-linear-gradient(135deg, rgba(212, 176, 118, 0.22) 0 4px, transparent 4px 8px);
+    /* 外壳危险描边：--sem-red 的内描边 2px 加 28px 内发光 */
+    --rn-danger-ring: inset 0 0 0 2px rgba(198, 110, 120, 0.75), inset 0 0 28px rgba(198, 110, 120, 0.32);
+}
+
+/* 隐藏属性一律生效：.sc-pill、.sc-scrim 一类写了 display，会盖过浏览器默认的 [hidden]。 */
+[hidden] {
+    display: none !important;
+}
+
+@keyframes rnBreath {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.3;
+    }
+}
+
+@keyframes rnCool {
+    from {
+        stroke-dashoffset: 28.9;
+    }
+    to {
+        stroke-dashoffset: 0;
+    }
+}
+
+/* 键盘焦点环：与设计稿一致，2px 薰衣草色、离开 2px。深色模态里同一个颜色也看得清。 */
+.rn-shell :focus-visible {
+    outline: 2px solid var(--acc-strong);
+    outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ 外壳 */
+.rn-shell {
+    box-sizing: border-box;
+    flex: none;
+    font-family: var(--ff-sans);
+    color: var(--txt-2);
+    font-synthesis: none;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* 外壳 L2 危险描边：画在 ::after（::before 已被顶缘 angel-eye 占用）。
+   只对 opacity 做过渡，不动外壳自己的 box-shadow。 */
+.rn-shell::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: var(--rn-danger-ring);
+    pointer-events: none;
+    z-index: 4;
+    opacity: 0;
+    transition: opacity var(--dur-1) var(--ease);
+}
+
+.rn-shell[data-danger="1"]::after {
+    opacity: 1;
+}
+
+.rn-shell__content,
+.rn-shell__layer,
+.rn-shell__top {
+    position: absolute;
+    inset: 0;
+}
+
+.rn-shell__layer,
+.rn-shell__top {
+    pointer-events: none;
+}
+
+.rn-shell__layer > *,
+.rn-shell__top > * {
+    pointer-events: auto;
+}
+
+/* 宿主旁路时内容整体降到 .55；常驻红字在 layer 里，不随之降级 */
+.rn-shell[data-bypass] > .rn-shell__content {
+    opacity: 0.55;
+}
+
+/* ------------------------------------------------------------------ 页眉 */
+.rn-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-10);
+    min-width: 0;
+}
+
+.rn-brand__mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    box-sizing: border-box;
+    width: 38px;
+    height: 38px;
+    border-radius: var(--r-banner);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-inset);
+    color: var(--txt-1);
+}
+
+.rn-brand__text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    min-width: 0;
+}
+
+.rn-brand__row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-6);
+}
+
+.rn-brand__title {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-160);
+    line-height: 1.1;
+    color: var(--txt-1);
+    white-space: nowrap;
+}
+
+.rn-brand__suffix {
+    font-family: var(--ff-sans);
+    font-weight: 500;
+    font-size: var(--fs-125);
+    line-height: 1.1;
+    color: var(--txt-3);
+}
+
+.rn-brand__eyebrow {
+    font-family: var(--ff-mono);
+    font-weight: 400;
+    font-size: var(--fs-85);
+    letter-spacing: var(--eyebrow-ls);
+    color: var(--txt-3);
+    white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ 语言胶囊 */
+.rn-lang {
+    box-sizing: border-box;
+    align-items: center;
+    height: 22px;
+    padding: 2px;
+}
+
+.rn-lang .sc-seg__item {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 16px;
+    padding: 0 var(--sp-9);
+    line-height: 1;
+}
+
+/* 纵向透明扩展区：胶囊 22 高，每项补到 24 */
+.rn-lang .sc-seg__item::before {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+}
+
+/* ------------------------------------------------------------ 按钮 */
+.rn-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-6);
+    box-sizing: border-box;
+    flex: none;
+    height: 24px;
+    padding: 0 var(--sp-11);
+}
+
+.rn-btn--lg {
+    height: 28px;
+    padding: 0 var(--sp-14);
+}
+
+.rn-btn--cta {
+    padding: 0 var(--sp-12);
+}
+
+.rn-btn--lg.rn-btn--cta {
+    padding: 0 var(--sp-14);
+}
+
+/* 深色实心次按钮：消息位里「查看说明」「知道了」用 */
+.rn-btn--darkSolid {
+    background: var(--dark-solid);
+    border-color: rgba(var(--wh), 0.18);
+    color: var(--txt-dark-btn);
+}
+
+.rn-btn[aria-disabled="true"] {
+    cursor: progress;
+}
+
+/* 「恢复回送」冷却期的细进度弧：12×12，随冷却时长走一圈 */
+.rn-coolArc {
+    display: block;
+    flex: none;
+    width: 12px;
+    height: 12px;
+}
+
+.rn-coolArc__track {
+    fill: none;
+    stroke: rgba(var(--ink), 0.22);
+    stroke-width: 1.6;
+}
+
+.rn-coolArc__arc {
+    fill: none;
+    stroke: var(--acc-ink);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-dasharray: 28.9;
+    animation: rnCool 1.5s linear forwards;
+    transform: rotate(-90deg);
+    transform-origin: 6px 6px;
+}
+
+/* ------------------------------------------------------------ 页脚 */
+.rn-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-8);
+    height: 26px;
+}
+
+.rn-footer__hint {
+    min-width: 0;
+    overflow: hidden;
+    font-size: var(--fs-115);
+    color: var(--txt-3);
+}
+
+.rn-footer__hintText {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rn-footer__right {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: var(--sp-8);
+}
+
+.rn-footer__scaleWrap {
+    display: inline-flex;
+    flex: none;
+}
+
+.rn-footer__scale {
+    height: 22px;
+    box-sizing: border-box;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.rn-footer__scale:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.rn-footer__version {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 24px;
+    padding: 0 var(--sp-4);
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: var(--ff-mono);
+    font-size: var(--fs-95);
+    letter-spacing: var(--mono-ls-ui);
+    color: var(--txt-2);
+}
+
+.rn-footer__version:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.rn-footer__help {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    flex: none;
+    overflow: hidden;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 50%;
+    cursor: pointer;
+    background: var(--acc-chip-violet);
+    border: 1px solid rgba(var(--wh), 0.5);
+    color: var(--txt-dark-1);
+}
+
+.rn-footer__help:hover {
+    box-shadow: 0 0 0 3px rgba(var(--acc), 0.35);
+}
+
+/* ------------------------------------------------------------ 模态 */
+.rn-modal {
+    box-sizing: border-box;
+    max-width: calc(100% - var(--sp-24));
+    z-index: 120;
+}
+
+.rn-modal--placed {
+    position: absolute;
+}
+
+.rn-scaleConfirm {
+    padding: var(--sp-20) 22px var(--sp-18);
+}
+
+.rn-scaleConfirm__body {
+    font-size: var(--fs-125);
+    color: var(--txt-dark-2);
+}
+
+.rn-scaleConfirm__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--sp-10);
+    margin-top: var(--sp-16);
+}
+
+.rn-scaleConfirm .rn-btn--cta {
+    padding: 0 var(--sp-16);
+    box-shadow: 0 6px 18px var(--acc-cta-shadow-lg);
+}
