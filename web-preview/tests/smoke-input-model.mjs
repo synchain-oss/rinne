@@ -6,6 +6,7 @@
 //
 // 用法：node web-preview/tests/smoke-input-model.mjs [仓库根]
 
+import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { createRun, repoRoot } from "./lib/harness.mjs";
@@ -832,6 +833,94 @@ const messages = ({ M, ok, eq }) => {
         { f: "14.4" },
         "高切被采样率截断",
     );
+    // 通知（rinne.state.notices）：配对状态与数值表达不了的五条
+    const note = (list, patch) =>
+        derive(M, (c) => {
+            c.state.notices = list;
+            if (patch) patch(c);
+        });
+    const sandbox = note([{ id: "ipcSandbox" }]);
+    eq(
+        [sandbox.messages[0].id, sandbox.messages[0].tone, sandbox.messages[0].action],
+        ["ipcSandbox", "red", { name: "guide" }],
+        "沙盒拒绝共享内存：红、带指南",
+    );
+    eq(
+        ids(
+            note([{ id: "ipcSandbox" }], (c) => {
+                c.pair.state = "ipcUnavailable";
+            }),
+        ),
+        ["ipcSandbox"],
+        "沙盒通知在时不再叠一条泛泛的共享内存不可用",
+    );
+    eq(
+        ids(
+            note([], (c) => {
+                c.pair.state = "ipcUnavailable";
+            }),
+        ),
+        ["ipc"],
+        "没有沙盒通知时仍是泛泛的共享内存不可用",
+    );
+    for (const [id, tone] of [
+        ["outOfOrder", "amber"],
+        ["unstable", "amber"],
+        ["stateDecodeFailed", "amber"],
+    ]) {
+        const r = note([{ id }]);
+        eq([ids(r), r.messages[0].tone, r.messages[0].key], [[id], tone, "band.in." + id], "通知 " + id + "：琥珀");
+    }
+    eq(
+        note([{ id: "newerProject", a: "1.2.0", b: "0.9.0" }]).messages[0].vals,
+        { a: "0.9.0", b: "1.2.0" },
+        "较新工程：通知里 a 是工程版本、b 是本机版本，文案写「本机 {a} / 工程 {b}」，取值对调",
+    );
+    eq(
+        note([{ id: "newerProject" }]).messages[0].vals,
+        { a: "—", b: "—" },
+        "较新工程缺版本号：破折号，占位符不原样上屏",
+    );
+    eq(
+        ids(
+            note([
+                { id: "ipcSandbox" },
+                { id: "stateDecodeFailed" },
+                { id: "unstable" },
+                { id: "outOfOrder" },
+                { id: "newerProject" },
+            ]),
+        ),
+        ["ipcSandbox", "outOfOrder", "unstable", "newerProject", "stateDecodeFailed"],
+        "五条同时在：按固定优先级排，不按到达顺序",
+    );
+    eq(
+        ids(
+            note(
+                [{ id: "unstable" }, { id: "outOfOrder" }, { id: "newerProject" }, { id: "stateDecodeFailed" }],
+                (c) => {
+                    c.values.limiter = false;
+                    c.pair.state = "crossTrack";
+                    c.pair.peer.name = "Gtr DI";
+                    c.meters.lamps.nonfinite = "zeroed";
+                },
+            ),
+        ),
+        ["outOfOrder", "unstable", "limiterOff", "crossTrack", "newerProject", "stateDecodeFailed", "ringNonfinite"],
+        "通知夹在限制器关闭之前与环内非有限之间，次序与字串表一致",
+    );
+    eq(ids(note([{ id: "outOfOrder" }, { id: "outOfOrder" }])), ["outOfOrder"], "同一个 id 重复只出一条");
+    for (const bad of [
+        undefined,
+        null,
+        "outOfOrder",
+        7,
+        {},
+        { id: "outOfOrder" },
+        [null, 3, "x", {}, { id: 5 }, { id: "nope" }],
+    ]) {
+        eq(ids(note(bad)), ["summary"], "通知缺省、不是数组、元素残缺或 id 不认识：当没有 " + JSON.stringify(bad));
+    }
     // 确认条
     eq(
         derive(M, (c) => {
@@ -864,5 +953,52 @@ caught("消息表", messages, {
 caught("消息表", messages, {
     deriveMessages: (c) => real.deriveMessages({ ...c, exportRec: null }),
 });
+caught("消息表", messages, {
+    // 不认通知
+    deriveMessages: (c) => real.deriveMessages({ ...c, state: { ...c.state, notices: [] } }),
+});
+caught("消息表", messages, {
+    // 较新工程的版本号不对调
+    deriveMessages: (c) => {
+        const n = (c.state.notices || []).map((x) => (x && x.id === "newerProject" ? { ...x, a: x.b, b: x.a } : x));
+        return real.deriveMessages({ ...c, state: { ...c.state, notices: n } });
+    },
+});
+caught("消息表", messages, {
+    // 沙盒通知在时又叠一条泛泛的 ipc
+    deriveMessages: (c) => {
+        const r = real.deriveMessages(c);
+        const hasBox = r.messages.some((m) => m.id === "ipcSandbox");
+        return hasBox ? { ...r, messages: [{ ...r.messages[0], id: "ipc" }, ...r.messages] } : r;
+    },
+});
+
+// ---------------------------------------------------------------- 单位写入唯一落点
+
+/** 源码里对 mem 的赋值（mem.x = …、mem[x] = …），不含比较。 */
+const MEM_WRITE = new RegExp(String.raw`\bmem(?:\.\w+|\[[^\]\n]+\])\s*=(?!=)`, "g");
+const memWrites = (src) => src.match(MEM_WRITE) || [];
+const inputSources = (dir) =>
+    fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) return inputSources(p);
+        return e.name.endsWith(".js") ? [p] : [];
+    });
+{
+    const writes = [];
+    for (const file of inputSources(path.join(ROOT, "web/input"))) {
+        for (const w of memWrites(fs.readFileSync(file, "utf8")))
+            writes.push(`${path.relative(ROOT, file).split(path.sep).join("/")}：${w}`);
+    }
+    // 单位（反馈 %/dB、延迟 ms/样本）只能由 app.js 里的 setUnit 写；卡片和别处一律经 ctx.setUnit
+    run.check(
+        writes.length === 2 && writes.every((w) => w.startsWith("web/input/app.js：mem.")),
+        `页面内存里的单位只在 app.js 的 setUnit 里写（fb、delay 各一处），实得 ${JSON.stringify(writes)}`,
+    );
+    run.check(
+        memWrites("ctx.mem.fbUnit = id;\nmem.delayUnit = x;\nif (mem.fbUnit === 'db') {}").length === 2,
+        "坏样例：卡片里直接写 ctx.mem.fbUnit 应被扫描抓出，比较不算",
+    );
+}
 
 run.finish();

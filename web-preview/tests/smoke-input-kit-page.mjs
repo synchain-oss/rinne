@@ -30,7 +30,7 @@ export const SCENES = Object.freeze(ALL_SCENES.filter((s) => s.role === "input" 
 export const VIEW = Object.freeze({ w: 1700, h: 1300 });
 
 /**
- * 打开 Input 页面的某个场景并等它画完：壳页报「注入成功」、页面置位 __rinneBooted、字体与有限时长的动画走完。
+ * 打开 Input 页面的某个场景并等它画完：壳页报「注入成功」、页面画出首批快照（配对 pill 带上状态）、字体与有限时长的动画走完。
  * 场景缺省时按默认态。fresh 先清全局位，免得上一页留下的语言或档位串进来。
  */
 export async function openInput(page, server, scenario, { lang, scale, extra = "" } = {}) {
@@ -49,7 +49,7 @@ export async function openInput(page, server, scenario, { lang, scale, extra = "
     if (await page.eval(`document.querySelector(".pv-status").getAttribute("data-ok") === "0"`))
         throw new Error(`壳页注入失败（${label}）：${status}`);
     await page.waitFor(
-        `(() => { const f = document.querySelector("iframe"); return !!(f && f.contentWindow && f.contentWindow.__rinneBooted === true && f.contentDocument.querySelector('[data-gb="input.shell"]')); })()`,
+        `(() => { const f = document.querySelector("iframe"); return !!(f && f.contentWindow && f.contentDocument.querySelector('[data-gb="input.shell"]') && f.contentDocument.querySelector('[data-gb="input.pair.pill"][data-state]')); })()`,
         { timeout: 20000, label: `页面 boot（${label}）` },
     );
     await settle(page);
@@ -309,7 +309,7 @@ export function confirmAlpha(doc, win) {
 }
 
 /**
- * 对比度采样：每段可见文字的矩形（iframe 内坐标）、计算色、各层不透明度与分档。分档：
+ * 对比度采样：每段可见文字的矩形（iframe 内坐标）、计算色、各层不透明度（op）、是否在非空闲的消息位里（inLine）与分档。分档：
  *   A：危险与确认横幅、模态里的文字、横幅与消息位里的按钮、紧急切断；B：琥珀 / 灰 / 紫横幅、配对状态灯；C：其余只记录。
  * 模态遮罩打开时只取遮罩里的文字（下面的被压暗，不是要判的对象）。
  */
@@ -407,6 +407,9 @@ export function contrastProbe(doc, win) {
             idx: win.__cp.length - 1,
             scrolled: Boolean(sc),
             tone: toneEl ? toneEl.getAttribute("data-tone") : "",
+            // 在消息位里（非空闲）：宿主旁路时消息位不降级，要和别的内容层文字分开对待
+            inLine: Boolean(p.closest('.rn-msgline:not([data-state="idle"])')),
+            inBtn: Boolean(p.closest("button")),
             text: text.slice(0, 48),
             tier,
             sel: cls.split(" ").filter(Boolean).slice(0, 3).join("."),

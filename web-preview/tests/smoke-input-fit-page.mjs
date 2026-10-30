@@ -31,6 +31,15 @@ const EXPORT_CAUSES = [
 ];
 const EXPORT_MAX_PX = 300;
 
+/** 通知五条（rinne.state.notices）：id、词条键、色调，以及 newerProject 要带的两个版本号。 */
+const NOTICES = [
+    { id: "ipcSandbox", key: "band.in.ipcSandbox", tone: "red" },
+    { id: "outOfOrder", key: "band.in.outOfOrder", tone: "amber" },
+    { id: "unstable", key: "band.in.unstable", tone: "amber" },
+    { id: "newerProject", key: "band.in.newerProject", tone: "amber", a: "0.11.0", b: "0.9.0" },
+    { id: "stateDecodeFailed", key: "band.in.stateDecodeFailed", tone: "amber" },
+];
+
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser({ width: VIEW.w, height: VIEW.h });
 try {
@@ -110,6 +119,59 @@ try {
     }
 
     run.log(`  导出提示自然宽度（px）：${widths.join("，")}`);
+
+    // ---- ⑤ 通知五条：逐语言上屏，不越出、不被裁、占位符被替换成版本号
+    const noticeWidths = [];
+    for (const lang of LANGS) {
+        await openInput(page, server, "in-playing", { lang });
+        for (const n of NOTICES) {
+            const tag = `通知 ${n.id}/${lang}`;
+            await page.eval(`(() => {
+                const s = window.__RINNE_PREVIEW__;
+                s.model.notices = [${JSON.stringify({ id: n.id, a: n.a, b: n.b })}];
+                s.core.push("rinne.state");
+            })()`);
+            await page.waitFor(
+                `(() => { const e = document.querySelector("iframe").contentDocument.querySelector('[data-gb="input.band"]'); return !!e && e.getAttribute("data-msg") === "${n.key}"; })()`,
+                { label: `${tag}：消息位应显示这一句` },
+            );
+            const m = await inFrame(page, (doc, win) => {
+                const band = doc.querySelector('[data-gb="input.band"]');
+                const t = band.querySelector(".rn-banner__text");
+                const cs = win.getComputedStyle(t);
+                const g = doc.createElement("canvas").getContext("2d");
+                g.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+                const br = band.getBoundingClientRect();
+                const tr = t.getBoundingClientRect();
+                return {
+                    text: t.textContent.trim(),
+                    natural: g.measureText(t.textContent.trim()).width,
+                    inside: tr.left >= br.left - 1 && tr.right <= br.right + 1,
+                    clipped: t.scrollWidth > t.clientWidth + 1,
+                    tone: band.getAttribute("data-tone"),
+                };
+            });
+            noticeWidths.push(`${n.id.slice(0, 6)}/${lang} ${m.natural.toFixed(0)}`);
+            run.check(m.text.length > 0, `${tag}：消息位里应有字`);
+            run.check(m.tone === n.tone, `${tag}：色调应是 ${n.tone}，实得 ${m.tone}`);
+            run.check(m.inside, `${tag}：文字不应越出消息位`);
+            run.check(!m.clipped, `${tag}：文字不应被省略号裁掉（${m.text}）`);
+            run.check(
+                !/[{}]/.test(m.text) && !/null|undefined/.test(m.text),
+                `${tag}：不应带占位符或 null（${m.text}）`,
+            );
+            if (n.a) {
+                // 文案写作「本机 {a} / 工程 {b}」：通知里 a 是工程版本、b 是本机版本，对调后本机版本在前
+                const iLocal = m.text.indexOf(n.b);
+                const iProject = m.text.indexOf(n.a);
+                run.check(
+                    iLocal >= 0 && iProject >= 0 && iLocal < iProject,
+                    `${tag}：应是本机版本 ${n.b} 在前、工程版本 ${n.a} 在后（${m.text}）`,
+                );
+            }
+        }
+    }
+    run.log(`  通知自然宽度（px）：${noticeWidths.join("，")}`);
     // ---- 坏样例：量尺必须抓得出
     await openInput(page, server, "in-conflict", { lang: "fr" });
     await inFrame(page, (doc) => {
