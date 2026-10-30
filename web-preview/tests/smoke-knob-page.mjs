@@ -6,7 +6,9 @@
 //   ③ 拖动：纵向拖 30 px 越过 100% 处的闸停在 100，抬起后桥收到 begin、set、end 的完整手势，值与回声一致；
 //   ④ pointercancel：拖动中取消，显示与桥里的值都回到起点，桥收到最后一次写回起点值与 end，没有残留的拖动态；
 //   ⑤ 发光圆心：在 0.5、1.25、2 三档，指针在旋钮盘内某处，发光圆心（--mx / --my）折回设计坐标后与指针位置重合；
-//   ⑥ 坏样例：滚轮不设上限的旋钮、发光不除倍率的圆心，必须被上面各项抓出来（量尺本身可信）。
+//   ⑥ 坏样例：滚轮不设上限的旋钮、发光不除倍率的圆心，必须被上面各项抓出来（量尺本身可信）；
+//   ⑦ 写入粒度：Shift 微调 3 px 写到宿主的是带小数的 0.1 % 格点值；反馈输入 72.5 % 写到宿主的是 72.5（不是 73）；延迟毫秒档输入 12.34 写 12.3，
+//      样本档输入 1234 样本写 25.708 ms（0.001 ms 的格点，换回样本数仍是 1234）。
 // 手势的纯逻辑由 smoke-knob-gesture 钉住，这里钉的是页面接线。浏览器缺失时整套跳过（退出码 2），不是通过。
 // 本机同时只能有一个浏览器冒烟。
 //
@@ -263,6 +265,96 @@ try {
     {
         const g = await glowAt(page, 0.5, 0.5);
         run.check(Math.abs(g.mx - 70) > 5, `坏样例：不除倍率的圆心在 2 档应明显偏离 70，实得 ${g.mx}`);
+    }
+
+    // ================================================================ ⑦ 数值输入的写入粒度
+    // 在开着的数值输入框里填文本再按回车；等值落到桥里的模型上。
+    const typeInto = (page, text) =>
+        inFrame(
+            page,
+            (doc, win, sel, txt) => {
+                const input = doc.querySelector(sel + " input");
+                input.value = txt;
+                input.dispatchEvent(
+                    new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+                );
+            },
+            NUMEDIT,
+            text,
+        );
+    const openEdit = async (page, readoutSel) => {
+        const rd = await centerOf(page, readoutSel);
+        await click(page, rd.x, rd.y, 1, 2); // Ctrl 加单击：立即开数值输入
+        await page.waitFor(`!!document.querySelector("iframe").contentDocument.querySelector('${NUMEDIT}')`, {
+            label: `数值输入应打开（${readoutSel}）`,
+        });
+    };
+    const modelOf = (page, id) => page.eval(`window.__RINNE_PREVIEW__.model.values.${id}`);
+
+    await openInput(page, server, "in-playing", { lang: "zh" });
+    {
+        const rec = await recordBridge(page, ["setParam"]);
+        await openEdit(page, '[data-part="fb.readout"]');
+        await typeInto(page, "72.5");
+        await page.waitFor(`window.__RINNE_PREVIEW__.model.values.feedback === 72.5`, {
+            label: "反馈输入 72.5 应写成 72.5",
+        });
+        const sets = (await rec.calls()).filter((x) => x[0] === "setParam" && x[1] === "feedback");
+        run.eq(
+            sets[sets.length - 1] && sets[sets.length - 1][2],
+            72.5,
+            "反馈输入 72.5：最后一次写桥应是 72.5（不取成 73）",
+        );
+        run.eq(await modelOf(page, "feedback"), 72.5, "反馈输入 72.5：桥里的值应是 72.5");
+    }
+
+    // Shift 微调：纵向 3 px 只走不到 1 个百分点，写到桥里的值落在 0.1 % 的格点上、带小数（取整到 1 % 就体现不出来）
+    await openInput(page, server, "in-playing", { lang: "zh" });
+    await setFeedback(page, 50);
+    {
+        const c = await centerOf(page, DISC);
+        const sh = { modifiers: 8 };
+        await mouse(page, "mouseMoved", c.x, c.y + 20, sh);
+        await mouse(page, "mousePressed", c.x, c.y + 20, { clickCount: 1, ...sh });
+        // 先挪 6 px 越过松动距离（这一段不计），再挪 3 px 才是计入的微调量
+        await mouse(page, "mouseMoved", c.x, c.y + 14, sh);
+        await mouse(page, "mouseMoved", c.x, c.y + 11, sh);
+        await sleep(page, 80);
+        await mouse(page, "mouseReleased", c.x, c.y + 11, { clickCount: 1, ...sh });
+        await sleep(page, 200);
+        const v = await model(page);
+        run.check(
+            v > 50 && v < 51 && Math.abs(v * 10 - Math.round(v * 10)) < 1e-6 && v !== Math.round(v),
+            `Shift 微调 3 px：桥里的值应在 0.1 % 的格点上、在 50 与 51 之间且带小数，实得 ${v}`,
+        );
+    }
+
+    await openInput(page, server, "in-playing", { lang: "zh" });
+    {
+        await openEdit(page, '[data-part="dly.readout"]');
+        await typeInto(page, "12.34");
+        await page.waitFor(`window.__RINNE_PREVIEW__.model.values.delay_ms === 12.3`, {
+            label: "延迟毫秒档输入 12.34 应写成 12.3",
+        });
+        run.eq(await modelOf(page, "delay_ms"), 12.3, "延迟毫秒档输入 12.34：桥里的值应是 12.3（0.1 ms）");
+    }
+
+    await openInput(page, server, "in-playing", { lang: "zh" });
+    {
+        const sw = await centerOf(page, '[data-part="dly.unit"] [data-seg="samples"]');
+        await click(page, sw.x, sw.y);
+        await page.waitFor(
+            `document.querySelector("iframe").contentDocument.querySelector('[data-part="dly.unit"]').getAttribute("data-state") === "samples"`,
+            { label: "延迟单位应切到样本" },
+        );
+        await openEdit(page, '[data-part="dly.readout"]');
+        await typeInto(page, "1234");
+        await page.waitFor(`window.__RINNE_PREVIEW__.model.values.delay_ms === 25.708`, {
+            label: "延迟样本档输入 1234 样本应写成 25.708 ms",
+        });
+        const ms = await modelOf(page, "delay_ms");
+        run.eq(ms, 25.708, "延迟样本档输入 1234 样本：桥里的值应是 25.708 ms（0.001 ms 的格点）");
+        run.eq(Math.round((ms * 48000) / 1000), 1234, "写到桥里的毫秒数换回样本数仍是 1234");
     }
 
     run.check(page.errors.length === 0, `页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
