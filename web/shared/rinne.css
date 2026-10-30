@@ -1,0 +1,1120 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+/* Rinne 自己的样式层：.rn-* 规则，以及对 base.css 里 .sc-* 件的局部覆盖。
+   规则只由 tokens.css 已有的 token 组合而成；下面三个组合变量是唯一新增的值，
+   各自写明由哪些已有颜色拼成。页面里不写裸色值。 */
+:root {
+    /* 反馈大旋钮外弧的线宽 */
+    --rn-arc-w: 6px;
+    /* 限制器关闭时，旋钮上 100% 之后一段铺的琥珀斜纹（--sem-amber 的 .22 透明度） */
+    --rn-hatch: repeating-linear-gradient(135deg, rgba(212, 176, 118, 0.22) 0 4px, transparent 4px 8px);
+    /* 外壳危险描边：--sem-red 的内描边 2px 加 28px 内发光 */
+    --rn-danger-ring: inset 0 0 0 2px rgba(198, 110, 120, 0.75), inset 0 0 28px rgba(198, 110, 120, 0.32);
+}
+
+/* 隐藏属性一律生效：.sc-pill、.sc-scrim 一类写了 display，会盖过浏览器默认的 [hidden]。 */
+[hidden] {
+    display: none !important;
+}
+
+@keyframes rnBreath {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.3;
+    }
+}
+
+@keyframes rnCool {
+    from {
+        stroke-dashoffset: 28.9;
+    }
+    to {
+        stroke-dashoffset: 0;
+    }
+}
+
+/* 键盘焦点环：与设计稿一致，2px 薰衣草色、离开 2px。深色模态里同一个颜色也看得清。 */
+.rn-shell :focus-visible {
+    outline: 2px solid var(--acc-strong);
+    outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ 外壳 */
+.rn-shell {
+    box-sizing: border-box;
+    flex: none;
+    font-family: var(--ff-sans);
+    color: var(--txt-2);
+    font-synthesis: none;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* 外壳 L2 危险描边：画在 ::after（::before 已被顶缘 angel-eye 占用）。
+   只对 opacity 做过渡，不动外壳自己的 box-shadow。 */
+.rn-shell::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: var(--rn-danger-ring);
+    pointer-events: none;
+    z-index: 4;
+    opacity: 0;
+    transition: opacity var(--dur-1) var(--ease);
+}
+
+.rn-shell[data-danger="1"]::after {
+    opacity: 1;
+}
+
+.rn-shell__content,
+.rn-shell__layer,
+.rn-shell__top {
+    position: absolute;
+    inset: 0;
+}
+
+.rn-shell__layer,
+.rn-shell__top {
+    pointer-events: none;
+}
+
+.rn-shell__layer > *,
+.rn-shell__top > * {
+    pointer-events: auto;
+}
+
+/* 宿主旁路时内容整体降到 .55；常驻红字在 layer 里，不随之降级 */
+.rn-shell[data-bypass] > .rn-shell__content {
+    opacity: 0.55;
+}
+
+/* ------------------------------------------------------------------ 页眉 */
+.rn-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-10);
+    min-width: 0;
+}
+
+.rn-brand__mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    box-sizing: border-box;
+    width: 38px;
+    height: 38px;
+    border-radius: var(--r-banner);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-inset);
+    color: var(--txt-1);
+}
+
+.rn-brand__text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    min-width: 0;
+}
+
+.rn-brand__row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-6);
+}
+
+.rn-brand__title {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-160);
+    line-height: 1.1;
+    color: var(--txt-1);
+    white-space: nowrap;
+}
+
+.rn-brand__suffix {
+    font-family: var(--ff-sans);
+    font-weight: 500;
+    font-size: var(--fs-125);
+    line-height: 1.1;
+    color: var(--txt-3);
+}
+
+.rn-brand__eyebrow {
+    font-family: var(--ff-mono);
+    font-weight: 400;
+    font-size: var(--fs-85);
+    letter-spacing: var(--eyebrow-ls);
+    color: var(--txt-3);
+    white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ 语言胶囊 */
+.rn-lang {
+    box-sizing: border-box;
+    align-items: center;
+    height: 22px;
+    padding: 2px;
+}
+
+.rn-lang .sc-seg__item {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 16px;
+    padding: 0 var(--sp-9);
+    line-height: 1;
+}
+
+/* 纵向透明扩展区：胶囊 22 高，每项补到 24 */
+.rn-lang .sc-seg__item::before {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+}
+
+/* ------------------------------------------------------------ 组选择 */
+.rn-group {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-8);
+    height: 26px;
+}
+
+.rn-group__label {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls-pill);
+    text-transform: uppercase;
+    color: var(--txt-3);
+    white-space: nowrap;
+}
+
+.rn-group__bar {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    box-sizing: border-box;
+    height: 26px;
+    padding: var(--sp-2);
+    border-radius: var(--r-pill);
+    background: rgba(var(--wh), 0.14);
+    border: 1px solid rgba(var(--wh), 0.28);
+}
+
+.rn-group__pill {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-3);
+    box-sizing: border-box;
+    min-width: 22px;
+    height: 20px;
+    padding: 0 var(--sp-6);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    font-family: var(--ff-mono);
+    font-size: var(--fs-105);
+    letter-spacing: var(--mono-ls-tag);
+    color: var(--txt-3);
+    background: transparent;
+}
+
+/* 纵向透明扩展区：胶囊 20 高，上下各补 2，命中高 24 */
+.rn-group__pill::before {
+    content: "";
+    position: absolute;
+    inset: -2px -1px;
+}
+
+.rn-group__pill:hover {
+    background: rgba(var(--wh), 0.3);
+}
+
+.rn-group__pill:active {
+    background: rgba(var(--wh), 0.5);
+}
+
+.rn-group__pill[aria-checked="true"] {
+    background: var(--seg-on-bg);
+    color: var(--acc-ink);
+}
+
+.rn-group__pill[aria-disabled="true"] {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.rn-group__dot {
+    flex: none;
+    width: var(--sp-4);
+    height: var(--sp-4);
+    border-radius: 50%;
+    background: rgb(var(--sem-green));
+}
+
+.rn-group__auto {
+    padding: var(--sp-3) var(--sp-6);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls);
+    color: var(--txt-2);
+}
+
+/* ------------------------------------------------------------ 配对 pill */
+.rn-pair {
+    box-sizing: border-box;
+    height: 22px;
+    padding: 0 var(--sp-12);
+    gap: var(--sp-7);
+    max-width: 240px;
+}
+
+/* 绿、红两态的墨色压在 16% 染色的玻璃上只有 2.3 / 2.8:1，够不到 3:1。
+   这里在染色下面垫一层白（--wh），只改配对 pill 的底，不动 token 与 .sc-pill 的共享配方。 */
+.rn-pair[data-tone="green"] {
+    background: linear-gradient(rgba(var(--sem-green), 0.16), rgba(var(--sem-green), 0.16)), rgba(var(--wh), 0.5);
+}
+
+.rn-pair[data-tone="red"] {
+    background: linear-gradient(rgba(var(--sem-red), 0.16), rgba(var(--sem-red), 0.16)), rgba(var(--wh), 0.5);
+}
+
+/* 灰色常态也要带 data-tone 才吃到语义色；没有时退回 .sc-pill 的灰 */
+.rn-pair[data-tone="gray"] {
+    background: rgba(var(--sem-gray), 0.16);
+    border-color: rgba(var(--sem-gray), 0.42);
+    color: var(--sem-gray-ink);
+}
+
+.rn-verify {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex: none;
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls-tag);
+    white-space: nowrap;
+}
+
+.rn-verify[data-tone="green"] {
+    color: var(--sem-green-ink);
+}
+
+.rn-verify[data-tone="amber"] {
+    color: var(--sem-amber-ink);
+}
+
+.rn-verify[data-tone="gray"] {
+    color: var(--sem-gray-ink);
+}
+
+.rn-ch {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-5);
+    font-size: var(--fs-80);
+}
+
+.rn-ch[data-tone="amber"] {
+    padding: 0 var(--sp-5);
+    background: rgba(var(--sem-amber), 0.22);
+    border: 1px solid rgba(var(--sem-amber), 0.45);
+    color: var(--sem-amber-ink);
+}
+
+.rn-ch .rn-icon {
+    color: var(--sem-amber-icon);
+}
+
+/* ------------------------------------------------------------ 插入链示意 */
+.rn-chain {
+    position: relative;
+    flex: none;
+    width: 132px;
+}
+
+.rn-chain__svg {
+    display: block;
+    overflow: visible;
+}
+
+.rn-chain__slot {
+    fill: rgba(var(--wh), 0.1);
+    stroke: rgba(var(--wh), 0.42);
+    stroke-width: 1;
+}
+
+.rn-chain__slot[data-slot="in"] {
+    fill: var(--acc-strong);
+}
+
+.rn-chain__slot[data-slot="out"] {
+    stroke: rgba(var(--txt-1-rgb), 0.55);
+    stroke-dasharray: 2 1.6;
+}
+
+.rn-chain__slot[data-slot="out"][data-lit="1"] {
+    stroke: var(--txt-1);
+    stroke-width: 1.2;
+    animation: rnBreath var(--pulse-dur) ease-in-out infinite;
+}
+
+.rn-chain__ring {
+    fill: none;
+    stroke: var(--txt-1);
+    stroke-width: 1.2;
+    animation: rnBreath var(--pulse-dur) ease-in-out infinite;
+}
+
+.rn-chain[data-state="static"] .rn-chain__slot,
+.rn-chain[data-state="static"] .rn-chain__ring {
+    animation: none;
+}
+
+.rn-chain__label {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-75);
+    fill: var(--txt-1);
+}
+
+.rn-chain__faderLabel {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-85);
+    letter-spacing: 0.08em;
+    fill: var(--txt-1);
+}
+
+.rn-chain__fader {
+    stroke: var(--txt-1);
+    stroke-width: 1.3;
+}
+
+.rn-chain[data-dark] .rn-chain__slot[data-slot="out"] {
+    stroke: var(--txt-dark-2);
+}
+
+.rn-chain[data-dark] .rn-chain__slot[data-slot="out"][data-lit="1"],
+.rn-chain[data-dark] .rn-chain__ring {
+    stroke: var(--txt-dark-1);
+}
+
+.rn-chain[data-dark] .rn-chain__label[data-slot="out"],
+.rn-chain[data-dark] .rn-chain__faderLabel {
+    fill: var(--txt-dark-1);
+}
+
+.rn-chain[data-dark] .rn-chain__fader {
+    stroke: var(--txt-dark-1);
+}
+
+/* ------------------------------------------------------------ 按钮 */
+.rn-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-6);
+    box-sizing: border-box;
+    flex: none;
+    height: 24px;
+    padding: 0 var(--sp-11);
+}
+
+.rn-btn--lg {
+    height: 28px;
+    padding: 0 var(--sp-14);
+}
+
+.rn-btn--cta {
+    padding: 0 var(--sp-12);
+}
+
+.rn-btn--lg.rn-btn--cta {
+    padding: 0 var(--sp-14);
+}
+
+/* 深色实心次按钮：消息位里「查看说明」「知道了」用 */
+.rn-btn--darkSolid {
+    background: var(--dark-solid);
+    border-color: rgba(var(--wh), 0.18);
+    color: var(--txt-dark-btn);
+}
+
+.rn-btn[aria-disabled="true"] {
+    cursor: progress;
+}
+
+/* 「恢复回送」冷却期的细进度弧：12×12，随冷却时长走一圈 */
+.rn-coolArc {
+    display: block;
+    flex: none;
+    width: 12px;
+    height: 12px;
+}
+
+.rn-coolArc__track {
+    fill: none;
+    stroke: rgba(var(--ink), 0.22);
+    stroke-width: 1.6;
+}
+
+.rn-coolArc__arc {
+    fill: none;
+    stroke: var(--acc-ink);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-dasharray: 28.9;
+    animation: rnCool 1.5s linear forwards;
+    transform: rotate(-90deg);
+    transform-origin: 6px 6px;
+}
+
+/* ------------------------------------------------------------ 消息位 */
+.rn-msgline {
+    position: relative;
+    box-sizing: border-box;
+    flex: none;
+}
+
+/* Input：一行，452×30 */
+.rn-msgline--line {
+    width: 452px;
+    height: 30px;
+}
+
+/* Output：最多三行，424×58 */
+.rn-msgline--block {
+    width: 424px;
+    height: 58px;
+}
+
+/* 紧凑配方：Rinne 的消息位比 SCVB 的横幅矮 */
+.rn-msgline .sc-banner {
+    padding: var(--sp-6) var(--sp-10);
+    line-height: 1.3;
+}
+
+.rn-banner {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    gap: var(--sp-8);
+}
+
+.rn-msgline--line .rn-banner {
+    padding: 0 var(--sp-10);
+}
+
+.rn-msgline--line .rn-banner__text {
+    white-space: nowrap;
+}
+
+.rn-msgline--block .rn-banner__text {
+    max-width: 272px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+}
+
+.rn-banner__text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.rn-banner__right {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: var(--sp-6);
+    margin-left: auto;
+}
+
+/* Output：chip 与动作按钮上下叠放，统一宽 108 靠右 */
+.rn-msgline--block .rn-banner__right {
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: var(--sp-4);
+    width: 108px;
+}
+
+.rn-msgline .sc-banner__dismiss {
+    margin-left: var(--sp-4);
+}
+
+/* 红（浅底）：--light-solid 叠红染 .12 */
+.rn-banner--red {
+    background: linear-gradient(rgba(var(--sem-red), 0.12), rgba(var(--sem-red), 0.12)), var(--light-solid);
+}
+
+/* 灰 */
+.rn-banner--gray {
+    background: rgba(var(--sem-gray), 0.15);
+    border-color: rgba(var(--sem-gray), 0.42);
+    color: var(--txt-1);
+}
+
+.rn-banner--gray .sc-banner__icon {
+    stroke: var(--sem-gray-ink);
+}
+
+/* 中性：玻璃数据卡里的 mono 小字 */
+.rn-banner--neutral {
+    background: var(--card-bg);
+    border-color: var(--card-border);
+    box-shadow: var(--card-inset), var(--glass-inset);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    color: var(--txt-3);
+}
+
+/* 空闲：Output 没有消息时槽里只放一行淡字，不画卡片，竖向居中（设计稿 O-09） */
+.rn-banner--idle {
+    display: flex;
+    align-items: center;
+    padding: var(--sp-6) var(--sp-10);
+    color: var(--txt-2);
+}
+
+.rn-banner--neutral .rn-banner__text {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-100);
+    font-weight: 400;
+    letter-spacing: var(--mono-ls-ui);
+    color: var(--txt-1);
+}
+
+.rn-banner--neutral .sc-banner__icon {
+    stroke: var(--txt-2);
+}
+
+.rn-banner__idle {
+    max-width: 380px;
+    color: var(--txt-2);
+    line-height: 1.3;
+}
+
+/* 切断类：深底危险条，主界面上唯一的深色条 */
+.rn-banner--danger {
+    background: var(--dark-toast), var(--dark-solid);
+    border-color: var(--sem-red-glass);
+    box-shadow: inset 0 0 18px rgba(var(--sem-red), 0.32);
+    color: var(--sem-red-ink-dark);
+}
+
+.rn-banner--danger .sc-banner__icon {
+    stroke: var(--sem-red-ink-dark);
+}
+
+/* 深底上的「+n」chip：浅色 chip 配深灰字压在深底上只有 2.3:1，换成反相配方 */
+.rn-banner--danger .rn-more {
+    background: rgba(var(--wh), 0.14);
+    border-color: rgba(var(--wh), 0.34);
+    color: var(--txt-dark-1);
+}
+
+.rn-banner--danger .rn-more:hover {
+    background: rgba(var(--wh), 0.24);
+}
+
+/* 确认条：圆角更大，按钮贴右 */
+.rn-banner--confirm {
+    display: flex;
+    align-items: center;
+    padding: 0 var(--sp-10);
+    border-radius: var(--r-md);
+    font-size: var(--fs-115);
+    font-weight: 500;
+    line-height: 1.3;
+    background: linear-gradient(rgba(var(--sem-amber), 0.15), rgba(var(--sem-amber), 0.15)), var(--light-solid);
+    border: 1px solid rgba(var(--sem-amber), 0.42);
+    color: var(--sem-amber-ink);
+}
+
+.rn-msgline--block .rn-banner--confirm {
+    padding: var(--sp-6) var(--sp-10);
+}
+
+.rn-banner--confirm .rn-icon {
+    flex: none;
+    color: var(--sem-amber-icon);
+}
+
+/* 「+n」chip */
+.rn-more {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    flex: none;
+    min-width: 28px;
+    height: 20px;
+    padding: 0 var(--sp-7);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    background: rgba(var(--wh), 0.5);
+    border: 1px solid var(--slate-border);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-95);
+    color: var(--txt-2);
+    font-variant-numeric: tabular-nums;
+}
+
+.rn-more::before {
+    content: "";
+    position: absolute;
+    inset: -2px 0;
+}
+
+.rn-more:hover {
+    background: var(--slate-bg);
+}
+
+/* ------------------------------------------------------------ 页脚 */
+.rn-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-8);
+    height: 26px;
+}
+
+.rn-footer__hint {
+    min-width: 0;
+    overflow: hidden;
+    font-size: var(--fs-115);
+    color: var(--txt-3);
+}
+
+.rn-footer__hintText {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rn-footer__right {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: var(--sp-8);
+}
+
+.rn-footer__scaleWrap {
+    display: inline-flex;
+    flex: none;
+}
+
+.rn-footer__scale {
+    height: 22px;
+    box-sizing: border-box;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.rn-footer__scale:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.rn-footer__version {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 24px;
+    padding: 0 var(--sp-4);
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: var(--ff-mono);
+    font-size: var(--fs-95);
+    letter-spacing: var(--mono-ls-ui);
+    color: var(--txt-2);
+}
+
+.rn-footer__version:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.rn-footer__help {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    flex: none;
+    overflow: hidden;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 50%;
+    cursor: pointer;
+    background: var(--acc-chip-violet);
+    border: 1px solid rgba(var(--wh), 0.5);
+    color: var(--txt-dark-1);
+}
+
+.rn-footer__help:hover {
+    box-shadow: 0 0 0 3px rgba(var(--acc), 0.35);
+}
+
+/* ------------------------------------------------------------ 模态 */
+.rn-modal {
+    box-sizing: border-box;
+    max-width: calc(100% - var(--sp-24));
+    z-index: 120;
+}
+
+.rn-modal--placed {
+    position: absolute;
+}
+
+.rn-scaleConfirm {
+    padding: var(--sp-20) 22px var(--sp-18);
+}
+
+.rn-scaleConfirm__body {
+    font-size: var(--fs-125);
+    color: var(--txt-dark-2);
+}
+
+.rn-scaleConfirm__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--sp-10);
+    margin-top: var(--sp-16);
+}
+
+.rn-scaleConfirm .rn-btn--cta {
+    padding: 0 var(--sp-16);
+    box-shadow: 0 6px 18px var(--acc-cta-shadow-lg);
+}
+
+/* ------------------------------------------------------------ toast */
+.rn-toast {
+    z-index: 90;
+    max-width: 306px;
+    box-sizing: border-box;
+    bottom: 44px;
+    right: 20px;
+    color: var(--txt-dark-2);
+}
+
+.rn-shell[data-role="output"] .rn-toast {
+    right: 18px;
+}
+
+.rn-toast .sc-toast__dot {
+    margin-top: var(--sp-6);
+}
+
+.rn-toast .sc-toast__dot[data-tone="green"] {
+    background: rgb(var(--sem-green));
+}
+
+.rn-toast .sc-toast__dot[data-tone="red"] {
+    background: rgba(var(--sem-red), 0.95);
+}
+
+.rn-toast .sc-toast__dot[data-tone="amber"] {
+    background: rgb(var(--sem-amber));
+}
+
+/* ------------------------------------------------------------ 关于面板 */
+.rn-about {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+}
+
+.rn-about__head {
+    flex: none;
+    padding: 18px 22px 12px;
+    border-bottom: 1px solid var(--dark-rule-weak);
+}
+
+.rn-shell[data-role="output"] .rn-about__head {
+    padding: 14px 18px 10px;
+}
+
+.rn-about__brandRow {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-8);
+}
+
+.rn-about__mark {
+    display: inline-block;
+    flex: none;
+    width: 22px;
+    height: 22px;
+    background-color: var(--txt-dark-1);
+    -webkit-mask: var(--rn-mark) center / contain no-repeat;
+    mask: var(--rn-mark) center / contain no-repeat;
+}
+
+.rn-about__lockup {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-110);
+    letter-spacing: 0.2em;
+    color: var(--txt-dark-1);
+}
+
+.rn-about__title {
+    margin-top: var(--sp-10);
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-170);
+    color: var(--txt-dark-1);
+}
+
+.rn-about__product {
+    margin-top: var(--sp-2);
+    font-size: var(--fs-120);
+    color: var(--txt-dark-2);
+}
+
+.rn-about__build {
+    margin-top: var(--sp-4);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-95);
+    letter-spacing: 0.02em;
+    color: var(--txt-dark-mono);
+}
+
+.rn-about__body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: var(--sp-4) var(--sp-18) var(--sp-14) 22px;
+}
+
+.rn-shell[data-role="output"] .rn-about__body {
+    padding: var(--sp-2) var(--sp-12) var(--sp-12) var(--sp-18);
+}
+
+.rn-about__sec {
+    margin-top: var(--sp-12);
+}
+
+.rn-about__sec--tight {
+    margin-top: var(--sp-8);
+}
+
+.rn-about__sec--wide {
+    margin-top: var(--sp-14);
+}
+
+.rn-about__text {
+    font-size: var(--fs-115);
+    line-height: 1.55;
+    color: var(--txt-dark-2);
+    text-wrap: pretty;
+}
+
+.rn-about__small {
+    font-size: var(--fs-105);
+    line-height: 1.55;
+    color: var(--txt-dark-3);
+    text-wrap: pretty;
+}
+
+.rn-about__small--gap {
+    margin-top: var(--sp-6);
+}
+
+.rn-about__actions {
+    margin-top: var(--sp-6);
+}
+
+.rn-about__links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--sp-14);
+}
+
+.rn-about__link {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-4);
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font-family: var(--ff-sans);
+    font-size: var(--fs-115);
+    color: var(--acc-link);
+}
+
+.rn-about__link:hover {
+    color: var(--acc-link-hover);
+}
+
+.rn-about__eyebrow {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-85);
+    letter-spacing: var(--eyebrow-ls);
+    color: var(--txt-dark-3);
+    white-space: nowrap;
+}
+
+.rn-about__eyebrow--gap {
+    margin-top: var(--sp-8);
+}
+
+.rn-about__preview {
+    margin: var(--sp-6) 0 0;
+    padding: var(--sp-8) var(--sp-10);
+    max-height: 92px;
+    overflow: auto;
+    border-radius: var(--r-xs);
+    background: var(--dark-solid);
+    border: 1px solid var(--dark-window-border);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    line-height: 1.55;
+    color: var(--txt-dark-mono);
+    white-space: pre;
+}
+
+.rn-about__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-10);
+    min-height: 26px;
+}
+
+.rn-about__rowLabel {
+    font-size: var(--fs-115);
+    color: var(--txt-dark-2);
+}
+
+.rn-about__ctl {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-6);
+    flex: none;
+}
+
+.rn-about__state {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls);
+    color: var(--txt-dark-3);
+}
+
+/* 开关：外层 30×24 的透明按钮，里面是 base.css 的 26×15 轨道 */
+.rn-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 30px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+/* 深色模态里的三段选项 */
+.rn-darkSeg {
+    display: inline-flex;
+    gap: var(--sp-2);
+    box-sizing: border-box;
+    height: 22px;
+    padding: var(--sp-2);
+    border-radius: var(--r-pill);
+    background: rgba(var(--wh), 0.08);
+    border: 1px solid rgba(var(--wh), 0.18);
+}
+
+.rn-darkSeg__item {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 16px;
+    padding: 0 var(--sp-9);
+    border: 0;
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    background: transparent;
+    font-family: var(--ff-sans);
+    font-size: var(--fs-100);
+    color: var(--txt-dark-3);
+}
+
+.rn-darkSeg__item::before {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+}
+
+.rn-darkSeg__item[aria-checked="true"] {
+    background: rgba(var(--wh), 0.85);
+    color: var(--txt-1);
+}
+
+.rn-about__foot {
+    display: flex;
+    flex: none;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--sp-8);
+    padding: var(--sp-12) 22px var(--sp-16);
+    border-top: 1px solid var(--dark-rule);
+}
+
+.rn-shell[data-role="output"] .rn-about__foot {
+    padding: var(--sp-10) var(--sp-16) var(--sp-12);
+}
+
+.rn-about__fail {
+    margin-right: auto;
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-110);
+    color: var(--sem-red-ink-dark);
+}
+
+/* ------------------------------------------------------------ 对 SCVB 件的局部覆盖 */
+/* 电平表与增益缩减表：数值由页面的 rAF 弹道自己平滑，CSS 过渡会叠一层滞后 */
+.rn-meters .sc-meter__fill,
+.rn-meters .sc-meter__peak,
+.rn-gr .sc-meter__fill {
+    transition: none;
+}
+
+/* 系统「减少动效」：脉冲、呼吸、冷却弧一律静止 */
+@media (prefers-reduced-motion: reduce) {
+    .sc-pill__dot,
+    .rn-chain__slot,
+    .rn-chain__ring,
+    .rn-coolArc__arc {
+        animation: none !important;
+    }
+
+    .rn-shell::after {
+        transition: none;
+    }
+}

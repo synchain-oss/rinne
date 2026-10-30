@@ -1012,7 +1012,7 @@ function AboutOv(win, st) {
         sec([t('about.license', { tag: 'div', s: body }), row({ marginTop: 6 }, Btn({ kind: 'dark', k: 'about.viewLicense', h: 24 }))]),
         sec([t('about.fonts', { tag: 'div', s: small }), t('about.tm', { tag: 'div', s: Object.assign({}, small, { marginTop: 6 }) })]),
         sec([row({ gap: 14, flexWrap: 'wrap' }, link('about.link.source'), link('about.link.site'), link('about.link.contact'), link('about.link.notices')), t('about.noGithub', { tag: 'div', s: small })], 8),
-        sec([t('about.diagNote', { tag: 'div', s: small }),
+        sec([t('about.diagNote', { tag: 'div', s: small, p: { 'data-errata': '诊断文本含 8 位轨道名散列（指纹，不是匿名化），词条已改写；稿内文案待下次勘误同步' } }),
           h('div', { style: { marginTop: 8 } }, Eyebrow('about.diagPreview', { s: { color: C.d3 } })),
           h('pre', { 'data-mock': 'diag.preview', 'data-part': 'about.diagPreview', style: { margin: '6px 0 0', padding: '8px 10px', maxHeight: 92, overflow: 'auto', borderRadius: 9, background: C.darkSolid, border: '1px solid rgba(255,255,255,.13)', fontFamily: FM, fontSize: 9, lineHeight: 1.55, color: C.dMono, whiteSpace: 'pre' } }, isIn ? DIAG_IN : DIAG_OUT)]),
         sec([col({ gap: 0 }, ...advKids)], 14)),
