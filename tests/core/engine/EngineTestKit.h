@@ -6,6 +6,9 @@
 //                   它记下读头（安全链的输入）与应有的输出，测试拿引擎的输出与它逐位比较。
 //                   控制量、淡入请求、混合律都在这里按文档另写一遍，不调引擎的任何内部函数：接线错了（次序、
 //                   有效位、干声增益、mono 取平均、旁路门）两边就对不上。
+//                   音色级（③④⑤）默认不进参照：这时它就是「不接音色级」的接线，默认参数下引擎必须与它逐位相同。
+//                   enableTone() 之后用另外构造的两个 CutFilter 与一个 SwitchRamp 按 InputEngine.h 写明的次序与复位时机
+//                   重算（前段 → 低切 → 高切 → 极性 mix(x, −x) →（mono 时取平均）→ 后段）。
 //   位型比较、相邻差与低频正弦这几个小工具。
 #pragma once
 
@@ -17,6 +20,8 @@
 #include <memory>
 #include <vector>
 
+#include "dsp/SvfTpt.h"
+#include "dsp/SwitchRamp.h"
 #include "engine/EngineContext.h"
 #include "engine/EngineParams.h"
 #include "engine/InputEngine.h"
@@ -52,7 +57,13 @@ public:
     {
         chain_.setCommandBaseline(0, 0);
         chain_.prepare(sampleRate);
+        lowCut_.prepare(sampleRate);
+        highCut_.prepare(sampleRate);
+        polarity_.prepare(sampleRate, dsp::kSwitchRampSeconds);
     }
+
+    // 音色级进参照（第一块之前调）：参数每块给一次，第一块落定到参数，起播沿的复位点上清状态、落定
+    void enableTone() { tone_ = true; }
 
     // 与引擎的 setCommandBaseline 对应（构造后、第一块之前调）
     void setCommandBaseline(const engine::CommandBaseline& baseline)
@@ -99,6 +110,17 @@ public:
             stateSeq_ = p.stateSeq;
             chain_.requestFadeIn(engine::FadeReason::SetState);
         }
+        if (tone_)
+        {
+            lowCut_.setCutoff(p.lowCutHz);
+            highCut_.setCutoff(p.highCutHz);
+            polarity_.setTarget(p.polarityInvert);
+            if (firstBlock_)
+            {
+                settleTone();
+            }
+        }
+        firstBlock_ = false;
 
         const float gDry = referenceDryGain(p.mixPercent);
         const bool unity = gDry == 1.0f;
@@ -122,6 +144,10 @@ public:
             if (i == resetAt)
             {
                 chain_.playEdgeReset();
+                if (tone_)
+                {
+                    settleTone();
+                }
             }
             float l = i < retLength ? r.returnLeft[i] : 0.0f;
             float rr = i < retLength ? r.returnRight[i] : 0.0f;
@@ -130,6 +156,14 @@ public:
             tapRight.push_back(rr);
             tapValid.push_back(valid ? 1 : 0);
             chain_.processFront(l, rr, valid);
+            if (tone_)
+            {
+                lowCut_.process(l, rr);
+                highCut_.process(l, rr);
+                polarity_.step();
+                l = polarity_.mix(l, -l);
+                rr = polarity_.mix(rr, -rr);
+            }
             const float xl = inLeft[i];
             const float xr = inRight != nullptr ? inRight[i] : xl;
             const float dl = unity ? xl : xl * gDry;
@@ -138,12 +172,15 @@ public:
             if (inRight == nullptr)
             {
                 float m = 0.5f * (l + rr);
+                preLeft.push_back(m);
                 float same = m;
                 chain_.processBack(m, same, dl, dl);
                 overwrite(wantLeft[at], dl, m, unity);
                 retLeft.push_back(m);
                 continue;
             }
+            preLeft.push_back(l);
+            preRight.push_back(rr);
             chain_.processBack(l, rr, dl, dr);
             overwrite(wantLeft[at], dl, l, unity);
             overwrite(wantRight[at], dr, rr, unity);
@@ -176,16 +213,30 @@ public:
     std::vector<float> tapLeft; // 读头（安全链的输入）
     std::vector<float> tapRight;
     std::vector<std::uint8_t> tapValid;
+    std::vector<float> preLeft; // ⑥ ×g 之前（音色级之后，mono 时取过平均）
+    std::vector<float> preRight;
     std::vector<float> retLeft; // 安全链的输出（回送）
     std::vector<float> retRight;
     std::vector<float> wantLeft; // 应有的 Input 输出
     std::vector<float> wantRight;
 
 private:
+    void settleTone() noexcept
+    {
+        lowCut_.reset();
+        highCut_.reset();
+        polarity_.snapToTarget();
+    }
+
     engine::SafetyChain chain_;
     engine::Meters meters_;
     std::uint32_t presetSeq_ = 0;
     std::uint32_t stateSeq_ = 0;
+    bool tone_ = false;
+    bool firstBlock_ = true;
+    dsp::CutFilter lowCut_{dsp::CutKind::LowCut};
+    dsp::CutFilter highCut_{dsp::CutKind::HighCut};
+    dsp::SwitchRamp polarity_;
 };
 
 // 一条闭环：一条轨道上 Input 在前、Output 在后，中间可插一个「环内插件的替身」（middle）。
@@ -212,6 +263,8 @@ struct ClosedLoop
     bool inputBypassed = false;
     bool outputBypassed = false;
     bool writerIsSecond = false;
+    // Input 的声道数：1 时 Input 只处理左声道（mono，回送取两格的平均），右声道原样交给 middle 与 Output
+    int inputChannels = 2;
 
     std::int64_t at = 0; // 下一块的第一个样本号
     std::vector<float> dryLeft;
@@ -275,8 +328,11 @@ struct ClosedLoop
             dryRight.insert(dryRight.end(), right.begin(), right.end());
             const std::vector<float> dl = left;
             const std::vector<float> dr = right;
-            input.process(view, p, transport, inputBypassed, inputContext());
-            reference.block(p, input.lastBlockResult(), inputBypassed, dl.data(), dr.data(), n);
+            const bool mono = inputChannels == 1;
+            engine::AudioView inputView = view;
+            inputView.numChannels = mono ? 1 : 2;
+            input.process(inputView, p, transport, inputBypassed, inputContext());
+            reference.block(p, input.lastBlockResult(), inputBypassed, dl.data(), mono ? nullptr : dr.data(), n);
             outLeft.insert(outLeft.end(), left.begin(), left.end());
             outRight.insert(outRight.end(), right.begin(), right.end());
         }

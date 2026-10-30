@@ -6,9 +6,12 @@
 //   1. 块首：块长观察；两端停用之后的清空请求（在环路层处理本块之前执行）。
 //   2. 干声的增益（线性律：m = mixPercent / 100）与回送增益的目标（feedback × g_ret）。
 //   3. 交给环路层：参数与走带整体下传，环路层算好 D、拉环、混好回送（含逐样本有效位）。
-//   4. 安全链的块首控制量（参数 + 环路层报的配对、断档与 D）；命令序号与环路层的换写方 / 换绑定变成淡入请求。
-//   5. 逐样本：读头 → 安全链前段 → （音色级的空位）→ 安全链后段 → 加到干声上。起播沿的复位点上复位安全链。
-//   6. 块末：安全链发布测量量；跳闸淡出走完时清空本地延迟线；事件进诊断队列；琥珀灯与诊断的账；发布本端的会合槽。
+//   4. 安全链的块首控制量（参数 + 环路层报的配对、断档与 D）；命令序号与环路层的换写方 / 换绑定变成淡入请求；
+//      音色级的参数（低切、高切、极性）。
+//   5. 逐样本：读头 → 安全链前段（①②）→ 音色级（③④⑤）→ 安全链后段（⑥–⑨）→ 加到干声上，顺带收电平。
+//      起播沿的复位点上复位安全链与音色级。
+//   6. 块末：安全链发布测量量，引擎发布电平；跳闸淡出走完时清空本地延迟线；事件进诊断队列；琥珀灯与诊断的账；
+//      发布本端的会合槽。
 //
 // 实时约定：不分配、不加锁、不读墙钟、不抛异常；0 样本的调用立刻返回，不推进任何计数。
 #include "engine/InputEngine.h"
@@ -63,6 +66,16 @@ inline float toDb(float linear) noexcept
     return 20.0f * std::log10(linear);
 }
 
+// 电平表的峰值：只收有限样本（NaN 与 ±Inf 不计，有限性按位判断，见 dsp/Sanitize.h）
+inline void notePeak(float& peak, float x) noexcept
+{
+    const float a = std::fabs(x);
+    if (a > peak && dsp::isFiniteSample(a))
+    {
+        peak = a;
+    }
+}
+
 // 回送加到干声上。回送为 ±0 时不加：g_dry 恰为 1 就一位不碰（−0.0 与 NaN 载荷原样留着），否则只写乘过的干声。
 inline void addReturn(float* out, int i, float dry, float ret, bool dryIsUnity) noexcept
 {
@@ -113,15 +126,23 @@ void InputEngine::setFadeObserver(void* context, FadeObserver observer) noexcept
 void InputEngine::prepare(double sampleRate, int maxBlock) noexcept
 {
     const double sr = sampleRate > 0.0 ? sampleRate : 48000.0;
+    const bool rateChanged = !prepared_ || sr != sampleRate_;
     sampleRate_ = sr;
     maxBlock_ = maxBlock > 0 ? maxBlock : 0;
     // N_obs 每次 prepare 清零：延迟下限因此回落，重新按声明值算。
     maxBlockSeen_ = 0;
     prepared_ = true;
 
-    // 同采样率重新 prepare 时环路层与安全链什么都不动（流保持连续）；换采样率时它们各自从头来。
+    // 同采样率重新 prepare 时环路层、安全链与音色级什么都不动（流保持连续）；换采样率时它们各自从头来。
     loop_.prepare(sr);
     chain_.prepare(sr);
+    if (rateChanged)
+    {
+        lowCut_.prepare(sr);
+        highCut_.prepare(sr);
+        polarity_.prepare(sr, dsp::kSwitchRampSeconds);
+        toneSnapPending_ = true;
+    }
     lampSamples_ = static_cast<std::int64_t>(std::llround(kLoopNanLampSeconds * sr));
 
     // 混好的回送：定长，容得下支持的最大块长。音频线程上不再分配。
@@ -215,11 +236,48 @@ SafetyControls InputEngine::makeControls(const EngineParams& params, const loop:
     return c;
 }
 
-// 逐样本：读头 → ① 清洗 → ② DC 阻断 → （③ 低切 → ④ 高切 → ⑤ 极性：音色级还没有接入，这是它们的位置）
-// → ⑥–⑨ → 加到干声上。安全链每个样本都要走（快速路径也不跳过）：等首个有效读样本、冷却与淡变的计时都靠它推进。
-// mono（一个声道）时回送取两格的平均 0.5·(L + R)，不放大环路增益；平均在清洗之后，一个声道坏了另一个照常。
+// 音色级的块首。CutFilter 每块给同一个值什么都不改；极性只改交叉的方向，位置按样本走，与切块无关。
+// prepare 重来过三级之后的第一块直接落定到参数（截止不滑、交叉不走）：这时 g_safety 是 0，落定没有可听的跳变。
+void InputEngine::beginTone(const EngineParams& params) noexcept
+{
+    lowCut_.setCutoff(params.lowCutHz);
+    highCut_.setCutoff(params.highCutHz);
+    polarity_.setTarget(params.polarityInvert);
+    if (toneSnapPending_)
+    {
+        resetTone();
+        toneSnapPending_ = false;
+    }
+}
+
+// 清状态，截止平滑与开关交叉都落定到目标：起播沿的复位点、prepare 之后的第一块
+void InputEngine::resetTone() noexcept
+{
+    lowCut_.reset();
+    highCut_.reset();
+    polarity_.snapToTarget();
+}
+
+// ③ 低切 → ④ 高切 → ⑤ 极性。极性在原样与反号之间 10 ms 线性交叉，交叉走完时直接返回那一路（关：一位不碰；
+// 开：只翻符号位）。三级都不清非有限值，算出来的原样交给 ⑥。
+void InputEngine::processTone(float& left, float& right) noexcept
+{
+    lowCut_.process(left, right);
+    highCut_.process(left, right);
+    polarity_.step();
+    left = polarity_.mix(left, -left);
+    right = polarity_.mix(right, -right);
+}
+
+// 逐样本：读头 → ① 清洗 → ② DC 阻断 → ③ 低切 → ④ 高切 → ⑤ 极性 → ⑥–⑨ → 加到干声上。
+// 安全链与音色级每个样本都要走（没有跳过它们的快速路径）：等首个有效读样本、冷却与淡变的计时都靠它推进，
+// 音色级的平滑与交叉也按样本走。
+// mono（一个声道）时回送取两格的平均 0.5·(L + R)，不放大环路增益。平均在 ①–⑤ 之后、⑥ 之前：每个声道先各自清洗、
+// 过音色级（两个声道的状态互不相干），一个声道坏了另一个照常；音色级的两个声道也因此和立体声时一样用，
+// 宿主中途改声道数也不会让一个实例换着两种调用方式。
 // 回送只有 returnLength 个样本（一般等于块长；超长块里只有开头那段淡出），之后的样本当 0、不算有效。
-void InputEngine::renderBlock(const AudioView& buffer, const loop::BlockResult& result, float& blockPeak) noexcept
+void InputEngine::renderBlock(const AudioView& buffer, const loop::BlockResult& result, float& blockPeak,
+                              BlockLevels& levels) noexcept
 {
     const int n = buffer.length;
     float* outLeft = buffer.left();
@@ -231,7 +289,7 @@ void InputEngine::renderBlock(const AudioView& buffer, const loop::BlockResult& 
     const std::uint8_t* const retValid = result.returnValid;
     const bool dryIsUnity = dryGain_ == 1.0f;
 
-    // 起播沿的复位点：本地延迟线已由环路层在沿上复位过，这里在同一个样本上复位安全链的 DSP 与判据。
+    // 起播沿的复位点：本地延迟线已由环路层在沿上复位过，这里在同一个样本上复位安全链的 DSP 与判据、音色级的状态。
     int resetAt = -1;
     if (result.resetDsp && result.resetAtSample >= 0)
     {
@@ -243,6 +301,7 @@ void InputEngine::renderBlock(const AudioView& buffer, const loop::BlockResult& 
         if (i == resetAt)
         {
             chain_.playEdgeReset();
+            resetTone();
         }
         float l = 0.0f;
         float r = 0.0f;
@@ -255,23 +314,56 @@ void InputEngine::renderBlock(const AudioView& buffer, const loop::BlockResult& 
         }
         blockPeak = std::max({blockPeak, std::fabs(dsp::sanitizeSample(l)), std::fabs(dsp::sanitizeSample(r))});
         chain_.processFront(l, r, valid);
+        processTone(l, r);
 
         const float inLeft = outLeft != nullptr ? outLeft[i] : 0.0f;
         const float inRight = outRight != nullptr ? outRight[i] : inLeft;
         const float dryLeft = dryIsUnity ? inLeft : inLeft * dryGain_;
         const float dryRight = dryIsUnity ? inRight : inRight * dryGain_;
+        notePeak(levels.input, inLeft);
+        notePeak(levels.input, inRight);
+        notePeak(levels.dryPart, dryLeft);
+        notePeak(levels.dryPart, dryRight);
         if (mono)
         {
             float m = 0.5f * (l + r);
+            notePeak(levels.preGain, m);
             float same = m;
             chain_.processBack(m, same, dryLeft, dryLeft);
             addReturn(outLeft, i, dryLeft, m, dryIsUnity);
+            notePeak(levels.returnPart, m);
+            if (outLeft != nullptr)
+            {
+                notePeak(levels.output, outLeft[i]);
+            }
             continue;
         }
+        notePeak(levels.preGain, l);
+        notePeak(levels.preGain, r);
         chain_.processBack(l, r, dryLeft, dryRight);
         addReturn(outLeft, i, dryLeft, l, dryIsUnity);
         addReturn(outRight, i, dryRight, r, dryIsUnity);
+        notePeak(levels.returnPart, l);
+        notePeak(levels.returnPart, r);
+        if (outLeft != nullptr)
+        {
+            notePeak(levels.output, outLeft[i]);
+        }
+        if (outRight != nullptr)
+        {
+            notePeak(levels.output, outRight[i]);
+        }
     }
+}
+
+void InputEngine::publishLevels(const BlockLevels& levels) noexcept
+{
+    meters_.inputPeak.publishMax(levels.input);
+    meters_.returnPeak.publishMax(levels.preGain);
+    meters_.outputPeak.publishMax(levels.output);
+    meters_.dryPartPeak.publishMax(levels.dryPart);
+    meters_.returnPartPeak.publishMax(levels.returnPart);
+    meters_.highCutLimited.store(highCut_.cutoffLimited(), std::memory_order_relaxed);
 }
 
 void InputEngine::drainSafetyEvents() noexcept
@@ -442,12 +534,15 @@ bool InputEngine::process(const AudioView& buffer, const EngineParams& params, c
         requestFadeIn(FadeReason::FirstPair);
     }
     checkCommands(params);
+    beginTone(params);
 
     float blockPeak = 0.0f;
-    renderBlock(buffer, result, blockPeak);
+    BlockLevels levels;
+    renderBlock(buffer, result, blockPeak, levels);
 
-    // 块末：测量量、跳闸淡出走完之后的清空（只改几个整数）、事件。
+    // 块末：测量量与电平、跳闸淡出走完之后的清空（只改几个整数）、事件。
     chain_.publish(meters_);
+    publishLevels(levels);
     if (chain_.takeFlushRequest())
     {
         loop_.flushLocalDelayLine();
