@@ -4,14 +4,16 @@
 
 #include <RinneOutputWebData.h> // juce_add_binary_data 生成：嵌入的 web/output 页面资源与许可证文本
 
+#include "OutputEditor.h"
 #include "OutputProcessor.h"
 #include "RinneEditorFactory.h"
 
 namespace rinne
 {
 
-// 正式构建：加载页面的网页编辑器；探针构建：探针面板（经注入点，由处理器基类造）。
-// 工厂造不出时（例如没有浏览器组件）退回 JUCE 的通用参数编辑器，窗口至少是开得了的。
+// 正式构建：加载页面的网页编辑器（OutputEditor，带 Output 的原生桥）；探针构建：探针面板（经注入点，由处理器基类造）。
+// WebView 运行时缺失或页面起不来时，编辑器自己换上兜底面板；工厂造不出时（例如没有浏览器组件）退回 JUCE 的
+// 通用参数编辑器，窗口至少是开得了的。
 juce::AudioProcessorEditor* OutputProcessor::createEditor()
 {
     editor::Options options;
@@ -24,6 +26,11 @@ juce::AudioProcessorEditor* OutputProcessor::createEditor()
     // Output 没有可以急停或恢复的东西
     options.controls = {};
     options.probeEditorFactory = [this] { return createProbeEditor(); };
+    // 网页编辑器经工厂的构造缝造：工厂只认识通用的 WebViewHost，Output 的桥函数与事件在 OutputEditor 里
+    options.webViewEditorMaker = [this,
+                                  resources = options.resources](juce::AudioProcessor&) -> juce::AudioProcessorEditor* {
+        return new output::OutputEditor(*this, resources);
+    };
     return editor::createEditorOrGeneric(*this, options);
 }
 
