@@ -37,14 +37,14 @@ The bridge between the web UI and the native plugin: function names, event names
 | `setLang` | `code`：`zh` / `en` / `fr` | `{ ok, lang }` | 写全局位，所有实例共用；不是这三个字符串之一回 `{ ok: false, reason: "bad-lang" }`，不写；兜底面板在场时回 `{ ok: false, reason: "not-ready" }`（见下），先于参数校验，不写。 |
 | `setUiScale` | `f`：该角色设计盒的档位之一 | `{ ok, scale }` | 档位不在表内回 `{ ok: false, reason: "bad-scale" }`；缩放被锁定（系统 WebKit 过旧，窗口钉在 100%）时回 `{ ok: false, reason: "scale-locked" }`，窗口不变；兜底面板在场时回 `{ ok: false, reason: "not-ready" }`（见下），先于其余判断，窗口不变；应用后进入 10 秒确认。 |
 | `commitUiScale` | 无 | `{ ok, scale }` | 确认保留当前档位并落盘；没有待确认的档位回 `{ ok: false, reason: "no-pending" }`；缩放被锁定时回 `{ ok: false, reason: "scale-locked" }`，不落盘；兜底面板在场时回 `{ ok: false, reason: "not-ready" }`（见下），先于其余判断，不落盘。 |
-| `setRulesAck` | `version`：非负整数 | `{ ok }` | 记下已确认的规则页版本，写全局位。 |
-| `setGuideSeen` | `true` | `{ ok }` | 记下本角色的引导已看，写全局位；Output 据此判断是否跳过自己的引导。 |
-| `setGroup` | `g`：`A` 到 `H` | `{ ok, group }` | 手动选组，之后永不自动迁组；`groupOrigin` 变为 `manual`。 |
-| `copyDiagnostics` | `commit`：布尔 | `{ ok, copied, text }` | `false` 只返回预览文本，`true` 才写剪贴板。文本是 `rinne-diag v1`，只含下面「诊断文本」一节名字表里的字段，末行 `ui:` 段已包含在 `text` 里。 |
-| `openExternal` | `url` | `{ ok }` | 原生侧解析后精确匹配：scheme 为 `https`，host 为 `synchain.ca`，或 host 为 `github.com` 且路径等于 `/synchain-oss/rinne` 或以 `/synchain-oss/rinne/` 开头。其余一律回 `{ ok: false, reason: "not-allowed" }`。 |
-| `setDiagLog` | `on`：布尔 | `{ ok, value }` | 诊断日志开关，本机设置，写全局位，不进工程。 |
-| `resolveTakeover` | `accept`：布尔 | `{ ok, accepted }` | 休眠实例占着本组时的确认条：`true` 接管，`false` 取消。没有待确认的接管回 `{ ok: false, reason: "no-pending" }`。 |
-| `showLicense` | 无 | `{ ok }` | 查看许可证：原生侧用系统方式打开嵌入的 LICENSE。 |
+| `setRulesAck` | `version`：非负整数 | `{ ok }` | 记下已确认的规则页版本，写全局位；不是非负整数回 `{ ok: false, reason: "bad-version" }`，不写。 |
+| `setGuideSeen` | `true` | `{ ok }` | 记下本角色的引导已看，写全局位；Output 据此判断是否跳过自己的引导。参数不是 `true` 回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `setGroup` | `g`：`A` 到 `H` | `{ ok, group }` | 手动选组，之后永不自动迁组；`groupOrigin` 变为 `manual`。不是 `A` 到 `H` 之一的单个字母（或这一构建选不了组）回 `{ ok: false, reason: "bad-group" }`，不改。 |
+| `copyDiagnostics` | `commit`：布尔 | `{ ok, copied, text }` | 恰为 `true` 才写剪贴板，其余只返回预览文本。文本是 `rinne-diag v1`，只含下面「诊断文本」一节名字表里的字段，末行 `ui:` 段已包含在 `text` 里。失败回 `{ ok: false, copied: false, reason: "clipboard" \| "not-ready" }`：诊断文本还拿不到（处理器还没备好）是 `reason: "not-ready"`，预览与写剪贴板都一样；写了剪贴板但回读对不上是 `reason: "clipboard"`。 |
+| `openExternal` | `url` | `{ ok }` | 原生侧逐字节核对、不解码：scheme 为 `https`；host 整段等于 `synchain.ca` 或 `github.com`（带端口、userinfo、子域都不算）；路径只含字母、数字与 `-._~/`，没有 `.`、`..` 段；`github.com` 的路径等于 `/synchain-oss/rinne` 或以 `/synchain-oss/rinne/` 开头；全长不超过 2048。查询串与片段一律不放行，连空的 `?`、`#` 也拒；百分号编码、空白、反斜杠在哪里都拒。其余一律回 `{ ok: false, reason: "not-allowed" }`；地址放行了但系统没能打开（没有默认浏览器）回 `{ ok: false, reason: "unavailable" }`。 |
+| `setDiagLog` | `on`：布尔 | `{ ok, value }` | 诊断日志开关，本机设置，写全局位，不进工程；参数不是布尔回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `resolveTakeover` | `accept`：布尔 | `{ ok, accepted }` | 休眠实例占着本组时的确认条：`true` 接管，`false` 取消。参数不是布尔回 `{ ok: false, reason: "bad-value" }`，先于其余判断，不动；没有待确认的接管回 `{ ok: false, reason: "no-pending" }`。 |
+| `showLicense` | 无 | `{ ok }` | 查看许可证：原生侧用系统方式打开嵌入的 LICENSE；拿不到嵌入的 LICENSE 或系统没能打开回 `{ ok: false, reason: "unavailable" }`。 |
 
 兜底面板在场：运行时缺失、前端启动失败或加载超时后，原生侧换上兜底面板并把网页隐藏，用户看不到网页。此时万一还有页面请求到达（切面板之前已排进队列的调用，或 WebView2 的控制器在超时之后才建好、页面在隐藏状态下加载完），会改窗口、改设置文件或改内存状态的函数一律先拒：`setLang`、`setUiScale`、`commitUiScale` 回 `{ ok: false, reason: "not-ready" }`，先于参数校验，不改窗口、不写设置文件、不改语言与缩放、不发事件。窗口在切面板时已放大到不小于设计盒，拒绝也是为了不再把它缩回去。`requestInitialState` 在这种情形下只回 `{ ok: true }`：不发首帧（网页不可见，首帧没有收件人），也不当作桥已就绪，上面时序里「立刻发首帧」这一条对它不适用。用户点重试后入口页整页重新加载，之后一切照常。页面只判 `ok`，不依赖具体原因。
 

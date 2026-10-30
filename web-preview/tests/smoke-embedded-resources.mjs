@@ -512,12 +512,24 @@ for (const role of roles) {
 // ---------------------------------------------------------------- ⑧ 桥回执的失败原因
 // 哪个函数能回哪个原因，是契约表（docs/UI_BRIDGE.md 的函数表）的内容；这里把「C++ 有哪些原因」「文档的行里写没写」
 // 「mock 回不回」三方对起来。C++ 多出一个原因而这张表没跟上，会判红，逼着同批改文档与 mock。
+// 登记的是原生真会回这个原因的函数（以 C++ 的实际返回为准），不是「文档里愿意写的」那几个。
+// 函数键不带节名时取文档里第一处函数行（common 节的共用函数表在最前面）；「节名:函数名」只在那一节里找，
+// 给两个角色各有一行、而原因只写在其中一节的函数用（如 output:setTailMode，input 节另有一行 setTailMode）。
 const REASON_FUNCTIONS = {
     "bad-lang": ["setLang"],
     "bad-scale": ["setUiScale"],
     "scale-locked": ["setUiScale", "commitUiScale"],
-    "no-pending": ["commitUiScale"],
-    "not-ready": ["setLang", "setUiScale", "commitUiScale"],
+    "no-pending": ["commitUiScale", "resolveTakeover"],
+    // copyDiagnostics：诊断文本还拿不到
+    "not-ready": ["setLang", "setUiScale", "commitUiScale", "copyDiagnostics"],
+    "bad-value": ["setGuideSeen", "setDiagLog", "resolveTakeover", "output:setTailMode"],
+    "bad-version": ["setRulesAck"],
+    "bad-group": ["setGroup"],
+    "not-allowed": ["openExternal"],
+    // copyDiagnostics：写了剪贴板但回读对不上
+    clipboard: ["copyDiagnostics"],
+    // 地址或文件已通过校验，系统没能打开
+    unavailable: ["openExternal", "showLicense"],
 };
 
 /** 从 BridgeBase.h 抽 namespace Reason 里的字符串值（先去注释）；抽不到 namespace 给 null。 */
@@ -532,6 +544,39 @@ function extractCppReasons(rawText) {
 function docFunctionRow(docText, fn) {
     const prefix = `| \`${fn}\` |`;
     return docText.split("\n").find((line) => line.startsWith(prefix)) ?? null;
+}
+
+/** 文档里的一节：从「## 节名：」那行之后起，到下一个二级标题为止；找不到给 null。 */
+function docSection(docText, name) {
+    const lines = docText.split("\n");
+    const start = lines.findIndex((line) => line.startsWith(`## ${name}：`));
+    if (start < 0) return null;
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex((line) => line.startsWith("## "));
+    return (end < 0 ? rest : rest.slice(0, end)).join("\n");
+}
+
+/** 文档里每一节的函数行与它们写的失败原因：common 节的键是函数名，其余节是「节名:函数名」（与登记表同口径）。 */
+function docFunctionRows(docText) {
+    const rows = [];
+    let section = null;
+    for (const line of docText.split("\n")) {
+        // 每个二级标题都换节；不是「## 节名：」形式的（如 Summary）不算任何一节
+        if (line.startsWith("## ")) section = /^## ([A-Za-z]+)：/.exec(line)?.[1] ?? null;
+        const fn = /^\| `([^`]+)` \|/.exec(line)?.[1];
+        if (!section || !fn) continue;
+        const reasons = [...new Set([...line.matchAll(/reason:\s*"([^"]+)"/g)].map((m) => m[1]))].sort();
+        rows.push({ key: section === "common" ? fn : `${section}:${fn}`, reasons });
+    }
+    return rows;
+}
+
+/** 登记表里的函数键对应的文档行：「节名:函数名」只在那一节里找，不带节名的取全文第一处；找不到给 null。 */
+function docFunctionRowFor(docText, key) {
+    const at = key.indexOf(":");
+    if (at < 0) return docFunctionRow(docText, key);
+    const section = docSection(docText, key.slice(0, at));
+    return section === null ? null : docFunctionRow(section, key.slice(at + 1));
 }
 
 {
@@ -551,6 +596,32 @@ function docFunctionRow(docText, fn) {
         "抽取器自测：文档行按整个函数名匹配",
     );
     run.eq(docFunctionRow("| `setLangX` | b |", "setLang"), null, "抽取器自测：只是前缀相同的函数名不算");
+    {
+        const twoSections =
+            "## common：c\n| `f` | c |\n## input：i\n| `f` | i |\n## output：o\n| `g` | o |\n| `f` | o |\n";
+        run.eq(docFunctionRowFor(twoSections, "output:f"), "| `f` | o |", "抽取器自测：带节名的键只在那一节里找");
+        run.eq(docFunctionRowFor(twoSections, "input:f"), "| `f` | i |", "抽取器自测：两节各有一行时各取各的");
+        run.eq(docFunctionRowFor(twoSections, "f"), "| `f` | c |", "抽取器自测：不带节名仍取第一处");
+        run.eq(
+            docFunctionRowFor(twoSections, "input:g"),
+            null,
+            "抽取器自测：节到下一个二级标题为止，节内没有这一行给 null（后面判红）",
+        );
+        run.eq(docFunctionRowFor(twoSections, "nosuch:f"), null, "抽取器自测：没有这一节给 null（后面判红）");
+        run.eq(
+            docFunctionRows(
+                '| `x` | 节外 reason: "a" |\n' +
+                    twoSections.replace("| `g` | o |", '| `g` | reason: "a" reason: "b" |'),
+            ),
+            [
+                { key: "f", reasons: [] },
+                { key: "input:f", reasons: [] },
+                { key: "output:g", reasons: ["a", "b"] },
+                { key: "output:f", reasons: [] },
+            ],
+            "抽取器自测：逐节列函数行与它写的原因，common 节用函数名、其余节带节名，节外的行不算",
+        );
+    }
 
     const cppReasons = extractCppReasons(read("src/plugin-common/BridgeBase.h"));
     run.check(cppReasons !== null, "⑧ BridgeBase.h 里找不到 namespace Reason");
@@ -563,7 +634,7 @@ function docFunctionRow(docText, fn) {
     const doc = read("docs/UI_BRIDGE.md");
     for (const [reason, fns] of Object.entries(REASON_FUNCTIONS)) {
         for (const fn of fns) {
-            const row = docFunctionRow(doc, fn);
+            const row = docFunctionRowFor(doc, fn);
             run.check(row !== null, `⑧ UI_BRIDGE.md 的函数表里找不到 ${fn}`);
             run.check(
                 row !== null && row.includes(`reason: "${reason}"`),
@@ -574,7 +645,7 @@ function docFunctionRow(docText, fn) {
 
     // 反向：文档行里写的每个失败原因，登记表里也得有。表里漏登记一个，上面的正向核对就永远核对不到它
     for (const fn of new Set(Object.values(REASON_FUNCTIONS).flat())) {
-        const row = docFunctionRow(doc, fn);
+        const row = docFunctionRowFor(doc, fn);
         if (row === null) continue; // 上面已判红
         const inDoc = [...new Set([...row.matchAll(/reason:\s*"([^"]+)"/g)].map((m) => m[1]))].sort();
         const registered = Object.entries(REASON_FUNCTIONS)
@@ -583,6 +654,18 @@ function docFunctionRow(docText, fn) {
             .sort();
         run.eq(inDoc, registered, `⑧ UI_BRIDGE.md 里 ${fn} 一行写的失败原因与本断言登记的不一致`);
     }
+
+    // 反向（全文）：任何一节的函数行写了 C++ 有的失败原因，这个函数就得为这个原因登记。只核对登记过的函数不够：
+    // 一个真会回某原因的函数整个漏登记，它那一行就永远核对不到
+    const unregistered = docFunctionRows(doc)
+        .map(({ key, reasons }) => ({
+            key,
+            reasons: reasons.filter(
+                (r) => (cppReasons ?? []).includes(r) && !(REASON_FUNCTIONS[r] ?? []).includes(key),
+            ),
+        }))
+        .filter((row) => row.reasons.length > 0);
+    run.eq(unregistered, [], "⑧ UI_BRIDGE.md 的函数行写了 C++ 有的失败原因，登记表里却没有这个函数");
 
     // mock 的行为：同一批原因，同样的函数
     const u = (f) => pathToFileURL(path.join(ROOT, f)).href;
