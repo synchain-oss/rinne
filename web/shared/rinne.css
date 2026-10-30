@@ -276,6 +276,16 @@
     max-width: 240px;
 }
 
+/* 绿、红两态的墨色压在 16% 染色的玻璃上只有 2.3 / 2.8:1，够不到 3:1。
+   这里在染色下面垫一层白（--wh），只改配对 pill 的底，不动 token 与 .sc-pill 的共享配方。 */
+.rn-pair[data-tone="green"] {
+    background: linear-gradient(rgba(var(--sem-green), 0.16), rgba(var(--sem-green), 0.16)), rgba(var(--wh), 0.5);
+}
+
+.rn-pair[data-tone="red"] {
+    background: linear-gradient(rgba(var(--sem-red), 0.16), rgba(var(--sem-red), 0.16)), rgba(var(--wh), 0.5);
+}
+
 /* 灰色常态也要带 data-tone 才吃到语义色；没有时退回 .sc-pill 的灰 */
 .rn-pair[data-tone="gray"] {
     background: rgba(var(--sem-gray), 0.16);

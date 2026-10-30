@@ -24,7 +24,6 @@ import {
     itemsDrift,
     rectsDrift,
     TIER_MIN,
-    KNOWN_SHORT,
 } from "./shared-measure.mjs";
 
 const ROOT = repoRoot();
@@ -48,7 +47,8 @@ try {
     const worstOf = { A: null, B: null, C: null };
     const rows = [];
     const counts = { A: 0, B: 0, C: 0 };
-    const knownSeen = new Set();
+    /** 配对 pill 文字按色分开记最差值：绿、红两态靠局部白垫才够 B 档，要单独看得见 */
+    const pillWorst = new Map();
 
     for (const role of ROLES) {
         for (const lang of LANGS) {
@@ -60,30 +60,28 @@ try {
                     const v = it.worst.min;
                     const rec = { tag, tier: it.tier, v, text: it.text, sel: it.sel, bg: it.worst.bg, fg: it.worst.fg };
                     if (!worstOf[it.tier] || v < worstOf[it.tier].v) worstOf[it.tier] = rec;
+                    if (it.tier === "B" && it.sel.startsWith("rn-pair__text")) {
+                        const pk = it.tone;
+                        if (!pillWorst.has(pk) || v < pillWorst.get(pk).v) pillWorst.set(pk, rec);
+                    }
                     if (it.tier !== "C" && v < TIER_MIN[it.tier]) {
-                        const known = it.tier === "B" ? KNOWN_SHORT[`${it.sel.split(".")[0]}|${it.tone}`] : null;
-                        if (known) {
-                            knownSeen.add(`${it.sel.split(".")[0]}|${it.tone}`);
-                            run.check(
-                                v >= known.floor,
-                                `${tag}：已知不达标项 ${known.note} 又变差了：${v.toFixed(2)}:1 < 下限 ${known.floor}:1，` +
-                                    `底 rgb(${it.worst.bg}) 字 rgb(${it.worst.fg}) 文字色 ${JSON.stringify(it.c)} 各层不透明度 ${it.op} 矩形 ${JSON.stringify(it.r)}`,
-                            );
-                        } else {
-                            run.check(
-                                false,
-                                `${tag}：${it.tier} 档文字 ${JSON.stringify(it.text)}（${it.sel}）对比度 ${v.toFixed(2)}:1 < ${TIER_MIN[it.tier]}:1，底 rgb(${it.worst.bg}) 字 rgb(${it.worst.fg})`,
-                            );
-                        }
+                        // 失败消息带上底色、字色、各层不透明度与矩形：偶发时才查得清
+                        run.check(
+                            false,
+                            `${tag}：${it.tier} 档文字 ${JSON.stringify(it.text)}（${it.sel}）对比度 ${v.toFixed(2)}:1 < ${TIER_MIN[it.tier]}:1，` +
+                                `底 rgb(${it.worst.bg}) 字 rgb(${it.worst.fg}) 文字色 ${JSON.stringify(it.c)} 各层不透明度 ${it.op} 矩形 ${JSON.stringify(it.r)}`,
+                        );
                     }
                     rows.push(rec);
                 }
             }
         }
     }
-    // 已知不达标项必须真的出现过：它们消失（被修好）时要把这张表同步删掉，不留死条目
-    for (const k of Object.keys(KNOWN_SHORT))
-        run.check(knownSeen.has(k), `已知不达标项 ${k} 没有再出现：若已修好，请从 KNOWN_SHORT 里删掉`);
+    // 绿、红两态的配对 pill 文字必须真的量到过（防空转）；各色最差值打印出来
+    for (const tone of ["green", "red"])
+        run.check(pillWorst.has(tone), `配对 pill 的${tone === "green" ? "绿" : "红"}字应量到过`);
+    for (const [tone, w] of [...pillWorst.entries()].sort())
+        run.log(`  配对 pill ${tone} 字最差 ${w.v.toFixed(2)}:1：${w.tag} ${JSON.stringify(w.text)}`);
     for (const tier of ["A", "B"])
         run.check(counts[tier] > 20, `${tier} 档应量到足够多的文字（防空转），实得 ${counts[tier]}`);
 
@@ -126,11 +124,11 @@ try {
     }
 
     {
-        // 坏样例：配对 pill 的不透明度一直在闪（祖先层淡入淡出没走完的情形）。量尺必须拒绝出数，不能拿拼凑的画面去量
+        // 坏样例：配对 pill 的不透明度每一帧都在变（祖先层淡入淡出没走完的情形，用逐帧换值而不是周期动画，免得两次采样碰巧相等）。量尺必须拒绝出数，不能拿拼凑的画面去量
         const scene = SCENES.find((s) => s.id === "window");
         await openScene(page, server, design, "input", "zh", scene);
         await page.eval(
-            `(() => { const s = document.createElement("style"); s.textContent = "@keyframes fxFlicker{from{opacity:.2}to{opacity:1}} .rn-pair{animation:fxFlicker .2s linear infinite alternate}"; document.head.append(s); })()`,
+            `(() => { let n = 0; const el = document.querySelector(".rn-pair"); const tick = () => { n++; el.style.opacity = String(0.2 + (n % 80) / 100); requestAnimationFrame(tick); }; tick(); })()`,
         );
         let msg = "";
         try {

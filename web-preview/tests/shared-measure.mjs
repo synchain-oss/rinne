@@ -583,13 +583,3 @@ export async function measureContrastOnPage(page) {
 }
 
 export const TIER_MIN = Object.freeze({ A: 4.5, B: 3.0 });
-
-/**
- * 已知不达标：设计稿的配对 pill 绿字（--sem-green-ink）与红字（--sem-red-ink）压在 16% 染色的玻璃上，
- * 实测低于 B 档的 3.0:1。这里不改 token、不改设计稿的 pill 配方，只把现状钉成下限，防止继续变差；
- * 要不要提亮 pill 垫底或加深墨色是设计决定，已登记给统筹。floor 是实测最差值向下取到 0.1 再减 0.1 的余量。
- */
-export const KNOWN_SHORT = Object.freeze({
-    "rn-pair__text|green": { floor: 2.2, note: "配对 pill 绿字，实测最差 2.30:1" },
-    "rn-pair__text|red": { floor: 2.7, note: "配对 pill 红字，实测最差 2.82:1" },
-});
