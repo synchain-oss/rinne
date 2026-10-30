@@ -4,7 +4,7 @@
 // 反馈与 Mix 的显示值来自参数回声（param-echo）：拖动期间显示跟手，宿主自动化时按指数逼近。
 
 import { el } from "../../shared/dom.js";
-import { FB_CAP, FB_MAX, fbDbText, feedbackChip, parseFeedbackInput, WHEEL_STEP_PX } from "../model.js";
+import { FB_CAP, FB_MAX, fbDbText, feedbackChip, parseFeedbackInput, roundFeedback, WHEEL_STEP_PX } from "../model.js";
 import { createDial } from "./dial.js";
 import { createMixFader } from "./mix-fader.js";
 import { createToggle } from "./toggle.js";
@@ -84,7 +84,9 @@ export function createFeedbackCard(ctx) {
         param: fb,
         toPos: (v) => v / FB_MAX,
         fromPos: (p) => p * FB_MAX,
-        quantize: Math.round,
+        // 0.1 %：契约里 feedback 的步进。UI 规格没有规定拖动的取整粒度，只写了 Shift 微调是 ×0.1，
+        // 取整到 1 % 会让微调到不了比 1 % 更细的格点；读数只显示整数，副行 dB 给到 0.1
+        quantize: roundFeedback,
         stepPos: 1 / FB_MAX,
         wheelPxPerStep: WHEEL_STEP_PX,
         def: 0,
@@ -123,14 +125,14 @@ export function createFeedbackCard(ctx) {
         const v = fb.value() ?? 0;
         ctx.edit({
             cover: dial.main,
-            initial: unit === "db" ? fbDbText(v) : String(Math.round(v)),
+            initial: unit === "db" ? fbDbText(v) : String(roundFeedback(v)),
             field: "fb.input",
             label: ctx.view.t("in.fb.label"),
             fs: 18,
             h: 30,
             w: 70,
             parse: (text) => parseFeedbackInput(text, unit),
-            onCommit: (res) => fb.commit(Math.round(Math.min(FB_MAX, Math.max(0, res.value)))),
+            onCommit: (res) => fb.commit(roundFeedback(Math.min(FB_MAX, Math.max(0, res.value)))),
             focusBack: dial.disc,
         });
     }

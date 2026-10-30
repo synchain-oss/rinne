@@ -88,6 +88,22 @@ const feedback = ({ M, ok, eq }) => {
     ok(Math.abs(M.parseFeedbackInput("0", "db").value - 100) < 1e-9, "0 dB 是 100%");
     eq(M.parseFeedbackInput(`${MINUS}∞`, "db"), { ok: true, value: 0 }, "−∞ 输入是 0%");
     eq(M.parseFeedbackInput("5", "db").ok, false, "超过 +3.5 dB 报错");
+    // 写入精度 0.1 %（契约里 feedback 的步进）：72.5 % 不被取成 73 %
+    eq(M.roundFeedback(72.5), 72.5, "72.5 % 保留 0.1 %");
+    eq(M.roundFeedback(72.54), 72.5, "72.54 % 取到 72.5 %");
+    eq(M.roundFeedback(72.56), 72.6, "72.56 % 取到 72.6 %");
+    eq(M.roundFeedback(0.04), 0, "0.04 % 取到 0");
+    eq(M.roundFeedback(150), 150, "150 % 不变");
+    eq(M.roundFeedback(M.parseFeedbackInput("72.5", "pct").value), 72.5, "按百分比输入 72.5 % 经取整后仍是 72.5 %");
+    // 按 dB 输入：常用范围（−12 到 +3.5 dB，每 0.1 dB）经 0.1 % 取整后换回 dB 读数不变
+    const lossy = [];
+    for (let t = -120; t <= 35; t++) {
+        const db = t / 10;
+        const pct = M.roundFeedback(M.parseFeedbackInput(M.fmtFixed(db, 1), "db").value);
+        if (M.fbDbText(pct) !== M.fmtSigned(db, 1)) lossy.push(M.fmtSigned(db, 1));
+    }
+    eq(lossy, [], "按 dB 输入（−12 到 +3.5，每 0.1 dB）取整后 dB 读数应不变");
+    eq(M.fbDbText(M.roundFeedback(M.dbToPct(-6))), M.fmtSigned(-6, 1), "−6 dB 输入后读回 −6.0");
     eq(M.feedbackChip({ cut: true, fadeIn: true, limiterOn: false, feedback: 130 }).kind, "cut", "切断压过其余芯片");
     eq(
         M.feedbackChip({ cut: false, fadeIn: true, limiterOn: false, feedback: 130 }).kind,
@@ -145,6 +161,7 @@ caught("反馈", feedback, {
                 : null,
 });
 caught("反馈", feedback, { parseFeedbackInput: (t) => ({ ok: true, value: Number(t) }) });
+caught("反馈", feedback, { roundFeedback: Math.round });
 
 // ---------------------------------------------------------------- Mix 与音色
 

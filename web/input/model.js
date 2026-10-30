@@ -112,6 +112,16 @@ export function fbAngle(pct) {
     return -135 + clamp(pct, 0, FB_MAX) * 1.8;
 }
 
+/**
+ * 反馈写入宿主前的取整：0.1 %，即契约 docs/contracts/PARAMETERS.md 里 feedback 的步进。
+ * 拖动、滚轮、方向键和数值输入（含按 dB 输入换算出来的百分比）都落在这个格点上，输入 72.5 % 不会被取成 73 %，
+ * 常用的 dB 值（−12 到 +3.5 dB）输入再读回来，dB 读数不变。读数本身只显示整数百分比（副行 dB 给到 0.1），
+ * 所以数值输入框的初值要用这里的精度，不能再取整，否则打开输入框再按回车会悄悄改掉值。
+ */
+export function roundFeedback(pct) {
+    return Math.round(pct * 10) / 10;
+}
+
 /** 反馈数值输入：按当前读数单位解析，返回 { value, ok }；超出范围 ok 为假并给出该单位的范围文字。 */
 export function parseFeedbackInput(text, unit) {
     const raw = String(text).trim().replace(/−/g, "-");
