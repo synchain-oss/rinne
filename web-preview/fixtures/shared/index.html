@@ -1,0 +1,68 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  共享件夹具页：把 web/shared 里的共享外壳与共享件按两个角色、三种语言摆出来，供冒烟脚本量。
+  参数：?role=input|output &lang=zh|en|fr &scene=window|pair|badges|group|chain|bands &overlay=about|scale|toast
+        &st=<子状态> &danger=1 &defect=<坏样例名>（只给冒烟的坏样例用）。
+  不是产品界面，不进插件包。
+-->
+<!doctype html>
+<html lang="zh">
+    <head>
+        <meta charset="utf-8" />
+        <title>shared fixture</title>
+        <link rel="stylesheet" href="../../../web/shared/tokens.css" />
+        <link rel="stylesheet" href="../../../web/shared/base.css" />
+        <link rel="stylesheet" href="../../../web/shared/rinne.css" />
+        <style>
+            html,
+            body {
+                margin: 0;
+                min-height: 100%;
+                background: #191820;
+            }
+            body {
+                display: flex;
+                align-items: flex-start;
+                justify-content: flex-start;
+            }
+            #stage {
+                position: relative;
+                flex: none;
+            }
+            /* 目录场景：一格一格的玻璃底板，每格一个状态 */
+            .fx-catalog {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 14px;
+                padding: 14px;
+                width: 1180px;
+                box-sizing: border-box;
+            }
+            .fx-plate {
+                position: relative;
+                box-sizing: border-box;
+                padding: 10px;
+                border-radius: 14px;
+                background: var(--page-gradient);
+                border: 1px solid var(--shell-border);
+            }
+            .fx-plate--dark {
+                background: var(--dark-solid);
+                border-color: var(--dark-window-border);
+            }
+            .fx-cap {
+                margin-top: 6px;
+                font-family: var(--ff-mono);
+                font-size: 9px;
+                color: var(--txt-dark-3);
+            }
+            .fx-abs {
+                position: absolute;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="stage"></div>
+        <script type="module" src="./fixture.js"></script>
+    </body>
+</html>
