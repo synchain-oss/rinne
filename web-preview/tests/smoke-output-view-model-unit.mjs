@@ -351,8 +351,8 @@ run.eq(
 );
 run.eq(
     vm.messagesFor(mkState(), mkPair("srMismatch"))[0].vals,
-    { a: "48000", b: "?" },
-    "对端采样率缺失：写问号，不让 {b} 原样上屏",
+    { a: "48000", b: "—" },
+    "对端采样率缺失：写破折号，不让 {b} 原样上屏",
 );
 run.eq(
     vm.messagesFor(mkState({ notices: [{ id: "newerProject", a: null, b: null }] }), mkPair("searching"))[0].vals,

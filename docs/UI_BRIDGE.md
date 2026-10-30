@@ -309,7 +309,7 @@ Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有
 ### 配对卡
 
 - `rinne.pair` 的 `self.name` 与 `peer.name` 对应配对卡里「本轨」与「Input 所在轨」两行；`verify` 决定核验徽标。
-- 配对卡另读三个可缺省字段：`self.color`（本轨颜色点，缺省用默认点色）、`peer.channels`（对端声道，`1` / `2` 或 `"MONO"` / `"ST"`，缺省不画声道徽标）、`peer.sampleRate`（`srMismatch` 消息里对端的采样率，缺省显示「?」）。
+- 配对卡另读两个可缺省字段：`self.color`（本轨颜色点，缺省用默认点色）、`peer.channels`（对端声道，`1` / `2` 或 `"MONO"` / `"ST"`，缺省不画声道徽标）。`srMismatch` 消息里对端的采样率读 `peer.sampleRate`（字段登记在 common 节），缺省显示「—」。
 - 消息位里「查看说明」按钮（版本不匹配、IPC 不可用、沙盒拒绝、跨进程四条消息带它）经 `openExternal` 打开当前版本钉死的用户指南（`docs/USER_GUIDE.zh-CN.md`，不带片段），地址必须通过原生白名单。
 - `conflict` 时的修复按钮文案是「重新配对」（按智能默认重选组）。界面文字里不出现「自动配对」。
 - 智能默认只看本进程内的实例，新 Output 的选组顺序是：同名轨上未配对的 Input、最近认领的未配对 Input、编号最小的空组等待（每 1 s 重评）。用户手选组之后永不自动迁组。

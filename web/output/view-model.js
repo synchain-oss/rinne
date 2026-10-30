@@ -326,7 +326,7 @@ function activeIds(state, pair) {
 /** 占位符的取值；缺的用问号，不让 {x} 原样上屏。 */
 function valsFor(id, state, pair) {
     const q = (v) => (v === null || v === undefined || v === "" ? "?" : String(v));
-    const hz = (v) => (finitePositive(v) ? String(Math.round(v)) : "?");
+    const hz = (v) => (finitePositive(v) ? String(Math.round(v)) : "—");
     switch (id) {
         case "conflict":
             return { g: q(state.group) };
