@@ -112,7 +112,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         presetDirty: false,
         cut: null,
         cutAt: 0,
-        delay: { actualMs: 100, minMs: 10.7, reason: "ok", maxBlock: 512 },
+        delay: { actualMs: 100, minMs: 10.7, reason: "ok", maxBlock: 512, bpm: 120, noTempo: false },
         pair: {
             state: "searching",
             groupMask: 0,
@@ -133,6 +133,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         },
         exportCauses: { bits: 0, count: 0 },
         silentCause: null,
+        fadeIn: false,
         userPresets: [],
         dismissed: new Set(),
     };
@@ -236,7 +237,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         cfg: { ...model.cfg },
         preset: { id: model.presetId, dirty: model.presetDirty, name: presetName(model.presetId) },
         delay: { ...model.delay },
-        safety: { cut: model.cut, cooldownMs: cooldownLeft(), l2: model.cut !== null },
+        safety: { cut: model.cut, cooldownMs: cooldownLeft(), l2: model.cut !== null, fadeIn: model.fadeIn },
         dismissedHints: [...model.dismissed],
         exportCauses: { ...model.exportCauses },
         silentCause: model.silentCause,
@@ -407,7 +408,16 @@ const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const TRACK_NAME = "Vox Lead";
 const TRACK_COLOR = "#2d79c6";
 /** 设计稿里对端在场的配对状态。 */
-const PEER_STATES = ["connected", "connectedUnverified", "connectedStill", "crossTrack", "crossProcess", "stale"];
+const PEER_STATES = [
+    "connected",
+    "connectedUnverified",
+    "connectedStill",
+    "crossTrack",
+    "crossProcess",
+    "stale",
+    "abiMismatch",
+    "srMismatch",
+];
 
 /** 在设计稿里以 playing() 为底的场景；其余以 inBase() 为底。 */
 const PLAYING_BASED = new Set([

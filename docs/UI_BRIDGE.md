@@ -272,8 +272,8 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 |---|---|
 | `cfg` | 非参数的工程状态：`resetOnPlay`（默认开）、`tailMode`、`delayUnit`（ms 或样本）、`fbUnit`（% 或 dB）、`guardOn`（失控保护，默认开）。 |
 | `preset` | `{ id, dirty, name }`；`dirty` 为真时界面在名字后加「 *」。工厂预设的 `name` 是 `{ zh, en, fr }`，用户预设是字符串。 |
-| `delay` | 环路延迟卡：`actualMs`、`minMs`、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长）。 |
-| `safety` | `{ cut, cooldownMs, l2 }`。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`l2` 为真表示有任一 L2 条件。 |
+| `delay` | 环路延迟卡：`actualMs`、`minMs`、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长），另带可选的 `bpm`（同步档换算用的速度）与 `noTempo`（真为宿主没给速度、`bpm` 是兜底的 120；缺席按有速度处理，`bpm` 缺席按 120）。 |
+| `safety` | `{ cut, cooldownMs, l2 }`，另带可选的 `fadeIn`（布尔，回送正在 500 ms 淡入：新配对、恢复回送、载入预设之后；缺席按假）。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`l2` 为真表示有任一 L2 条件。 |
 | `dismissedHints` | 本实例已关闭的提示 ID，不进工程。 |
 | `exportCauses` | 导出不一致的锁存信息：`{ bits, count }`。`bits` 是自上次确认起各原因位的并集（1 = 宿主违约，2 = 主读头补 0，4 = 对端报告违约，8 = 重同步），`count` 是自上次确认起被计入的事件数（无符号 32 位，回绕无碍，只用「不等」比较）。`count` 为 0 表示没有锁存。 |
 | `silentCause` | 可选。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停）、`stalled`（块序号停滞）。只在 `rinne.pair.state` 为 `connectedStill` 或 `connectedUnverified` 时有意义；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
