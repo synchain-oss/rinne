@@ -16,8 +16,9 @@
 //   缩放、关于     共享的状态机与面板；关于面板的 tail 行经 setTailMode 改 cfg.tailMode（随工程走）。
 // 页面不依赖具体桥：只用 createBridge 返回的对象，所以预览（mock）、真宿主与「没有桥」的纯浏览器三种情形走同一份代码。
 // 首帧前禁写：有桥时，rinne.state 与 rinne.pair 两路首帧都到之前，400 ms 兜底揭幕只为把外壳显示出来（内容是默认状态的
-// 占位），组胶囊、重新配对与接管确认这几处写入都不发：它们都基于默认值，点了会把默认值写进宿主。语言、缩放、关于照常，
-// requestInitialState 照旧重试。没有桥（纯浏览器）时没有首帧可等，按默认状态照常。
+// 占位），组胶囊、重新配对、接管确认与缩放这几处写入都不发：它们都基于默认值，点了会把默认值写进宿主（缩放的回退目标是
+// 默认的 100%，取消或倒计时到点就会 setUiScale(1)）。缩放下拉只剩一项置灰的「—」，不显示编出来的档位。语言与关于照常
+// （setLang 不依赖旧值，没有回退目标），requestInitialState 照旧重试。没有桥（纯浏览器）时没有首帧可等，按默认状态照常。
 //
 // 防回环纪律：这里没有任何参数拖动；setGroup / setLang 的回执只用来触发提示，显示一律以快照为准。
 // 重绘靠视图模型的 JSON 签名去重：回声每秒来好几次同样的状态，签名不变就什么都不写，hover 的提示与键盘焦点不会被打断。
@@ -58,6 +59,8 @@ const REVEAL_WAIT_MS = 400;
 /** requestInitialState 失败后的重试间隔与次数。 */
 const INITIAL_RETRY_MS = 400;
 const INITIAL_RETRIES = 3;
+/** 首帧前缩放下拉的唯一一项：置灰的占位，档位 0 不是合法缩放，页脚的 change 回调也不会收它。 */
+const NO_SCALE = Object.freeze({ factor: 0, label: "—", disabled: true, titleKey: null });
 /** cfg.tailMode 认得的三个值（关于面板的 tail 行）；其余按缺省 auto。 */
 const TAIL_MODES = ["auto", "infinite", "30s"];
 const GROUP_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"];
@@ -130,10 +133,13 @@ export function mountOutputPage(o) {
     });
     const footer = createFooter({
         role,
-        onScale: (f) => void scaleUi.preview(f),
+        onScale: (f) => {
+            if (!writesLocked()) void scaleUi.preview(f);
+        },
         onAbout: () => openAbout(),
         onHelp: () => (typeof hooks.onHelp === "function" ? hooks.onHelp() : undefined),
     });
+    const footerScale = footer.el.querySelector("select");
     const scaleConfirm = createScaleConfirm({
         role,
         host: shell.top,
@@ -252,12 +258,15 @@ export function mountOutputPage(o) {
         });
         footer.update({
             hint: { state: view.hint, text: t(HINT_KEYS[view.hint]) },
-            scaleOptions: options,
-            scale: state.uiScale,
+            // 首帧前没有真档位：只给一项置灰的「—」，选不了也不显示默认的 100%
+            scaleOptions: noWrite ? [NO_SCALE] : options,
+            scale: noWrite ? NO_SCALE.factor : state.uiScale,
             locked,
             version: state.version || "—",
             t,
         });
+        // 首帧前整个下拉也置灰。页脚自己的置灰只给旧 WebKit 的锁定（会把提示位换成锁定说明），这里不借它，直接设在下拉上
+        footerScale.disabled = locked || noWrite;
         if (about.isOpen()) about.update({ t, lang, build: buildInfo(), cfg: { ...cfg }, diagLog: state.diagLog });
         if (scaleUi.state().confirming) scaleConfirm.update({ ...scaleUi.state(), t });
         applyShellState();

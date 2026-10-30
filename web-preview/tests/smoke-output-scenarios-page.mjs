@@ -10,7 +10,7 @@
 //   ④ 重绘纪律：回声每秒来好几次同样的状态（含乱序的旧帧），页面不写任何 DOM；乱序旧帧与未知配对状态整帧丢弃；
 //   ⑤ 外壳：冲突与版本不匹配是危险描边、旁路是旁路态且只降内容层（常驻红字不降）、覆盖层打开时内容 inert、脉冲只在音频流动时；
 //   ⑥ 桥不通：requestInitialState 一直失败时 400 ms 兜底揭幕、重试 3 次；无桥模式不报错、照常能选组；首帧慢：兜底揭幕后两路
-//      首帧到齐前组胶囊、重新配对、接管确认都不写（语言照常），到齐后照常选组；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
+//      首帧到齐前组胶囊、重新配对、接管确认与缩放都不写（缩放下拉置灰只显示「—」，语言照常），到齐后照常选组与选档；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
 //   ⑦ 坏样例：把红字挪进内容层、把危险描边关掉，上面对应的断言必须变红（见各自的替身断言）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
@@ -690,7 +690,7 @@ try {
     }
     {
         // 首帧慢：requestInitialState 回执成功但帧迟迟不来。兜底揭幕只为显示外壳，两路首帧到齐前组胶囊、重新配对、
-        // 接管确认这几处写入都不发（都基于默认值）；语言照常；到齐后照常选组。三个小页各验一处，帧由测试手动派发
+        // 接管确认与缩放这几处写入都不发（都基于默认值）；语言照常；到齐后照常选组、选档。三个小页各验一处，帧由测试手动派发
         const r = await page.eval(`(async () => {
             const { mountOutputPage } = await import("/web/output/page.js");
             const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -706,8 +706,10 @@ try {
                 const $ = (s) => host.querySelector(s);
                 const pill = (g) => $('[data-gb="output.group"] [role="radio"][data-group="' + g + '"]');
                 const action = () => $('[data-gb="output.band"] [data-part="band.action"]');
+                const scaleSel = () => $('[data-gb="output.footer.scale"] select');
+                const scaleConfirmShown = () => { const c = $('[data-gb="output.scale.confirm"]'); return Boolean(c && !c.closest("[hidden]")); };
                 const count = (name) => calls.filter((n) => n === name).length;
-                return { host, handlers, p, $, pill, action, count, done: () => { p.destroy(); host.remove(); } };
+                return { host, handlers, p, $, pill, action, scaleSel, scaleConfirmShown, count, done: () => { p.destroy(); host.remove(); } };
             };
             const state = (extra) => ({ seq: 1, role: "output", group: "A", lang: "zh", version: "1.0.0", ...extra });
             const out = {};
@@ -716,10 +718,20 @@ try {
             await sleep(650);
             out.revealed = A.p.isRevealed();
             out.disabled = [...A.host.querySelectorAll('[data-gb="output.group"] [role="radio"]')].filter((n) => n.getAttribute("aria-disabled") === "true").length;
+            const sel = A.scaleSel();
+            const enabledOptions = () => [...sel.options].filter((n) => !n.disabled).length;
+            out.scaleBefore = { disabled: sel.disabled, shown: sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].textContent : null, enabled: enabledOptions() };
             A.pill("C").click();
             A.$('[data-gb="output.lang"] [data-lang="en"]').click();
+            // 下拉置灰之外再验页面自己这一道：即使来了一次选档（合成的 change），首帧前也不进缩放预览
+            const probe = document.createElement("option");
+            probe.value = "1.5";
+            sel.append(probe);
+            sel.value = "1.5";
+            sel.dispatchEvent(new Event("change"));
+            probe.remove();
             await sleep(30);
-            out.before = { setGroup: A.count("setGroup"), setLang: A.count("setLang"), asked: A.count("requestInitialState") };
+            out.before = { setGroup: A.count("setGroup"), setLang: A.count("setLang"), asked: A.count("requestInitialState"), setUiScale: A.count("setUiScale"), commitUiScale: A.count("commitUiScale"), scaleConfirm: A.scaleConfirmShown() };
             A.handlers["rinne.state"](state());
             await sleep(30);
             A.pill("C").click();
@@ -730,6 +742,14 @@ try {
             A.pill("C").click();
             await sleep(30);
             out.after = A.count("setGroup");
+            out.scaleAfter = { disabled: sel.disabled, value: sel.value, enabled: enabledOptions() };
+            const pick = [...sel.options].find((n) => !n.disabled && n.value !== sel.value);
+            if (pick) {
+                sel.value = pick.value;
+                sel.dispatchEvent(new Event("change"));
+            }
+            await sleep(30);
+            out.scalePicked = { setUiScale: A.count("setUiScale"), scaleConfirm: A.scaleConfirmShown() };
             A.done();
             // 重新配对：只来了 rinne.pair（冲突）时不发 repairPair，rinne.state 也到了才发
             const B = mount();
@@ -764,12 +784,23 @@ try {
         run.eq(r.revealed, true, "首帧慢：400 ms 兜底揭幕照常（外壳不能一直空着）");
         run.eq(r.disabled, 8, "首帧慢：兜底揭幕后两路首帧到齐前组胶囊整排禁用");
         run.eq(
+            r.scaleBefore,
+            { disabled: true, shown: "—", enabled: 0 },
+            "首帧慢：缩放下拉置灰，读数是「—」（不显示默认的 100%），没有可选的档位",
+        );
+        run.eq(
             r.before,
-            { setGroup: 0, setLang: 1, asked: 1 },
-            "首帧慢：点组胶囊不发 setGroup，语言照常发 setLang（回执成功不重试）",
+            { setGroup: 0, setLang: 1, asked: 1, setUiScale: 0, commitUiScale: 0, scaleConfirm: false },
+            "首帧慢：点组胶囊不发 setGroup、选档不发 setUiScale / commitUiScale 也不出缩放确认条，语言照常发 setLang（回执成功不重试）",
         );
         run.eq(r.stateOnly, 0, "首帧慢：只到了 rinne.state 仍不发 setGroup");
         run.eq([r.disabledAfter, r.after], [false, 1], "首帧慢：两路首帧到齐后组胶囊解禁，点 C 发 setGroup");
+        run.eq(
+            [r.scaleAfter.disabled, r.scaleAfter.value, r.scaleAfter.enabled > 1],
+            [false, "1", true],
+            "首帧慢：两路首帧到齐后缩放下拉可用，读数是快照里的档位",
+        );
+        run.eq(r.scalePicked, { setUiScale: 1, scaleConfirm: true }, "首帧慢：就绪后选档发 setUiScale 并出缩放确认条");
         run.eq(r.repairAction, "repair", "首帧慢（对照）：只到了冲突的 rinne.pair 时消息位已有「重新配对」");
         run.eq([r.repairBefore, r.repairAfter], [0, 1], "首帧慢：rinne.state 没到时不发 repairPair，到了才发");
         run.eq(r.confirmAction, "takeover", "首帧慢（对照）：只到了待接管的 rinne.state 时确认条已展开");
