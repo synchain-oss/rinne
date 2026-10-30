@@ -332,7 +332,8 @@ void checkKept(const SuspendTrace& t)
 // ---- S24 工程重载 ----
 
 constexpr std::int64_t kReloadAt = 3 * kSecond;
-constexpr float kReloadDelayMs = 200.0f; // D = 9600，220 Hz 与 330 Hz 在 D 内各是 44、66 个整周期
+// D = 9600：s14::kHzLeft（100 Hz）与 s14::kHzRight（150 Hz）在 D 内各是 20、30 个整周期
+constexpr float kReloadDelayMs = 200.0f;
 
 struct ReloadTrace
 {

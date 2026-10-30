@@ -34,7 +34,7 @@ build/tests/Release/rinne_loop_rig.exe "[s05]"
 build/tests/Release/rinne_host_tests.exe "[s03b],[s05b]"
 ```
 
-场景的 Catch2 标签是 `[loop_rig][sNN]`（环路试验台）与 `[plugin_host][sNN]`（插件级复验），用标签就能按场景挑着跑。Debug 构建加 `-Config Debug` 和独立的 `-BuildDir`。整套 `rinne_loop_rig` 本机实测约 9 s（Release）、约 1 分钟（Debug）；加场景时留意总耗时别逼近 ctest 超时（300 s），逼近了在 `tests/loop_rig/suite.cmake` 里放宽。
+场景的 Catch2 标签是 `[loop_rig][sNN]`（环路试验台）与 `[plugin_host][sNN]`（插件级复验），用标签就能按场景挑着跑。Debug 构建加 `-Config Debug` 和独立的 `-BuildDir`。整套 `rinne_loop_rig` 本机实测约 9 s（Release）、约 1 分钟（Debug）；加场景时留意总耗时别逼近 ctest 超时（300 s），逼近了在 `tests/CMakeLists.txt` 注册这个套件的 `rinne_add_test_suite` 行里放宽（`suite.cmake` 不注册 ctest）。
 
 场景文件头都写同一套内容：测什么、做法、断言（判据与取值理由）、以及标 ⛔ 的删除式验证点。⛔ 点的意思是：把对应的实现改坏，这个场景必须变红。改场景判据之前先读文件头，别把判据放宽到让改坏的实现也能过。
 
