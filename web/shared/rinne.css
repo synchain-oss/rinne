@@ -179,6 +179,233 @@
     inset: -4px 0;
 }
 
+/* ------------------------------------------------------------ 组选择 */
+.rn-group {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-8);
+    height: 26px;
+}
+
+.rn-group__label {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls-pill);
+    text-transform: uppercase;
+    color: var(--txt-3);
+    white-space: nowrap;
+}
+
+.rn-group__bar {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    box-sizing: border-box;
+    height: 26px;
+    padding: var(--sp-2);
+    border-radius: var(--r-pill);
+    background: rgba(var(--wh), 0.14);
+    border: 1px solid rgba(var(--wh), 0.28);
+}
+
+.rn-group__pill {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-3);
+    box-sizing: border-box;
+    min-width: 22px;
+    height: 20px;
+    padding: 0 var(--sp-6);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    font-family: var(--ff-mono);
+    font-size: var(--fs-105);
+    letter-spacing: var(--mono-ls-tag);
+    color: var(--txt-3);
+    background: transparent;
+}
+
+/* 纵向透明扩展区：胶囊 20 高，上下各补 2，命中高 24 */
+.rn-group__pill::before {
+    content: "";
+    position: absolute;
+    inset: -2px -1px;
+}
+
+.rn-group__pill:hover {
+    background: rgba(var(--wh), 0.3);
+}
+
+.rn-group__pill:active {
+    background: rgba(var(--wh), 0.5);
+}
+
+.rn-group__pill[aria-checked="true"] {
+    background: var(--seg-on-bg);
+    color: var(--acc-ink);
+}
+
+.rn-group__pill[aria-disabled="true"] {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.rn-group__dot {
+    flex: none;
+    width: var(--sp-4);
+    height: var(--sp-4);
+    border-radius: 50%;
+    background: rgb(var(--sem-green));
+}
+
+.rn-group__auto {
+    padding: var(--sp-3) var(--sp-6);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls);
+    color: var(--txt-2);
+}
+
+/* ------------------------------------------------------------ 配对 pill */
+.rn-pair {
+    box-sizing: border-box;
+    height: 22px;
+    padding: 0 var(--sp-12);
+    gap: var(--sp-7);
+    max-width: 240px;
+}
+
+/* 灰色常态也要带 data-tone 才吃到语义色；没有时退回 .sc-pill 的灰 */
+.rn-pair[data-tone="gray"] {
+    background: rgba(var(--sem-gray), 0.16);
+    border-color: rgba(var(--sem-gray), 0.42);
+    color: var(--sem-gray-ink);
+}
+
+.rn-verify {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex: none;
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls-tag);
+    white-space: nowrap;
+}
+
+.rn-verify[data-tone="green"] {
+    color: var(--sem-green-ink);
+}
+
+.rn-verify[data-tone="amber"] {
+    color: var(--sem-amber-ink);
+}
+
+.rn-verify[data-tone="gray"] {
+    color: var(--sem-gray-ink);
+}
+
+.rn-ch {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-5);
+    font-size: var(--fs-80);
+}
+
+.rn-ch[data-tone="amber"] {
+    padding: 0 var(--sp-5);
+    background: rgba(var(--sem-amber), 0.22);
+    border: 1px solid rgba(var(--sem-amber), 0.45);
+    color: var(--sem-amber-ink);
+}
+
+.rn-ch .rn-icon {
+    color: var(--sem-amber-icon);
+}
+
+/* ------------------------------------------------------------ 插入链示意 */
+.rn-chain {
+    position: relative;
+    flex: none;
+    width: 132px;
+}
+
+.rn-chain__svg {
+    display: block;
+    overflow: visible;
+}
+
+.rn-chain__slot {
+    fill: rgba(var(--wh), 0.1);
+    stroke: rgba(var(--wh), 0.42);
+    stroke-width: 1;
+}
+
+.rn-chain__slot[data-slot="in"] {
+    fill: var(--acc-strong);
+}
+
+.rn-chain__slot[data-slot="out"] {
+    stroke: rgba(var(--txt-1-rgb), 0.55);
+    stroke-dasharray: 2 1.6;
+}
+
+.rn-chain__slot[data-slot="out"][data-lit="1"] {
+    stroke: var(--txt-1);
+    stroke-width: 1.2;
+    animation: rnBreath var(--pulse-dur) ease-in-out infinite;
+}
+
+.rn-chain__ring {
+    fill: none;
+    stroke: var(--txt-1);
+    stroke-width: 1.2;
+    animation: rnBreath var(--pulse-dur) ease-in-out infinite;
+}
+
+.rn-chain[data-state="static"] .rn-chain__slot,
+.rn-chain[data-state="static"] .rn-chain__ring {
+    animation: none;
+}
+
+.rn-chain__label {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-75);
+    fill: var(--txt-1);
+}
+
+.rn-chain__faderLabel {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-85);
+    letter-spacing: 0.08em;
+    fill: var(--txt-1);
+}
+
+.rn-chain__fader {
+    stroke: var(--txt-1);
+    stroke-width: 1.3;
+}
+
+.rn-chain[data-dark] .rn-chain__slot[data-slot="out"] {
+    stroke: var(--txt-dark-2);
+}
+
+.rn-chain[data-dark] .rn-chain__slot[data-slot="out"][data-lit="1"],
+.rn-chain[data-dark] .rn-chain__ring {
+    stroke: var(--txt-dark-1);
+}
+
+.rn-chain[data-dark] .rn-chain__label[data-slot="out"],
+.rn-chain[data-dark] .rn-chain__faderLabel {
+    fill: var(--txt-dark-1);
+}
+
+.rn-chain[data-dark] .rn-chain__fader {
+    stroke: var(--txt-dark-1);
+}
+
 /* ------------------------------------------------------------ 按钮 */
 .rn-btn {
     display: inline-flex;
