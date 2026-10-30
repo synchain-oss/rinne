@@ -41,8 +41,9 @@ export function textRecordsOf(el) {
         }
     };
     const errata = !!el.closest("[data-errata]");
-    // 目录里的多语言对照格外层带 data-lang，按该语言列核对；没有就按场景语言
-    const langHost = el.closest("[data-lang]");
+    // 目录里的多语言对照格外层带 data-lang，按该语言列核对；没有就按场景语言。
+    // 只看祖先，不看节点自己：节点自带 data-lang 的（比如语言胶囊里各语言那一格）不改变核对语言
+    const langHost = el.parentElement ? el.parentElement.closest("[data-lang]") : null;
     const lang = langHost ? langHost.getAttribute("data-lang") : null;
     const out = [];
     if (el.hasAttribute("data-t"))
@@ -576,16 +577,22 @@ export function selfTest() {
         "文案",
     );
     // title、aria 的占位符代入值各有自己的属性。用假节点跑 textRecordsOf（与浏览器里嵌入的是同一份源码）再交给 analyze
-    const fakeEl = (attrs, { errata = false, text = "", lang = null } = {}) => ({
-        hasAttribute: (n) => Object.hasOwn(attrs, n),
-        getAttribute: (n) => (Object.hasOwn(attrs, n) ? attrs[n] : null),
-        closest: (sel) => {
-            if (sel === "[data-errata]") return errata ? {} : null;
-            if (sel === "[data-lang]") return lang ? { getAttribute: () => lang } : null;
-            return null;
-        },
-        textContent: text,
-    });
+    // lang 是祖先的 data-lang，selfLang 是节点自己带的；closest 与浏览器一样先算自己再往上找，parentElement.closest 只找祖先
+    const fakeEl = (attrs, { errata = false, text = "", lang = null, selfLang = null } = {}) => {
+        const ancestor = lang ? { getAttribute: () => lang } : null;
+        const self = selfLang ? { getAttribute: () => selfLang } : null;
+        return {
+            hasAttribute: (n) => Object.hasOwn(attrs, n),
+            getAttribute: (n) => (Object.hasOwn(attrs, n) ? attrs[n] : null),
+            closest: (sel) => {
+                if (sel === "[data-errata]") return errata ? {} : null;
+                if (sel === "[data-lang]") return self || ancestor;
+                return null;
+            },
+            parentElement: { closest: (sel) => (sel === "[data-lang]" ? ancestor : null) },
+            textContent: text,
+        };
+    };
     const withNode = (attrs, opts, dict) =>
         mutate((i) => {
             snap(i).texts = textRecordsOf(fakeEl(attrs, opts));
@@ -620,6 +627,24 @@ export function selfTest() {
         "data-lang 取值不认识时回到场景语言",
         false,
         withNode({ "data-t": "common.cancel" }, { lang: "xx", text: "取消" }, {}),
+    );
+    // 节点自己带 data-lang 不改变核对语言：只有祖先的 data-lang 才算（自己带 fr 就退成只查非空，会放过不一致）
+    add(
+        "节点自己带 data-lang=fr：仍按场景语言逐字比，文字与 zh 词条不一致为红",
+        true,
+        withNode({ "data-t": "common.cancel" }, { selfLang: "fr", text: "Annuler" }, {}),
+        "文案",
+    );
+    add(
+        "节点自己带 data-lang=en：仍按场景语言比，文字与 zh 词条一致为绿",
+        false,
+        withNode({ "data-t": "common.cancel" }, { selfLang: "en", text: "取消" }, {}),
+    );
+    add(
+        "节点自己带 data-lang=fr、祖先带 data-lang=en：按祖先的 en 逐字比",
+        true,
+        withNode({ "data-t": "common.cancel" }, { selfLang: "fr", lang: "en", text: "Annuler" }, {}),
+        "文案",
     );
     add(
         "title 的代入值写在 data-t-title-vals 时按它代入",
