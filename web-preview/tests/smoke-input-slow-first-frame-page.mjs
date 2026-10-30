@@ -6,8 +6,9 @@
 //      配对 pill 不声称任何状态；
 //   ② 所有写入与手势都关着：五张卡、组选择、对端行里的每个控件都在 inert 之内；对它们派发指针拖动、双击、滚轮、方向键、
 //      点击、Ctrl+单击，桥一次写入都收不到，读数仍是「—」，数值输入框与限制器确认卡都不弹；真鼠标点上去也一样；
-//   ③ 紧急切断照常可点，真点一下桥恰好收到一次 panic；语言、缩放、关于不受影响（语言真能切，关于面板能开、
-//      高级设置那几行关着，缩放下拉可用且选档真调 setUiScale）；
+//   ③ 紧急切断照常可点，真点一下桥恰好收到一次 panic；语言、关于不受影响（语言真能切，关于面板能开、高级设置那几行
+//      关着）；缩放不可用：宿主的档位还不知道，选档记下的回退目标是编的，所以下拉置灰、里面只有「—」，强行塞进一个
+//      真实档位并发出 change，桥也收不到 setUiScale、不出缩放确认条；快照到齐后下拉恢复，选档真调 setUiScale；
 //   ④ requestInitialState 按间隔重发，次数有上界（首次加三次重发）；快照一到就不再重发；
 //   ⑤ 首批真快照走正常的首帧路径：带锁存切断（界面出现「恢复回送」）、反馈单位 dB、已关闭过导出提示的快照来了，
 //      界面是切断态、单位 dB、导出提示不再弹出；第一批参数回声直接落位，没有从默认值逼近的过程，也没有「自动」标记；
@@ -102,7 +103,10 @@ function pendingProbe(doc) {
     const FREE = '[data-gb="input.lang"], [data-gb="input.footer"], .rn-brand, [data-gb="input.panic"]';
     const CTRL = 'button, [role="slider"], [role="switch"], [role="tab"], [role="radio"], select, input';
     const locked = all(CTRL).filter((e) => content.contains(e) && !e.closest(FREE));
-    const free = all(CTRL).filter((e) => e.closest(FREE) || e.closest('[data-gb="input.panic"]'));
+    // 缩放下拉在页脚里但等待期是置灰的（单独断言），不算「照常可用」的那一批
+    const free = all(CTRL).filter(
+        (e) => (e.closest(FREE) || e.closest('[data-gb="input.panic"]')) && !e.classList.contains("rn-footer__scale"),
+    );
     const eyebrows = all(".in-card .sc-eyebrow").map((e) => e.textContent.trim());
     return {
         pending: content.getAttribute("data-pending"),
@@ -124,6 +128,15 @@ function pendingProbe(doc) {
         freeDisabled: free.filter((e) => e.disabled).map((e) => e.getAttribute("data-part") || e.className),
         panicLabel: (q('[data-gb="input.panic"]') || { textContent: "" }).textContent.trim(),
         version: (q('[data-gb="input.footer.version"]') || { textContent: "" }).textContent.trim(),
+        scale: (() => {
+            const sel = q(".rn-footer__scale");
+            if (!sel) return null;
+            return {
+                disabled: sel.disabled,
+                options: [...sel.options].map((o) => o.textContent.trim()),
+                selected: sel.selectedOptions.length ? sel.selectedOptions[0].textContent.trim() : null,
+            };
+        })(),
         // 不在五张卡里、也要整块 inert 的几处：预设槽、消息位（没有控件时也得是 inert，以后往里放东西不会漏）
         slotsNotInert: ['[data-slot="preset-trigger"]', '[data-gb="input.band"]']
             .filter((s) => !q(s) || !q(s).closest("[inert]"))
@@ -287,10 +300,15 @@ try {
         run.eq(p.notInert, [], "A：五张卡、组选择、对端行里的每个控件都应在 inert 之内");
         run.eq(p.slotsNotInert, [], "A：预设槽与消息位应整块在 inert 之内（即使里面暂时没有控件）");
         run.check(p.version.includes("—"), `A：页脚版本号应写「—」，实得 ${JSON.stringify(p.version)}`);
+        run.eq(
+            p.scale,
+            { disabled: true, options: ["—"], selected: "—" },
+            "A：快照没到时缩放下拉应置灰，里面只有一项「—」（宿主的档位还不知道，不编读数）",
+        );
         run.eq(p.disabledToggles, 4, "A：环路、限制器、守卫、极性四个开关应都带 aria-disabled");
         run.eq(p.disabledSegs, 2, "A：反馈单位与延迟单位两个分段控件应都带 aria-disabled");
         run.eq(p.disabledPills, 8, "A：八枚组胶囊应都带 aria-disabled");
-        run.check(p.freeCount >= 7, `A：语言、页脚、紧急切断里应有一批可用的控件（防空转），实得 ${p.freeCount}`);
+        run.check(p.freeCount >= 6, `A：语言、页脚、紧急切断里应有一批可用的控件（防空转），实得 ${p.freeCount}`);
         run.eq(p.freeInert, [], "A：语言、页脚、紧急切断不应在 inert 之内");
         run.eq(p.freeDisabled, [], "A：语言、页脚、紧急切断不应被置灰");
         run.check(p.panicLabel.length > 0, "A：紧急切断应有文字");
@@ -365,28 +383,36 @@ try {
         const closeBtn = await centerOf(page, '[data-part="about.close"]');
         await click(page, closeBtn.x, closeBtn.y);
 
-        // ③ 缩放：下拉可用，选档真调 setUiScale
+        // ③ 缩放：宿主的档位还不知道，选档要记下的回退目标是编的，所以等待期缩放不可用。
+        // 下拉置灰、里面只有「—」（pendingProbe 已断言）；再把一个真实档位塞进去、强行打开并发出 change，
+        // 下面几层也要挡住：桥不应收到 setUiScale、不应出现缩放确认条
         await rec.clear();
-        const picked = await inFrame(page, (doc, win) => {
+        await inFrame(page, (doc, win) => {
             const sel = doc.querySelector(".rn-footer__scale");
-            if (!sel || sel.disabled) return { ok: false, why: "没有下拉或被置灰" };
-            const opt = [...sel.options].find((o) => !o.disabled && Number(o.value) !== 1);
-            if (!opt) return { ok: false, why: "没有可选的非 100% 档" };
-            sel.value = opt.value;
+            const opt = doc.createElement("option");
+            opt.value = "1.5";
+            opt.textContent = "150%";
+            sel.append(opt);
+            sel.disabled = false;
+            sel.value = "1.5";
             sel.dispatchEvent(new win.Event("change", { bubbles: true }));
-            return { ok: true, factor: Number(opt.value) };
         });
-        run.check(picked.ok, `A：快照没到时缩放下拉应可用：${picked.why || ""}`);
-        if (picked.ok) {
-            await sleep(page, 200);
-            const scaleCalls = (await rec.calls()).filter((c) => c[0] === "setUiScale");
-            run.eq(scaleCalls, [["setUiScale", picked.factor]], "A：选缩放档，桥应收到 setUiScale");
-            // 取消预览，免得确认条挡着后面的步骤
+        await sleep(page, 300);
+        run.eq(
+            (await rec.calls()).filter((c) => c[0] === "setUiScale" || c[0] === "commitUiScale"),
+            [],
+            "A：快照没到时选缩放档，桥不应收到 setUiScale 或 commitUiScale",
+        );
+        run.eq(
             await inFrame(page, (doc) => {
-                const b = doc.querySelector('[data-gb="input.scale.confirm"] [data-part="confirm.cancel"]');
-                if (b) b.click();
-            });
-        }
+                const m = doc.querySelector('[data-gb="input.scale.confirm"]');
+                if (!m) return false;
+                const scrim = m.closest('[data-part="scrim"]') || m;
+                return !scrim.hidden;
+            }),
+            false,
+            "A：快照没到时不应出现缩放确认条",
+        );
 
         // ④ requestInitialState 的重发：首次加三次，不超过四次
         await sleep(page, 2200);
@@ -447,6 +473,32 @@ try {
         run.check(poked2 >= 12, `A：放行后刺激应仍落在一批控件上，实得 ${poked2}`);
         const writes3 = (await rec.calls()).filter((c) => GATED_WRITES.includes(c[0]));
         run.check(writes3.length > 0, "A：放行后同一套刺激应能写到桥上（防空转）");
+
+        // 放行之后缩放可用：下拉恢复成真实的档位表，选档真调 setUiScale
+        await rec.clear();
+        const picked = await inFrame(page, (doc, win) => {
+            const sel = doc.querySelector(".rn-footer__scale");
+            if (!sel || sel.disabled) return { ok: false, why: "没有下拉或被置灰" };
+            const opt = [...sel.options].find((o) => !o.disabled && Number(o.value) > 0 && Number(o.value) !== 1);
+            if (!opt) return { ok: false, why: "没有可选的非 100% 档" };
+            sel.value = opt.value;
+            sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+            return { ok: true, factor: Number(opt.value) };
+        });
+        run.check(picked.ok, `A：快照到齐后缩放下拉应可用：${picked.why || ""}`);
+        if (picked.ok) {
+            await sleep(page, 200);
+            run.eq(
+                (await rec.calls()).filter((c) => c[0] === "setUiScale"),
+                [["setUiScale", picked.factor]],
+                "A：快照到齐后选缩放档，桥应收到 setUiScale",
+            );
+            // 取消预览，免得确认条挡着后面的步骤
+            await inFrame(page, (doc) => {
+                const b = doc.querySelector('[data-gb="input.scale.confirm"] [data-part="confirm.cancel"]');
+                if (b) b.click();
+            });
+        }
         run.check(page.errors.length === 0, `A：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
         await page.close();
     }

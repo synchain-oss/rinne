@@ -9,7 +9,7 @@
 // 渲染：快照到达只做「读 -> 比较 -> 写有变化的部分」，恒值段不产生 DOM 变更。电平帧走 meter.js 的弹道，
 // 与其余渲染分开。
 // 启动：真宿主的第一批快照到齐之前，页面不替宿主编造任何值。400 ms 内没有快照，只把界面揭出来（标签与「—」，所有
-// 写入与手势关着，紧急切断、语言、缩放、关于照常可用），同时按间隔重发 requestInitialState；快照到了走正常的首帧路径。
+// 写入与手势关着，缩放下拉也置灰，紧急切断、语言、关于照常可用），同时按间隔重发 requestInitialState；快照到了走正常的首帧路径。
 // 只有完全没有桥（离线模式）才用默认快照显示。
 // 预览专用：浏览器预览里从 mock 读场景描述，用来直接摆出限制器确认、关于面板、缩放确认这几种覆盖层；
 // 真宿主没有 previewScene，这些分支不会走到。
@@ -221,7 +221,7 @@ function boot() {
         getScreen: () => ({ availWidth: globalThis.screen.availWidth, availHeight: globalThis.screen.availHeight }),
         onChange: (s) => {
             S.scaleState = s;
-            scaleConfirm.update({ ...s, t: ctx.view ? ctx.view.t : (k) => k });
+            scaleConfirm.update({ ...s, t: ctx.view ? ctx.view.t : makeT(pendingLang()) });
             renderShellState();
         },
     });
@@ -327,7 +327,8 @@ function boot() {
     installShellFit({ el: shell.el, box });
 
     // ---- 快照到齐之前不接受操作
-    // 五张卡、组选择、对端行、消息位和预设槽整块 inert（键盘、指针、读屏都进不去）；语言、缩放、关于、紧急切断不在其内。
+    // 五张卡、组选择、对端行、消息位和预设槽整块 inert（键盘、指针、读屏都进不去）；语言、关于、紧急切断不在其内，
+    // 缩放下拉单独置灰（它在页脚里，不在 inert 的范围内）。
     // inert 是第一层，bridge-gate.js 与 ctx.param 的入口守卫是第二层，旧内核不认 inert 时也不会写出去。
     const lockables = [pairRow, peerRow.el, msgline.el, presetSlot, ...Object.values(cards).map((c) => c.el)];
     function setLocked(on) {
@@ -587,7 +588,9 @@ function boot() {
         }
         if (S.exportRec && !exportHint(f.exportCauses, S.exportRec).rec) S.exportRec = null;
         trackSmartDefault(f);
-        enforceZoomLock(f.uiScale, (s) => bridge.setUiScale(s));
+        // 旧 WebKit 把缩放钉在 100% 时，宿主若按存档的档位开了窗，请回 1。这里用的是宿主自己给的 state.uiScale，不是
+        // 页面编的值，只改窗口、不存档，所以不经写入闸（快照没到齐时也要能钉住）
+        enforceZoomLock(f.uiScale, (s) => opened.bridge.setUiScale(s));
         if (changed) scheduleRender();
         maybeApplyScene();
     };
@@ -681,14 +684,18 @@ function boot() {
         group.update({ group: null, auto: false, peers: [], unassigned: false, autoGroup: null, disabled: true, t });
         for (const card of Object.values(cards)) card.renderPending(t);
         panic.update({ cut: false, overScrim: about.isOpen() || S.scaleState.confirming, t });
+        // 缩放：宿主的档位还不知道，下拉里只有一项「—」且置灰（选档要记下选档前的档位，快照没到时那是编出来的）。
+        // 下拉是共享页脚的节点，页脚的 update 在 locked 为假时会把它重新打开，所以每次 update 之后再关一次；
+        // 就绪后 renderFooter 的 update 用真实的选项表，下拉随之重建、重新可用
         footer.update({
             hint: null,
-            scaleOptions: scaleUi.options(),
-            scale: 1,
+            scaleOptions: [{ factor: 0, label: NO_VALUE, disabled: true, titleKey: null }],
+            scale: 0,
             locked: zoomLocked(),
             version: NO_VALUE,
             t,
         });
+        footer.el.querySelector(".rn-footer__scale").disabled = true;
         renderShellState();
         scaleConfirm.update({ ...S.scaleState, t });
     }

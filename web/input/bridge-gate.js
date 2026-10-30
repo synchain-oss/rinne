@@ -7,11 +7,12 @@
 // 请求根本不发给宿主；界面上对应的控件另有置灰与 inert（见 app.js 的 setLocked），这里是兜底的那一层，
 // 不依赖任何一个控件记得去查「现在能不能写」。
 //
-// 不在名单里的：requestInitialState（要靠它拿快照）、panic（任何时刻都必须能切断）、语言与缩放（setLang、setUiScale、
-// commitUiScale，窗口层面的操作，与快照无关）、setRulesAck / setGuideSeen（首启确认，不读快照）、
-// 以及只读或外跳的 copyDiagnostics、openExternal、showLicense。
+// 不在名单里的：requestInitialState（要靠它拿快照）、panic（任何时刻都必须能切断）、setLang（写的是用户刚选的语言，
+// 没有要回退的旧值）、setRulesAck / setGuideSeen（首启确认，不读快照）、以及只读或外跳的 copyDiagnostics、
+// openExternal、showLicense。缩放（setUiScale、commitUiScale）在名单里：选档要记下选档前的档位，倒计时到点或点
+// 取消时写回去，快照没到时这个回退目标是编出来的，写回去的就是假值。
 
-/** 快照到齐之前被挡住的桥函数：参数写入、限制器、守卫、组、恢复与接管、预设、关于面板里的高级设置。 */
+/** 快照到齐之前被挡住的桥函数：参数写入、限制器、守卫、组、恢复与接管、预设、缩放、关于面板里的高级设置。 */
 export const GATED_WRITES = Object.freeze([
     "beginParamGesture",
     "setParam",
@@ -29,6 +30,8 @@ export const GATED_WRITES = Object.freeze([
     "setResetOnPlay",
     "setTailMode",
     "setDiagLog",
+    "setUiScale",
+    "commitUiScale",
 ]);
 
 /**

@@ -21,13 +21,11 @@ const { BRIDGE_FUNCTIONS } = await import(u("web/shared/bridge.js"));
 
 const run = createRun("Input 写入闸");
 
-/** 快照没到也要能调的桥函数：取快照本身、紧急切断、窗口层面的语言与缩放、首启确认、只读或外跳。 */
+/** 快照没到也要能调的桥函数：取快照本身、紧急切断、语言（没有要回退的旧值）、首启确认、只读或外跳。缩放要挡：回退目标是编的。 */
 const OPEN = [
     "requestInitialState",
     "panic",
     "setLang",
-    "setUiScale",
-    "commitUiScale",
     "setRulesAck",
     "setGuideSeen",
     "copyDiagnostics",
