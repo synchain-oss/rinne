@@ -374,12 +374,12 @@ function Invoke-SelfTest {
     # 压测结论
     $okLines = @('[stress][ring] edge-two-writers chunks=1', 'All tests passed (155 assertions in 6 test cases)')
     & $check '压测结论：退出码 0、汇总行、用例数够，通过' $false ((Get-StressVerdict 0 $okLines 6).Ok)
-    & $check '压测结论：单数写法「1 assertion in 1 test case」也认得（用例数不够时判红）' $true (-not (Get-StressVerdict 0 @('All tests passed (1 assertion in 1 test case)') 6).Ok)
+    & $check '压测结论：单数写法「1 assertion in 1 test case」也认得（用例数不够时判红，原因写用例数）' $true ((-not (Get-StressVerdict 0 @('All tests passed (1 assertion in 1 test case)') 6).Ok) -and ((Get-StressVerdict 0 @('All tests passed (1 assertion in 1 test case)') 6).Reason -match '只跑了 1 个用例'))
     & $check '压测结论：退出码非 0 判红，并带上汇总行' $true ((Get-StressVerdict 3 @('test cases:  6 |  5 passed | 1 failed', 'assertions: 147 | 145 passed | 2 failed') 6).Reason -match 'assertions: 147')
-    & $check '压测结论：退出码 0 但没有汇总行（没跑完），判红' $true (-not (Get-StressVerdict 0 @('[stress] 开头') 6).Ok)
+    & $check '压测结论：退出码 0 但没有汇总行（没跑完），判红，原因写没有汇总行' $true ((-not (Get-StressVerdict 0 @('[stress] 开头') 6).Ok) -and ((Get-StressVerdict 0 @('[stress] 开头') 6).Reason -match '汇总行'))
     & $check '压测结论：用例数少于下限（被删或被过滤），判红' $true (-not (Get-StressVerdict 0 @('All tests passed (40 assertions in 3 test cases)') 6).Ok)
-    & $check '压测结论：零断言，判红' $true (-not (Get-StressVerdict 0 @('All tests passed (0 assertions in 6 test cases)') 6).Ok)
-    & $check '压测结论：超时（-1），判红' $true (-not (Get-StressVerdict -1 $okLines 6).Ok)
+    & $check '压测结论：零断言，判红，原因写没有断言' $true ((-not (Get-StressVerdict 0 @('All tests passed (0 assertions in 6 test cases)') 6).Ok) -and ((Get-StressVerdict 0 @('All tests passed (0 assertions in 6 test cases)') 6).Reason -match '一条断言都没有'))
+    & $check '压测结论：超时（-1），判红，原因写超过时限' $true ((-not (Get-StressVerdict -1 $okLines 6).Ok) -and ((Get-StressVerdict -1 $okLines 6).Reason -match '时限'))
 
     # 变异结论
     $failed = @('a.cpp(1): FAILED:', 'test cases:  6 |  4 passed |  1 failed | 1 skipped', 'assertions: 91 | 78 passed | 13 failed')
