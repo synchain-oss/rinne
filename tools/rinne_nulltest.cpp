@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Derived from synchain-oss/scvb; see upstream/nulltest.json
 //
-// rinne_nulltest：WAV 对拍与回声间隔测量的命令行工具。三个子命令：
+// rinne_nulltest：WAV 对拍与回声间隔测量的命令行工具。四个子命令：
 //   make-signal  生成测试信号（冲激、冲激加 200 ms 粉噪突发、等间隔冲激串），同参数逐字节一致
 //   compare      两份 WAV 对比：是否逐位相同、对齐偏移（lag）、残差 dBFS，可单列开头一段
 //   echo         量回声间隔：在录音里找冲激回声，判相邻间隔是否都等于期望的 D，直接给 PASS / FAIL
+//   self-test    进程内自测：在临时目录里造 WAV，直接调上面三个子命令，核对输出与退出码（ctest 里跑）
 // 零外部依赖：WAV 读写、互相关与统计都在本文件里，不链接 JUCE 和 rinne_core。
 // 退出码：0 通过，2 判定未通过（FAIL），1 参数或文件错误。
 
@@ -14,13 +15,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <map>
+#include <random>
+#include <sstream>
 #include <string>
-#include <exception>
 #include <vector>
 
 #if defined(_WIN32)
@@ -46,6 +50,10 @@ struct WavData
     uint16_t fmtTag = 0; // 1 整数 PCM，3 浮点
     uint16_t bits = 0;
     std::vector<uint8_t> raw; // data 块里的原始字节：32 位整数和 64 位浮点解码成 float 会丢位，逐位比对要看它
+    // data 块声明的长度大于文件里实际剩下的字节：录音被截短了。0xFFFFFFFF 是流式写入的「长度未知」占位，不算
+    bool dataShort = false;
+    uint64_t dataDeclared = 0;
+    uint64_t dataActual = 0;
 
     float at(size_t frame, size_t ch) const { return samples[frame * channels + ch]; }
 };
@@ -110,6 +118,8 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
     uint32_t sampleRate = 0;
     size_t dataOffset = 0;
     size_t dataSize = 0;
+    bool dataShort = false;
+    uint64_t dataDeclared = 0;
 
     size_t pos = 12;
     while (pos + 8 <= bytes.size())
@@ -119,9 +129,24 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
         const uint8_t* body = head + 8;
         if (tagIs(head, "data") && !haveData)
         {
-            // 录音软件中途停止时 data 块可能比声明的短，取实际剩下的部分
             dataOffset = pos + 8;
-            dataSize = std::min(size, bytes.size() - dataOffset);
+            const size_t remaining = bytes.size() - dataOffset;
+            dataDeclared = size;
+            if (size == 0xFFFFFFFFu)
+            {
+                // 流式写入的录音软件还没来得及回填长度时留下的占位：长度未知，data 一直到文件尾，不是截短
+                dataSize = remaining;
+            }
+            else if (size > remaining)
+            {
+                // 声明的长度比文件里实际剩下的长：录音被截短了。只取实际有的部分，并如实标出来，交给调用方报告
+                dataSize = remaining;
+                dataShort = true;
+            }
+            else
+            {
+                dataSize = size;
+            }
             haveData = true;
         }
         else if (pos + 8 + size > bytes.size())
@@ -177,6 +202,9 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
     const size_t bytesPerSample = bits / 8u;
     out.sampleRate = sampleRate;
     out.channels = channels;
+    out.dataShort = dataShort;
+    out.dataDeclared = dataDeclared;
+    out.dataActual = dataSize;
     out.frames = dataSize / blockAlign;
     out.samples.assign(out.frames * channels, 0.0f);
     out.fmtTag = isFloat ? 3 : 1;
@@ -727,7 +755,15 @@ void printResidual(const std::string& title, const Residual& r)
 
 // 在 ±maxLag 内找 B 相对 A 的滞后：B[i + lag] 最像 A[i] 的 lag。
 // 取 A 里第一个有声音的位置起一小段做互相关；并列最高时取绝对值最小的 lag，所以周期信号不会报出周期的整数倍。
-int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundSignal)
+// 搜索范围超过 kProgressMinLags 个 lag 时每完成 10% 往 progress 写一行（默认的 ±4800 要算好一阵子，不报进度像卡死了）。
+constexpr int64_t kProgressMinLags = 2000;
+
+void reportLagProgress(std::ostream& os, int tenth, int64_t totalLags)
+{
+    os << "搜索对齐偏移：" << tenth * 10 << "%（共 " << totalLags << " 个 lag）\n";
+}
+
+int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundSignal, std::ostream* progress = nullptr)
 {
     foundSignal = false;
     int64_t start = -1;
@@ -744,8 +780,14 @@ int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundS
     const int64_t window = std::min<int64_t>(32768, static_cast<int64_t>(a.frames) - start);
     int64_t bestLag = 0;
     double best = -kInf;
+    const int64_t totalLags = 2 * maxLag + 1;
+    const bool report = progress != nullptr && totalLags > kProgressMinLags;
+    int nextTenth = 1;
     for (int64_t lag = -maxLag; lag <= maxLag; ++lag)
     {
+        const int64_t done = lag + maxLag; // 已经算完的 lag 个数
+        while (report && nextTenth <= 10 && done * 10 >= totalLags * nextTenth)
+            reportLagProgress(*progress, nextTenth++, totalLags);
         double sum = 0.0;
         for (int64_t n = 0; n < window; ++n)
             for (size_t c = 0; c < a.channels; ++c)
@@ -758,11 +800,14 @@ int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundS
             bestLag = lag;
         }
     }
+    while (report && nextTenth <= 10)
+        reportLagProgress(*progress, nextTenth++, totalLags);
     return bestLag;
 }
 
-// 参考信号（A）的峰值低于它就算「里面没有声音」：两份静音互比什么也说明不了
-constexpr double kMinSignalPeak = 0.001; // -60 dBFS
+// 参考信号（A）的峰值低于它就算「里面没有声音」：两份静音互比什么也说明不了。--min-signal-db 可以覆盖，范围 -200..0
+constexpr double kDefaultMinSignalDb = -60.0; // 峰值 0.001
+constexpr double kLowestMinSignalDb = -200.0;
 
 bool hasNonFinite(const WavData& w)
 {
@@ -780,6 +825,13 @@ double peakOf(const WavData& w)
     return p;
 }
 
+// data 块被截短时的说明：声明多少字节、实际多少字节。who 是 A、B 或「文件」
+std::string shortDataText(const char* who, const WavData& w)
+{
+    return std::string(who) + " 的 data 块声明 " + std::to_string(w.dataDeclared) + " 字节，文件里只有 " +
+           std::to_string(w.dataActual) + " 字节：录音被截短了，只能用实际有的部分";
+}
+
 bool loadWav(const std::string& path, WavData& w)
 {
     std::string err;
@@ -788,7 +840,32 @@ bool loadWav(const std::string& path, WavData& w)
         std::cerr << "出错：" << err << "\n";
         return false;
     }
+    if (w.dataShort)
+        std::cerr << "警告：" << path << "：" << shortDataText("文件", w) << "\n";
     return true;
+}
+
+// 帧区间 [from, to) 的峰值（线性）；区间超出文件的部分不算
+double rangePeak(const WavData& w, int64_t from, int64_t to)
+{
+    from = std::max<int64_t>(from, 0);
+    to = std::min<int64_t>(to, static_cast<int64_t>(w.frames));
+    double p = 0.0;
+    for (int64_t i = from; i < to; ++i)
+        for (size_t c = 0; c < w.channels; ++c)
+            p = std::max(p, static_cast<double>(std::fabs(w.at(static_cast<size_t>(i), c))));
+    return p;
+}
+
+// 报告 --allow-length-diff 放过去的部分：哪一份的哪一段没参与比较，峰值多大
+void printIgnored(const char* who, const WavData& w, int64_t from, int64_t to)
+{
+    from = std::max<int64_t>(from, 0);
+    to = std::min<int64_t>(to, static_cast<int64_t>(w.frames));
+    if (to <= from)
+        return;
+    std::cout << "    " << who << " 第 " << from << " 到 " << (to - 1) << " 帧（" << (to - from)
+              << " 帧）没有参与比较，峰值 " << dbText(toDb(rangePeak(w, from, to))) << "\n";
 }
 
 void describe(const char* label, const std::string& path, const WavData& w)
@@ -801,17 +878,20 @@ int runCompare(int argc, char** argv)
 {
     Args a;
     std::string err;
-    if (!parseArgs(argc, argv, 2, {"a", "b", "head-seconds", "threshold-db", "max-lag"}, {"allow-lag"}, a, err))
+    if (!parseArgs(argc, argv, 2, {"a", "b", "head-seconds", "threshold-db", "max-lag", "min-signal-db"},
+                   {"allow-lag", "allow-length-diff"}, a, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
     }
     std::string pathA, pathB;
-    double headSeconds = 0.0, thresholdDb = 0.0;
+    double headSeconds = 0.0, thresholdDb = 0.0, minSignalDb = 0.0;
     int64_t maxLag = 0;
     if (!getString(a, "a", pathA, err) || !getString(a, "b", pathB, err) ||
         !getNumber(a, "head-seconds", 0.0, headSeconds, err) ||
-        !getNumber(a, "threshold-db", -120.0, thresholdDb, err) || !getInt(a, "max-lag", 4800, 0, 1000000, maxLag, err))
+        !getNumber(a, "threshold-db", -120.0, thresholdDb, err) ||
+        !getInt(a, "max-lag", 4800, 0, 1000000, maxLag, err) ||
+        !getNumber(a, "min-signal-db", kDefaultMinSignalDb, minSignalDb, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
@@ -821,6 +901,16 @@ int runCompare(int argc, char** argv)
         std::cerr << "出错：--head-seconds 不能是负数\n";
         return kExitError;
     }
+    if (minSignalDb > 0.0 || minSignalDb < kLowestMinSignalDb)
+    {
+        std::cerr << "出错：--min-signal-db 要在 " << fixed(kLowestMinSignalDb, 0) << " 到 0 dBFS 之间（缺省 "
+                  << fixed(kDefaultMinSignalDb, 0) << "，即峰值 0.001），收到 " << a.values.at("min-signal-db")
+                  << "。A 的峰值低于它就判「信号太弱」：要放宽就写更小的负数，如 --min-signal-db -90；"
+                  << fixed(kLowestMinSignalDb, 0) << " 基本等于不设门，全静音仍然判弱\n";
+        return kExitError;
+    }
+    const double minSignalPeak = std::pow(10.0, minSignalDb / 20.0);
+    const bool allowLengthDiff = hasFlag(a, "allow-length-diff");
     WavData wa, wb;
     if (!loadWav(pathA, wa) || !loadWav(pathB, wb))
         return kExitError;
@@ -843,14 +933,19 @@ int runCompare(int argc, char** argv)
         return kExitFail;
     }
 
-    // 对拍的前提是里面真有声音：空文件、含 NaN / Inf、参考信号太弱都不下结论，直接 FAIL
+    // 对拍的前提是里面真有声音，而且文件是完整的：data 块被截短、空文件、含 NaN / Inf、参考信号太弱都不下结论，直接
+    // FAIL
+    if (wa.dataShort)
+        reasons.push_back(shortDataText("A", wa));
+    if (wb.dataShort)
+        reasons.push_back(shortDataText("B", wb));
     if (wa.frames == 0 || wb.frames == 0)
         reasons.push_back("有一份文件没有任何采样（0 帧），里面没有声音，对拍没有意义");
     else if (hasNonFinite(wa) || hasNonFinite(wb))
         reasons.push_back("文件里有 NaN 或 Inf，对拍没有意义");
-    else if (peakOf(wa) < kMinSignalPeak)
+    else if (peakOf(wa) < minSignalPeak)
         reasons.push_back("信号太弱，无法判定：A 的峰值 " + dbText(toDb(peakOf(wa))) + " 低于 " +
-                          fixed(toDb(kMinSignalPeak), 0) + " dBFS，里面没有声音，对拍没有意义");
+                          fixed(minSignalDb, 1) + " dBFS（门限可用 --min-signal-db 调整），里面没有声音，对拍没有意义");
     if (!reasons.empty())
     {
         std::cout << "结果：FAIL\n";
@@ -870,18 +965,41 @@ int runCompare(int argc, char** argv)
     int64_t lag = 0;
     bool foundSignal = true;
     if (!identical)
-        lag = findLag(wa, wb, maxLag, foundSignal);
+        lag = findLag(wa, wb, maxLag, foundSignal, &std::cerr);
     std::cout << "对齐偏移（lag）：" << lag << " 样本（正数表示 B 比 A 晚）";
     if (!foundSignal)
         std::cout << "，A 里没有找到声音，未做对齐";
     std::cout << "\n";
 
-    const int64_t lo = std::min<int64_t>(0, -lag);
-    const int64_t hi = std::max<int64_t>(static_cast<int64_t>(wa.frames), static_cast<int64_t>(wb.frames) - lag);
+    // B 应该刚好比 A 长 lag 个样本；长度对不上说明导出范围不一致
+    const int64_t expectedFramesB = static_cast<int64_t>(wa.frames) + lag;
+    const bool lengthMismatch = static_cast<int64_t>(wb.frames) != expectedFramesB;
+    // 默认把超出文件的部分按静音算，长度不一致另判 FAIL；--allow-length-diff 只比较两份重叠的部分，剩下的只报告
+    const bool overlapOnly = allowLengthDiff && lengthMismatch;
+    int64_t lo = std::min<int64_t>(0, -lag);
+    int64_t hi = std::max<int64_t>(static_cast<int64_t>(wa.frames), static_cast<int64_t>(wb.frames) - lag);
+    if (overlapOnly)
+    {
+        lo = std::max<int64_t>(0, -lag);
+        hi = std::min<int64_t>(static_cast<int64_t>(wa.frames), static_cast<int64_t>(wb.frames) - lag);
+        if (hi <= lo)
+        {
+            std::cout << "结果：FAIL\n原因：两份没有重叠的部分，--allow-length-diff 无从比较（A " << wa.frames
+                      << " 帧，B " << wb.frames << " 帧，错位 " << lag << " 样本）\n";
+            return kExitFail;
+        }
+    }
     const Residual whole = measure(wa, wb, lag, lo, hi);
-    printResidual("整体残差", whole);
-    if (wa.frames != wb.frames)
-        std::cout << "提示：两份长度不同，较短的一份在结尾按静音算\n";
+    printResidual(overlapOnly ? "重叠部分残差" : "整体残差", whole);
+    if (overlapOnly)
+    {
+        std::cout << "长度不同，已按 --allow-length-diff 只比较重叠的 " << (hi - lo) << " 帧（A 的第 " << lo << " 到 "
+                  << (hi - 1) << " 帧）；没参与比较的部分：\n";
+        printIgnored("A", wa, 0, lo);
+        printIgnored("A", wa, hi, static_cast<int64_t>(wa.frames));
+        printIgnored("B", wb, 0, lo + lag);
+        printIgnored("B", wb, hi + lag, static_cast<int64_t>(wb.frames));
+    }
 
     const double peakDb = toDb(maxPeak(whole));
     bool headOk = true;
@@ -916,15 +1034,19 @@ int runCompare(int argc, char** argv)
         pass = false;
         reasons.push_back("两份有 " + std::to_string(lag) + " 样本的错位（如果错位是预期的，加 --allow-lag）");
     }
-    // B 应该刚好比 A 长 lag 个样本；长度对不上说明导出范围不一致，尾部本来是静音也不放过
-    if (static_cast<int64_t>(wb.frames) != static_cast<int64_t>(wa.frames) + lag)
+    // 长度对不上说明导出范围不一致，尾部本来是静音也不放过；长度差是预期的就加 --allow-length-diff
+    if (lengthMismatch && !allowLengthDiff)
     {
         pass = false;
-        reasons.push_back("两份长度不同，导出范围不一致");
+        reasons.push_back("两份长度不同，导出范围不一致（期望 B 有 " + std::to_string(expectedFramesB) + " 帧，实际 " +
+                          std::to_string(wb.frames) + " 帧；A 有 " + std::to_string(wa.frames) +
+                          " 帧。如果长度差是预期的，加 --allow-length-diff）");
     }
     std::cout << "结果：" << (pass ? "PASS" : "FAIL");
     if (pass)
-        std::cout << (identical ? "（逐位相同）" : "（残差不高于 " + fixed(thresholdDb, 1) + " dBFS）");
+        std::cout << (identical ? "（逐位相同）"
+                                : "（残差不高于 " + fixed(thresholdDb, 1) + " dBFS" +
+                                      (overlapOnly ? "，仅比较重叠部分" : "") + "）");
     std::cout << "\n";
     for (const std::string& r : reasons)
         std::cout << "原因：" << r << "\n";
@@ -1114,11 +1236,13 @@ void printHelp(std::ostream& os)
           "    rinne_nulltest compare --a 原始.wav --b 导出.wav [--head-seconds 2]\n"
           "    报告：是否逐位相同、B 相对 A 的错位（lag，单位样本）、残差峰值与 RMS（dBFS）。\n"
           "    --head-seconds <秒>   再单独报告开头这一段的残差（整体残差已包含这一段，不是额外的门）\n"
-          "    A 要有声音（峰值不低于 -60 dBFS），两份都不能是空文件或含 NaN / Inf，长度要对得上（B 比 A 长 lag "
-          "个样本），"
-          "否则 FAIL。\n"
+          "    A 要有声音（峰值不低于 -60 dBFS），两份都不能是空文件或含 NaN / Inf，data "
+          "块不能被截短（声明的长度大于文件里"
+          "实际有的；0xFFFFFFFF 的流式占位不算），长度要对得上（B 比 A 长 lag 个样本），否则 FAIL。\n"
           "    --threshold-db <dB>   残差不高于它才算 PASS，默认 -120\n"
-          "    --max-lag <样本>      找错位时的搜索范围，默认 4800\n"
+          "    --max-lag <样本>      找错位时的搜索范围，默认 4800；范围大时每完成 10% 在 stderr 报一行进度\n"
+          "    --min-signal-db <dB>  A 的峰值低于它就判「信号太弱」，默认 -60，可写 -200..0；弱信号的对拍要放宽它\n"
+          "    --allow-length-diff   长度差是预期的时候加上：只比较两份重叠的部分，没参与比较的部分只报告峰值\n"
           "    --allow-lag           错位是预期的时候加上，否则有错位就是 FAIL\n"
           "\n"
           "echo          量回声间隔\n"
@@ -1131,7 +1255,315 @@ void printHelp(std::ostream& os)
           "    --min-peak-db <dB>    比最大峰值低多少以内的峰都算回声，默认 -20\n"
           "    --tol-samples <N>     允许的偏差，默认 0（必须完全相等）\n"
           "\n"
+          "self-test     进程内自测（ctest 里跑）：在临时目录造 WAV，直接调上面三个子命令，核对输出与退出码\n"
+          "    rinne_nulltest self-test\n"
+          "\n"
           "结果最后一行附近会写 PASS 或 FAIL。退出码：0 通过，2 未通过，1 是参数或文件有问题。\n";
+}
+
+// ---------------------------------------------------------------- 自测
+
+// 把 std::cout、std::cerr 临时接到字符串里，析构时还原
+class OutputCapture
+{
+public:
+    OutputCapture() : oldOut_(std::cout.rdbuf(out_.rdbuf())), oldErr_(std::cerr.rdbuf(err_.rdbuf())) {}
+    OutputCapture(const OutputCapture&) = delete;
+    OutputCapture& operator=(const OutputCapture&) = delete;
+    ~OutputCapture()
+    {
+        std::cout.rdbuf(oldOut_);
+        std::cerr.rdbuf(oldErr_);
+    }
+
+    std::string text() const { return out_.str() + err_.str(); }
+
+private:
+    std::ostringstream out_;
+    std::ostringstream err_;
+    std::streambuf* oldOut_;
+    std::streambuf* oldErr_;
+};
+
+struct Outcome
+{
+    int rc = -1;
+    std::string text; // stdout 与 stderr 合起来
+};
+
+// 在进程内跑一个子命令，退出码与输出都拿回来。args[0] 是子命令名
+Outcome invoke(const std::vector<std::string>& args)
+{
+    std::vector<std::string> full{"rinne_nulltest"};
+    full.insert(full.end(), args.begin(), args.end());
+    std::vector<char*> argv;
+    for (std::string& s : full)
+        argv.push_back(s.data());
+    argv.push_back(nullptr);
+    const int argc = static_cast<int>(full.size());
+
+    Outcome o;
+    OutputCapture capture;
+    if (args[0] == "compare")
+        o.rc = runCompare(argc, argv.data());
+    else if (args[0] == "echo")
+        o.rc = runEcho(argc, argv.data());
+    else if (args[0] == "make-signal")
+        o.rc = runMakeSignal(argc, argv.data());
+    o.text = capture.text();
+    return o;
+}
+
+// 自测的临时目录：只放这次新建的文件，结束时逐个删掉自己建的文件，再删这个（空的）目录；不递归删任何东西
+class SelfTestDir
+{
+public:
+    SelfTestDir()
+    {
+        std::error_code ec;
+        const std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+        if (ec)
+            return;
+        std::random_device device;
+        char suffix[32];
+        std::snprintf(suffix, sizeof suffix, "%08x%08x", static_cast<unsigned>(device()),
+                      static_cast<unsigned>(device()));
+        const std::filesystem::path dir = base / (std::string("rinne_nulltest_selftest_") + suffix);
+        if (std::filesystem::create_directory(dir, ec) && !ec)
+            dir_ = dir;
+    }
+    SelfTestDir(const SelfTestDir&) = delete;
+    SelfTestDir& operator=(const SelfTestDir&) = delete;
+    ~SelfTestDir()
+    {
+        std::error_code ec;
+        for (const std::filesystem::path& f : files_)
+            std::filesystem::remove(f, ec);
+        if (!dir_.empty())
+            std::filesystem::remove(dir_, ec); // 只删空目录
+    }
+
+    bool ok() const { return !dir_.empty(); }
+
+    // 登记并返回一个本目录下的文件路径
+    std::string file(const std::string& name)
+    {
+        const std::filesystem::path p = dir_ / name;
+        files_.push_back(p);
+        return p.string();
+    }
+
+private:
+    std::filesystem::path dir_;
+    std::vector<std::filesystem::path> files_;
+};
+
+std::vector<float> selfTestNoise(size_t frames, size_t channels, double amplitude, uint64_t seed)
+{
+    Rng rng(seed);
+    std::vector<float> v(frames * channels);
+    for (float& s : v)
+        s = static_cast<float>(amplitude * rng.next());
+    return v;
+}
+
+bool writeF32(const std::string& path, const std::vector<float>& samples, uint16_t channels = 2)
+{
+    std::string err;
+    return writeWav(path, 48000, channels, samples, 3, 32, std::numeric_limits<size_t>::max(), err);
+}
+
+// 改写 44 字节标准头里 data 块的长度字段（偏移 40），其余字节不动
+bool patchDataSize(const std::string& path, uint32_t declared)
+{
+    std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+    if (!f)
+        return false;
+    std::vector<uint8_t> v;
+    putU32(v, declared);
+    f.seekp(40);
+    f.write(reinterpret_cast<const char*>(v.data()), static_cast<std::streamsize>(v.size()));
+    f.flush();
+    return static_cast<bool>(f);
+}
+
+size_t countOf(const std::string& text, const std::string& needle)
+{
+    size_t n = 0;
+    for (size_t pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+bool has(const std::string& text, const std::string& needle)
+{
+    return text.find(needle) != std::string::npos;
+}
+
+// 自测：不碰仓库里的任何文件，在临时目录里造 WAV，直接调 compare 的实现。ctest 里的 rinne_nulltest_inproc_selftest 跑它
+int runSelfTest()
+{
+    SelfTestDir dir;
+    if (!dir.ok())
+    {
+        std::cerr << "出错：建不出临时目录，自测没法进行\n";
+        return kExitError;
+    }
+    int failed = 0;
+    int total = 0;
+    const auto expect = [&](const char* label, bool ok, const Outcome& o) {
+        ++total;
+        if (ok)
+            return;
+        ++failed;
+        std::cerr << "FAIL  " << label << "（退出码 " << o.rc << "）\n" << o.text << "\n";
+    };
+
+    const size_t kFrames = 4096;
+    const size_t kShort = 3000;
+    const std::vector<float> body = selfTestNoise(kFrames, 2, 0.5, 1);
+    const std::vector<float> body3000(body.begin(), body.begin() + static_cast<std::ptrdiff_t>(kShort * 2));
+    std::vector<float> bodyOff = body3000; // 重叠部分整体加 0.05（约 -26 dBFS），远高于默认的 -120 dBFS 门限
+    for (float& s : bodyOff)
+        s += 0.05f;
+    // 尾部有大信号（峰值恰好 0.9）的一份，和它去掉尾部的一份：被忽略的尾部峰值要报出来
+    std::vector<float> loudTail = selfTestNoise(kFrames, 2, 0.1, 2);
+    for (size_t i = kShort * 2; i < loudTail.size(); ++i)
+        loudTail[i] *= 2.0f;
+    loudTail[3500 * 2] = 0.9f;
+    const std::vector<float> quietHead(loudTail.begin(), loudTail.begin() + static_cast<std::ptrdiff_t>(kShort * 2));
+    const std::vector<float> weak = selfTestNoise(2000, 2, 5e-4, 3); // 峰值约 -66 dBFS
+    const std::vector<float> lagBody = selfTestNoise(2048, 2, 0.5, 4);
+    std::vector<float> lagged(6, 0.0f); // 前面补 3 帧静音
+    lagged.insert(lagged.end(), lagBody.begin(), lagBody.end());
+
+    const std::string a = dir.file("a.wav");
+    const std::string aShort = dir.file("a-short.wav");
+    const std::string aOff = dir.file("a-off.wav");
+    const std::string tailA = dir.file("tail-a.wav");
+    const std::string tailB = dir.file("tail-b.wav");
+    const std::string weakA = dir.file("weak.wav");
+    const std::string cut = dir.file("cut.wav");
+    const std::string streamed = dir.file("streamed.wav");
+    const std::string lagA = dir.file("lag-a.wav");
+    const std::string lagB = dir.file("lag-b.wav");
+    const bool made = writeF32(a, body) && writeF32(aShort, body3000) && writeF32(aOff, bodyOff) &&
+                      writeF32(tailA, loudTail) && writeF32(tailB, quietHead) && writeF32(weakA, weak) &&
+                      writeF32(cut, body) && patchDataSize(cut, static_cast<uint32_t>(body.size() * 4 * 2)) &&
+                      writeF32(streamed, body) && patchDataSize(streamed, 0xFFFFFFFFu) && writeF32(lagA, lagBody) &&
+                      writeF32(lagB, lagged);
+    if (!made)
+    {
+        std::cerr << "出错：自测的 WAV 写不出来\n";
+        return kExitError;
+    }
+
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", a});
+        expect("同一份文件对拍：逐位相同、PASS", o.rc == 0 && has(o.text, "逐位相同：是") && has(o.text, "结果：PASS"),
+               o);
+    }
+
+    // 长度不同：默认判红，写明期望与实际的帧数；已经删掉的自相矛盾的提示不能回来
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", aShort});
+        expect("长度不同默认 FAIL，且打印期望与实际帧数",
+               o.rc == 2 && has(o.text, "两份长度不同，导出范围不一致") && has(o.text, "期望 B 有 4096 帧") &&
+                   has(o.text, "实际 3000 帧") && has(o.text, "--allow-length-diff"),
+               o);
+        expect("长度不同时不再说「较短的一份在结尾按静音算」", !has(o.text, "按静音算"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", aShort, "--allow-length-diff"});
+        expect("--allow-length-diff：重叠部分一致就 PASS，并报告没参与比较的尾部",
+               o.rc == 0 && has(o.text, "结果：PASS") && has(o.text, "仅比较重叠部分") &&
+                   has(o.text, "A 第 3000 到 4095 帧（1096 帧）没有参与比较") && !has(o.text, "导出范围不一致"),
+               o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", aOff, "--allow-length-diff"});
+        expect("--allow-length-diff 不放过重叠部分里的差异", o.rc == 2 && has(o.text, "高于门限"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", tailA, "--b", tailB, "--allow-length-diff"});
+        expect("--allow-length-diff 报告被忽略尾部的峰值（0.9 = -0.92 dBFS）",
+               o.rc == 0 && has(o.text, "A 第 3000 到 4095 帧（1096 帧）没有参与比较，峰值 -0.92 dBFS"), o);
+    }
+
+    // 弱信号门
+    {
+        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA});
+        expect("弱信号默认 FAIL（缺省门限 -60 dBFS），并提示可用 --min-signal-db 调整",
+               o.rc == 2 && has(o.text, "信号太弱，无法判定") && has(o.text, "--min-signal-db"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA, "--min-signal-db", "-80"});
+        expect("--min-signal-db -80 放宽后同一份弱信号 PASS", o.rc == 0 && has(o.text, "结果：PASS"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA, "--min-signal-db", "-70"});
+        expect("--min-signal-db -70 仍低于峰值（约 -66 dBFS），PASS", o.rc == 0 && has(o.text, "结果：PASS"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA, "--min-signal-db", "-60"});
+        expect("显式写缺省值 -60 与不写一样判弱", o.rc == 2 && has(o.text, "信号太弱，无法判定"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", a, "--min-signal-db", "3"});
+        expect("--min-signal-db 大于 0 是用法错误，写明范围、缺省与改法",
+               o.rc == 1 && has(o.text, "-200 到 0 dBFS") && has(o.text, "缺省 -60") && has(o.text, "-90"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", a, "--min-signal-db", "-250"});
+        expect("--min-signal-db 低于 -200 是用法错误", o.rc == 1 && has(o.text, "-200 到 0 dBFS"), o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", a, "--min-signal-db", "abc"});
+        expect("--min-signal-db 不是数字是用法错误", o.rc == 1 && has(o.text, "需要一个数字"), o);
+    }
+
+    // data 块：声明比实际长走显式分支（警告 + FAIL，写明两个数）；0xFFFFFFFF 的流式占位照常 PASS 且不报警
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", cut});
+        expect("data 声明长度大于实际：警告并 FAIL，写明声明与实际字节数",
+               o.rc == 2 && has(o.text, "警告") && has(o.text, "声明 65536 字节，文件里只有 32768 字节") &&
+                   has(o.text, "录音被截短") && has(o.text, "结果：FAIL"),
+               o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", a, "--b", streamed});
+        expect("data 长度是 0xFFFFFFFF 的流式占位：PASS，不报警",
+               o.rc == 0 && has(o.text, "逐位相同：是") && has(o.text, "结果：PASS") && !has(o.text, "警告"), o);
+    }
+
+    // --max-lag 的进度：搜索范围大时每 10% 一行，小范围不报
+    {
+        const Outcome o = invoke({"compare", "--a", lagA, "--b", lagB, "--allow-lag"});
+        expect("默认的 ±4800 搜索每 10% 报一行进度，共 10 行，找到 lag 3",
+               o.rc == 0 && countOf(o.text, "搜索对齐偏移：") == 10 &&
+                   has(o.text, "搜索对齐偏移：10%（共 9601 个 lag）") &&
+                   has(o.text, "搜索对齐偏移：100%（共 9601 个 lag）") && has(o.text, "对齐偏移（lag）：3 样本"),
+               o);
+    }
+    {
+        const Outcome o = invoke({"compare", "--a", lagA, "--b", lagB, "--allow-lag", "--max-lag", "500"});
+        expect("±500（1001 个 lag）的小范围搜索不报进度",
+               o.rc == 0 && !has(o.text, "搜索对齐偏移：") && has(o.text, "lag）：3 样本"), o);
+    }
+
+    {
+        std::ostringstream help;
+        printHelp(help);
+        Outcome o;
+        o.rc = 0;
+        o.text = help.str();
+        expect("帮助里写了 --min-signal-db、--allow-length-diff 和 self-test",
+               has(o.text, "--min-signal-db") && has(o.text, "--allow-length-diff") && has(o.text, "self-test"), o);
+    }
+
+    std::cout << "rinne_nulltest 自测：" << (total - failed) << " / " << total << " 项通过"
+              << (failed == 0 ? "，全部通过" : "") << "\n";
+    return failed == 0 ? kExitPass : kExitFail;
 }
 
 } // namespace
@@ -1168,6 +1600,8 @@ int main(int argc, char** argv)
             return runCompare(argc, argv);
         if (cmd == "echo")
             return runEcho(argc, argv);
+        if (cmd == "self-test")
+            return runSelfTest();
     }
     catch (const std::exception&)
     {
@@ -1175,6 +1609,6 @@ int main(int argc, char** argv)
             << "出错：运行中途失败，多半是内存不够（文件太大，或参数把信号开得太长）。请换小一点的文件或参数再试\n";
         return kExitError;
     }
-    std::cerr << "出错：不认识的子命令 " << cmd << "（可用：make-signal、compare、echo；--help 看用法）\n";
+    std::cerr << "出错：不认识的子命令 " << cmd << "（可用：make-signal、compare、echo、self-test；--help 看用法）\n";
     return kExitError;
 }

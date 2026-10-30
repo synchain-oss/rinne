@@ -26,4 +26,9 @@ if(RINNE_BUILD_TESTS)
             "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/nulltest-selftest"
             -P "${CMAKE_SOURCE_DIR}/tests/tools/nulltest/selftest.cmake")
   set_tests_properties(rinne_nulltest_selftest PROPERTIES TIMEOUT 120)
+
+  # 进程内自测（rinne_nulltest self-test）：在临时目录造 WAV，直接调 compare 的实现，按输出文本与退出码核对。
+  # 与上面那条互补：上面的由 cmake -P 驱动整个可执行文件，这条能构造任意头形状（data 声明比实际长）并核对进度输出
+  add_test(NAME rinne_nulltest_inproc_selftest COMMAND rinne_nulltest self-test)
+  set_tests_properties(rinne_nulltest_inproc_selftest PROPERTIES TIMEOUT 120)
 endif()
