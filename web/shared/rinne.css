@@ -467,6 +467,209 @@
     transform-origin: 6px 6px;
 }
 
+/* ------------------------------------------------------------ 消息位 */
+.rn-msgline {
+    position: relative;
+    box-sizing: border-box;
+    flex: none;
+}
+
+/* Input：一行，452×30 */
+.rn-msgline--line {
+    width: 452px;
+    height: 30px;
+}
+
+/* Output：最多三行，424×58 */
+.rn-msgline--block {
+    width: 424px;
+    height: 58px;
+}
+
+/* 紧凑配方：Rinne 的消息位比 SCVB 的横幅矮 */
+.rn-msgline .sc-banner {
+    padding: var(--sp-6) var(--sp-10);
+    line-height: 1.3;
+}
+
+.rn-banner {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    gap: var(--sp-8);
+}
+
+.rn-msgline--line .rn-banner {
+    padding: 0 var(--sp-10);
+}
+
+.rn-msgline--line .rn-banner__text {
+    white-space: nowrap;
+}
+
+.rn-msgline--block .rn-banner__text {
+    max-width: 272px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+}
+
+.rn-banner__text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.rn-banner__right {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: var(--sp-6);
+    margin-left: auto;
+}
+
+/* Output：chip 与动作按钮上下叠放，统一宽 108 靠右 */
+.rn-msgline--block .rn-banner__right {
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: var(--sp-4);
+    width: 108px;
+}
+
+.rn-msgline .sc-banner__dismiss {
+    margin-left: var(--sp-4);
+}
+
+/* 红（浅底）：--light-solid 叠红染 .12 */
+.rn-banner--red {
+    background: linear-gradient(rgba(var(--sem-red), 0.12), rgba(var(--sem-red), 0.12)), var(--light-solid);
+}
+
+/* 灰 */
+.rn-banner--gray {
+    background: rgba(var(--sem-gray), 0.15);
+    border-color: rgba(var(--sem-gray), 0.42);
+    color: var(--txt-1);
+}
+
+.rn-banner--gray .sc-banner__icon {
+    stroke: var(--sem-gray-ink);
+}
+
+/* 中性：玻璃数据卡里的 mono 小字 */
+.rn-banner--neutral {
+    background: var(--card-bg);
+    border-color: var(--card-border);
+    box-shadow: var(--card-inset), var(--glass-inset);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    color: var(--txt-3);
+}
+
+/* 空闲：Output 没有消息时槽里只放一行淡字，不画卡片，竖向居中（设计稿 O-09） */
+.rn-banner--idle {
+    display: flex;
+    align-items: center;
+    padding: var(--sp-6) var(--sp-10);
+    color: var(--txt-2);
+}
+
+.rn-banner--neutral .rn-banner__text {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-100);
+    font-weight: 400;
+    letter-spacing: var(--mono-ls-ui);
+    color: var(--txt-1);
+}
+
+.rn-banner--neutral .sc-banner__icon {
+    stroke: var(--txt-2);
+}
+
+.rn-banner__idle {
+    max-width: 380px;
+    color: var(--txt-2);
+    line-height: 1.3;
+}
+
+/* 切断类：深底危险条，主界面上唯一的深色条 */
+.rn-banner--danger {
+    background: var(--dark-toast), var(--dark-solid);
+    border-color: var(--sem-red-glass);
+    box-shadow: inset 0 0 18px rgba(var(--sem-red), 0.32);
+    color: var(--sem-red-ink-dark);
+}
+
+.rn-banner--danger .sc-banner__icon {
+    stroke: var(--sem-red-ink-dark);
+}
+
+/* 深底上的「+n」chip：浅色 chip 配深灰字压在深底上只有 2.3:1，换成反相配方 */
+.rn-banner--danger .rn-more {
+    background: rgba(var(--wh), 0.14);
+    border-color: rgba(var(--wh), 0.34);
+    color: var(--txt-dark-1);
+}
+
+.rn-banner--danger .rn-more:hover {
+    background: rgba(var(--wh), 0.24);
+}
+
+/* 确认条：圆角更大，按钮贴右 */
+.rn-banner--confirm {
+    display: flex;
+    align-items: center;
+    padding: 0 var(--sp-10);
+    border-radius: var(--r-md);
+    font-size: var(--fs-115);
+    font-weight: 500;
+    line-height: 1.3;
+    background: linear-gradient(rgba(var(--sem-amber), 0.15), rgba(var(--sem-amber), 0.15)), var(--light-solid);
+    border: 1px solid rgba(var(--sem-amber), 0.42);
+    color: var(--sem-amber-ink);
+}
+
+.rn-msgline--block .rn-banner--confirm {
+    padding: var(--sp-6) var(--sp-10);
+}
+
+.rn-banner--confirm .rn-icon {
+    flex: none;
+    color: var(--sem-amber-icon);
+}
+
+/* 「+n」chip */
+.rn-more {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    flex: none;
+    min-width: 28px;
+    height: 20px;
+    padding: 0 var(--sp-7);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    background: rgba(var(--wh), 0.5);
+    border: 1px solid var(--slate-border);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-95);
+    color: var(--txt-2);
+    font-variant-numeric: tabular-nums;
+}
+
+.rn-more::before {
+    content: "";
+    position: absolute;
+    inset: -2px 0;
+}
+
+.rn-more:hover {
+    background: var(--slate-bg);
+}
+
 /* ------------------------------------------------------------ 页脚 */
 .rn-footer {
     display: flex;
@@ -588,4 +791,320 @@
 .rn-scaleConfirm .rn-btn--cta {
     padding: 0 var(--sp-16);
     box-shadow: 0 6px 18px var(--acc-cta-shadow-lg);
+}
+
+/* ------------------------------------------------------------ toast */
+.rn-toast {
+    z-index: 90;
+    max-width: 306px;
+    box-sizing: border-box;
+    bottom: 44px;
+    right: 20px;
+    color: var(--txt-dark-2);
+}
+
+.rn-shell[data-role="output"] .rn-toast {
+    right: 18px;
+}
+
+.rn-toast .sc-toast__dot {
+    margin-top: var(--sp-6);
+}
+
+.rn-toast .sc-toast__dot[data-tone="green"] {
+    background: rgb(var(--sem-green));
+}
+
+.rn-toast .sc-toast__dot[data-tone="red"] {
+    background: rgba(var(--sem-red), 0.95);
+}
+
+.rn-toast .sc-toast__dot[data-tone="amber"] {
+    background: rgb(var(--sem-amber));
+}
+
+/* ------------------------------------------------------------ 关于面板 */
+.rn-about {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+}
+
+.rn-about__head {
+    flex: none;
+    padding: 18px 22px 12px;
+    border-bottom: 1px solid var(--dark-rule-weak);
+}
+
+.rn-shell[data-role="output"] .rn-about__head {
+    padding: 14px 18px 10px;
+}
+
+.rn-about__brandRow {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-8);
+}
+
+.rn-about__mark {
+    display: inline-block;
+    flex: none;
+    width: 22px;
+    height: 22px;
+    background-color: var(--txt-dark-1);
+    -webkit-mask: var(--rn-mark) center / contain no-repeat;
+    mask: var(--rn-mark) center / contain no-repeat;
+}
+
+.rn-about__lockup {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-110);
+    letter-spacing: 0.2em;
+    color: var(--txt-dark-1);
+}
+
+.rn-about__title {
+    margin-top: var(--sp-10);
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-170);
+    color: var(--txt-dark-1);
+}
+
+.rn-about__product {
+    margin-top: var(--sp-2);
+    font-size: var(--fs-120);
+    color: var(--txt-dark-2);
+}
+
+.rn-about__build {
+    margin-top: var(--sp-4);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-95);
+    letter-spacing: 0.02em;
+    color: var(--txt-dark-mono);
+}
+
+.rn-about__body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: var(--sp-4) var(--sp-18) var(--sp-14) 22px;
+}
+
+.rn-shell[data-role="output"] .rn-about__body {
+    padding: var(--sp-2) var(--sp-12) var(--sp-12) var(--sp-18);
+}
+
+.rn-about__sec {
+    margin-top: var(--sp-12);
+}
+
+.rn-about__sec--tight {
+    margin-top: var(--sp-8);
+}
+
+.rn-about__sec--wide {
+    margin-top: var(--sp-14);
+}
+
+.rn-about__text {
+    font-size: var(--fs-115);
+    line-height: 1.55;
+    color: var(--txt-dark-2);
+    text-wrap: pretty;
+}
+
+.rn-about__small {
+    font-size: var(--fs-105);
+    line-height: 1.55;
+    color: var(--txt-dark-3);
+    text-wrap: pretty;
+}
+
+.rn-about__small--gap {
+    margin-top: var(--sp-6);
+}
+
+.rn-about__actions {
+    margin-top: var(--sp-6);
+}
+
+.rn-about__links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--sp-14);
+}
+
+.rn-about__link {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-4);
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font-family: var(--ff-sans);
+    font-size: var(--fs-115);
+    color: var(--acc-link);
+}
+
+.rn-about__link:hover {
+    color: var(--acc-link-hover);
+}
+
+.rn-about__eyebrow {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-85);
+    letter-spacing: var(--eyebrow-ls);
+    color: var(--txt-dark-3);
+    white-space: nowrap;
+}
+
+.rn-about__eyebrow--gap {
+    margin-top: var(--sp-8);
+}
+
+.rn-about__preview {
+    margin: var(--sp-6) 0 0;
+    padding: var(--sp-8) var(--sp-10);
+    max-height: 92px;
+    overflow: auto;
+    border-radius: var(--r-xs);
+    background: var(--dark-solid);
+    border: 1px solid var(--dark-window-border);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    line-height: 1.55;
+    color: var(--txt-dark-mono);
+    white-space: pre;
+}
+
+.rn-about__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-10);
+    min-height: 26px;
+}
+
+.rn-about__rowLabel {
+    font-size: var(--fs-115);
+    color: var(--txt-dark-2);
+}
+
+.rn-about__ctl {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-6);
+    flex: none;
+}
+
+.rn-about__state {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls);
+    color: var(--txt-dark-3);
+}
+
+/* 开关：外层 30×24 的透明按钮，里面是 base.css 的 26×15 轨道 */
+.rn-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 30px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+/* 深色模态里的三段选项 */
+.rn-darkSeg {
+    display: inline-flex;
+    gap: var(--sp-2);
+    box-sizing: border-box;
+    height: 22px;
+    padding: var(--sp-2);
+    border-radius: var(--r-pill);
+    background: rgba(var(--wh), 0.08);
+    border: 1px solid rgba(var(--wh), 0.18);
+}
+
+.rn-darkSeg__item {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 16px;
+    padding: 0 var(--sp-9);
+    border: 0;
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    background: transparent;
+    font-family: var(--ff-sans);
+    font-size: var(--fs-100);
+    color: var(--txt-dark-3);
+}
+
+.rn-darkSeg__item::before {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+}
+
+.rn-darkSeg__item[aria-checked="true"] {
+    background: rgba(var(--wh), 0.85);
+    color: var(--txt-1);
+}
+
+.rn-about__foot {
+    display: flex;
+    flex: none;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--sp-8);
+    padding: var(--sp-12) 22px var(--sp-16);
+    border-top: 1px solid var(--dark-rule);
+}
+
+.rn-shell[data-role="output"] .rn-about__foot {
+    padding: var(--sp-10) var(--sp-16) var(--sp-12);
+}
+
+.rn-about__fail {
+    margin-right: auto;
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-110);
+    color: var(--sem-red-ink-dark);
+}
+
+/* ------------------------------------------------------------ 对 SCVB 件的局部覆盖 */
+/* 电平表与增益缩减表：数值由页面的 rAF 弹道自己平滑，CSS 过渡会叠一层滞后 */
+.rn-meters .sc-meter__fill,
+.rn-meters .sc-meter__peak,
+.rn-gr .sc-meter__fill {
+    transition: none;
+}
+
+/* 系统「减少动效」：脉冲、呼吸、冷却弧一律静止 */
+@media (prefers-reduced-motion: reduce) {
+    .sc-pill__dot,
+    .rn-chain__slot,
+    .rn-chain__ring,
+    .rn-coolArc__arc {
+        animation: none !important;
+    }
+
+    .rn-shell::after {
+        transition: none;
+    }
 }
