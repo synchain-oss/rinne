@@ -29,6 +29,9 @@
 //   8. 读两端引擎的状态对象、两端的端点槽、Input 的上一块结果与诊断安全段。
 //   9. 信号源脚本（静音、冲激、斜坡或场景自己的函数）。
 //  10. 只重新准备一端（prepareOutput / prepareInput）：两端采样率可以不同，写方按自己的采样率发布环头。
+//  11. 越界哨兵：每周期在轨道缓冲的有效样本之后放一串哨兵位型，周期末核对（canaryHits）。
+//  12. 两端各自的声道数（setChannels，1 或 2）：单声道的一端只看到第 0 个声道，轨道缓冲的第 1 个声道不碰。
+//  13. 单端切片（setSlicing）：Input 或 Output 一端每个周期的块再切成带种子随机的小块依次调用，另一端仍整块。
 //
 // 线程：只在非实时线程用（建段、prepare 都要分配）。引擎的 process 在这里同步调用，模拟音频线程。
 
@@ -97,6 +100,21 @@ public:
     void setSource(SourceFn source) { source_ = std::move(source); }
     void setCallOrder(CallOrder order) noexcept { order_ = order; }
     void setChain(ChainKind kind) noexcept { chain_.setKind(kind); }
+    // 两端各自的声道数（1 = 单声道，2 = 立体声），默认都是 2。单声道的一端只拿到轨道缓冲的第 0 个声道
+    // （AudioView 的约定：左右都取第 0 个）；缓冲的第 1 个声道它不碰，中间链照常处理两个声道。
+    void setChannels(int inputChannels, int outputChannels) noexcept
+    {
+        inputChannels_ = inputChannels == 1 ? 1 : 2;
+        outputChannels_ = outputChannels == 1 ? 1 : 2;
+    }
+    // 单端切片：这一端每个周期的块再切成长度在 [1, maxSlice] 的带种子随机小块依次调用（块长之和不变，另一端仍整块）。
+    // maxSlice 为 0 = 不切。小块拿到同一份走带信息，所以只用于走带不变（没有起播沿）的场景；
+    // 切片之后 inputLastBlock() 是最后一个小块的结果，不再对应整个周期，要逐周期喂参照的场景不要切。
+    void setSlicing(bool inputSide, int maxSlice, std::uint64_t seed) noexcept
+    {
+        (inputSide ? inputSlice_ : outputSlice_) = maxSlice > 0 ? maxSlice : 0;
+        (inputSide ? inputSliceState_ : outputSliceState_) = seed;
+    }
     void setInputBypassed(bool on) noexcept { inputBypassed_ = on; }
     void setOutputBypassed(bool on) noexcept { outputBypassed_ = on; }
     // 命令序号的基线（构造引擎后、prepare 前给一次）。场景要验「Panic 不重放」时用。
@@ -162,8 +180,14 @@ public:
     // 信号源已经给出的样本数（下一周期的第一个样本编号）
     std::uint64_t sourcePosition() const noexcept { return sourceCounter_; }
 
+    // 越界哨兵：每周期信号源填完之后，在轨道缓冲的有效样本之后放 kCanarySamples 个哨兵位型，周期末核对它们还在。
+    // 两端引擎或中间链写过有效样本之外的位置就会被抓到。累计被改动的样本数（左右声道合计），正常应恒为 0。
+    std::size_t canaryHits() const noexcept { return canaryHits_; }
+
     // 环的写头（诊断用）
     std::uint64_t writeHead() const noexcept;
+    // 环的写公告（诊断用）：写方在动样本之前公告的目标。只有一个写方、每块都写完时恒等于写头
+    std::uint64_t writeIntent() const noexcept;
     // 环的帧数（诊断用）
     std::uint32_t ringFrames() const noexcept;
 
@@ -181,6 +205,8 @@ public:
 
 private:
     void runInput(std::size_t index, int n) noexcept;
+    // 下一个小块的长度（1…maxSlice，不超过 left）
+    static int nextSlice(std::uint64_t& state, int maxSlice, int left) noexcept;
     void runChain(int n) noexcept;
     void runOutput(std::size_t index, int n) noexcept;
     void runSecondOutput(std::size_t index, int n) noexcept;
@@ -230,6 +256,12 @@ private:
     CallOrder order_ = CallOrder::kInputFirst;
     bool inputBypassed_ = false;
     bool outputBypassed_ = false;
+    int inputChannels_ = 2;
+    int outputChannels_ = 2;
+    int inputSlice_ = 0;
+    int outputSlice_ = 0;
+    std::uint64_t inputSliceState_ = 0;
+    std::uint64_t outputSliceState_ = 0;
 
     // 中间链在起播沿复位点上要复位：本周期 Input 报出的块内偏移（-1 = 没有）
     std::int64_t chainResetAt_ = -1;
@@ -255,6 +287,10 @@ private:
 
     // 信号源已经给出的样本数（跨周期连续）
     std::uint64_t sourceCounter_ = 0;
+
+    // 越界哨兵：本周期哨兵起点（= 信号源填的样本数；0 = 本周期没有）与累计命中
+    int canaryAt_ = 0;
+    std::size_t canaryHits_ = 0;
 };
 
 } // namespace rinne::rig
