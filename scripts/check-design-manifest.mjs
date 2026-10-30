@@ -41,6 +41,9 @@ export function textRecordsOf(el) {
         }
     };
     const errata = !!el.closest("[data-errata]");
+    // 目录里的多语言对照格外层带 data-lang，按该语言列核对；没有就按场景语言
+    const langHost = el.closest("[data-lang]");
+    const lang = langHost ? langHost.getAttribute("data-lang") : null;
     const out = [];
     if (el.hasAttribute("data-t"))
         out.push({
@@ -48,6 +51,7 @@ export function textRecordsOf(el) {
             key: el.getAttribute("data-t"),
             vals: valsOf("data-t-vals"),
             errata,
+            lang,
             text: el.textContent,
         });
     if (el.hasAttribute("data-t-title"))
@@ -56,6 +60,7 @@ export function textRecordsOf(el) {
             key: el.getAttribute("data-t-title"),
             vals: valsOf("data-t-title-vals"),
             errata,
+            lang,
             text: el.getAttribute("title") || "",
         });
     if (el.hasAttribute("data-t-aria"))
@@ -64,6 +69,7 @@ export function textRecordsOf(el) {
             key: el.getAttribute("data-t-aria"),
             vals: valsOf("data-t-aria-vals"),
             errata,
+            lang,
             text: el.getAttribute("aria-label") || "",
         });
     return out;
@@ -202,6 +208,7 @@ const norm = (s) =>
         .replace(/[ \t\r\n]+/g, " ")
         .trim();
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const LANG_CODES = ["zh", "en", "fr"];
 
 /** 词条文本代入占位符，与 web/shared/i18n.js 的 format 同口径。 */
 const fill = (text, vals) =>
@@ -239,8 +246,8 @@ export function analyze(i) {
                 add("覆盖", "red", s.id, `元件 ${code} 的节点没有 data-state`, code);
         }
         // 文案
-        const lang = s.lang;
         for (const t of snap.texts) {
+            const lang = LANG_CODES.includes(t.lang) ? t.lang : s.lang;
             if (t.vals === "bad") {
                 add("文案", "red", s.id, `${t.key} 的 data-t-vals 不是合法 JSON`, t.key);
                 continue;
@@ -569,10 +576,14 @@ export function selfTest() {
         "文案",
     );
     // title、aria 的占位符代入值各有自己的属性。用假节点跑 textRecordsOf（与浏览器里嵌入的是同一份源码）再交给 analyze
-    const fakeEl = (attrs, { errata = false, text = "" } = {}) => ({
+    const fakeEl = (attrs, { errata = false, text = "", lang = null } = {}) => ({
         hasAttribute: (n) => Object.hasOwn(attrs, n),
         getAttribute: (n) => (Object.hasOwn(attrs, n) ? attrs[n] : null),
-        closest: (sel) => (sel === "[data-errata]" && errata ? {} : null),
+        closest: (sel) => {
+            if (sel === "[data-errata]") return errata ? {} : null;
+            if (sel === "[data-lang]") return lang ? { getAttribute: () => lang } : null;
+            return null;
+        },
         textContent: text,
     });
     const withNode = (attrs, opts, dict) =>
@@ -581,6 +592,35 @@ export function selfTest() {
             Object.assign(i.dicts.zh, dict);
         });
     const tipDict = { "x.tip": "共 {n} 项", "x.aria": "{n} 项可选" };
+    // 目录里的多语言对照格外层带 data-lang：按该语言的词条核对，不按场景语言
+    add(
+        "带 data-lang=en 的对照格按 en 词条核对",
+        false,
+        withNode({ "data-t": "common.cancel" }, { lang: "en", text: "Cancel" }, {}),
+    );
+    add(
+        "带 data-lang=en 的对照格里放了 zh 文字",
+        true,
+        withNode({ "data-t": "common.cancel" }, { lang: "en", text: "取消" }, {}),
+        "文案",
+    );
+    // fr 节点同样按节点自己的语言走「只查非空」：文字非空为绿、空串为红（场景语言是 zh，不拿 zh 词条去比 fr 文字）
+    add(
+        "带 data-lang=fr 的对照格文字非空：只查非空，为绿",
+        false,
+        withNode({ "data-t": "common.cancel" }, { lang: "fr", text: "Annuler" }, {}),
+    );
+    add(
+        "带 data-lang=fr 的对照格是空的",
+        true,
+        withNode({ "data-t": "common.cancel" }, { lang: "fr", text: "  " }, {}),
+        "文案",
+    );
+    add(
+        "data-lang 取值不认识时回到场景语言",
+        false,
+        withNode({ "data-t": "common.cancel" }, { lang: "xx", text: "取消" }, {}),
+    );
     add(
         "title 的代入值写在 data-t-title-vals 时按它代入",
         false,
