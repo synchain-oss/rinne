@@ -133,6 +133,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         },
         exportCauses: { bits: 0, count: 0 },
         silentCause: null,
+        notices: [], // [{ id, a?, b? }]，id 取 ipcSandbox、outOfOrder、unstable、newerProject、stateDecodeFailed
         fadeIn: false,
         userPresets: [],
         dismissed: new Set(),
@@ -241,6 +242,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         dismissedHints: [...model.dismissed],
         exportCauses: { ...model.exportCauses },
         silentCause: model.silentCause,
+        notices: model.notices.map((n) => ({ ...n })),
     }));
     core.register("rinne.pair", () => ({
         seq: core.nextSeq(),
@@ -387,97 +389,14 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
 
     const mock = { addEventListener: core.addEventListener };
     for (const name of FUNCTIONS) mock[name] = fns[name];
-    // previewScene 由预览会话在套完场景状态之后赋值；赋值时补全设计稿里该场景的底座与新增字段（只给预览用，真桥没有）
-    let scene = null;
-    Object.defineProperty(mock, "previewScene", {
-        enumerable: true,
-        get: () => scene,
-        set(v) {
-            scene = v;
-            if (v && v.state) applyPreviewExtras(model, v);
-        },
-    });
     return { role: "input", core, model, mock, cutReasons: CUT_REASONS };
 }
 
-// ---- 预览场景补全 ----
-// scenarios.js 里每个场景只写「与底座不同的部分」，设计稿的底座（inBase / playing）不在表里，所以这里按场景 ID 补上；
-// 再把新增的桥字段（分量电平、导出原因、静音原因、对端采样率等）从场景描述推出来。只补场景没写的键，写了的不动。
-
-const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
-const TRACK_NAME = "Vox Lead";
-const TRACK_COLOR = "#2d79c6";
-/** 设计稿里对端在场的配对状态。 */
-const PEER_STATES = [
-    "connected",
-    "connectedUnverified",
-    "connectedStill",
-    "crossTrack",
-    "crossProcess",
-    "stale",
-    "abiMismatch",
-    "srMismatch",
-];
-
-/** 设计稿里电平与默认不同的场景（dBFS；null 为无信号）。场景自带 meters 的优先。 */
-const SCENE_METERS = {
-    "in-stale": { in: -12.4, ret: null, out: -12.4 },
-    "in-over100": { ret: -5.2, out: -6.3 },
-    "in-guard": { ret: -3.8, out: -5.6 },
-    "in-fr-worst": { in: -8.2, ret: null, out: -8.4 },
-};
-
-/** 在设计稿里以 playing() 为底的场景；其余以 inBase() 为底。 */
-const PLAYING_BASED = new Set([
-    "in-playing",
-    "in-over100",
-    "in-guard",
-    "in-limiter-confirm",
-    "in-limiter-cap",
-    "in-mix-mode",
-    "in-loop-off",
-    "in-bypassed",
-    "in-panic",
-    "in-nan-latched",
-    "in-ring-nan",
-    "in-cut-runaway",
-    "in-preset-menu",
-    "in-preset-save",
-    "in-about",
-    "in-scale-confirm",
-    "in-en",
-]);
-
-/** 场景串里的第一个数（兼容 U+2212）；没有数给 undefined。 */
-function firstNumber(text) {
-    if (typeof text === "number") return text;
-    const m = typeof text === "string" ? /[-−]?\d+(?:\.\d+)?/.exec(text) : null;
-    return m ? Number(m[0].replace("−", "-")) : undefined;
-}
+// ---- 电平帧的派生分量 ----
+// 场景底座与场景描述的映射在 state-driver.js 的 applyInput，这里只管把模型变成桥载荷。
 
 const dbOf = (ratio) => (ratio > 0 ? 20 * Math.log10(ratio) : null);
 const round1 = (x) => Math.round(x * 10) / 10;
-/** 同步档 1 拍的毫秒数：预览固定 120 BPM。 */
-const BEAT_MS = 500;
-const NOTE_BEATS = {
-    n64: 1 / 16,
-    n32t: 1 / 12,
-    n32: 1 / 8,
-    n16t: 1 / 6,
-    n16: 1 / 4,
-    n8t: 1 / 3,
-    n16d: 3 / 8,
-    n8: 1 / 2,
-    n4t: 2 / 3,
-    n8d: 3 / 4,
-    n4: 1,
-    n2t: 4 / 3,
-    n4d: 3 / 2,
-    n2: 2,
-    n2d: 3,
-    n1: 4,
-};
-
 /**
  * Mix 推子的两路分量：干声 = 输入电平 + 干声比例，回送 = 回送电平 + 回送比例（与设计稿的 mixLevels 同式，
  * 比例 g_dry = min(1, 2(1 - m))、g_ret = min(1, 2m)）；静音、环路关闭或比例为 0 的一路给 null。
@@ -499,75 +418,6 @@ export function deriveParts(model) {
                   : null,
         highCutLimited: highCutLimited !== undefined ? highCutLimited : hc < 20000 && hc > 0.45 * model.sampleRate,
     };
-}
-
-/**
- * 套用设计稿的场景底座与新增字段。scene.state 是 scenarios.js 里的描述；model 已经被 state-driver 套过一遍。
- * 覆盖层场景（预设面板、关于、缩放确认）按 playing 底座补，细节归页面。
- * @param {object} model
- * @param {{id:string, state:object}} scene
- */
-export function applyPreviewExtras(model, scene) {
-    const st = scene.state;
-    const playing = PLAYING_BASED.has(scene.id);
-
-    // 组的来源：场景没写 groupAuto 的都按用户手选算，否则页面会在 10 秒内再提示一条「已自动选组」
-    if (!st.groupAuto) model.groupOrigin = "manual";
-
-    // 底座：已连接、对端 Vox Lead、核验一致
-    if (!has(st, "pair")) model.pair.state = "connected";
-    if (PEER_STATES.includes(model.pair.state)) {
-        const unverified = model.pair.state === "connectedUnverified";
-        if (!has(st, "peer") && !unverified) {
-            model.pair.peer.name = TRACK_NAME;
-            model.pair.verify = model.pair.state === "crossTrack" ? "diff" : "match";
-        }
-        if (model.pair.peer.name) model.pair.peer.color = TRACK_COLOR;
-        model.pair.peer.channels = 2;
-        model.pair.peer.sampleRate = model.sampleRate;
-    }
-    model.pair.self.name = model.pair.self.name ?? TRACK_NAME;
-    model.pair.self.channels = 2;
-
-    const lv = has(st, "meters") ? st.meters : {};
-    if (!has(lv, "in")) model.meters.in = playing ? -12.4 : -18;
-    if (!has(lv, "out")) model.meters.out = playing ? -9.1 : -18;
-    if (!has(lv, "ret")) model.meters.ret = playing ? -14.8 : null;
-    if (playing) {
-        if (!has(st, "mix")) model.values.mix = 25;
-        if (!has(st, "feedback")) model.values.feedback = 72;
-        if (!has(st, "highCut")) model.values.high_cut = 6000;
-        if (!has(st, "gr")) model.meters.gr = model.values.loop_on === false ? 0 : -2.1;
-        model.presetId = "slapback";
-        model.presetDirty = true;
-    }
-    if (st.panic === "cut") {
-        // 切断：回送静音，输出保留干声
-        if (!has(lv, "ret")) model.meters.ret = null;
-        if (!has(lv, "out")) model.meters.out = -12.6;
-        if (!has(st, "gr")) model.meters.gr = 0;
-    }
-    if (has(st, "gr")) model.meters.gr = firstNumber(st.gr) ?? 0;
-    for (const [k, v] of Object.entries(SCENE_METERS[scene.id] || {})) if (!has(lv, k)) model.meters[k] = v;
-    if (scene.id === "in-fr-worst" && !has(st, "mix")) model.values.mix = 100;
-
-    // 延迟卡：实际值由设定与下限推出；同步档按 120 BPM 换算
-    model.delay.actualMs =
-        model.values.delay_mode === "sync"
-            ? round1(NOTE_BEATS[model.values.delay_note] * BEAT_MS)
-            : round1(Math.max(model.values.delay_ms, model.delay.minMs));
-
-    // 失控保护降了多少 dB
-    if (st.lamps && typeof st.lamps.run === "string" && st.lamps.run.startsWith("reduced")) {
-        model.meters.lamps.guardDb = firstNumber(st.lamps.run) ?? firstNumber(st.vals && st.vals.x) ?? 0;
-    }
-    // 导出锁存：设计稿的 exportMismatch 对应违约加补 0 两个原因
-    if (Array.isArray(st.band) && st.band.includes("exportMismatch")) model.exportCauses = { bits: 3, count: 3 };
-    // 宿主旁路并入回送静音，原因单独给
-    if (st.hostBypass === true) {
-        if (model.pair.state === "connected") model.pair.state = "connectedStill";
-        model.silentCause = "hostBypass";
-    }
 }
 
 function structuredCloneSafe(o) {

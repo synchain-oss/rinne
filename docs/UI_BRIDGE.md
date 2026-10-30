@@ -83,8 +83,8 @@ The bridge between the web UI and the native plugin: function names, event names
 | `seq` | 帧序号。 |
 | `state` | 下面 15 个状态之一。 |
 | `groupMask` | 八位位图，第 n 位为 1 表示第 n 个组里有未配对的对端在等待。 |
-| `peer` | 对端信息：`name`（轨道名，宿主不给时为 `null`）、`color`、`channels`、`version`、`holder`（占组者的轨道名）。 |
-| `self` | 本端信息：`name`。 |
+| `peer` | 对端信息：`name`（轨道名，宿主不给时为 `null`）、`color`、`channels`、`version`、`holder`（占组者的轨道名），另带可选的 `sampleRate`（对端采样率，`srMismatch` 的提示用它；缺席显示「—」）。 |
+| `self` | 本端信息：`name`，另带可选的 `channels`（本端声道数，1 或 2，与 `peer.channels` 比较决定声道徽标；缺席只显示对端声道）。 |
 | `verify` | 两端轨道名核验：`match`、`diff` 或 `unknown`。 |
 
 ### 配对状态
@@ -277,6 +277,7 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | `dismissedHints` | 本实例已关闭的提示 ID，不进工程。 |
 | `exportCauses` | 导出不一致的锁存信息：`{ bits, count }`。`bits` 是自上次确认起各原因位的并集（1 = 宿主违约，2 = 主读头补 0，4 = 对端报告违约，8 = 重同步），`count` 是自上次确认起被计入的事件数（无符号 32 位，回绕无碍，只用「不等」比较）。`count` 为 0 表示没有锁存。 |
 | `silentCause` | 可选。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停）、`stalled`（块序号停滞）。只在 `rinne.pair.state` 为 `connectedStill` 或 `connectedUnverified` 时有意义；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
+| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝；出现时界面不再另报泛泛的共享内存不可用）、`outOfOrder`（错序证据成立）、`unstable`（宿主时序不稳定，已切到容忍模式）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）之一。这五条没有对应的配对状态，只能由这个字段带；缺省、非数组、元素残缺、未知 `id` 一律当没有，同一个 `id` 只取第一条。导出不一致的原因位不走这里，仍在 `exportCauses`。 |
 
 ### 电平帧补充字段
 
@@ -289,8 +290,6 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | `lamps.guardDb` | 可选，非负数。失控保护当前把回送压低了多少 dB（核心侧的增益值取负）；`lamps.guard` 为 `reduced` 时界面显示它，缺席则只写「自动降低」不带数。 |
 
 ### Input 页面读到的配对补充字段
-
-`rinne.pair` 的 `peer` 与 `self` 在 Input 一侧另带两个可选字段，缺席时界面降级：`peer.sampleRate`（对端采样率，`srMismatch` 的提示用它；缺席显示「—」）和 `self.channels`（本端声道数，1 或 2，与 `peer.channels` 比较决定声道徽标；缺席只显示对端声道）。
 
 Input 页面把 `peer.color` 当作 `#rrggbb` 字符串（宿主不给时为 `null`），格式不对的值一律当没有；`peer.channels` 是数字 1 或 2。
 
