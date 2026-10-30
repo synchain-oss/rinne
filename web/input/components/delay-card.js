@@ -16,13 +16,11 @@ import {
     fmtFixed,
     msToSamples,
     parseDelayInput,
-    samplesToMs,
+    quantizeDelayMs,
 } from "../model.js";
 import { createSeg } from "./seg.js";
 import { attachControl, attachReadoutEdit } from "./gesture.js";
 import { setAttr, setHidden, setLine, setText, setVar } from "./util.js";
-
-const round1 = (v) => Math.round(v * 10) / 10;
 
 /** @param {object} ctx 页面上下文 */
 export function createDelayCard(ctx) {
@@ -124,14 +122,7 @@ export function createDelayCard(ctx) {
     );
 
     // ---- 手势：滑杆在对数轴上，毫秒档取 0.1 ms、采样档取整采样
-    const quantize = (v) => {
-        const clamped = Math.min(DELAY_MAX_MS, Math.max(DELAY_MIN_MS, v));
-        if (unit() === "samples") {
-            const sr = sampleRate();
-            return Math.round(samplesToMs(Math.max(1, msToSamples(clamped, sr)), sr) * 10000) / 10000;
-        }
-        return Math.max(DELAY_MIN_MS, round1(clamped));
-    };
+    const quantize = (v) => quantizeDelayMs(v, unit(), sampleRate());
     attachControl(slider, {
         param: ms,
         toPos: (v) => delayPos(v) / 100,

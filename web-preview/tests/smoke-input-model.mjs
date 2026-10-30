@@ -277,6 +277,28 @@ const delay = ({ M, ok, eq }) => {
     });
     eq([raised.raised, raised.inHatch, raised.badge], [true, true, "raised"], "设定低于最小值：抬升箭头、斜纹、徽标");
     eq(raised.actualVals, { d: "10.7" }, "实际值");
+    // 写入取整：毫秒档 0.1 ms，夹在 1 到 4000 ms
+    eq(M.quantizeDelayMs(12.34, "ms", 48000), 12.3, "毫秒档取到 0.1 ms");
+    eq(M.quantizeDelayMs(0.2, "ms", 48000), 1, "毫秒档不低于 1 ms");
+    eq(M.quantizeDelayMs(5000, "ms", 48000), 4000, "毫秒档不高于 4000 ms");
+    // 按样本数设的值来回换算不变：样本数 -> 毫秒（0.001 ms）-> 样本数，仍是原来的样本数，且落在 0.001 ms 的格点上
+    const drift = [];
+    const offGrid = [];
+    for (const sr of [44100, 48000, 88200, 96000, 192000]) {
+        const lo = M.msToSamples(1, sr);
+        const hi = M.msToSamples(4000, sr);
+        const ns = [];
+        for (let n = lo; n < lo + 400; n++) ns.push(n);
+        for (let n = lo + 400; n < hi; n += 997) ns.push(n);
+        ns.push(hi);
+        for (const n of ns) {
+            const q = M.quantizeDelayMs(M.samplesToMs(n, sr), "samples", sr);
+            if (M.msToSamples(q, sr) !== n) drift.push(`${n}@${sr}->${M.msToSamples(q, sr)}`);
+            if (Math.abs(q * 1000 - Math.round(q * 1000)) > 1e-6) offGrid.push(`${n}@${sr}`);
+        }
+    }
+    eq(drift.slice(0, 5), [], "按样本数设的值经取整再换回样本数应不变");
+    eq(offGrid.slice(0, 5), [], "样本档取整后的毫秒值应落在 0.001 ms 的格点上");
     eq(
         M.delayView({
             mode: "time",
@@ -367,6 +389,10 @@ const delay = ({ M, ok, eq }) => {
     ok(Math.abs(M.delayFromPos(M.delayPos(37)) - 37) < 1e-6, "滑杆位置往返");
 };
 group("延迟卡", delay);
+caught("延迟卡", delay, {
+    // 样本档只取到 0.1 ms：按样本数设的值换回来会漂
+    quantizeDelayMs: (ms, unit, sr) => Math.max(1, Math.min(4000, Math.round(ms * 10) / 10)),
+});
 caught("延迟卡", delay, { delayView: (p) => real.delayView({ ...p, note: "n4" }) });
 caught("延迟卡", delay, { delayPos: (ms) => (ms / 4000) * 100 });
 caught("延迟卡", delay, { parseDelayInput: (t) => ({ ok: true, ms: Number(t) }) });

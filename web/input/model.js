@@ -400,6 +400,19 @@ export function delayView({ mode, unit, delayMs, note, delay, sampleRate }) {
     };
 }
 
+/**
+ * 延迟写入宿主前的取整：毫秒档取 0.1 ms；样本档取整样本数再换回毫秒，落在契约 delay_ms 的 0.001 ms 步进上。
+ * 按样本数设的值来回换算不变：样本数 -> 毫秒（取到 0.001 ms）-> 样本数，仍是原来的样本数。
+ */
+export function quantizeDelayMs(ms, unit, sampleRate) {
+    const clamped = clamp(ms, DELAY_MIN_MS, DELAY_MAX_MS);
+    if (unit === "samples") {
+        const sr = finite(sampleRate) && sampleRate > 0 ? sampleRate : 48000;
+        return Math.round(samplesToMs(Math.max(1, msToSamples(clamped, sr)), sr) * 1000) / 1000;
+    }
+    return Math.max(DELAY_MIN_MS, Math.round(clamped * 10) / 10);
+}
+
 /** 延迟数值输入：毫秒档按毫秒、样本档按样本。返回 { ok, ms } 或 { ok:false, min, max }。 */
 export function parseDelayInput(text, unit, sampleRate) {
     const raw = String(text).trim().replace(/−/g, "-");
