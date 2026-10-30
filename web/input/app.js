@@ -82,6 +82,7 @@ function boot() {
         dragging: new Set(),
         msgSig: "",
         metersSig: "",
+        frameSig: { state: "", pair: "" },
         renderQueued: false,
         scaleState: { confirming: false, left: 0 },
         sceneApplied: false,
@@ -462,6 +463,15 @@ function boot() {
     }
 
     // ---- 事件
+    /** 快照的内容签名：序号每帧都变，不算内容。 */
+    const contentSig = (frame) => JSON.stringify(frame, (k, v) => (k === "seq" ? undefined : v));
+    /** 快照内容与上一帧相同就不必重画：回声与周期快照每秒几十帧，重写同样的值会让浏览器重排、读屏重复播报。 */
+    const changedSince = (kind, frame) => {
+        const sig = contentSig(frame);
+        const same = sig === S.frameSig[kind];
+        S.frameSig[kind] = sig;
+        return !same;
+    };
     const fresh = (kind, frame) => {
         if (!frame || typeof frame !== "object") return false;
         if (Number.isFinite(frame.seq)) {
@@ -474,6 +484,8 @@ function boot() {
     bridge.on("rinne.state", (f) => {
         if (!fresh("state", f)) return;
         const first = S.state === null;
+        // 守卫开关的乐观覆盖要在下一帧回声里收回：即便内容没变也得重画一次，把界面拉回宿主的值
+        const changed = changedSince("state", f) || S.guardOverride !== undefined;
         S.state = f;
         S.guardOverride = undefined;
         if (first) {
@@ -488,13 +500,14 @@ function boot() {
         if (S.exportRec && !exportHint(f.exportCauses, S.exportRec).rec) S.exportRec = null;
         trackSmartDefault(f);
         enforceZoomLock(f.uiScale, (s) => bridge.setUiScale(s));
-        scheduleRender();
+        if (changed) scheduleRender();
         maybeApplyScene();
     });
     bridge.on("rinne.pair", (f) => {
         if (!fresh("pair", f)) return;
+        const changed = changedSince("pair", f);
         S.pair = f;
-        scheduleRender();
+        if (changed) scheduleRender();
         maybeApplyScene();
     });
     bridge.on("rinne.params", (f) => {
@@ -507,11 +520,14 @@ function boot() {
         S.meters = f;
         meterRenderer.push({ in: f.in, ret: f.ret, out: f.out, dry: f.dryPart, wet: f.retPart });
         const sig = `${f.gr}|${JSON.stringify(f.lamps)}|${f.highCutLimited}`;
-        if (sig !== S.metersSig && ctx.view) {
+        if (sig !== S.metersSig) {
+            // 视图还没建起来时也要记下签名：首次渲染的 buildView 会取最新的 S.meters，不必等下一帧再补画一次
             S.metersSig = sig;
-            ctx.view.meters = f;
-            cards.safety.render();
-            scheduleMessages();
+            if (ctx.view) {
+                ctx.view.meters = f;
+                cards.safety.render();
+                scheduleMessages();
+            }
         }
     });
     bridge.on("rinne.presets", () => {});
