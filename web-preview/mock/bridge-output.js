@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Rinne Output 的 mock 后端：十二个共用函数加一个 Output 专用函数，三个事件。Output 只做分组与配对，没有参数。
+// Rinne Output 的 mock 后端：十二个共用函数加两个 Output 专用函数（repairPair、setTailMode），三个事件。
+// Output 只做分组与配对，没有参数；随工程走的非参数设置只有 tail 模式（cfg.tailMode）。
 // 名表与 docs/UI_BRIDGE.md、src/output/OutputBridgeApi.h、web/shared/bridge.js 逐名相等，由 check-bridge-parity 对拍。
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据。
 //
@@ -34,12 +35,15 @@ export const FUNCTIONS = [
     "resolveTakeover",
     "showLicense",
     "repairPair",
+    "setTailMode",
 ];
 
 export const EVENTS = ["rinne.state", "rinne.pair", "rinne.error"];
 
 /** 契约里没有独立状态的四条消息，经 rinne.state 的 notices 字段带给页面。 */
 const NOTICE_IDS = ["ipcSandbox", "newerProject", "stateDecodeFailed", "outOfOrder"];
+/** setTailMode 收的三个值，与 Input 同一张表。 */
+const TAIL_MODES = ["auto", "infinite", "30s"];
 /** 预览里有名字的轨道用的颜色（设计稿的示例蓝）。 */
 const PREVIEW_TRACK_COLOR = "rgb(45,121,198)";
 const PREVIEW_TRACK_NAME = "Vox Lead";
@@ -71,6 +75,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         send: { channels: "ST", sampleRate: 48000, bypassed: false, hostPaused: false },
         notices: [], // [{ id, a?, b? }]，id 取 NOTICE_IDS
         build: { sha: "a1b2c3d", fmt: "VST3", arch: "Windows x64" },
+        cfg: { tailMode: "auto" },
         pair: {
             state: "searching",
             groupMask: 0,
@@ -203,6 +208,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             send: { ...model.send },
             notices: model.notices.map((n) => ({ ...n })),
             build: { ...model.build },
+            cfg: { ...model.cfg },
         };
     });
     core.register("rinne.pair", () => {
@@ -230,6 +236,12 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             model.pair.state = "searching";
             core.scheduleEcho();
             return { ok: true, group: free };
+        },
+        setTailMode(mode) {
+            if (!TAIL_MODES.includes(mode)) return { ok: false, reason: "bad-value" };
+            model.cfg.tailMode = mode;
+            core.scheduleEcho();
+            return { ok: true, value: mode };
         },
     };
     for (const name of FUNCTIONS) mock[name] = fns[name];

@@ -287,7 +287,7 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 
 ## output：Rinne Output
 
-Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
+Output 用共用的十二个函数加 `repairPair`、`setTailMode`，以及三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
 
 ### 专用函数
 
@@ -295,7 +295,8 @@ Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有
 
 | 函数 | 参数 | 回执 | 说明 |
 |---|---|---|---|
-| `repairPair` | 无 | `{ ok, group }` | `conflict` 时的一键修复，按钮文案「重新配对」：按智能默认重选组；不在冲突态回 `{ ok: false, reason: "not-conflict" }`。 |
+| `repairPair` | 无 | `{ ok, group }` | `conflict` 时的一键修复，按钮文案「重新配对」：按智能默认重选组；不在冲突态回 `{ ok: false, reason: "not-conflict" }`，冲突里没有可去的组回 `{ ok: false, reason: "no-free-group" }`。要去的组被一个休眠实例占着时先不动，回 `{ ok: false, reason: "needs-confirm" }`，`rinne.state` 随后带 `takeover: true` 与 `takeoverGroup`，用户经 `resolveTakeover` 确认或取消。 |
+| `setTailMode` | `mode`：`auto`、`infinite`、`30s` | `{ ok, value }` | tail 模式（`cfg.tailMode`，随工程走），在关于面板的高级设置里；其余取值回 `{ ok: false, reason: "bad-value" }`，不改。改值后工程标脏。 |
 
 ### rinne.state 的 Output 字段
 
@@ -304,7 +305,13 @@ Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有
 | `send` | 发送状态：`channels`（`ST` 或 `MONO`）、`sampleRate`、`bypassed`（旁路写入静音）、`hostPaused`。 |
 | `inputGuideSeen` | Input 的引导是否已看；已看时 Output 首次打开跳过自己的引导。 |
 | `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）、`outOfOrder`（错序证据成立）之一。这四条没有对应的配对状态，只能由这个字段带；缺省、非数组、未知 `id` 一律当没有。 |
-| `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；缺省时只显示版本号。 |
+| `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；缺省时只显示版本号。三项各自拿不到时不发。 |
+| `cfg` | 非参数的工程状态，Output 只有 `tailMode`（`auto`、`infinite`、`30s`，默认 `auto`）。 |
+| `takeoverGroup` | 可缺省。`takeover` 为真时等待接管的组（`A` 到 `H`）；确认条里的组号读它，缺省时读 `group`。一键修复要接管的是别的组时才和 `group` 不同。 |
+
+### rinne.error 的 Output 取值
+
+Output 目前只发一种：保存工程时 state 编码失败（交出了空块），`code` 是 `stateEncode`，不带 `detail`。编辑器打开之前发生的不补报；页面不显示它，累计次数在诊断文本里。
 
 ### 配对卡
 

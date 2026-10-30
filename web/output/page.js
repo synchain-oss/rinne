@@ -9,10 +9,11 @@
 // 交互一览：
 //   选组          setGroup(字母)；成功后等下一帧确认已切过去、且没有等接管，才弹「已切到组 X」，免得接管确认条和成功提示同时出现；
 //   重新配对       消息位的动作按钮 → repairPair()（冲突态的一键修复），成功后同样弹「已切到组 X」；
-//   接管确认条     resolveTakeover(true / false)，展开期间其余组胶囊禁用；
+//   接管确认条     resolveTakeover(true / false)，展开期间其余组胶囊禁用；条里的组号读快照的 takeoverGroup（一键修复要接管的
+//                 是别的组时才有），缺省读 group；
 //   查看说明       消息位的动作按钮 → openExternal(用户指南)，链接钉当前版本的 tag；
 //   语言           setLang；成功后立即换语言，以后续帧里的 lang 为准；
-//   缩放、关于     共享的状态机与面板。
+//   缩放、关于     共享的状态机与面板；关于面板的 tail 行经 setTailMode 改 cfg.tailMode（随工程走）。
 // 页面不依赖具体桥：只用 createBridge 返回的对象，所以预览（mock）、真宿主与「没有桥」的纯浏览器三种情形走同一份代码。
 //
 // 防回环纪律：这里没有任何参数拖动；setGroup / setLang 的回执只用来触发提示，显示一律以快照为准。
@@ -54,6 +55,9 @@ const REVEAL_WAIT_MS = 400;
 /** requestInitialState 失败后的重试间隔与次数。 */
 const INITIAL_RETRY_MS = 400;
 const INITIAL_RETRIES = 3;
+/** cfg.tailMode 认得的三个值（关于面板的 tail 行）；其余按缺省 auto。 */
+const TAIL_MODES = ["auto", "infinite", "30s"];
+const GROUP_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
 const noop = () => {};
 
@@ -91,6 +95,9 @@ export function mountOutputPage(o) {
     /** 选组成功后等待确认的那个组与截止时刻。 */
     let groupToast = null;
     let staticConfirm = false;
+    /** 视图模型不收的两项：关于面板的工程设置与待接管的组，直接从快照原帧读。 */
+    let cfg = { tailMode: "auto" };
+    let takeoverGroup = null;
 
     // ---------------------------------------------------------------- 创建共享件
 
@@ -142,8 +149,8 @@ export function mountOutputPage(o) {
         host: shell.top,
         inert: [shell.content],
         bridge,
-        // Output 没有起播清空，tail 行也还没有桥函数（归 Output 原生桥那张卡）：features 都关，备注 about.adv.noteOut 跟着不出现
-        features: { resetOnPlay: false, tail: false },
+        // Output 没有起播清空；tail 行经 setTailMode 改本实例的 tail 模式，备注 about.adv.noteOut 跟着 tail 行出现
+        features: { resetOnPlay: false, tail: true },
         onViewRules: () => (typeof hooks.onViewRules === "function" ? hooks.onViewRules() : undefined),
         onCopied: () => toast.show({ key: "toast.diagCopied", t }),
         onCopyFail: (reason) => toast.show({ key: "toast.copyFail", vals: { reason }, t }),
@@ -188,7 +195,7 @@ export function mountOutputPage(o) {
         view = deriveView(state, pair);
         const options = scaleUi.options();
         const locked = zoomLocked();
-        const sig = JSON.stringify([view, state.uiScale, state.diagLog, state.build, options, locked]);
+        const sig = JSON.stringify([view, state.uiScale, state.diagLog, state.build, options, locked, cfg, takeoverGroup]);
         if (!force && sig === lastSig) return;
         lastSig = sig;
         lang = view.lang;
@@ -214,7 +221,7 @@ export function mountOutputPage(o) {
             confirm: view.confirm
                 ? {
                       key: TAKEOVER_KEY,
-                      vals: { g: view.confirm.g },
+                      vals: { g: takeoverGroup || view.confirm.g },
                       onConfirm: () => void resolveTakeover(true),
                       onCancel: () => void resolveTakeover(false),
                   }
@@ -231,7 +238,7 @@ export function mountOutputPage(o) {
             version: state.version || "—",
             t,
         });
-        if (about.isOpen()) about.update({ t, lang, build: buildInfo(), diagLog: state.diagLog });
+        if (about.isOpen()) about.update({ t, lang, build: buildInfo(), cfg: { ...cfg }, diagLog: state.diagLog });
         if (scaleUi.state().confirming) scaleConfirm.update({ ...scaleUi.state(), t });
         applyShellState();
     }
@@ -263,6 +270,9 @@ export function mountOutputPage(o) {
         if (!next) return;
         state = next;
         gotState = true;
+        const rawCfg = raw.cfg && typeof raw.cfg === "object" ? raw.cfg : {};
+        cfg = { tailMode: TAIL_MODES.includes(rawCfg.tailMode) ? rawCfg.tailMode : "auto" };
+        takeoverGroup = state.takeover && GROUP_LETTERS.includes(raw.takeoverGroup) ? raw.takeoverGroup : null;
         // 旧 WebKit 把缩放锁在 100%：宿主按存档开了别的档位时请回 1（走现有 setUiScale，不新增桥函数）
         enforceZoomLock(state.uiScale, (f) => Promise.resolve(bridge.setUiScale(f)).catch(noop));
         afterFrame();
@@ -341,7 +351,7 @@ export function mountOutputPage(o) {
     }
 
     function openAbout() {
-        void about.open({ t, lang, build: buildInfo(), cfg: {}, diagLog: state.diagLog });
+        void about.open({ t, lang, build: buildInfo(), cfg: { ...cfg }, diagLog: state.diagLog });
         applyShellState();
     }
 
