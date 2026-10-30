@@ -90,7 +90,12 @@ export function createToneCard(ctx) {
             },
             timers: ctx.timers,
         });
-        attachReadoutEdit(readout, { onEdit: edit, timers: ctx.timers, disabled: () => k.off(param.value() ?? 0) });
+        attachReadoutEdit(readout, {
+            onEdit: edit,
+            timers: ctx.timers,
+            param,
+            disabled: () => k.off(param.value() ?? 0),
+        });
         cols[kind] = { param, dial, label, readout, off, col, k };
     }
 
@@ -165,6 +170,28 @@ export function createToneCard(ctx) {
 
     return {
         el: root,
+        /** 宿主的快照还没到：标签照写，读数写「—」，两只小表盘与极性开关关着。 */
+        renderPending(t) {
+            setText(eyebrow, t("in.tone.eyebrow"));
+            setAttr(eyebrow, "title", t("in.tone.eyebrowTip"));
+            setAttr(root, "aria-label", t("in.tone.eyebrow"));
+            for (const c of Object.values(cols)) {
+                setText(c.label, t(c.k.labelKey));
+                setText(c.readout, "—");
+                setHidden(c.readout, false);
+                setHidden(c.off, true);
+                setAttr(c.dial.el, "aria-label", t(c.k.labelKey));
+                setAttr(c.dial.el, "aria-valuenow", null);
+                setAttr(c.dial.el, "aria-valuetext", "—");
+                setAttr(c.dial.el, "aria-disabled", "true");
+                setAttr(c.dial.el, "data-state", "disabled");
+                setAttr(c.col, "data-state", "pending");
+            }
+            setText(polLabel, t("in.tone.polarity"));
+            polToggle.update({ on: false, label: t("in.tone.polarity"), disabled: true });
+            setAttr(polRow, "data-state", "pending");
+            setAttr(root, "data-state", "pending");
+        },
         render() {
             if (!ctx.view) return;
             setText(eyebrow, ctx.view.t("in.tone.eyebrow"));

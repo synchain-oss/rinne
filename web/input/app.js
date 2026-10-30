@@ -8,6 +8,9 @@
 //   消息位的内容由 model.js 的 deriveMessages 从这些快照与参数当前值现算，不另存。
 // 渲染：快照到达只做「读 -> 比较 -> 写有变化的部分」，恒值段不产生 DOM 变更。电平帧走 meter.js 的弹道，
 // 与其余渲染分开。
+// 启动：真宿主的第一批快照到齐之前，页面不替宿主编造任何值。400 ms 内没有快照，只把界面揭出来（标签与「—」，所有
+// 写入与手势关着，紧急切断、语言、缩放、关于照常可用），同时按间隔重发 requestInitialState；快照到了走正常的首帧路径。
+// 只有完全没有桥（离线模式）才用默认快照显示。
 // 预览专用：浏览器预览里从 mock 读场景描述，用来直接摆出限制器确认、关于面板、缩放确认这几种覆盖层；
 // 真宿主没有 previewScene，这些分支不会走到。
 
@@ -54,10 +57,17 @@ import { createPeerRow } from "./components/peer-row.js";
 import { createPanic, createLimiterConfirm } from "./components/safety-layer.js";
 import { setHidden, setVar } from "./components/util.js";
 import { createOfflineBridge, defaultFrames } from "./offline.js";
+import { gateBridge } from "./bridge-gate.js";
 
 const ROLE = "input";
-/** 桥一直不给快照时，等这么久就按默认快照揭幕。 */
+/** 真宿主一直不给快照时，等这么久就揭幕（只画标签与「—」）。 */
 const FALLBACK_MS = 400;
+/** 快照迟迟不到时重发 requestInitialState 的间隔与最多重发次数（与 Output 页面同一口径）。 */
+const INITIAL_RETRY_MS = 400;
+const INITIAL_RETRIES = 3;
+/** 快照没到之前界面上没有值的地方写这个。 */
+const NO_VALUE = "—";
+const LANGS = ["zh", "en", "fr"];
 /** 参数的当前值影响消息位的那几个（回声显示出来时要重算消息）。 */
 const MESSAGE_PARAMS = new Set(["feedback", "mix", "loop_on", "limiter", "ceiling"]);
 /** 导出不一致的四条消息 id：它们共用一条「已关闭」记录。 */
@@ -80,7 +90,10 @@ function openBridge() {
 
 function boot() {
     installDicts(common, input);
-    const { bridge, offline } = openBridge();
+    const opened = openBridge();
+    const { offline } = opened;
+    // 写入闸：真快照（state 与 pair）到齐之前，对宿主的写入一律不发（见 bridge-gate.js）
+    const bridge = gateBridge(opened.bridge, () => !isReady());
     installGlow(document);
 
     // ---- 页面状态
@@ -91,7 +104,6 @@ function boot() {
         seq: { state: -Infinity, pair: -Infinity, meters: -Infinity, params: -Infinity },
         dismissedLocal: new Set(),
         exportRec: null,
-        exportSeeded: false,
         touchedFeedback: false,
         smartActive: false,
         smartGroup: null,
@@ -104,7 +116,14 @@ function boot() {
         renderQueued: false,
         scaleState: { confirming: false, left: 0 },
         sceneApplied: false,
+        pending: false,
+        pendingLang: "zh",
+        uiLocked: true,
     };
+    /** 宿主的第一批快照（state 与 pair）是否已到：之前页面不写任何东西，界面也不画值。 */
+    function isReady() {
+        return S.state !== null && S.pair !== null;
+    }
     const params = new Map();
     const mem = { fbUnit: "pct", delayUnit: "ms" };
     /**
@@ -120,7 +139,7 @@ function boot() {
     const scene = readPreviewScene();
 
     // ---- 上下文：各张卡共用
-    const echo = createParamEcho({ bridge });
+    const echo = createParamEcho({ bridge, locked: () => !isReady() });
     const ctx = {
         bridge,
         timers: globalThis,
@@ -144,6 +163,8 @@ function boot() {
             for (const [id, p] of params) out[id] = p.value();
             return out;
         },
+        /** 宿主的快照还没到：各卡的分段控件与开关据此不响应。 */
+        locked: () => !isReady(),
         edit: (cfg) => numEdit.open(cfg),
         toast: (key, vals, tone) => {
             if (ctx.view) toastUi.show({ key, vals, tone, t: ctx.view.t });
@@ -174,8 +195,13 @@ function boot() {
     const header = createHeader({ role: ROLE });
     const langCap = createLangCapsule({
         role: ROLE,
-        onPick: (code) => {
-            bridge.setLang(code);
+        onPick: async (code) => {
+            const r = await bridge.setLang(code).catch(() => null);
+            // 快照没到，没有 rinne.state 把语言带回来：宿主接受了就在本地换，免得界面不动
+            if (r && r.ok && !isReady()) {
+                S.pendingLang = code;
+                if (S.pending) renderPending();
+            }
         },
     });
     const group = createGroupPills({
@@ -300,6 +326,18 @@ function boot() {
     host.replaceWith(shell.el);
     installShellFit({ el: shell.el, box });
 
+    // ---- 快照到齐之前不接受操作
+    // 五张卡、组选择、对端行、消息位和预设槽整块 inert（键盘、指针、读屏都进不去）；语言、缩放、关于、紧急切断不在其内。
+    // inert 是第一层，bridge-gate.js 与 ctx.param 的入口守卫是第二层，旧内核不认 inert 时也不会写出去。
+    const lockables = [pairRow, peerRow.el, msgline.el, presetSlot, ...Object.values(cards).map((c) => c.el)];
+    function setLocked(on) {
+        if (S.uiLocked === on) return;
+        S.uiLocked = on;
+        for (const n of lockables) n.toggleAttribute("inert", on);
+        if (!on) shell.content.removeAttribute("data-pending");
+    }
+    for (const n of lockables) n.toggleAttribute("inert", true);
+
     // ---- 渲染
     function buildView() {
         const state = S.state;
@@ -327,7 +365,8 @@ function boot() {
     }
 
     function renderAll() {
-        if (!S.state || !S.pair) return;
+        if (!isReady()) return;
+        if (S.pending || S.uiLocked) leavePending();
         buildView();
         const { lang, t, state, pair } = ctx.view;
         if (document.documentElement.lang !== lang) document.documentElement.lang = lang;
@@ -364,7 +403,11 @@ function boot() {
     }
 
     function renderShellState() {
-        if (!ctx.view) return;
+        if (!ctx.view) {
+            // 快照没到：不知道危险与否，只反映遮罩
+            shell.setState({ danger: false, hostBypass: false, overlay: about.isOpen() || S.scaleState.confirming });
+            return;
+        }
         const { state, pair } = ctx.view;
         const safety = state.safety || {};
         shell.setState({
@@ -476,11 +519,27 @@ function boot() {
     }
 
     function openAbout() {
-        if (!ctx.view) return;
-        const { t, lang, state, cfg } = ctx.view;
-        about.open({ t, lang, build: { version: state.version }, cfg, diagLog: state.diagLog === true });
-        renderShellState();
-        panic.update({ cut: Boolean((state.safety || {}).cut), overScrim: true, t });
+        const v = ctx.view;
+        if (v) {
+            const { t, lang, state, cfg } = v;
+            about.open({ t, lang, build: { version: state.version }, cfg, diagLog: state.diagLog === true });
+            lockAboutAdvanced(false);
+            renderShellState();
+            panic.update({ cut: Boolean((state.safety || {}).cut), overScrim: true, t });
+        } else {
+            // 快照没到：版本、起播清空、尾音模式、诊断日志都没有宿主的值，关于面板照开，但高级设置那几行先关着
+            const lang = pendingLang();
+            const t = makeT(lang);
+            about.open({ t, lang, build: {}, cfg: {}, diagLog: false });
+            lockAboutAdvanced(true);
+            renderShellState();
+            panic.update({ cut: false, overScrim: true, t });
+        }
+    }
+
+    /** 关于面板里要写宿主的几行（起播清空、尾音模式、诊断日志）：快照没到时置灰。 */
+    function lockAboutAdvanced(on) {
+        for (const b of about.el.querySelectorAll("[data-adv], [data-tail]")) b.disabled = on;
     }
 
     function closeOverlays() {
@@ -599,8 +658,62 @@ function boot() {
         });
     }
 
+    // ---- 快照没到时的界面
+    const pendingLang = () => {
+        const l = S.state && S.state.lang;
+        return LANGS.includes(l) ? l : S.pendingLang;
+    };
+
+    /** 揭幕但不编造：标签照常，没有值的地方写「—」，值的图形由样式表收起；操作全部关着。 */
+    function showPending() {
+        if (isReady()) return;
+        S.pending = true;
+        shell.content.setAttribute("data-pending", "1");
+        renderPending();
+    }
+
+    function renderPending() {
+        const lang = pendingLang();
+        const t = makeT(lang);
+        if (document.documentElement.lang !== lang) document.documentElement.lang = lang;
+        header.update({ lang, t });
+        langCap.update({ lang, t });
+        group.update({ group: null, auto: false, peers: [], unassigned: false, autoGroup: null, disabled: true, t });
+        for (const card of Object.values(cards)) card.renderPending(t);
+        panic.update({ cut: false, overScrim: about.isOpen() || S.scaleState.confirming, t });
+        footer.update({
+            hint: null,
+            scaleOptions: scaleUi.options(),
+            scale: 1,
+            locked: zoomLocked(),
+            version: NO_VALUE,
+            t,
+        });
+        renderShellState();
+        scaleConfirm.update({ ...S.scaleState, t });
+    }
+
+    /** 第一批真快照到了：撤掉「—」状态，打开操作；关于面板若开着，换成宿主的值。 */
+    function leavePending() {
+        const wasPending = S.pending;
+        S.pending = false;
+        setLocked(false);
+        if (wasPending && about.isOpen() && S.state) {
+            const st = S.state;
+            const lang = LANGS.includes(st.lang) ? st.lang : "zh";
+            about.update({
+                t: makeT(lang),
+                lang,
+                build: { version: st.version },
+                cfg: st.cfg || {},
+                diagLog: st.diagLog === true,
+            });
+            lockAboutAdvanced(false);
+        }
+    }
+
     // ---- 启动
-    // 桥一直不给快照（没有桥，或桥没接通）：按默认快照揭幕，真快照一到按序号盖过它。哪一路已经收到就不动哪一路。
+    // 没有桥（离线模式）：按默认快照显示，不报错。真宿主：不给默认值，等第一批真快照，期间按间隔重发 requestInitialState。
     const applyDefaults = () => {
         const d = defaultFrames();
         if (!S.state) onState(d.state);
@@ -608,9 +721,24 @@ function boot() {
         if (S.seq.params === -Infinity) onParams(d.params);
         if (!S.meters) onMeters(d.meters);
     };
-    bridge.requestInitialState();
-    if (offline) queueMicrotask(applyDefaults);
-    else setTimeout(applyDefaults, FALLBACK_MS);
+    async function requestInitial(tries) {
+        try {
+            await bridge.requestInitialState();
+        } catch {
+            // 当作没成功：下面照样排重试
+        }
+        if (isReady() || tries <= 0) return;
+        setTimeout(() => {
+            if (!isReady()) void requestInitial(tries - 1);
+        }, INITIAL_RETRY_MS);
+    }
+    if (offline) {
+        bridge.requestInitialState().catch(() => {});
+        queueMicrotask(applyDefaults);
+    } else {
+        void requestInitial(INITIAL_RETRIES);
+        setTimeout(showPending, FALLBACK_MS);
+    }
     return { bridge, ctx };
 }
 

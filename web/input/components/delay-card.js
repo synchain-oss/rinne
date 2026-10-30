@@ -39,6 +39,7 @@ export function createDelayCard(ctx) {
         part: "dly.unit",
         ids: ["ms", "samples", "sync"],
         onPick: (id) => {
+            if (ctx.locked()) return;
             if (id === "sync") {
                 if (mode.value() !== "sync") mode.commit("sync");
                 return;
@@ -141,7 +142,12 @@ export function createDelayCard(ctx) {
         disabled: () => mode.value() === "sync",
         timers: ctx.timers,
     });
-    attachReadoutEdit(big, { onEdit: edit, timers: ctx.timers, disabled: () => mode.value() === "sync" });
+    attachReadoutEdit(big, {
+        onEdit: edit,
+        timers: ctx.timers,
+        param: ms,
+        disabled: () => mode.value() === "sync",
+    });
 
     function edit() {
         const sr = sampleRate();
@@ -229,5 +235,33 @@ export function createDelayCard(ctx) {
         setAttr(root, "data-state", m.state);
     }
 
-    return { el: root, render: renderAll };
+    /** 宿主的快照还没到：标签照写，读数写「—」，其余各行留空，滑杆与单位分段关着。 */
+    function renderPending(t) {
+        setText(eyebrow, t("in.dly.eyebrow"));
+        setAttr(eyebrow, "title", t("in.dly.eyebrowTip"));
+        seg.update({
+            value: "",
+            labels: [t("in.dly.unit.ms"), t("in.dly.unit.samples"), t("in.dly.unit.sync")],
+            label: t("in.dly.eyebrow"),
+            disabled: true,
+        });
+        setText(big, "—");
+        setHidden(bigUnit, true);
+        setLine(sub, "");
+        setHidden(slider, true);
+        setHidden(noteSlot, true);
+        setAttr(slider, "aria-valuenow", null);
+        setAttr(slider, "aria-valuetext", "—");
+        setAttr(slider, "aria-label", t("in.dly.eyebrow"));
+        setLine(actual, "");
+        setHidden(up, true);
+        setAttr(actualRow, "data-tone", null);
+        setLine(minText, "");
+        setLine(maxText, "");
+        setText(totalText, "");
+        setHidden(badge, true);
+        setAttr(root, "data-state", "pending");
+    }
+
+    return { el: root, render: renderAll, renderPending };
 }

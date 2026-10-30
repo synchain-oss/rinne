@@ -293,6 +293,14 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 
 Input 页面把 `peer.color` 当作 `#rrggbb` 字符串（宿主不给时为 `null`），格式不对的值一律当没有；`peer.channels` 是数字 1 或 2。
 
+### 首批快照到齐之前，Input 页面不写桥
+
+页面把「`rinne.state` 与 `rinne.pair` 都收到过一帧」当作就绪。就绪之前页面手里没有宿主的真值，所以不编造默认值，也不对宿主写任何东西：
+装载后调 `requestInitialState`，400 ms 内没等到就揭幕外壳（标签照常，没有值的地方写「—」，操作全部关着），并每 400 ms 重发一次 `requestInitialState`，最多再重发 3 次；两个事件都到了就进正常的首帧路径，按宿主的值显示并开放操作。
+就绪之前，参数写入（`beginParamGesture`、`setParam`、`endParamGesture`）、限制器与失控保护开关、组选择、恢复与接管、预设、关于面板里的高级设置这些函数页面一律不发，被拦下的调用在页面内回 `{ ok: false, reason: "not-ready" }`，不到桥。
+照常可用的是 `requestInitialState`、`panic`（任何时刻都必须能切断）、`setLang`、`setUiScale`、`commitUiScale`、`setRulesAck`、`setGuideSeen`、`copyDiagnostics`、`openExternal`、`showLicense`。
+所以原生侧首帧要把 `rinne.state` 与 `rinne.pair` 一起发出（上面时序第 2 条），只发其中一个页面会继续等另一个。
+
 ### 反馈安全在桥上的体现
 
 - 反馈默认 0。限制器关闭时反馈有效上限 100 %：表盘 100–150 % 段画斜纹，显示「设定 130 %，有效 100 %」，不报错。

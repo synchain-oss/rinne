@@ -1569,3 +1569,28 @@ html[lang="fr"] .in-limconfirm .sc-btn {
 .in-preset-slot {
     pointer-events: none;
 }
+
+/* ------------------------------------------------------------------ 宿主的快照没到（外壳内容层带 data-pending）
+   标签照画，没有值的地方由页面写「—」；值的图形（弧线、端点、把手、液柱、峰线、滑杆）一律收起，免得把图形的初始位置看成真值。
+   卡片压暗，指针事件关掉；键盘与读屏另由页面给这些块加 inert。快照一到页面撤掉 data-pending，下面的规则全部失效。 */
+[data-pending="1"] .in-card,
+[data-pending="1"] .in-pairrow,
+[data-pending="1"] .in-peer {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+[data-pending="1"] .in-dial__svg > :not(defs):not([data-part="track"]),
+[data-pending="1"] .in-mini__svg > :nth-child(n + 3),
+[data-pending="1"] .in-mini__needle,
+[data-pending="1"] .in-mini__halo,
+[data-pending="1"] .in-mix__collar,
+[data-pending="1"] .in-liq,
+[data-pending="1"] .sc-tube__peak,
+[data-pending="1"] .in-dly__hatch,
+[data-pending="1"] .in-dly__fill,
+[data-pending="1"] .in-dly__tick,
+[data-pending="1"] .in-dly__tick-label,
+[data-pending="1"] .in-dly__knob {
+    visibility: hidden;
+}

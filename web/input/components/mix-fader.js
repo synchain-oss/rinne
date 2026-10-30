@@ -84,8 +84,21 @@ export function createMixFader() {
         setAttr(root, "data-state", p.drag ? "drag" : p.auto ? "auto" : "normal");
     }
 
+    /** 宿主的值还没到：标签照写，读数写「—」（卡箍与液柱由样式表收起）。 */
+    function pending(t) {
+        setText(readout, "—");
+        setText(label, t("in.mix.label"));
+        setText(endDry, t("in.mix.endDry"));
+        setText(endRet, t("in.mix.endReturn"));
+        setAttr(fader, "aria-valuenow", null);
+        setAttr(fader, "aria-valuetext", "—");
+        setAttr(fader, "aria-label", t("in.mix.label"));
+        setAttr(root, "data-state", "pending");
+    }
+
     return {
         el: root,
+        pending,
         fader,
         slot,
         readout,

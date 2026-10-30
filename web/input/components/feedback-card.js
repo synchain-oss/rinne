@@ -60,6 +60,7 @@ export function createFeedbackCard(ctx) {
         part: "fb.unit",
         ids: ["pct", "db"],
         onPick: (id) => {
+            if (ctx.locked()) return;
             ctx.setUnit("fb", id);
             renderDial();
             renderSeg();
@@ -117,7 +118,7 @@ export function createFeedbackCard(ctx) {
         },
         timers: ctx.timers,
     });
-    attachReadoutEdit(mix.readout, { onEdit: editMix, timers: ctx.timers });
+    attachReadoutEdit(mix.readout, { onEdit: editMix, timers: ctx.timers, param: mixP });
 
     // ---- 数值输入
     function editFeedback() {
@@ -229,9 +230,29 @@ export function createFeedbackCard(ctx) {
         renderSeg();
     }
 
+    /** 宿主的快照还没到：标签照写，值的地方写「—」，开关与分段控件关着。 */
+    function renderPending(t) {
+        setText(eyebrow, t("in.fb.eyebrow"));
+        setText(loopLabel, t("in.loop.label"));
+        setText(label, t("in.fb.label"));
+        setAttr(root, "aria-label", t("in.fb.eyebrow"));
+        loopToggle.update({ on: false, label: t("in.loop.label"), title: t("in.loop.tip"), disabled: true });
+        setAttr(loopWrap, "data-state", "pending");
+        dial.pending(t);
+        mix.pending(t);
+        seg.update({
+            value: "",
+            labels: [t("in.fb.unit.pct"), t("in.fb.unit.db")],
+            label: t("in.fb.label"),
+            disabled: true,
+        });
+        setHidden(chip, true);
+    }
+
     return {
         el: root,
         render: renderAll,
+        renderPending,
         /** 电平弹道要写液柱的节点。 */
         levels: mix.levels,
     };

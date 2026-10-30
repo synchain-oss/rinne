@@ -135,5 +135,22 @@ export function createMeterCard(ctx, o) {
         );
     }
 
-    return { el: root, render, write };
+    /** 宿主的快照还没到：标签照写（液柱由样式表收起；电平帧到了仍按帧写，那是真数据）。 */
+    function renderPending(t) {
+        setText(eyebrow, t("in.meter.eyebrow"));
+        setAttr(root, "aria-label", t("in.meter.eyebrow"));
+        for (const r of ROWS) {
+            const row = rows[r.id];
+            setText(row.label, t(r.label));
+            setAttr(row.track, "aria-label", t(r.label));
+            setAttr(row.name, "title", r.tip ? t(r.tip) : null);
+            setAttr(row.readout, "title", t("in.meter.clearTip"));
+        }
+        setText(rows.ret.fade, "");
+        setHidden(rows.ret.fade, true);
+        setHidden(rows.ret.muted, true);
+        setAttr(root, "data-state", "pending");
+    }
+
+    return { el: root, render, renderPending, write };
 }

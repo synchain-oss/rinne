@@ -174,5 +174,16 @@ export function createDial() {
         setAttr(root, "data-cut", p.cut ? "1" : null);
     }
 
-    return { el: root, disc, readout, main, update };
+    /** 宿主的值还没到：读数写「—」，可访问性属性换成无值（弧线与端点由样式表收起）。 */
+    function pending(t) {
+        setText(main, "—");
+        setText(sub, "");
+        setAttr(disc, "aria-valuenow", null);
+        setAttr(disc, "aria-valuetext", "—");
+        setAttr(disc, "aria-label", t("in.fb.label"));
+        setAttr(disc, "title", null);
+        setAttr(root, "data-state", "pending");
+    }
+
+    return { el: root, disc, readout, main, update, pending };
 }

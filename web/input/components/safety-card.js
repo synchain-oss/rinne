@@ -176,7 +176,7 @@ export function createSafetyCard(ctx, o) {
         disabled: ceilingOff,
         timers: ctx.timers,
     });
-    attachReadoutEdit(ceilText, { onEdit: editCeiling, timers: ctx.timers, disabled: ceilingOff });
+    attachReadoutEdit(ceilText, { onEdit: editCeiling, timers: ctx.timers, param: ceilingP, disabled: ceilingOff });
 
     // ---- 渲染
     function renderLimiter() {
@@ -273,5 +273,46 @@ export function createSafetyCard(ctx, o) {
         renderCause();
     }
 
-    return { el: root, render: renderAll, panicSlot, limiterToggle: limToggle.el };
+    /** 宿主的快照还没到：标签照写，读数与灯的状态写「—」，限制器、上限、守卫关着；切断原因不显示。 */
+    function renderPending(t) {
+        setText(eyebrow, t("in.safety.eyebrow"));
+        setAttr(root, "aria-label", t("in.safety.eyebrow"));
+        setText(limLabel, t("in.lim.label"));
+        limToggle.update({ on: false, label: t("in.lim.label"), title: t("in.lim.tip"), disabled: true });
+        setText(offNote, "");
+        setHidden(offNote, true);
+        setAttr(limiter, "data-state", "pending");
+        setText(ceilText, "—");
+        setAttr(ceilRow, "data-state", "disabled");
+        setAttr(ceilDial.el, "aria-label", t("in.lim.ceilingTip"));
+        setAttr(ceilDial.el, "aria-valuenow", null);
+        setAttr(ceilDial.el, "aria-valuetext", "—");
+        setAttr(ceilDial.el, "aria-disabled", "true");
+        setAttr(ceilDial.el, "data-state", "disabled");
+        setText(grLabel, t("in.gr.label"));
+        setText(grRead, "—");
+        setAttr(gr, "data-state", "hidden");
+        setAttr(gr, "title", null);
+        setHidden(grFill, true);
+        for (const id of ["dc", "nan", "run"]) {
+            const r = lampRows[id];
+            setText(r.name, t(LAMP_META[id].label));
+            setText(r.state, "—");
+            setAttr(r.row, "data-state", "pending");
+            setAttr(r.row, "data-tone", "gray");
+            setAttr(r.dot, "data-tone", "gray");
+            setAttr(r.dot, "data-hollow", "1");
+            setAttr(r.row, "title", t(LAMP_META[id].tip));
+            setAttr(r.row, "aria-label", t(LAMP_META[id].label) + ": —");
+        }
+        setText(guardLabel, t("in.guard.label"));
+        guardToggle.update({ on: false, label: t("in.guard.label"), title: t("in.guard.tip"), disabled: true });
+        setAttr(guardRow, "data-state", "pending");
+        setAttr(lamps, "data-state", "pending");
+        setHidden(cause, true);
+        setText(cause, "");
+        setAttr(cause, "data-state", null);
+    }
+
+    return { el: root, render: renderAll, renderPending, panicSlot, limiterToggle: limToggle.el };
 }

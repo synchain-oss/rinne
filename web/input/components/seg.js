@@ -22,7 +22,12 @@ export function createSeg(o) {
             "data-glow": "1",
             "data-seg": id,
             aria: { selected: "false" },
-            on: { click: () => o.onPick(id) },
+            on: {
+                click: () => {
+                    if (root.getAttribute("aria-disabled") === "true") return;
+                    o.onPick(id);
+                },
+            },
         }),
     );
     const root = el("div", { class: "sc-seg sc-seg--sm in-seg", role: "tablist", "data-part": o.part }, ...tabs);
@@ -36,9 +41,10 @@ export function createSeg(o) {
     });
     return {
         el: root,
-        /** @param {{value:string, labels:string[], label:string}} p */
+        /** @param {{value:string, labels:string[], label:string, disabled?:boolean}} p disabled：快照没到，整组不响应 */
         update(p) {
             setAttr(root, "aria-label", p.label);
+            setAttr(root, "aria-disabled", p.disabled ? "true" : null);
             setAttr(root, "data-state", p.value);
             tabs.forEach((tab, i) => {
                 const on = o.ids[i] === p.value;
