@@ -8,7 +8,7 @@
 //      语言胶囊、缩放确认的保存与取消、关于面板的开关与复制诊断、「?」在首启链接入前不动作也不报错；
 //   ④ 重绘纪律：回声每秒来好几次同样的状态（含乱序的旧帧），页面不写任何 DOM；乱序旧帧与未知配对状态整帧丢弃；
 //   ⑤ 外壳：冲突与版本不匹配是危险描边、旁路是旁路态且只降内容层（常驻红字不降）、覆盖层打开时内容 inert、脉冲只在音频流动时；
-//   ⑥ 桥不通：requestInitialState 一直失败时 400 ms 兜底揭幕、重试 3 次；无桥模式不报错；
+//   ⑥ 桥不通：requestInitialState 一直失败时 400 ms 兜底揭幕、重试 3 次；无桥模式不报错；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
 //   ⑦ 坏样例：把红字挪进内容层、把危险描边关掉，上面对应的断言必须变红（见各自的替身断言）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
@@ -617,6 +617,81 @@ try {
             return out;
         })()`);
         run.eq(r, { revealed: true, texts: true }, "无桥模式：立即揭幕并按默认状态显示");
+    }
+
+    {
+        // 销毁：首帧快照一直不来、重试排着的时候销毁（A：挂载后立刻销毁，回执还没到；B：回执到了、重试已排上再销毁），
+        // 页面自己排的定时器一个不留，等过整个重试窗口也不再调 requestInitialState，pagehide 监听摘掉
+        const r = await page.eval(`(async () => {
+            const { mountOutputPage } = await import("/web/output/page.js");
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const noop = async () => ({ ok: false, reason: "not-ready" });
+            const make = () => {
+                const live = new Set();
+                const st = { asked: 0 };
+                const timers = {
+                    setTimeout: (fn, ms) => {
+                        const id = setTimeout(() => { live.delete(id); fn(); }, ms);
+                        live.add(id);
+                        return id;
+                    },
+                    clearTimeout: (id) => { live.delete(id); clearTimeout(id); },
+                };
+                const bridge = { role: "output", isPreview: false, on: () => () => {}, requestInitialState: async () => { st.asked++; return { ok: false }; }, setUiScale: noop, commitUiScale: noop, setLang: noop, setGroup: noop, openExternal: noop, copyDiagnostics: noop, setDiagLog: noop, setRulesAck: noop, setGuideSeen: noop, resolveTakeover: noop, showLicense: noop, repairPair: noop };
+                const hooks = new Set();
+                const win = new EventTarget();
+                win.document = document;
+                win.screen = window.screen;
+                const add = win.addEventListener.bind(win);
+                const rm = win.removeEventListener.bind(win);
+                win.addEventListener = (t, h, o) => { if (t === "pagehide") hooks.add(h); add(t, h, o); };
+                win.removeEventListener = (t, h, o) => { if (t === "pagehide") hooks.delete(h); rm(t, h, o); };
+                const host = document.createElement("div");
+                document.body.append(host);
+                const p = mountOutputPage({ host, bridge, win, timers });
+                let hidden = 0;
+                p.parts.scaleUi.pagehide = () => { hidden++; };
+                return { live, st, hooks, win, host, p, hidden: () => hidden };
+            };
+            const A = make();
+            const out = { A: {}, B: {} };
+            out.A.askedAtMount = A.st.asked;
+            out.A.pendingAtMount = A.live.size;
+            out.A.hooksAtMount = A.hooks.size;
+            A.win.dispatchEvent(new Event("pagehide"));
+            out.A.hiddenWired = A.hidden();
+            A.p.destroy();
+            out.A.pendingAtDestroy = A.live.size;
+            const B = make();
+            await sleep(100);
+            out.A.pendingAfterTick = A.live.size;
+            out.B.pendingBeforeDestroy = B.live.size;
+            B.p.destroy();
+            B.p.destroy();
+            out.B.pendingAtDestroy = B.live.size;
+            await sleep(1700);
+            out.A.askedFinal = A.st.asked;
+            out.B.askedFinal = B.st.asked;
+            out.A.hooksAfter = A.hooks.size;
+            out.B.hooksAfter = B.hooks.size;
+            A.win.dispatchEvent(new Event("pagehide"));
+            out.A.hiddenAfter = A.hidden();
+            A.host.remove();
+            B.host.remove();
+            return out;
+        })()`);
+        run.eq(r.A.askedAtMount, 1, "销毁：挂载时问了桥一次（对照）");
+        run.eq(r.A.hooksAtMount, 1, "销毁：挂载时 pagehide 监听挂上（对照）");
+        run.eq(r.A.hiddenWired, 1, "销毁：销毁前 pagehide 会转给缩放件（对照）");
+        run.eq(r.A.pendingAtMount, 1, "销毁：挂载时排着兜底揭幕计时器一个（对照）");
+        run.eq(r.B.pendingBeforeDestroy, 2, "销毁：回执失败后排着兜底揭幕与重试两个计时器（对照）");
+        run.eq(r.A.pendingAtDestroy, 0, "销毁（回执未到）：页面自己排的定时器一个不留");
+        run.eq(r.A.pendingAfterTick, 0, "销毁（回执未到）：回执到了也不再排重试");
+        run.eq(r.B.pendingAtDestroy, 0, "销毁（重试已排上）：重试与兜底揭幕计时器都清掉");
+        run.eq(r.A.askedFinal, 1, "销毁（回执未到）：等过整个重试窗口也不再调 requestInitialState");
+        run.eq(r.B.askedFinal, 1, "销毁（重试已排上）：等过整个重试窗口也不再调 requestInitialState");
+        run.eq([r.A.hooksAfter, r.B.hooksAfter], [0, 0], "销毁：pagehide 监听已摘掉");
+        run.eq(r.A.hiddenAfter, 1, "销毁后 pagehide 不再转给缩放件");
     }
 
     // ---------------------------------------------------------------- ⑦ 坏样例：替身必须被同一组断言抓出来

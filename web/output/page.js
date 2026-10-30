@@ -81,6 +81,9 @@ export function mountOutputPage(o) {
     let gotPair = false;
     let revealed = false;
     let revealTimer = 0;
+    /** requestInitialState 失败后排着的下一次重试。 */
+    let retryTimer = 0;
+    let destroyed = false;
     let lastSig = "";
     let lang = "zh";
     let t = makeT(lang);
@@ -371,7 +374,8 @@ export function mountOutputPage(o) {
         offs.push(bridge.on("rinne.pair", onPair));
         offs.push(bridge.on("rinne.error", noop));
     }
-    win.addEventListener("pagehide", () => scaleUi.pagehide());
+    const onPageHide = () => scaleUi.pagehide();
+    win.addEventListener("pagehide", onPageHide);
 
     async function requestInitial(tries) {
         let ok = false;
@@ -381,7 +385,14 @@ export function mountOutputPage(o) {
         } catch {
             ok = false;
         }
-        if (!ok && tries > 0) timers.setTimeout(() => void requestInitial(tries - 1), INITIAL_RETRY_MS);
+        // 等回执期间页面可能已经销毁：不再排重试，更不再去问桥
+        if (destroyed) return;
+        if (!ok && tries > 0) {
+            retryTimer = timers.setTimeout(() => {
+                retryTimer = 0;
+                void requestInitial(tries - 1);
+            }, INITIAL_RETRY_MS);
+        }
     }
 
     render(true);
@@ -416,8 +427,15 @@ export function mountOutputPage(o) {
         fit,
         isRevealed: () => revealed,
         destroy() {
+            if (destroyed) return;
+            destroyed = true;
             for (const off of offs) if (typeof off === "function") off();
+            win.removeEventListener("pagehide", onPageHide);
             if (revealTimer) timers.clearTimeout(revealTimer);
+            revealTimer = 0;
+            if (retryTimer) timers.clearTimeout(retryTimer);
+            retryTimer = 0;
+            groupToast = null;
             msgline.destroy();
             fit.destroy();
         },
