@@ -4,7 +4,7 @@
 // 反馈与 Mix 的显示值来自参数回声（param-echo）：拖动期间显示跟手，宿主自动化时按指数逼近。
 
 import { el } from "../../shared/dom.js";
-import { FB_CAP, FB_MAX, fbDbText, feedbackChip, parseFeedbackInput, roundFeedback, WHEEL_STEP_PX } from "../model.js";
+import { FB_CAP, FB_MAX, fbDbText, feedbackChip, parseFeedbackEdit, roundFeedback, WHEEL_STEP_PX } from "../model.js";
 import { createDial } from "./dial.js";
 import { createMixFader } from "./mix-fader.js";
 import { createToggle } from "./toggle.js";
@@ -124,16 +124,20 @@ export function createFeedbackCard(ctx) {
     function editFeedback() {
         const unit = ctx.mem.fbUnit;
         const v = fb.value() ?? 0;
+        const initial = unit === "db" ? fbDbText(v) : String(roundFeedback(v));
         ctx.edit({
             cover: dial.main,
-            initial: unit === "db" ? fbDbText(v) : String(roundFeedback(v)),
+            initial,
             field: "fb.input",
             label: ctx.view.t("in.fb.label"),
             fs: 18,
             h: 30,
             w: 70,
-            parse: (text) => parseFeedbackInput(text, unit),
-            onCommit: (res) => fb.commit(roundFeedback(Math.min(FB_MAX, Math.max(0, res.value)))),
+            parse: (text) => parseFeedbackEdit(text, initial, unit),
+            onCommit: (res) => {
+                if (res.unchanged) return; // 没改就回车：不写，免得 dB 档的 1 位小数把值悄悄改掉
+                fb.commit(roundFeedback(Math.min(FB_MAX, Math.max(0, res.value))));
+            },
             focusBack: dial.disc,
         });
     }

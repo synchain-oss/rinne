@@ -14,6 +14,7 @@ import { createRun, repoRoot } from "./lib/harness.mjs";
 const ROOT = repoRoot();
 const run = createRun("Input 页面纯函数");
 const real = await import(pathToFileURL(path.join(ROOT, "web/input/model.js")).href);
+const M_parse = real.parseFeedbackInput;
 
 /** 一组断言：对给定的模块替身跑，返回失败描述数组。 */
 function suite(M) {
@@ -104,6 +105,25 @@ const feedback = ({ M, ok, eq }) => {
     }
     eq(lossy, [], "按 dB 输入（−12 到 +3.5，每 0.1 dB）取整后 dB 读数应不变");
     eq(M.fbDbText(M.roundFeedback(M.dbToPct(-6))), M.fmtSigned(-6, 1), "−6 dB 输入后读回 −6.0");
+    // 打开数值输入框、什么也不改就回车：值不变（框里的文字与初值一样就不写）。dB 档初值只有 1 位小数，
+    // 照常解析再取整会把 72.5 % 改成 72.4 %，所以要逐个 0.1 % 的格点查，百分比与 dB 两档都查
+    for (const unit of ["db", "pct"]) {
+        const moved = [];
+        for (let i = 0; i <= 1500; i++) {
+            const pct = i / 10;
+            const initial = unit === "db" ? M.fbDbText(pct) : String(M.roundFeedback(pct));
+            const res = M.parseFeedbackEdit(initial, initial, unit);
+            const after = res.ok && res.unchanged ? pct : res.ok ? M.roundFeedback(res.value) : null;
+            if (after !== pct) moved.push(`${pct}->${after}`);
+        }
+        eq(moved.slice(0, 5), [], `${unit} 档：每个 0.1 % 格点打开输入框原样回车，值应不变`);
+    }
+    eq(M.parseFeedbackEdit("−2.8", "−2.8", "db"), { ok: true, unchanged: true }, "文字与初值一样：不写");
+    eq(M.parseFeedbackEdit(" 72.5 ", "72.5", "pct"), { ok: true, unchanged: true }, "首尾空格不算改动");
+    eq(M.parseFeedbackEdit("−3.0", "−2.8", "db").ok, true, "改了文字：照常解析");
+    ok(M.parseFeedbackEdit("−3.0", "−2.8", "db").unchanged !== true, "改了文字：不是『没改』");
+    eq(M.roundFeedback(M.parseFeedbackEdit("−3.0", "−2.8", "db").value), 70.8, "改成 −3.0 dB 写 70.8 %");
+    eq(M.parseFeedbackEdit("5", "−2.8", "db").ok, false, "改了文字且超范围：报错");
     eq(M.feedbackChip({ cut: true, fadeIn: true, limiterOn: false, feedback: 130 }).kind, "cut", "切断压过其余芯片");
     eq(
         M.feedbackChip({ cut: false, fadeIn: true, limiterOn: false, feedback: 130 }).kind,
@@ -162,6 +182,8 @@ caught("反馈", feedback, {
 });
 caught("反馈", feedback, { parseFeedbackInput: (t) => ({ ok: true, value: Number(t) }) });
 caught("反馈", feedback, { roundFeedback: Math.round });
+// 不做「没改就不写」，一律照常解析：dB 档原样回车会改动格点
+caught("反馈", feedback, { parseFeedbackEdit: (text, initial, unit) => M_parse(text, unit) });
 
 // ---------------------------------------------------------------- Mix 与音色
 

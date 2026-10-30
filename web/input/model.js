@@ -139,6 +139,16 @@ export function parseFeedbackInput(text, unit) {
     return { ok: true, value: n };
 }
 
+/**
+ * 反馈数值输入框的解析：框里的文字与打开时的初值一样（没改）就不写，返回 { ok: true, unchanged: true }，其余按
+ * parseFeedbackInput。dB 档的初值只有 1 位小数，而 0.1 % 的格点落不到 0.1 dB 上（100 % 附近 0.1 dB 约 1.2 %），
+ * 原样回车若照常解析再取整，会把 72.5 % 悄悄改成 72.4 %。
+ */
+export function parseFeedbackEdit(text, initial, unit) {
+    if (String(text).trim() === initial) return { ok: true, unchanged: true };
+    return parseFeedbackInput(text, unit);
+}
+
 /** 反馈单位：cfg.fbUnit 里写 db（任意大小写）是 dB，其余按百分比。 */
 export function fbUnitOf(cfg) {
     return cfg && typeof cfg.fbUnit === "string" && cfg.fbUnit.toLowerCase() === "db" ? "db" : "pct";

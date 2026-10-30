@@ -8,6 +8,7 @@
 //   ⑤ 发光圆心：在 0.5、1.25、2 三档，指针在旋钮盘内某处，发光圆心（--mx / --my）折回设计坐标后与指针位置重合；
 //   ⑥ 坏样例：滚轮不设上限的旋钮、发光不除倍率的圆心，必须被上面各项抓出来（量尺本身可信）；
 //   ⑦ 写入粒度：Shift 微调 3 px 写到宿主的是带小数的 0.1 % 格点值；反馈输入 72.5 % 写到宿主的是 72.5（不是 73）；延迟毫秒档输入 12.34 写 12.3，
+//      dB 档打开输入框原样回车不改值也不写桥，
 //      样本档输入 1234 样本写 25.708 ms（0.001 ms 的格点，换回样本数仍是 1234）。
 // 手势的纯逻辑由 smoke-knob-gesture 钉住，这里钉的是页面接线。浏览器缺失时整套跳过（退出码 2），不是通过。
 // 本机同时只能有一个浏览器冒烟。
@@ -274,7 +275,7 @@ try {
             page,
             (doc, win, sel, txt) => {
                 const input = doc.querySelector(sel + " input");
-                input.value = txt;
+                if (txt !== null) input.value = txt;
                 input.dispatchEvent(
                     new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
                 );
@@ -306,6 +307,37 @@ try {
             "反馈输入 72.5：最后一次写桥应是 72.5（不取成 73）",
         );
         run.eq(await modelOf(page, "feedback"), 72.5, "反馈输入 72.5：桥里的值应是 72.5");
+    }
+
+    // dB 档打开数值输入框、什么也不改就回车：值不变，也不写桥（dB 档的初值只有 1 位小数，72.5 % 显示成 −2.8 dB，
+    // 照常解析再取整会变成 72.4 %）
+    await openInput(page, server, "in-playing", { lang: "zh" });
+    // 表盘的读数只到整数，所以不能用 setFeedback 等 aria-valuenow 等于 72.5；改等桥里的模型值，再等回声落到页面
+    await page.eval('window.__RINNE_PREVIEW__.mock.setParam("feedback", 72.5)');
+    await sleep(page, 700);
+    {
+        const sw = await centerOf(page, '[data-part="fb.unit"] [data-seg="db"]');
+        await click(page, sw.x, sw.y);
+        await page.waitFor(
+            `document.querySelector("iframe").contentDocument.querySelector('[data-part="fb.unit"]').getAttribute("data-state") === "db"`,
+            { label: "反馈单位应切到 dB" },
+        );
+        const rec = await recordBridge(page, ["beginParamGesture", "setParam", "endParamGesture"]);
+        await openEdit(page, '[data-part="fb.readout"]');
+        const initial = await inFrame(page, (doc, win, sel) => doc.querySelector(sel + " input").value, NUMEDIT);
+        run.check(
+            /^[−+-]?\d+\.\d$/.test(initial),
+            `dB 档数值输入框的初值应是 1 位小数的 dB，实得 ${JSON.stringify(initial)}`,
+        );
+        await typeInto(page, null);
+        await sleep(page, 400);
+        run.check(!(await hasEdit(page)), "原样回车后数值输入框应关闭");
+        run.eq(await modelOf(page, "feedback"), 72.5, "dB 档原样回车：桥里的值应仍是 72.5（不变成 72.4）");
+        run.eq(
+            (await rec.calls()).filter((x) => x[1] === "feedback"),
+            [],
+            "dB 档原样回车：不应往桥里写反馈",
+        );
     }
 
     // Shift 微调：纵向 3 px 只走不到 1 个百分点，写到桥里的值落在 0.1 % 的格点上、带小数（取整到 1 % 就体现不出来）
