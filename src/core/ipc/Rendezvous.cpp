@@ -311,10 +311,12 @@ void Rendezvous::tick(u64 nowMs)
         return;
     }
     RvSegment& rv = *static_cast<RvSegment*>(rv_->base());
+    bool scanned = false;
     if (observer_.due(nowMs))
     {
         const bool firstScan = !observer_.scanned();
         observer_.scan(rv, nowMs);
+        scanned = true;
         if (firstScan)
         {
             firstSampleMs_ = nowMs;
@@ -326,7 +328,7 @@ void Rendezvous::tick(u64 nowMs)
     }
     if (myCtl_ != 0)
     {
-        ownerTick(rv, nowMs);
+        ownerTick(rv, nowMs, scanned);
     }
     else if (prepared_)
     {
@@ -673,13 +675,17 @@ bool Rendezvous::intentHeld(u64 nowMs, u64& evalMs) noexcept
     return catchUp;
 }
 
-void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs)
+void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs, bool scanned)
 {
     RoleSlot& slot = roleSlot(rv, group_, role());
     if (slot.ctl.load(std::memory_order_acquire) != myCtl_)
     {
         lostOwnership(nowMs);
         return;
+    }
+    if (scanned)
+    {
+        upkeepPairedFlag(slot, nowMs);
     }
     const bool heartbeatDue = nowMs < lastHeartbeatMs_ || nowMs - lastHeartbeatMs_ >= RendezvousTiming::kHeartbeatMs;
     if (heartbeatDue)
@@ -695,6 +701,40 @@ void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs)
         upkeepLabel(slot, nowMs, heartbeatDue);
     }
     refreshState();
+}
+
+// 「认领以来还没配上过」位的清除，只在扫描过的那一拍、自检通过之后调用（这一拍我们仍是属主）。两端各管自己槽里的
+// 位：属主第一次在扫描里看到同组的对端「配上了」就清，之后对端走了也不再置回；只有新的一次认领（claimTick，含换组、
+// 接管、被抢占后重新认领）才重新置位，休眠与唤醒不是新认领，不碰。
+// 「配上了」只用会合层已有的判据，与读方 EndView::isLive 同口径：本端是 active（休眠的一端并没有在环里），对端槽
+// 是 active、这份样本稳定、心跳没有陈旧（< kLostHeartbeatMs）。abi 不用另查：rv 是按本构建的 abi 初始化过的段才会
+// 走到这里（openRendezvous 守着），对端槽就在这个段里。样本取自这一拍刚做完的扫描，一定晚于本次认领，不会拿认领之前
+// 的旧样本当证据。
+// 位在本地副本 cfgFlags_ 上改，再 relaxed 存进槽里：槽里是单个 u32 原子量，读方（PairingSnapshot）只拿这一位做
+// 启发式判断，读到新值或旧值都只是晚一拍或早一拍认出「已经配过」，不影响安全；后面每个心跳的 writeIdentity 从副本
+// 重写，也不会把位写回去。本函数不碰音频线程。
+// 存储之前再核一次 ctl：ownerTick 开头那次自检到这里之间也可能被接管，被接管了就什么都不写（副本也不改），
+// 交给下一拍 ownerTick 开头的自检去走 lostOwnership。核过之后到 store 之间仍有一个窗口，与心跳里 writeIdentity 的窗口
+// 同类：晚到的 store 最多把新属主刚置上的位清掉，新属主下一个心跳的 writeIdentity 从自己的副本整字重写，一个心跳
+// （250 ms）内自愈；这一位只做启发式判断，窗口内多看到一次 0 不影响安全
+void Rendezvous::upkeepPairedFlag(RoleSlot& slot, u64 nowMs) noexcept
+{
+    if ((cfgFlags_ & kCfgNeverPaired) == 0 || ctlPhase(myCtl_) != kCtlPhaseActive)
+    {
+        return;
+    }
+    const SlotSample& peer = observer_.sample(group_, peerOf(config_.role));
+    if (!peer.stable || ctlPhase(peer.ctl) != kCtlPhaseActive ||
+        ageMs(nowMs, peer.heartbeatMs) >= RendezvousTiming::kLostHeartbeatMs)
+    {
+        return;
+    }
+    if (slot.ctl.load(std::memory_order_acquire) != myCtl_)
+    {
+        return;
+    }
+    cfgFlags_ &= ~kCfgNeverPaired;
+    slot.cfg_flags.store(cfgFlags_, std::memory_order_relaxed);
 }
 
 // 标签的维护，只在自检通过之后调用（这一拍我们仍是属主）。标脏就写；心跳那一拍不脏也读回来核对，不一致就当场

@@ -9,12 +9,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "ipc/LoopRing.h"
 #include "loop/LoopTiming.h"
 
 namespace rinne::rig
 {
+
+namespace
+{
+// 越界哨兵：位型不是任何正常样本，也不是 NaN 的常见位型
+constexpr std::uint32_t kCanaryBits = 0xa5a5a5a5u;
+constexpr int kCanarySamples = 8;
+} // namespace
 
 SourceFn silenceSource()
 {
@@ -288,6 +296,16 @@ int EngineHost::runCycle(std::size_t index)
         std::copy(trackRight_.begin(), trackRight_.begin() + filled, secondInRight_.begin());
         sourceCounter_ += static_cast<std::uint64_t>(filled);
     }
+    // 哨兵紧跟在有效样本之后（缓冲比最长的块多留了 8 个样本）
+    canaryAt_ = filled > 0 && filled + kCanarySamples <= capacity ? filled : 0;
+    if (canaryAt_ > 0)
+    {
+        for (int i = 0; i < kCanarySamples; ++i)
+        {
+            std::memcpy(&trackLeft_[static_cast<std::size_t>(canaryAt_ + i)], &kCanaryBits, sizeof kCanaryBits);
+            std::memcpy(&trackRight_[static_cast<std::size_t>(canaryAt_ + i)], &kCanaryBits, sizeof kCanaryBits);
+        }
+    }
 
     switch (order_)
     {
@@ -352,6 +370,18 @@ int EngineHost::runCycle(std::size_t index)
         break;
     }
 
+    if (canaryAt_ > 0)
+    {
+        for (int i = 0; i < kCanarySamples; ++i)
+        {
+            std::uint32_t left = 0;
+            std::uint32_t right = 0;
+            std::memcpy(&left, &trackLeft_[static_cast<std::size_t>(canaryAt_ + i)], sizeof left);
+            std::memcpy(&right, &trackRight_[static_cast<std::size_t>(canaryAt_ + i)], sizeof right);
+            canaryHits_ += (left != kCanaryBits ? 1u : 0u) + (right != kCanaryBits ? 1u : 0u);
+        }
+    }
+
     inputStatus_ = input_.loopStatus();
     if (haveSecondInput_)
     {
@@ -372,13 +402,32 @@ void EngineHost::runInput(std::size_t index, int n) noexcept
 {
     engine::AudioView view;
     view.channels = trackChannels_.data();
-    view.numChannels = 2;
+    view.numChannels = inputChannels_;
     view.length = n;
 
     // 0 样本：引擎必须立刻返回、不推进任何计数。仍然调一次，验它真的不推进。
     // 超长块：缓冲按脚本给足了，引擎自己判超限。
-    input_.process(view, paramsScript_.at(index), transportFor(index, config_.inputHostNsOffset), inputBypassed_,
-                   inputContext());
+    if (inputSlice_ > 0 && n > 0)
+    {
+        // 单端切片：整个周期的块切成小块依次调用，每个小块是缓冲里的一段
+        for (int offset = 0; offset < n;)
+        {
+            const int length = nextSlice(inputSliceState_, inputSlice_, n - offset);
+            float* channels[2] = {trackLeft_.data() + offset, trackRight_.data() + offset};
+            engine::AudioView slice;
+            slice.channels = channels;
+            slice.numChannels = inputChannels_;
+            slice.length = length;
+            input_.process(slice, paramsScript_.at(index), transportFor(index, config_.inputHostNsOffset),
+                           inputBypassed_, inputContext());
+            offset += length;
+        }
+    }
+    else
+    {
+        input_.process(view, paramsScript_.at(index), transportFor(index, config_.inputHostNsOffset), inputBypassed_,
+                       inputContext());
+    }
     if (n <= 0)
     {
         return;
@@ -394,6 +443,18 @@ void EngineHost::runInput(std::size_t index, int n) noexcept
     {
         chainResetAt_ = order_ == CallOrder::kInputFirst ? result.resetAtSample - result.blockStart : 0;
     }
+}
+
+int EngineHost::nextSlice(std::uint64_t& state, int maxSlice, int left) noexcept
+{
+    // splitmix64
+    state += 0x9e3779b97f4a7c15ull;
+    std::uint64_t z = state;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    z ^= z >> 31;
+    const int length = 1 + static_cast<int>(z % static_cast<std::uint64_t>(maxSlice));
+    return std::min(length, left);
 }
 
 void EngineHost::runChain(int n) noexcept
@@ -432,11 +493,29 @@ void EngineHost::runOutput(std::size_t index, int n) noexcept
 {
     engine::AudioView view;
     view.channels = trackChannels_.data();
-    view.numChannels = 2;
+    view.numChannels = outputChannels_;
     view.length = n;
 
-    output_.process(view, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset), outputBypassed_,
-                    outputContext(false));
+    if (outputSlice_ > 0 && n > 0)
+    {
+        for (int offset = 0; offset < n;)
+        {
+            const int length = nextSlice(outputSliceState_, outputSlice_, n - offset);
+            float* channels[2] = {trackLeft_.data() + offset, trackRight_.data() + offset};
+            engine::AudioView slice;
+            slice.channels = channels;
+            slice.numChannels = outputChannels_;
+            slice.length = length;
+            output_.process(slice, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset),
+                            outputBypassed_, outputContext(false));
+            offset += length;
+        }
+    }
+    else
+    {
+        output_.process(view, paramsScript_.at(index), transportFor(index, config_.outputHostNsOffset), outputBypassed_,
+                        outputContext(false));
+    }
     if (n <= 0)
     {
         return;
@@ -515,6 +594,12 @@ std::uint64_t EngineHost::writeHead() const noexcept
 {
     auto* ring = segments_.ring(group_);
     return ring == nullptr ? 0u : ipc::LoopRing::writeHead(*ring);
+}
+
+std::uint64_t EngineHost::writeIntent() const noexcept
+{
+    auto* ring = segments_.ring(group_);
+    return ring == nullptr ? 0u : ipc::LoopRing::writeIntent(*ring);
 }
 
 std::uint32_t EngineHost::ringFrames() const noexcept

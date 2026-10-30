@@ -5,6 +5,7 @@
 # 本目录，Windows 构建与本机 gates 不受影响。只在 build.yml 的 mac 构建里单独配置：
 #   cmake -S tests/oop -B build-oop -DCMAKE_BUILD_TYPE=Release
 # 宿主只链 AudioToolbox 与 CoreFoundation，去加载同一个 run 里已经构建、已经装好的 AU，所以这里不编任何插件。
+# 配对模式（--pair）还要只读映射插件创建的共享内存段，段布局取自 src/core/ipc/SegmentLayout.h（只含头文件）。
 cmake_minimum_required(VERSION 3.22)
 
 # 必须在 project() 之前：参与编译器探测。与根工程的默认值一致，命令行给了就不覆盖。
@@ -25,6 +26,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(rinne_auhost rinne_auhost.cpp)
+# 配对判据（PairJudge.h）只依赖标准库与 ipc/SegmentLayout.h，后者再要 util/Fourcc.h：加 src/core 一条包含路径即可，不链 rinne_core
+target_include_directories(rinne_auhost PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/core")
 # 警告即错误，与根工程对第一方代码的口径一致；-fblocks：AudioComponentInstantiate 的完成回调是 block
 target_compile_options(rinne_auhost PRIVATE -fblocks -Wall -Wextra -Werror)
 target_link_libraries(rinne_auhost PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")

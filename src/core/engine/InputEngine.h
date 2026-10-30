@@ -8,9 +8,25 @@
 //
 // 回送链（每个样本，固定顺序；安全链见 SafetyMachine.h）：
 //   环路层的读头 → ① 清洗 → ② DC 阻断（SafetyChain::processFront）
-//   → ③ 低切 → ④ 高切 → ⑤ 极性（音色级，还没有接入：这里是空位，接入方夹在前后两段之间）
+//   → ③ 低切 → ④ 高切 → ⑤ 极性（音色级，本引擎夹在前后两段之间，每个声道各走一遍）
+//   → mono 时取两格的平均
 //   → ⑥ ×g → 超大值检测 → ⑦ 限制器 → ⑧ 软削波 → ⑨ 有限性检查（SafetyChain::processBack）
 //   → out = g_dry·干声 + 回送。
+// 音色级：③④ 是 dsp/SvfTpt.h 的 CutFilter（左右声道共用一套系数，关时逐位直通；截止 30 ms 平滑、开关 10 ms 交叉），
+// ⑤ 是 dsp/SwitchRamp.h 的 10 ms 线性交叉 mix(x, −x)，不直接翻符号（直接翻会出咔嗒）；关且交叉走完时逐位直通，
+// 所以默认参数（低切 20、高切 20000、极性关）下回送与不接音色级时逐位相同。参数每块给一次。三级各自落定到参数、清状态的
+// 时机：prepare 之后的第一块（这时 g_safety 是 0，落定听不见），以及起播沿的复位点（与安全链的复位同一个样本）；
+// 同采样率重新 prepare 不动它们（流保持连续）。引擎没有跳过逐样本处理的快速路径（安全链每个样本都要走），音色级也每个
+// 样本都走，所以没有「离开快速路径」这一时机。
+// 音色级不清非有限值：输入已经 ① 清洗过，它自己算出的非有限值原样交给 ⑥，在那里跳闸（TRIPPED(nan) 并锁存）。
+// 电平（Meters 的 inputPeak / returnPeak / outputPeak / dryPartPeak / returnPartPeak）：每块 publishMax 一次，
+// 只收有限样本。
+//   in   宿主给的干声（g_dry 之前）；
+//   ret  ⑥ ×g 之前的回送：③④⑤ 之后、mono 时取过平均，正是 ⑥ 要乘的那一路（读头峰值 blockPeak 在 ① 之后、② 之前，
+//        不是这一点；它照旧给端点槽与诊断）；
+//   out  Input 的最终输出（宿主缓冲里留下的值，一位不碰的样本就是干声本身）；
+//   Mix 推子的两路分量：干声分量 g_dry·干声，回送分量是真正加到干声上的那一项（⑨ 之后，含 g_safety、g_guard、
+//        限制器与软削波），两路相加就是 out。
 // 回送为 ±0 且 g_dry 恰为 1 的样本，宿主缓冲一位不碰（−0.0 与 NaN 载荷都原样留着）：加 +0.0 会把 −0.0 变成 +0.0，
 // 任何算术都会改 NaN 的载荷，所以只能不写。g_dry 不为 1 时只乘干声，回送为 ±0 照样不加。
 // 淡入（新配对、换写方、预设、宿主设状态、恢复）、上界、跳闸与锁存全由安全链负责；本引擎只把事实与命令交给它。
@@ -29,7 +45,7 @@
 // 线程：
 //   - setCommandBaseline / setFadeObserver（非实时线程）：构造后、prepare 前调。
 //   - prepare（非实时线程）：分配本地延迟线与暂存、重算全部按样本计的时长。换采样率才重新分配本地延迟线；
-//     同采样率重新 prepare 不动读头、延迟线与安全链（流保持连续）。可以分配。
+//     同采样率重新 prepare 不动读头、延迟线、安全链与音色级（流保持连续）。可以分配。
 //   - process（音频线程）：拉环、读回送、过安全链、加干声、发布端点槽。不加锁、不分配、不做 I/O、不读墙钟、不抛异常。
 //   - requestFlushAfterSuspend（任意线程）：置一个原子标志，下一块块首执行。
 //   - 0 样本调用：立刻返回，不推进任何计数。
@@ -43,6 +59,8 @@
 #include <vector>
 
 #include "diag/EventQueue.h"
+#include "dsp/SvfTpt.h"
+#include "dsp/SwitchRamp.h"
 #include "engine/AudioView.h"
 #include "engine/EngineContext.h"
 #include "engine/EngineEvents.h"
@@ -137,7 +155,8 @@ public:
     // 消息线程：诊断报告安全段的六个量与琥珀灯位。
     SafetyDiag safetyDiag() const noexcept;
 
-    // 测量量（回送 DC 均值、贴近满幅时长、限制器增益缩减、失控保护、安全状态、读环后清洗的计数）：安全链每块末填。
+    // 测量量（回送 DC 均值、贴近满幅时长、限制器增益缩减、失控保护、安全状态、读环后清洗的计数）：安全链每块末填；
+    // 电平与高切的截断提示位：引擎每块末填（取点见文件头）。
     const Meters& meters() const noexcept { return meters_; }
     Meters& meters() noexcept { return meters_; }
 
@@ -172,8 +191,27 @@ private:
     // 安全链每块的控制量：参数映射加上环路层报的配对、断档与 D。
     SafetyControls makeControls(const EngineParams& params, const loop::BlockResult& result,
                                 bool bypassed) const noexcept;
-    // 整块逐样本过安全链并加到干声上；blockPeak 收读头（清洗后、安全链之前）的峰值。
-    void renderBlock(const AudioView& buffer, const loop::BlockResult& result, float& blockPeak) noexcept;
+    // 一块里的电平峰值（线性，只收有限样本），块末一次发布进 Meters
+    struct BlockLevels
+    {
+        float input = 0.0f;
+        float preGain = 0.0f;
+        float output = 0.0f;
+        float dryPart = 0.0f;
+        float returnPart = 0.0f;
+    };
+
+    // 音色级的块首：参数交给三级；prepare 之后的第一块再落定到参数
+    void beginTone(const EngineParams& params) noexcept;
+    // 音色级落定到参数、清状态（prepare 之后的第一块、起播沿的复位点）
+    void resetTone() noexcept;
+    // ③ 低切 → ④ 高切 → ⑤ 极性，就地处理一对样本
+    void processTone(float& left, float& right) noexcept;
+    // 整块逐样本过安全链与音色级并加到干声上；blockPeak 收读头（清洗后、DC 阻断之前）的峰值，levels 收电平。
+    void renderBlock(const AudioView& buffer, const loop::BlockResult& result, float& blockPeak,
+                     BlockLevels& levels) noexcept;
+    // 电平与高切的截断提示位写进 Meters（每块一次）
+    void publishLevels(const BlockLevels& levels) noexcept;
     // 安全链本块的事件转进诊断队列（安全链每块开头清空它们），顺带数跳闸次数。
     void drainSafetyEvents() noexcept;
     // 环内 NaN 的琥珀灯：当前写方的清洗计数增加了就亮 5 s。换写方、换绑定、换段时重取基线，不把别人的历史算进来。
@@ -192,6 +230,11 @@ private:
 
     loop::LoopSession loop_;
     SafetyChain chain_;
+    // 音色级 ③④⑤（见文件头）。toneSnapPending_：prepare 重来过三级，下一块落定到参数
+    dsp::CutFilter lowCut_{dsp::CutKind::LowCut};
+    dsp::CutFilter highCut_{dsp::CutKind::HighCut};
+    dsp::SwitchRamp polarity_;
+    bool toneSnapPending_ = true;
     diag::EventQueue<256> events_;
     loop::BlockResult lastResult_;
 

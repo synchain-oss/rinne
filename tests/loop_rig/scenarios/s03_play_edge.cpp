@@ -3,25 +3,28 @@
 // S03 起播沿：同一段起播之后的信号，不管之前预滚了多久、宿主怎么切块、是实时还是离线，从起播沿 + T 起输出逐位相同。
 //
 // 做法：每一路先预滚一段（transport 不走带，信号是各路不同的非静音噪声，淡入早已走完），再起播（transport 走带），
-// 起播之后的信号是「相对起播点」的同一个纯函数。环路延迟 D = 4800，环内放一个一阶低通（高切的替身，截止 2 kHz），
-// 中间链在引擎报出的 DSP 复位点上复位。四路：
+// 起播之后的信号是「相对起播点」的同一个纯函数。环路延迟 D = 4800，中间链是恒等；回送链的高切开（2 kHz）与关各一遍，
+// 开着时参照也带音色级，关着时参照不带（默认参数下 Input 与不接音色级的接线逐位相同）。四路：
 //   实时一  预滚 44137（块长 64…512 随机），起播后块长恒为 256；
 //   实时二  预滚 51203（块长 480…512 随机），起播后块长 480…512 随机；
 //   离线一  预滚 58301，块长 1…4096 随机，宿主标成离线渲染；
 //   离线二  预滚 65537，另一粒种子的 1…4096 随机切分，离线渲染。
 // 预滚长度都不是 16 与 480 的整数倍：10 ms 一格的内部计时若还停在预滚的相位上，各路就会对不齐。
-// 反馈 50 % 与 100 % 各做一遍（100 % 时限制器与失控保护都会介入）。
+// 反馈 50 % 与 100 % 各做一遍（100 % 时限制器与失控保护都会介入），每个反馈高切开、关各一遍。
 //
 // 断言：
 //   - 每路恰好一次起播重同步（原因：起播），DSP 复位点恰为起播点 + T（T = 240 = 5 ms），其余原因的重同步为 0；
 //   - 起播点 + T 起，左右声道的 Input 输出四路逐位相同，比较窗口 3 s；
 //   - 起播点到起播点 + T 之间，实时一与离线一的输出确有不同（旧读头 5 ms 淡出的尾巴是各路预滚里的内容），
 //     证明比较窗口的起点不是随手挑的；
-//   - 每路输出与参照安全链按文档接线重算的结果逐位相同。
+//   - 每路输出与参照安全链按文档接线重算的结果逐位相同；
+//   - 分辨力：实时一在比较窗口里高切开着的那一遍与关着的那一遍确有不同（高切真的在回送链里，开着时的逐位相同
+//     钉住了高切在起播沿复位点上的复位）。
 //
 // 宿主短暂报停（Cubase 15 实测：走带中间连续 3 块、约 16 ms 把 isPlaying 报成 false 再恢复，十二次里出一次）：
 // 报停不到阈值（max(100 ms, 4 × 最大块长)，按样本计，口径见 ADR-0010）不算停走带，恢复时不是起播沿，
-// 不触发 5 ms 淡出与本地延迟线复位，回声尾巴连续。同一条环路（块长恒为 256、低通替身、反馈 50 %）预滚之后起播，
+// 不触发 5 ms 淡出、本地延迟线与回送链（含音色级）的复位，回声尾巴连续。同一条环路（块长恒为 256、高切 2 kHz、
+// 反馈 50 %）预滚之后起播，
 // 走带中间停几个周期：
 //   对照       不停：一次起播重同步，复位点 = 起播点 + T；
 //   短暂报停   3 个周期（768 个样本，实测的长度）：仍只有一次起播重同步、一个复位点，整段输出（左右声道）
@@ -33,12 +36,10 @@
 // 宿主停走带之后一块都不再调用我们的反例（样本数不再走）在 tests/core/timing/test_play_debounce.cpp 里：
 // 试验台的记录器在 Input 不跑时报空转，这里造不出来。
 //
-// 暂缺：高切（high_cut）还没有接进回送链的音色级，这里用中间链的一阶低通顶替环内滤波；
-//   音色级接入之后，再把高切开关本身放进本场景。
-//
 // 标 ⛔ 的是删除式验证点：把对应的实现改坏，本场景必须变红。
 //   ⛔ 起播沿不复位回送链（playEdgeReset 不调）→ DC 阻断与限制器的状态各路不同，窗口内逐位对不上；
-//   ⛔ 起播沿不复位中间链 → 低通的状态各路不同，窗口内逐位对不上；
+//   ⛔ 起播沿不复位音色级 → 高切的状态各路不同，高切开着的那一遍窗口内逐位对不上；
+//   ⛔ 高切不接（引擎不理 highCutHz）→ 高切开着的那一遍与参照对不上，且与关着的那一遍逐位相同；
 //   ⛔ 起播沿不去抖（报停一块就算停走带）→ 短暂报停那一行出现第二次起播重同步，输出与对照不再逐位相同；
 //   ⛔ 阈值取得过大（吞掉 30 个周期的真停走带）→ 真停走带那一行没有第二次起播重同步；
 //   ⛔ 挂起清空时不通知去抖（flushAfterSuspend 不调 suspended）→ 挂起反例没有第二次起播重同步。
@@ -64,6 +65,25 @@ constexpr std::int64_t kEdgeFade = 240; // T = min(5 ms, D)
 constexpr std::int64_t kWindow = 3 * 48000;
 constexpr std::int64_t kPlaySamples = kWindow + 4096 + 512; // 起播之后至少跑这么多
 constexpr int kMaxBlock = 4096;
+constexpr float kHighCutOn = 2000.0f;
+constexpr float kHighCutOff = rinne::engine::kDefaultHighCutHz; // 20000 = 关
+
+// 场景的参数：混合 50 %、环路延迟 100 ms，加上这一遍的反馈与高切
+rinne::engine::EngineParams scenarioParams(float feedbackPercent, float highCutHz)
+{
+    rinne::engine::EngineParams p = loopParams(feedbackPercent, 50.0f, 100.0f);
+    p.highCutHz = highCutHz;
+    return p;
+}
+
+// 高切开着时参照也带音色级；关着时不带（参照就是不接音色级的接线）
+void referenceFollows(Recorder& rec, float highCutHz)
+{
+    if (highCutHz != kHighCutOff)
+    {
+        rec.reference.enableTone();
+    }
+}
 
 // 把总长 total 随机切成长度在 [lo, hi] 里的块（最后一块取余数）
 std::vector<int> randomBlocks(rinne::test::Rng& rng, std::int64_t total, int lo, int hi)
@@ -122,7 +142,7 @@ SourceFn sourceFor(std::uint64_t edge, std::uint64_t seed)
     };
 }
 
-RunResult runOne(const RunSpec& spec, float feedbackPercent)
+RunResult runOne(const RunSpec& spec, float feedbackPercent, float highCutHz)
 {
     RunResult result;
     auto host = makeHost(kSr, kMaxBlock);
@@ -138,12 +158,11 @@ RunResult runOne(const RunSpec& spec, float feedbackPercent)
     transport.nonrealtime = {spec.offline};
     host->setBlockScripts(blocks, blocks);
     host->setTransportScript(transport);
-    host->setChain(ChainKind::kOnePoleLowpass);
-    host->chain().setLowpassHz(2000.0f);
 
     const auto edge = static_cast<std::uint64_t>(spec.preroll);
     Recorder rec(*host, sourceFor(edge, spec.seed));
-    const rinne::engine::EngineParams p = loopParams(feedbackPercent, 50.0f, 100.0f);
+    referenceFollows(rec, highCutHz);
+    const rinne::engine::EngineParams p = scenarioParams(feedbackPercent, highCutHz);
     for (std::size_t i = 0; i < blocks.lengths.size(); ++i)
     {
         rec.cycle(i, p);
@@ -201,8 +220,6 @@ StopRun runStop(std::size_t stopCycles, bool suspend)
     }
     transport.nonrealtime = {false};
     host->setTransportScript(transport);
-    host->setChain(ChainKind::kOnePoleLowpass);
-    host->chain().setLowpassHz(2000.0f);
 
     Recorder rec(*host, [](std::uint64_t first, float* left, float* right, int n) {
         for (int i = 0; i < n; ++i)
@@ -211,7 +228,8 @@ StopRun runStop(std::size_t stopCycles, bool suspend)
             right[i] = 0.25f * hashNoise(first + static_cast<std::uint64_t>(i), 32);
         }
     });
-    const rinne::engine::EngineParams p = loopParams(50.0f, 50.0f, 100.0f);
+    referenceFollows(rec, kHighCutOn);
+    const rinne::engine::EngineParams p = scenarioParams(50.0f, kHighCutOn);
     for (std::size_t i = 0; i < kStopTotal; ++i)
     {
         if (suspend && i == kStopAt + stopCycles)
@@ -246,57 +264,74 @@ public:
         for (const float feedback : {50.0f, 100.0f})
         {
             INFO("feedback = " << feedback << " %");
-            rinne::test::Rng rngRt(0x5eed01u);
-            rinne::test::Rng rngOff1(0x5eed02u);
-            rinne::test::Rng rngOff2(0x5eed03u);
-            std::vector<RunSpec> specs;
-            specs.push_back({"realtime-1", 44137, 11, false, randomBlocks(rngRt, 44137, 64, 512),
-                             std::vector<int>(static_cast<std::size_t>(kPlaySamples / 256 + 1), 256)});
-            specs.push_back({"realtime-2", 51203, 12, false, randomBlocks(rngRt, 51203, 480, 512),
-                             randomBlocks(rngRt, kPlaySamples, 480, 512)});
-            specs.push_back({"offline-1", 58301, 13, true, randomBlocks(rngOff1, 58301, 1, 4096),
-                             randomBlocks(rngOff1, kPlaySamples, 1, 4096)});
-            specs.push_back({"offline-2", 65537, 14, true, randomBlocks(rngOff2, 65537, 1, 4096),
-                             randomBlocks(rngOff2, kPlaySamples, 1, 4096)});
-
-            std::vector<RunResult> results;
-            for (const RunSpec& spec : specs)
+            std::vector<float> firstRun[2]; // 实时一的左声道：[0] 高切开，[1] 高切关
+            for (int pass = 0; pass < 2; ++pass)
             {
-                results.push_back(runOne(spec, feedback));
+                const float highCut = pass == 0 ? kHighCutOn : kHighCutOff;
+                INFO("high cut = " << highCut << " Hz");
+                firstRun[pass] = runPass(v, feedback, highCut);
             }
-
-            for (std::size_t r = 0; r < results.size(); ++r)
-            {
-                INFO("run " << specs[r].name);
-                const RunResult& res = results[r];
-                RIG_EQ(v, res.playResyncs, 1u);
-                RIG_EQ(v, res.resyncs, 1u);
-                RIG_EQ(v, res.resetPoints.size(), std::size_t{1});
-                if (!res.resetPoints.empty())
-                {
-                    RIG_EQ(v, res.resetPoints[0], specs[r].preroll + kEdgeFade);
-                }
-                RIG_CHECK(v, res.matchesReference);
-                RIG_CHECK(v, res.audible > static_cast<std::size_t>(kWindow / 2));
-                RIG_CHECK(v, res.left.size() >= static_cast<std::size_t>(kEdgeFade + kWindow));
-            }
-
+            // 分辨力：高切开着与关着的两遍在比较窗口里确有不同
             const auto from = static_cast<std::size_t>(kEdgeFade);
             const auto to = static_cast<std::size_t>(kEdgeFade + kWindow);
-            for (std::size_t r = 1; r < results.size(); ++r)
-            {
-                INFO("run " << specs[r].name << " vs " << specs[0].name);
-                RIG_CHECK(v, sameBits(results[r].left, results[0].left, from, to));
-                RIG_CHECK(v, sameBits(results[r].right, results[0].right, from, to));
-            }
-            // 分辨力：起播点到起播点 + T 之间，旧读头的 5 ms 淡出尾巴各路不同
-            RIG_CHECK(v, !sameBits(results[2].left, results[0].left, 0, from));
+            RIG_CHECK(v, !sameBits(firstRun[0], firstRun[1], from, to));
         }
         briefStop(v);
         return v.ok();
     }
 
 private:
+    // 一个反馈、一个高切的四路；返回实时一从起播点起的左声道输出
+    static std::vector<float> runPass(Verdict& v, float feedback, float highCut)
+    {
+        rinne::test::Rng rngRt(0x5eed01u);
+        rinne::test::Rng rngOff1(0x5eed02u);
+        rinne::test::Rng rngOff2(0x5eed03u);
+        std::vector<RunSpec> specs;
+        specs.push_back({"realtime-1", 44137, 11, false, randomBlocks(rngRt, 44137, 64, 512),
+                         std::vector<int>(static_cast<std::size_t>(kPlaySamples / 256 + 1), 256)});
+        specs.push_back({"realtime-2", 51203, 12, false, randomBlocks(rngRt, 51203, 480, 512),
+                         randomBlocks(rngRt, kPlaySamples, 480, 512)});
+        specs.push_back({"offline-1", 58301, 13, true, randomBlocks(rngOff1, 58301, 1, 4096),
+                         randomBlocks(rngOff1, kPlaySamples, 1, 4096)});
+        specs.push_back({"offline-2", 65537, 14, true, randomBlocks(rngOff2, 65537, 1, 4096),
+                         randomBlocks(rngOff2, kPlaySamples, 1, 4096)});
+
+        std::vector<RunResult> results;
+        for (const RunSpec& spec : specs)
+        {
+            results.push_back(runOne(spec, feedback, highCut));
+        }
+
+        for (std::size_t r = 0; r < results.size(); ++r)
+        {
+            INFO("run " << specs[r].name);
+            const RunResult& res = results[r];
+            RIG_EQ(v, res.playResyncs, 1u);
+            RIG_EQ(v, res.resyncs, 1u);
+            RIG_EQ(v, res.resetPoints.size(), std::size_t{1});
+            if (!res.resetPoints.empty())
+            {
+                RIG_EQ(v, res.resetPoints[0], specs[r].preroll + kEdgeFade);
+            }
+            RIG_CHECK(v, res.matchesReference);
+            RIG_CHECK(v, res.audible > static_cast<std::size_t>(kWindow / 2));
+            RIG_CHECK(v, res.left.size() >= static_cast<std::size_t>(kEdgeFade + kWindow));
+        }
+
+        const auto from = static_cast<std::size_t>(kEdgeFade);
+        const auto to = static_cast<std::size_t>(kEdgeFade + kWindow);
+        for (std::size_t r = 1; r < results.size(); ++r)
+        {
+            INFO("run " << specs[r].name << " vs " << specs[0].name);
+            RIG_CHECK(v, sameBits(results[r].left, results[0].left, from, to));
+            RIG_CHECK(v, sameBits(results[r].right, results[0].right, from, to));
+        }
+        // 分辨力：起播点到起播点 + T 之间，旧读头的 5 ms 淡出尾巴各路不同
+        RIG_CHECK(v, !sameBits(results[2].left, results[0].left, 0, from));
+        return results[0].left;
+    }
+
     static void briefStop(Verdict& v)
     {
         constexpr std::int64_t kFirstEdge = static_cast<std::int64_t>(kStopPreroll * kStopBlock) + kEdgeFade;

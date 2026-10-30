@@ -50,68 +50,71 @@ TEST_CASE("a foreign-abi peer publishes first and we only report the mismatch", 
         SKIP(peerSkipReason());
     }
     PeerRig rig;
-    auto peer = rig.spawn({"--role", "output", "--group", "4", "--abi", "2", "--version",
-                           std::to_string(kForeignVersion), "--seconds", "3"},
-                          "abi-foreign-first");
-    REQUIRE(peer != nullptr);
-    const bool reached = peer->waitForLine("state foreignPublished", 5000);
-    INFO(peer->output());
-    REQUIRE(reached);
-
-    const std::string rvName = segmentName(rig.naming(), SegmentId::rendezvous());
-    const std::vector<unsigned char> before = readHeaderBytes(rig.backend(), rvName, kRvHeaderBytes);
-
-    Rendezvous input(configFor(Role::kInput, rig));
-    const u64 start = rinne::util::monoNowMs();
-    input.setGroup(4, ClaimIntent::kManual, start);
-    input.prepare({48000, kBlockFrames, 2}, start);
-
-    bool mismatched = false;
-    bool becameActive = false;
-    bool becameConflict = false;
-    const u64 deadline = rinne::util::monoNowMs() + 2000;
-    while (rinne::util::monoNowMs() < deadline)
     {
-        input.tick(rinne::util::monoNowMs());
-        if (input.state() == RendezvousState::kAbiMismatch)
+        auto peer = rig.spawn({"--role", "output", "--group", "4", "--abi", "2", "--version",
+                               std::to_string(kForeignVersion), "--seconds", "3"},
+                              "abi-foreign-first");
+        REQUIRE(peer != nullptr);
+        const bool reached = peer->waitForLine("state foreignPublished", 5000);
+        INFO(peer->output());
+        REQUIRE(reached);
+
+        const std::string rvName = segmentName(rig.naming(), SegmentId::rendezvous());
+        const std::vector<unsigned char> before = readHeaderBytes(rig.backend(), rvName, kRvHeaderBytes);
+
+        Rendezvous input(configFor(Role::kInput, rig));
+        const u64 start = rinne::util::monoNowMs();
+        input.setGroup(4, ClaimIntent::kManual, start);
+        input.prepare({48000, kBlockFrames, 2}, start);
+
+        bool mismatched = false;
+        bool becameActive = false;
+        bool becameConflict = false;
+        const u64 deadline = rinne::util::monoNowMs() + 2000;
+        while (rinne::util::monoNowMs() < deadline)
         {
-            mismatched = true;
-            break;
+            input.tick(rinne::util::monoNowMs());
+            if (input.state() == RendezvousState::kAbiMismatch)
+            {
+                mismatched = true;
+                break;
+            }
+            becameActive = becameActive || input.state() == RendezvousState::kActive;
+            becameConflict = becameConflict || input.state() == RendezvousState::kConflict;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        becameActive = becameActive || input.state() == RendezvousState::kActive;
-        becameConflict = becameConflict || input.state() == RendezvousState::kConflict;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    INFO(peer->output());
-    CHECK(mismatched);
-    CHECK_FALSE(becameActive);
-    CHECK_FALSE(becameConflict);
-    CHECK(input.state() == RendezvousState::kAbiMismatch);
-    CHECK(input.abiMismatchVersion() == kForeignVersion);
+        INFO(peer->output());
+        CHECK(mismatched);
+        CHECK_FALSE(becameActive);
+        CHECK_FALSE(becameConflict);
+        CHECK(input.state() == RendezvousState::kAbiMismatch);
+        CHECK(input.abiMismatchVersion() == kForeignVersion);
 
-    // 再看 400 ms：仍然停在 kAbiMismatch（不是 opening / waitingPrepare），期间一个字节都没写 rv
-    int mismatches = 0;
-    int observations = 0;
-    const u64 observeUntil = rinne::util::monoNowMs() + 400;
-    while (rinne::util::monoNowMs() < observeUntil)
-    {
-        input.tick(rinne::util::monoNowMs());
-        ++observations;
-        mismatches += input.state() == RendezvousState::kAbiMismatch ? 1 : 0;
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    }
-    CHECK(observations > 0);
-    CHECK(mismatches == observations);
-    const std::vector<unsigned char> after = readHeaderBytes(rig.backend(), rvName, kRvHeaderBytes);
-    CHECK(before == after);
+        // 再看 400 ms：仍然停在 kAbiMismatch（不是 opening / waitingPrepare），期间一个字节都没写 rv
+        int mismatches = 0;
+        int observations = 0;
+        const u64 observeUntil = rinne::util::monoNowMs() + 400;
+        while (rinne::util::monoNowMs() < observeUntil)
+        {
+            input.tick(rinne::util::monoNowMs());
+            ++observations;
+            mismatches += input.state() == RendezvousState::kAbiMismatch ? 1 : 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        }
+        CHECK(observations > 0);
+        CHECK(mismatches == observations);
+        const std::vector<unsigned char> after = readHeaderBytes(rig.backend(), rvName, kRvHeaderBytes);
+        CHECK(before == after);
 
-    int exitCode = -1;
-    REQUIRE(peer->wait(6000, exitCode));
-    INFO(peer->output());
-    CHECK(exitCode == 0);
-    const PeerResult result = parsePeerResult(peer->output());
-    REQUIRE(result.ok);
-    CHECK(result.state == "foreignPublished");
+        int exitCode = -1;
+        REQUIRE(peer->wait(6000, exitCode));
+        INFO(peer->output());
+        CHECK(exitCode == 0);
+        const PeerResult result = parsePeerResult(peer->output());
+        REQUIRE(result.ok);
+        CHECK(result.state == "foreignPublished");
+    }
+    expectNoLeftovers(rig);
 }
 
 TEST_CASE("our kIpcAbi rendezvous makes a foreign-abi peer report the mismatch", "[ipc][xproc]")
@@ -121,43 +124,47 @@ TEST_CASE("our kIpcAbi rendezvous makes a foreign-abi peer report the mismatch",
         SKIP(peerSkipReason());
     }
     PeerRig rig;
-    Rendezvous input(configFor(Role::kInput, rig));
-    const u64 start = rinne::util::monoNowMs();
-    input.setGroup(4, ClaimIntent::kManual, start);
-    input.prepare({48000, kBlockFrames, 2}, start);
-    bool active = false;
-    const u64 activeDeadline = rinne::util::monoNowMs() + 3000;
-    while (rinne::util::monoNowMs() < activeDeadline)
     {
-        input.tick(rinne::util::monoNowMs());
-        if (input.state() == RendezvousState::kActive)
+        Rendezvous input(configFor(Role::kInput, rig));
+        const u64 start = rinne::util::monoNowMs();
+        input.setGroup(4, ClaimIntent::kManual, start);
+        input.prepare({48000, kBlockFrames, 2}, start);
+        bool active = false;
+        const u64 activeDeadline = rinne::util::monoNowMs() + 3000;
+        while (rinne::util::monoNowMs() < activeDeadline)
         {
-            active = true;
-            break;
+            input.tick(rinne::util::monoNowMs());
+            if (input.state() == RendezvousState::kActive)
+            {
+                active = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        REQUIRE(active);
+
+        auto peer =
+            rig.spawn({"--role", "output", "--group", "4", "--abi", "2", "--seconds", "2"}, "abi-foreign-second");
+        REQUIRE(peer != nullptr);
+        const bool reached = peer->waitForLine("state abiMismatch", 5000);
+        INFO(peer->output());
+        REQUIRE(reached);
+
+        // 对方报不兼容，我们这边不受影响
+        for (int i = 0; i < 10; ++i)
+        {
+            input.tick(rinne::util::monoNowMs());
+            CHECK(input.state() == RendezvousState::kActive);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        int exitCode = -1;
+        REQUIRE(peer->wait(6000, exitCode));
+        INFO(peer->output());
+        CHECK(exitCode == 0);
+        const PeerResult result = parsePeerResult(peer->output());
+        REQUIRE(result.ok);
+        CHECK(result.state == "abiMismatch");
     }
-    REQUIRE(active);
-
-    auto peer = rig.spawn({"--role", "output", "--group", "4", "--abi", "2", "--seconds", "2"}, "abi-foreign-second");
-    REQUIRE(peer != nullptr);
-    const bool reached = peer->waitForLine("state abiMismatch", 5000);
-    INFO(peer->output());
-    REQUIRE(reached);
-
-    // 对方报不兼容，我们这边不受影响
-    for (int i = 0; i < 10; ++i)
-    {
-        input.tick(rinne::util::monoNowMs());
-        CHECK(input.state() == RendezvousState::kActive);
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-
-    int exitCode = -1;
-    REQUIRE(peer->wait(6000, exitCode));
-    INFO(peer->output());
-    CHECK(exitCode == 0);
-    const PeerResult result = parsePeerResult(peer->output());
-    REQUIRE(result.ok);
-    CHECK(result.state == "abiMismatch");
+    expectNoLeftovers(rig);
 }
