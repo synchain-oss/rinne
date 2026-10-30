@@ -182,6 +182,96 @@ run(1 "不认识的子命令" nonsense)
 run(1 "打不开文件" compare --a "${RUN_DIR}/nope.wav" --b "${sig}")
 run(0 "用法" --help)
 
+# ---- 长度差、弱信号门、data 声明长度、错位搜索进度（以下只新增用例） ----
+
+# run_without(<期望退出码> <输出里不许出现的正则> <参数...>)：退出码要对，且输出里不能有这段文字
+function(run_without expect_rc forbidden_text)
+  execute_process(COMMAND "${NULLTEST}" ${ARGN}
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    ENCODING UTF-8)
+  if(NOT rc EQUAL expect_rc)
+    message(FATAL_ERROR "期望退出码 ${expect_rc}，实际 ${rc}：rinne_nulltest ${ARGN}
+${out}${err}")
+  endif()
+  if("${out}${err}" MATCHES "${forbidden_text}")
+    message(FATAL_ERROR "输出里不该有 ${forbidden_text}：rinne_nulltest ${ARGN}
+${out}${err}")
+  endif()
+endfunction()
+
+# run_count(<期望退出码> <统计的文字> <期望出现次数> <参数...>)：退出码要对，且这段文字恰好出现这么多次
+function(run_count expect_rc needle expect_count)
+  execute_process(COMMAND "${NULLTEST}" ${ARGN}
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err
+    ENCODING UTF-8)
+  if(NOT rc EQUAL expect_rc)
+    message(FATAL_ERROR "期望退出码 ${expect_rc}，实际 ${rc}：rinne_nulltest ${ARGN}
+${out}${err}")
+  endif()
+  string(REGEX MATCHALL "${needle}" hits "${out}${err}")
+  list(LENGTH hits n)
+  if(NOT n EQUAL expect_count)
+    message(FATAL_ERROR "${needle} 出现 ${n} 次，期望 ${expect_count} 次：rinne_nulltest ${ARGN}
+${out}${err}")
+  endif()
+endfunction()
+
+fx(noise-a "${RUN_DIR}/len-a.wav")
+fx(len-short "${RUN_DIR}/len-short.wav")
+fx(len-short-off "${RUN_DIR}/len-short-off.wav")
+fx(tail-loud "${RUN_DIR}/tail-loud.wav")
+fx(tail-quiet "${RUN_DIR}/tail-quiet.wav")
+fx(weak-66 "${RUN_DIR}/weak-66.wav")
+fx(data-over "${RUN_DIR}/data-over.wav")
+fx(data-stream "${RUN_DIR}/data-stream.wav")
+fx(lag-a "${RUN_DIR}/lag-a.wav")
+fx(lag-b "${RUN_DIR}/lag-b.wav")
+
+# 长度不同（4096 帧对 3000 帧）：默认判红，写明期望与实际的帧数和 --allow-length-diff；不能再说「较短的一份在结尾按静音算」
+run(2 "两份长度不同，导出范围不一致（期望 B 有 4096 帧，实际 3000 帧.*--allow-length-diff"
+    compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-short.wav")
+run_without(2 "按静音算" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-short.wav")
+# --allow-length-diff：重叠的部分一致就 PASS，并报告没参与比较的尾部；不再报「导出范围不一致」
+run(0 "A 第 3000 到 4095 帧（1096 帧）没有参与比较.*结果：PASS.*仅比较重叠部分"
+    compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-short.wav" --allow-length-diff)
+run_without(0 "导出范围不一致" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-short.wav" --allow-length-diff)
+# 放过长度差不等于放过重叠部分里的差异
+run(2 "高于门限" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-short-off.wav" --allow-length-diff)
+# 没参与比较的尾部要报峰值：0.9 即 -0.92 dBFS
+run(0 "A 第 3000 到 4095 帧（1096 帧）没有参与比较，峰值 -0.92 dBFS"
+    compare --a "${RUN_DIR}/tail-loud.wav" --b "${RUN_DIR}/tail-quiet.wav" --allow-length-diff)
+
+# 弱信号门：峰值约 -66 dBFS 的一份对自己，缺省门限 -60 判「信号太弱」并提示 --min-signal-db；放宽到 -80 或 -70 就 PASS；显式写 -60 与不写一样
+run(2 "信号太弱，无法判定.*--min-signal-db" compare --a "${RUN_DIR}/weak-66.wav" --b "${RUN_DIR}/weak-66.wav")
+run(0 "结果：PASS" compare --a "${RUN_DIR}/weak-66.wav" --b "${RUN_DIR}/weak-66.wav" --min-signal-db -80)
+run(0 "结果：PASS" compare --a "${RUN_DIR}/weak-66.wav" --b "${RUN_DIR}/weak-66.wav" --min-signal-db -70)
+run(2 "信号太弱，无法判定" compare --a "${RUN_DIR}/weak-66.wav" --b "${RUN_DIR}/weak-66.wav" --min-signal-db -60)
+# --min-signal-db 的取值：大于 0、低于 -200 都是用法错误并写明范围、缺省与改法；不是数字也是
+run(1 "-200 到 0 dBFS.*缺省 -60.*-90" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-a.wav" --min-signal-db 3)
+run(1 "-200 到 0 dBFS" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-a.wav" --min-signal-db -250)
+run(1 "需要一个数字" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/len-a.wav" --min-signal-db abc)
+
+# data 块声明的长度大于文件里实际有的：走显式分支，警告并 FAIL，写明声明与实际的字节数；
+# 0xFFFFFFFF 的流式占位不是截短：PASS 且不报警
+# （警告写在 stderr，结果写在 stdout，run 把两者拼起来，所以每段文字单独核对）
+run(2 "警告：" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/data-over.wav")
+run(2 "声明 65536 字节，文件里只有 32768 字节：录音被截短了" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/data-over.wav")
+run(2 "结果：FAIL" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/data-over.wav")
+run(0 "逐位相同：是.*结果：PASS" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/data-stream.wav")
+run_without(0 "警告" compare --a "${RUN_DIR}/len-a.wav" --b "${RUN_DIR}/data-stream.wav")
+
+# 找错位的进度：默认 ±4800（9601 个 lag）每 10% 在 stderr 报一行，共 10 行，找到 lag 3；±500 的小范围不报
+run_count(0 "搜索对齐偏移：" 10 compare --a "${RUN_DIR}/lag-a.wav" --b "${RUN_DIR}/lag-b.wav" --allow-lag)
+# 进度写在 stderr、结果写在 stdout，run 把两者拼起来（stdout 在前），所以两段文字分开核对
+run(0 "搜索对齐偏移：10%（共 9601 个 lag）.*搜索对齐偏移：100%（共 9601 个 lag）"
+    compare --a "${RUN_DIR}/lag-a.wav" --b "${RUN_DIR}/lag-b.wav" --allow-lag)
+run(0 "对齐偏移（lag）：3 样本" compare --a "${RUN_DIR}/lag-a.wav" --b "${RUN_DIR}/lag-b.wav" --allow-lag)
+run_without(0 "搜索对齐偏移：" compare --a "${RUN_DIR}/lag-a.wav" --b "${RUN_DIR}/lag-b.wav" --allow-lag --max-lag 500)
+run(0 "lag）：3 样本" compare --a "${RUN_DIR}/lag-a.wav" --b "${RUN_DIR}/lag-b.wav" --allow-lag --max-lag 500)
+
+# 帮助里列出两个新选项
+run(0 "--min-signal-db.*--allow-length-diff" --help)
+
 # 用例全部通过：只删本进程这次新建的 RUN_DIR。删之前断言它的真实路径确实是 WORK_DIR 真实路径
 # 下带 run- 前缀的子目录（用的就是上面 MAKE_DIRECTORY 新建的那个变量，不重算）；断言不过就
 # 报错、不删，失败的现场留着便于排查。

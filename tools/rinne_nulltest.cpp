@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Derived from synchain-oss/scvb; see upstream/nulltest.json
 //
-// rinne_nulltest：WAV 对拍与回声间隔测量的命令行工具。四个子命令：
+// rinne_nulltest：WAV 对拍与回声间隔测量的命令行工具。三个子命令：
 //   make-signal  生成测试信号（冲激、冲激加 200 ms 粉噪突发、等间隔冲激串），同参数逐字节一致
 //   compare      两份 WAV 对比：是否逐位相同、对齐偏移（lag）、残差 dBFS，可单列开头一段
 //   echo         量回声间隔：在录音里找冲激回声，判相邻间隔是否都等于期望的 D，直接给 PASS / FAIL
-//   self-test    进程内自测：在临时目录里造 WAV，直接调上面三个子命令，核对输出与退出码（ctest 里跑）
 // 零外部依赖：WAV 读写、互相关与统计都在本文件里，不链接 JUCE 和 rinne_core。
 // 退出码：0 通过，2 判定未通过（FAIL），1 参数或文件错误。
 
@@ -16,14 +15,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <map>
-#include <random>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1255,315 +1251,7 @@ void printHelp(std::ostream& os)
           "    --min-peak-db <dB>    比最大峰值低多少以内的峰都算回声，默认 -20\n"
           "    --tol-samples <N>     允许的偏差，默认 0（必须完全相等）\n"
           "\n"
-          "self-test     进程内自测（ctest 里跑）：在临时目录造 WAV，直接调上面三个子命令，核对输出与退出码\n"
-          "    rinne_nulltest self-test\n"
-          "\n"
           "结果最后一行附近会写 PASS 或 FAIL。退出码：0 通过，2 未通过，1 是参数或文件有问题。\n";
-}
-
-// ---------------------------------------------------------------- 自测
-
-// 把 std::cout、std::cerr 临时接到字符串里，析构时还原
-class OutputCapture
-{
-public:
-    OutputCapture() : oldOut_(std::cout.rdbuf(out_.rdbuf())), oldErr_(std::cerr.rdbuf(err_.rdbuf())) {}
-    OutputCapture(const OutputCapture&) = delete;
-    OutputCapture& operator=(const OutputCapture&) = delete;
-    ~OutputCapture()
-    {
-        std::cout.rdbuf(oldOut_);
-        std::cerr.rdbuf(oldErr_);
-    }
-
-    std::string text() const { return out_.str() + err_.str(); }
-
-private:
-    std::ostringstream out_;
-    std::ostringstream err_;
-    std::streambuf* oldOut_;
-    std::streambuf* oldErr_;
-};
-
-struct Outcome
-{
-    int rc = -1;
-    std::string text; // stdout 与 stderr 合起来
-};
-
-// 在进程内跑一个子命令，退出码与输出都拿回来。args[0] 是子命令名
-Outcome invoke(const std::vector<std::string>& args)
-{
-    std::vector<std::string> full{"rinne_nulltest"};
-    full.insert(full.end(), args.begin(), args.end());
-    std::vector<char*> argv;
-    for (std::string& s : full)
-        argv.push_back(s.data());
-    argv.push_back(nullptr);
-    const int argc = static_cast<int>(full.size());
-
-    Outcome o;
-    OutputCapture capture;
-    if (args[0] == "compare")
-        o.rc = runCompare(argc, argv.data());
-    else if (args[0] == "echo")
-        o.rc = runEcho(argc, argv.data());
-    else if (args[0] == "make-signal")
-        o.rc = runMakeSignal(argc, argv.data());
-    o.text = capture.text();
-    return o;
-}
-
-// 自测的临时目录：只放这次新建的文件，结束时逐个删掉自己建的文件，再删这个（空的）目录；不递归删任何东西
-class SelfTestDir
-{
-public:
-    SelfTestDir()
-    {
-        std::error_code ec;
-        const std::filesystem::path base = std::filesystem::temp_directory_path(ec);
-        if (ec)
-            return;
-        std::random_device device;
-        char suffix[32];
-        std::snprintf(suffix, sizeof suffix, "%08x%08x", static_cast<unsigned>(device()),
-                      static_cast<unsigned>(device()));
-        const std::filesystem::path dir = base / (std::string("rinne_nulltest_selftest_") + suffix);
-        if (std::filesystem::create_directory(dir, ec) && !ec)
-            dir_ = dir;
-    }
-    SelfTestDir(const SelfTestDir&) = delete;
-    SelfTestDir& operator=(const SelfTestDir&) = delete;
-    ~SelfTestDir()
-    {
-        std::error_code ec;
-        for (const std::filesystem::path& f : files_)
-            std::filesystem::remove(f, ec);
-        if (!dir_.empty())
-            std::filesystem::remove(dir_, ec); // 只删空目录
-    }
-
-    bool ok() const { return !dir_.empty(); }
-
-    // 登记并返回一个本目录下的文件路径
-    std::string file(const std::string& name)
-    {
-        const std::filesystem::path p = dir_ / name;
-        files_.push_back(p);
-        return p.string();
-    }
-
-private:
-    std::filesystem::path dir_;
-    std::vector<std::filesystem::path> files_;
-};
-
-std::vector<float> selfTestNoise(size_t frames, size_t channels, double amplitude, uint64_t seed)
-{
-    Rng rng(seed);
-    std::vector<float> v(frames * channels);
-    for (float& s : v)
-        s = static_cast<float>(amplitude * rng.next());
-    return v;
-}
-
-bool writeF32(const std::string& path, const std::vector<float>& samples, uint16_t channels = 2)
-{
-    std::string err;
-    return writeWav(path, 48000, channels, samples, 3, 32, std::numeric_limits<size_t>::max(), err);
-}
-
-// 改写 44 字节标准头里 data 块的长度字段（偏移 40），其余字节不动
-bool patchDataSize(const std::string& path, uint32_t declared)
-{
-    std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
-    if (!f)
-        return false;
-    std::vector<uint8_t> v;
-    putU32(v, declared);
-    f.seekp(40);
-    f.write(reinterpret_cast<const char*>(v.data()), static_cast<std::streamsize>(v.size()));
-    f.flush();
-    return static_cast<bool>(f);
-}
-
-size_t countOf(const std::string& text, const std::string& needle)
-{
-    size_t n = 0;
-    for (size_t pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + needle.size()))
-        ++n;
-    return n;
-}
-
-bool has(const std::string& text, const std::string& needle)
-{
-    return text.find(needle) != std::string::npos;
-}
-
-// 自测：不碰仓库里的任何文件，在临时目录里造 WAV，直接调 compare 的实现。ctest 里的 rinne_nulltest_inproc_selftest 跑它
-int runSelfTest()
-{
-    SelfTestDir dir;
-    if (!dir.ok())
-    {
-        std::cerr << "出错：建不出临时目录，自测没法进行\n";
-        return kExitError;
-    }
-    int failed = 0;
-    int total = 0;
-    const auto expect = [&](const char* label, bool ok, const Outcome& o) {
-        ++total;
-        if (ok)
-            return;
-        ++failed;
-        std::cerr << "FAIL  " << label << "（退出码 " << o.rc << "）\n" << o.text << "\n";
-    };
-
-    const size_t kFrames = 4096;
-    const size_t kShort = 3000;
-    const std::vector<float> body = selfTestNoise(kFrames, 2, 0.5, 1);
-    const std::vector<float> body3000(body.begin(), body.begin() + static_cast<std::ptrdiff_t>(kShort * 2));
-    std::vector<float> bodyOff = body3000; // 重叠部分整体加 0.05（约 -26 dBFS），远高于默认的 -120 dBFS 门限
-    for (float& s : bodyOff)
-        s += 0.05f;
-    // 尾部有大信号（峰值恰好 0.9）的一份，和它去掉尾部的一份：被忽略的尾部峰值要报出来
-    std::vector<float> loudTail = selfTestNoise(kFrames, 2, 0.1, 2);
-    for (size_t i = kShort * 2; i < loudTail.size(); ++i)
-        loudTail[i] *= 2.0f;
-    loudTail[3500 * 2] = 0.9f;
-    const std::vector<float> quietHead(loudTail.begin(), loudTail.begin() + static_cast<std::ptrdiff_t>(kShort * 2));
-    const std::vector<float> weak = selfTestNoise(2000, 2, 5e-4, 3); // 峰值约 -66 dBFS
-    const std::vector<float> lagBody = selfTestNoise(2048, 2, 0.5, 4);
-    std::vector<float> lagged(6, 0.0f); // 前面补 3 帧静音
-    lagged.insert(lagged.end(), lagBody.begin(), lagBody.end());
-
-    const std::string a = dir.file("a.wav");
-    const std::string aShort = dir.file("a-short.wav");
-    const std::string aOff = dir.file("a-off.wav");
-    const std::string tailA = dir.file("tail-a.wav");
-    const std::string tailB = dir.file("tail-b.wav");
-    const std::string weakA = dir.file("weak.wav");
-    const std::string cut = dir.file("cut.wav");
-    const std::string streamed = dir.file("streamed.wav");
-    const std::string lagA = dir.file("lag-a.wav");
-    const std::string lagB = dir.file("lag-b.wav");
-    const bool made = writeF32(a, body) && writeF32(aShort, body3000) && writeF32(aOff, bodyOff) &&
-                      writeF32(tailA, loudTail) && writeF32(tailB, quietHead) && writeF32(weakA, weak) &&
-                      writeF32(cut, body) && patchDataSize(cut, static_cast<uint32_t>(body.size() * 4 * 2)) &&
-                      writeF32(streamed, body) && patchDataSize(streamed, 0xFFFFFFFFu) && writeF32(lagA, lagBody) &&
-                      writeF32(lagB, lagged);
-    if (!made)
-    {
-        std::cerr << "出错：自测的 WAV 写不出来\n";
-        return kExitError;
-    }
-
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", a});
-        expect("同一份文件对拍：逐位相同、PASS", o.rc == 0 && has(o.text, "逐位相同：是") && has(o.text, "结果：PASS"),
-               o);
-    }
-
-    // 长度不同：默认判红，写明期望与实际的帧数；已经删掉的自相矛盾的提示不能回来
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", aShort});
-        expect("长度不同默认 FAIL，且打印期望与实际帧数",
-               o.rc == 2 && has(o.text, "两份长度不同，导出范围不一致") && has(o.text, "期望 B 有 4096 帧") &&
-                   has(o.text, "实际 3000 帧") && has(o.text, "--allow-length-diff"),
-               o);
-        expect("长度不同时不再说「较短的一份在结尾按静音算」", !has(o.text, "按静音算"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", aShort, "--allow-length-diff"});
-        expect("--allow-length-diff：重叠部分一致就 PASS，并报告没参与比较的尾部",
-               o.rc == 0 && has(o.text, "结果：PASS") && has(o.text, "仅比较重叠部分") &&
-                   has(o.text, "A 第 3000 到 4095 帧（1096 帧）没有参与比较") && !has(o.text, "导出范围不一致"),
-               o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", aOff, "--allow-length-diff"});
-        expect("--allow-length-diff 不放过重叠部分里的差异", o.rc == 2 && has(o.text, "高于门限"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", tailA, "--b", tailB, "--allow-length-diff"});
-        expect("--allow-length-diff 报告被忽略尾部的峰值（0.9 = -0.92 dBFS）",
-               o.rc == 0 && has(o.text, "A 第 3000 到 4095 帧（1096 帧）没有参与比较，峰值 -0.92 dBFS"), o);
-    }
-
-    // 弱信号门
-    {
-        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA});
-        expect("弱信号默认 FAIL（缺省门限 -60 dBFS），并提示可用 --min-signal-db 调整",
-               o.rc == 2 && has(o.text, "信号太弱，无法判定") && has(o.text, "--min-signal-db"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA, "--min-signal-db", "-80"});
-        expect("--min-signal-db -80 放宽后同一份弱信号 PASS", o.rc == 0 && has(o.text, "结果：PASS"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA, "--min-signal-db", "-70"});
-        expect("--min-signal-db -70 仍低于峰值（约 -66 dBFS），PASS", o.rc == 0 && has(o.text, "结果：PASS"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", weakA, "--b", weakA, "--min-signal-db", "-60"});
-        expect("显式写缺省值 -60 与不写一样判弱", o.rc == 2 && has(o.text, "信号太弱，无法判定"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", a, "--min-signal-db", "3"});
-        expect("--min-signal-db 大于 0 是用法错误，写明范围、缺省与改法",
-               o.rc == 1 && has(o.text, "-200 到 0 dBFS") && has(o.text, "缺省 -60") && has(o.text, "-90"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", a, "--min-signal-db", "-250"});
-        expect("--min-signal-db 低于 -200 是用法错误", o.rc == 1 && has(o.text, "-200 到 0 dBFS"), o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", a, "--min-signal-db", "abc"});
-        expect("--min-signal-db 不是数字是用法错误", o.rc == 1 && has(o.text, "需要一个数字"), o);
-    }
-
-    // data 块：声明比实际长走显式分支（警告 + FAIL，写明两个数）；0xFFFFFFFF 的流式占位照常 PASS 且不报警
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", cut});
-        expect("data 声明长度大于实际：警告并 FAIL，写明声明与实际字节数",
-               o.rc == 2 && has(o.text, "警告") && has(o.text, "声明 65536 字节，文件里只有 32768 字节") &&
-                   has(o.text, "录音被截短") && has(o.text, "结果：FAIL"),
-               o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", a, "--b", streamed});
-        expect("data 长度是 0xFFFFFFFF 的流式占位：PASS，不报警",
-               o.rc == 0 && has(o.text, "逐位相同：是") && has(o.text, "结果：PASS") && !has(o.text, "警告"), o);
-    }
-
-    // --max-lag 的进度：搜索范围大时每 10% 一行，小范围不报
-    {
-        const Outcome o = invoke({"compare", "--a", lagA, "--b", lagB, "--allow-lag"});
-        expect("默认的 ±4800 搜索每 10% 报一行进度，共 10 行，找到 lag 3",
-               o.rc == 0 && countOf(o.text, "搜索对齐偏移：") == 10 &&
-                   has(o.text, "搜索对齐偏移：10%（共 9601 个 lag）") &&
-                   has(o.text, "搜索对齐偏移：100%（共 9601 个 lag）") && has(o.text, "对齐偏移（lag）：3 样本"),
-               o);
-    }
-    {
-        const Outcome o = invoke({"compare", "--a", lagA, "--b", lagB, "--allow-lag", "--max-lag", "500"});
-        expect("±500（1001 个 lag）的小范围搜索不报进度",
-               o.rc == 0 && !has(o.text, "搜索对齐偏移：") && has(o.text, "lag）：3 样本"), o);
-    }
-
-    {
-        std::ostringstream help;
-        printHelp(help);
-        Outcome o;
-        o.rc = 0;
-        o.text = help.str();
-        expect("帮助里写了 --min-signal-db、--allow-length-diff 和 self-test",
-               has(o.text, "--min-signal-db") && has(o.text, "--allow-length-diff") && has(o.text, "self-test"), o);
-    }
-
-    std::cout << "rinne_nulltest 自测：" << (total - failed) << " / " << total << " 项通过"
-              << (failed == 0 ? "，全部通过" : "") << "\n";
-    return failed == 0 ? kExitPass : kExitFail;
 }
 
 } // namespace
@@ -1600,8 +1288,6 @@ int main(int argc, char** argv)
             return runCompare(argc, argv);
         if (cmd == "echo")
             return runEcho(argc, argv);
-        if (cmd == "self-test")
-            return runSelfTest();
     }
     catch (const std::exception&)
     {
@@ -1609,6 +1295,6 @@ int main(int argc, char** argv)
             << "出错：运行中途失败，多半是内存不够（文件太大，或参数把信号开得太长）。请换小一点的文件或参数再试\n";
         return kExitError;
     }
-    std::cerr << "出错：不认识的子命令 " << cmd << "（可用：make-signal、compare、echo、self-test；--help 看用法）\n";
+    std::cerr << "出错：不认识的子命令 " << cmd << "（可用：make-signal、compare、echo；--help 看用法）\n";
     return kExitError;
 }
