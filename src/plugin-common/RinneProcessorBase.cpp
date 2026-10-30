@@ -5,11 +5,25 @@
 #include <limits>
 #include <utility>
 
+#include "PlatformLog.h"
 #include "ProbeHost.h"
+#include "UiDefaultsStore.h"
+#include "engine/EngineParams.h"
 #include "util/RinneVersion.h"
 
 namespace rinne
 {
+
+// 外壳的 TailMode、state 里的 tail_mode、引擎的 TailMode 三份数值必须逐个相同（state 是线格式，只能追加）
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Auto) == static_cast<int>(state::TailMode::Auto));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Infinite) == static_cast<int>(state::TailMode::Infinite));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::ThirtySeconds) ==
+              static_cast<int>(state::TailMode::ThirtySeconds));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Auto) == static_cast<int>(engine::TailMode::kAuto));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::Infinite) ==
+              static_cast<int>(engine::TailMode::kInfinite));
+static_assert(static_cast<int>(RinneProcessorBase::TailMode::ThirtySeconds) ==
+              static_cast<int>(engine::TailMode::kThirtySeconds));
 
 RinneProcessorBase::RinneProcessorBase()
     : juce::AudioProcessor(BusesProperties()
@@ -20,6 +34,9 @@ RinneProcessorBase::RinneProcessorBase()
     setLatencySamples(0);
 }
 
+// 子类的成员（参数层、胶水）先于这里析构；InstanceHost 的定时器回调只碰它自己的成员，不碰子类
+RinneProcessorBase::~RinneProcessorBase() = default;
+
 bool RinneProcessorBase::detectValidationHost()
 {
     const juce::PluginHostType host;
@@ -28,46 +45,27 @@ bool RinneProcessorBase::detectValidationHost()
 
 void RinneProcessorBase::prepareToPlay(double sampleRate, int maximumExpectedSamplesPerBlock)
 {
-    if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->prepare(sampleRate, maximumExpectedSamplesPerBlock);
-    }
-    else
-    {
-        juce::ignoreUnused(sampleRate, maximumExpectedSamplesPerBlock);
-    }
+    installDiagLogOnFirstPrepare();
+    host_->prepare(sampleRate, maximumExpectedSamplesPerBlock);
 }
 
 void RinneProcessorBase::releaseResources()
 {
-    if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->release();
-    }
+    host_->release();
 }
 
 void RinneProcessorBase::reset()
 {
-    if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->reset();
-    }
+    host_->reset();
 }
 
+// JUCE 规定只在消息线程调。正式构建写进本端的标签（InstanceHost），探针构建照旧转给探针
 void RinneProcessorBase::updateTrackProperties(const TrackProperties& properties)
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->trackProperties(properties);
-    }
+        static_cast<probe::ProbeHost&>(*host_).trackProperties(properties);
     else
-    {
-        juce::ignoreUnused(properties);
-    }
+        host_->setTrackProperties(properties);
 }
 
 bool RinneProcessorBase::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -108,31 +106,21 @@ const juce::String RinneProcessorBase::getName() const
     return JucePlugin_Name;
 }
 
-// 外壳阶段没有任何状态要存；state 容器接上之前，存出空块、读入时忽略（探针构建里存取的是探针 state）
+// 探针构建存取探针 state。正式构建里两个子类经各自的胶水重写，这两个只在子类没有接线时兜底：存出空块、读入时忽略
 void RinneProcessorBase::getStateInformation(juce::MemoryBlock& destData)
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-        {
-            probe_->getState(destData);
-            return;
-        }
-    }
-    destData.reset();
+        static_cast<probe::ProbeHost&>(*host_).getState(destData);
+    else
+        destData.reset();
 }
 
 void RinneProcessorBase::setStateInformation(const void* data, int sizeInBytes)
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->setState(data, sizeInBytes);
-    }
+        static_cast<probe::ProbeHost&>(*host_).setState(data, sizeInBytes);
     else
-    {
         juce::ignoreUnused(data, sizeInBytes);
-    }
 }
 
 std::int64_t RinneProcessorBase::getProcessedSamples() const noexcept
@@ -149,50 +137,149 @@ bool RinneProcessorBase::beginBlock(int numSamples) noexcept
     return true;
 }
 
-void RinneProcessorBase::attachProbe(Side side)
+void RinneProcessorBase::attachHost(Side side, const InstanceHostConfig& config)
 {
+    InstanceHostConfig wiring = config;
+    wiring.role = side == Side::Input ? ipc::Role::kInput : ipc::Role::kOutput;
+    wiring.validationHost = validationHost_;
+    wiring.pairing = !build::kProbeBuild;
+    role_ = wiring.role;
+    installLog_ = config.installLog;
+    copyToClipboard_ = config.copyToClipboard;
     if constexpr (build::kProbeBuild)
     {
-        probe::ProbeHostConfig config;
-        config.role = side == Side::Input ? ipc::Role::kInput : ipc::Role::kOutput;
-        config.validationHost = validationHost_;
-        probe_.reset(new probe::ProbeHost(*this, std::move(config)));
+        probe::ProbeHostConfig probeConfig;
+        static_cast<InstanceHostConfig&>(probeConfig) = wiring;
+        host_.reset(new probe::ProbeHost(*this, std::move(probeConfig)));
     }
     else
     {
-        juce::ignoreUnused(side);
+        host_ = std::make_unique<InstanceHost>(*this, wiring);
     }
+}
+
+const char* RinneProcessorBase::roleName() const noexcept
+{
+    return role_ == ipc::Role::kInput ? "input" : "output";
+}
+
+// 每个插件二进制只装一次：已经装过（同一宿主里的另一个实例先装了）时 install 返回假，什么都不用做。
+// 装日志会把日志的出口放进 IpcDiag 唯一的槽、挤掉 InstanceHost 的转发出口：真的装上了就把转发出口放回最上面，
+// 它再转发给日志的出口，链不断
+void RinneProcessorBase::installDiagLog()
+{
+    const bool installed = installLog_ != nullptr ? installLog_(roleName()) : platformlog::install(roleName());
+    if (installed)
+        InstanceHost::installIpcDiagSink();
+}
+
+// prepare 可能在非消息线程上：读一次设置文件（一次文件 I/O 与有上限的进程间锁）可以接受，不进任何音频回调。
+// 每个实例只在第一次 prepare 看开关；本插件二进制已经装过日志（别的实例、或开窗时装的）就连设置也不读
+void RinneProcessorBase::installDiagLogOnFirstPrepare()
+{
+    if constexpr (!build::kProbeBuild)
+    {
+        if (diagLogChecked_.exchange(true, std::memory_order_relaxed) || validationHost_ || platformlog::isInstalled())
+            return;
+        if (uidefaults::diagLogEnabled())
+            installDiagLog();
+    }
+}
+
+void RinneProcessorBase::unwirePairing()
+{
+    host_->setSmartGroupSink({});
+}
+
+pairing::PairModel RinneProcessorBase::pairState() const
+{
+    return host_->pairState();
+}
+
+// 只写本机的全局设置，不进工程、不定型。探针构建有自己的日志：只写设置，不装文件日志
+void RinneProcessorBase::setDiagLogEnabled(bool enabled)
+{
+    uidefaults::setDiagLogEnabled(enabled);
+    if constexpr (!build::kProbeBuild)
+    {
+        if (enabled && !validationHost_)
+            installDiagLog();
+    }
+}
+
+std::string RinneProcessorBase::diagnosticsWith(const diag::DiagState& stateSection) const
+{
+    diag::DiagInputs in;
+    host_->fillDiagnostics(in);
+    in.state = stateSection;
+    return diag::buildDiagReport(in);
+}
+
+void RinneProcessorBase::copyText(const std::string& text) const
+{
+    const juce::String copied = juce::String::fromUTF8(text.data(), static_cast<int>(text.size()));
+    if (copyToClipboard_ != nullptr)
+        copyToClipboard_(copied);
+    else
+        juce::SystemClipboard::copyTextToClipboard(copied);
+}
+
+diag::DiagLoadStatus RinneProcessorBase::loadStatusOf(const std::optional<state::StateLoadStatus>& status) noexcept
+{
+    if (!status.has_value())
+        return diag::DiagLoadStatus::kNone;
+    switch (*status)
+    {
+    case state::StateLoadStatus::Ok:
+        return diag::DiagLoadStatus::kOk;
+    case state::StateLoadStatus::Migrated:
+        return diag::DiagLoadStatus::kMigrated;
+    case state::StateLoadStatus::Empty:
+        return diag::DiagLoadStatus::kEmpty;
+    case state::StateLoadStatus::IgnoredProbe:
+        return diag::DiagLoadStatus::kIgnoredProbe;
+    case state::StateLoadStatus::RejectedNewer:
+        return diag::DiagLoadStatus::kRejectedNewer;
+    case state::StateLoadStatus::Corrupt:
+        return diag::DiagLoadStatus::kCorrupt;
+    }
+    return diag::DiagLoadStatus::kNone;
+}
+
+// 组号已定 = 非 0，或来源是用户选的（用户明确离组也算表过态）：已定的不再做智能默认
+void RinneProcessorBase::restoreConfigs(const state::Configs& configs)
+{
+    const bool decided = configs.group != 0 || configs.groupOrigin == state::GroupOrigin::User;
+    host_->restoreGroup(configs.group, decided);
+    switch (configs.tailMode)
+    {
+    case state::TailMode::Infinite:
+        setTailMode(TailMode::Infinite);
+        return;
+    case state::TailMode::ThirtySeconds:
+        setTailMode(TailMode::ThirtySeconds);
+        return;
+    case state::TailMode::Auto:
+        break;
+    }
+    // 解码已把越界值换成默认值；这里再兜一次，不认识的一律按自动
+    setTailMode(TailMode::Auto);
 }
 
 void RinneProcessorBase::processProbe(juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            probe_->process(buffer, bypassed);
-    }
+        static_cast<probe::ProbeHost&>(*host_).process(buffer, bypassed);
     else
-    {
         juce::ignoreUnused(buffer, bypassed);
-    }
 }
 
 juce::AudioProcessorEditor* RinneProcessorBase::createProbeEditor()
 {
     if constexpr (build::kProbeBuild)
-    {
-        if (probe_ != nullptr)
-            return probe_->createEditor();
-    }
-    return nullptr;
-}
-
-void RinneProcessorBase::destroyProbe(probe::ProbeHost* host) noexcept
-{
-    if constexpr (build::kProbeBuild)
-        delete host;
+        return static_cast<probe::ProbeHost&>(*host_).createEditor();
     else
-        juce::ignoreUnused(host);
+        return nullptr;
 }
 
 } // namespace rinne

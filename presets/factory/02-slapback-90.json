@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-slapback-90",
+  "name": {
+    "zh": "Slapback 90 ms",
+    "en": "Slapback 90 ms",
+    "fr": "Slapback 90 ms"
+  },
+  "params": {
+    "feedback": 50,
+    "mix": 25,
+    "delay_mode": 0,
+    "delay_ms": 90,
+    "delay_note": 10,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-dub-quarter-dotted",
+  "name": {
+    "zh": "Dub 1/4D",
+    "en": "Dub 1/4D",
+    "fr": "Dub 1/4D"
+  },
+  "params": {
+    "feedback": 65,
+    "mix": 50,
+    "delay_mode": 1,
+    "delay_ms": 100,
+    "delay_note": 12,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}

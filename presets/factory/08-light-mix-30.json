@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "f-light-mix-30",
+  "name": {
+    "zh": "Light Mix 30 %",
+    "en": "Light Mix 30 %",
+    "fr": "Mélange léger 30 %"
+  },
+  "params": {
+    "feedback": 75,
+    "mix": 30,
+    "delay_mode": 0,
+    "delay_ms": 100,
+    "delay_note": 10,
+    "low_cut": 20,
+    "high_cut": 20000,
+    "polarity": 0
+  }
+}

@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <utility>
 
-// 品红探针。开成 1 后 HostWebView::paint 铺品红而不是占位渐变：真机上一眼就能分出
+// 品红探针。开成 1 后两层 paint 的占位（paintPlaceholder）都铺品红而不是占位：真机或抓屏工具上一眼就能分出
 // 「白闪没了，是因为我们这层 paint 真的在跑」还是「WebView2 这次恰好起得快」。
 // 默认关，只经编译定义临时打开；交付构建里它必须是 0
 #ifndef RINNE_PROBE_MAGENTA
@@ -107,13 +107,15 @@ class WebViewHost::HostWebView final : public juce::WebBrowserComponent
 public:
     HostWebView(WebViewHost& owner, Options options) : juce::WebBrowserComponent(std::move(options)), owner_(owner) {}
 
-    // 开窗白闪的真正那一层。
+    // 开窗白闪的那一层（WebView 落在可视区里时）。
     //
     // 本组件在构造里声明不透明，又铺满父组件；JUCE 画父组件前会把不透明子组件的矩形从裁剪区里剔掉，
     // 所以宿主组件的 paint 在这一段净效果为 0。控制器建好之前真正在画的是 JUCE 自己：
     // 基类的 paint 转给后端的兜底绘制，WebView2 后端那份每帧无条件把整块填成白色，白的来源就是它。
+    // WebView2 上遮挡闸从加载尝试一开头就把本组件挪出可视区（见 WebViewRevealGate.h），这一层在开窗路上不再上屏；
+    // 它仍管着闸门不启用的平台（系统 WebKit）与将来闸门被关掉的情形。
     //
-    // 修法：先调基类，再把自己的占位渐变盖上去。两次填充落在同一个 Graphics、同一次 paint 里，先白后占位，
+    // 修法：先调基类，再把自己的占位盖上去。两次填充落在同一个 Graphics、同一次 paint 里，先白后占位，
     // 中间不上屏（两条渲染路都是整帧画完才出），上屏的只有后盖的那一层。
     //
     // 为什么不是「覆写且不调基类」：基类的兜底绘制尾部还有一句「控制器没建起来就继续检查窗口关联」，
@@ -134,22 +136,25 @@ public:
     //       外链就绪之前文档整体不进正常绘制路径。所以这条内联声明确定兜住的只有一种情形：外链取不到或加载失败，
     //       阻塞随之解除，画出来的是内联背景而不是白；
     //   WebView2 自己的宿主窗口在首帧合成之前由运行时画，JUCE 不暴露它。这一段是否还看得见白，只有真机能判。
-    // 光换颜色盖不住最后一段，所以主修法是不让 WebView 上屏：导航开始到页面首帧已绘之间，
-    // 把它挪出可视区，那块地方由宿主组件的 paint 铺占位渐变。判定见 WebViewRevealGate.h。
+    // 光换颜色盖不住最后一段，所以主修法是不让 WebView 上屏：加载尝试开始（发起导航之前）到页面首帧已绘之间，
+    // 把它挪出可视区，那块地方由宿主组件的 paint 铺占位。判定见 WebViewRevealGate.h。
     void paint(juce::Graphics& g) override
     {
         // 基类的兜底绘制：白底加控制器重试泵。这一句必须在前，它画的白由下面整块盖掉，而泵要的是每帧都被调到
         juce::WebBrowserComponent::paint(g);
 
-        // 盖上去的是占位渐变：与成品外壳同一组色标、同一角度的线性渐变，开窗那几帧「占位到内容」不再有明暗跳变。
-        // 坐标系是本组件的本地边界，与外壳铺满设计盒时的几何同形
-#if RINNE_PROBE_MAGENTA
-        g.fillAll(juce::Colours::magenta);
-#else
-        const auto area = getLocalBounds().toFloat();
-        g.setFillType(juce::FillType(shellBackdropGradient(area)));
-        g.fillRect(area);
-#endif
+        // 盖上去的是与宿主组件同一份占位（外圈色加与外壳同几何的圆角渐变）。本组件与宿主组件同尺寸，坐标系同形
+        owner_.paintPlaceholder(g, getLocalBounds().toFloat());
+    }
+
+    // 挡住期间（本组件在可视区之外，JUCE 不再画它）代驱动上面那一句基类绘制：画进一张临时小图，屏上什么都不变，
+    // 基类尾部那句「控制器没建起来就继续检查窗口关联」照样每个定时 tick 被调到一次。
+    // 调的是同一个基类函数，不是复刻件，理由见上。小图用软件渲染，免得每个 tick 建一次 GPU 绘制上下文；
+    // 小图只建一次，挡住期间每个 tick 复用
+    void pumpControllerCreation()
+    {
+        juce::Graphics g(pumpScratch_);
+        juce::WebBrowserComponent::paint(g);
     }
 
     // 导航闸：页面带着原生桥（会写磁盘的 setLang、setUiScale、commitUiScale），一旦被带到外站，外站的脚本就够得到桥。
@@ -207,6 +212,8 @@ public:
 
 private:
     WebViewHost& owner_;
+    // pumpControllerCreation 画进去的 1×1 软件图：只建一次，挡住期间每个 tick 复用
+    juce::Image pumpScratch_{juce::Image::RGB, 1, 1, false, juce::SoftwareImageType()};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HostWebView)
 };
@@ -217,7 +224,7 @@ WebViewHost::WebViewHost(juce::AudioProcessor& processor, Config config)
       lang_(initialLang())
 {
     // 声明本组件完全不透明：JUCE 因此不会去画它下面的东西（宿主给的编辑器容器）。
-    // 这一句挡不住开窗白闪，白闪那一段本组件的 paint 根本不执行（见 HostWebView::paint），它管的是兜底面板路径下这块底
+    // 本组件的 paint 每次都铺满（外圈色加圆角占位），遮挡期与兜底面板路径下露出来的都是它，声明不透明是成立的
     setOpaque(true);
 
     // 诊断日志开关打开时装上平台文件日志，早于本构造里的第一行诊断。这个类只在正式身份下构造，
@@ -293,6 +300,15 @@ void WebViewHost::beginLoadAttempt()
 
     logBackgroundColourSupport();
 
+    // 发起导航之前先挪出可视区：控制器建好时 JUCE 按组件此刻的边界摆 WebView2 的宿主窗口，然后才发导航，
+    // 等导航开始再挪就晚了这一段（理由与代价见 WebViewRevealGate.h）。挡住期间控制器创建的重试泵由定时器代驱动。
+    // 只在 WebView2 上：系统 WebKit 上闸门不武装，理由见 onNavigationStarted
+    if (PlatformWebView::revealGateEnabled())
+    {
+        revealGate_.holdBeforeNavigation();
+        applyRevealGate();
+    }
+
     // 必须在任何事件发送之前完成首个跳转（前端脚本随后加载并注册监听）
     webView_->setVisible(true);
     webView_->goToURL(entryUrl());
@@ -316,6 +332,9 @@ juce::String WebViewHost::entryUrl() const
 WebViewHost::~WebViewHost()
 {
     stopTimer();
+    // 关窗诊断行：开到关用了多久、关的时候停在哪一档（行的拼装与各档含义见 WebViewRevealGate.h）
+    logDiag(windowClosedLine(juce::Time::getMillisecondCounter(), startMs_, revealGate_,
+                             PlatformWebView::revealGateEnabled(), fallback_ != nullptr));
     releaseReadyBridge(); // 编辑器关闭后，本实例不再为「热启动」判定背书
 }
 
@@ -337,13 +356,25 @@ juce::WebBrowserComponent& WebViewHost::webView()
 
 void WebViewHost::paint(juce::Graphics& g)
 {
-    // 见头文件注：WebView 落在本组件里时本函数净效果为 0，控制器建好之前那一段由 HostWebView::paint 接住。
-    // 本函数真正会画的有两条路：兜底面板路径（那时 WebView 被隐藏），以及遮挡期（WebView 被挪到可视区之外，
-    // 见 WebViewRevealGate.h）。后者整个窗口露的就是这一层，它就是用户在内容出来之前看到的那块占位底，
-    // 画的是与成品外壳同一组色标的占位渐变，所以从占位切到内容不跳阶、明暗走向也一致
-    const auto area = getLocalBounds().toFloat();
-    g.setFillType(juce::FillType(shellBackdropGradient(area)));
+    // 见头文件注：WebView 落在本组件里时本函数净效果为 0。本函数真正会画的有两条路：兜底面板路径
+    // （那时 WebView 被隐藏），以及遮挡期（WebView 被挪到可视区之外，见 WebViewRevealGate.h）。
+    // WebView2 上遮挡期从加载尝试一开头就开始，所以用户在内容出来之前看到的占位就是这一层
+    paintPlaceholder(g, getLocalBounds().toFloat());
+}
+
+// 两层 paint 共用的占位：先铺外圈色，再按页面外壳的几何画圆角渐变（色标、角度与外壳同一组，圆角按页面的缩放），
+// 从占位切到内容时轮廓、明暗都不跳。几何与色标在 PlatformWebView.h，与样式表的对拍在嵌入资源回归里。
+// 设计盒取 100% 档的窗口尺寸：页面按「窗口 / 设计盒」缩放外壳，这里用同一个比值
+void WebViewHost::paintPlaceholder(juce::Graphics& g, juce::Rectangle<float> area) const
+{
+#if RINNE_PROBE_MAGENTA
+    // 探针构建也要零告警编过：铺的就是传进来的这块，不用 fillAll
+    g.setColour(juce::Colours::magenta);
     g.fillRect(area);
+#else
+    const auto design = bridge::designBoxWindowSize(config_.role, 1.0f);
+    paintShellPlaceholder(g, area, static_cast<float>(design.width), static_cast<float>(design.height));
+#endif
 }
 
 void WebViewHost::resized()
@@ -376,8 +407,9 @@ void WebViewHost::logBackgroundColourSupport() const
 
 // 放行诊断行。读表的人要知道的三件事：
 //   - 放行原因有三种：firstFrame 是正常路；timeout 是首帧信号没来、到点兜底；fallback 是遮挡期内被兜底面板顶掉。
-//     fallback 不是放行，是被面板顶掉，数表时把它单独归一类。它实际只由前端启动失败那一条路打得出来
-//     （看门狗的预算恒大于闸门的超时，闸门早已自己记了 timeout；运行时缺失时闸门从未挡住），
+//     fallback 不是放行，是被面板顶掉，数表时把它单独归一类。它只由两条路打得出来：前端启动失败，
+//     以及导航一次都没开始就到了看门狗预算（envNotStarted：闸门在导航之前就挡着、不起算超时）。
+//     导航开始之后看门狗的预算恒大于闸门的超时，闸门早已自己记了 timeout；运行时缺失时闸门从未挡住。
 //     所以表里没有 fallback 是正常的，别据此去查接线；
 //   - timeout 必须当异常读：正常开窗一次都不该出现它。所以它带后缀，说明加载完成回调到过没有：
 //     到过说明页面加载完了但前端没发信号（查前端启动与动画帧那一段），
@@ -511,8 +543,9 @@ void WebViewHost::showFallback(FallbackReason reason)
     // 放行诊断要在这里调：拿掉加载完成放行之后，唯一还会调它的地方只剩首帧信号的处理，
     // 而「走到兜底面板」的典型场景恰恰是首帧信号根本不会来，放行行会从此消失。这里本来也是更自然的落点：面板一切，
     // 就该当场记下闸门是被谁顶掉的。
-    // 但它真正打得出来的只有一条路：运行时缺失或过旧发生在加载尝试开头，闸门从未挡住，不打；
-    // 加载超时的预算恒大于闸门超时，闸门早已自己放行并写过行，不打；前端启动失败可以在闸门超时之内到，只有这一条打得出
+    // 但它真正打得出来的只有两条路：运行时缺失或过旧发生在加载尝试开头，闸门从未挡住，不打；
+    // 导航开始之后的加载超时，预算恒大于闸门超时，闸门早已自己放行并写过行，不打；
+    // 前端启动失败可以在闸门超时之内到，打；导航一次都没开始就超时（envNotStarted），闸门从导航之前一直挡着，打
     revealGate_.onFallbackShown();
     noteRevealed();
     // 隐藏网页。这一步在 JUCE 8.0.8 里的真实行为（核对过 WebBrowserComponent 的两个平台实现；
@@ -629,8 +662,9 @@ void WebViewHost::onNavigationStarted(const juce::String& url)
             deadlineMs_ = extended;
     }
 
-    // 导航开始说明控制器已建好，挂在 paint 上的重试泵此刻已是空调用，才可以把 WebView 挪出可视区
-    // （挪走之后 JUCE 就不再画它，泵也就不再被驱动）。
+    // WebView2 上 WebView 早在加载尝试开头就挪出了可视区（beginLoadAttempt），这里不再挪，只把闸门的超时起点落在此刻；
+    // 导航开始说明控制器已建好，定时器代驱动的那个重试泵也随之停下（holdingBeforeNavigation 翻假）。
+    // 下面那句 applyRevealGate 在这条路上是原位重设，留着是为了「闸门状态一变就落地」只有一个出口。
     // 挪窗只在 WebView2 上启用：系统 WebKit 上不武装闸门，边界恒走原位，放行段与放行诊断都是空调用。
     // 不这样做的话，WKWebView 上首帧信号一旦没到（挪出可视区后动画帧是否照跑没验证过），每次开窗都要白等兜底时长。
     // 闸门的其余记账调用照常，不改状态
@@ -801,6 +835,9 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
         return;
     }
     bridgeReady_ = true; // 前端确认就绪，此后定时器才允许发送事件
+    // 看门狗从这里起就不管了；闸门如果还挡在导航之前，按导航开始补记，超时兜底照常生效（理由见 onBridgeReady）
+    if (revealGate_.onBridgeReady(juce::Time::getMillisecondCounter()))
+        logDiag("bridge ready while still held before navigation; reveal deadline starts now");
     // 本实例的桥活着，共享的 WebView2 进程组必在跑，其它编辑器可按热预算起看门狗。
     // requestInitialState 可能被同一页面多次调用（页面重载后要重来一次），故用标志防重复计数
     if (!countedAsReady_)
@@ -878,9 +915,13 @@ void WebViewHost::timerCallback()
     //   - 信号没来时到点强制放行，绝不允许出现「永远挪在外面」，那会是一块彻底不动的占位板，比白闪坏得多。
     // 放行现在只可能发生在这个 tick 上，这个 if 是唯一会把闸门从挡住翻过来的地方（兜底面板那条除外），
     // 别把它读成「只是超时兜底」。
-    // 下面第二个 if 是看门狗，方向相反：那里到点是换成兜底面板，这里到点是把界面放出来。两段不要读串
+    // 下面第二个 if 是看门狗，方向相反：那里到点是换成兜底面板，这里到点是把界面放出来。两段不要读串。
+    // 导航开始之前的那一段（holdingBeforeNavigation）闸门不起算超时，这里只代驱动控制器创建的重试泵：
+    // WebView 在可视区之外，JUCE 不再画它，泵要靠这一句才有人调（理由见 WebViewRevealGate.h）
     if (revealGate_.parked())
     {
+        if (revealGate_.holdingBeforeNavigation())
+            webView_->pumpControllerCreation();
         revealGate_.onTick(juce::Time::getMillisecondCounter());
         if (!revealGate_.parked())
         {

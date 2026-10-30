@@ -32,6 +32,9 @@ using rinne::state::ConfigType;
 using rinne::state::StateDocument;
 using rinne::test::Bytes;
 
+// 契约状态：state-schema.json 的 status 与 STATE_SCHEMA.md 开头的 status 行取同一个值，下面有用例对拍
+constexpr const char* kContractStatus = "frozen";
+
 std::string boolText(bool value)
 {
     return value ? "true" : "false";
@@ -236,7 +239,7 @@ std::string schemaText()
     const std::string n = "\n";
     std::string text;
     text += "{" + n;
-    text += "  \"status\": \"draft\"," + n;
+    text += "  \"status\": \"" + std::string(kContractStatus) + "\"," + n;
     text += "  \"format\": \"RNST\"," + n;
     text += "  \"abi\": " + std::to_string(rinne::state::kAbi) + "," + n;
     text += "  \"probeAbi\": " + std::to_string(rinne::state::kProbeAbi) + "," + n;
@@ -513,6 +516,19 @@ TEST_CASE("golden: state-schema.json 由代码生成", "[state][golden]")
 {
     const std::string text = schemaText();
     compareWithFile(rinne::test::goldenDir() + "state-schema.json", Bytes(text.begin(), text.end()));
+}
+
+TEST_CASE("golden: state-schema.json 的 status 与契约文档的 status 行一致", "[state][golden]")
+{
+    // 文档开头恰好一行 status（draft 或 frozen）。两边各写各的，读机读说明的人就看不出契约到底冻没冻
+    const std::string doc = contractDoc();
+    const std::string want = std::string("\nstatus: ") + kContractStatus + "\n";
+    INFO("STATE_SCHEMA.md 应当有一行：status: " << kContractStatus);
+    CHECK(doc.find(want) != std::string::npos);
+    std::size_t lines = 0;
+    for (std::size_t at = doc.find("\nstatus: "); at != std::string::npos; at = doc.find("\nstatus: ", at + 1))
+        ++lines;
+    CHECK(lines == 1);
 }
 
 TEST_CASE("golden: STATE_SCHEMA.md 的键表与代码一致", "[state][golden]")

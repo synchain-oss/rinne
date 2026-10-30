@@ -10,6 +10,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "diag/DiagCounters.h"
 #include "diag/DiagReport.h"
@@ -109,6 +110,11 @@ DiagInputs makeSnapshotInputs(const DiagEventLog& events)
     in.safety.nonfiniteRing = 9;
     in.safety.clampRing = 11;
 
+    in.state.lastLoad = DiagLoadStatus::kMigrated;
+    in.state.droppedUnknownParams = 3;
+    in.state.encodeFailures = 1;
+    in.state.holdingNewer = false;
+
     in.events = &events;
     return in;
 }
@@ -133,6 +139,10 @@ DiagInputs makeOutputInputs()
     in.pairState = "searching";
     in.trackHash = 0;
     in.peer.present = false;
+    in.state.lastLoad = DiagLoadStatus::kRejectedNewer;
+    in.state.droppedUnknownParams = 5; // Output 不输出这一项
+    in.state.encodeFailures = 2;
+    in.state.holdingNewer = true;
     return in;
 }
 
@@ -361,6 +371,7 @@ loop: d_user_ms=12.375 d_eff=594 d_min=256 mode=sync bpm=120.0 bpm_src=host taps
 sync: resync=1 overflow=2 torn=3 overrun=4 w_cas_fail=5 unstable=6 off_drift_blocks=7 frozen_max=8
 order: verdict=wrong votes=1.00 host_ns=valid
 safety: state=RUN trips=2 tail_peak_max_db=-0.5 limiter_gr_max_db=-3.3 nonfinite_ring=9 clamp_ring=11
+state: last_load=migrated dropped_unknown=3 encode_failures=1 holding_newer=0
 events(last 3 of 3):
   t+1.234 construct
   t+61.001 prepare 48000/512
@@ -381,6 +392,7 @@ peer: none
 prepare: count=0 sr=0 max=0 nonrealtime_seen=0 setstate_before_prepare=0 reset_calls=0
 blocks: total=0 zero_len=0 over_max=0 bypassed=0 max_n_seen=0
 nsamples: min=0 max=0 hist=0,0,0,0,0,0,0,0
+state: last_load=rejected_newer encode_failures=2 holding_newer=1
 events(last 0 of 0):
 )";
     CHECK(text == expected);
@@ -388,7 +400,57 @@ events(last 0 of 0):
     CHECK(text.find("sync:") == std::string::npos);
     CHECK(text.find("order:") == std::string::npos);
     CHECK(text.find("safety:") == std::string::npos);
+    CHECK(text.find("dropped_unknown") == std::string::npos);
     CHECK(text.find("\n  t+") == std::string::npos);
+}
+
+TEST_CASE("the state line carries all four items with their values", "[diag]")
+{
+    const auto stateLine = [](const DiagInputs& in) {
+        const std::string text = buildDiagReport(in);
+        const std::size_t start = text.find("\nstate: ");
+        REQUIRE(start != std::string::npos);
+        const std::size_t end = text.find('\n', start + 1u);
+        REQUIRE(end != std::string::npos);
+        // 恰好一行，而且紧挨在事件之前
+        CHECK(text.find("\nstate: ", end) == std::string::npos);
+        CHECK(end + 1u == text.find("events(last "));
+        return text.substr(start + 1u, end - start - 1u);
+    };
+
+    DiagEventLog events;
+    DiagInputs in = makeSnapshotInputs(events);
+    in.state.lastLoad = DiagLoadStatus::kCorrupt;
+    in.state.droppedUnknownParams = 4294967295u;
+    in.state.encodeFailures = 17;
+    in.state.holdingNewer = true;
+    CHECK(stateLine(in) == "state: last_load=corrupt dropped_unknown=4294967295 encode_failures=17 holding_newer=1");
+
+    // 读入结果的名字表逐项固定；还没有过 setState 时是 none
+    const std::pair<DiagLoadStatus, const char*> names[] = {
+        {DiagLoadStatus::kNone, "none"},
+        {DiagLoadStatus::kOk, "ok"},
+        {DiagLoadStatus::kMigrated, "migrated"},
+        {DiagLoadStatus::kEmpty, "empty"},
+        {DiagLoadStatus::kIgnoredProbe, "ignored_probe"},
+        {DiagLoadStatus::kRejectedNewer, "rejected_newer"},
+        {DiagLoadStatus::kCorrupt, "corrupt"},
+    };
+    for (const auto& [status, name] : names)
+    {
+        in.state = DiagState{};
+        in.state.lastLoad = status;
+        CHECK(stateLine(in) ==
+              std::string("state: last_load=") + name + " dropped_unknown=0 encode_failures=0 holding_newer=0");
+    }
+
+    // Output：同样三项，没有未知参数这一项（Output 的 state 里没有参数）
+    DiagInputs out = makeOutputInputs();
+    out.state.lastLoad = DiagLoadStatus::kOk;
+    out.state.droppedUnknownParams = 9;
+    out.state.encodeFailures = 0;
+    out.state.holdingNewer = false;
+    CHECK(stateLine(out) == "state: last_load=ok encode_failures=0 holding_newer=0");
 }
 
 TEST_CASE("report generation is read-only and formats non-finite values as nan", "[diag]")
@@ -458,7 +520,7 @@ TEST_CASE("privacy fields never leak user, host, path or track names", "[diag]")
     REQUIRE(eventsPos != std::string::npos);
     std::string beforeEvents = text.substr(0, eventsPos);
     const char* const labels[] = {
-        "track:", "peer:", "prepare:", "blocks:", "nsamples:", "loop:", "sync:", "order:", "safety:"};
+        "track:", "peer:", "prepare:", "blocks:", "nsamples:", "loop:", "sync:", "order:", "safety:", "state:"};
     for (const char* rawLabel : labels)
     {
         const std::string label(rawLabel);

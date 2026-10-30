@@ -163,6 +163,28 @@ const char* orderVerdictName(DiagOrderVerdict verdict) noexcept
     return "unknown";
 }
 
+const char* loadStatusName(DiagLoadStatus status) noexcept
+{
+    switch (status)
+    {
+    case DiagLoadStatus::kNone:
+        return "none";
+    case DiagLoadStatus::kOk:
+        return "ok";
+    case DiagLoadStatus::kMigrated:
+        return "migrated";
+    case DiagLoadStatus::kEmpty:
+        return "empty";
+    case DiagLoadStatus::kIgnoredProbe:
+        return "ignored_probe";
+    case DiagLoadStatus::kRejectedNewer:
+        return "rejected_newer";
+    case DiagLoadStatus::kCorrupt:
+        return "corrupt";
+    }
+    return "none";
+}
+
 std::string packedVersion(std::uint32_t version)
 {
     return std::to_string(version >> 16u) + "." + std::to_string((version >> 8u) & 0xffu) + "." +
@@ -547,6 +569,19 @@ std::string buildDiagReport(const DiagInputs& in)
         out += std::to_string(in.safety.clampRing);
         out += '\n';
     }
+
+    out += "state: last_load=";
+    out += loadStatusName(in.state.lastLoad);
+    if (in.role == DiagRole::kInput)
+    {
+        out += " dropped_unknown=";
+        out += std::to_string(in.state.droppedUnknownParams);
+    }
+    out += " encode_failures=";
+    out += std::to_string(in.state.encodeFailures);
+    out += " holding_newer=";
+    appendBool(out, in.state.holdingNewer);
+    out += '\n';
 
     const std::uint64_t eventCount = in.events != nullptr ? static_cast<std::uint64_t>(in.events->size()) : 0u;
     const std::uint64_t eventTotal = in.events != nullptr ? in.events->total() : 0u;

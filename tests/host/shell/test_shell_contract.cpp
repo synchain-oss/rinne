@@ -193,7 +193,8 @@ TEMPLATE_TEST_CASE("validation host detection follows the host executable", "[ho
     CHECK(processor.isValidationHost() == hostNameLooksLikeValidator());
     CHECK(processor.isValidationHost() == expectValidation);
 
-    // 外壳阶段还没有共享内存段：验证宿主与普通宿主一样不开段，音频一样逐位直通。段接上之后在这里加「验证宿主下不建段」的断言。
+    // 这里反馈是默认的 0，两种宿主下音频都逐位直通。验证宿主下开了反馈也只出干声、一个段都不开，接线之后的断言在
+    // tests/host/wiring/test_wiring_hosts.cpp（要测试作用域与 tick，这里的处理器用的是默认配置）
     auto fixture = std::make_unique<BlockFixture>();
     juce::MidiBuffer midi;
     fixture->fill(2, 480);

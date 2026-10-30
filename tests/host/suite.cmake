@@ -16,7 +16,8 @@ target_sources(rinne_host_tests PRIVATE
   "${_rinne_src}/output/OutputProcessor.cpp")
 target_include_directories(rinne_host_tests PRIVATE
   "${_rinne_src}/plugin-common" "${_rinne_src}/input" "${_rinne_src}/output")
-target_link_libraries(rinne_host_tests PRIVATE juce::juce_audio_processors)
+# 预设库（tests/host/wiring/PresetStoreSource.cpp 编进）读插件里嵌的同一份工厂预设
+target_link_libraries(rinne_host_tests PRIVATE juce::juce_audio_processors RinnePresetAssets)
 # RinneProcessorBase::getName 读 JucePlugin_Name；真正的插件由 juce_add_plugin 定义它，这里没有插件目标
 target_compile_definitions(rinne_host_tests PRIVATE
   "JucePlugin_Name=\"Rinne Host Test\""

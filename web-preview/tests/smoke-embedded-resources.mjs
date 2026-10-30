@@ -16,6 +16,8 @@
 //      逐项同色标，也与 C++ 侧的占位色标数组相同（开窗白闪的第三段）。这一族是占位：遮挡闸期间铺满窗口的那块底；
 //   ⑥b tokens.css 的 --page-backdrop 是外圈色，与占位是两个角色：必须不等于占位的任何一个色标；
 //   ⑥c 占位的 C++ 真源与 --page-gradient 整张色标表逐项相同（tokens 是真源，C++ 数组与内联字面量照抄它）；
+//   ⑥d 占位与成品外壳同形：C++ 的外壳圆角半径与外圈色与 tokens.css 的 --r-shell、--page-backdrop 同值，
+//      而且这两个 token 真是外壳与外圈在用的那两个（base.css 的 .sc-shell 圆角、body 底色）；
 //   ⑦ 「首帧已绘」上行信号在场：事件名与 C++ 一致，武装是嵌套两层 requestAnimationFrame 且由 paint 记录接线，
 //      回落路与保险定时器都在，保险的回调直接发信号、不绕 rAF，撤网（sent 置位与清保险）排在 postMessage 之后；
 //   ⑧ 桥回执的失败原因：C++ 的 BridgeBase.h 里有哪几个原因，docs/UI_BRIDGE.md 里能返回它的函数行就写哪几个，
@@ -26,8 +28,8 @@
 //      src/<角色>/sources-webview.cmake 以对的角色目录、命名空间调用 rinne_add_web_assets，嵌入根目录的 LICENSE，
 //      并把生成的目标链进该插件；插件入口文件包含同名头、把四个成员原样交给编辑器工厂；工厂把资源、角色、钩子原样转给网页编辑器。
 //      这几处都在插件目标里编，宿主测试编不到，是「资源没进包」一类空白窗口故障的静态面，只能靠这里的源码判据守。
-// C++ 侧文件（WebViewHost.h、PlatformWebView.h）必须在库里：缺文件、或事件名、字段名、角度与色标表抽不出来，一律判红。
-// 本套没有跳过项：⑥ ⑥c ⑦ 的对拍全是真判据。
+// C++ 侧文件（WebViewHost.h、PlatformWebView.h）必须在库里：缺文件、或事件名、字段名、角度、色标表、外壳半径与外圈色
+// 抽不出来，一律判红。本套没有跳过项：⑥ ⑥c ⑥d ⑦ 的对拍全是真判据。
 //
 // 用法：node web-preview/tests/smoke-embedded-resources.mjs [仓库根]
 // 退出码：0 全绿；1 有失败项。
@@ -165,7 +167,7 @@ for (const role of roles) {
 }
 
 // ---------------------------------------------------------------- C++ 真源
-// 两个 C++ 文件都必须在库里，五个名字都必须抽得出来：缺文件或抽不出来就判红，没有跳过的路。
+// 两个 C++ 文件都必须在库里，七个名字都必须抽得出来：缺文件或抽不出来就判红，没有跳过的路。
 // 抽取前先去掉注释（含被注释掉的旧声明），声明按「名字 = 值」「名字[] = {…};」的形态认，
 // 注释或函数体里提到同名标识符不会被当成声明。
 const CPP_FILES = ["src/plugin-common/WebViewHost.h", "src/plugin-common/PlatformWebView.h"];
@@ -218,7 +220,7 @@ function parseCppStopEntries(body) {
     return { stops, malformed };
 }
 
-/** 从 C++ 文本抽出对拍用的五个事实；抽不到的是 null。 */
+/** 从 C++ 文本抽出对拍用的七个事实；抽不到的是 null。 */
 function extractCppFacts(rawText) {
     const text = stripCppComments(rawText);
     const constant = (name) => new RegExp(`\\b${name}\\s*=\\s*"([^"]+)"`).exec(text)?.[1] ?? null;
@@ -229,6 +231,8 @@ function extractCppFacts(rawText) {
         delta: constant("kPaintDeltaField"),
         angle: /\bkShellBackdropAngleDeg\s*=\s*(\d+)/.exec(text)?.[1] ?? null,
         stops: table === null ? null : parseCppStopEntries(table),
+        radius: /\bkShellCornerRadiusPx\s*=\s*(\d+(?:\.\d+)?)f?\s*;/.exec(text)?.[1] ?? null,
+        rim: /\bkShellRimRgb\s*=\s*0x([0-9a-fA-F]{6})\s*;/.exec(text)?.[1]?.toLowerCase() ?? null,
     };
 }
 
@@ -238,9 +242,11 @@ const cppExpected = {
     delta: "kPaintDeltaField",
     angle: "kShellBackdropAngleDeg",
     stops: "kShellBackdropStops",
+    radius: "kShellCornerRadiusPx",
+    rim: "kShellRimRgb",
 };
 
-/** 判红的对拍项：缺任何一个 C++ 文件时五项全红（没有可抽的东西），否则只有抽不到的那几项。 */
+/** 判红的对拍项：缺任何一个 C++ 文件时全部判红（没有可抽的东西），否则只有抽不到的那几项。 */
 function failedCppFacts(missingFileCount, facts) {
     if (missingFileCount > 0) return Object.values(cppExpected);
     return Object.keys(cppExpected)
@@ -263,11 +269,21 @@ function failedCppFacts(missingFileCount, facts) {
             {0xfde8ed, 1.00f},
         };
         auto f() { return sizeof(kShellBackdropStops); }
+        // inline constexpr float kShellCornerRadiusPx = 99.0f;
+        inline constexpr float kShellCornerRadiusPx = 20.0f;
+        inline constexpr juce::uint32 kShellRimRgb = 0x19182A;
     `);
     run.eq(good.boot, "evt.boot", "抽取器自测：被注释掉的旧声明不能盖过真声明");
     run.eq(good.first, "evt.first", "抽取器自测：块注释里的声明不算");
     run.eq(good.delta, "delta", "抽取器自测：字段名");
     run.eq(good.angle, "157", "抽取器自测：角度");
+    run.eq(good.radius, "20.0", "抽取器自测：外壳半径按声明抽，被注释掉的旧值不算");
+    run.eq(good.rim, "19182a", "抽取器自测：外圈色抽成小写的六位十六进制");
+    const badShell = extractCppFacts(
+        "inline constexpr float kShellCornerRadiusPx = radiusOf(x); inline constexpr juce::uint32 kShellRimRgb = 0xff191820;",
+    );
+    run.eq(badShell.radius, null, "抽取器自测：半径不是数字字面量就抽不到（判红）");
+    run.eq(badShell.rim, null, "抽取器自测：外圈色写成带 alpha 的八位就抽不到（判红）");
     run.eq(
         good.stops,
         { stops: ["#b5acc9 0%", "#fde8ed 100%"], malformed: 0 },
@@ -304,18 +320,19 @@ function failedCppFacts(missingFileCount, facts) {
     run.eq(extraField.stops, { stops: [], malformed: 1 }, "抽取器自测：多出字段的项必须读不懂");
 
     // 对拍项判红：缺文件或抽不到都红，没有跳过的路
-    const allNull = { boot: null, first: null, delta: null, angle: null, stops: null };
+    const allNull = { boot: null, first: null, delta: null, angle: null, stops: null, radius: null, rim: null };
     const names = Object.values(cppExpected);
-    run.eq(failedCppFacts(2, allNull), names, "判红自测：C++ 文件都不在时五项全红，不是跳过");
-    run.eq(failedCppFacts(1, good), names, "判红自测：缺一个文件时，即使另一个抽得到也五项全红");
+    run.eq(failedCppFacts(2, allNull), names, "判红自测：C++ 文件都不在时全部判红，不是跳过");
+    run.eq(failedCppFacts(1, good), names, "判红自测：缺一个文件时，即使另一个抽得到也全部判红");
     run.eq(failedCppFacts(0, allNull), names, "判红自测：文件在但全抽不到时全部判红");
     run.eq(failedCppFacts(0, { ...good, delta: null }), ["kPaintDeltaField"], "判红自测：只有抽不到的那一项判红");
+    run.eq(failedCppFacts(0, { ...good, rim: null }), ["kShellRimRgb"], "判红自测：外圈色抽不到时只有它判红");
     run.eq(failedCppFacts(0, good), [], "判红自测：文件齐全且都抽得到时没有红项");
 }
 
 const cppFile = CPP_FILES.filter(exists);
 const cpp = extractCppFacts(cppFile.map(read).join("\n"));
-for (const f of CPP_FILES) run.check(exists(f), `C++ 真源文件 ${f} 不在库里（⑥ ⑥c ⑦ 的对拍没有可比的东西）`);
+for (const f of CPP_FILES) run.check(exists(f), `C++ 真源文件 ${f} 不在库里（⑥ ⑥c ⑥d ⑦ 的对拍没有可比的东西）`);
 const failedFacts = failedCppFacts(CPP_FILES.length - cppFile.length, cpp);
 for (const name of Object.values(cppExpected)) {
     run.check(
@@ -354,6 +371,52 @@ if (cpp.stops !== null && pageGradient) {
 }
 if (cpp.angle !== null && pageGradient) {
     run.eq(Number(cpp.angle), pageGradient.angle, "⑥c：C++ 的占位角度与 --page-gradient 不同");
+}
+
+// ---------------------------------------------------------------- ⑥d 外壳几何
+// 占位画成与成品外壳同形的圆角：半径与圆角之外的外圈色必须与页面同值，否则四个角从占位切到内容时比方形占位还跳。
+// 两个 token 还得真是页面在用的那两个：.sc-shell 的圆角用 --r-shell，body 的底用 --page-backdrop。
+
+/**
+ * CSS 文本里选择器恰好是 selector 的那条规则的正文（选择器独占一行、上一行不以逗号结尾，到第一个右花括号为止）；
+ * 找不到是 null。选择器列表（「html,」换行「body {」）里的那一项不算单独的规则。
+ */
+function cssBlock(text, selector) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = new RegExp(`(?:^|(?<!,[ \\t]*)\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(text);
+    return m ? m[1] : null;
+}
+{
+    const sample = "a {\n}\n.sc-shell {\n    border-radius: var(--r-shell);\n}\n.sc-shell::before {\n    top: 0;\n}\n";
+    run.eq(cssBlock(sample, ".sc-shell")?.trim(), "border-radius: var(--r-shell);", "⑥d 自测：按选择器取规则正文");
+    run.eq(cssBlock(sample, ".sc-glass"), null, "⑥d 自测：没有这个选择器时取不到");
+    run.eq(cssBlock(".sc-shell::before { top: 0; }", ".sc-shell"), null, "⑥d 自测：伪元素的规则不冒充本体");
+    run.eq(
+        cssBlock("html,\nbody {\n    margin: 0;\n}\n", "body"),
+        null,
+        "⑥d 自测：选择器列表里的 body 不算单独的 body 规则",
+    );
+}
+const shellRadius = /--r-shell:\s*(\d+(?:\.\d+)?)px\s*;/.exec(tokens)?.[1] ?? null;
+run.check(shellRadius !== null, "tokens.css 读不到 --r-shell");
+if (cpp.radius !== null && shellRadius !== null) {
+    run.eq(Number(cpp.radius), Number(shellRadius), "⑥d：C++ 的 kShellCornerRadiusPx 与 tokens.css 的 --r-shell 不同");
+}
+if (cpp.rim !== null && backdrop) {
+    run.eq(`#${cpp.rim}`, hexOf(backdrop), "⑥d：C++ 的 kShellRimRgb 与 tokens.css 的 --page-backdrop 不同");
+}
+{
+    const baseCss = read("web/shared/base.css");
+    const shellRule = cssBlock(baseCss, ".sc-shell");
+    run.check(
+        shellRule !== null && /(?:^|[;\s])border-radius:\s*var\(--r-shell\)\s*;/.test(shellRule),
+        "⑥d：base.css 的 .sc-shell 圆角不是 var(--r-shell)，C++ 占位的半径对不上页面",
+    );
+    const bodyRule = cssBlock(baseCss, "body");
+    run.check(
+        bodyRule !== null && /(?:^|[;\s])background:\s*var\(--page-backdrop\)\s*;/.test(bodyRule),
+        "⑥d：base.css 的 body 底色不是 var(--page-backdrop)，C++ 占位的外圈色对不上页面",
+    );
 }
 
 // ---------------------------------------------------------------- ④ ⑥ ⑦ 逐个 index.html

@@ -1,6 +1,6 @@
 # State 格式（RNST）
 
-status: draft
+status: frozen
 
 ## Summary (EN)
 
@@ -34,7 +34,10 @@ status: draft
   generated from it and the key table below must match it; both are checked by unit tests. The two baselines
   `tests/golden/state/{input,output}-abi1.bin` pin the byte layout, and the unit tests parse the byte annotations
   below and compare them with the baselines.
-- **Status**: draft. It is frozen together with the parameter table.
+- **Status**: frozen, after the parameter table. From now on a PR that touches this document, `src/core/state/`
+  or `tests/golden/state*` adds a contract-change document or a `contract-neutral:` line. The first 16 bytes, and
+  refusing a higher abi of this end's role while writing its bytes back unchanged, never change. From the first
+  public release candidate on, such a PR also carries the `status/frozen-contract` label and the maintainer's approval.
 
 ## 范围
 
@@ -47,6 +50,7 @@ status: draft
 | [`StateDocument.h`](../../src/core/state/StateDocument.h) | 每一端认识哪些块，整份 state 的编解码 |
 | [`StateMigration.h`](../../src/core/state/StateMigration.h) | 加载入口 `loadState`：abi 分流与逐级迁移 |
 | [`StateMigrationTesting.h`](../../src/core/state/StateMigrationTesting.h) | 只给单测的加载入口 `loadStateWith`；处理器只经 `loadState` |
+| [`StateGlueCommon.h`](../../src/core/state/StateGlueCommon.h) | 两端 state 胶水共用的规则：加载结果怎么分流、定型、保存时先 set 已知参数再裁剪 |
 | [`state-schema.json`](../../tests/golden/state-schema.json) | 机读说明，由单测按代码生成并逐字节比较 |
 | [`input-abi1.bin`](../../tests/golden/state/input-abi1.bin)、[`output-abi1.bin`](../../tests/golden/state/output-abi1.bin) | 两端的 abi 1 基线，由单测逐字节锁定 |
 
@@ -197,8 +201,9 @@ count × { u8 idLen | id（idLen 字节）| f32 值 }
 
 ## 基线
 
-两份基线由单测里的示例 state 编码而来：编码结果与文件逐字节相同，读回来还原那份示例。示例里每个 CFGS 键都取与默认
-不同的值，另带一个未知参数、一个未知 CFGS 键和一个未知块。参数值只为钉住线格式，单位与范围以参数表为准。下面的
+两份基线由单测里的示例 state 编码而来：编码结果与文件逐字节相同，读回来还原那份示例。Input 示例的 PRMS 由参数表
+生成：11 个参数按序号排、取参数表的默认值，其中反馈、混合、环路延迟、限制器（关）与限制器上限改成非默认值。示例里
+每个 CFGS 键都取与默认不同的值，另带一个未知参数、一个未知 CFGS 键和一个未知块。参数值的单位与范围以参数表为准。下面的
 逐字节注解由 `[state][golden]` 用例解析：每一行的偏移与字节都要与 bin 相同，`output-abi1.bin` 的注解还必须完整
 覆盖全部 60 字节；加载表也由同一个用例按 `state-schema.json` 的 `load` 数组逐行对照。
 
@@ -251,4 +256,7 @@ count × { u8 idLen | id（idLen 字节）| f32 值 }
   改载荷。
 - 改已有载荷字段的布局或含义必须升 abi：把 `kAbi` 加一，在 `kMigrators` 末尾追加一个从旧 abi 升上来的迁移函数，
   新增一份新 abi 的基线；旧的基线保留，作迁移测试的输入。迁移函数只读写载荷，容器框架不动。
-- 已冻结之后，改到本文、`src/core/state/` 或 `tests/golden/state*` 的 PR 要按契约变更的规程走。
+- 本文已冻结（在参数表之后）：此后改到本文、`src/core/state/` 或 `tests/golden/state*` 的 PR，同一个 PR 新增
+  `docs/contract-changes/<YYYYMMDD>-<slug>.md`，或在正文写 `contract-neutral: <理由>`；从第一个公开 rc 起另加
+  `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。前 16 字节的位置与含义，以及「abi 更高且
+  role 是这一端时拒载、原样回写」这一条，任何时候都不改。

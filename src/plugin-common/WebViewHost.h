@@ -65,9 +65,10 @@ public:
     ~WebViewHost() override;
 
     void resized() override;
-    // 铺满占位渐变。WebView 落在本组件里时它铺满本组件且声明不透明，JUCE 会把它的矩形从父组件的裁剪区里剔掉，
-    // 本函数净效果为 0（那一段由 HostWebView::paint 管，见实现）。它真正会画的有两条路：兜底面板路径
-    // （WebView 被隐藏），以及遮挡期（WebView 被挪到可视区之外）。后者正是用户在内容出来之前看到的占位底
+    // 铺满占位（外圈色加与页面外壳同几何的圆角渐变）。WebView 落在本组件里时它铺满本组件且声明不透明，
+    // JUCE 会把它的矩形从父组件的裁剪区里剔掉，本函数净效果为 0。它真正会画的有两条路：兜底面板路径
+    // （WebView 被隐藏），以及遮挡期（WebView 被挪到可视区之外；WebView2 上从加载尝试一开头就是）。
+    // 后者正是用户在内容出来之前看到的占位
     void paint(juce::Graphics& g) override;
 
     // 当前窗口实际使用的缩放档位（锁定时是 1.0）
@@ -190,6 +191,8 @@ private:
     // 遮挡闸的两个动作面。判定全在 revealGate_ 里（纯逻辑，可单测），这两个函数只负责把判定落到组件几何上并写诊断行
     void applyRevealGate(); // 把闸门是否挡住落到 WebView 的边界上
     void noteRevealed(); // 放行时写一行诊断（原因加用时）
+    // 两层 paint（本组件与 HostWebView）共用的占位。品红探针也只在这里分叉
+    void paintPlaceholder(juce::Graphics& g, juce::Rectangle<float> area) const;
 
     // 「默认背景色这一层在不在」的诊断行（每次加载尝试一条）
     void logBackgroundColourSupport() const;
