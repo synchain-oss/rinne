@@ -138,7 +138,9 @@ export function createMsgline(o) {
                 on: {
                     click: () => {
                         if (cooling) return;
-                        onAction(name, msg);
+                        // 签名不变时节点不重建，按钮挂的是第一次渲染时的消息；点击时取页面最近一次给的同 id 消息，免得载荷是旧的
+                        const now = latest && (latest.messages || []).find((m) => m.id === msg.id);
+                        onAction(name, now || msg);
                     },
                 },
             },
@@ -164,14 +166,15 @@ export function createMsgline(o) {
             type: "button",
             class: "sc-btn rn-btn",
             data: { glow: "1", part: "confirm.cancel" },
-            on: { click: () => c.onCancel && c.onCancel() },
+            // 签名不变时节点不重建：点击时从最近一次 update 取回调，不用第一次渲染时捕获的那一份
+            on: { click: () => latest && latest.confirm && latest.confirm.onCancel && latest.confirm.onCancel() },
             text: t(BUTTON_KEYS.cancel),
         });
         const go = el("button", {
             type: "button",
             class: "sc-btn sc-btn--cta rn-btn rn-btn--cta",
             data: { glow: "1", part: "band.action", action: "takeover" },
-            on: { click: () => c.onConfirm && c.onConfirm() },
+            on: { click: () => latest && latest.confirm && latest.confirm.onConfirm && latest.confirm.onConfirm() },
             text: t(c.confirmKey || "band.action.takeover", c.vals),
         });
         if (!c.confirmKey) go.setAttribute("title", t("band.action.takeoverTip"));

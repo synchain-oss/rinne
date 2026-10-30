@@ -6,10 +6,30 @@
 //   - 遮罩铺满外壳，面板可以居中，也可以按设计坐标钉位置（Input 的模态放在左两栏，不压右侧安全栏）；
 //   - 打开时把 inert 列表里的节点（通常是外壳的 content 层）设为 inert，Tab 出不去，
 //     但不碰 layer 与 top：紧急切断那一层要在任何遮罩下都点得到；
+//     inert 按节点计数：关于面板与缩放确认共用同一个 content 节点，两个同时开着时先关的那个不能把 inert 清掉，
+//     数到 0 才移除；
 //   - 打开时记住焦点并把焦点交给面板，关闭时还回去；Esc 关闭（调 onEsc，由调用方决定是取消还是关闭）；
 //   - 面板 role=dialog、aria-modal=true。
 
 import { el } from "./dom.js";
+
+/** 每个节点被几个打开着的模态要求 inert。 */
+const inertCount = new WeakMap();
+
+function lockInert(node) {
+    inertCount.set(node, (inertCount.get(node) || 0) + 1);
+    node.setAttribute("inert", "");
+}
+
+function unlockInert(node) {
+    const left = (inertCount.get(node) || 0) - 1;
+    if (left > 0) {
+        inertCount.set(node, left);
+        return;
+    }
+    inertCount.delete(node);
+    node.removeAttribute("inert");
+}
 
 /**
  * @param {object} o
@@ -57,13 +77,13 @@ export function createModal(o) {
             if (!scrim.hidden) return;
             returnFocus = document.activeElement;
             scrim.hidden = false;
-            for (const n of inertNodes) n.setAttribute("inert", "");
+            for (const n of inertNodes) lockInert(n);
             panel.focus({ preventScroll: true });
         },
         hide() {
             if (scrim.hidden) return;
             scrim.hidden = true;
-            for (const n of inertNodes) n.removeAttribute("inert");
+            for (const n of inertNodes) unlockInert(n);
             if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === "function") {
                 returnFocus.focus({ preventScroll: true });
             }

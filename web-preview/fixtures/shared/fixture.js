@@ -186,7 +186,7 @@ function buildWindow() {
     pair = createPairPill({ gb: role === "input" ? "input.pair.pill" : "output.pair.pill" });
     msgline = createMsgline({
         role,
-        onAction: (name) => log("action", name),
+        onAction: (name, msg) => log("action", name, msg && msg.tag),
         onDismiss: (id) => {
             log("dismiss", id);
             S.messages = S.messages.filter((m) => m.id !== id);
@@ -292,6 +292,18 @@ function msgFor(meta, extra) {
     };
 }
 
+function footerArgs(over = {}) {
+    return {
+        hint: { state: S.hintState, text: t(S.hintKey) },
+        scaleOptions: scaleUi.options(),
+        scale: S.scale,
+        locked: q.get("locked") === "1",
+        version: S.version,
+        t,
+        ...over,
+    };
+}
+
 function render() {
     header.update({ lang, t });
     langCap.update({ lang, t });
@@ -311,14 +323,7 @@ function render() {
         lang,
         t,
     });
-    footer.update({
-        hint: { state: S.hintState, text: t(S.hintKey) },
-        scaleOptions: scaleUi.options(),
-        scale: S.scale,
-        locked: q.get("locked") === "1",
-        version: S.version,
-        t,
-    });
+    footer.update(footerArgs());
     shell.setState({ danger: S.danger, overlay: Boolean(overlay) });
 }
 
@@ -578,6 +583,10 @@ async function main() {
             msgline: () => msgline,
             about: () => about,
             toast: () => toast,
+            footer: () => footer,
+            // 用当前状态加覆盖项直接调一次页脚的 update（测下拉选项的重建判据用）
+            footerUpdate: (over) => footer.update(footerArgs(over)),
+            makeT: (code) => makeT(code),
             shell: () => shell,
             group: () => group,
             setMessages: (ids, extra) => {

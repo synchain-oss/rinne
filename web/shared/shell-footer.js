@@ -72,6 +72,9 @@ export function createFooter(o) {
         el("div", { class: "rn-footer__right" }, scaleWrap, version, help),
     );
 
+    /** 下拉选项的签名：页面每秒会重发好几次同样的状态，选项没变就不重建（用户正打开下拉或用键盘选档时重建会让弹出层关掉、高亮跳回）。 */
+    let optionsSig = "";
+
     return {
         el: root,
         /**
@@ -87,17 +90,26 @@ export function createFooter(o) {
             hint.setAttribute("data-state", h ? h.state : "none");
             root.setAttribute("data-state", h ? h.state : "none");
             hintText.setAttribute("title", h ? h.text : "");
-            // 下拉：每次整表重写，选中项按当前档位
-            select.textContent = "";
-            for (const opt of p.scaleOptions) {
-                const node = el("option", { value: String(opt.factor), text: opt.label });
-                if (opt.disabled) {
-                    node.disabled = true;
-                    if (opt.titleKey) node.setAttribute("title", t(opt.titleKey));
+            // 下拉：档位、标签、置灰与置灰说明（已按当前语言取好）、锁定都没变就不重建，只在签名变了时整表重写
+            const titleOf = (opt) => (opt.disabled && opt.titleKey ? t(opt.titleKey) : "");
+            const sig = JSON.stringify([
+                p.scaleOptions.map((opt) => [opt.factor, opt.label, opt.disabled, titleOf(opt)]),
+                locked,
+            ]);
+            if (sig !== optionsSig) {
+                optionsSig = sig;
+                select.textContent = "";
+                for (const opt of p.scaleOptions) {
+                    const node = el("option", { value: String(opt.factor), text: opt.label });
+                    if (opt.disabled) {
+                        node.disabled = true;
+                        if (opt.titleKey) node.setAttribute("title", titleOf(opt));
+                    }
+                    select.append(node);
                 }
-                select.append(node);
             }
-            select.value = String(p.scale);
+            // 选中项始终跟页面给的档位（用户选了但页面没接受时要弹回去）；值相同就不写，免得打扰打开着的下拉
+            if (select.value !== String(p.scale)) select.value = String(p.scale);
             select.setAttribute("aria-label", t("common.scale.label"));
             select.disabled = locked;
             scaleWrap.setAttribute("data-state", locked ? "macLocked" : "collapsed");

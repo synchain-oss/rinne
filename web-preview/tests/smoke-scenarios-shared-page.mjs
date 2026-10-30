@@ -181,6 +181,36 @@ try {
             [1, 1],
             `${role}：确认与取消各回调一次`,
         );
+        // 签名不变、回调换了：节点不重建，点击必须走最新的回调，不能走第一次渲染时捕获的那一份
+        await page.eval(`(() => {
+            const api = window.__fx.api;
+            const mk = (tag) => ({
+                key: "band.${k}.takeover",
+                vals: { g: "H" },
+                onConfirm: () => window.__fx.calls.push({ name: "confirm" + tag, args: [] }),
+                onCancel: () => window.__fx.calls.push({ name: "cancel" + tag, args: [] }),
+            });
+            window.__fx.calls.length = 0;
+            api.setConfirm(mk("Old"));
+            api.setConfirm(mk("New"));
+        })()`);
+        await clickPart(page, `${band} [data-part="band.action"]`);
+        await clickPart(page, `${band} [data-part="confirm.cancel"]`);
+        run.eq(
+            await page.eval("window.__fx.calls.map((c) => c.name)"),
+            ["confirmNew", "cancelNew"],
+            `${role}：确认条回调换了（签名没变）点击要走新回调`,
+        );
+        // 动作按钮的载荷同理：签名不变、消息对象换了，点击交给页面的是最新的那一份
+        await page.eval(
+            `(() => { const api = window.__fx.api; api.setConfirm(null); window.__fx.calls.length = 0; api.setMessages(${JSON.stringify(role === "input" ? ["cutPanic"] : ["conflict"])}, { tag: "A" }); api.setMessages(${JSON.stringify(role === "input" ? ["cutPanic"] : ["conflict"])}, { tag: "B" }); })()`,
+        );
+        await clickPart(page, `${band} [data-part="band.action"]`);
+        run.eq(
+            await calls(page, "action"),
+            [[actionName, "B"]],
+            `${role}：动作按钮载荷换了（签名没变）点击要交最新的消息`,
+        );
         await page.eval(`window.__fx.api.setConfirm(null); window.__fx.api.setMessages([])`);
         run.eq(await attr(page, band, "data-state"), "idle", `${role}：清空后回到空闲`);
         if (role === "output") {
@@ -293,6 +323,41 @@ try {
         run.check(
             greyed.length >= 1 && greyed.every((g) => g.title.length > 0),
             `${role}：1000×700 屏上应有置灰档位，且都带提示，实得 ${JSON.stringify(greyed)}`,
+        );
+        // 下拉选项的签名：页面每秒重发好几次同样的状态，选项没变就不能重建（正打开的下拉会被换掉）
+        const rebuild = await page.eval(`(() => {
+            const api = window.__fx.api;
+            const sel = document.querySelector('${sel}');
+            const nodes = () => [...sel.options];
+            const first = nodes();
+            const zhTitles = first.filter((o) => o.disabled).map((o) => o.title);
+            api.footerUpdate({});
+            api.footerUpdate({});
+            api.render();
+            const again = nodes();
+            const kept = again.length === first.length && again.every((n, i) => n === first[i]);
+            // 只换选中档位：选项不重建，选中值要跟上
+            const other = first.find((o) => !o.disabled && o.value !== sel.value);
+            api.footerUpdate({ scale: Number(other.value) });
+            const afterScale = nodes();
+            const keptOnScale = afterScale.length === first.length && afterScale.every((n, i) => n === first[i]);
+            const selectedFollows = sel.value === other.value;
+            // 换语言：置灰说明的文字变了，签名变了，必须重建
+            api.footerUpdate({ t: api.makeT("en") });
+            const enNodes = nodes();
+            const rebuilt = enNodes.length === first.length && enNodes.every((n, i) => n !== first[i]);
+            const enTitles = enNodes.filter((o) => o.disabled).map((o) => o.title);
+            return { kept, keptOnScale, selectedFollows, rebuilt, zhTitles, enTitles };
+        })()`);
+        run.eq(rebuild.kept, true, `${role}：页脚重复 update（同样的状态）不重建下拉选项`);
+        run.eq(rebuild.keptOnScale, true, `${role}：只换选中档位不重建下拉选项`);
+        run.eq(rebuild.selectedFollows, true, `${role}：只换选中档位时选中值要跟上`);
+        run.eq(rebuild.rebuilt, true, `${role}：置灰说明换了语言（签名变了）要重建下拉选项`);
+        run.check(
+            rebuild.zhTitles.length > 0 &&
+                rebuild.enTitles.length === rebuild.zhTitles.length &&
+                rebuild.enTitles.every((x, i) => x !== rebuild.zhTitles[i]),
+            `${role}：重建后置灰说明是英文，实得 ${JSON.stringify(rebuild.enTitles)} 对 ${JSON.stringify(rebuild.zhTitles)}`,
         );
 
         // ============================================================ 关于面板
@@ -453,6 +518,40 @@ try {
     run.eq(await page.eval(`!document.querySelector('${toastSel}').hidden`), true, "轻提示：3.2 秒时还在");
     await sleep(page, Math.max(0, 4300 - (await shownAge())));
     run.eq(await page.eval(`!document.querySelector('${toastSel}').hidden`), false, "轻提示：4.3 秒时已收");
+
+    // ============================================================ 模态的 inert 按节点计数：两个模态共用一个 content 节点
+    await openScene(page, server, design, "input", "zh", scene("window"));
+    const inertProbe = await page.eval(`(async () => {
+        const { createModal } = await import("../../../web/shared/modal.js");
+        const host = document.createElement("div");
+        const content = document.createElement("div");
+        document.body.append(host, content);
+        const mk = (gb) => createModal({ host, gb, width: 100, inert: [content] });
+        const a = mk("probe.a");
+        const b = mk("probe.b");
+        const has = () => content.hasAttribute("inert");
+        a.show();
+        b.show();
+        const both = has();
+        a.hide();
+        const afterFirstClose = has();
+        b.hide();
+        const afterSecondClose = has();
+        // 重复 show / hide 不能让计数漏掉或多减
+        a.show();
+        a.show();
+        a.hide();
+        a.hide();
+        const afterRepeat = has();
+        host.remove();
+        content.remove();
+        return { both, afterFirstClose, afterSecondClose, afterRepeat };
+    })()`);
+    run.eq(
+        inertProbe,
+        { both: true, afterFirstClose: true, afterSecondClose: false, afterRepeat: false },
+        "模态：两个同时开着时先关一个 content 仍 inert，都关了才清掉；重复 show / hide 不漏计",
+    );
 
     // ============================================================ 「+n」无人操作 8 秒后回到第一条（要等真实时间）
     await openScene(page, server, design, "input", "zh", scene("window"));
