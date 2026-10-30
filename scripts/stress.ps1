@@ -25,7 +25,8 @@
 # 输出：每一步的日志在 -LogDir（缺省 <构建目录>/logs/stress），屏幕上只打印步骤与失败步骤日志的末尾；最后一行是「完成：…」或「失败：…」。
 # 起子进程时本进程的标准输出与标准错误不可继承（scripts/lib/StdHandles.psm1），编译器留下的常驻进程拖不住调用方的管道。
 # 开跑前从本进程删掉凭据与个人针变量（判据是 build.ps1 的 $SecretEnv，整个仓库只有那一份）。
-# 退出码：0 通过；1 失败；2 没有可跑的压测（构建目录里没有当前 HEAD 的 rinne_stress）。
+# 退出码：0 通过；1 失败；2 没有可跑的压测（构建目录里没有当前 HEAD 的 rinne_stress）。tsan.supp 检查已经失败时，
+# 没有可跑的压测也报 1：2 在 gate 里记 SKIP，不能让它把前面已经记下的失败吞掉。
 [CmdletBinding()]
 param(
     [string]$BuildDir = 'build', [ValidateSet('Release', 'Debug', 'RelWithDebInfo')][string]$Config = 'Release',
@@ -282,17 +283,26 @@ function Invoke-Stress {
     $notes = [System.Collections.Generic.List[string]]::new()
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
+    # 没有可跑的压测：退出码 2（gate 记 SKIP）。但前面已经记下的失败（tsan.supp 不合格）不能被这个 2 吞掉，有失败就报 1
+    $noStress = {
+        param([string]$Why)
+        Write-Host $Why
+        if (-not $failures.Count) { return 2 }
+        Write-Host "失败：$($failures -join '；')"
+        1
+    }
+
     Write-Host '== tsan.supp'
     if (-not (Invoke-SuppLint)) { $failures.Add('tsan.supp 有抑制没写理由') }
 
     $main = [IO.Path]::GetFullPath($BuildDir, $Root)
-    if (-not (Test-Path -LiteralPath $main -PathType Container)) { Write-Host "没有构建目录 $main"; return 2 }
+    if (-not (Test-Path -LiteralPath $main -PathType Container)) { return (& $noStress "没有构建目录 $main") }
     if (-not $NoStampCheck) {
         $stale = Test-BuildStamp $main
-        if ($stale) { Write-Host $stale; return 2 }
+        if ($stale) { return (& $noStress $stale) }
     }
     $exe = Find-StressExe $main
-    if (-not $exe) { Write-Host "$main 里没有 rinne_stress（这个构建没建压测目标？）"; return 2 }
+    if (-not $exe) { return (& $noStress "$main 里没有 rinne_stress（这个构建没建压测目标？）") }
     $script:StressLogDir = $LogDir ? [IO.Path]::GetFullPath($LogDir, $Root) : (Join-Path $main 'logs/stress')
     $null = New-Item -ItemType Directory -Force -Path $script:StressLogDir
 
@@ -421,8 +431,42 @@ function Invoke-SelfTest {
         Set-ProcessEnv 'RINNE_STRESS_SCALE' '9'
         try { $null = Invoke-StressExe $pwshExe (Join-Path $dir 'd.log') 60 @{ RINNE_STRESS_SCALE = $null } $probeArgs } finally { Set-ProcessEnv 'RINNE_STRESS_SCALE' $before }
         & $check '起进程：给 $null 就是把这个变量从子进程里去掉（变异构建不带放大系数）' $false ((Get-LogLines (Join-Path $dir 'd.log')) -join '' -ceq 'scale=')
+
+        # 没有可跑的压测（退出码 2，gate 记 SKIP）的三个出口：tsan.supp 不合格时必须仍报 1，不能被 SKIP 吞掉；合格时仍是 2
+        $badSupp = Join-Path $dir 'bad.supp'
+        $goodSupp = Join-Path $dir 'good.supp'
+        Set-Content -LiteralPath $badSupp -Value 'race:Catch::Timer::start'
+        Set-Content -LiteralPath $goodSupp -Value '# 只有注释，没有条目'
+        $head = "$(git -C $Root rev-parse HEAD 2>$null)".Trim()
+        $missingBuild = Join-Path $dir 'build-missing'
+        $staleBuild = Join-Path $dir 'build-stale'
+        $noExeBuild = Join-Path $dir 'build-no-exe'
+        foreach ($b in @(@($staleBuild, '0000000'), @($noExeBuild, $head))) {
+            $null = New-Item -ItemType Directory -Path $b[0]
+            Set-Content -LiteralPath (Join-Path $b[0] 'rinne-build.json') -Value (@{ sha = $b[1] } | ConvertTo-Json)
+        }
+        $savedSupp = $script:TsanSupp
+        $savedBuildDir = $script:BuildDir
+        try {
+            foreach ($exit in @(@('没有构建目录', $missingBuild), @('构建记录不是当前 HEAD', $staleBuild), @('构建目录里没有 rinne_stress', $noExeBuild))) {
+                $script:BuildDir = $exit[1]
+                $script:TsanSupp = $badSupp
+                $codeBad = @(Invoke-Stress 6>$null)[-1]
+                $script:TsanSupp = $goodSupp
+                $codeGood = @(Invoke-Stress 6>$null)[-1]
+                & $check "没有可跑的压测（$($exit[0])）而 tsan.supp 不合格：退出码 1，不被 SKIP 吞掉" $true ($codeBad -eq 1)
+                & $check "没有可跑的压测（$($exit[0])）而 tsan.supp 合格：仍是 2（gate 记 SKIP）" $false ($codeGood -eq 2)
+            }
+        } finally {
+            $script:TsanSupp = $savedSupp
+            $script:BuildDir = $savedBuildDir
+        }
     } finally {
-        # 只删本次新建的临时目录里的文件，再删这个空目录（非递归）
+        # 只删本次新建的临时目录里的文件与子目录（子目录里也只有文件），再删这个空目录；都不递归
+        foreach ($d in Get-ChildItem -LiteralPath $dir -Directory) {
+            foreach ($f in Get-ChildItem -LiteralPath $d.FullName -File) { Remove-Item -LiteralPath $f.FullName }
+            Remove-Item -LiteralPath $d.FullName
+        }
         foreach ($f in Get-ChildItem -LiteralPath $dir -File) { Remove-Item -LiteralPath $f.FullName }
         Remove-Item -LiteralPath $dir
     }
