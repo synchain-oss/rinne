@@ -1,0 +1,304 @@
+{
+  "page": "common",
+  "note": "fr 为初译，待抽检；定稿后从这里删掉对应项，全部抽检完后本文件清空。",
+  "entries": {
+    "common.save": {
+      "fr": "Enregistrer",
+      "status": "待抽检"
+    },
+    "common.close": {
+      "fr": "Fermer",
+      "status": "待抽检"
+    },
+    "common.delete": {
+      "fr": "Supprimer",
+      "status": "待抽检"
+    },
+    "common.on": {
+      "fr": "Activé",
+      "status": "待抽检"
+    },
+    "common.off": {
+      "fr": "Désactivé",
+      "status": "待抽检"
+    },
+    "common.brand.cnSuffix": {
+      "fr": "",
+      "status": "待抽检"
+    },
+    "common.group.label": {
+      "fr": "GROUPE",
+      "status": "待抽检"
+    },
+    "common.group.auto": {
+      "fr": "AUTO",
+      "status": "待抽检"
+    },
+    "common.verify.match": {
+      "fr": "Noms identiques",
+      "status": "待抽检"
+    },
+    "common.verify.diff": {
+      "fr": "Noms différents",
+      "status": "待抽检"
+    },
+    "common.verify.unknown": {
+      "fr": "Non vérifiable",
+      "status": "待抽检"
+    },
+    "common.ch.mismatchTip": {
+      "fr": "Nombre de canaux différent : Input {a}, Output {b}.",
+      "status": "待抽检"
+    },
+    "common.footer.aboutTip": {
+      "fr": "À propos et licences",
+      "status": "待抽检"
+    },
+    "common.footer.helpTip": {
+      "fr": "Revoir les règles et le guide",
+      "status": "待抽检"
+    },
+    "common.pair.validator": {
+      "fr": "MODE VALIDATION",
+      "status": "待抽检"
+    },
+    "common.pair.ipcUnavailable": {
+      "fr": "CONNEXION IMPOSSIBLE",
+      "status": "待抽检"
+    },
+    "common.pair.abiMismatch": {
+      "fr": "VERSION INCOMPATIBLE",
+      "status": "待抽检"
+    },
+    "common.pair.srMismatch": {
+      "fr": "FRÉQ. INCOHÉRENTE",
+      "status": "待抽检"
+    },
+    "common.pair.conflict": {
+      "fr": "CONFLIT",
+      "status": "待抽检"
+    },
+    "common.pair.unassigned": {
+      "fr": "SANS GROUPE",
+      "status": "待抽检"
+    },
+    "common.pair.stale": {
+      "fr": "LIAISON PERDUE",
+      "status": "待抽检"
+    },
+    "common.pair.crossProcess": {
+      "fr": "AUTRE PROCESSUS",
+      "status": "待抽检"
+    },
+    "common.pair.crossTrack": {
+      "fr": "AUTRE PISTE ?",
+      "status": "待抽检"
+    },
+    "common.pair.waitingAudio": {
+      "fr": "EN ATTENTE D’AUDIO",
+      "status": "待抽检"
+    },
+    "common.pair.connectedUnverified": {
+      "fr": "CONNECTÉ (NON VÉRIFIÉ)",
+      "status": "待抽检"
+    },
+    "common.pair.connected": {
+      "fr": "CONNECTÉ",
+      "status": "待抽检"
+    },
+    "band.action.restore": {
+      "fr": "Rétablir le retour",
+      "status": "待抽检"
+    },
+    "band.action.cooldownTip": {
+      "fr": "Vient d’être coupé — patientez un instant avant de rétablir",
+      "status": "待抽检"
+    },
+    "band.action.moveFree": {
+      "fr": "Vers un groupe libre",
+      "status": "待抽检"
+    },
+    "band.action.moveTo": {
+      "fr": "Passer au groupe {y}",
+      "status": "待抽检"
+    },
+    "band.action.repair": {
+      "fr": "Réappairer",
+      "status": "待抽检"
+    },
+    "band.action.guide": {
+      "fr": "Voir l’aide",
+      "status": "待抽检"
+    },
+    "band.action.limOn": {
+      "fr": "Activer le limiteur",
+      "status": "待抽检"
+    },
+    "band.action.ack": {
+      "fr": "Compris",
+      "status": "待抽检"
+    },
+    "band.action.takeover": {
+      "fr": "Reprendre",
+      "status": "待抽检"
+    },
+    "band.action.takeoverTip": {
+      "fr": "Cette instance perdra le groupe.",
+      "status": "待抽检"
+    },
+    "band.moreTip": {
+      "fr": "{n} avis de plus — cliquez pour les faire défiler",
+      "status": "待抽检"
+    },
+    "toast.group": {
+      "fr": "Passé au groupe {g} ; le retour revient en fondu depuis 0",
+      "status": "待抽检"
+    },
+    "toast.diagCopied": {
+      "fr": "Diagnostics copiés",
+      "status": "待抽检"
+    },
+    "toast.copyFail": {
+      "fr": "Échec de la copie : {reason}",
+      "status": "待抽检"
+    },
+    "about.title.in": {
+      "fr": "À propos de Rinne Input",
+      "status": "待抽检"
+    },
+    "about.title.out": {
+      "fr": "À propos de Rinne Output",
+      "status": "待抽检"
+    },
+    "about.product": {
+      "fr": "Synchain Rinne",
+      "status": "待抽检"
+    },
+    "about.build": {
+      "fr": "{role} {v} · build {sha} · {fmt} · {arch}",
+      "status": "待抽检"
+    },
+    "about.origin": {
+      "fr": "Se prononce RIN-neh, du japonais 輪廻 (rinne) — le cycle des renaissances.",
+      "status": "待抽检"
+    },
+    "about.license": {
+      "fr": "Source code : GPL-3.0-or-later. The binary as a whole is distributed under GPLv3 ; its JUCE portion is covered by AGPLv3 (GPLv3 §13). No warranty.",
+      "status": "待抽检",
+      "note": "法律口径句按英文原文保留，只补了法语标点前的不换行空格。"
+    },
+    "about.viewLicense": {
+      "fr": "Voir la licence",
+      "status": "待抽检"
+    },
+    "about.fonts": {
+      "fr": "Polices de l’interface : Space Grotesk ; Rinne Sans et Rinne Mono (sous-ensembles d’IBM Plex Sans / IBM Plex Mono, renommés selon la SIL OFL 1.1) ; Noto Sans SC — toutes sous licence SIL Open Font License 1.1.",
+      "status": "待抽检"
+    },
+    "about.tm": {
+      "fr": "Conçu avec JUCE. VST est une marque déposée de Steinberg Media Technologies GmbH. Audio Units est une marque d’Apple Inc.",
+      "status": "待抽检"
+    },
+    "about.link.source": {
+      "fr": "Code source",
+      "status": "待抽检"
+    },
+    "about.link.site": {
+      "fr": "Site web",
+      "status": "待抽检"
+    },
+    "about.link.contact": {
+      "fr": "Contact",
+      "status": "待抽检"
+    },
+    "about.link.notices": {
+      "fr": "Licences tierces",
+      "status": "待抽检"
+    },
+    "about.linkTip": {
+      "fr": "Ouvrir dans le navigateur",
+      "status": "待抽检"
+    },
+    "about.noGithub": {
+      "fr": "Pas de compte GitHub ? Envoyez les diagnostics à contact@synchain.ca",
+      "status": "待抽检"
+    },
+    "about.diagNote": {
+      "fr": "Les diagnostics comprennent les versions, le système, l’hôte, les réglages audio et l’état de la boucle — ni chemins de fichiers, ni noms d’utilisateur, ni noms de piste (seulement s’ils correspondent).",
+      "status": "待抽检"
+    },
+    "about.diagPreview": {
+      "fr": "APERÇU DES DIAGNOSTICS",
+      "status": "待抽检"
+    },
+    "about.copy": {
+      "fr": "Copier les diagnostics",
+      "status": "待抽检"
+    },
+    "about.copied": {
+      "fr": "Copié",
+      "status": "待抽检"
+    },
+    "about.copyFail": {
+      "fr": "Échec de la copie : {reason}",
+      "status": "待抽检"
+    },
+    "about.viewRules": {
+      "fr": "Voir les règles",
+      "status": "待抽检"
+    },
+    "about.adv.title": {
+      "fr": "AVANCÉ",
+      "status": "待抽检"
+    },
+    "about.adv.resetOnPlay": {
+      "fr": "Vider la boucle au démarrage de la lecture",
+      "status": "待抽检"
+    },
+    "about.adv.resetOnPlayTip": {
+      "fr": "Activé par défaut : chaque lecture démarre d’une boucle propre, l’export et la lecture concordent donc dès le début.",
+      "status": "待抽检"
+    },
+    "about.adv.tail": {
+      "fr": "Mode Tail",
+      "status": "待抽检"
+    },
+    "about.adv.tail.auto": {
+      "fr": "Auto",
+      "status": "待抽检"
+    },
+    "about.adv.tail.infinite": {
+      "fr": "Infini",
+      "status": "待抽检"
+    },
+    "about.adv.tail.s30": {
+      "fr": "30 s",
+      "status": "待抽检"
+    },
+    "about.adv.tailTip": {
+      "fr": "Indique à l’hôte la durée de queue de ce plug-in, pour qu’il ne le suspende pas pendant le silence et n’interrompe pas la boucle. Auto = infini en VST3, 30 s en AU.",
+      "status": "待抽检"
+    },
+    "about.adv.diagLog": {
+      "fr": "Enregistrer un journal de diagnostic",
+      "status": "待抽检"
+    },
+    "about.adv.diagLogTip": {
+      "fr": "Ajoute les événements récents de la boucle aux diagnostics pour les rapports de bug ; désactivé par défaut. Réglage propre à cet ordinateur, valable pour tous les projets.",
+      "status": "待抽检"
+    },
+    "about.adv.note": {
+      "fr": "Le vidage au démarrage et le mode Tail sont enregistrés avec le projet pour cette instance ; l’interrupteur du journal de diagnostic est un réglage propre à cet ordinateur.",
+      "status": "待抽检"
+    },
+    "about.adv.noteOut": {
+      "fr": "Le mode Tail est enregistré avec le projet pour cette instance ; l’interrupteur du journal de diagnostic est un réglage propre à cet ordinateur.",
+      "status": "待抽检"
+    },
+    "common.scale.label": {
+      "fr": "Zoom",
+      "status": "待抽检",
+      "note": "交接包之外新增的键：缩放下拉的可访问名。"
+    }
+  }
+}
