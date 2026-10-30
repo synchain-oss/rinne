@@ -166,10 +166,11 @@ private:
     bool openRendezvous(u64 nowMs);
     bool openRing(u64 nowMs);
     void claimTick(RvSegment& rv, u64 nowMs);
-    void ownerTick(RvSegment& rv, u64 nowMs);
+    void ownerTick(RvSegment& rv, u64 nowMs, bool scanned);
     void publishBinding();
     void refreshState() noexcept;
     void writeIdentity(RoleSlot& slot) noexcept;
+    void upkeepPairedFlag(RoleSlot& slot, u64 nowMs) noexcept;
     void upkeepLabel(RoleSlot& slot, u64 nowMs, bool heartbeatDue) noexcept;
     void upkeepWriter() noexcept;
     void enterConflict(u64 nowMs, bool retryDue) noexcept;
@@ -190,7 +191,7 @@ private:
     u64 myCtl_ = 0;
     u64 claimMs_ = 0;
     u64 dormantMs_ = 0;
-    u32 cfgFlags_ = 0;
+    u32 cfgFlags_ = 0; // 槽里 cfg_flags 的本地副本：每个心跳整字重写，所以位只能在这里改，不能只改槽
     u64 lastHeartbeatMs_ = 0;
     u64 token_ = 0;
     HandleKeeper keeper_;
