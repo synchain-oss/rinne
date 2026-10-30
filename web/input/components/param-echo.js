@@ -11,6 +11,8 @@
 //     开关与枚举直接落位。回声值与当前目标相同时什么都不做，恒值段不会触发任何显示更新（不闪）。
 //   - 页面刚打开收到的第一帧直接落位，不从 0 动画过去。
 // 没有 requestAnimationFrame 的环境（首帧回归测试里被故意删掉）直接落位。
+// 锁：宿主的第一批快照没到之前（locked() 为真），或这个参数还没有宿主给的值（显示值是 null），参数不接受手势与写入。
+//   不挡的话，用户在这段空档里的一次拖动会把显示值设成凭空的数，第一帧真回声到了反而被当成宿主自动化去逼近它。
 
 /** 自动化逼近的时间常数（毫秒）。 */
 export const AUTOMATION_TAU_MS = 40;
@@ -28,6 +30,7 @@ export const AUTO_HOLD_MS = 600;
  * @param {(cb:Function)=>number} [o.raf] 缺省取全局 requestAnimationFrame；不是函数时直接落位
  * @param {(id:number)=>void} [o.caf]
  * @param {()=>number} [o.now]
+ * @param {()=>boolean} [o.locked] 为真时所有参数都不接受手势与写入（缺省不锁）
  */
 export function createParamEcho(o) {
     const { bridge } = o;
@@ -44,6 +47,7 @@ export function createParamEcho(o) {
             ? (id) => globalThis.cancelAnimationFrame(id)
             : () => {});
     const now = o.now || (() => (typeof performance !== "undefined" ? performance.now() : Date.now()));
+    const globalLocked = o.locked || (() => false);
 
     /**
      * 登记一个参数。
@@ -141,6 +145,8 @@ export function createParamEcho(o) {
             active: () => gesture !== null,
             /** 宿主自动化中。 */
             automating: () => auto,
+            /** 不接受手势与写入：整体被锁，或这个参数还没有宿主的值。 */
+            locked: () => globalLocked() || shown === null,
             /** 页面刚打开或外部直接给值（不经桥）：落位。 */
             seed(v) {
                 if (gesture) return;
@@ -169,6 +175,7 @@ export function createParamEcho(o) {
             },
             /** 手势开始。已经在手势里就什么也不做。 */
             begin() {
+                if (api.locked()) return undefined;
                 if (gesture && !gesture.ended) return gesture;
                 stopApproach();
                 if (idleTimer) timers.clearTimeout(idleTimer);
@@ -190,6 +197,7 @@ export function createParamEcho(o) {
             },
             /** 手势里给一个新值：显示立即跟手，写入按 50 Hz 合并。 */
             set(v) {
+                if (api.locked()) return;
                 const g = gesture || api.begin();
                 if (shown !== v) {
                     shown = v;
@@ -235,6 +243,7 @@ export function createParamEcho(o) {
             },
             /** 滚轮与方向键：第一个事件开手势，停手 IDLE_END_MS 后结束。 */
             nudge(v) {
+                if (api.locked()) return;
                 api.set(v);
                 if (idleTimer) timers.clearTimeout(idleTimer);
                 idleTimer = timers.setTimeout(() => {

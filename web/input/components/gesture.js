@@ -87,7 +87,8 @@ export function attachControl(el, o) {
     const pxPerStep = o.wheelPxPerStep || 40;
     const quantize = o.quantize || ((v) => v);
     const value = () => o.param.value();
-    const disabled = () => Boolean(o.disabled && o.disabled());
+    // 参数被锁（宿主的快照没到、或这个参数还没有值）时一概不响应：指针、滚轮、方向键、Enter 进数值输入、双击复位都在内
+    const disabled = () => Boolean(o.disabled && o.disabled()) || Boolean(o.param.locked && o.param.locked());
 
     let drag = null;
     let wheelAcc = 0;
@@ -291,12 +292,12 @@ export function attachControl(el, o) {
  * 只有读数可点的件（Mix 的读数、延迟的读数、音色和上限的读数）：单击等双击判定窗口过去才进入数值输入，
  * 双击不进入，Ctrl（mac：Cmd）+ 单击立即进入。
  * @param {HTMLElement} node 读数元素
- * @param {{onEdit:()=>void, disabled?:()=>boolean, timers?:object}} o
+ * @param {{onEdit:()=>void, disabled?:()=>boolean, param?:object, timers?:object}} o param：给了就随它的锁（locked()）一起禁用
  */
 export function attachReadoutEdit(node, o) {
     const timers = o.timers || globalThis;
     let timer = 0;
-    const off = () => Boolean(o.disabled && o.disabled());
+    const off = () => Boolean(o.disabled && o.disabled()) || Boolean(o.param && o.param.locked && o.param.locked());
     node.addEventListener("click", (e) => {
         if (off()) return;
         if (e.ctrlKey || e.metaKey) {
