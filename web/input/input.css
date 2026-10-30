@@ -1474,6 +1474,7 @@ html[lang="zh"] .in-lamp__state {
 }
 
 .in-limconfirm .sc-btn {
+    flex: none;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1484,6 +1485,11 @@ html[lang="zh"] .in-lamp__state {
 }
 
 .in-limconfirm .in-btn--darkred {
+    padding: 0 11px;
+}
+
+/* 法语的两个按钮文字最长，224 宽的确认框里两颗并排要收一点内边距才不被挤 */
+html[lang="fr"] .in-limconfirm .sc-btn {
     padding: 0 11px;
 }
 
