@@ -106,6 +106,8 @@ export function createMsgline(o) {
     const root = el("div", {
         class: `rn-msgline rn-msgline--${size}`,
         role: "status",
+        // tabindex=-1：重建内容时焦点原先在槽里却找不到对应的件，要有个落脚处（只能程序化聚焦，不进 Tab 序）
+        tabindex: "-1",
         data: { gb: `${role}.band`, state: "idle", size },
     });
 
@@ -115,6 +117,25 @@ export function createMsgline(o) {
     let lastIds = "";
     let current = null;
     let latest = null; // 最近一次 update 的参数，轮换点击与到点回位时重画用
+
+    /**
+     * 重建槽里的内容。重建会把正在持有键盘焦点的按钮一起换掉，焦点掉到 body 上，键盘用户的位置就丢了
+     * （「+n」连按轮换、8 秒到点自动回位都会重建）。所以重建前看焦点是否在槽里：在，就还给新节点里同一个 data-part 的件；
+     * 没有同名件就退到新的「+n」，再退到槽本身。焦点原本不在槽里不去抢。
+     */
+    function rebuild(...children) {
+        const doc = root.ownerDocument;
+        const active = doc.activeElement;
+        const had = Boolean(active) && root.contains(active);
+        const part = had ? active.getAttribute("data-part") : null;
+        root.replaceChildren(...children);
+        if (!had) return;
+        const next =
+            (part && root.querySelector(`[data-part="${part}"]`)) ||
+            root.querySelector('[data-part="band.more"]') ||
+            root;
+        next.focus({ preventScroll: true });
+    }
 
     function armReset() {
         if (resetTimer) timers.clearTimeout(resetTimer);
@@ -183,7 +204,7 @@ export function createMsgline(o) {
         root.setAttribute("data-tone", "amber");
         root.setAttribute("data-msg", c.key);
         root.setAttribute("data-variant", "confirm");
-        root.replaceChildren(
+        rebuild(
             el(
                 "div",
                 { class: "rn-banner rn-banner--confirm" },
@@ -206,7 +227,7 @@ export function createMsgline(o) {
         root.removeAttribute("data-msg");
         root.removeAttribute("data-variant");
         // replaceChildren(null) 会插入文字「null」，没有空闲提示时必须传空参数表
-        root.replaceChildren(
+        rebuild(
             ...(idle
                 ? [
                       el(
@@ -289,7 +310,7 @@ export function createMsgline(o) {
         if (tone === "violet") cls.push("sc-banner--violet");
         const iconEl = icon(tone, 14);
         iconEl.classList.add("sc-banner__icon");
-        root.replaceChildren(
+        rebuild(
             el(
                 "div",
                 { class: cls.join(" ") },
