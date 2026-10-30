@@ -217,15 +217,17 @@ export function attachControl(el, o) {
         const px = wheelPx(e);
         if (!px) return;
         wheelAcc += -px; // 向上滚（deltaY 为负）加大
+        // 这个方向已经走不动（到了上限或下端）：累计清零，不攒着等反向。一个一个小滚轮事件也一样，
+        // 不能等攒满一步才发现走不动，否则到顶之后会带着不满一步的余量，反向要多滚好几下才有反应
+        const dir = Math.sign(wheelAcc);
+        if (dir !== 0 && stepBy(dir) === value()) {
+            wheelAcc = 0;
+            return;
+        }
         const steps = Math.trunc(wheelAcc / pxPerStep);
         if (steps === 0) return;
         wheelAcc -= steps * pxPerStep;
-        const v = stepBy(steps);
-        if (v === value()) {
-            wheelAcc = 0; // 顶到头：不攒着等反向
-            return;
-        }
-        setValue(v, "nudge");
+        setValue(stepBy(steps), "nudge");
     }
 
     function onKeyDown(e) {
