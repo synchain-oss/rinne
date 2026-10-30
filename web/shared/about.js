@@ -43,9 +43,8 @@ export const COPY_FAIL_UNKNOWN = "about.copyFail.unknown";
 
 /** 失败原因码换成词条键：只认登记过的码，其他一律退回「原因不明」。 */
 export function copyFailKey(code) {
-    return (
-        (typeof code === "string" && Object.hasOwn(COPY_FAIL_KEYS, code) && COPY_FAIL_KEYS[code]) || COPY_FAIL_UNKNOWN
-    );
+    const known = typeof code === "string" && Object.prototype.hasOwnProperty.call(COPY_FAIL_KEYS, code);
+    return known ? COPY_FAIL_KEYS[code] : COPY_FAIL_UNKNOWN;
 }
 
 const TAIL_MODES = Object.freeze([
