@@ -4,7 +4,7 @@
 //   ① 名称：页上每个可交互件都有非空的可访问名称（aria-labelledby > aria-label > 文字 > title）；
 //   ② 角色与状态：语言胶囊 tablist / tab、组选择 radiogroup / radio（roving tabindex，恰好一个 tabindex=0）、
 //      关于面板里的 switch 与 tail 的 radiogroup、对话框 dialog + aria-modal + aria-labelledby、消息位红为 alert 其余 status、轻提示 status；
-//   ③ 键盘：方向键只移焦点不选中，空格与回车才选中；Esc 关闭关于面板且焦点还给版本按钮，打开期间外壳内容 inert；
+//   ③ 键盘：组选择与关于面板的 tail 三项同口径（roving tabindex，方向键循环只移焦点不选中，空格与回车才选中）；Esc 关闭关于面板且焦点还给版本按钮，打开期间外壳内容 inert；
 //      Tab 走一圈，每一站都有看得见的焦点环；
 //   ④ 坏样例：夹具的 ?defect=noname 必须被名称审计抓出来。
 // 浏览器缺失时整套跳过（退出码 2）。
@@ -63,6 +63,8 @@ const KEY = {
     Escape: { key: "Escape", code: "Escape", vk: 27 },
     ArrowRight: { key: "ArrowRight", code: "ArrowRight", vk: 39 },
     ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", vk: 37 },
+    ArrowDown: { key: "ArrowDown", code: "ArrowDown", vk: 40 },
+    ArrowUp: { key: "ArrowUp", code: "ArrowUp", vk: 38 },
     Space: { key: " ", code: "Space", vk: 32, text: " " },
     Enter: { key: "Enter", code: "Enter", vk: 13, text: "\r" },
 };
@@ -230,6 +232,82 @@ try {
                     ctl.groups >= 1 && ctl.radios >= 2 && ctl.radioOk,
                     `${tag}：Input 关于面板的 tail 模式应是 radiogroup，实得 ${JSON.stringify(ctl)}`,
                 );
+            if (role === "input") {
+                // ---- ③ 键盘：tail 三项与组选择同口径：roving tabindex、方向键只移焦点、空格选中 ----
+                const tailSel = `[data-gb="${role}.about"] [role="radiogroup"] [role="radio"]`;
+                const tailInfo = () =>
+                    page.eval(
+                        `[...document.querySelectorAll('${tailSel}')].map((e) => ({ mode: e.getAttribute("data-tail"), checked: e.getAttribute("aria-checked"), tab: e.tabIndex }))`,
+                    );
+                const tailActive = () =>
+                    page.eval(
+                        `(() => { const a = document.activeElement; if (!a || !a.matches('${tailSel}')) return null; const cs = getComputedStyle(a); return { mode: a.getAttribute("data-tail"), ring: cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0 }; })()`,
+                    );
+                const info0 = await tailInfo();
+                run.eq(
+                    info0.map((x) => [x.mode, x.checked, x.tab]),
+                    [
+                        ["auto", "true", 0],
+                        ["infinite", "false", -1],
+                        ["30s", "false", -1],
+                    ],
+                    `${tag}：tail 三项应恰好选中一项且只有选中项是 Tab 停靠点，实得 ${JSON.stringify(info0)}`,
+                );
+                // Tab 走一圈对话框：tail 三项只停一站（选中项）
+                const dlgStops = await page.eval(
+                    `(() => { const d = document.querySelector('[data-gb="${role}.about"]'); return [...d.querySelectorAll('button, select, input, a[href], [tabindex]')].filter((e) => e.tabIndex >= 0 && !e.disabled && !e.hidden && !e.closest("[hidden]") && e.getClientRects().length > 0).length; })()`,
+                );
+                run.check(dlgStops >= 6, `${tag}：对话框里应有足够多的 Tab 停靠点（防空转），实得 ${dlgStops}`);
+                const visited = [];
+                for (let i = 0; i < dlgStops; i++) {
+                    await press(page, "Tab");
+                    const a = await tailActive();
+                    if (a) visited.push(a.mode);
+                }
+                run.eq(visited, ["auto"], `${tag}：Tab 走一圈只该在 tail 三项里停一站（选中项）`);
+                // 方向键只移焦点，循环；不触发 setTailMode，不改选中与停靠点
+                await page.eval(`document.querySelector('${tailSel}[tabindex="0"]').focus()`);
+                const callsBefore = await page.eval("window.__fx.calls.length");
+                for (const [key, want] of [
+                    ["ArrowRight", "infinite"],
+                    ["ArrowRight", "30s"],
+                    ["ArrowRight", "auto"],
+                    ["ArrowLeft", "30s"],
+                    ["ArrowDown", "auto"],
+                    ["ArrowUp", "30s"],
+                ]) {
+                    await press(page, key);
+                    const a = await tailActive();
+                    run.eq(a && a.mode, want, `${tag}：${key} 应把焦点移到 ${want}`);
+                    run.check(a && a.ring, `${tag}：方向键移到 ${want} 后应有看得见的焦点环`);
+                }
+                run.eq(
+                    await page.eval("window.__fx.calls.length"),
+                    callsBefore,
+                    `${tag}：方向键只移焦点，不触发 setTailMode`,
+                );
+                run.eq(
+                    (await tailInfo()).map((x) => [x.checked, x.tab]),
+                    info0.map((x) => [x.checked, x.tab]),
+                    `${tag}：方向键不改选中与 Tab 停靠点`,
+                );
+                // 空格选中焦点所在项，停靠点跟着选中项走
+                await press(page, "Space");
+                run.eq(
+                    await page.eval(`window.__fx.calls.filter((c) => c.name === "setTailMode").map((c) => c.args[0])`),
+                    ["30s"],
+                    `${tag}：空格应选中焦点所在的 tail 项`,
+                );
+                run.eq(
+                    (await tailInfo()).map((x) => [x.mode, x.checked, x.tab]),
+                    [
+                        ["auto", "false", -1],
+                        ["infinite", "false", -1],
+                        ["30s", "true", 0],
+                    ],
+                    `${tag}：选中后 Tab 停靠点应跟到新选中项`,
+                );
+            }
             const dlgNames = await page.eval(NAME_AUDIT);
             run.eq(dlgNames.missing, [], `${tag}：关于面板里这些可交互件没有可访问名称`);
             await press(page, "Escape");

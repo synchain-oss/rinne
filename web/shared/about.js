@@ -18,6 +18,8 @@
 // 诊断日志开关是本机设置（setDiagLog，写全局位，不进工程）。三项各自是否出现由 features 决定：
 // 起播清空只有 Input 有；tail 行当前只有 Input 的桥提供函数。
 // 行下面那句备注点名了 tail 模式，所以和 tail 行共用同一个开关：tail 行不渲染时备注也不渲染，免得指向看不见的控件。
+// tail 三项是 radiogroup，键盘口径与组选择一致：roving tabindex（选中项是唯一的 Tab 停靠点，没有选中项时第一项），
+// 方向键（左上 / 右下，首尾循环）只移动焦点，空格 / 回车才选中。
 //
 // 链接只经桥函数 openExternal 交给系统浏览器：元素是 role=link 的按钮，不是带 href 的 <a>，
 // 页面里不出现任何外部地址的赋值；地址表在 links.js。
@@ -224,18 +226,30 @@ export function createAbout(o) {
             },
         }),
     );
-    const tailRow = features.tail
+    const tailBar = features.tail
         ? el(
               "div",
-              { class: "rn-about__row", data: { row: "tail" } },
-              tailLabel,
-              el(
-                  "div",
-                  { class: "rn-darkSeg", role: "radiogroup", aria: { labelledby: `rn-about-tail-${role}` } },
-                  ...tailItems,
-              ),
+              { class: "rn-darkSeg", role: "radiogroup", aria: { labelledby: `rn-about-tail-${role}` } },
+              ...tailItems,
           )
         : null;
+    if (tailBar) {
+        // 方向键只移焦点（button 自己处理空格 / 回车），不选中：与组选择一致
+        tailBar.addEventListener("keydown", (e) => {
+            const i = tailItems.indexOf(document.activeElement);
+            if (i < 0) return;
+            const step =
+                e.key === "ArrowRight" || e.key === "ArrowDown"
+                    ? 1
+                    : e.key === "ArrowLeft" || e.key === "ArrowUp"
+                      ? -1
+                      : 0;
+            if (!step) return;
+            e.preventDefault();
+            tailItems[(i + step + tailItems.length) % tailItems.length].focus();
+        });
+    }
+    const tailRow = tailBar ? el("div", { class: "rn-about__row", data: { row: "tail" } }, tailLabel, tailBar) : null;
     if (tailRow) tailLabel.id = `rn-about-tail-${role}`;
     const advNote = el("div", { class: "rn-about__small rn-about__small--gap", data: { part: "about.advNote" } });
 
@@ -359,9 +373,12 @@ export function createAbout(o) {
             tailLabel.textContent = t("about.adv.tail");
             tailLabel.setAttribute("title", t("about.adv.tailTip"));
             const cur = view.cfg.tailMode || "auto";
+            const curIdx = TAIL_MODES.findIndex((m) => m.mode === cur);
+            const stop = curIdx < 0 ? 0 : curIdx; // roving tabindex：选中项（没有选中项时第一项）是唯一的 Tab 停靠点
             tailItems.forEach((n, i) => {
                 n.textContent = t(TAIL_MODES[i].key);
-                n.setAttribute("aria-checked", TAIL_MODES[i].mode === cur ? "true" : "false");
+                n.setAttribute("aria-checked", i === curIdx ? "true" : "false");
+                n.tabIndex = i === stop ? 0 : -1;
             });
         }
         diagRow.label.textContent = t("about.adv.diagLog");
