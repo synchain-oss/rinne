@@ -24,7 +24,7 @@ import {
 import { createChainDiagram } from "../../../web/shared/chain-diagram.js";
 import { createMsgline, ACTIONS } from "../../../web/shared/msgline.js";
 import { createToast } from "../../../web/shared/toast.js";
-import { createAbout } from "../../../web/shared/about.js";
+import { createAbout, COPY_FAIL_KEYS } from "../../../web/shared/about.js";
 import common from "../../../web/i18n/common.js";
 import { PAGE_DICT, BAND_META } from "./fixture-dict.js";
 
@@ -41,6 +41,12 @@ installDicts(common, PAGE_DICT);
 document.documentElement.lang = lang;
 const t = makeT(lang);
 
+/** 复制失败的原因短语里本语言最长的一条（页面真正会传给轻提示的就是这种已本地化的短语）及产生它的原因码。 */
+const WORST_CODE = Object.keys(COPY_FAIL_KEYS).reduce((a, b) =>
+    t(COPY_FAIL_KEYS[b]).length > t(COPY_FAIL_KEYS[a]).length ? b : a,
+);
+const WORST_REASON = t(COPY_FAIL_KEYS[WORST_CODE]);
+
 /** 每个占位符的样例值：取尽量长的合理值，让最坏串真的上屏。 */
 const SAMPLE_VALS = {
     a: "0.10.0",
@@ -54,7 +60,7 @@ const SAMPLE_VALS = {
     f: "14.4",
     s: "130",
     c: "−6.0",
-    reason: "shm_open EACCES",
+    reason: WORST_REASON,
     peer: "Gtr DI",
     self: "Vox Lead",
 };
@@ -78,6 +84,8 @@ const DIAG =
     "events: 12 (last 64 kept)\nui: webview=WebView2 scale=1.00 lang=zh";
 
 let diagFail = st === "copyFail";
+// reason= 指定桥返回的失败原因：缺省取会上屏最长短语的原因码；throw 表示桥抛异常；其他值原样当作桥给的原因码
+const failReason = q.get("reason") || WORST_CODE;
 let diagLog = false;
 const cfg = { resetOnPlay: true, tailMode: "auto" };
 const bridge = {
@@ -94,7 +102,10 @@ const bridge = {
     },
     async copyDiagnostics(commit) {
         log("copyDiagnostics", commit);
-        if (commit && diagFail) return { ok: false, copied: false, reason: "clipboard denied" };
+        if (commit && diagFail) {
+            if (failReason === "throw") throw new Error("TypeError: boom at secret-host/a.js:12");
+            return { ok: false, copied: false, reason: failReason };
+        }
         return { ok: true, copied: commit, text: DIAG };
     },
     async openExternal(url) {
@@ -343,6 +354,9 @@ async function setupOverlay() {
             const btn = about.el.querySelector('[data-part="about.copy"]');
             btn.click();
             await new Promise((r) => setTimeout(r, 120));
+            if (st === "copyFail" && failReason === WORST_CODE) {
+                expectText(t("about.copyFail", { reason: WORST_REASON }), "text");
+            }
         }
         expectText(t(role === "input" ? "about.title.in" : "about.title.out"), "text");
         expectText(t("about.license"), "text");
@@ -358,22 +372,13 @@ async function setupOverlay() {
         window.__fxToastAt = performance.now();
         toast.show({
             key,
-            vals:
-                key === "toast.copyFail"
-                    ? { reason: "clipboard denied by system policy" }
-                    : key === "toast.group"
-                      ? { g: "H" }
-                      : undefined,
+            vals: key === "toast.copyFail" ? { reason: WORST_REASON } : key === "toast.group" ? { g: "H" } : undefined,
             t,
         });
         expectText(
             t(
                 key,
-                key === "toast.copyFail"
-                    ? { reason: "clipboard denied by system policy" }
-                    : key === "toast.group"
-                      ? { g: "H" }
-                      : undefined,
+                key === "toast.copyFail" ? { reason: WORST_REASON } : key === "toast.group" ? { g: "H" } : undefined,
             ),
             "text",
         );

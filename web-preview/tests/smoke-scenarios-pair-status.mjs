@@ -223,6 +223,17 @@ run.eq(
             run.check(typeof parts[lang][key] === "string" && parts[lang][key].length > 0, `${key}（${lang}）非空`);
         }
     }
+    // 诊断说明如实交代轨道名：只给是否一致，外加 8 位散列，散列是指纹不是匿名化；不能写成「不含轨道名」
+    const diagNote = {
+        zh: { word: "散列", denial: /不含[^。；]*轨道名/ },
+        en: { word: "hash", denial: /\bno [^.—]*track names/i },
+        fr: { word: "hachage", denial: /ni noms de piste/i },
+    };
+    for (const [lang, { word, denial }] of Object.entries(diagNote)) {
+        const text = parts[lang]["about.diagNote"];
+        run.check(text.includes(word), `诊断说明（${lang}）应点明轨道名的散列：${text}`);
+        run.check(!denial.test(text), `诊断说明（${lang}）不能声称不含轨道名：${text}`);
+    }
     // 消息位动作表的键都真有词条
     for (const [name, def] of Object.entries(msg.ACTIONS)) {
         run.check(Boolean(common.zh[def.key]), `动作 ${name} 的词条 ${def.key} 存在`);

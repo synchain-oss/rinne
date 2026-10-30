@@ -11,6 +11,8 @@
 // 诊断预览：打开面板时先调 copyDiagnostics(false) 取文本放进可滚动预览区，用户看过、点「复制诊断信息」
 // 才调 copyDiagnostics(true) 写剪贴板。文本里有 8 位散列，它是指纹不是匿名化，所以必须让用户先看到再决定。
 // 复制成功按钮变成「已复制」，失败在底栏左侧用红字写出原因；成败都回调给页面（页面决定要不要弹 toast）。
+// 失败原因只显示登记过的几种说法：桥给的原因码查表换成本语言的短语，查不到（含异常消息、系统错误文字）一律写「原因不明」，
+// 原始文字不上屏也不传给页面：它可能带路径、用户名或其他语言，面板里不该出现。
 //
 // 高级设置：起播清空环路与 tail 模式随工程走（桥函数 setResetOnPlay、setTailMode，只影响本实例），
 // 诊断日志开关是本机设置（setDiagLog，写全局位，不进工程）。三项各自是否出现由 features 决定：
@@ -29,6 +31,22 @@ import { aboutLinks, isAllowedExternal } from "./links.js";
 
 /** 「已复制」状态停留多久（毫秒）。 */
 export const COPIED_MS = 2500;
+
+/** 桥给的失败原因码 → 失败原因词条。 */
+export const COPY_FAIL_KEYS = Object.freeze({
+    clipboard: "about.copyFail.clipboard",
+    "not-ready": "about.copyFail.notReady",
+});
+
+/** 原因码不认识时的词条。 */
+export const COPY_FAIL_UNKNOWN = "about.copyFail.unknown";
+
+/** 失败原因码换成词条键：只认登记过的码，其他一律退回「原因不明」。 */
+export function copyFailKey(code) {
+    return (
+        (typeof code === "string" && Object.hasOwn(COPY_FAIL_KEYS, code) && COPY_FAIL_KEYS[code]) || COPY_FAIL_UNKNOWN
+    );
+}
 
 const TAIL_MODES = Object.freeze([
     { mode: "auto", key: "about.adv.tail.auto" },
@@ -61,7 +79,7 @@ const ROLE_NAME_KEY = Object.freeze({ input: "in.brand.title", output: "out.bran
  * @param {{resetOnPlay?:boolean, tail?:boolean}} [o.features]
  * @param {()=>void} [o.onViewRules] 点「查看使用规则」
  * @param {()=>void} [o.onCopied] 复制成功
- * @param {(reason:string)=>void} [o.onCopyFail] 复制失败
+ * @param {(reason:string)=>void} [o.onCopyFail] 复制失败；参数是已按当前语言取好的失败原因短语，不是原始原因码
  * @param {()=>void} [o.onClose]
  * @param {{setTimeout:Function, clearTimeout:Function}} [o.timers]
  */
@@ -75,7 +93,7 @@ export function createAbout(o) {
 
     let view = { t: (k) => k, lang: "zh", build: {}, cfg: {}, diagLog: false };
     let copyState = "open"; // open、copied、copyFail
-    let copyReason = "";
+    let copyFailCode = ""; // 桥给的原因码，上屏时按当前语言换成短语
     let copiedTimer = 0;
 
     const modal = createModal({
@@ -290,13 +308,13 @@ export function createAbout(o) {
         if (copiedTimer) timers.clearTimeout(copiedTimer);
         copiedTimer = 0;
         let ok = false;
-        let reason = "";
+        let code = "";
         try {
             const r = await bridge.copyDiagnostics(true);
             ok = Boolean(r && r.ok && r.copied);
-            if (!ok) reason = (r && r.reason) || "unknown";
-        } catch (e) {
-            reason = (e && e.message) || "unknown";
+            if (!ok) code = r && typeof r.reason === "string" ? r.reason : "";
+        } catch {
+            code = ""; // 异常消息不上屏
         }
         if (ok) {
             copyState = "copied";
@@ -308,8 +326,8 @@ export function createAbout(o) {
             if (o.onCopied) o.onCopied();
         } else {
             copyState = "copyFail";
-            copyReason = reason;
-            if (o.onCopyFail) o.onCopyFail(reason);
+            copyFailCode = code;
+            if (o.onCopyFail) o.onCopyFail(view.t(copyFailKey(code)));
         }
         applyCopy();
     }
@@ -326,7 +344,8 @@ export function createAbout(o) {
             copyBtn.removeAttribute("data-state");
         }
         copyFail.hidden = copyState !== "copyFail";
-        copyFail.textContent = copyState === "copyFail" ? t("about.copyFail", { reason: copyReason }) : "";
+        copyFail.textContent =
+            copyState === "copyFail" ? t("about.copyFail", { reason: t(copyFailKey(copyFailCode)) }) : "";
     }
 
     function applyAdvanced() {

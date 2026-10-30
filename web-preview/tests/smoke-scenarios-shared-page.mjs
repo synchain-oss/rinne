@@ -24,6 +24,7 @@ if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 
 const design = await loadDesign(ROOT);
 const links = await import(pathToFileURL(path.join(ROOT, "web/shared/links.js")).href);
+const common = (await import(pathToFileURL(path.join(ROOT, "web/i18n/common.js")).href)).default;
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser();
 
@@ -384,15 +385,51 @@ try {
             const withTail = await noteOf();
             run.check(withTail.shown && withTail.text.includes("tail"), `${role}：有 tail 行时备注出现并点名 tail`);
         }
-        // 复制失败：红色错误行 + 红色轻提示
-        await openScene(page, server, design, role, "zh", scene("about-copyFail"));
-        const fail = await page.eval(
-            `(() => { const f = document.querySelector('${about} .rn-about__fail'); const t = document.querySelector('${gb("toast")}'); return { shown: !f.hidden, text: f.textContent, role: f.getAttribute("role"), tone: t.getAttribute("data-tone") }; })()`,
-        );
+        // 复制失败：红色错误行 + 红色轻提示。原因只显示登记过的短语：认识的原因码换成本语言的短语，
+        // 不认识的码、桥抛的异常消息、对象原型上的名字一律退回「原因不明」，原始文字不上屏
+        const dict = common.zh;
+        const failText = (phrase) => dict["about.copyFail"].replace("{reason}", phrase);
+        const failProbe = async (query, lang = "zh") => {
+            await openScene(page, server, design, role, lang, scene("about-copyFail"), query);
+            return page.eval(
+                `(() => { const f = document.querySelector('${about} .rn-about__fail'); const t = document.querySelector('${gb("toast")}'); return { shown: !f.hidden, text: f.textContent, role: f.getAttribute("role"), tone: t.getAttribute("data-tone"), toast: t.textContent }; })()`,
+            );
+        };
+        const worst = await failProbe("");
         run.check(
-            fail.shown && fail.text.includes("clipboard denied") && fail.role === "alert" && fail.tone === "red",
-            `${role}：复制失败应显示带原因的 alert 与红色轻提示，实得 ${JSON.stringify(fail)}`,
+            worst.shown &&
+                worst.text === failText(dict["about.copyFail.notReady"]) &&
+                worst.role === "alert" &&
+                worst.tone === "red" &&
+                worst.toast.includes(dict["about.copyFail.notReady"]),
+            `${role}：复制失败（缺省原因码）应显示对应短语的 alert 与带同一短语的红色轻提示，实得 ${JSON.stringify(worst)}`,
         );
+        const known = await failProbe("&reason=clipboard");
+        run.check(
+            known.text === failText(dict["about.copyFail.clipboard"]) &&
+                known.toast.includes(dict["about.copyFail.clipboard"]),
+            `${role}：原因码 clipboard 应显示「${dict["about.copyFail.clipboard"]}」，实得 ${JSON.stringify(known)}`,
+        );
+        const knownEn = await failProbe("&reason=clipboard", "en");
+        run.check(
+            knownEn.text === common.en["about.copyFail"].replace("{reason}", common.en["about.copyFail.clipboard"]) &&
+                knownEn.toast.includes(common.en["about.copyFail.clipboard"]),
+            `${role}：英文下应显示英文短语，实得 ${JSON.stringify(knownEn)}`,
+        );
+        const unknownCases = [
+            ["&reason=clipboard%20denied", ["clipboard denied"], "未登记的原因码"],
+            ["&reason=throw", ["boom", "TypeError", "secret-host"], "桥抛出的异常"],
+            ["&reason=constructor", ["function", "Object"], "对象原型上的名字"],
+        ];
+        for (const [query, leaks, what] of unknownCases) {
+            const r = await failProbe(query);
+            run.check(
+                r.text === failText(dict["about.copyFail.unknown"]) &&
+                    r.toast.includes(dict["about.copyFail.unknown"]) &&
+                    !leaks.some((w) => r.text.includes(w) || r.toast.includes(w)),
+                `${role}：${what}应退回「${dict["about.copyFail.unknown"]}」且原始文字不上屏，实得 ${JSON.stringify(r)}`,
+            );
+        }
 
         // ============================================================ 外壳危险描边
         await openScene(page, server, design, role, "zh", scene("window-danger"));

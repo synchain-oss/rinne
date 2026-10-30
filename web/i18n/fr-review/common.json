@@ -224,7 +224,7 @@
       "status": "待抽检"
     },
     "about.diagNote": {
-      "fr": "Les diagnostics comprennent les versions, le système, l’hôte, les réglages audio et l’état de la boucle — ni chemins de fichiers, ni noms d’utilisateur, ni noms de piste (seulement s’ils correspondent).",
+      "fr": "Les diagnostics comprennent les versions, le système, l’hôte, les réglages audio et l’état de la boucle — ni chemins de fichiers ni noms d’utilisateur. Les noms de piste ne figurent que sous forme de correspondance, avec un hachage de 8 caractères (une empreinte, pas une anonymisation).",
       "status": "待抽检"
     },
     "about.diagPreview": {
@@ -241,6 +241,18 @@
     },
     "about.copyFail": {
       "fr": "Échec de la copie : {reason}",
+      "status": "待抽检"
+    },
+    "about.copyFail.clipboard": {
+      "fr": "presse-papiers indisponible",
+      "status": "待抽检"
+    },
+    "about.copyFail.notReady": {
+      "fr": "interface pas encore prête",
+      "status": "待抽检"
+    },
+    "about.copyFail.unknown": {
+      "fr": "raison inconnue",
       "status": "待抽检"
     },
     "about.viewRules": {
