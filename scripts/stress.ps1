@@ -447,15 +447,27 @@ function Invoke-SelfTest {
         }
         $savedSupp = $script:TsanSupp
         $savedBuildDir = $script:BuildDir
+        # 跑一遍 Invoke-Stress：退出码是输出流的最后一个值，Write-Host 的信息流用 6>&1 收下来，断言走的是哪个出口
+        $runStress = {
+            $all = @(Invoke-Stress 6>&1)
+            @{ Code = $all[-1]; Text = (@($all | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { "$($_.MessageData)" }) -join "`n") }
+        }
         try {
-            foreach ($exit in @(@('没有构建目录', $missingBuild), @('构建记录不是当前 HEAD', $staleBuild), @('构建目录里没有 rinne_stress', $noExeBuild))) {
+            # 每个出口：名字、夹具目录、这个出口打印的原因文本（正则）。夹具搭错了（比如构建记录对上了 HEAD）原因文本就对不上
+            $exits = @(
+                @('没有构建目录', $missingBuild, '没有构建目录'),
+                @('构建记录不是当前 HEAD', $staleBuild, '构建记录是 0000000 的'),
+                @('构建目录里没有 rinne_stress', $noExeBuild, '里没有 rinne_stress'))
+            foreach ($exit in $exits) {
                 $script:BuildDir = $exit[1]
                 $script:TsanSupp = $badSupp
-                $codeBad = @(Invoke-Stress 6>$null)[-1]
+                $bad = & $runStress
                 $script:TsanSupp = $goodSupp
-                $codeGood = @(Invoke-Stress 6>$null)[-1]
-                & $check "没有可跑的压测（$($exit[0])）而 tsan.supp 不合格：退出码 1，不被 SKIP 吞掉" $true ($codeBad -eq 1)
-                & $check "没有可跑的压测（$($exit[0])）而 tsan.supp 合格：仍是 2（gate 记 SKIP）" $false ($codeGood -eq 2)
+                $good = & $runStress
+                & $check "没有可跑的压测（$($exit[0])）而 tsan.supp 不合格：退出码 1，原因文本是这个出口的，并列出 tsan.supp 的失败" $true (
+                    $bad.Code -eq 1 -and $bad.Text -match $exit[2] -and $bad.Text -match '失败：.*tsan\.supp')
+                & $check "没有可跑的压测（$($exit[0])）而 tsan.supp 合格：仍是 2（gate 记 SKIP），原因文本是这个出口的，没有「失败：」" $false (
+                    $good.Code -eq 2 -and $good.Text -match $exit[2] -and $good.Text -notmatch '失败：')
             }
         } finally {
             $script:TsanSupp = $savedSupp
