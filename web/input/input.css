@@ -31,6 +31,21 @@ html[lang="zh"] {
     position: absolute;
 }
 
+/* 宿主旁路：设计稿把内容整体降到 .55（等同停用的界面）。消息位里的红字与「恢复」按钮降到 .55 就读不清，不能降。
+   不透明度只能往下叠、不能从子件往上抬，所以把降级从内容层挪到各件上；紧急切断在最上层，本来就不在内容层里。
+   消息位空闲时只有一行灰字提示，照设计稿一起降。 */
+.rn-shell[data-role="input"][data-bypass] > .rn-shell__content {
+    opacity: 1;
+}
+
+.rn-shell[data-role="input"][data-bypass] > .rn-shell__content > .in-abs {
+    opacity: 0.55;
+}
+
+.rn-shell[data-role="input"][data-bypass] > .rn-shell__content > .rn-msgline:not([data-state="idle"]) {
+    opacity: 1;
+}
+
 .in-pairrow {
     display: flex;
     align-items: center;
