@@ -104,6 +104,9 @@ export function createSafetyCard(ctx, o) {
     const guardLabel = el("span", { class: "in-guard__label" });
     const guardToggle = createToggle({
         part: "guard.toggle",
+        // 关失控保护不弹确认框，与设计稿一致（设计稿只给限制器关闭配了确认框）。关掉以后限制器、软削波、超大值跳闸和
+        // Panic 仍在，回送的硬上界没有被拿掉；它是一次点击就能再开的开关，不像限制器关了会拿掉硬上界。
+        // 要加确认框得先有设计稿的正文与按钮，这里不自编。
         onToggle: (next) => {
             ctx.setGuardOn(next);
         },
