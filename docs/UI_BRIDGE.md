@@ -320,9 +320,13 @@ Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有
 |---|---|
 | `send` | 发送状态：`channels`（`ST` 或 `MONO`）、`sampleRate`、`bypassed`（旁路写入静音）、`hostPaused`。 |
 | `inputGuideSeen` | Input 的引导是否已看；已看时 Output 首次打开跳过自己的引导。 |
+| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）、`outOfOrder`（错序证据成立）之一。这四条没有对应的配对状态，只能由这个字段带；缺省、非数组、未知 `id` 一律当没有。 |
+| `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；缺省时只显示版本号。 |
 
 ### 配对卡
 
 - `rinne.pair` 的 `self.name` 与 `peer.name` 对应配对卡里「本轨」与「Input 所在轨」两行；`verify` 决定核验徽标。
+- 配对卡另读两个可缺省字段：`self.color`（本轨颜色点，缺省用默认点色）、`peer.channels`（对端声道，`1` / `2` 或 `"MONO"` / `"ST"`，缺省不画声道徽标）。`srMismatch` 消息里对端的采样率读 `peer.sampleRate`（字段登记在 common 节），缺省显示「—」。
+- 消息位里「查看说明」按钮（版本不匹配、IPC 不可用、沙盒拒绝、跨进程四条消息带它）经 `openExternal` 打开当前版本钉死的用户指南（`docs/USER_GUIDE.zh-CN.md`，不带片段），地址必须通过原生白名单。
 - `conflict` 时的修复按钮文案是「重新配对」（按智能默认重选组）。界面文字里不出现「自动配对」。
 - 智能默认只看本进程内的实例，新 Output 的选组顺序是：同名轨上未配对的 Input、最近认领的未配对 Input、编号最小的空组等待（每 1 s 重评）。用户手选组之后永不自动迁组。
