@@ -164,6 +164,12 @@ function ConvertTo-CommandLine([string[]]$Arguments) {
         }) -join ' '
 }
 
+# 结束整棵进程树。进程已经退出（InvalidOperationException）、没有权限（Win32Exception）一类任何失败都吞掉：
+# 调用方照样按超时返回 -1，不能把超时变成没人接的异常
+function Stop-ProcessTree($Process) {
+    try { $Process.Kill($true) } catch { $null = $_ }
+}
+
 # 跑一个外部命令，标准输出与标准错误进 $Log 与 $Log.err（文件，不是管道）；只等它自己退出，不等它留下的子进程；
 # 到点结束整棵进程树。返回退出码，超时返回 -1。
 function Invoke-Logged([string]$Exe, [string[]]$Arguments, [string]$Log, [int]$TimeoutSeconds) {
@@ -173,7 +179,7 @@ function Invoke-Logged([string]$Exe, [string[]]$Arguments, [string]$Log, [int]$T
     $p = Start-Process @start
     $null = $p.Handle   # 先拿住句柄，退出后才读得到退出码
     if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
-        try { $p.Kill($true) } catch [InvalidOperationException] { $null = $_ }
+        Stop-ProcessTree $p
         return -1
     }
     $p.ExitCode
@@ -326,8 +332,15 @@ function Invoke-Stress {
         if (-not $ninjaExe) { $failures.Add('变异构建：找不到 ninja（传 -Ninja，或设 RINNE_NINJA / git config rinne.ninja）') }
         else {
             $env:VSLANG = '1033'
-            Enter-MsvcShell
-            foreach ($name in $MutationNames) {
+            # 进不了 MSVC 环境（找不到 vswhere、没有 VC 工具集）：把原因记进失败，不让异常带走前面已经算出的 tsan.supp 与压测
+            # 结论和最后的「失败：/完成：」行；也不带着坏环境去跑变异循环
+            $msvcError = $null
+            try { Enter-MsvcShell } catch { $msvcError = $_.Exception.Message }
+            if ($msvcError) {
+                Write-Host "变异构建：进不了 MSVC 环境（$msvcError）"
+                $failures.Add("变异构建：进不了 MSVC 环境（$msvcError）")
+            }
+            foreach ($name in ($msvcError ? @() : $MutationNames)) {
                 try {
                     $m0 = $sw.Elapsed.TotalSeconds
                     $mexe = Invoke-MutationBuild $name $main $ninjaExe
@@ -473,9 +486,81 @@ function Invoke-SelfTest {
             $script:TsanSupp = $savedSupp
             $script:BuildDir = $savedBuildDir
         }
+
+        # 进不了 MSVC 环境：记进失败，已经算出的 tsan.supp 与压测结论照常报告，变异循环一个都不跑；环境正常时两个变异都会去构建。
+        # 在子作用域里用同名函数顶掉 Enter-MsvcShell、Invoke-StressExe、Invoke-MutationBuild，不真的起进程、不真的构建
+        $fakeBuild = Join-Path $dir 'build-fake'
+        $null = New-Item -ItemType Directory -Path (Join-Path $fakeBuild 'tests')
+        Set-Content -LiteralPath (Join-Path $fakeBuild ('tests/' + ($IsWindows ? 'rinne_stress.exe' : 'rinne_stress'))) -Value 'x'
+        $pwshForNinja = (Get-Process -Id $PID).Path
+        $savedMutations = $script:Mutations
+        $savedNinja = $script:Ninja
+        $savedLogDir = $script:LogDir
+        $savedNoStamp = $script:NoStampCheck
+        $savedVslang = $env:VSLANG
+        $savedSupp = $script:TsanSupp
+        $savedBuildDir = $script:BuildDir
+        try {
+            $script:Mutations = $true
+            $script:Ninja = $pwshForNinja
+            $script:LogDir = Join-Path $dir 'stress-logs'
+            $script:NoStampCheck = $true
+            $script:TsanSupp = $goodSupp
+            $script:BuildDir = $fakeBuild
+            $run = & {
+                $mutationCalls = [System.Collections.Generic.List[string]]::new()
+                function Invoke-StressExe([string]$Exe, [string]$Log, [int]$TimeoutSeconds, [hashtable]$Vars, [string[]]$Arguments = @()) {
+                    Set-Content -LiteralPath $Log -Value 'All tests passed (155 assertions in 6 test cases)'
+                    0
+                }
+                function Invoke-MutationBuild([string]$Name, [string]$MainBuild, [string]$NinjaExe) {
+                    $mutationCalls.Add($Name)
+                    throw '桩：不真的构建'
+                }
+                function Enter-MsvcShell { throw '桩：找不到 vswhere' }
+                $broken = & $runStress
+                $brokenCalls = $mutationCalls.Count
+                function Enter-MsvcShell { }
+                $healthy = & $runStress
+                @{ Broken = $broken; BrokenCalls = $brokenCalls; Healthy = $healthy; HealthyCalls = @($mutationCalls) }
+            }
+            & $check '进不了 MSVC 环境：退出码 1，失败行里有这条原因' $true (
+                $run.Broken.Code -eq 1 -and $run.Broken.Text -match '变异构建：进不了 MSVC 环境（桩：找不到 vswhere）' -and $run.Broken.Text -match '失败：.*进不了 MSVC 环境')
+            & $check '进不了 MSVC 环境：前面已经算出的压测与 tsan.supp 结论照常报告，不被异常带走' $true (
+                $run.Broken.Text -match '压测：通过' -and $run.Broken.Text -match 'tsan\.supp：合格')
+            & $check '进不了 MSVC 环境：变异循环一个都不跑' $true ($run.BrokenCalls -eq 0)
+            & $check 'MSVC 环境正常：两个变异都去构建（上一条不是恒不跑）' $false (($run.HealthyCalls -join ',') -ceq 'no_intent,no_read_fence')
+            & $check 'MSVC 环境正常：构建失败照常记进失败，退出码 1' $false (
+                $run.Healthy.Code -eq 1 -and $run.Healthy.Text -notmatch '进不了 MSVC 环境' -and $run.Healthy.Text -match '变异 no_intent：构建失败')
+        } finally {
+            $script:Mutations = $savedMutations
+            $script:Ninja = $savedNinja
+            $script:LogDir = $savedLogDir
+            $script:NoStampCheck = $savedNoStamp
+            $env:VSLANG = $savedVslang
+            $script:TsanSupp = $savedSupp
+            $script:BuildDir = $savedBuildDir
+        }
+
+        # 结束进程树失败：什么异常都不能冒出来（调用方照样按超时返回 -1）
+        foreach ($thrown in @(
+                @('进程已退出（InvalidOperationException）', { [InvalidOperationException]::new('已退出') }),
+                @('没有权限（Win32Exception）', { [System.ComponentModel.Win32Exception]::new('拒绝访问') }),
+                @('别的异常', { [ArgumentException]::new('随便什么') }))) {
+            $fake = [pscustomobject]@{ Killed = 0 }
+            $makeError = $thrown[1]
+            Add-Member -InputObject $fake -MemberType ScriptMethod -Name Kill -Value ({ param($tree) throw (& $makeError) }.GetNewClosure())
+            $escaped = $null
+            try { Stop-ProcessTree $fake } catch { $escaped = $_ }
+            & $check "结束进程树失败（$($thrown[0])）：异常不冒出来" $true ($null -eq $escaped)
+        }
     } finally {
-        # 只删本次新建的临时目录里的文件与子目录（子目录里也只有文件），再删这个空目录；都不递归
+        # 只删本次新建的临时目录里的文件与子目录（最深两层，逐层列出，不用递归删除），再删这个空目录
         foreach ($d in Get-ChildItem -LiteralPath $dir -Directory) {
+            foreach ($d2 in Get-ChildItem -LiteralPath $d.FullName -Directory) {
+                foreach ($f in Get-ChildItem -LiteralPath $d2.FullName -File) { Remove-Item -LiteralPath $f.FullName }
+                Remove-Item -LiteralPath $d2.FullName
+            }
             foreach ($f in Get-ChildItem -LiteralPath $d.FullName -File) { Remove-Item -LiteralPath $f.FullName }
             Remove-Item -LiteralPath $d.FullName
         }
