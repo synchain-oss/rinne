@@ -425,9 +425,6 @@ function boot() {
             params.get("limiter").commit(true);
         } else if (name === "guide") {
             openGuide();
-        } else if (name === "ack") {
-            // 「知道了」只用于导出提示：记下当前原因位，之后出现新原因才会再提示
-            if (msg && EXPORT_IDS.has(msg.id)) onMessageDismiss(msg.id);
         }
     }
 

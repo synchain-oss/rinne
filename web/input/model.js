@@ -489,16 +489,17 @@ export function exportHint(cur, rec) {
 }
 
 /**
- * 导出提示的文案按原因选：同时有几个原因时只说优先级最高的一个（宿主违约 > 补 0 > 对端违约 > 重同步），
- * 免得一件事占几条消息；没有原因位时没有消息。关掉记录里存的是全部原因位，之后出现新原因仍会重新提示。
+ * 导出提示按原因拆成消息，顺序即优先级（宿主违约 > 补 0 > 对端违约 > 重同步）：消息位先显示第一条，
+ * 其余的由「+n」轮换。每条都能单独关掉，关掉记的是当下的原因位与计数（见 exportHint）。
  */
 export function exportMessages(bits) {
     const b = bits >>> 0;
-    if (b & EXPORT_BIT.violation) return [{ id: "exportViolation", key: "band.in.exportViolation" }];
-    if (b & EXPORT_BIT.overrun) return [{ id: "exportOverrun", key: "band.in.exportOverrun" }];
-    if (b & EXPORT_BIT.peer) return [{ id: "exportPeer", key: "band.in.exportPeer" }];
-    if (b & EXPORT_BIT.resync) return [{ id: "exportResync", key: "band.in.exportResync" }];
-    return [];
+    const out = [];
+    if (b & EXPORT_BIT.violation) out.push({ id: "exportViolation", key: "band.in.exportViolation" });
+    if (b & EXPORT_BIT.overrun) out.push({ id: "exportOverrun", key: "band.in.exportOverrun" });
+    if (b & EXPORT_BIT.peer) out.push({ id: "exportPeer", key: "band.in.exportPeer" });
+    if (b & EXPORT_BIT.resync) out.push({ id: "exportResync", key: "band.in.exportResync" });
+    return out;
 }
 
 // ---------------------------------------------------------------- 消息位
@@ -599,8 +600,7 @@ export function deriveMessages(c) {
         );
     const exp = exportHint(state.exportCauses, c.exportRec === undefined ? null : c.exportRec);
     if (exp.show) {
-        for (const m of exportMessages(state.exportCauses.bits))
-            out.push(msg(m.id, m.key, "amber", { action: { name: "ack" } }));
+        for (const m of exportMessages(state.exportCauses.bits)) out.push(msg(m.id, m.key, "amber", { dismiss: true }));
     }
     if (values.limiter === false)
         out.push(msg("limiterOff", "band.in.limiterOff", "amber", { action: { name: "limOn" } }));

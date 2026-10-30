@@ -428,26 +428,23 @@ const exportRec = ({ M, ok, eq }) => {
         false,
         "计数更小（回绕之前）不算更新的反例",
     );
-    const first = (bits) => M.exportMessages(bits).map((m) => m.id);
-    eq(first(15), ["exportViolation"], "四个原因都在：只说宿主违约");
-    eq(first(14), ["exportOverrun"], "没有宿主违约：说补 0");
-    eq(first(12), ["exportPeer"], "没有前两个：说对端违约");
-    eq(first(8), ["exportResync"], "只有重同步");
-    eq(first(4), ["exportPeer"], "只有对端违约");
+    const ids = (bits) => M.exportMessages(bits).map((m) => m.id);
+    eq(
+        ids(15),
+        ["exportViolation", "exportOverrun", "exportPeer", "exportResync"],
+        "四个原因按优先级各出一条，由「+n」轮换",
+    );
+    eq(ids(12), ["exportPeer", "exportResync"], "没有前两个：对端违约排在重同步前");
+    eq(ids(4), ["exportPeer"], "只有对端违约");
     eq(M.exportMessages(0), [], "没有原因位没有消息");
 };
 group("导出提示", exportRec);
 caught("导出提示", exportRec, { exportHint: (cur, rec) => ({ show: cur.bits !== 0 && rec === null, rec }) });
 caught("导出提示", exportRec, { exportMessages: (b) => (b ? [{ id: "exportViolation", key: "k" }] : []) });
 caught("导出提示", exportRec, {
-    // 四个原因各出一条（旧写法）：同一件事占几条消息
+    // 只取优先级最高的一条：其余原因没有「+n」可轮换
     exportMessages: (b) =>
-        [1, 2, 4, 8]
-            .filter((x) => b & x)
-            .map((x) => ({
-                id: ["", "exportViolation", "exportOverrun", "", "exportPeer", "", "", "", "exportResync"][x],
-                key: "k",
-            })),
+        b & 1 ? [{ id: "exportViolation", key: "k" }] : b & 4 ? [{ id: "exportPeer", key: "k" }] : [],
 });
 caught("导出提示", exportRec, {
     exportHint: (cur, rec) => ({ show: Boolean(cur.bits) && (!rec || cur.bits !== rec.bits), rec }),
@@ -665,11 +662,11 @@ const messages = ({ M, ok, eq }) => {
     const ex = derive(M, (c) => {
         c.state.exportCauses = { bits: 1 | 4, count: 2 };
     });
-    eq(ids(ex), ["exportViolation"], "导出提示同时有几个原因时只说优先级最高的一个");
+    eq(ids(ex), ["exportViolation", "exportPeer"], "导出提示按原因拆开");
     eq(
-        ex.messages.every((m) => m.tone === "amber" && m.action && m.action.name === "ack" && !m.dismiss),
+        ex.messages.every((m) => m.dismiss === true && m.tone === "amber"),
         true,
-        "导出提示琥珀、动作是「知道了」、不带 ✕",
+        "导出提示琥珀、带 ✕",
     );
     eq(
         ids(
