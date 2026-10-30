@@ -243,7 +243,7 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | 事件 | 内容与频率 |
 |---|---|
 | `rinne.params` | 参数值的宿主回声，`{ seq, values }`；首帧必发。宿主自动化回放时，指针用 rAF 指数逼近最新回声，时间常数 40 ms，不用 CSS 过渡。 |
-| `rinne.meters` | 25 Hz，先 diff 再发：`in`、`ret`（增益前）、`out` 三条电平（dBFS，静音为 `null`）、增益缩减 `gr`、三盏灯 `lamps`（`dc`、`nonfinite`、`guard`）。 |
+| `rinne.meters` | 25 Hz，先 diff 再发：`in`、`ret`（增益前）、`out` 三条电平（dBFS，静音为 `null`）、Mix 推子的两路分量 `dryPart`、`retPart`（dBFS，静音为 `null`）、增益缩减 `gr`、高切截断位 `highCutLimited`、三盏灯 `lamps`（`dc`、`nonfinite`、`guard`，另带可选的 `nonfiniteCount`、`guardDb`）。字段含义见下面「电平帧补充字段」。 |
 | `rinne.presets` | 预设列表：`factory`（8 个，三语名）、`user`、`current`。 |
 
 ### 参数（11 个）
@@ -275,6 +275,24 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | `delay` | 环路延迟卡：`actualMs`、`minMs`、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长）。 |
 | `safety` | `{ cut, cooldownMs, l2 }`。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`l2` 为真表示有任一 L2 条件。 |
 | `dismissedHints` | 本实例已关闭的提示 ID，不进工程。 |
+| `exportCauses` | 导出不一致的锁存信息：`{ bits, count }`。`bits` 是自上次确认起各原因位的并集（1 = 宿主违约，2 = 主读头补 0，4 = 对端报告违约，8 = 重同步），`count` 是自上次确认起被计入的事件数（无符号 32 位，回绕无碍，只用「不等」比较）。`count` 为 0 表示没有锁存。 |
+| `silentCause` | 可选。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停）、`stalled`（块序号停滞）。只在 `rinne.pair.state` 为 `connectedStill` 或 `connectedUnverified` 时有意义；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
+
+### 电平帧补充字段
+
+| 字段 | 含义 |
+|---|---|
+| `dryPart` | Mix 推子的干声分量峰值（dBFS，静音为 `null`），即 g_dry 作用之后的干声。 |
+| `retPart` | Mix 推子的回送分量峰值（dBFS，静音为 `null`），即加到干声上的那一项。输出是这两路逐样本相加，两路的峰值不一定同时出现，所以各自的峰值不能相加还原 `out`；推子从左填干声、从右填回送，各占一半量程。 |
+| `highCutLimited` | 布尔。高切设定高于采样率允许的上限（0.45 倍采样率）而又不是「关」，实际按上限截断；界面据此给一条中性提示。 |
+| `lamps.nonfiniteCount` | 环里读到并已置 0 的非有限样本累计数，`lamps.nonfinite` 为 `zeroed` 时界面显示它。 |
+| `lamps.guardDb` | 可选，非负数。失控保护当前把回送压低了多少 dB（核心侧的增益值取负）；`lamps.guard` 为 `reduced` 时界面显示它，缺席则只写「自动降低」不带数。 |
+
+### Input 页面读到的配对补充字段
+
+`rinne.pair` 的 `peer` 与 `self` 在 Input 一侧另带两个可选字段，缺席时界面降级：`peer.sampleRate`（对端采样率，`srMismatch` 的提示用它；缺席显示「—」）和 `self.channels`（本端声道数，1 或 2，与 `peer.channels` 比较决定声道徽标；缺席只显示对端声道）。
+
+Input 页面把 `peer.color` 当作 `#rrggbb` 字符串（宿主不给时为 `null`），格式不对的值一律当没有；`peer.channels` 是数字 1 或 2。
 
 ### 反馈安全在桥上的体现
 
