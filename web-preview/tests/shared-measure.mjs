@@ -454,6 +454,7 @@ export function contrastRatio(l1, l2) {
 /**
  * 一段文字在合成底上的最差对比度：矩形内逐像素取底色，把文字色（含 alpha 与各层 opacity）合成到该像素上，
  * 取全矩形的最小比值。返回 { min, at:{x,y}, bg:[r,g,b], fg:[r,g,b] }。
+ * 矩形与截图没有交集、一个像素都没采到时抛错：不能让「什么都没量」变成一个无限大的比值悄悄通过。
  */
 export function worstContrast(png, item) {
     const { c, op, r } = item;
@@ -482,6 +483,11 @@ export function worstContrast(png, item) {
                 };
         }
     }
+    if (!worst.at) {
+        throw new Error(
+            `一个像素都没采到：${JSON.stringify(item.text)}（${item.sel}）的矩形 ${JSON.stringify(r)} 与 ${png.w}×${png.h} 的截图没有交集`,
+        );
+    }
     return worst;
 }
 
@@ -489,6 +495,10 @@ export function worstContrast(png, item) {
 export function measureAll(png, items) {
     return items.map((it) => ({ ...it, worst: worstContrast(png, it) }));
 }
+
+/** 撤掉页内的透明文字样式；没有就什么也不做，可以放心重复调。 */
+const dropHideText = (page) =>
+    page.eval('(() => { const s = document.getElementById("fx-hide-text"); if (s) s.remove(); })()');
 
 /** 两次采样之间允许的矩形漂移（亚像素抖动）与不透明度 / 色值漂移。 */
 const DRIFT_PX = 0.5;
@@ -542,6 +552,8 @@ export async function measureContrastOnPage(page) {
     let png;
     let last = "";
     for (let attempt = 0; attempt < 5; attempt++) {
+        // 上一遍（同一页面连量两遍）或上一次尝试可能留下透明文字样式：先撤掉，采样读到的才是真实的文字色
+        await dropHideText(page);
         const first = await page.eval(CONTRAST_PROBE);
         await page.eval("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))");
         items = await page.eval(CONTRAST_PROBE);
@@ -554,7 +566,7 @@ export async function measureContrastOnPage(page) {
             png = decodePng(await page.screenshot());
             last = rectsDrift(items, await page.eval("window.__cpRects()"));
             if (!last) break;
-            await page.eval('(() => { const s = document.getElementById("fx-hide-text"); if (s) s.remove(); })()');
+            await dropHideText(page);
         }
         await settleScene(page);
     }

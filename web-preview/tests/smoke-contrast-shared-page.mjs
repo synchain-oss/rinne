@@ -121,6 +121,39 @@ try {
         run.check(Math.abs(a - 21) < 0.01, `量尺自检：黑底白字应为 21:1，实得 ${a}`);
         run.check(Math.abs(b - 1) < 0.01, `量尺自检：同色应为 1:1，实得 ${b}`);
         run.check(c > 1 && c < a, `量尺自检：半透明白字应介于两者之间，实得 ${c}`);
+        // 矩形整个落在截图之外：一个像素都没采到，必须抛错，不能当成无限大的比值放过
+        const outside = { ...white, r: { x: 10, y: 10, w: 4, h: 4 }, text: "越界", sel: "probe" };
+        let thrown = "";
+        try {
+            measureAll(png, [outside]);
+        } catch (e) {
+            thrown = String(e && e.message);
+        }
+        run.check(
+            thrown.includes("一个像素都没采到") && thrown.includes("越界"),
+            `量尺自检：矩形在截图之外应抛错并点名文字，实得 ${JSON.stringify(thrown)}`,
+        );
+        // 只有一部分在截图里：按交集量，不抛错
+        const partial = { ...white, r: { x: 2, y: 2, w: 10, h: 10 } };
+        run.check(
+            Math.abs(measureAll(png, [partial])[0].worst.min - 21) < 0.01,
+            "量尺自检：矩形一部分在截图里时按交集量",
+        );
+    }
+    {
+        // 同一页面连量两遍：第一遍留下的透明文字样式不能把第二遍量成 1:1，也不能叠出两份样式
+        const scene = SCENES.find((s) => s.id === "window");
+        await openScene(page, server, design, "input", "zh", scene);
+        const key = (xs) => xs.map((it) => `${it.sel}|${it.text}|${it.worst.min.toFixed(2)}`).join(" ; ");
+        const first = await measureContrastOnPage(page);
+        const second = await measureContrastOnPage(page);
+        run.check(first.length > 10, `连量两遍：第一遍应量到足够多的文字，实得 ${first.length}`);
+        run.check(key(first) === key(second), "连量两遍：两遍结果应一致（第二遍不受第一遍留下的样式影响）");
+        run.eq(
+            await page.eval('document.querySelectorAll("#fx-hide-text").length'),
+            1,
+            "连量两遍：透明文字样式只留一份",
+        );
     }
 
     {
