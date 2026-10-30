@@ -60,7 +60,7 @@ export function createFeedbackCard(ctx) {
         part: "fb.unit",
         ids: ["pct", "db"],
         onPick: (id) => {
-            ctx.mem.fbUnit = id;
+            ctx.setUnit("fb", id);
             renderDial();
             renderSeg();
         },

@@ -504,6 +504,22 @@ export function exportMessages(bits) {
 
 // ---------------------------------------------------------------- 消息位
 
+/** rinne.state.notices 里认得的 id：配对状态与数值表达不了的五条消息。 */
+export const NOTICE_IDS = Object.freeze(["ipcSandbox", "outOfOrder", "unstable", "newerProject", "stateDecodeFailed"]);
+
+/**
+ * rinne.state.notices：[{ id, a?, b? }]。缺省、非数组、非对象元素、未知 id 一律当没有；同一个 id 只取第一条。
+ * 返回 id 到通知的 Map。
+ */
+export function noticeMap(raw) {
+    const out = new Map();
+    if (!Array.isArray(raw)) return out;
+    for (const n of raw) {
+        if (n && typeof n === "object" && NOTICE_IDS.includes(n.id) && !out.has(n.id)) out.set(n.id, n);
+    }
+    return out;
+}
+
 const CUT_KEYS = Object.freeze({
     panic: "band.in.cutPanic",
     nan: "band.in.cutNan",
@@ -535,6 +551,7 @@ export function deriveMessages(c) {
     const delay = state.delay || {};
     const safety = state.safety || {};
     const dismissed = new Set(Array.isArray(state.dismissedHints) ? state.dismissedHints : []);
+    const notices = noticeMap(state.notices);
     const peer = pair.peer || {};
     const ps = pair.state;
     const out = [];
@@ -549,7 +566,10 @@ export function deriveMessages(c) {
             }),
         );
     }
-    if (ps === "ipcUnavailable") out.push(msg("ipc", "band.in.ipc", "red", { action: { name: "guide" } }));
+    // 共享内存不可用：有沙盒通知时只报沙盒那条（更具体），不再叠一条泛泛的
+    if (notices.has("ipcSandbox"))
+        out.push(msg("ipcSandbox", "band.in.ipcSandbox", "red", { action: { name: "guide" } }));
+    else if (ps === "ipcUnavailable") out.push(msg("ipc", "band.in.ipc", "red", { action: { name: "guide" } }));
     if (ps === "abiMismatch")
         out.push(
             msg("abi", "band.in.abi", "red", {
@@ -602,6 +622,8 @@ export function deriveMessages(c) {
     if (exp.show) {
         for (const m of exportMessages(state.exportCauses.bits)) out.push(msg(m.id, m.key, "amber", { dismiss: true }));
     }
+    if (notices.has("outOfOrder")) out.push(msg("outOfOrder", "band.in.outOfOrder", "amber"));
+    if (notices.has("unstable")) out.push(msg("unstable", "band.in.unstable", "amber"));
     if (values.limiter === false)
         out.push(msg("limiterOff", "band.in.limiterOff", "amber", { action: { name: "limOn" } }));
     if (ps === "crossProcess")
@@ -612,6 +634,12 @@ export function deriveMessages(c) {
                 vals: { peer: textOr(peer.name), self: textOr((pair.self || {}).name) },
             }),
         );
+    if (notices.has("newerProject")) {
+        // 通知里 a 是工程里的版本、b 是本插件版本；这条消息的写法是「本机 {a} / 工程 {b}」，所以对调
+        const n = notices.get("newerProject");
+        out.push(msg("newerProject", "band.in.newerProject", "amber", { vals: { a: textOr(n.b), b: textOr(n.a) } }));
+    }
+    if (notices.has("stateDecodeFailed")) out.push(msg("stateDecodeFailed", "band.in.stateDecodeFailed", "amber"));
     if (lamps.nonfinite === "zeroed")
         out.push(
             msg("ringNonfinite", "band.in.ringNonfinite", "amber", {

@@ -53,16 +53,34 @@ import { createMeterCard } from "./components/meter-card.js";
 import { createPeerRow } from "./components/peer-row.js";
 import { createPanic, createLimiterConfirm } from "./components/safety-layer.js";
 import { setHidden, setVar } from "./components/util.js";
+import { createOfflineBridge, defaultFrames } from "./offline.js";
 
 const ROLE = "input";
+/** 桥一直不给快照时，等这么久就按默认快照揭幕。 */
+const FALLBACK_MS = 400;
 /** 参数的当前值影响消息位的那几个（回声显示出来时要重算消息）。 */
 const MESSAGE_PARAMS = new Set(["feedback", "mix", "loop_on", "limiter", "ceiling"]);
 /** 导出不一致的四条消息 id：它们共用一条「已关闭」记录。 */
 const EXPORT_IDS = new Set(["exportViolation", "exportOverrun", "exportPeer", "exportResync"]);
 
+/**
+ * 桥有三种来路：真宿主（window.__JUCE__ 带后端）、预览（壳页注入 window.__RINNE_MOCK__）、都没有（纯浏览器直接打开，
+ * 首帧冒烟与离线扫描就是这样）。只有第三种降级成无桥模式；真宿主里 createBridge 失败是真故障，让异常冒出去，
+ * 由 index.html 的 boot 守卫上报原生侧，免得把它悄悄吞成一个空壳。
+ */
+function openBridge() {
+    const hasMock = Boolean(globalThis.__RINNE_MOCK__);
+    const hasHost = Boolean(globalThis.__JUCE__ && globalThis.__JUCE__.backend);
+    if (!hasMock && !hasHost) {
+        console.warn("Rinne Input：没有检测到桥（既不是插件宿主也不是预览），按无桥模式显示默认状态。");
+        return { bridge: createOfflineBridge(), offline: true };
+    }
+    return { bridge: createBridge({ role: ROLE }), offline: false };
+}
+
 function boot() {
     installDicts(common, input);
-    const bridge = createBridge({ role: ROLE });
+    const { bridge, offline } = openBridge();
     installGlow(document);
 
     // ---- 页面状态
@@ -89,6 +107,16 @@ function boot() {
     };
     const params = new Map();
     const mem = { fbUnit: "pct", delayUnit: "ms" };
+    /**
+     * 单位（反馈 %/dB、延迟 ms/样本）写进页面内存的唯一落点：用户点分段控件和首帧采纳宿主快照都走这里。
+     * 目前选择只留在页面内存；原生桥补上 setFbUnit / setDelayUnit 之后，在这里把用户的选择转发给宿主即可。
+     * @param {"fb"|"delay"} kind
+     * @param {string} value 反馈 "pct" | "db"；延迟 "ms" | "samples"
+     */
+    const setUnit = (kind, value) => {
+        if (kind === "fb") mem.fbUnit = value === "db" ? "db" : "pct";
+        else if (kind === "delay") mem.delayUnit = value === "samples" ? "samples" : "ms";
+    };
     const scene = readPreviewScene();
 
     // ---- 上下文：各张卡共用
@@ -97,6 +125,7 @@ function boot() {
         bridge,
         timers: globalThis,
         mem,
+        setUnit,
         view: null,
         param(id, opt = {}) {
             const userDisplay = opt.onDisplay;
@@ -481,7 +510,7 @@ function boot() {
         return true;
     };
 
-    bridge.on("rinne.state", (f) => {
+    const onState = (f) => {
         if (!fresh("state", f)) return;
         const first = S.state === null;
         // 守卫开关的乐观覆盖要在下一帧回声里收回：即便内容没变也得重画一次，把界面拉回宿主的值
@@ -489,8 +518,8 @@ function boot() {
         S.state = f;
         S.guardOverride = undefined;
         if (first) {
-            mem.fbUnit = fbUnitOf(f.cfg);
-            mem.delayUnit = delayUnitOf(f.cfg);
+            setUnit("fb", fbUnitOf(f.cfg));
+            setUnit("delay", delayUnitOf(f.cfg));
             // 本实例此前已经关掉过导出提示：以当前的锁存为基线，出现新原因或更多事件才重新提示
             if (Array.isArray(f.dismissedHints) && f.dismissedHints.includes("exportMismatch")) {
                 const cur = f.exportCauses || { bits: 0, count: 0 };
@@ -502,20 +531,20 @@ function boot() {
         enforceZoomLock(f.uiScale, (s) => bridge.setUiScale(s));
         if (changed) scheduleRender();
         maybeApplyScene();
-    });
-    bridge.on("rinne.pair", (f) => {
+    };
+    const onPair = (f) => {
         if (!fresh("pair", f)) return;
         const changed = changedSince("pair", f);
         S.pair = f;
         if (changed) scheduleRender();
         maybeApplyScene();
-    });
-    bridge.on("rinne.params", (f) => {
+    };
+    const onParams = (f) => {
         if (!fresh("params", f) || !f.values) return;
         for (const [id, p] of params)
             if (Object.prototype.hasOwnProperty.call(f.values, id)) p.receive(f.values[id], f.seq);
-    });
-    bridge.on("rinne.meters", (f) => {
+    };
+    const onMeters = (f) => {
         if (!fresh("meters", f)) return;
         S.meters = f;
         meterRenderer.push({ in: f.in, ret: f.ret, out: f.out, dry: f.dryPart, wet: f.retPart });
@@ -529,7 +558,11 @@ function boot() {
                 scheduleMessages();
             }
         }
-    });
+    };
+    bridge.on("rinne.state", onState);
+    bridge.on("rinne.pair", onPair);
+    bridge.on("rinne.params", onParams);
+    bridge.on("rinne.meters", onMeters);
     bridge.on("rinne.presets", () => {});
     bridge.on("rinne.error", () => {});
 
@@ -567,8 +600,17 @@ function boot() {
     }
 
     // ---- 启动
+    // 桥一直不给快照（没有桥，或桥没接通）：按默认快照揭幕，真快照一到按序号盖过它。哪一路已经收到就不动哪一路。
+    const applyDefaults = () => {
+        const d = defaultFrames();
+        if (!S.state) onState(d.state);
+        if (!S.pair) onPair(d.pair);
+        if (S.seq.params === -Infinity) onParams(d.params);
+        if (!S.meters) onMeters(d.meters);
+    };
     bridge.requestInitialState();
-    window.__rinneBooted = true;
+    if (offline) queueMicrotask(applyDefaults);
+    else setTimeout(applyDefaults, FALLBACK_MS);
     return { bridge, ctx };
 }
 
@@ -580,3 +622,5 @@ function readPreviewScene() {
 }
 
 boot();
+// 主模块初始化完成：index.html 的首帧信号与 boot 守卫都到位，才算页面起来了（见 index.html 头部）
+if (typeof window.__rinneMarkReady === "function") window.__rinneMarkReady();

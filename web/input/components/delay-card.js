@@ -45,7 +45,7 @@ export function createDelayCard(ctx) {
                 if (mode.value() !== "sync") mode.commit("sync");
                 return;
             }
-            ctx.mem.delayUnit = id;
+            ctx.setUnit("delay", id);
             if (mode.value() !== "time") mode.commit("time");
             renderAll();
         },

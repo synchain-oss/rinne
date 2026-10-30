@@ -426,6 +426,10 @@
       "fr": "Pas de mémoire partagée : sec seul.",
       "status": "待抽检"
     },
+    "band.in.ipcSandbox": {
+      "fr": "Hôte en bac à sable : non pris en charge.",
+      "status": "待抽检"
+    },
     "band.in.abi": {
       "fr": "Versions différentes (In {a} / Out {b}).",
       "status": "待抽检"
@@ -486,6 +490,14 @@
       "fr": "L’export peut différer : boucle resynchronisée.",
       "status": "待抽检"
     },
+    "band.in.outOfOrder": {
+      "fr": "Ordre inversé : déplacez Rinne Output plus bas.",
+      "status": "待抽检"
+    },
+    "band.in.unstable": {
+      "fr": "Cadencement instable : mode tolérant, délai variable.",
+      "status": "待抽检"
+    },
     "band.in.limiterOff": {
       "fr": "Limiteur désactivé : réinjection max 100 %.",
       "status": "待抽检"
@@ -496,6 +508,14 @@
     },
     "band.in.crossTrack": {
       "fr": "Noms de piste différents : délai variable.",
+      "status": "待抽检"
+    },
+    "band.in.newerProject": {
+      "fr": "Projet plus récent ({a} / {b}) : valeurs par défaut.",
+      "status": "待抽检"
+    },
+    "band.in.stateDecodeFailed": {
+      "fr": "Réglages illisibles : valeurs par défaut (réinj. 0).",
       "status": "待抽检"
     },
     "band.in.ringNonfinite": {

@@ -66,7 +66,7 @@ export function createParamEcho(o) {
         let shown = null; // 当前显示值
         let target = null; // 最新宿主目标值
         let gesture = null; // 进行中的手势
-        let dropUntil = -1; // 回声帧序号不超过它就丢
+        let dropUntil = -Infinity; // 回声帧序号不超过它就丢；一开始什么都不丢（含无桥时序号为 -1 的默认快照）
         let rafId = 0;
         let lastFrame = 0;
         let auto = false;
