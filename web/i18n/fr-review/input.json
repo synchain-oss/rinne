@@ -1,0 +1,614 @@
+{
+  "page": "input",
+  "note": "fr 为初译，待抽检；定稿后从这里删掉对应项，全部抽检完后本文件清空。",
+  "entries": {
+    "in.pair.searching": {
+      "fr": "AUCUN OUTPUT",
+      "status": "待抽检"
+    },
+    "in.brand.eyebrow": {
+      "fr": "SYNCHAIN · RINNE · DÉBUT CHAÎNE",
+      "status": "待抽检"
+    },
+    "in.group.autoTip": {
+      "fr": "Choisi automatiquement à l’insertion ; cliquez sur un groupe pour choisir à la main.",
+      "status": "待抽检"
+    },
+    "in.group.peerDotTip": {
+      "fr": "Groupe {g} : un Rinne Output non appairé est en ligne",
+      "status": "待抽检"
+    },
+    "in.peer.label": {
+      "fr": "Output :",
+      "status": "待抽检"
+    },
+    "in.peer.noName": {
+      "fr": "(sans nom de piste)",
+      "status": "待抽检"
+    },
+    "in.peer.selfTip": {
+      "fr": "Cette piste : {name}",
+      "status": "待抽检"
+    },
+    "in.fb.eyebrow": {
+      "fr": "RÉINJECTION",
+      "status": "待抽检"
+    },
+    "in.fb.label": {
+      "fr": "Réinjection",
+      "status": "待抽检"
+    },
+    "in.fb.tip": {
+      "fr": "Glisser pour régler · Maj pour affiner · double-clic pour réinitialiser · Ctrl+clic (Cmd sur Mac) pour saisir",
+      "status": "待抽检"
+    },
+    "in.fb.amberTip": {
+      "fr": "Plus il y a de retour, plus l’auto-oscillation vient facilement : avec le mix à 50 % ou plus et sans atténuation dans la boucle, elle est certaine au-delà de 100 % ; un gain dans la boucle peut la provoquer plus bas.",
+      "status": "待抽检"
+    },
+    "in.fb.chip.selfOsc": {
+      "fr": "AUTO-OSC.",
+      "status": "待抽检"
+    },
+    "in.fb.chip.fadeIn": {
+      "fr": "FONDU ENTR.",
+      "status": "待抽检"
+    },
+    "in.fb.chip.cut": {
+      "fr": "COUPÉ",
+      "status": "待抽检"
+    },
+    "in.fb.capNote": {
+      "fr": "Réglé {s} %, effectif 100 %",
+      "status": "待抽检"
+    },
+    "in.fb.capTip": {
+      "fr": "Limiteur désactivé : réinjection plafonnée à 100 %",
+      "status": "待抽检"
+    },
+    "in.fb.offTip": {
+      "fr": "Boucle désactivée (automatisable)",
+      "status": "待抽检"
+    },
+    "in.loop.label": {
+      "fr": "BOUCLE",
+      "status": "待抽检"
+    },
+    "in.loop.tip": {
+      "fr": "Désactivée, la boucle fait disparaître le retour en fondu sans vider la boucle ; automatisable, et assignable à un contrôleur comme coupure d’urgence matérielle.",
+      "status": "待抽检"
+    },
+    "in.mix.endDry": {
+      "fr": "SEC",
+      "status": "待抽检"
+    },
+    "in.mix.endReturn": {
+      "fr": "RETOUR",
+      "status": "待抽检"
+    },
+    "in.dly.eyebrow": {
+      "fr": "DÉLAI DE BOUCLE D",
+      "status": "待抽检"
+    },
+    "in.dly.eyebrowTip": {
+      "fr": "La latence des autres plug-ins de la boucle s’ajoute à D",
+      "status": "待抽检"
+    },
+    "in.dly.unit.samples": {
+      "fr": "ÉCH.",
+      "status": "待抽检"
+    },
+    "in.dly.unitSmp": {
+      "fr": "éch.",
+      "status": "待抽检"
+    },
+    "in.dly.sub.ms": {
+      "fr": "= {n} échantillons · {sr} kHz",
+      "status": "待抽检"
+    },
+    "in.dly.sub.samples": {
+      "fr": "= {d} ms · {sr} kHz",
+      "status": "待抽检"
+    },
+    "in.dly.sub.sync": {
+      "fr": "= {d} ms @ {bpm} BPM",
+      "status": "待抽检"
+    },
+    "in.dly.hatchTip": {
+      "fr": "Inférieur au minimum — inutilisable",
+      "status": "待抽检"
+    },
+    "in.dly.actual": {
+      "fr": "Réel {d} ms",
+      "status": "待抽检"
+    },
+    "in.dly.min": {
+      "fr": "Min {m} ms",
+      "status": "待抽检"
+    },
+    "in.dly.minTip": {
+      "fr": "Minimum = la plus grande valeur entre la taille de bloc maximale déclarée par l’hôte et le plus grand bloc observé durant cette session ({n} échantillons) ; elle varie avec les réglages de tampon, et l’ASIO-Guard de Cubase la relève.",
+      "status": "待抽检"
+    },
+    "in.dly.minWait": {
+      "fr": "Min : attente de l’hôte…",
+      "status": "待抽检"
+    },
+    "in.dly.maxBlock": {
+      "fr": "Bloc max {n} @ {sr} kHz",
+      "status": "待抽检"
+    },
+    "in.dly.maxBlockTip": {
+      "fr": "Le plus grand bloc envoyé par l’hôte durant cette session",
+      "status": "待抽检"
+    },
+    "in.dly.total": {
+      "fr": "Total = D + latence des plug-ins de la boucle",
+      "status": "待抽检"
+    },
+    "in.dly.badge.overrun": {
+      "fr": "Bloc hors limite, D relevé",
+      "status": "待抽检"
+    },
+    "in.dly.badge.raised": {
+      "fr": "Relevé au minimum",
+      "status": "待抽检"
+    },
+    "in.dly.badge.clipped": {
+      "fr": "Plafonné à 4000 ms",
+      "status": "待抽检"
+    },
+    "in.dly.badge.noTempo": {
+      "fr": "Pas de tempo hôte, 120 BPM",
+      "status": "待抽检"
+    },
+    "in.dly.note.n32t": {
+      "fr": "1/32 triolet",
+      "status": "待抽检"
+    },
+    "in.dly.note.n16t": {
+      "fr": "1/16 triolet",
+      "status": "待抽检"
+    },
+    "in.dly.note.n8t": {
+      "fr": "1/8 triolet",
+      "status": "待抽检"
+    },
+    "in.dly.note.n16d": {
+      "fr": "1/16 pointée",
+      "status": "待抽检"
+    },
+    "in.dly.note.n4t": {
+      "fr": "1/4 triolet",
+      "status": "待抽检"
+    },
+    "in.dly.note.n8d": {
+      "fr": "1/8 pointée",
+      "status": "待抽检"
+    },
+    "in.dly.note.n2t": {
+      "fr": "1/2 triolet",
+      "status": "待抽检"
+    },
+    "in.dly.note.n4d": {
+      "fr": "1/4 pointée",
+      "status": "待抽检"
+    },
+    "in.dly.note.n2d": {
+      "fr": "1/2 pointée",
+      "status": "待抽检"
+    },
+    "in.tone.eyebrow": {
+      "fr": "TIMBRE DU RETOUR",
+      "status": "待抽检"
+    },
+    "in.tone.eyebrowTip": {
+      "fr": "Retour uniquement ; le signal sec n’est pas affecté",
+      "status": "待抽检"
+    },
+    "in.tone.lowcut": {
+      "fr": "COUPE-BAS",
+      "status": "待抽检"
+    },
+    "in.tone.highcut": {
+      "fr": "COUPE-HAUT",
+      "status": "待抽检"
+    },
+    "in.tone.polarity": {
+      "fr": "Ø INV. POLARITÉ",
+      "status": "待抽检"
+    },
+    "in.safety.eyebrow": {
+      "fr": "SÉCURITÉ",
+      "status": "待抽检"
+    },
+    "in.panic.label": {
+      "fr": "COUPURE D’URGENCE",
+      "status": "待抽检"
+    },
+    "in.panic.tip": {
+      "fr": "Fait disparaître aussitôt le retour jusqu’à 0 et le maintient coupé ; le signal sec continue de passer. Pour le rétablir, utilisez Rétablir le retour dans la barre d’avis ci-dessus.",
+      "status": "待抽检"
+    },
+    "in.panic.cut": {
+      "fr": "COUPÉ",
+      "status": "待抽检"
+    },
+    "in.panic.cutTip": {
+      "fr": "Le retour est coupé. Un nouveau clic ici ne le rétablit pas : utilisez Rétablir le retour dans la barre d’avis ci-dessus.",
+      "status": "待抽检"
+    },
+    "in.panic.cause.manual": {
+      "fr": "Cause : manuelle",
+      "status": "待抽检"
+    },
+    "in.panic.cause.nan": {
+      "fr": "Cause : valeurs invalides",
+      "status": "待抽检"
+    },
+    "in.panic.cause.huge": {
+      "fr": "Cause : niveau trop élevé",
+      "status": "待抽检"
+    },
+    "in.panic.cause.runaway": {
+      "fr": "Cause : emballement",
+      "status": "待抽检"
+    },
+    "in.panic.aria": {
+      "fr": "Coupure d’urgence : couper le retour immédiatement",
+      "status": "待抽检"
+    },
+    "in.lim.label": {
+      "fr": "LIMITEUR",
+      "status": "待抽检"
+    },
+    "in.lim.tip": {
+      "fr": "Limiteur du retour, enregistré avec le projet ; désactivé, il ne reste que l’écrêtage doux et la réinjection est plafonnée à 100 %.",
+      "status": "待抽检"
+    },
+    "in.lim.ceiling": {
+      "fr": "Plafond {c} dBFS",
+      "status": "待抽检"
+    },
+    "in.lim.ceilingTip": {
+      "fr": "Plafond du limiteur, de −24 à 0 dBFS par pas de 0,1 ; les préréglages ne le modifient pas",
+      "status": "待抽检"
+    },
+    "in.lim.offNote": {
+      "fr": "Désactivé · écrêtage doux actif",
+      "status": "待抽检"
+    },
+    "in.lim.confirm": {
+      "fr": "Une fois le limiteur désactivé, il ne reste que l’écrêtage doux et la réinjection est plafonnée à 100 % ; des plug-ins ajoutant du gain dans la boucle peuvent encore produire un son très fort. Baissez d’abord le volume d’écoute.",
+      "status": "待抽检"
+    },
+    "in.lim.confirmOff": {
+      "fr": "Désactiver limiteur",
+      "status": "待抽检"
+    },
+    "in.gr.label": {
+      "fr": "RÉDUCTION DE GAIN",
+      "status": "待抽检"
+    },
+    "in.gr.readout": {
+      "fr": "GR {v} dB",
+      "status": "待抽检"
+    },
+    "in.gr.hiddenTip": {
+      "fr": "Limiteur désactivé",
+      "status": "待抽检"
+    },
+    "in.lamp.run": {
+      "fr": "EMBALL.",
+      "status": "待抽检"
+    },
+    "in.lamp.dc.blocked": {
+      "fr": "BLOQUÉ",
+      "status": "待抽检"
+    },
+    "in.lamp.nan.zeroed": {
+      "fr": "MIS À 0 ×{n}",
+      "status": "待抽检"
+    },
+    "in.lamp.nan.latched": {
+      "fr": "VERROUILLÉ",
+      "status": "待抽检"
+    },
+    "in.lamp.run.limiting": {
+      "fr": "LIMITATION",
+      "status": "待抽检"
+    },
+    "in.lamp.run.reduced": {
+      "fr": "RÉDUIT DE {x} dB",
+      "status": "待抽检"
+    },
+    "in.lamp.run.cut": {
+      "fr": "COUPÉ",
+      "status": "待抽检"
+    },
+    "in.lamp.dc.tip": {
+      "fr": "Le décalage DC dans la boucle est filtré en permanence ; allumé, il signale qu’un décalage important vient d’être supprimé, généralement par un plug-in de distorsion ou de saturation dans la boucle.",
+      "status": "待抽检"
+    },
+    "in.lamp.nan.tip": {
+      "fr": "Quand un plug-in de la boucle émet des NaN/Inf, Rinne Output les met à zéro et les compte (ambre, allumé 5 s) ; des valeurs invalides à l’intérieur de Rinne Input coupent le retour (rouge).",
+      "status": "待抽检"
+    },
+    "in.lamp.run.tip": {
+      "fr": "Allumé tant que le retour reste contre le limiteur. Avec la protection anti-emballement activée, la réinjection est réduite automatiquement, et le retour est coupé si −24 dB ne suffisent pas.",
+      "status": "待抽检"
+    },
+    "in.guard.label": {
+      "fr": "ANTI-EMBALLEMENT",
+      "status": "待抽检"
+    },
+    "in.guard.tip": {
+      "fr": "Si le retour reste en surcharge, la réinjection est réduite automatiquement (6 dB par seconde) et remonte après 3 s de calme. Elle n’intervient pas à 90 % de réinjection ou moins sans gain dans la boucle.",
+      "status": "待抽检"
+    },
+    "in.meter.eyebrow": {
+      "fr": "NIVEAUX",
+      "status": "待抽检"
+    },
+    "in.meter.in": {
+      "fr": "ENT.",
+      "status": "待抽检"
+    },
+    "in.meter.ret": {
+      "fr": "RET.",
+      "status": "待抽检"
+    },
+    "in.meter.out": {
+      "fr": "SORT.",
+      "status": "待抽检"
+    },
+    "in.meter.retTip": {
+      "fr": "Niveau du retour avant gain : il bouge même à 0 % de réinjection, ce qui permet de vérifier que la boucle est fermée.",
+      "status": "待抽检"
+    },
+    "in.meter.muted": {
+      "fr": "MUET",
+      "status": "待抽检"
+    },
+    "in.meter.fadeIn": {
+      "fr": "FONDU ENTR.",
+      "status": "待抽检"
+    },
+    "in.meter.clearTip": {
+      "fr": "Cliquez pour effacer le maintien de crête",
+      "status": "待抽检"
+    },
+    "in.num.range": {
+      "fr": "Hors plage : {min}–{max}",
+      "status": "待抽检"
+    },
+    "in.hint.ready": {
+      "fr": "Prêt",
+      "status": "待抽检"
+    },
+    "in.hint.unpaired": {
+      "fr": "Étape suivante : insérez Rinne Output (le plus simple : dernier slot pré-fader)",
+      "status": "待抽检"
+    },
+    "in.hint.zero": {
+      "fr": "Connecté. La réinjection démarre à 0 — montez-la lentement",
+      "status": "待抽检"
+    },
+    "in.hint.drag": {
+      "fr": "Maj : affiner · Double-clic : réinitialiser · Ctrl+clic (Cmd sur Mac) pour saisir",
+      "status": "待抽检"
+    },
+    "in.hint.cut": {
+      "fr": "Retour coupé — cliquez sur Rétablir le retour pour le refaire entrer en fondu",
+      "status": "待抽检"
+    },
+    "band.in.cutPanic": {
+      "fr": "Coupure : retour coupé, sec intact.",
+      "status": "待抽检"
+    },
+    "band.in.cutPanicHot": {
+      "fr": "Coupure : réinj. > 100 %, baissez-la.",
+      "status": "待抽检"
+    },
+    "band.in.cutNan": {
+      "fr": "NaN/Inf : retour coupé, boucle vidée.",
+      "status": "待抽检"
+    },
+    "band.in.cutHuge": {
+      "fr": "Retour > +12 dBFS : coupé, vidé.",
+      "status": "待抽检"
+    },
+    "band.in.cutRunaway": {
+      "fr": "Emballement malgré −24 dB : coupé.",
+      "status": "待抽检"
+    },
+    "band.in.ipc": {
+      "fr": "Pas de mémoire partagée : sec seul.",
+      "status": "待抽检"
+    },
+    "band.in.abi": {
+      "fr": "Versions différentes (In {a} / Out {b}).",
+      "status": "待抽检"
+    },
+    "band.in.srMismatch": {
+      "fr": "Fréquences différentes ({a} / {b} Hz) : retour arrêté.",
+      "status": "待抽检"
+    },
+    "band.in.conflict": {
+      "fr": "Groupe {g} pris par un autre Input.",
+      "status": "待抽检"
+    },
+    "band.in.unassigned": {
+      "fr": "Les 8 groupes sont pris : libérez-en un.",
+      "status": "待抽检"
+    },
+    "band.in.unsupportedBlock": {
+      "fr": "Bloc {n} > 32768 : boucle arrêtée, réduisez le tampon.",
+      "status": "待抽检"
+    },
+    "band.in.guardActive": {
+      "fr": "Anti-emballement : réinjection réduite de {x} dB.",
+      "status": "待抽检"
+    },
+    "band.in.limiting": {
+      "fr": "Réinjection forte : le limiteur travaille en continu.",
+      "status": "待抽检"
+    },
+    "band.in.stale": {
+      "fr": "Retour interrompu : Rinne Output muet depuis 2 s.",
+      "status": "待抽检"
+    },
+    "band.in.stalled": {
+      "fr": "Rinne Output en ligne mais sans audio.",
+      "status": "待抽检"
+    },
+    "band.in.hostViolation": {
+      "fr": "Bloc {n} trop grand : D relevé à {d} ms.",
+      "status": "待抽检"
+    },
+    "band.in.dRaised": {
+      "fr": "D sous le minimum : fonctionne à {m} ms.",
+      "status": "待抽检"
+    },
+    "band.in.exportViolation": {
+      "fr": "L’export peut différer : blocs trop grands ; augmentez D.",
+      "status": "待抽检"
+    },
+    "band.in.exportOverrun": {
+      "fr": "L’export peut différer : D trop court ; augmentez D.",
+      "status": "待抽检"
+    },
+    "band.in.exportPeer": {
+      "fr": "L’export peut différer : l’hôte d’Output déborde.",
+      "status": "待抽检"
+    },
+    "band.in.exportResync": {
+      "fr": "L’export peut différer : boucle resynchronisée.",
+      "status": "待抽检"
+    },
+    "band.in.limiterOff": {
+      "fr": "Limiteur désactivé : réinjection max 100 %.",
+      "status": "待抽检"
+    },
+    "band.in.crossProcess": {
+      "fr": "Processus différents : délai variable.",
+      "status": "待抽检"
+    },
+    "band.in.crossTrack": {
+      "fr": "Noms de piste différents : délai variable.",
+      "status": "待抽检"
+    },
+    "band.in.ringNonfinite": {
+      "fr": "NaN/Inf d’un plug-in de la boucle : {n} mises à zéro.",
+      "status": "待抽检"
+    },
+    "band.in.bypassed": {
+      "fr": "Contourné par l’hôte : retour coupé, sec seul.",
+      "status": "待抽检"
+    },
+    "band.in.outputBypassed": {
+      "fr": "Rinne Output contourné par l’hôte : retour muet.",
+      "status": "待抽检"
+    },
+    "band.in.loopOff": {
+      "fr": "Boucle désactivée : retour non ajouté à la sortie.",
+      "status": "待抽检"
+    },
+    "band.in.hostIdle": {
+      "fr": "L’hôte a suspendu le traitement : retour en pause.",
+      "status": "待抽检"
+    },
+    "band.in.waitingAudio": {
+      "fr": "En attente d’audio : lisez ou choisissez un groupe.",
+      "status": "待抽检"
+    },
+    "band.in.validator": {
+      "fr": "Outil de validation : boucle désactivée, sec seul.",
+      "status": "待抽检"
+    },
+    "band.in.nextStep": {
+      "fr": "Ensuite : Rinne Output (dernier slot pré-fader), groupe {g}.",
+      "status": "待抽检"
+    },
+    "band.in.switchHint": {
+      "fr": "Groupe {g} sans Output ; le {y} en a un.",
+      "status": "待抽检"
+    },
+    "band.in.linkedZero": {
+      "fr": "Connecté. Écoute basse, puis réinjection en douceur.",
+      "status": "待抽检"
+    },
+    "band.in.smartDefault": {
+      "fr": "Groupe {g} choisi d’office ; cliquez pour changer.",
+      "status": "待抽检"
+    },
+    "band.in.summary": {
+      "fr": "Boucle fermée · D réel {d} ms · plafond {c} dBFS",
+      "status": "待抽检"
+    },
+    "band.in.highCutClamped": {
+      "fr": "Coupe-haut limité à {f} kHz à cette fréquence.",
+      "status": "待抽检"
+    },
+    "band.in.limiterCap100": {
+      "fr": "Limiteur désactivé : réglée {s} %, effective 100 %.",
+      "status": "待抽检"
+    },
+    "band.in.takeover": {
+      "fr": "Groupe {g} tenu par une instance inactive.",
+      "status": "待抽检"
+    },
+    "toast.restored": {
+      "fr": "Retour rétabli, il revient en fondu depuis 0",
+      "status": "待抽检"
+    },
+    "toast.over100": {
+      "fr": "Au-delà de 100 % : avec le mix à 50 % ou plus, la boucle auto-oscille et le limiteur la contient",
+      "status": "待抽检"
+    },
+    "toast.moved": {
+      "fr": "Déplacé vers le groupe libre {g}. Cliquez ensuite sur Réappairer dans le Rinne Output de cette piste.",
+      "status": "待抽检"
+    },
+    "feedback": {
+      "fr": "Réinjection",
+      "status": "待抽检"
+    },
+    "loop_on": {
+      "fr": "Boucle",
+      "status": "待抽检"
+    },
+    "delay_mode": {
+      "fr": "Mode de délai",
+      "status": "待抽检"
+    },
+    "delay_ms": {
+      "fr": "Délai de boucle",
+      "status": "待抽检"
+    },
+    "delay_note": {
+      "fr": "Valeur de synchro",
+      "status": "待抽检"
+    },
+    "low_cut": {
+      "fr": "Coupe-bas",
+      "status": "待抽检"
+    },
+    "high_cut": {
+      "fr": "Coupe-haut",
+      "status": "待抽检"
+    },
+    "polarity": {
+      "fr": "Inversion de polarité",
+      "status": "待抽检"
+    },
+    "limiter": {
+      "fr": "Limiteur de retour",
+      "status": "待抽检"
+    },
+    "ceiling": {
+      "fr": "Plafond",
+      "status": "待抽检"
+    }
+  }
+}
