@@ -234,6 +234,16 @@ TEST_CASE("pairing verdict: each broken criterion turns it red with its own mess
     expectRed("Input 安全状态是跳闸", "安全状态",
               [](Pair& p) { p.late.input.safetyState = ipc::kSafetyTripped | (ipc::kTripNan << ipc::kTripShift); });
     expectRed("数据段没映射", "数据段没有映射到", [](Pair& p) { p.late.ringMapped = false; });
+    // 起点没映射上时 early.writeHead 是 0；后一次的写头本身足够大，增量按绝对值算就会通过，所以要单独判红
+    expectRed("窗口开头数据段还没映射", "窗口开头还没有映射", [](Pair& p) {
+        p.early.ringMapped = false;
+        p.early.writeHead = 0;
+    });
+    expectRed("两次取样数据段都没映射", "数据段没有映射到", [](Pair& p) {
+        p.early.ringMapped = false;
+        p.early.writeHead = 0;
+        p.late.ringMapped = false;
+    });
     expectRed("数据段 magic 不对", "magic 不对", [](Pair& p) { p.late.ringMagic = 0; });
     expectRed("写头不前进", "写头", [](Pair& p) { p.late.writeHead = p.early.writeHead + 100; });
 }

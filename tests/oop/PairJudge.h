@@ -255,6 +255,12 @@ inline Verdict judgePairing(const GroupSnapshot& early, const GroupSnapshot& lat
     {
         v.failures.push_back("数据段没有映射到：Output 没有创建这一组的环");
     }
+    else if (!early.ringMapped)
+    {
+        // 写头的增量要有起点：起点没映射上时 early.writeHead 是 0，增量就成了写头的绝对值，
+        // 「写头在涨」会被放宽成「写过」
+        v.failures.push_back("数据段在观察窗口开头还没有映射，写头没有起点，增量无从比较");
+    }
     else
     {
         if (late.ringMagic != ipc::kRingMagic)

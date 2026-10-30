@@ -599,6 +599,7 @@ int runPair(const Options& opt)
     oop::GroupSnapshot latest;
     std::uint64_t earlyBlock = 0;
     bool haveEarly = false;
+    ipc::u32 activeWithoutRing = 0; // 配上过但数据段始终没映射上的组号，只用于报告
     // 每轮把所有组的快照存下来：配不上时报告里要列出各组的占用情况
     const auto pollOnce = [&](std::uint64_t block) {
         if (!watcher.poll(groups))
@@ -608,8 +609,16 @@ int runPair(const Options& opt)
             const ipc::u32 g = oop::findPairedGroup(groups);
             if (g == 0)
                 return;
-            early = groups[g - 1];
-            watcher.attachRing(early);
+            // 写头的增量要有起点：属主在槽变成 Active 之后才由维护步骤创建数据段，这一轮还没映射上就不记起点，
+            // 下一轮再试；记了一个没有写头的起点，判据里的「写头在涨」就只剩「写过」
+            oop::GroupSnapshot candidate = groups[g - 1];
+            watcher.attachRing(candidate);
+            if (!candidate.ringMapped)
+            {
+                activeWithoutRing = g;
+                return;
+            }
+            early = candidate;
             earlyBlock = block;
             haveEarly = true;
         }
@@ -673,12 +682,21 @@ int runPair(const Options& opt)
     {
         if (!haveEarly)
         {
-            pairing.failures.push_back(watcher.rendezvousMapped()
-                                           ? "整个渲染期间没有任何一组出现 Input 与 Output 同时 Active：没有配上"
-                                           : "没有找到会合段 " +
-                                                 oop::posixSegmentName(watcher.prefix(), watcher.uid(), 0) +
-                                                 "：插件没有创建它（沙箱不许进程外的插件用 POSIX "
-                                                 "共享内存，或段名前缀与构建不一致，见 --shm-prefix）");
+            if (activeWithoutRing != 0)
+            {
+                pairing.failures.push_back("组 " + std::to_string(activeWithoutRing) +
+                                           " 的 Input 与 Output 都是 Active，但数据段始终没有映射到：Output "
+                                           "没有创建这一组的环，或段名前缀与构建不一致（见 --shm-prefix）");
+            }
+            else
+            {
+                pairing.failures.push_back(watcher.rendezvousMapped()
+                                               ? "整个渲染期间没有任何一组出现 Input 与 Output 同时 Active：没有配上"
+                                               : "没有找到会合段 " +
+                                                     oop::posixSegmentName(watcher.prefix(), watcher.uid(), 0) +
+                                                     "：插件没有创建它（沙箱不许进程外的插件用 POSIX "
+                                                     "共享内存，或段名前缀与构建不一致，见 --shm-prefix）");
+            }
         }
         else
         {
