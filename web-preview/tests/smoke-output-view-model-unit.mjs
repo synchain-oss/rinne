@@ -356,9 +356,50 @@ run.eq(
 );
 run.eq(
     vm.messagesFor(mkState({ notices: [{ id: "newerProject", a: null, b: null }] }), mkPair("searching"))[0].vals,
-    { a: "?", b: "?" },
-    "newerProject 缺版本：写问号",
+    { a: "—", b: "—" },
+    "newerProject 缺版本：写破折号",
 );
+run.eq(vm.messagesFor(mkState({ group: null }), mkPair("conflict"))[0].vals, { g: "—" }, "conflict 缺组号：写破折号");
+run.eq(
+    vm.messagesFor(mkState({ version: "" }), mkPair("abiMismatch", { peer: { version: null } }))[0].vals,
+    { a: "—", b: "—" },
+    "abi 缺本端与对端版本：写破折号",
+);
+run.eq(
+    vm.messagesFor(mkState({ version: "0.9.0" }), mkPair("abiMismatch", { peer: { version: null } }))[0].vals,
+    { a: "0.9.0", b: "—" },
+    "abi 只缺对端版本：只有那一格写破折号",
+);
+run.eq(
+    vm.deriveView(mkState({ takeover: true, group: null }), mkPair("searching")).confirm,
+    { key: "band.out.takeover", g: "—" },
+    "接管确认条缺组号：写破折号",
+);
+{
+    // 缺省占位统一：三语下都不留原样的 {x}，也不出现问号占位
+    for (const lang of ["zh", "en", "fr"]) {
+        const t = dom.makeT(lang);
+        const miss = [
+            ["band.out.conflict", vm.messagesFor(mkState({ group: null }), mkPair("conflict"))[0]],
+            [
+                "band.out.abi",
+                vm.messagesFor(mkState({ version: "" }), mkPair("abiMismatch", { peer: { version: null } }))[0],
+            ],
+            ["band.out.srMismatch", vm.messagesFor(mkState(), mkPair("srMismatch"))[0]],
+            [
+                "band.out.newerProject",
+                vm.messagesFor(
+                    mkState({ notices: [{ id: "newerProject", a: null, b: null }] }),
+                    mkPair("searching"),
+                )[0],
+            ],
+        ];
+        for (const [key, msg] of miss) {
+            const s = t(msg.key, msg.vals);
+            run.check(!/{w+}/.test(s) && !s.includes("?"), `${lang} / ${key}：缺值时没有残留占位符与问号：${s}`);
+        }
+    }
+}
 run.eq(
     vm.messagesFor(mkState(), mkPair("conflict")).map((m) => m.action && m.action.name),
     ["repair"],

@@ -323,10 +323,13 @@ function activeIds(state, pair) {
     return on;
 }
 
-/** 占位符的取值；缺的用问号，不让 {x} 原样上屏。 */
+/** 占位符缺值时统一写的破折号：版本号、组号、采样率都一样，不让 {x} 原样上屏。 */
+const MISSING = "—";
+
+/** 占位符的取值；缺的一律写 MISSING。 */
 function valsFor(id, state, pair) {
-    const q = (v) => (v === null || v === undefined || v === "" ? "?" : String(v));
-    const hz = (v) => (finitePositive(v) ? String(Math.round(v)) : "—");
+    const q = (v) => (v === null || v === undefined || v === "" ? MISSING : String(v));
+    const hz = (v) => (finitePositive(v) ? String(Math.round(v)) : MISSING);
     switch (id) {
         case "conflict":
             return { g: q(state.group) };
@@ -402,7 +405,7 @@ export function deriveView(state, pair) {
         },
         send,
         messages: messagesFor(state, pair),
-        confirm: state.takeover ? { key: TAKEOVER_KEY, g: state.group || "?" } : null,
+        confirm: state.takeover ? { key: TAKEOVER_KEY, g: state.group || MISSING } : null,
         hint: hintKind(ps),
     };
 }
