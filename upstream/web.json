@@ -160,6 +160,13 @@
       "from": "scripts/check-design-box.mjs",
       "fromBlob": "9b3b8c42c72b75ee4663551a49dbe177c77b55ea",
       "mode": "forked"
+    },
+    {
+      "path": "web/input/components/meter.js",
+      "source": "scvb-macos-au",
+      "from": "web/output/canvas/meter.js",
+      "fromBlob": "d06ca6814297365137f607ea06ae92b0b187a9f4",
+      "mode": "adapted"
     }
   ]
 }

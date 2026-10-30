@@ -107,10 +107,8 @@
                         // 撤网必须落在 postMessage 之后：撤在它之前的话，__JUCE__ 缺席时上面的 return
                         // 会在网已经撤了、信号却没真的发出去的状态下退出，保险彻底空转。
                         sent = true;
-                        // 占位页没有页面模块，首帧即视为起来了。接入页面模块的实现要把这个标志改成由主模块
-                        // 初始化完成后再置位（例如入口末尾）：占位底色可能在模块加载失败之前就已经画出来，
-                        // 绑在首帧上会让这类失败不再被上报。
-                        window.__rinneBooted = true;
+                        // 起来的标志不在这里置位：占位底色可能在模块加载失败之前就已经画出来，
+                        // 绑在首帧上会让这类失败不再被上报。由主模块 app.js 初始化末尾置位。
                         if (guard !== null) {
                             clearTimeout(guard);
                             guard = null;
@@ -160,6 +158,8 @@
         </script>
         <link rel="stylesheet" href="../shared/tokens.css" />
         <link rel="stylesheet" href="../shared/base.css" />
+        <link rel="stylesheet" href="../shared/rinne.css" />
+        <link rel="stylesheet" href="./input.css" />
         <style>
             html,
             body {
@@ -173,5 +173,6 @@
     </head>
     <body>
         <div class="sc-shell" id="shell"></div>
+        <script type="module" src="./app.js"></script>
     </body>
 </html>
