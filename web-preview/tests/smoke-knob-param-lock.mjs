@@ -8,7 +8,9 @@
 //   ③ 第一帧回声直接落位：显示回调只一次、不进「自动」态、不开 rAF 逼近；有了值之后才接受写入；
 //   ④ 第二帧不同的回声才进「自动」并逼近（对照：③ 里「不逼近」不是因为逼近根本不工作）；
 //   ⑤ 手势层：参数锁着时，指针按下、滚轮、方向键、Enter、双击、读数点击一概不响应；解锁后同一套输入有响应；
-//   ⑥ 坏样例：不认锁的参数替身必须被同一组断言抓出来。
+//   ⑥ 坏样例：不认锁的参数替身必须被同一组断言抓出来；
+//   ⑦ 手势收尾的空档：松手后、结束命令的回执到达前立刻来一个滚轮，桥上的序列必须是 begin、set、end、begin、set、end，
+//      不能有落在手势之外的 set（拖动、滚轮、方向键走的是同一个 set 入口）；判据自带坏样例。
 // 用法：node web-preview/tests/smoke-knob-param-lock.mjs [仓库根]
 
 import { pathToFileURL } from "node:url";
@@ -18,7 +20,7 @@ import { createRun, repoRoot } from "./lib/harness.mjs";
 const ROOT = repoRoot();
 const run = createRun("参数锁");
 const u = (rel) => pathToFileURL(path.join(ROOT, rel)).href;
-const { createParamEcho } = await import(u("web/input/components/param-echo.js"));
+const { createParamEcho, IDLE_END_MS } = await import(u("web/input/components/param-echo.js"));
 const { attachControl, attachReadoutEdit, DBLCLICK_MS } = await import(u("web/input/components/gesture.js"));
 
 /** 假桥：记录所有调用。 */
@@ -245,5 +247,81 @@ async function lockedFailures(locked) {
 
 // ⑥ 坏样例：不认锁的实现（locked 恒为假）被 ① 的判据抓出来
 run.check((await lockedFailures({ v: false })).length > 0, "⑥ 坏样例：不认锁的参数应被 ① 的判据抓出来（判据不是空转）");
+
+// ⑦ 手势收尾的空档
+{
+    /** 假桥的变体：endParamGesture 的回执扣着，手动放行（模拟原生侧还没回执的那段空档）。 */
+    const deferredEnd = () => {
+        const b = fakeBridge();
+        const waiters = [];
+        b.endParamGesture = (...a) => {
+            b.calls.push(["endParamGesture", ...a]);
+            return new Promise((r) => waiters.push(() => r({ ok: true, seq: 1 })));
+        };
+        b.releaseEnds = () => {
+            while (waiters.length) waiters.shift()();
+        };
+        return b;
+    };
+    const flushMicro = async () => {
+        for (let i = 0; i < 30; i++) await Promise.resolve();
+    };
+    const names = (calls) => calls.map((c) => c[0]);
+    /** 不在 beginParamGesture 与 endParamGesture 之间的 setParam。 */
+    const strayWrites = (calls) => {
+        let open = 0;
+        const stray = [];
+        for (const c of calls) {
+            if (c[0] === "beginParamGesture") open++;
+            else if (c[0] === "endParamGesture") open--;
+            else if (c[0] === "setParam" && open <= 0) stray.push(c);
+        }
+        return stray;
+    };
+
+    const bridge = deferredEnd();
+    const clock = fakeClock();
+    const echo = createParamEcho({ bridge, timers: clock.timers, raf: clock.raf, caf: () => {}, now: clock.now });
+    const p = echo.param("feedback", {});
+    p.seed(10);
+    p.begin();
+    p.set(20);
+    p.end(); // 松手：结束命令已发出，回执扣着
+    p.nudge(30); // 回执到达前来一个滚轮
+    await flushMicro();
+    run.eq(
+        names(bridge.calls),
+        ["beginParamGesture", "setParam", "endParamGesture"],
+        "⑦ 回执没到时：桥上只有第一个手势，新手势的 begin 与 set 排在回执之后",
+    );
+    run.eq(p.value(), 30, "⑦ 显示立即跟手：滚轮的值已经显示");
+    bridge.releaseEnds();
+    await flushMicro();
+    clock.tick(IDLE_END_MS + 50); // 停手：第二个手势收尾
+    await flushMicro();
+    bridge.releaseEnds();
+    await flushMicro();
+    run.eq(
+        names(bridge.calls),
+        ["beginParamGesture", "setParam", "endParamGesture", "beginParamGesture", "setParam", "endParamGesture"],
+        "⑦ 序列应是 begin、set、end、begin、set、end",
+    );
+    run.eq(
+        bridge.calls.filter((c) => c[0] === "setParam").map((c) => c[2]),
+        [20, 30],
+        "⑦ 两次 setParam 的值应依次是 20 与 30",
+    );
+    run.eq(strayWrites(bridge.calls), [], "⑦ 不应有落在手势之外的 setParam");
+
+    // 判据自检（坏样例）：旧行为的序列（第二个值落在 end 之后）必须被 strayWrites 抓出来；正常序列不被误报
+    const old = [
+        ["beginParamGesture", "feedback"],
+        ["setParam", "feedback", 20],
+        ["endParamGesture", "feedback"],
+        ["setParam", "feedback", 30],
+    ];
+    run.eq(strayWrites(old).length, 1, "⑦ 坏样例：set 落在 end 之后的序列应被判据抓出来");
+    run.eq(strayWrites(bridge.calls).length, 0, "⑦ 正例：正常序列不应被判据误报");
+}
 
 run.finish();

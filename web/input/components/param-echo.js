@@ -198,7 +198,9 @@ export function createParamEcho(o) {
             /** 手势里给一个新值：显示立即跟手，写入按 50 Hz 合并。 */
             set(v) {
                 if (api.locked()) return;
-                const g = gesture || api.begin();
+                // 已经排了结束命令（ended）、回执还没回来的手势不能再写：这时来的拖动、滚轮、方向键会让 setParam 落在
+                // endParamGesture 之后、任何手势之外。当它不存在，开一个新手势
+                const g = gesture && !gesture.ended ? gesture : api.begin();
                 if (shown !== v) {
                     shown = v;
                     target = v;
