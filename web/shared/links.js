@@ -43,7 +43,9 @@ export function aboutLinks(version) {
 /**
  * 前端镜像的白名单：scheme 为 https，host 为 synchain.ca，
  * 或 host 为 github.com 且路径等于 /synchain-oss/rinne 或以 /synchain-oss/rinne/ 开头。
- * 原生侧用同一口径再判一次，这里只是少发一次必被拒的调用。
+ * 不收用户信息、端口、查询串与片段（含空的 ? 和 #）：地址表里没有带这些的链接，离线扫描的口径也是这样。
+ * 原生侧会再判一次（docs/UI_BRIDGE.md 登记的是 scheme、host、路径三项精确匹配），
+ * 这里按更严的口径少发必被拒的调用，不替代原生的判断。
  */
 export function isAllowedExternal(url) {
     let u;
@@ -53,6 +55,8 @@ export function isAllowedExternal(url) {
         return false;
     }
     if (u.protocol !== "https:" || u.username || u.password || u.port) return false;
+    // 解析后单独的 ? 或 # 让 search / hash 都是空串，看不出来，所以直接看原串
+    if (/[?#]/.test(String(url))) return false;
     if (u.hostname === "synchain.ca") return true;
     return (
         u.hostname === "github.com" &&
