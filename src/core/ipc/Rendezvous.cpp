@@ -712,7 +712,11 @@ void Rendezvous::ownerTick(RvSegment& rv, u64 nowMs, bool scanned)
 // 的旧样本当证据。
 // 位在本地副本 cfgFlags_ 上改，再 relaxed 存进槽里：槽里是单个 u32 原子量，读方（PairingSnapshot）只拿这一位做
 // 启发式判断，读到新值或旧值都只是晚一拍或早一拍认出「已经配过」，不影响安全；后面每个心跳的 writeIdentity 从副本
-// 重写，也不会把位写回去。本函数不碰音频线程
+// 重写，也不会把位写回去。本函数不碰音频线程。
+// 存储之前再核一次 ctl：ownerTick 开头那次自检到这里之间也可能被接管，被接管了就什么都不写（副本也不改），
+// 交给下一拍 ownerTick 开头的自检去走 lostOwnership。核过之后到 store 之间仍有一个窗口，与心跳里 writeIdentity 的窗口
+// 同类：晚到的 store 最多把新属主刚置上的位清掉，新属主下一个心跳的 writeIdentity 从自己的副本整字重写，一个心跳
+// （250 ms）内自愈；这一位只做启发式判断，窗口内多看到一次 0 不影响安全
 void Rendezvous::upkeepPairedFlag(RoleSlot& slot, u64 nowMs) noexcept
 {
     if ((cfgFlags_ & kCfgNeverPaired) == 0 || ctlPhase(myCtl_) != kCtlPhaseActive)
@@ -722,6 +726,10 @@ void Rendezvous::upkeepPairedFlag(RoleSlot& slot, u64 nowMs) noexcept
     const SlotSample& peer = observer_.sample(group_, peerOf(config_.role));
     if (!peer.stable || ctlPhase(peer.ctl) != kCtlPhaseActive ||
         ageMs(nowMs, peer.heartbeatMs) >= RendezvousTiming::kLostHeartbeatMs)
+    {
+        return;
+    }
+    if (slot.ctl.load(std::memory_order_acquire) != myCtl_)
     {
         return;
     }
