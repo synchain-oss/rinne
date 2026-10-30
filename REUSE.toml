@@ -174,3 +174,13 @@ path = ["third_party/github-slugger/LICENSE", "third_party/github-slugger/index.
 precedence = "override"
 SPDX-FileCopyrightText = "2015 Dan Flettre"
 SPDX-License-Identifier = "ISC"
+
+# --- section:design-runtime ---
+# support.js 是 Claude Design 随设计稿导出的预览运行时，原样收录，文件里没有许可或版权声明，
+# 版权人未知：版权行写 NOASSERTION，不写任何我们没有证据的名字；许可指向 LICENSES/ 里的说明，
+# 那份说明只陈述来源与用途，不授予任何许可。
+[[annotations]]
+path = "docs/design/support.js"
+precedence = "override"
+SPDX-FileCopyrightText = "NOASSERTION"
+SPDX-License-Identifier = "LicenseRef-Design-Export-Runtime"

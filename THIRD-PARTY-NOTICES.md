@@ -63,6 +63,7 @@ Not linked into the plugins and not distributed with them.
 | --- | --- | --- | --- | --- |
 | Catch2 | FetchContent tag in `tests/CMakeLists.txt` (v3.5.4) | `BSL-1.0` | unit-test executables | `third_party/notices/catch2.LICENSE.txt` |
 | github-slugger slug rules | vendored in `third_party/github-slugger/` | `ISC` | the documentation link check | — |
+| Claude Design preview runtime (`docs/design/support.js`) | as exported, unmodified | `LicenseRef-Design-Export-Runtime` | opening the archived design in a browser (design review, the design-manifest check); not shipped | — |
 | pluginval | `.pluginval-version` | `GPL-3.0-only` | plugin validation in CI and local gates; downloaded, not linked | — |
 
 ## 3. Component notes
@@ -205,6 +206,24 @@ Not linked into the plugins and not distributed with them.
   the upstream licence file: `Copyright (c) 2015, Dan Flettre`.
 
 <!-- /section:github-slugger -->
+
+<!-- section:design-runtime -->
+
+### Design preview runtime (build and design-review use only)
+
+- `docs/design/support.js` is the preview runtime that Claude Design exports next to a design file. The archived design
+  file in `docs/design/` loads it so that the design can be opened in a browser. It was exported by the maintainers'
+  own account together with the design and is kept here byte for byte as exported.
+- The file carries no licence statement and no copyright notice, and no redistribution terms for it were found. This
+  file therefore names neither a licence nor a copyright holder for it. `REUSE.toml` registers it with
+  `SPDX-FileCopyrightText: NOASSERTION` and the identifier `LicenseRef-Design-Export-Runtime`; the text under that
+  identifier, `LICENSES/LicenseRef-Design-Export-Runtime.txt`, is a provenance statement and not a licence grant.
+- It is used only to open the archived design during design review and by the design-manifest check. It is not part of
+  either plugin, is not compiled or linked into any binary, and is not in any release package. Release packages still
+  carry the text file `LICENSES/LicenseRef-Design-Export-Runtime.txt`, because every text under `LICENSES/` is packed and
+  has to be cited in this file; that text describes a file the package does not contain.
+
+<!-- /section:design-runtime -->
 
 ## 4. Code derived from other Synchain projects
 

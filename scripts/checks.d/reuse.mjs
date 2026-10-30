@@ -18,6 +18,7 @@ export const SECTIONS = [
     "fonts",
     "third-party-notices",
     "third-party-src",
+    "design-runtime",
 ];
 
 export function checkReuseToml(text, licenseFiles) {
