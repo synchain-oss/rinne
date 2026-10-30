@@ -369,6 +369,21 @@ try {
                 `${role}：Output 的关于面板没有起播复位与 tail 行`,
             );
         }
+        // 备注点名了 tail 模式：有 tail 行才渲染，没有就整句不渲染（不留指向看不见的控件的文字）
+        const noteOf = async () =>
+            page.eval(
+                `(() => { const n = document.querySelector('${about} [data-part="about.advNote"]'); return { shown: Boolean(n) && !n.hidden, text: n ? n.textContent : "" }; })()`,
+            );
+        const note = await noteOf();
+        if (role === "input") {
+            run.check(note.shown && note.text.includes("tail"), `${role}：有 tail 行时备注出现并点名 tail`);
+        } else {
+            run.eq(note, { shown: false, text: "" }, `${role}：没有 tail 行时备注整句不渲染`);
+            await openScene(page, server, design, role, "zh", scene("about"), "&tail=1");
+            run.eq(await count(page, `${about} [data-tail]`), 3, `${role}：tail=1 时 Output 也有 tail 三项`);
+            const withTail = await noteOf();
+            run.check(withTail.shown && withTail.text.includes("tail"), `${role}：有 tail 行时备注出现并点名 tail`);
+        }
         // 复制失败：红色错误行 + 红色轻提示
         await openScene(page, server, design, role, "zh", scene("about-copyFail"));
         const fail = await page.eval(

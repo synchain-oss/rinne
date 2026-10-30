@@ -15,6 +15,7 @@
 // 高级设置：起播清空环路与 tail 模式随工程走（桥函数 setResetOnPlay、setTailMode，只影响本实例），
 // 诊断日志开关是本机设置（setDiagLog，写全局位，不进工程）。三项各自是否出现由 features 决定：
 // 起播清空只有 Input 有；tail 行当前只有 Input 的桥提供函数。
+// 行下面那句备注点名了 tail 模式，所以和 tail 行共用同一个开关：tail 行不渲染时备注也不渲染，免得指向看不见的控件。
 //
 // 链接只经桥函数 openExternal 交给系统浏览器：元素是 role=link 的按钮，不是带 href 的 <a>，
 // 页面里不出现任何外部地址的赋值；地址表在 links.js。
@@ -219,7 +220,7 @@ export function createAbout(o) {
           )
         : null;
     if (tailRow) tailLabel.id = `rn-about-tail-${role}`;
-    const advNote = el("div", { class: "rn-about__small rn-about__small--gap" });
+    const advNote = el("div", { class: "rn-about__small rn-about__small--gap", data: { part: "about.advNote" } });
 
     const body = el(
         "div",
@@ -348,8 +349,9 @@ export function createAbout(o) {
         diagRow.label.textContent = t("about.adv.diagLog");
         diagRow.label.setAttribute("title", t("about.adv.diagLogTip"));
         diagRow.set(view.diagLog === true, t);
-        // 备注按这个角色实际有哪些行选词条：Output 没有起播清空
-        advNote.textContent = t(isIn ? "about.adv.note" : "about.adv.noteOut");
+        // 备注按这个角色实际有哪些行选词条（Output 没有起播清空），并跟着 tail 行：没有 tail 行就不写这句
+        advNote.hidden = !tailRow;
+        advNote.textContent = tailRow ? t(isIn ? "about.adv.note" : "about.adv.noteOut") : "";
     }
 
     function applyText() {

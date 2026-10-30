@@ -219,7 +219,8 @@ function buildWindow() {
         host: shell.top,
         inert: [shell.content],
         bridge,
-        features: { resetOnPlay: role === "input", tail: role === "input" },
+        // tail=1：让 Output 也带上 tail 行，测备注是否跟着 tail 行走
+        features: { resetOnPlay: role === "input", tail: role === "input" || q.get("tail") === "1" },
         onViewRules: () => log("viewRules"),
         onCopied: () => toast.show({ key: "toast.diagCopied", t }),
         onCopyFail: (reason) => toast.show({ key: "toast.copyFail", vals: { reason }, t }),
