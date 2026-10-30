@@ -86,8 +86,16 @@ const INCLUDE = [
     },
 ];
 
-/** 可以出现 http(s) 字面量的两种情形：SVG 命名空间（标识符，不是请求）；JUCE 前端辅助脚本里宿主资源的伪源（原生侧拦截，不出网）。 */
-const ALLOWED_URL = /^https?:\/\/(?:www\.w3\.org\/2000\/svg|juce\.backend\/?)$/;
+/**
+ * 可以出现 http(s) 字面量的三种情形：
+ *   - SVG 命名空间（标识符，不是请求）；
+ *   - JUCE 前端辅助脚本里宿主资源的伪源（原生侧拦截，不出网）；
+ *   - 关于面板的两个外链源：https://synchain.ca（可带结尾 /）与 https://github.com/synchain-oss/rinne（及其后接 / 的路径）。
+ *     它们只经桥函数 openExternal 交给原生端用系统浏览器打开，页面从不加载，不是页面请求；
+ *     口径与原生 openExternal 的白名单一致（docs/UI_BRIDGE.md），只收 https，路径里不许有 ..，不收查询串与片段。
+ */
+const ALLOWED_URL =
+    /^(?:https?:\/\/(?:www\.w3\.org\/2000\/svg|juce\.backend\/?)|https:\/\/synchain\.ca\/?|https:\/\/github\.com\/synchain-oss\/rinne(?:\/(?!.*\.\.)[\w.~%/-]*)?)$/;
 /**
  * 网络调用：fetch、sendBeacon 等只要出现这个词就判红（不要求带括号：`const f = window.fetch; f()` 这类间接调用也拦住），
  * 另外 XMLHttpRequest、WebSocket、EventSource、各类 Worker 与 importScripts。静态扫描挡不住运行时拼出来的名字，

@@ -9,12 +9,10 @@
 // 链接只经桥函数 openExternal 交给系统浏览器，页面本身从不把外部地址写进 href 或 location。
 // isAllowedExternal 是原生白名单的前端镜像：先在页面里挡掉明显不会放行的地址，原生侧仍会再判一次。
 
-// 离线扫描（web-preview/build-static.mjs）只放行 SVG 命名空间与 juce.backend 两种 http(s) 字面量，源码里不能直接写外链。
-// 这里的地址只会交给 openExternal，页面从不加载它们，所以由字段拼出来；扫描的白名单登记这两个源之后可以改回字面量。
-const https = (...parts) => ["https:", "", ...parts].join("/");
-
-export const REPO_URL = https("github.com", "synchain-oss", "rinne");
-export const SITE_URL = `${https("synchain.ca")}/`;
+// 这两个地址是字面量：离线扫描（web-preview/build-static.mjs）的白名单登记了同样的两个源，口径与原生 openExternal 一致。
+// 它们只经桥交给原生端用系统浏览器打开，页面从不加载，不是页面请求。
+export const REPO_URL = "https://github.com/synchain-oss/rinne";
+export const SITE_URL = "https://synchain.ca/";
 export const ISSUES_URL = `${REPO_URL}/issues`;
 export const CONTACT_MAIL = "contact@synchain.ca";
 

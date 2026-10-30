@@ -21,6 +21,18 @@ const good = (label, rel, text) =>
 // 坏例：http(s) 字面量
 bad("https 外链", "web/a.html", '<script src="https://cdn.example.invalid/a.js"></script>');
 bad("http 外链", "web/a.css", "@import url(http://x.invalid/a.css);");
+// 坏例：关于面板两个外链源的近似写法（只放行 https://synchain.ca 与 https://github.com/synchain-oss/rinne 及其下的路径）
+bad("synchain.ca 用 http", "web/a.js", 'const u = "http://synchain.ca";');
+bad("synchain.ca 后接别的域", "web/a.js", 'const u = "https://synchain.ca.evil.invalid";');
+bad("synchain.ca 带用户信息", "web/a.js", 'const u = "https://synchain.ca@evil.invalid/";');
+bad("synchain.ca 带端口", "web/a.js", 'const u = "https://synchain.ca:8443/";');
+bad("仓库地址用 http", "web/a.js", 'const u = "http://github.com/synchain-oss/rinne";');
+bad("仓库名只是前缀（rinne-x）", "web/a.js", 'const u = "https://github.com/synchain-oss/rinne-x";');
+bad("别的仓库", "web/a.js", 'const u = "https://github.com/synchain-oss/other";');
+bad("只有组织没有仓库名", "web/a.js", 'const u = "https://github.com/synchain-oss";');
+bad("别的组织同名仓库", "web/a.js", 'const u = "https://github.com/evil/synchain-oss/rinne";');
+bad("仓库路径里绕出去（..）", "web/a.js", 'const u = "https://github.com/synchain-oss/rinne/../other";');
+bad("仓库地址带查询串", "web/a.js", 'const u = "https://github.com/synchain-oss/rinne?x=1";');
 // 坏例：协议相对地址
 bad("script src=//", "web/a.html", '<script src="//cdn.example.invalid/a.js"></script>');
 bad("link href=// 单引号", "web/a.html", "<link rel='stylesheet' href='//cdn.example.invalid/a.css'>");
@@ -67,6 +79,16 @@ good("srcset 全是同源地址（相对、根相对）", "web/a.html", '<img sr
 good("meta refresh 只刷新不跳转", "web/a.html", '<meta http-equiv="refresh" content="5">');
 good("meta refresh 跳相对地址", "web/a.html", '<meta http-equiv="refresh" content="0; url=web-preview/input.html">');
 good("普通 import", "web/a.js", 'import { a } from "./a.js";');
+// 好例：关于面板的两个外链源只经桥交给原生端打开，不是页面请求
+good("synchain.ca", "web/a.js", 'const u = "https://synchain.ca";');
+good("synchain.ca 带结尾斜杠", "web/a.js", 'const u = "https://synchain.ca/";');
+good("仓库地址", "web/a.js", 'const u = "https://github.com/synchain-oss/rinne";');
+good("仓库地址下的子路径", "web/a.js", 'const u = "https://github.com/synchain-oss/rinne/issues";');
+good(
+    "仓库地址下的 blob 路径",
+    "web/a.js",
+    'const u = "https://github.com/synchain-oss/rinne/blob/prod/THIRD-PARTY-NOTICES.md";',
+);
 good("JUCE 的宿主伪源", "web/js/juce/index.js", 'const origin = "https://juce.backend/";');
 good("JUCE 副本里的网络词不查", "web/js/juce/index.js", "new XMLHttpRequest();");
 good("正则里的双斜杠", "web/a.js", "const re = /a\\/\\/b/;");
