@@ -338,6 +338,7 @@ export function contrastProbe(doc, win) {
         if (p.closest('[class*="eyebrow"]')) return "C";
         if (p.closest(".rn-about__preview")) return "B";
         if (p.closest(".rn-modal")) return "A";
+        if (p.closest(".in-limconfirm")) return "A"; // 限制器关闭确认框：Input 自己的确认层，和模态同档
         if (p.closest(".in-panic")) return "A";
         const band = p.closest(".rn-banner");
         if (band) {
