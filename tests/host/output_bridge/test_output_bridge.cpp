@@ -473,7 +473,7 @@ TEST_CASE("output bridge: the build line takes the commit from the label and lea
     CHECK(keysOf(standalone) == std::set<std::string>{"sha", "arch"});
 }
 
-TEST_CASE("output bridge: send reports the host bypass and a host that stopped calling", "[host][output_bridge][state]")
+TEST_CASE("output bridge: send reports a host that stopped calling", "[host][output_bridge][state]")
 {
     formalOnly();
     Bench bench;
@@ -493,6 +493,20 @@ TEST_CASE("output bridge: send reports the host bypass and a host that stopped c
     bench.setRunning(output, true);
     bench.run(20);
     CHECK_FALSE(static_cast<bool>(send().getProperty("hostPaused", {})));
+}
+
+TEST_CASE("output bridge: send reports the host bypass", "[host][output_bridge][state]")
+{
+    formalOnly();
+    // bypassed 看引擎的写状态（旁路写零）：要有环。验证宿主副本不开段，写状态停在 kIdle，配对态是 validator
+    needsSharedMemory();
+    Bench bench;
+    OutputProcessor& output = bench.addOutput();
+    Recorded rec;
+    OutputBridge bridge(output, hooksFor(bench, rec));
+    bench.run(200);
+    auto send = [&] { return stateFields(bridge).getProperty("send", {}); };
+    CHECK_FALSE(static_cast<bool>(send().getProperty("bypassed", {})));
 
     bench.setBypassed(output, true);
     bench.run(200);
