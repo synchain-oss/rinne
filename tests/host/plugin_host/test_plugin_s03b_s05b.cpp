@@ -17,8 +17,9 @@
 // 所以起点就是 s0 + T；起点的取法仍按这个式子算，场景里再核一遍它等于 s0 + T。比较窗口 3 s。
 // 断言：每路恰 1 次起播重同步，DSP 复位点恰为 s0 + T；窗口里左右声道四路逐位相同；起播点到 s0 + T
 // 之间实时一与离线一确有不同（比较起点不是随手挑的）；Output 逐位不碰宿主缓冲，两端都不写块尾之后。
-// 高切：参数 high_cut 写了一个有限的值（8 kHz），回送链的音色级还没有接入，目前不改变输出；
-// 音色级接入之后这个值也要逐位相同。
+// 高切：参数 high_cut 写 8 kHz（开）与 20000（关）各一遍，两遍各自满足上面的断言（开着时窗口里四路照样逐位相同：
+// 高切在起播沿的复位点上与回送链一起复位）；另外实时一在窗口里开着与关着的两遍确有不同，且开着时回送的高频占比
+// （相邻差的能量 / 自身的能量）明显更低：参数经参数树写进去，高切真的在回送链里。
 //
 // S05b 停调与起播沿：Output 停调（30 ms、120 ms，停调边界落在块边界上）恢复之后再起播，起播沿之后的输出与实时/离线、
 // 切块方式、停调与否都无关：从 s0 + T 起逐位相同。起播点离停调的恢复点 64000 个样本（1.33 s），
@@ -34,11 +35,13 @@
 // 停调的周期里 Output 不被调用，Output 一侧的游标这期间不走，恢复时按 Input 的游标对齐（宿主的时间线没有停）。
 // 断言：每路恰 1 次起播重同步，复位点恰为 s0 + T；停调离起播点 64000 个样本的路在停调恢复时有重同步（断档恢复或位移，
 // 至少 1 次）；起点 s0 + T 起 3 s 里左右声道十路逐位相同；实时一与对照在起播之前的某段确有不同（停调确实改变了回送，
-// 对拍不是平凡相等）。
+// 对拍不是平凡相等）。高切开、关各一遍，对照在窗口里两遍的分辨力同 S03b。
 //
 // 标 ⛔ 的是删除式验证点：把对应的实现改坏，本场景必须变红。
 //   ⛔ 起播沿不复位回送链（playEdgeReset 不调）→ DC 阻断与限制器的状态各路不同，窗口内逐位对不上；
-//   ⛔ 起播沿不被识别（复位开关取反）→ 没有起播重同步，复位点对不上。
+//   ⛔ 起播沿不被识别（复位开关取反）→ 没有起播重同步，复位点对不上；
+//   ⛔ 起播沿不复位音色级 → 高切的状态带着预滚（与停调）的痕迹，高切开着的那一遍窗口内逐位对不上；
+//   ⛔ 高切不接（引擎不理 highCutHz）→ 开着与关着的两遍逐位相同，高频占比也一样。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -66,6 +69,9 @@ constexpr std::int64_t kEdgeFade = 240; // T = min(5 ms, D)
 constexpr std::int64_t kFirstPairFade = 24000; // 500 ms
 constexpr std::int64_t kWindow = 3 * 48000;
 constexpr int kDeclaredBlock = 4096;
+constexpr float kHighCutOn = 8000.0f;
+constexpr float kHighCutOff = rinne::engine::kDefaultHighCutHz; // 20000 = 关
+constexpr std::uint64_t kPlaySeed = 0x5ca1ab1eull; // 起播点之后的信号源（各路共用）
 
 struct Blocks
 {
@@ -129,7 +135,7 @@ void runTo(PluginHost& host, std::int64_t target, BlockSource& blocks, bool runO
     }
 }
 
-Result runPlan(const Plan& plan)
+Result runPlan(const Plan& plan, float highCutHz)
 {
     Result out;
     HostOptions options;
@@ -144,7 +150,7 @@ Result runPlan(const Plan& plan)
     setParamExact(host, "feedback", plan.feedback);
     setParamExact(host, "mix", 50.0f);
     setParam(host, "delay_ms", 100.0f);
-    setParam(host, "high_cut", 8000.0f);
+    setParamExact(host, "high_cut", highCutHz);
 
     const std::int64_t edge = plan.edge;
     const std::uint64_t seed = plan.noiseSeed;
@@ -157,8 +163,8 @@ Result runPlan(const Plan& plan)
         else
         {
             // 起播点之后：相对起播点的同一个纯函数（四路共用）
-            left = noiseFor(0x5ca1ab1eull, index - edge, 0);
-            right = noiseFor(0x5ca1ab1eull, index - edge, 1);
+            left = noiseFor(kPlaySeed, index - edge, 0);
+            right = noiseFor(kPlaySeed, index - edge, 1);
         }
     };
 
@@ -243,6 +249,38 @@ std::size_t differingSamples(const Result& a, const Plan& pa, const Result& b, c
     return count;
 }
 
+// 窗口里左声道回送（输出减干声；混合 50 % 时 g_dry = 1）的高频占比：相邻差的能量 / 自身的能量。
+// 白噪声约为 2，低通过的噪声小得多
+double returnHighShare(const Result& r, const Plan& plan, std::int64_t from)
+{
+    double diff = 0.0;
+    double energy = 0.0;
+    double previous = 0.0;
+    for (std::int64_t k = from; k < from + kWindow; ++k)
+    {
+        const double ret = static_cast<double>(r.left[static_cast<std::size_t>(plan.edge + k)]) -
+                           static_cast<double>(noiseFor(kPlaySeed, k, 0));
+        if (k > from)
+        {
+            diff += (ret - previous) * (ret - previous);
+        }
+        energy += ret * ret;
+        previous = ret;
+    }
+    return energy > 0.0 ? diff / energy : 0.0;
+}
+
+// 高切开着与关着的两遍（同一路）：窗口里确有不同，开着时回送的高频占比明显更低
+void checkHighCutAudible(const Result& on, const Result& off, const Plan& plan, std::int64_t from)
+{
+    CHECK(differingSamples(on, plan, off, plan, from, from + kWindow) > 0u);
+    const double shareOn = returnHighShare(on, plan, from);
+    const double shareOff = returnHighShare(off, plan, from);
+    INFO("high-band share: high cut on " << shareOn << ", off " << shareOff);
+    CHECK(shareOff > 0.0);
+    CHECK(shareOn < 0.5 * shareOff);
+}
+
 void checkEdge(const Plan& plan, const Result& r)
 {
     CHECK(r.playResyncs == 1u);
@@ -267,25 +305,33 @@ TEST_CASE("plugin_host s03b: from the play edge on, the output is bit for bit th
         plans[1] = Plan{false, 72407, Blocks{480, 512, 12}, Blocks{480, 512, 13}, 102, 0, feedback};
         plans[2] = Plan{true, 83521, Blocks{1, 4096, 14}, Blocks{1, 4096, 15}, 103, 0, feedback};
         plans[3] = Plan{true, 94793, Blocks{1, 4096, 16}, Blocks{1, 4096, 17}, 104, 0, feedback};
-        std::vector<Result> results;
-        for (const Plan& plan : plans)
-        {
-            results.push_back(runPlan(plan));
-            checkEdge(plan, results.back());
-        }
+        Result first[2]; // 实时一：[0] 高切开，[1] 高切关
         std::int64_t from = kEdgeFade;
-        for (std::size_t i = 0; i < plans.size(); ++i)
+        for (int pass = 0; pass < 2; ++pass)
         {
-            from = std::max(from, compareStart(plans[i], results[i]));
+            const float highCut = pass == 0 ? kHighCutOn : kHighCutOff;
+            INFO("high cut " << highCut << " Hz");
+            std::vector<Result> results;
+            for (const Plan& plan : plans)
+            {
+                results.push_back(runPlan(plan, highCut));
+                checkEdge(plan, results.back());
+            }
+            for (std::size_t i = 0; i < plans.size(); ++i)
+            {
+                from = std::max(from, compareStart(plans[i], results[i]));
+            }
+            CHECK(from == kEdgeFade);
+            for (std::size_t i = 1; i < plans.size(); ++i)
+            {
+                INFO("run " << i << " against run 0");
+                CHECK(sameWindow(results[0], plans[0], results[i], plans[i], from));
+            }
+            // 起播点到 s0 + T 之间，旧读头 5 ms 淡出的尾巴是各路预滚里的内容：实时一与离线一确有不同
+            CHECK(differingSamples(results[0], plans[0], results[2], plans[2], 0, kEdgeFade) > 0u);
+            first[pass] = results[0];
         }
-        CHECK(from == kEdgeFade);
-        for (std::size_t i = 1; i < plans.size(); ++i)
-        {
-            INFO("run " << i << " against run 0");
-            CHECK(sameWindow(results[0], plans[0], results[i], plans[i], from));
-        }
-        // 起播点到 s0 + T 之间，旧读头 5 ms 淡出的尾巴是各路预滚里的内容：实时一与离线一确有不同
-        CHECK(differingSamples(results[0], plans[0], results[2], plans[2], 0, kEdgeFade) > 0u);
+        checkHighCutAudible(first[0], first[1], plans[0], from);
     }
 }
 
@@ -308,37 +354,45 @@ TEST_CASE("plugin_host s05b: a stalled Output does not leave a trace past the pl
         plans[7] = Plan{false, 131071, Blocks{64, 512, 22}, Blocks{64, 512, 23}, 202, 5760, feedback, 3000};
         plans[8] = Plan{true, 140239, Blocks{1, 4096, 24}, Blocks{1, 4096, 25}, 203, 1440, feedback, 0};
         plans[9] = Plan{true, 152233, Blocks{1, 4096, 26}, Blocks{1, 4096, 27}, 204, 5760, feedback, 3000};
-        std::vector<Result> results;
-        for (const Plan& plan : plans)
-        {
-            results.push_back(runPlan(plan));
-            checkEdge(plan, results.back());
-            if (plan.stallLength > 0 && plan.gap >= 64000)
-            {
-                CHECK(results.back().stallResyncs >= 1u);
-            }
-        }
+        Result control[2]; // 对照：[0] 高切开，[1] 高切关
         std::int64_t from = kEdgeFade;
-        for (std::size_t i = 0; i < plans.size(); ++i)
+        for (int pass = 0; pass < 2; ++pass)
         {
-            from = std::max(from, compareStart(plans[i], results[i]));
+            const float highCut = pass == 0 ? kHighCutOn : kHighCutOff;
+            INFO("high cut " << highCut << " Hz");
+            std::vector<Result> results;
+            for (const Plan& plan : plans)
+            {
+                results.push_back(runPlan(plan, highCut));
+                checkEdge(plan, results.back());
+                if (plan.stallLength > 0 && plan.gap >= 64000)
+                {
+                    CHECK(results.back().stallResyncs >= 1u);
+                }
+            }
+            for (std::size_t i = 0; i < plans.size(); ++i)
+            {
+                from = std::max(from, compareStart(plans[i], results[i]));
+            }
+            CHECK(from == kEdgeFade);
+            for (std::size_t i = 1; i < plans.size(); ++i)
+            {
+                INFO("run " << i << " against the control");
+                CHECK(sameWindow(results[0], plans[0], results[i], plans[i], from));
+            }
+            // 分辨力：停调的路与对照在起播之前确有不同（停调改变了回送）
+            const Result& stalled = results[1];
+            std::size_t differing = 0;
+            for (std::int64_t t = stalled.stallFirst; t < plans[1].edge; ++t)
+            {
+                differing += rinne::test::floatBits(stalled.left[static_cast<std::size_t>(t)]) !=
+                                     rinne::test::floatBits(results[0].left[static_cast<std::size_t>(t)])
+                                 ? 1u
+                                 : 0u;
+            }
+            CHECK(differing > 1000u);
+            control[pass] = results[0];
         }
-        CHECK(from == kEdgeFade);
-        for (std::size_t i = 1; i < plans.size(); ++i)
-        {
-            INFO("run " << i << " against the control");
-            CHECK(sameWindow(results[0], plans[0], results[i], plans[i], from));
-        }
-        // 分辨力：停调的路与对照在起播之前确有不同（停调改变了回送）
-        const Result& stalled = results[1];
-        std::size_t differing = 0;
-        for (std::int64_t t = stalled.stallFirst; t < plans[1].edge; ++t)
-        {
-            differing += rinne::test::floatBits(stalled.left[static_cast<std::size_t>(t)]) !=
-                                 rinne::test::floatBits(results[0].left[static_cast<std::size_t>(t)])
-                             ? 1u
-                             : 0u;
-        }
-        CHECK(differing > 1000u);
+        checkHighCutAudible(control[0], control[1], plans[0], from);
     }
 }

@@ -5,7 +5,8 @@
 //   值（store / load）：当前值，读多少次都一样；
 //   峰值（publishMax / take）：音频线程只往大里写，界面以 25 Hz 左右 take 走并清零，两次读之间的最大值不会丢。
 // 这里的安全测量量（回送 DC 均值、贴近满幅的持续时长、限制器增益缩减）只供安全灯与失控保护判据使用，
-// 不参与任何别的音频决策。
+// 不参与任何别的音频决策。电平只供界面显示（rinne.meters 的 in / ret / out 与 Mix 推子的两路分量），
+// 不参与任何音频决策；取点见 InputEngine.h 的文件头。
 #pragma once
 
 #include <atomic>
@@ -71,6 +72,7 @@ struct PackedSafety
 struct Meters
 {
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "测量量必须无锁");
+    static_assert(std::atomic<bool>::is_always_lock_free, "测量量必须无锁");
 
     // 值：回送（清洗后、DC 阻断前）的直流均值，取左右声道绝对值较大者，线性幅度；时间常数 300 ms
     AtomicFloat returnDcMean;
@@ -84,6 +86,20 @@ struct Meters
     std::atomic<std::uint32_t> safety{0u};
     // 累计：环里读到并已置 0 的非有限样本数（只增不减，回绕无妨）
     std::atomic<std::uint32_t> returnNonFinite{0u};
+
+    // 电平：五个都是峰值，线性幅度，只收有限样本（NaN、±Inf 不计），两次 take 之间一直静音就是 0（换成 null 归桥）。
+    // 峰值：in，宿主给的干声（g_dry 之前）
+    AtomicFloat inputPeak;
+    // 峰值：ret，⑥ ×g 之前的回送（③④⑤ 之后，mono 时是两格的平均）
+    AtomicFloat returnPeak;
+    // 峰值：out，Input 的最终输出
+    AtomicFloat outputPeak;
+    // 峰值：Mix 推子的干声分量 g_dry·干声
+    AtomicFloat dryPartPeak;
+    // 峰值：Mix 推子的回送分量，就是加到干声上的那一项（⑨ 之后）
+    AtomicFloat returnPartPeak;
+    // 值：高切被采样率截断在 0.45·sr（参数在它之上而又不是关），界面据此给中性提示
+    std::atomic<bool> highCutLimited{false};
 };
 
 } // namespace rinne::engine

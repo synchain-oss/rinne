@@ -4,10 +4,11 @@
 // 切块方式、停调与否都无关：从起播点 s0 + T 起逐位相同（T = 240，5 ms）。S03 钉的是起播沿本身；这里钉的是起播之前发生过
 // 停调与恢复（读头重建、补零、onset、断档或位移重同步）时，这些后遗症不会越过起播沿。
 //
-// 做法：环路延迟 D = 4800，环内放一个一阶低通（截止 2 kHz，环内插件的替身，中间链在引擎报出的复位点上复位），
-// 声明的最大块长 4096，混合 50 %，反馈 50 % 与 100 % 各做一遍。每一路先预滚（transport 不走带，信号是各路不同的噪声），
-// 停调的路在起播点之前 64000 个样本（1.33 s）处让 Output 停调若干个周期（停调的样本数恰为 1440 或 5760，
-// 块在边界处截短），然后起播（transport 走带），起播之后的信号是相对起播点的同一个纯函数。六路：
+// 做法：环路延迟 D = 4800，中间链是恒等，声明的最大块长 4096，混合 50 %，反馈 50 % 与 100 % 各做一遍，每个反馈回送链的
+// 高切开（2 kHz）与关各一遍（开着时参照也带音色级，关着时参照不带）。每一路先预滚（transport
+// 不走带，信号是各路不同的噪声）， 停调的路在起播点之前 64000 个样本（1.33 s）处让 Output
+// 停调若干个周期（停调的样本数恰为 1440 或 5760， 块在边界处截短），然后起播（transport
+// 走带），起播之后的信号是相对起播点的同一个纯函数。六路：
 //   对照    块长恒为 256，预滚 120011，不停调；
 //   实时一  同上预滚，停调 30 ms；
 //   实时二  块长 64…512 随机，预滚 131071，停调 120 ms；
@@ -26,11 +27,14 @@
 //     （断档恢复或位移）；
 //   - 左右声道十路在窗口里逐位相同；
 //   - 每路输出与参照安全链按文档接线重算的结果逐位相同；
-//   - 分辨力：实时一与对照在起播之前确有不同（停调确实改变了回送，对拍不是平凡相等）。
+//   - 分辨力：实时一与对照在起播之前确有不同（停调确实改变了回送，对拍不是平凡相等）；对照在比较窗口里
+//     高切开着的那一遍与关着的那一遍确有不同（高切真的在回送链里）。
 //
 // 标 ⛔ 的是删除式验证点：把对应的实现改坏，本场景必须变红。
 //   ⛔ 起播沿不复位回送链（playEdgeReset 不调）→ 各路 DC 阻断与限制器的状态不同，窗口内逐位对不上；
-//   ⛔ 起播沿不被识别（复位开关取反）→ 没有起播重同步，复位点对不上。
+//   ⛔ 起播沿不被识别（复位开关取反）→ 没有起播重同步，复位点对不上；
+//   ⛔ 起播沿不复位音色级 → 高切的状态带着停调与预滚的痕迹，高切开着的那一遍窗口内逐位对不上；
+//   ⛔ 高切不接（引擎不理 highCutHz）→ 高切开着的那一遍与参照对不上，且与关着的那一遍逐位相同。
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -52,6 +56,9 @@ constexpr std::int64_t kDelay = 4800;
 constexpr std::int64_t kEdgeFade = 240; // T = min(5 ms, D)
 constexpr std::int64_t kWindow = 3 * 48000;
 constexpr int kMaxBlock = 4096;
+constexpr std::int64_t kControlEdge = 120011; // 对照的起播点
+constexpr float kHighCutOn = 2000.0f;
+constexpr float kHighCutOff = rinne::engine::kDefaultHighCutHz; // 20000 = 关
 
 struct Blocks
 {
@@ -88,7 +95,7 @@ float noiseFor(std::uint64_t seed, std::int64_t index, int channel)
     return 0.3f * hashNoise(static_cast<std::uint64_t>(index), seed * 2 + static_cast<std::uint64_t>(channel));
 }
 
-Result runPlan(const Plan& plan)
+Result runPlan(const Plan& plan, float highCutHz)
 {
     Result out;
     rinne::test::Rng rng(plan.blocks.seed);
@@ -124,8 +131,6 @@ Result runPlan(const Plan& plan)
     REQUIRE(host != nullptr);
     host->setBlockScripts(script, outputScript);
     host->setTransportScript(transport);
-    host->setChain(ChainKind::kOnePoleLowpass);
-    host->chain().setLowpassHz(2000.0f);
     const std::int64_t edge = plan.edge;
     const std::uint64_t seed = plan.noiseSeed;
     Recorder rec(*host, [edge, seed](std::uint64_t first, float* left, float* right, int n) {
@@ -139,8 +144,14 @@ Result runPlan(const Plan& plan)
             right[i] = noiseFor(s, k, 1);
         }
     });
+    // 高切开着时参照也带音色级；关着时不带（参照就是不接音色级的接线）
+    if (highCutHz != kHighCutOff)
+    {
+        rec.reference.enableTone();
+    }
 
-    const rinne::engine::EngineParams p = loopParams(plan.feedback, 50.0f, 100.0f);
+    rinne::engine::EngineParams p = loopParams(plan.feedback, 50.0f, 100.0f);
+    p.highCutHz = highCutHz;
     for (std::size_t i = 0; i < script.lengths.size(); ++i)
     {
         if (rec.cycle(i, p) <= 0)
@@ -179,69 +190,85 @@ public:
         for (const float feedback : {50.0f, 100.0f})
         {
             INFO("feedback " << feedback << " %");
-            const Plan plans[] = {
-                {false, 120011, Blocks{256, 256, 1}, 201, 0, feedback},
-                {false, 120011, Blocks{256, 256, 1}, 201, 1440, feedback},
-                {false, 131071, Blocks{64, 512, 22}, 202, 5760, feedback},
-                {true, 140239, Blocks{1, 4096, 24}, 203, 1440, feedback},
-                {true, 152233, Blocks{1, 4096, 26}, 204, 5760, feedback},
-                {true, 120011, Blocks{1, 4096, 28}, 201, 5760, feedback},
-                // 起播点紧接着停调的恢复：恢复点正好在起播点，或在它之前 3000 个样本（读头重建的零窗口还没走完）
-                {false, 120011, Blocks{256, 256, 1}, 201, 1440, feedback, 0},
-                {false, 131071, Blocks{64, 512, 22}, 202, 5760, feedback, 3000},
-                {true, 140239, Blocks{1, 4096, 24}, 203, 1440, feedback, 0},
-                {true, 152233, Blocks{1, 4096, 26}, 204, 5760, feedback, 3000},
-            };
-            std::vector<Result> results;
-            for (const Plan& plan : plans)
+            std::vector<float> control[2]; // 对照的左声道：[0] 高切开，[1] 高切关
+            for (int pass = 0; pass < 2; ++pass)
             {
-                results.push_back(runPlan(plan));
-                const Result& r = results.back();
-                RIG_EQ(v, r.playResyncs, 1u);
-                RIG_CHECK(v, r.resets == std::vector<std::int64_t>{plan.edge + kEdgeFade});
-                RIG_CHECK(v, r.matchesReference);
-                RIG_CHECK(v, r.left.size() >= static_cast<std::size_t>(plan.edge + kWindow));
-                if (plan.stallLength > 0 && plan.gap >= 64000)
-                {
-                    RIG_CHECK(v, r.stallResyncs >= 1u);
-                }
+                const float highCut = pass == 0 ? kHighCutOn : kHighCutOff;
+                INFO("high cut " << highCut << " Hz");
+                control[pass] = runPass(v, feedback, highCut);
             }
-            std::int64_t from = kEdgeFade;
-            for (std::size_t i = 0; i < results.size(); ++i)
-            {
-                from = std::max(from, compareStart(plans[i], results[i]));
-            }
-            RIG_EQ(v, from, kEdgeFade);
-            for (std::size_t i = 1; i < results.size(); ++i)
-            {
-                INFO("run " << i << " against the control");
-                const auto a = static_cast<std::size_t>(plans[0].edge + from);
-                const auto b = static_cast<std::size_t>(plans[i].edge + from);
-                const auto len = static_cast<std::size_t>(kWindow);
-                RIG_CHECK(v, std::equal(results[0].left.begin() + static_cast<std::ptrdiff_t>(a),
-                                        results[0].left.begin() + static_cast<std::ptrdiff_t>(a + len),
-                                        results[i].left.begin() + static_cast<std::ptrdiff_t>(b), [](float x, float y) {
-                                            return rinne::test::floatBits(x) == rinne::test::floatBits(y);
-                                        }));
-                RIG_CHECK(v,
-                          std::equal(results[0].right.begin() + static_cast<std::ptrdiff_t>(a),
-                                     results[0].right.begin() + static_cast<std::ptrdiff_t>(a + len),
-                                     results[i].right.begin() + static_cast<std::ptrdiff_t>(b), [](float x, float y) {
-                                         return rinne::test::floatBits(x) == rinne::test::floatBits(y);
-                                     }));
-            }
-            // 分辨力：停调的路与对照在起播之前确有不同
-            std::size_t differing = 0;
-            for (std::int64_t t = results[1].stallFirst; t < plans[1].edge; ++t)
-            {
-                differing += rinne::test::floatBits(results[1].left[static_cast<std::size_t>(t)]) !=
-                                     rinne::test::floatBits(results[0].left[static_cast<std::size_t>(t)])
-                                 ? 1u
-                                 : 0u;
-            }
-            RIG_CHECK(v, differing > 1000u);
+            // 分辨力：对照在比较窗口里高切开着与关着的两遍确有不同
+            const auto a = static_cast<std::size_t>(kControlEdge + kEdgeFade);
+            RIG_CHECK(v, !sameBits(control[0], control[1], a, a + static_cast<std::size_t>(kWindow)));
         }
         return v.ok();
+    }
+
+private:
+    // 一个反馈、一个高切的十路；返回对照的左声道输出
+    static std::vector<float> runPass(Verdict& v, float feedback, float highCut)
+    {
+        const Plan plans[] = {
+            {false, kControlEdge, Blocks{256, 256, 1}, 201, 0, feedback},
+            {false, 120011, Blocks{256, 256, 1}, 201, 1440, feedback},
+            {false, 131071, Blocks{64, 512, 22}, 202, 5760, feedback},
+            {true, 140239, Blocks{1, 4096, 24}, 203, 1440, feedback},
+            {true, 152233, Blocks{1, 4096, 26}, 204, 5760, feedback},
+            {true, 120011, Blocks{1, 4096, 28}, 201, 5760, feedback},
+            // 起播点紧接着停调的恢复：恢复点正好在起播点，或在它之前 3000 个样本（读头重建的零窗口还没走完）
+            {false, 120011, Blocks{256, 256, 1}, 201, 1440, feedback, 0},
+            {false, 131071, Blocks{64, 512, 22}, 202, 5760, feedback, 3000},
+            {true, 140239, Blocks{1, 4096, 24}, 203, 1440, feedback, 0},
+            {true, 152233, Blocks{1, 4096, 26}, 204, 5760, feedback, 3000},
+        };
+        std::vector<Result> results;
+        for (const Plan& plan : plans)
+        {
+            results.push_back(runPlan(plan, highCut));
+            const Result& r = results.back();
+            RIG_EQ(v, r.playResyncs, 1u);
+            RIG_CHECK(v, r.resets == std::vector<std::int64_t>{plan.edge + kEdgeFade});
+            RIG_CHECK(v, r.matchesReference);
+            RIG_CHECK(v, r.left.size() >= static_cast<std::size_t>(plan.edge + kWindow));
+            if (plan.stallLength > 0 && plan.gap >= 64000)
+            {
+                RIG_CHECK(v, r.stallResyncs >= 1u);
+            }
+        }
+        std::int64_t from = kEdgeFade;
+        for (std::size_t i = 0; i < results.size(); ++i)
+        {
+            from = std::max(from, compareStart(plans[i], results[i]));
+        }
+        RIG_EQ(v, from, kEdgeFade);
+        for (std::size_t i = 1; i < results.size(); ++i)
+        {
+            INFO("run " << i << " against the control");
+            const auto a = static_cast<std::size_t>(plans[0].edge + from);
+            const auto b = static_cast<std::size_t>(plans[i].edge + from);
+            const auto len = static_cast<std::size_t>(kWindow);
+            RIG_CHECK(v, std::equal(results[0].left.begin() + static_cast<std::ptrdiff_t>(a),
+                                    results[0].left.begin() + static_cast<std::ptrdiff_t>(a + len),
+                                    results[i].left.begin() + static_cast<std::ptrdiff_t>(b), [](float x, float y) {
+                                        return rinne::test::floatBits(x) == rinne::test::floatBits(y);
+                                    }));
+            RIG_CHECK(v, std::equal(results[0].right.begin() + static_cast<std::ptrdiff_t>(a),
+                                    results[0].right.begin() + static_cast<std::ptrdiff_t>(a + len),
+                                    results[i].right.begin() + static_cast<std::ptrdiff_t>(b), [](float x, float y) {
+                                        return rinne::test::floatBits(x) == rinne::test::floatBits(y);
+                                    }));
+        }
+        // 分辨力：停调的路与对照在起播之前确有不同
+        std::size_t differing = 0;
+        for (std::int64_t t = results[1].stallFirst; t < plans[1].edge; ++t)
+        {
+            differing += rinne::test::floatBits(results[1].left[static_cast<std::size_t>(t)]) !=
+                                 rinne::test::floatBits(results[0].left[static_cast<std::size_t>(t)])
+                             ? 1u
+                             : 0u;
+        }
+        RIG_CHECK(v, differing > 1000u);
+        return results[0].left;
     }
 };
 
