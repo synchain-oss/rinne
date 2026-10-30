@@ -208,6 +208,19 @@ void PluginHost::run(std::int64_t samples, int frames)
         cycle(frames);
 }
 
+void PluginHost::reloadInput()
+{
+    juce::MemoryBlock state;
+    input_->getStateInformation(state);
+    input_.reset();
+    input_ = std::make_unique<InputProcessor>(config(options_.realTimer));
+    input_->setPlayHead(&inputLane_);
+    input_->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    input_->prepareToPlay(options_.sampleRate, options_.inputBlock);
+    if (!options_.realTimer)
+        tick();
+}
+
 void PluginHost::tick()
 {
     input_->instanceHost().tick();
