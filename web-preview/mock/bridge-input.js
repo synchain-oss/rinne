@@ -419,6 +419,14 @@ const PEER_STATES = [
     "srMismatch",
 ];
 
+/** 设计稿里电平与默认不同的场景（dBFS；null 为无信号）。场景自带 meters 的优先。 */
+const SCENE_METERS = {
+    "in-stale": { in: -12.4, ret: null, out: -12.4 },
+    "in-over100": { ret: -5.2, out: -6.3 },
+    "in-guard": { ret: -3.8, out: -5.6 },
+    "in-fr-worst": { in: -8.2, ret: null, out: -8.4 },
+};
+
 /** 在设计稿里以 playing() 为底的场景；其余以 inBase() 为底。 */
 const PLAYING_BASED = new Set([
     "in-playing",
@@ -503,6 +511,9 @@ export function applyPreviewExtras(model, scene) {
     const st = scene.state;
     const playing = PLAYING_BASED.has(scene.id);
 
+    // 组的来源：场景没写 groupAuto 的都按用户手选算，否则页面会在 10 秒内再提示一条「已自动选组」
+    if (!st.groupAuto) model.groupOrigin = "manual";
+
     // 底座：已连接、对端 Vox Lead、核验一致
     if (!has(st, "pair")) model.pair.state = "connected";
     if (PEER_STATES.includes(model.pair.state)) {
@@ -526,7 +537,7 @@ export function applyPreviewExtras(model, scene) {
         if (!has(st, "mix")) model.values.mix = 25;
         if (!has(st, "feedback")) model.values.feedback = 72;
         if (!has(st, "highCut")) model.values.high_cut = 6000;
-        if (!has(st, "gr")) model.meters.gr = -2.1;
+        if (!has(st, "gr")) model.meters.gr = model.values.loop_on === false ? 0 : -2.1;
         model.presetId = "slapback";
         model.presetDirty = true;
     }
@@ -537,6 +548,8 @@ export function applyPreviewExtras(model, scene) {
         if (!has(st, "gr")) model.meters.gr = 0;
     }
     if (has(st, "gr")) model.meters.gr = firstNumber(st.gr) ?? 0;
+    for (const [k, v] of Object.entries(SCENE_METERS[scene.id] || {})) if (!has(lv, k)) model.meters[k] = v;
+    if (scene.id === "in-fr-worst" && !has(st, "mix")) model.values.mix = 100;
 
     // 延迟卡：实际值由设定与下限推出；同步档按 120 BPM 换算
     model.delay.actualMs =
