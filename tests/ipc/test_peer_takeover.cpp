@@ -53,11 +53,21 @@ std::string lastState(const std::string& output)
 }
 
 // 死进程接管的窗口（毫秒），从 kill 起算。
-//   下界：判死要求心跳、block_seq、ctl 都静止满 RendezvousTiming::kDeadMs（5 s）；block_seq 的静止起点是观察者最后一次
-//   看到它变化的那次扫描，最多比 kill 早一个扫描间隔，所以理论上最早在 4.75 s 前后；取 4.8 s。Windows 上实测 30
-//   次最小 5.05 s。 上界：判死发生在观察者的扫描上（SlotObserver::kScanIntervalMs，250 ms），认领则等下一次冲突重试
-//   （RendezvousTiming::kConflictRetryMs，1 s），再加 tick 的粒度与 CI 机器的调度抖动。实测 30 次最大 5.17 s；
-//   试过在 kill 前先等观察者刚扫完一轮（重试相位错开），也只到 5.8–5.95 s，仍在 6.5 s 以内。
+//   下界：判死（takeoverTier）要求心跳、block_seq、ctl 都静止满 RendezvousTiming::kDeadMs（5 s）。
+//   三者里最晚满足的是 block_seq：它的静止起点是观察者第一次看到最终取值的那次扫描，不会早于 peer
+//   最后一次写它的时刻。peer 的音频线程每约 10 ms 加一次（tools/rinne_ipc_peer.cpp），所以最后一次
+//   写入至多比 kill 早一个循环周期，理论最早约 4.99 s。心跳最多比 kill 早一个 kHeartbeatMs（250 ms）
+//   写入，ctl 早已静止，两者都先于 block_seq 满足，不是约束。
+//   死进程只在冲突重试的拍子上判（Rendezvous::claimTick）。重试从本测试进入冲突的那一拍起每 1 s 一次，
+//   每次再晚一个 tick，所以接管只会落在 kill 后约 k 秒加几十毫秒的栅格上：第 4 次重试约在 4.1 s，
+//   那时判死标准没满足，接管不了。
+//   取 4.8 s：在第 4 次重试之后、理论最早 4.99 s 之前，比理论低约 190 ms，留给 peer 的音频线程
+//   在被杀前被调度走的一小会儿。这个下界抓得到把 kDeadMs 缩短到约 4 s 或更低的实现；只缩短几百毫秒的
+//   实现照样等到第 5 次重试，在 5.1 s 左右接管，这个测试看不出来，那是 1 s 重试栅格的粒度，
+//   不是下界取得松。Windows 上实测 30 次最小 5.05 s。
+//   上界：判死发生在观察者的扫描上（SlotObserver::kScanIntervalMs，250 ms），认领则等下一次冲突重试
+//   （RendezvousTiming::kConflictRetryMs，1 s），再加 tick 的粒度与 CI 机器的调度抖动。实测 30 次最大
+//   5.17 s；试过在 kill 前先等观察者刚扫完一轮（重试相位错开），也只到 5.8–5.95 s，仍在 6.5 s 以内。
 constexpr u64 kTakeoverMinMs = 4800;
 constexpr u64 kTakeoverMaxMs = 6500;
 
