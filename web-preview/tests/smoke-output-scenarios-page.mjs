@@ -503,14 +503,36 @@ try {
         "0",
         "常态：危险描边不显示",
     );
-    // 旁路：内容层降到 .55，常驻红字不降
+    // 旁路：内容按设计降到 .55（降在各件上，容器自己不降）；常驻红字与 layer 层不降；成立的消息不降，空闲的灰字提示照设计降
     await openOutput(page, server, box, "zh", "out-bypassed");
-    {
-        const op = await page.eval(
-            `({ content: getComputedStyle(document.querySelector(".rn-shell__content")).opacity, place: getComputedStyle(document.querySelector(".rn-place")).opacity, layer: getComputedStyle(document.querySelector(".rn-shell__layer")).opacity })`,
+    const effective = (sel) =>
+        page.eval(
+            `(() => { let v = 1; for (let e = document.querySelector(${JSON.stringify(sel)}); e; e = e.parentElement) v *= Number(getComputedStyle(e).opacity); return Number(v.toFixed(3)); })()`,
         );
-        run.eq(op, { content: "0.55", place: "1", layer: "1" }, "旁路：内容层 .55，常驻红字与 layer 层不降级");
-    }
+    run.eq(
+        {
+            header: await effective(".rn-out--header"),
+            pair: await effective(".rn-out--pair"),
+            band: await effective(gb("band")),
+            foot: await effective(".rn-out--foot"),
+            place: await effective(".rn-place"),
+            layer: await effective(".rn-shell__layer"),
+        },
+        { header: 0.55, pair: 0.55, band: 0.55, foot: 0.55, place: 1, layer: 1 },
+        "旁路（空闲）：内容各件 .55，空闲的灰字提示一起降，常驻红字与 layer 层不降级",
+    );
+    // 旁路时有红字消息：消息位不降级（宿主旁路与配对冲突同时成立）
+    await setModel(page, { state: "conflict", send: { bypassed: true } });
+    run.eq(
+        await page.eval(`document.querySelector(".rn-shell").hasAttribute("data-bypass")`),
+        true,
+        "旁路 + 冲突：外壳带 data-bypass",
+    );
+    run.eq(
+        [await effective(gb("band")), await effective(".rn-out--pair"), await effective(".rn-place")],
+        [1, 0.55, 1],
+        "旁路 + 红字消息：消息位与常驻红字不降级，其余内容仍 .55",
+    );
     // 脉冲：只有连通且音频在流动的两态
     await openOutput(page, server, box, "zh", "out-connected");
     const pulseOf = async () => (await readPage(page)).pulse;

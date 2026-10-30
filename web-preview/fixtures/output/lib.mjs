@@ -125,8 +125,9 @@ export const OUT_CONTRAST_PROBE = (() => {
     return CONTRAST_PROBE.replace(
         FX_CAP_ANCHOR,
         `${FX_CAP_ANCHOR}
-        // 宿主旁路时整块内容按设计降到 .55 不透明度，等同被停用的界面：只记录不判（常驻红字在 layer 层，不受影响，仍判 A）
-        if (p.closest("[data-bypass] .rn-shell__content")) return "C";`,
+        // 宿主旁路时内容按设计降到 .55 不透明度，等同被停用的界面：只记录不判。
+        // 不在此列、照常分档的：常驻红字（在 layer 层）、消息位里成立的消息（旁路时不降级；空闲的灰字提示照设计一起降，仍是 C）
+        if (p.closest("[data-bypass] .rn-shell__content") && !p.closest('.rn-out--band:not([data-state="idle"])')) return "C";`,
     ).replace(
         SHARED_ANCHOR,
         `if (p.closest(".rn-place")) return "A";

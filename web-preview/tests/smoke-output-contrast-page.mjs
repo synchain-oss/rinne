@@ -78,6 +78,20 @@ try {
             });
             judge(await measureOutputContrast(page), `${lang}/消息 ${id}`);
         }
+
+        // 宿主旁路时成立的消息不降级：红字消息仍按 A 档判（旁路的其余内容按设计降到 .55，单列 C 档只记录）
+        for (const [name, model] of [
+            ["conflict", { state: "conflict" }],
+            ["ipcSandbox", { state: "searching", notices: [{ id: "ipcSandbox" }] }],
+        ]) {
+            await setModel(page, { ...model, send: { bypassed: true } });
+            const items = await measureOutputContrast(page);
+            judge(items, `${lang}/旁路 + ${name}`);
+            run.check(
+                items.some((i) => i.tier === "A" && i.sel.startsWith("rn-banner__text")),
+                `${lang}/旁路 + ${name}：消息位的红字应按 A 档量到（旁路时不降级、不被划进 C 档）`,
+            );
+        }
     }
 
     // 防空转：各档都量到了足够多的文字，A 档里必须有常驻红字与副行
