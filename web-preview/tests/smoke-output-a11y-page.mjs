@@ -216,9 +216,14 @@ try {
         // 红色消息态下也走一圈（动作按钮是新增的停靠点）
         await openOutput(page, server, box, lang, "out-conflict");
         const stops2 = await tabWalk(page);
+        run.eq(
+            stops.filter((s) => s.part === "band.action").length,
+            0,
+            `${tag}：已连接态没有消息位动作按钮这一站（对照）`,
+        );
         run.check(
-            stops2.some((s) => /band/.test(s.id) || /action/.test(s.id)) || stops2.length > stops.length,
-            `${tag}：冲突态应多出消息位的动作按钮这一站，实得 ${JSON.stringify(stops2.map((s) => s.id))}`,
+            stops2.some((s) => s.part === "band.action" && s.action === "repair"),
+            `${tag}：冲突态应有消息位的「重新配对」动作按钮这一站，实得 ${JSON.stringify(stops2.map((s) => [s.part, s.action, s.id]))}`,
         );
         run.eq(
             stops2.filter((s) => !s.ring).map((s) => s.id),

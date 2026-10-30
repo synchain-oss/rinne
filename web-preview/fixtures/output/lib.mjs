@@ -261,7 +261,10 @@ export const NAME_AUDIT = `(() => {
     return { interactive: n, missing };
 })()`;
 
-/** Tab 走一圈（只按可 Tab 到的件数），返回每一站的 { id, ring }。ring 只认 outline：焦点环的实现就是 outline。 */
+/**
+ * Tab 走一圈（只按可 Tab 到的件数），返回每一站的 { id, ring, part, action }。ring 只认 outline：焦点环的实现就是 outline；
+ * part、action 是节点的 data-part 与 data-action（没有就是空串），用来认出具体是哪个件，不靠 id（类名）猜。
+ */
 export async function tabWalk(page) {
     await page.eval("document.body.focus(); document.activeElement && document.activeElement.blur()");
     const tabbable = await page.eval(
@@ -271,7 +274,7 @@ export async function tabWalk(page) {
     for (let i = 0; i < tabbable; i++) {
         await press(page, "Tab");
         const f = await page.eval(
-            `(() => { const a = document.activeElement; if (!a || a === document.body) return null; const cs = getComputedStyle(a); const ring = cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0; return { id: (a.getAttribute("data-gb") || a.getAttribute("data-group") || a.className || a.tagName) + "", ring }; })()`,
+            `(() => { const a = document.activeElement; if (!a || a === document.body) return null; const cs = getComputedStyle(a); const ring = cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0; return { id: (a.getAttribute("data-gb") || a.getAttribute("data-group") || a.className || a.tagName) + "", ring, part: a.getAttribute("data-part") || "", action: a.getAttribute("data-action") || "" }; })()`,
         );
         if (!f) break;
         stops.push(f);
