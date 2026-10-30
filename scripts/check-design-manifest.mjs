@@ -25,6 +25,50 @@ import { resolveOutFile } from "../web-preview/tests/lib/safe-out.mjs";
 
 // ---------------------------------------------------------------- 浏览器里跑的采集脚本
 
+/**
+ * 一个带 data-t* 的节点产出的文案记录。占位符的代入值：文字读 data-t-vals，title 读 data-t-title-vals，
+ * aria 读 data-t-aria-vals，后两个缺省时退回 data-t-vals。
+ * 这个函数的源码会原样嵌进下面浏览器里跑的采集脚本，自测在 Node 里用假节点跑的是同一份，所以它不能引用函数外的任何变量。
+ */
+export function textRecordsOf(el) {
+    const valsOf = (name) => {
+        const attr = el.hasAttribute(name) ? name : "data-t-vals";
+        if (!el.hasAttribute(attr)) return null;
+        try {
+            return JSON.parse(el.getAttribute(attr));
+        } catch {
+            return "bad";
+        }
+    };
+    const errata = !!el.closest("[data-errata]");
+    const out = [];
+    if (el.hasAttribute("data-t"))
+        out.push({
+            attr: "text",
+            key: el.getAttribute("data-t"),
+            vals: valsOf("data-t-vals"),
+            errata,
+            text: el.textContent,
+        });
+    if (el.hasAttribute("data-t-title"))
+        out.push({
+            attr: "title",
+            key: el.getAttribute("data-t-title"),
+            vals: valsOf("data-t-title-vals"),
+            errata,
+            text: el.getAttribute("title") || "",
+        });
+    if (el.hasAttribute("data-t-aria"))
+        out.push({
+            attr: "aria",
+            key: el.getAttribute("data-t-aria"),
+            vals: valsOf("data-t-aria-vals"),
+            errata,
+            text: el.getAttribute("aria-label") || "",
+        });
+    return out;
+}
+
 /** 在页面里采集一个场景的快照。返回字符串形式的表达式，调用方 eval。 */
 export const collectExpression = (id) => `(() => {
     const id = ${JSON.stringify(id)};
@@ -42,15 +86,9 @@ export const collectExpression = (id) => `(() => {
     const all = [root, ...root.querySelectorAll("*")];
     for (const el of all) { if (el.getAttribute("data-mock") === "track.color") continue; const cs = getComputedStyle(el); for (const p of props) addColors(cs[p]); }
     const gbs = [...root.querySelectorAll("[data-gb]")].map((e) => ({ gb: e.getAttribute("data-gb"), state: e.getAttribute("data-state") || "" }));
+    const textRecordsOf = ${textRecordsOf.toString()};
     const texts = [];
-    for (const el of root.querySelectorAll("[data-t],[data-t-title],[data-t-aria]")) {
-        let vals = null;
-        try { vals = el.hasAttribute("data-t-vals") ? JSON.parse(el.getAttribute("data-t-vals")) : null; } catch { vals = "bad"; }
-        const errata = !!el.closest("[data-errata]");
-        if (el.hasAttribute("data-t")) texts.push({ attr: "text", key: el.getAttribute("data-t"), vals, errata, text: el.textContent });
-        if (el.hasAttribute("data-t-title")) texts.push({ attr: "title", key: el.getAttribute("data-t-title"), vals, errata, text: el.getAttribute("title") || "" });
-        if (el.hasAttribute("data-t-aria")) texts.push({ attr: "aria", key: el.getAttribute("data-t-aria"), vals, errata, text: el.getAttribute("aria-label") || "" });
-    }
+    for (const el of root.querySelectorAll("[data-t],[data-t-title],[data-t-aria]")) texts.push(...textRecordsOf(el));
     const redNodes = [];
     for (const el of root.querySelectorAll('[data-tone="red"],[data-safety="panic"]')) {
         const targets = [el, ...el.querySelectorAll("[data-t]")].filter((e) => e === el || e.hasAttribute("data-t"));
@@ -528,6 +566,87 @@ export function selfTest() {
         "data-t-vals 不是 JSON",
         true,
         mutate((i) => snap(i).texts.push({ attr: "text", key: "common.hello", vals: "bad", errata: false, text: "" })),
+        "文案",
+    );
+    // title、aria 的占位符代入值各有自己的属性。用假节点跑 textRecordsOf（与浏览器里嵌入的是同一份源码）再交给 analyze
+    const fakeEl = (attrs, { errata = false, text = "" } = {}) => ({
+        hasAttribute: (n) => Object.hasOwn(attrs, n),
+        getAttribute: (n) => (Object.hasOwn(attrs, n) ? attrs[n] : null),
+        closest: (sel) => (sel === "[data-errata]" && errata ? {} : null),
+        textContent: text,
+    });
+    const withNode = (attrs, opts, dict) =>
+        mutate((i) => {
+            snap(i).texts = textRecordsOf(fakeEl(attrs, opts));
+            Object.assign(i.dicts.zh, dict);
+        });
+    const tipDict = { "x.tip": "共 {n} 项", "x.aria": "{n} 项可选" };
+    add(
+        "title 的代入值写在 data-t-title-vals 时按它代入",
+        false,
+        withNode({ "data-t-title": "x.tip", "data-t-title-vals": '{"n":3}', title: "共 3 项" }, {}, tipDict),
+    );
+    add(
+        "title 的代入值写在 data-t-title-vals 但文字不对",
+        true,
+        withNode({ "data-t-title": "x.tip", "data-t-title-vals": '{"n":3}', title: "共 4 项" }, {}, tipDict),
+        "文案",
+    );
+    add(
+        "aria 的代入值写在 data-t-aria-vals 时按它代入",
+        false,
+        withNode({ "data-t-aria": "x.aria", "data-t-aria-vals": '{"n":5}', "aria-label": "5 项可选" }, {}, tipDict),
+    );
+    add(
+        "aria 的代入值写在 data-t-aria-vals 但文字不对",
+        true,
+        withNode({ "data-t-aria": "x.aria", "data-t-aria-vals": '{"n":5}', "aria-label": "6 项可选" }, {}, tipDict),
+        "文案",
+    );
+    add(
+        "同一节点上 title 与 aria 各用各的值（取错属性会判红）",
+        false,
+        withNode(
+            {
+                "data-t-title": "x.tip",
+                "data-t-title-vals": '{"n":3}',
+                title: "共 3 项",
+                "data-t-aria": "x.aria",
+                "data-t-aria-vals": '{"n":5}',
+                "aria-label": "5 项可选",
+            },
+            {},
+            tipDict,
+        ),
+    );
+    add(
+        "文字仍读 data-t-vals，不读 data-t-title-vals",
+        false,
+        withNode(
+            { "data-t": "common.hello", "data-t-vals": '{"n":3}', "data-t-title-vals": '{"n":9}' },
+            { text: "你好 3" },
+            {},
+        ),
+    );
+    add(
+        "title、aria 没有自己的代入值时退回 data-t-vals",
+        false,
+        withNode(
+            {
+                "data-t-vals": '{"n":3}',
+                "data-t-title": "common.hello",
+                title: "你好 3",
+                "data-t-aria": "common.hello",
+                "aria-label": "你好 3",
+            },
+            {},
+            {},
+        ),
+    );
+    add(
+        "data-t-title-vals 不是 JSON",
+        true,
+        withNode({ "data-t-title": "x.tip", "data-t-title-vals": "{oops", title: "" }, {}, tipDict),
         "文案",
     );
     add(
