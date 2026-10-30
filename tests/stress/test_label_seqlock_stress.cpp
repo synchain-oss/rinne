@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "StressMutation.h"
+#include "StressScale.h"
 #include "ipc/LabelSeqlock.h"
 #include "ipc/SegmentLayout.h"
 
@@ -150,12 +151,12 @@ Result runRound(std::size_t offset)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         const auto elapsed =
             static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count());
-        if (elapsed >= kRoundMs && accepted.load(std::memory_order_relaxed) >= kMinAccepted &&
+        if (elapsed >= rinne::stress::scaledMs(kRoundMs) && accepted.load(std::memory_order_relaxed) >= kMinAccepted &&
             published.load(std::memory_order_relaxed) >= kMinPublished)
         {
             break;
         }
-        if (elapsed >= kRoundCapMs)
+        if (elapsed >= rinne::stress::scaledMs(kRoundCapMs))
         {
             break;
         }

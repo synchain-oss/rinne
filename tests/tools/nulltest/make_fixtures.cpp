@@ -4,6 +4,8 @@
 // CMake 脚本写不了任意字节，所以读入路径要覆盖的"真实 DAW 导出的头形状"由它手工拼出来：
 //   make_fixtures <名字> <输出文件>
 // 同一组 8 帧 24 位采样（含负数、满幅与最低位）以不同的容器写出，和 ref-f32 逐值相同。
+// 另有 compare 的长度差、弱信号门、data 声明长度与错位搜索进度用的夹具：
+//   len-*、tail-*、weak-66、data-over、data-stream、lag-*。
 
 #include <cmath>
 #include <cstdint>
@@ -142,6 +144,34 @@ std::vector<float> noise(size_t frames, float amp)
     return v;
 }
 
+// 标准 44 字节头（RIFF、fmt 16 字节、data）的 data 块长度字段在偏移 40；只改这个字段，其余字节不动
+Bytes withDataSize(Bytes file, uint32_t declared)
+{
+    for (int i = 0; i < 4; ++i)
+        file[40 + static_cast<size_t>(i)] = static_cast<uint8_t>((declared >> (8 * i)) & 0xFF);
+    return file;
+}
+
+// 取 noise-a 的前 frames 帧，整体加上 offset（立体声）
+std::vector<float> noiseHead(size_t frames, float offset)
+{
+    std::vector<float> v = noise(4096, 0.5f);
+    v.resize(frames * 2);
+    for (float& s : v)
+        s += offset;
+    return v;
+}
+
+// 尾部有大信号的一份：3500 帧处恰好一个 0.9，其余尾部是 0.2 以内的噪声；峰值 0.9 即 -0.92 dBFS
+std::vector<float> loudTail()
+{
+    std::vector<float> v = noise(4096, 0.1f);
+    for (size_t i = 3000 * 2; i < v.size(); ++i)
+        v[i] *= 2.0f;
+    v[3500 * 2] = 0.9f;
+    return v;
+}
+
 bool build(const std::string& name, Bytes& out)
 {
     if (name == "ref-f32")
@@ -208,6 +238,33 @@ bool build(const std::string& name, Bytes& out)
         out = f32File(std::vector<float>(2000, std::nanf("")), 2);
     else if (name == "noise-a")
         out = f32File(noise(4096, 0.5f), 2);
+    else if (name == "len-short")
+        out = f32File(noiseHead(3000, 0.0f), 2); // noise-a 的前 3000 帧：和 noise-a 只差长度
+    else if (name == "len-short-off")
+        out = f32File(noiseHead(3000, 0.05f), 2); // 前 3000 帧整体加 0.05（约 -26 dBFS），重叠部分有差异
+    else if (name == "tail-loud")
+        out = f32File(loudTail(), 2);
+    else if (name == "tail-quiet")
+    {
+        std::vector<float> v = loudTail();
+        v.resize(3000 * 2); // 去掉大信号所在的尾部，前 3000 帧和 tail-loud 完全相同
+        out = f32File(v, 2);
+    }
+    else if (name == "weak-66")
+        out = f32File(noise(2000, 5e-4f), 2); // 峰值约 -66 dBFS：高于 -80、低于缺省的 -60
+    else if (name == "data-over")
+        out = withDataSize(f32File(noise(4096, 0.5f), 2), 4096 * 2 * 4 * 2); // 声明的 data 长度是实际的两倍
+    else if (name == "data-stream")
+        out = withDataSize(f32File(noise(4096, 0.5f), 2), 0xFFFFFFFFu); // 流式占位，实际长度完整
+    else if (name == "lag-a")
+        out = f32File(noise(2048, 0.5f), 2);
+    else if (name == "lag-b")
+    {
+        std::vector<float> v(3 * 2, 0.0f); // 前面补 3 帧静音：B 比 A 晚 3 个样本
+        const std::vector<float> body = noise(2048, 0.5f);
+        v.insert(v.end(), body.begin(), body.end());
+        out = f32File(v, 2);
+    }
     else if (name.rfind("noise-b", 0) == 0)
     {
         // noise-b<dB>：在 noise-a 的每个采样上加同一个常数，残差峰值恰好是 10^(dB/20)；dB 写成 m118 表示 -118

@@ -1,4 +1,13 @@
 # ThreadSanitizer 的抑制清单，tests/CMakeLists.txt 在 tsan 配置下经 TSAN_OPTIONS=suppressions= 交给每条 ctest。
 # 当前为空：rinne_core 与测试的告警都要修，不抑制。
-# 只有来自第三方库内部（Catch2、标准库）且确认是误报的，才允许加一行，并写明版本和理由；
-# 绝不为第一方代码里的竞争加抑制。格式见 clang 文档：race:<符号或路径片段>
+#
+# 规则（scripts/stress.ps1 -Lint 检查，本机 Full 档 gate 与 core-sanitizers 都跑，不符合就变红）：
+#   - 只有来自第三方库内部（Catch2、标准库）且确认是误报的，才允许加一条；绝不为第一方代码里的竞争加抑制
+#     （模式里出现 rinne、synchain，或 src/、tests/、tools/ 路径的一律不收）。
+#   - 每一条抑制紧挨着它上面要有一行「# 理由：…」，写明库与版本、为什么是误报、对应哪段代码或符号；
+#     每条有自己的理由，两条不共用一段；写不出理由的就不该加，已经加了的删掉。
+#   - 行格式见 clang 文档：<类型>:<符号或路径片段>，类型是 race、race_top、thread、mutex、signal、deadlock、called_from_lib 之一；
+#     模式不能只有通配符。
+# 写法（尖括号换成实际内容；下面两行是注释，不是条目）：
+#   # 理由：<库名与版本>，<为什么是误报>，<对应哪段代码>
+#   race:<第三方库里的符号>

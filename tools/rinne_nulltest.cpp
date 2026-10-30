@@ -14,13 +14,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <string>
-#include <exception>
 #include <vector>
 
 #if defined(_WIN32)
@@ -46,6 +46,10 @@ struct WavData
     uint16_t fmtTag = 0; // 1 整数 PCM，3 浮点
     uint16_t bits = 0;
     std::vector<uint8_t> raw; // data 块里的原始字节：32 位整数和 64 位浮点解码成 float 会丢位，逐位比对要看它
+    // data 块声明的长度大于文件里实际剩下的字节：录音被截短了。0xFFFFFFFF 是流式写入的「长度未知」占位，不算
+    bool dataShort = false;
+    uint64_t dataDeclared = 0;
+    uint64_t dataActual = 0;
 
     float at(size_t frame, size_t ch) const { return samples[frame * channels + ch]; }
 };
@@ -110,6 +114,8 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
     uint32_t sampleRate = 0;
     size_t dataOffset = 0;
     size_t dataSize = 0;
+    bool dataShort = false;
+    uint64_t dataDeclared = 0;
 
     size_t pos = 12;
     while (pos + 8 <= bytes.size())
@@ -119,9 +125,24 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
         const uint8_t* body = head + 8;
         if (tagIs(head, "data") && !haveData)
         {
-            // 录音软件中途停止时 data 块可能比声明的短，取实际剩下的部分
             dataOffset = pos + 8;
-            dataSize = std::min(size, bytes.size() - dataOffset);
+            const size_t remaining = bytes.size() - dataOffset;
+            dataDeclared = size;
+            if (size == 0xFFFFFFFFu)
+            {
+                // 流式写入的录音软件还没来得及回填长度时留下的占位：长度未知，data 一直到文件尾，不是截短
+                dataSize = remaining;
+            }
+            else if (size > remaining)
+            {
+                // 声明的长度比文件里实际剩下的长：录音被截短了。只取实际有的部分，并如实标出来，交给调用方报告
+                dataSize = remaining;
+                dataShort = true;
+            }
+            else
+            {
+                dataSize = size;
+            }
             haveData = true;
         }
         else if (pos + 8 + size > bytes.size())
@@ -177,6 +198,9 @@ bool readWav(const std::string& path, WavData& out, std::string& err)
     const size_t bytesPerSample = bits / 8u;
     out.sampleRate = sampleRate;
     out.channels = channels;
+    out.dataShort = dataShort;
+    out.dataDeclared = dataDeclared;
+    out.dataActual = dataSize;
     out.frames = dataSize / blockAlign;
     out.samples.assign(out.frames * channels, 0.0f);
     out.fmtTag = isFloat ? 3 : 1;
@@ -727,7 +751,15 @@ void printResidual(const std::string& title, const Residual& r)
 
 // 在 ±maxLag 内找 B 相对 A 的滞后：B[i + lag] 最像 A[i] 的 lag。
 // 取 A 里第一个有声音的位置起一小段做互相关；并列最高时取绝对值最小的 lag，所以周期信号不会报出周期的整数倍。
-int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundSignal)
+// 搜索范围超过 kProgressMinLags 个 lag 时每完成 10% 往 progress 写一行（默认的 ±4800 要算好一阵子，不报进度像卡死了）。
+constexpr int64_t kProgressMinLags = 2000;
+
+void reportLagProgress(std::ostream& os, int tenth, int64_t totalLags)
+{
+    os << "搜索对齐偏移：" << tenth * 10 << "%（共 " << totalLags << " 个 lag）\n";
+}
+
+int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundSignal, std::ostream* progress = nullptr)
 {
     foundSignal = false;
     int64_t start = -1;
@@ -744,8 +776,14 @@ int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundS
     const int64_t window = std::min<int64_t>(32768, static_cast<int64_t>(a.frames) - start);
     int64_t bestLag = 0;
     double best = -kInf;
+    const int64_t totalLags = 2 * maxLag + 1;
+    const bool report = progress != nullptr && totalLags > kProgressMinLags;
+    int nextTenth = 1;
     for (int64_t lag = -maxLag; lag <= maxLag; ++lag)
     {
+        const int64_t done = lag + maxLag; // 已经算完的 lag 个数
+        while (report && nextTenth <= 10 && done * 10 >= totalLags * nextTenth)
+            reportLagProgress(*progress, nextTenth++, totalLags);
         double sum = 0.0;
         for (int64_t n = 0; n < window; ++n)
             for (size_t c = 0; c < a.channels; ++c)
@@ -758,11 +796,14 @@ int64_t findLag(const WavData& a, const WavData& b, int64_t maxLag, bool& foundS
             bestLag = lag;
         }
     }
+    while (report && nextTenth <= 10)
+        reportLagProgress(*progress, nextTenth++, totalLags);
     return bestLag;
 }
 
-// 参考信号（A）的峰值低于它就算「里面没有声音」：两份静音互比什么也说明不了
-constexpr double kMinSignalPeak = 0.001; // -60 dBFS
+// 参考信号（A）的峰值低于它就算「里面没有声音」：两份静音互比什么也说明不了。--min-signal-db 可以覆盖，范围 -200..0
+constexpr double kDefaultMinSignalDb = -60.0; // 峰值 0.001
+constexpr double kLowestMinSignalDb = -200.0;
 
 bool hasNonFinite(const WavData& w)
 {
@@ -780,6 +821,13 @@ double peakOf(const WavData& w)
     return p;
 }
 
+// data 块被截短时的说明：声明多少字节、实际多少字节。who 是 A、B 或「文件」
+std::string shortDataText(const char* who, const WavData& w)
+{
+    return std::string(who) + " 的 data 块声明 " + std::to_string(w.dataDeclared) + " 字节，文件里只有 " +
+           std::to_string(w.dataActual) + " 字节：录音被截短了，只能用实际有的部分";
+}
+
 bool loadWav(const std::string& path, WavData& w)
 {
     std::string err;
@@ -788,7 +836,32 @@ bool loadWav(const std::string& path, WavData& w)
         std::cerr << "出错：" << err << "\n";
         return false;
     }
+    if (w.dataShort)
+        std::cerr << "警告：" << path << "：" << shortDataText("文件", w) << "\n";
     return true;
+}
+
+// 帧区间 [from, to) 的峰值（线性）；区间超出文件的部分不算
+double rangePeak(const WavData& w, int64_t from, int64_t to)
+{
+    from = std::max<int64_t>(from, 0);
+    to = std::min<int64_t>(to, static_cast<int64_t>(w.frames));
+    double p = 0.0;
+    for (int64_t i = from; i < to; ++i)
+        for (size_t c = 0; c < w.channels; ++c)
+            p = std::max(p, static_cast<double>(std::fabs(w.at(static_cast<size_t>(i), c))));
+    return p;
+}
+
+// 报告 --allow-length-diff 放过去的部分：哪一份的哪一段没参与比较，峰值多大
+void printIgnored(const char* who, const WavData& w, int64_t from, int64_t to)
+{
+    from = std::max<int64_t>(from, 0);
+    to = std::min<int64_t>(to, static_cast<int64_t>(w.frames));
+    if (to <= from)
+        return;
+    std::cout << "    " << who << " 第 " << from << " 到 " << (to - 1) << " 帧（" << (to - from)
+              << " 帧）没有参与比较，峰值 " << dbText(toDb(rangePeak(w, from, to))) << "\n";
 }
 
 void describe(const char* label, const std::string& path, const WavData& w)
@@ -801,17 +874,20 @@ int runCompare(int argc, char** argv)
 {
     Args a;
     std::string err;
-    if (!parseArgs(argc, argv, 2, {"a", "b", "head-seconds", "threshold-db", "max-lag"}, {"allow-lag"}, a, err))
+    if (!parseArgs(argc, argv, 2, {"a", "b", "head-seconds", "threshold-db", "max-lag", "min-signal-db"},
+                   {"allow-lag", "allow-length-diff"}, a, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
     }
     std::string pathA, pathB;
-    double headSeconds = 0.0, thresholdDb = 0.0;
+    double headSeconds = 0.0, thresholdDb = 0.0, minSignalDb = 0.0;
     int64_t maxLag = 0;
     if (!getString(a, "a", pathA, err) || !getString(a, "b", pathB, err) ||
         !getNumber(a, "head-seconds", 0.0, headSeconds, err) ||
-        !getNumber(a, "threshold-db", -120.0, thresholdDb, err) || !getInt(a, "max-lag", 4800, 0, 1000000, maxLag, err))
+        !getNumber(a, "threshold-db", -120.0, thresholdDb, err) ||
+        !getInt(a, "max-lag", 4800, 0, 1000000, maxLag, err) ||
+        !getNumber(a, "min-signal-db", kDefaultMinSignalDb, minSignalDb, err))
     {
         std::cerr << "出错：" << err << "\n";
         return kExitError;
@@ -821,6 +897,16 @@ int runCompare(int argc, char** argv)
         std::cerr << "出错：--head-seconds 不能是负数\n";
         return kExitError;
     }
+    if (minSignalDb > 0.0 || minSignalDb < kLowestMinSignalDb)
+    {
+        std::cerr << "出错：--min-signal-db 要在 " << fixed(kLowestMinSignalDb, 0) << " 到 0 dBFS 之间（缺省 "
+                  << fixed(kDefaultMinSignalDb, 0) << "，即峰值 0.001），收到 " << a.values.at("min-signal-db")
+                  << "。A 的峰值低于它就判「信号太弱」：要放宽就写更小的负数，如 --min-signal-db -90；"
+                  << fixed(kLowestMinSignalDb, 0) << " 基本等于不设门，全静音仍然判弱\n";
+        return kExitError;
+    }
+    const double minSignalPeak = std::pow(10.0, minSignalDb / 20.0);
+    const bool allowLengthDiff = hasFlag(a, "allow-length-diff");
     WavData wa, wb;
     if (!loadWav(pathA, wa) || !loadWav(pathB, wb))
         return kExitError;
@@ -843,14 +929,19 @@ int runCompare(int argc, char** argv)
         return kExitFail;
     }
 
-    // 对拍的前提是里面真有声音：空文件、含 NaN / Inf、参考信号太弱都不下结论，直接 FAIL
+    // 对拍的前提是里面真有声音，而且文件是完整的：data 块被截短、空文件、含 NaN / Inf、参考信号太弱都不下结论，直接
+    // FAIL
+    if (wa.dataShort)
+        reasons.push_back(shortDataText("A", wa));
+    if (wb.dataShort)
+        reasons.push_back(shortDataText("B", wb));
     if (wa.frames == 0 || wb.frames == 0)
         reasons.push_back("有一份文件没有任何采样（0 帧），里面没有声音，对拍没有意义");
     else if (hasNonFinite(wa) || hasNonFinite(wb))
         reasons.push_back("文件里有 NaN 或 Inf，对拍没有意义");
-    else if (peakOf(wa) < kMinSignalPeak)
+    else if (peakOf(wa) < minSignalPeak)
         reasons.push_back("信号太弱，无法判定：A 的峰值 " + dbText(toDb(peakOf(wa))) + " 低于 " +
-                          fixed(toDb(kMinSignalPeak), 0) + " dBFS，里面没有声音，对拍没有意义");
+                          fixed(minSignalDb, 1) + " dBFS（门限可用 --min-signal-db 调整），里面没有声音，对拍没有意义");
     if (!reasons.empty())
     {
         std::cout << "结果：FAIL\n";
@@ -870,18 +961,41 @@ int runCompare(int argc, char** argv)
     int64_t lag = 0;
     bool foundSignal = true;
     if (!identical)
-        lag = findLag(wa, wb, maxLag, foundSignal);
+        lag = findLag(wa, wb, maxLag, foundSignal, &std::cerr);
     std::cout << "对齐偏移（lag）：" << lag << " 样本（正数表示 B 比 A 晚）";
     if (!foundSignal)
         std::cout << "，A 里没有找到声音，未做对齐";
     std::cout << "\n";
 
-    const int64_t lo = std::min<int64_t>(0, -lag);
-    const int64_t hi = std::max<int64_t>(static_cast<int64_t>(wa.frames), static_cast<int64_t>(wb.frames) - lag);
+    // B 应该刚好比 A 长 lag 个样本；长度对不上说明导出范围不一致
+    const int64_t expectedFramesB = static_cast<int64_t>(wa.frames) + lag;
+    const bool lengthMismatch = static_cast<int64_t>(wb.frames) != expectedFramesB;
+    // 默认把超出文件的部分按静音算，长度不一致另判 FAIL；--allow-length-diff 只比较两份重叠的部分，剩下的只报告
+    const bool overlapOnly = allowLengthDiff && lengthMismatch;
+    int64_t lo = std::min<int64_t>(0, -lag);
+    int64_t hi = std::max<int64_t>(static_cast<int64_t>(wa.frames), static_cast<int64_t>(wb.frames) - lag);
+    if (overlapOnly)
+    {
+        lo = std::max<int64_t>(0, -lag);
+        hi = std::min<int64_t>(static_cast<int64_t>(wa.frames), static_cast<int64_t>(wb.frames) - lag);
+        if (hi <= lo)
+        {
+            std::cout << "结果：FAIL\n原因：两份没有重叠的部分，--allow-length-diff 无从比较（A " << wa.frames
+                      << " 帧，B " << wb.frames << " 帧，错位 " << lag << " 样本）\n";
+            return kExitFail;
+        }
+    }
     const Residual whole = measure(wa, wb, lag, lo, hi);
-    printResidual("整体残差", whole);
-    if (wa.frames != wb.frames)
-        std::cout << "提示：两份长度不同，较短的一份在结尾按静音算\n";
+    printResidual(overlapOnly ? "重叠部分残差" : "整体残差", whole);
+    if (overlapOnly)
+    {
+        std::cout << "长度不同，已按 --allow-length-diff 只比较重叠的 " << (hi - lo) << " 帧（A 的第 " << lo << " 到 "
+                  << (hi - 1) << " 帧）；没参与比较的部分：\n";
+        printIgnored("A", wa, 0, lo);
+        printIgnored("A", wa, hi, static_cast<int64_t>(wa.frames));
+        printIgnored("B", wb, 0, lo + lag);
+        printIgnored("B", wb, hi + lag, static_cast<int64_t>(wb.frames));
+    }
 
     const double peakDb = toDb(maxPeak(whole));
     bool headOk = true;
@@ -916,15 +1030,19 @@ int runCompare(int argc, char** argv)
         pass = false;
         reasons.push_back("两份有 " + std::to_string(lag) + " 样本的错位（如果错位是预期的，加 --allow-lag）");
     }
-    // B 应该刚好比 A 长 lag 个样本；长度对不上说明导出范围不一致，尾部本来是静音也不放过
-    if (static_cast<int64_t>(wb.frames) != static_cast<int64_t>(wa.frames) + lag)
+    // 长度对不上说明导出范围不一致，尾部本来是静音也不放过；长度差是预期的就加 --allow-length-diff
+    if (lengthMismatch && !allowLengthDiff)
     {
         pass = false;
-        reasons.push_back("两份长度不同，导出范围不一致");
+        reasons.push_back("两份长度不同，导出范围不一致（期望 B 有 " + std::to_string(expectedFramesB) + " 帧，实际 " +
+                          std::to_string(wb.frames) + " 帧；A 有 " + std::to_string(wa.frames) +
+                          " 帧。如果长度差是预期的，加 --allow-length-diff）");
     }
     std::cout << "结果：" << (pass ? "PASS" : "FAIL");
     if (pass)
-        std::cout << (identical ? "（逐位相同）" : "（残差不高于 " + fixed(thresholdDb, 1) + " dBFS）");
+        std::cout << (identical ? "（逐位相同）"
+                                : "（残差不高于 " + fixed(thresholdDb, 1) + " dBFS" +
+                                      (overlapOnly ? "，仅比较重叠部分" : "") + "）");
     std::cout << "\n";
     for (const std::string& r : reasons)
         std::cout << "原因：" << r << "\n";
@@ -1114,11 +1232,13 @@ void printHelp(std::ostream& os)
           "    rinne_nulltest compare --a 原始.wav --b 导出.wav [--head-seconds 2]\n"
           "    报告：是否逐位相同、B 相对 A 的错位（lag，单位样本）、残差峰值与 RMS（dBFS）。\n"
           "    --head-seconds <秒>   再单独报告开头这一段的残差（整体残差已包含这一段，不是额外的门）\n"
-          "    A 要有声音（峰值不低于 -60 dBFS），两份都不能是空文件或含 NaN / Inf，长度要对得上（B 比 A 长 lag "
-          "个样本），"
-          "否则 FAIL。\n"
+          "    A 要有声音（峰值不低于 -60 dBFS），两份都不能是空文件或含 NaN / Inf，data "
+          "块不能被截短（声明的长度大于文件里"
+          "实际有的；0xFFFFFFFF 的流式占位不算），长度要对得上（B 比 A 长 lag 个样本），否则 FAIL。\n"
           "    --threshold-db <dB>   残差不高于它才算 PASS，默认 -120\n"
-          "    --max-lag <样本>      找错位时的搜索范围，默认 4800\n"
+          "    --max-lag <样本>      找错位时的搜索范围，默认 4800；范围大时每完成 10% 在 stderr 报一行进度\n"
+          "    --min-signal-db <dB>  A 的峰值低于它就判「信号太弱」，默认 -60，可写 -200..0；弱信号的对拍要放宽它\n"
+          "    --allow-length-diff   长度差是预期的时候加上：只比较两份重叠的部分，没参与比较的部分只报告峰值\n"
           "    --allow-lag           错位是预期的时候加上，否则有错位就是 FAIL\n"
           "\n"
           "echo          量回声间隔\n"

@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 跨进程用例共用的东西：一个带测试作用域与平台后端的架子（POSIX 上连同临时锁目录）、peer 的启动与结果行解析、
-// 以及两边都要用的位置编码/解码。时间与等待仍由用例自己给；这里不含任何 sleep 循环。
+// 以及两边都要用的位置编码/解码。时间与等待仍由用例自己给；这里没有等 peer 的 sleep 循环，唯一的有界重试在
+// expectNoLeftovers（等操作系统收完刚退出的进程的句柄）。
 //
 // 用例先问 peerUsable()，不可用时 SKIP 并说明原因：Linux 的 PlatformSegmentBackend 是进程内后端，跨进程不可能；
 // 构建时没把 rinne_ipc_peer 接进来（RINNE_IPC_NO_PEER）也一样。
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -19,6 +22,7 @@
 
 #include "ipc/ISegmentBackend.h"
 #include "ipc/Naming.h"
+#include "SegmentProbe.h"
 #include "ipc/ProcessInfo.h"
 #include "support/Spawn.h"
 
@@ -124,6 +128,9 @@ public:
     const NameScope& scope() const noexcept { return scope_; }
     const Naming& naming() const noexcept { return naming_; }
     ISegmentBackend& backend() noexcept { return *backend_; }
+
+    // 这个测试作用域下此刻还存在的段（会合段与组 1..8 的数据段）
+    std::vector<std::string> leftovers() const { return existingSegments(naming_); }
 
     std::vector<std::string> commonArgs() const
     {
@@ -250,6 +257,23 @@ inline std::string segmentName(const Naming& naming, SegmentId id)
     std::string name;
     REQUIRE(naming.name(id, name) == NameStatus::kOk);
     return name;
+}
+
+// 用例收尾：本用例测试作用域下的段一个都不许剩。调用之前，本进程的 Rendezvous 与自己映射的视图要先销毁，peer 要已经
+// 退出或被杀：最后一个离开的进程负责收段（POSIX 上最后离开者 shm_unlink，Windows 上命名映射随最后一个句柄消失），
+// 崩溃的 peer 也不例外，它的锁与句柄随进程一起没了。正式作用域的残段由 [shm-leftover] 用例另查，这里查的是随机作用域。
+// 刚退出的进程的句柄由操作系统异步收，所以最多等 timeoutMs 毫秒再下结论；超过一秒还在的就是真残留。
+inline void expectNoLeftovers(const PeerRig& rig, std::chrono::milliseconds timeout = std::chrono::milliseconds(1500))
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::vector<std::string> left = rig.leftovers();
+    while (!left.empty() && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        left = rig.leftovers();
+    }
+    INFO("segments still present in the test scope: " << joinNames(left));
+    CHECK(left.empty());
 }
 
 // 只读打开一份视图、抄前面 bytes 个字节、立刻解映射。abi 用例用它证明我们一个字节都没写

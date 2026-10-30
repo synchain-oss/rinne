@@ -585,6 +585,30 @@ jobs:
         timeout-minutes: 15
         run: bash scripts/ci/mac/oop-run.sh triples.txt build-oop
 
+      # 进程外配对自测：Output 与 Input 同时以进程外选项实例化，按实时节奏渲染几秒，宿主只读映射共享内存段去看同组两个槽
+      # （Active、同 pid 且不是宿主、心跳与块计数在走、环的写头在涨），再判 Input 的输出里出现了 Output 的 880 Hz。
+      # 同样不是门禁，条件与上一步相同；宿主是上一步构建的 build-oop/rinne_auhost，没构建出来时打印说明并跳过。
+      - name: mac-au-oop pairing (AUHostingService, not a gate)
+        id: oop_pair
+        if: ${{ !cancelled() && steps.au_install.outcome == 'success' && env.MODE != 'release' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          if [ ! -x build-oop/rinne_auhost ]; then
+            echo '::notice::没有 build-oop/rinne_auhost（进程外自测那一步没构建出来），跳过配对自测'
+            exit 0
+          fi
+          rc=0
+          build-oop/rinne_auhost --pair || rc=$?
+          if [ "$rc" = "0" ]; then
+            echo "- 进程外配对：通过" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::进程外配对自测失败，退出码 $rc"
+            echo "- 进程外配对：**失败**（退出码 ${rc}）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
       # 压测与变异构建：core-only，不需要 JUCE。rinne_stress 不存在时打印 SKIP 并通过
       - name: Stress (arm64) and mutation builds must turn red
         if: ${{ !cancelled() }}
@@ -676,6 +700,10 @@ jobs:
           clang++-18 --version
           cmake --version
           pwsh --version
+
+      # tests/tsan.supp 的每一条抑制前面都要有「# 理由：」，且不许是第一方代码或通配：sanitizer 的绿不能靠无理由的抑制换来
+      - name: tsan.supp carries a reason for every suppression
+        run: pwsh -NoProfile -File scripts/stress.ps1 -Lint
 
       - name: asan_ubsan
         run: |

@@ -15,12 +15,14 @@
 #include <thread>
 #include <vector>
 
+#include "StressScale.h"
 #include "ipc/Rendezvous.h"
 
 namespace
 {
 
 using namespace rinne::ipc;
+using rinne::stress::scaledMs;
 using Clock = std::chrono::steady_clock;
 
 constexpr int kSlots = 4;
@@ -150,11 +152,11 @@ TEST_CASE("ctl stays exclusive under an eight-thread claim storm", "[stress][ctl
             static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count());
         const bool minimums = claims.load(std::memory_order_relaxed) >= kMinClaims &&
                               contention.load(std::memory_order_relaxed) >= kMinContention;
-        if (elapsed >= 1000 && minimums)
+        if (elapsed >= scaledMs(1000) && minimums)
         {
             break;
         }
-        if (elapsed >= 3000)
+        if (elapsed >= scaledMs(3000))
         {
             break;
         }
