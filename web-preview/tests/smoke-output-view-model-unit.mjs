@@ -396,7 +396,7 @@ run.eq(
         ];
         for (const [key, msg] of miss) {
             const s = t(msg.key, msg.vals);
-            run.check(!/{w+}/.test(s) && !s.includes("?"), `${lang} / ${key}：缺值时没有残留占位符与问号：${s}`);
+            run.check(!/\{\w+\}/.test(s) && !s.includes("?"), `${lang} / ${key}：缺值时没有残留占位符与问号：${s}`);
         }
     }
 }
