@@ -304,10 +304,10 @@ Output 用共用的十二个函数加 `repairPair`、`setTailMode`，以及三�
 |---|---|
 | `send` | 发送状态：`channels`（`ST` 或 `MONO`）、`sampleRate`、`bypassed`（旁路写入静音）、`hostPaused`。 |
 | `inputGuideSeen` | Input 的引导是否已看；已看时 Output 首次打开跳过自己的引导。 |
-| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）、`outOfOrder`（错序证据成立）之一。这四条没有对应的配对状态，只能由这个字段带；缺省、非数组、未知 `id` 一律当没有。 |
+| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝）、`newerProject`（工程由更新的版本存下；`a`、`b` 都是 state 的 abi，写成 `"ABI N"`，`a` 是被拒那份工程的、`b` 是本构建的）、`stateDecodeFailed`（state 解码失败）、`outOfOrder`（错序证据成立）之一。这四条没有对应的配对状态，只能由这个字段带；缺省、非数组、未知 `id` 一律当没有。 |
 | `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；缺省时只显示版本号。三项各自拿不到时不发。 |
 | `cfg` | 非参数的工程状态，Output 只有 `tailMode`（`auto`、`infinite`、`30s`，默认 `auto`）。 |
-| `takeoverGroup` | 可缺省。`takeover` 为真时等待接管的组（`A` 到 `H`）；确认条里的组号读它，缺省时读 `group`。一键修复要接管的是别的组时才和 `group` 不同。 |
+| `takeoverGroup` | 可缺省，没有待接管的组时不发。`takeover` 为真时等待接管的组（`A` 到 `H`）；确认条里的组号读它，缺省时读 `group`。一键修复要接管的是别的组时才和 `group` 不同。 |
 
 ### rinne.error 的 Output 取值
 

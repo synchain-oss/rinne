@@ -15,6 +15,9 @@
 //   语言           setLang；成功后立即换语言，以后续帧里的 lang 为准；
 //   缩放、关于     共享的状态机与面板；关于面板的 tail 行经 setTailMode 改 cfg.tailMode（随工程走）。
 // 页面不依赖具体桥：只用 createBridge 返回的对象，所以预览（mock）、真宿主与「没有桥」的纯浏览器三种情形走同一份代码。
+// 首帧前禁写：有桥时，rinne.state 与 rinne.pair 两路首帧都到之前，400 ms 兜底揭幕只为把外壳显示出来（内容是默认状态的
+// 占位），组胶囊、重新配对与接管确认这几处写入都不发：它们都基于默认值，点了会把默认值写进宿主。语言、缩放、关于照常，
+// requestInitialState 照旧重试。没有桥（纯浏览器）时没有首帧可等，按默认状态照常。
 //
 // 防回环纪律：这里没有任何参数拖动；setGroup / setLang 的回执只用来触发提示，显示一律以快照为准。
 // 重绘靠视图模型的 JSON 签名去重：回声每秒来好几次同样的状态，签名不变就什么都不写，hover 的提示与键盘焦点不会被打断。
@@ -191,11 +194,27 @@ export function mountOutputPage(o) {
         return { version: state.version, ...(state.build || {}) };
     }
 
+    /** 首帧前禁写（见文件头）：有桥而两路首帧还没到齐。 */
+    function writesLocked() {
+        return !o.offline && !(gotState && gotPair);
+    }
+
     function render(force) {
         view = deriveView(state, pair);
         const options = scaleUi.options();
         const locked = zoomLocked();
-        const sig = JSON.stringify([view, state.uiScale, state.diagLog, state.build, options, locked, cfg, takeoverGroup]);
+        const noWrite = writesLocked();
+        const sig = JSON.stringify([
+            view,
+            state.uiScale,
+            state.diagLog,
+            state.build,
+            options,
+            locked,
+            cfg,
+            takeoverGroup,
+            noWrite,
+        ]);
         if (!force && sig === lastSig) return;
         lastSig = sig;
         lang = view.lang;
@@ -208,7 +227,8 @@ export function mountOutputPage(o) {
             group: view.group.group,
             auto: view.group.auto,
             peers: view.group.peers,
-            disabled: view.group.disabled,
+            // 首帧前整排禁用（胶囊的点击与键盘都认 aria-disabled）
+            disabled: view.group.disabled || noWrite,
             unassigned: view.group.unassigned,
             autoGroup: view.group.group || "",
             t,
@@ -272,7 +292,8 @@ export function mountOutputPage(o) {
         gotState = true;
         const rawCfg = raw.cfg && typeof raw.cfg === "object" ? raw.cfg : {};
         cfg = { tailMode: TAIL_MODES.includes(rawCfg.tailMode) ? rawCfg.tailMode : "auto" };
-        takeoverGroup = state.takeover && GROUP_LETTERS.includes(raw.takeoverGroup) ? raw.takeoverGroup : null;
+        // 只在确认条展开（takeover 为真）时用得上；原生没有待接管的组时不发
+        takeoverGroup = GROUP_LETTERS.includes(raw.takeoverGroup) ? raw.takeoverGroup : null;
         // 旧 WebKit 把缩放锁在 100%：宿主按存档开了别的档位时请回 1（走现有 setUiScale，不新增桥函数）
         enforceZoomLock(state.uiScale, (f) => Promise.resolve(bridge.setUiScale(f)).catch(noop));
         afterFrame();
@@ -321,6 +342,7 @@ export function mountOutputPage(o) {
     }
 
     async function resolveTakeover(accept) {
+        if (writesLocked()) return;
         try {
             await bridge.resolveTakeover(accept);
         } catch {
@@ -330,6 +352,7 @@ export function mountOutputPage(o) {
 
     async function runAction(name) {
         if (name === "repair") {
+            if (writesLocked()) return;
             try {
                 const res = await bridge.repairPair();
                 if (res && res.ok === true && typeof res.group === "string") {
