@@ -25,9 +25,11 @@ struct alignas(64) Wide
     char bytes[64];
 };
 
-// 把指针存进全局的 volatile，让它逃出当前函数。只写一次 volatile 挡不住 clang 把小块的 new / delete
+// 把指针存进全局的 volatile 指针，让它逃出当前函数。限定符的位置有讲究：`void* volatile` 是「volatile 的指针变量」，
+// 对它的赋值是 volatile 写，编译器必须真的把地址写出去；原先的 `volatile void*` 是「指向 volatile 的指针」，变量本身
+// 不是 volatile，这次赋值可以被当成死存储删掉，指针就没有逃出去。只写一次 volatile 也挡不住 clang 把小块的 new / delete
 // 成对改成栈上变量（mac 上就发生过），那样计数器什么也看不到
-volatile void* gEscape = nullptr;
+void* volatile gEscape = nullptr;
 
 template<typename T>
 void touch(T* p)
