@@ -8,7 +8,7 @@
 //   阶跃滞后 = 液柱（峰线）追到各自终点 98% 的时刻（相邻两帧之间线性插值）减去它的变量变化那一帧的时刻。
 // 峰线只有在电平越过保持中的峰值时才会动，所以每次阶跃前先点读数清掉峰值，让峰线跟着液柱走。
 // 判据：四次上行阶跃的滞后中位数，液柱与峰线都不超过 40 ms，且两者到位时刻相差中位数不超过 8 ms；
-//   阶跃距离不小于 20 px（防空转）。每一步最多量 3 次、取最小值再进中位数（原因见 measureGoodStep）。
+//   阶跃距离不小于 20 px（防空转）。每一步最多量 3 次、取最好的一次整条再进中位数（原因见 measureGoodStep）。
 // 记录窗口锚在变化帧上：页内一看到 --lv 或 --pk 变了，再记固定时长才收尾；一直没变化最多等 2 秒。
 //   窗口不锚在变化帧的话，机器忙、测试进程到页面的往返被拖长时，变化落在窗口后段，过渡被窗口截断，终点量成了窗口末帧。
 // 坏样例：把液柱的过渡改成 0.18 s（SCVB 定谳前的病态值），滞后必须量到 150 ms 以上并被判红；
@@ -96,7 +96,7 @@ function reachTime(frames, col) {
 /**
  * 一次阶跃的结果：{ ok, liquid, peak, dist, gap }；ok 为假时带 why。
  * 滞后不大于 0 的不算有效：第一次看到变量变化时过渡已经走完，说明帧间隔比过渡还长，起点量丢了，
- * 这样的数取最小值会把任何过渡都量成「很快」。
+ * 这样的数一旦被挑成「最好的一次」，任何过渡都会被量成「很快」。
  */
 function analyse(rec) {
     const tl = changeTime(rec.frames, 3);
@@ -176,35 +176,31 @@ async function measureBad(page, server, css, key) {
 const triesText = (tries, key) => tries.map((r) => (r.ok ? r[key].toFixed(1) : "没量到")).join(" / ");
 
 /**
- * 好样例的一步：量一次上行阶跃，最多 GOOD_TRIES 次，各项取有效结果里的最小值；这一步已经在门槛内就提前结束。
- * 为什么取最小值：单次读数会有一帧（约 16.7 ms）的量化差，而门槛 40 ms 与产品实测的 32.6 ms 之间不到一帧，晚一帧不代表过渡慢。
+ * 好样例的一步：量一次上行阶跃，最多 GOOD_TRIES 次，从有效结果里挑最好的一次（液柱与峰线滞后里较大的那个最小，
+ * 相同则 gap 小的），整条结果原样取用，不逐项拼；这一步已经在门槛内就提前结束。
+ * 为什么挑最好的一次：单次读数会有一帧（约 16.7 ms）的量化差，而门槛 40 ms 与产品实测的 32.6 ms 之间不到一帧，晚一帧不代表过渡慢。
+ * 不逐项取最小值：液柱、峰线、gap 各取各的最小值，拼出来的数可能不对应任何一次真实测量，gap 的 8 ms 判据也跟着变松。
  * 这不是说噪声只会量大：调度噪声也可能量小（坏样例取最大值就是为这个），帧间隔比过渡还长时甚至量出负数，所以 analyse 把不大于 0 的判为无效。
- * 取最小值后读数可能比典型值小一帧；0.06 s 的过渡仍会判红，由删除式验证核对过，更小的差没有测过。门槛（LAG_MAX_MS、SYNC_MAX_MS）与中位数的算法不变。
+ * 挑最好的一次后读数可能比典型值小一帧，分辨率就是一帧。产品过渡临时改慢、不降速各跑 6 遍的实测（不变异对照 6 遍全绿）：
+ * 只有液柱或只有峰线变慢到 0.045 / 0.05 / 0.06 s，全部判红（36 遍里 36 遍），0.045 与 0.05 s 靠的是 8 ms 的相差判据，0.06 s 另有 40 ms 的滞后判据；
+ * 液柱与峰线一起变慢（--dur-meter-tube）：0.06 s 6/6 判红，0.05 s 2/6，0.045 s 0/6，相差判据帮不上忙，0.05 s 及以下的一起变慢会漏过。
+ * 门槛（LAG_MAX_MS、SYNC_MAX_MS）与中位数的算法不变。
  * 重量之前要先回到起点电平并清掉峰值（同一个电平再推一次，变量不会变）。
- * 返回 { step, tries }：step 是各项最小值与最大位移（一次都没量到为 null），tries 是每次的结果。
+ * 返回 { step, tries }：step 是挑中的那一次的 analyse 结果（一次都没量到为 null），tries 是每次的结果。
  */
 async function measureGoodStep(page, toDb) {
     const tries = [];
-    let acc = null;
+    let best = null;
+    const worse = (r) => Math.max(r.liquid, r.peak);
     for (let i = 0; i < GOOD_TRIES; i++) {
         if (i > 0) await prepare(page);
         const r = await step(page, toDb);
         tries.push(r);
-        if (r.ok) {
-            acc =
-                acc === null
-                    ? { ...r }
-                    : {
-                          ok: true,
-                          liquid: Math.min(acc.liquid, r.liquid),
-                          peak: Math.min(acc.peak, r.peak),
-                          gap: Math.min(acc.gap, r.gap),
-                          dist: Math.max(acc.dist, r.dist),
-                      };
-        }
-        if (acc !== null && acc.liquid <= LAG_MAX_MS && acc.peak <= LAG_MAX_MS && acc.gap <= SYNC_MAX_MS) break;
+        if (r.ok && (best === null || worse(r) < worse(best) || (worse(r) === worse(best) && r.gap < best.gap)))
+            best = r;
+        if (best !== null && best.liquid <= LAG_MAX_MS && best.peak <= LAG_MAX_MS && best.gap <= SYNC_MAX_MS) break;
     }
-    return { step: acc, tries };
+    return { step: best, tries };
 }
 
 const server = await startStaticServer(ROOT);
@@ -231,7 +227,7 @@ try {
         const gap = median(results.map((r) => r.gap));
         const fmt = (k) => results.map((r) => r[k].toFixed(1)).join(" / ");
         run.log(
-            `  阶跃滞后（ms，每步取至多 ${GOOD_TRIES} 次里的最小值）：液柱 ${fmt("liquid")}；峰线 ${fmt("peak")}；到位相差 ${fmt("gap")}；各步量了 ${counts.join(" / ")} 次`,
+            `  阶跃滞后（ms，每步取至多 ${GOOD_TRIES} 次里最好的一次）：液柱 ${fmt("liquid")}；峰线 ${fmt("peak")}；到位相差 ${fmt("gap")}；各步量了 ${counts.join(" / ")} 次`,
         );
         run.check(liquid <= LAG_MAX_MS, `液柱滞后中位数 ${liquid.toFixed(1)} ms 超过 ${LAG_MAX_MS} ms`);
         run.check(peak <= LAG_MAX_MS, `峰线滞后中位数 ${peak.toFixed(1)} ms 超过 ${LAG_MAX_MS} ms`);
