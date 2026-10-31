@@ -83,6 +83,21 @@ try {
             run.eq(p.anim !== "none", pulses, `${tag}：绿点是否真的在动画（connectedStill 与不流动时必须静止）`);
         }
 
+        // 动效设定固定在 no-preference 下量（见 lib/browser.mjs），与本机系统的「显示动画」开关无关；这里单独量 reduce 分支
+        const reduceNow = () => page.eval('matchMedia("(prefers-reduced-motion: reduce)").matches');
+        run.eq(await reduceNow(), false, `${role}：动效设定固定为 no-preference`);
+        await page.setReducedMotion(true);
+        await openScene(page, server, design, role, "zh", scene("pair"));
+        run.eq(await reduceNow(), true, `${role}：切到 reduce 后媒体查询跟着变`);
+        const reducedDots = await page.eval(
+            `[...document.querySelectorAll('[data-gb$=".pair.pill"] .sc-pill__dot')].map((d) => getComputedStyle(d).animationName)`,
+        );
+        run.check(
+            reducedDots.length > 0 && reducedDots.every((a) => a === "none"),
+            `${role}：减少动效下所有绿点都必须静止，实得 ${JSON.stringify(reducedDots)}`,
+        );
+        await page.setReducedMotion(false);
+
         // ============================================================ 整窗
         await openScene(page, server, design, role, "zh", scene("window"));
         run.eq(await attr(page, gb("shell"), "data-state"), "normal", `${role}：常态外壳 data-state`);
