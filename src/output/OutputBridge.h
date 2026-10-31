@@ -17,8 +17,8 @@
 // takeoverGroup 只在有待接管的组时发、self.color 与 peer.channels / peer.sampleRate 宿主或对端没给就不发。
 //
 // 接管：休眠实例占着要去的组时，一键修复先不动（回 needs-confirm），记下待接管的组，rinne.state 带 takeover 与
-// takeoverGroup；resolveTakeover(true) 带确认的意图去拿那一组，false 取消。不在冲突里了，或用户自己选了组，
-// 待接管的记录作废。
+// takeoverGroup；resolveTakeover(true) 带确认的意图去拿那一组，false 取消；没拿成（探针构建，或处理器拒了）回
+// no-pending，与已经没有待接管的同一个原因。不在冲突里了，或用户自己选了组，待接管的记录作废。
 //
 // 线程：全部在消息线程。音频线程只经处理器现有的原子量交出读数（样本计数、引擎状态、错序证据），
 // 这里不往音频路径里加任何锁或分配。
@@ -59,12 +59,15 @@ class OutputBridge
 {
 public:
     // 落到系统上的动作与时钟。编辑器填真的，宿主测试填替身；空的动作钩子按「做不到」回执
+    // （nowMs 与 takeOverGroup 除外，空的时候用括号里的那一份）
     struct Hooks
     {
         std::function<std::uint64_t()> nowMs; // 单调毫秒；空 = juce::Time::getMillisecondCounterHiRes
         std::function<bool(const juce::String&)> writeClipboard; // 写剪贴板并回读核对，成功返回真
         std::function<bool(const juce::String&)> launchUrl; // 用系统浏览器打开（地址已过白名单）
         std::function<bool()> showLicense; // 用系统方式打开随包的许可证
+        // 带确认的意图接管那一组，拿到了返回真；空 = 处理器的 takeOverGroup。宿主测试用它造出拿不到的情形
+        std::function<bool(int)> takeOverGroup;
     };
 
     // 宿主那边的界面状态：WebViewHost 管着语言与缩放，运行时描述只在 ui 段里用

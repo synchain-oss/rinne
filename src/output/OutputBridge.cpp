@@ -255,11 +255,15 @@ juce::var OutputBridge::resolveTakeover(const juce::Array<juce::var>& args)
         return common::failResponse(common::Reason::BadValue);
     if (!takeover_.has_value())
         return common::failResponse(common::Reason::NoPending);
-    const std::uint32_t group = *takeover_;
+    const int group = static_cast<int>(*takeover_);
     takeover_.reset();
-    if (accept)
-        processor_.takeOverGroup(static_cast<int>(group));
-    return common::okResponseWith("accepted", accept);
+    if (!accept)
+        return common::okResponseWith("accepted", false);
+    const bool taken = hooks_.takeOverGroup ? hooks_.takeOverGroup(group) : processor_.takeOverGroup(group);
+    // 没拿成：那一份已经接管不了，记录也已作废，回执与没有待接管的同一个原因
+    if (!taken)
+        return common::failResponse(common::Reason::NoPending);
+    return common::okResponseWith("accepted", true);
 }
 
 juce::var OutputBridge::showLicense()

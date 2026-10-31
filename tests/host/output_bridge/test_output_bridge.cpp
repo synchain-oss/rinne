@@ -370,6 +370,34 @@ TEST_CASE("output bridge: a repair onto a dormant slot asks first, then takes it
         CHECK(groupOf(copy) == 1);
         CHECK(stateOf(copy) == ipc::RendezvousState::kConflict);
     }
+    SECTION("a takeover that does not go through answers no-pending and leaves everything where it was")
+    {
+        // 处理器拒了（探针构建里就是这样）：回执不能说已接管。另造一座桥，把接管换成拒绝的替身
+        std::vector<int> tried;
+        auto hooks = hooksFor(bench, rec);
+        hooks.takeOverGroup = [&tried](int g) {
+            tried.push_back(g);
+            return false;
+        };
+        OutputBridge refusing(copy, std::move(hooks));
+        REQUIRE(reasonOf(refusing.repairPair()) == "needs-confirm");
+        const auto r = refusing.resolveTakeover(args({juce::var(true)}));
+        CHECK_FALSE(isOk(r));
+        CHECK(reasonOf(r) == "no-pending");
+        CHECK_FALSE(r.hasProperty("accepted"));
+        CHECK(tried == std::vector<int>{2});
+        CHECK_FALSE(refusing.pendingTakeover().has_value());
+        CHECK_FALSE(static_cast<bool>(stateFields(refusing).getProperty("takeover", juce::var())));
+        CHECK_FALSE(settled(copy));
+        CHECK(dirty.dirtyMarks == 0);
+        bench.run(300);
+        CHECK(groupOf(copy) == 1);
+        CHECK(stateOf(copy) == ipc::RendezvousState::kConflict);
+        // 取消不去碰接管
+        REQUIRE(reasonOf(refusing.repairPair()) == "needs-confirm");
+        CHECK(isOk(refusing.resolveTakeover(args({juce::var(false)}))));
+        CHECK(tried == std::vector<int>{2});
+    }
     SECTION("picking a group by hand drops the pending takeover")
     {
         CHECK(isOk(bridge.setGroup(args({juce::var("A")}))));
