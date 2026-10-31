@@ -4,13 +4,14 @@
 
 #include <RinneInputWebData.h> // juce_add_binary_data 生成：嵌入的 web/input 页面资源与许可证文本
 
+#include "InputEditor.h"
 #include "InputProcessor.h"
 #include "RinneEditorFactory.h"
 
 namespace rinne
 {
 
-// 正式构建：加载页面的网页编辑器；探针构建：探针面板（经注入点，由处理器基类造）。
+// 正式构建：加载页面的网页编辑器（InputEditor，带 Input 的桥函数）；探针构建：探针面板（经注入点，由处理器基类造）。
 // 工厂造不出时（例如没有浏览器组件）退回 JUCE 的通用参数编辑器，窗口至少是开得了的。
 juce::AudioProcessorEditor* InputProcessor::createEditor()
 {
@@ -27,6 +28,10 @@ juce::AudioProcessorEditor* InputProcessor::createEditor()
     options.controls.onLoopToggle = [this](bool on) { setLoopOnFromUi(on); };
     options.controls.loopOn = [this] { return isLoopOn(); };
     options.probeEditorFactory = [this] { return createProbeEditor(); };
+    options.webViewEditorMaker = [this, resources = options.resources,
+                                  controls = options.controls](juce::AudioProcessor&) -> juce::AudioProcessorEditor* {
+        return new input::InputEditor(*this, resources, controls);
+    };
     return editor::createEditorOrGeneric(*this, options);
 }
 
