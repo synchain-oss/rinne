@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Input 页面适配冒烟（无头浏览器）：范围内的 30 个 in-* 场景 × 中 / 英 / 法，真源页面经预览壳页装载。
+// Input 页面适配冒烟（无头浏览器）：范围内的 32 个 in-* 场景 × 中 / 英 / 法，真源页面经预览壳页装载。
 // 每页量四件事：
 //   ① 所有可见文字不越出所在的 data-gb 件、不越出外壳、不被 overflow 裁掉、互相不压住；data-gb 件不越出外壳；消息位不折行；
 //   ② 页上确有足够多的可见文字（防止量了个空）；有消息的场景消息位里确有字；
 //   ③ 界面上不得出现裸词条键、没替换的占位符、null / undefined（文字与 title、aria-label、aria-valuetext 都查）；
 //   ④ 导出提示的四句原因话术（本页新增，text-budget 里还没有词条）逐语言逐句上屏量宽：不越出消息位、不被裁，
 //      自然宽度不超过 300 px（消息位 452 px 里还要放图标、「+n」与 ✕）。
+//   ⑥ 预设面板：场景表里只有列表与重名两态，其余子态（长名当前、保存输入、名称为空、非法字符、保存失败、删除确认）
+//      逐语言逐子态经真实交互摆出来，量法同 ①（面板是独立一层，带完整 title 的预设名用省略号截短不算被裁）。
 // 另有端到端的坏样例：把一句超长的话塞进消息位、把词条键与占位符写进页面，必须被上面各项抓出来（量尺本身可信）。
-// 预设面板（I-03、I-04）与首启（I-30 到 I-32）不在本页范围，场景表里的对应场景不测。
+// 首启（I-30 到 I-32）不在本页范围，场景表里的对应场景不测；预设面板的两个场景（in-preset-*）在范围内。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
 // 用法：node web-preview/tests/smoke-input-fit-page.mjs [仓库根]
@@ -16,7 +18,18 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { LANGS, SCENES, VIEW, confirmAlpha, findLeaks, fitProbe, inFrame, openInput } from "./smoke-input-kit-page.mjs";
+import {
+    LANGS,
+    PRESET_STATES,
+    SCENES,
+    VIEW,
+    confirmAlpha,
+    findLeaks,
+    fitProbe,
+    inFrame,
+    openInput,
+    openPresetState,
+} from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("Input 页面适配");
@@ -75,6 +88,27 @@ try {
         }
     }
     run.log(`  共量 ${pages} 页、${texts} 段可见文字`);
+
+    // ---- ⑥ 预设面板的子态
+    let presetPages = 0;
+    for (const lang of LANGS) {
+        for (const state of PRESET_STATES) {
+            const tag = `预设面板 ${state}/${lang}`;
+            await openInput(page, server, "in-playing", { lang });
+            await openPresetState(page, state);
+            const probe = await inFrame(page, fitProbe);
+            presetPages++;
+            run.check(probe.texts > 30, `${tag}：页上应有足够多的可见文字（防空转），实得 ${probe.texts}`);
+            const bad = probe.problems.slice(0, 4).map((p) => `${p.kind}：${p.detail}`);
+            run.check(probe.problems.length === 0, `${tag}：${bad.join("；")}${probe.problems.length > 4 ? "…" : ""}`);
+            const leaks = findLeaks(`${probe.joined} ${probe.attrs.join(" ")}`);
+            run.check(
+                leaks.length === 0,
+                `${tag}：界面上出现了裸键、占位符或 null：${JSON.stringify(leaks.slice(0, 5))}`,
+            );
+        }
+    }
+    run.log(`  预设面板子态共量 ${presetPages} 页`);
 
     // ---- ④ 导出提示四句
     const widths = [];

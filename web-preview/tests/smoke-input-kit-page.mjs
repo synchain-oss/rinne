@@ -22,8 +22,8 @@ import { findLeaks } from "./shared-measure.mjs";
 export { findLeaks };
 export const LANGS = Object.freeze(["zh", "en", "fr"]);
 
-/** 本页范围外的场景：预设面板（I-03、I-04）与首启（I-30 到 I-32）由后续的页面接手。 */
-const OUT_OF_SCOPE = /^(in-lang|in-rules|in-tour-|in-preset-)/;
+/** 本页范围外的场景：首启（I-30 到 I-32）由后续的页面接手；预设面板的两个场景（in-preset-*）已在范围内。 */
+const OUT_OF_SCOPE = /^(in-lang|in-rules|in-tour-)/;
 export const SCENES = Object.freeze(ALL_SCENES.filter((s) => s.role === "input" && !OUT_OF_SCOPE.test(s.id)));
 
 /** 预览壳页的视口：够放下 2 档（1600×1160）。 */
@@ -154,7 +154,7 @@ export function fitProbe(doc, win) {
         for (let a = e.parentElement; a && a !== shellEl; a = a.parentElement) if (isScroller(a)) return a;
         return null;
     };
-    // 浮在内容上面的层：轻提示、模态、限制器关闭确认（不透明，盖住下面那几行）；压住下面的文字是设计，只比同一层
+    // 浮在内容上面的层：轻提示、模态、限制器关闭确认、预设面板（不透明，盖住下面那几行）；压住下面的文字是设计，只比同一层
     const layerOf = (e) =>
         e.closest(".rn-toast")
             ? "toast"
@@ -162,7 +162,11 @@ export function fitProbe(doc, win) {
               ? "modal"
               : e.closest(".in-limconfirm")
                 ? "confirm"
-                : "base";
+                : e.closest(".in-pm")
+                  ? "menu"
+                  : "base";
+    // 有意用省略号截短、并带完整 title 的文字（预设名）：按露出来的那一段量，不算被裁；没有 title 的省略号照旧算被裁
+    const ellipsized = (e) => gcs(e).textOverflow === "ellipsis" && e.getAttribute("title") === e.textContent.trim();
     const items = [];
     const walker = doc.createTreeWalker(shellEl, win.NodeFilter.SHOW_TEXT);
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
@@ -198,6 +202,18 @@ export function fitProbe(doc, win) {
                     height: r.height,
                 };
         }
+        const ell = ellipsized(p) && p.scrollWidth > p.clientWidth + 1;
+        if (ell) {
+            const pr = p.getBoundingClientRect();
+            r = {
+                left: Math.max(r.left, pr.left),
+                right: Math.min(r.right, pr.right),
+                width: Math.min(r.right, pr.right) - Math.max(r.left, pr.left),
+                top: r.top,
+                bottom: r.bottom,
+                height: r.height,
+            };
+        }
         const scr = sc ? sc.getBoundingClientRect() : null;
         const box = sc
             ? {
@@ -222,6 +238,7 @@ export function fitProbe(doc, win) {
                 detail: `${name(p)} 的文字 ${JSON.stringify(text.slice(0, 40))} 越出外壳`,
             });
         for (let a = p; a && a !== shellEl; a = a.parentElement) {
+            if (a === p && ell) continue;
             const cs = gcs(a);
             const clipX = /hidden|clip/.test(cs.overflowX);
             const clipY = /hidden|clip/.test(cs.overflowY);
@@ -310,7 +327,7 @@ export function confirmAlpha(doc, win) {
 
 /**
  * 对比度采样：每段可见文字的矩形（iframe 内坐标）、计算色、各层不透明度（op）、是否在非空闲的消息位里（inLine）与分档。分档：
- *   A：危险与确认横幅、模态里的文字、横幅与消息位里的按钮、紧急切断；B：琥珀 / 灰 / 紫横幅、配对状态灯；C：其余只记录。
+ *   A：危险与确认横幅、模态里的文字、横幅与消息位里的按钮、紧急切断、预设面板的条目与动作；B：琥珀 / 灰 / 紫横幅、配对状态灯、预设按钮与面板里的琥珀提示；C：其余只记录。
  * 模态遮罩打开时只取遮罩里的文字（下面的被压暗，不是要判的对象）。
  */
 export function contrastProbe(doc, win) {
@@ -340,6 +357,15 @@ export function contrastProbe(doc, win) {
         if (p.closest(".rn-modal")) return "A";
         if (p.closest(".in-limconfirm")) return "A"; // 限制器关闭确认框：Input 自己的确认层，和模态同档
         if (p.closest(".in-panic")) return "A";
+        // 预设按钮与面板：标签（mono 小标）与两处说明文字（设计稿给的 --txt-3）按 C 只记录；置灰的不判；
+        // 红字提示、删除确认框、条目与动作、按钮名是正文，按 A；琥珀提示与预设按钮按 B
+        if (p.closest(".in-pt, .in-pm")) {
+            if (p.closest(".in-pt__label, .in-pm__label, .in-pm__empty, .in-pm__note")) return "C";
+            if (p.closest(":disabled, [aria-disabled='true']")) return "C";
+            // 按钮在内容层里，宿主旁路时随内容层降到 0.55（按 B 档对待，旁路下只记录）；面板在浮层里，不降级
+            if (p.closest(".in-pt") || p.closest('.in-pm__msg[data-tone="amber"]')) return "B";
+            return "A";
+        }
         const band = p.closest(".rn-banner");
         if (band) {
             if (/danger|red|confirm/.test(band.className)) return "A";
@@ -421,16 +447,90 @@ export function contrastProbe(doc, win) {
     return out;
 }
 
+// ---------------------------------------------------------------- 预设面板子态
+
+/** 设计稿给的三个用户预设名（第三个超长，用来量截断）。 */
+export const PRESET_USERS = Object.freeze(["Vox 回旋", "Long tail 2", "我的超长预设名称用于测试截断效果甲乙"]);
+/** openPresetState 认的子态：list（工厂当前）、longCurrent（超长用户名当前）、saveInput、empty、badChars、dupe、saveFail、deleteConfirm。 */
+export const PRESET_STATES = Object.freeze([
+    "list",
+    "longCurrent",
+    "saveInput",
+    "empty",
+    "badChars",
+    "dupe",
+    "saveFail",
+    "deleteConfirm",
+]);
+
+/**
+ * 在已就绪的页面（场景 in-playing 之类）上摆出预设面板的某个子态，走真实交互：经 mock 造三个用户预设，按子态载入工厂或用户预设，
+ * 点开面板、点动作、往输入框里写字；saveFail 让宿主对保存回 write-failed。摆好后等页面静下来再返回。
+ */
+export async function openPresetState(page, state) {
+    if (!PRESET_STATES.includes(state)) throw new Error(`未知的预设子态 ${state}`);
+    const mock = (name, ...args) =>
+        page.eval(`window.__RINNE_PREVIEW__.mock[${JSON.stringify(name)}](...${JSON.stringify(args)})`);
+    const nap = (ms) => page.eval(`new Promise((r) => setTimeout(r, ${ms}))`);
+    const click = (sel) => inFrame(page, (doc, win, s) => doc.querySelector(s).click(), sel);
+    const write = (text) =>
+        inFrame(
+            page,
+            (doc, win, s) => {
+                const e = doc.querySelector('[data-part="preset.name.input"]');
+                e.focus();
+                e.value = s;
+                e.dispatchEvent(new win.Event("input", { bubbles: true }));
+            },
+            text,
+        );
+    for (const n of PRESET_USERS) await mock("savePreset", n, true);
+    const users = await page.eval(`window.__RINNE_PREVIEW__.model.userPresets.map((p) => [p.id, p.name])`);
+    const idOf = (name) => users.find((u) => u[1] === name)[0];
+    const cur =
+        state === "deleteConfirm" ? idOf("Long tail 2") : state === "longCurrent" ? idOf(PRESET_USERS[2]) : "slapback";
+    await mock("loadPreset", cur);
+    await nap(300);
+    await click('[data-gb="input.preset.trigger"]');
+    await nap(150);
+    if (state === "deleteConfirm") await click('[data-part="preset.delete"]');
+    else if (state !== "list" && state !== "longCurrent") {
+        await click('[data-part="preset.saveAs"]');
+        if (state === "empty") await write("");
+        else if (state === "badChars") await write("Vox/回旋");
+        else if (state === "dupe") await write("Vox 回旋");
+        else if (state === "saveFail") {
+            await page.eval(
+                `(() => { const m = window.__RINNE_PREVIEW__.mock; m.savePreset = () => ({ ok: false, reason: "write-failed" }); })()`,
+            );
+            await write("Fresh take");
+            await click(".in-pm__save .sc-btn--cta");
+        }
+    }
+    await nap(150);
+    await settle(page);
+    const got = await inFrame(page, (doc) => {
+        const e = doc.querySelector(".in-pm");
+        return e && !e.hidden ? e.getAttribute("data-state") : null;
+    });
+    const want = state === "longCurrent" ? "list" : state;
+    if (got !== want) throw new Error(`预设面板应摆在 ${want} 态，实得 ${got}`);
+}
+
 // ---------------------------------------------------------------- 自检
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
     const ROOT = repoRoot();
     const run = createRun("Input 页面冒烟公共件");
-    run.check(SCENES.length === 30, `范围内的场景应有 30 个，实得 ${SCENES.length}`);
+    run.check(SCENES.length === 32, `范围内的场景应有 32 个，实得 ${SCENES.length}`);
     run.check(
         SCENES.every((s) => !OUT_OF_SCOPE.test(s.id)),
-        "预设面板与首启场景不得混进来",
+        "首启场景不得混进来",
+    );
+    run.check(
+        ["in-preset-menu", "in-preset-save"].every((id) => SCENES.some((s) => s.id === id)),
+        "预设面板的两个场景应在范围内",
     );
     run.check(
         findLeaks("反馈 band.in.neverDefined").length === 1 &&
@@ -508,6 +608,75 @@ if (isMain) {
             doc.querySelector('[data-gb="input.meters"]').style.transform = "translateX(120px)";
         });
         run.check(got.has("gb-outside"), `坏样例（件越出外壳）应量出 gb-outside，实得 ${JSON.stringify([...got])}`);
+
+        // 预设面板：浮层，压住下面的页面文字是设计；面板自己里面两段文字互压仍要量出来
+        await openInput(page, server, "in-playing", { lang: "zh" });
+        await openPresetState(page, "list");
+        let menuProbe = await inFrame(page, fitProbe);
+        run.eq(
+            menuProbe.problems.map((p) => p.kind),
+            [],
+            "预设面板压住下面的页面文字不算互压（独立一层）",
+        );
+        await inFrame(page, (doc) => {
+            const names = doc.querySelectorAll(".in-pm__opt .in-pm__name");
+            names[1].style.position = "relative";
+            names[1].style.top = "-24px";
+        });
+        menuProbe = await inFrame(page, fitProbe);
+        run.check(
+            menuProbe.problems.some((p) => p.kind === "overlap"),
+            `坏样例（面板里两段文字互压）应量出 overlap，实得 ${JSON.stringify(menuProbe.problems.map((p) => p.kind))}`,
+        );
+
+        // 省略号：带完整 title 的预设名被截短不算被裁；去掉 title 就是被裁
+        await openInput(page, server, "in-playing", { lang: "zh" });
+        await openPresetState(page, "longCurrent");
+        menuProbe = await inFrame(page, fitProbe);
+        run.eq(
+            menuProbe.problems.map((p) => p.kind),
+            [],
+            "超长的当前预设名带 title、用省略号截短，不算被裁",
+        );
+        const cut = await inFrame(page, (doc) => {
+            const e = doc.querySelector(".in-pt__text");
+            return e.scrollWidth > e.clientWidth + 1;
+        });
+        run.check(cut, "前提：超长的当前预设名确实被省略号截短了");
+        await inFrame(page, (doc) => doc.querySelector(".in-pt__text").removeAttribute("title"));
+        menuProbe = await inFrame(page, fitProbe);
+        run.check(
+            menuProbe.problems.some((p) => p.kind === "clipped"),
+            `坏样例（省略号没有完整 title）应量出 clipped，实得 ${JSON.stringify(menuProbe.problems.map((p) => p.kind))}`,
+        );
+
+        // 对比度分档：预设面板的条目与动作按 A，琥珀提示按 B，红字提示按 A，标签与说明按 C
+        const tiersIn = async (state) => {
+            await openInput(page, server, "in-playing", { lang: "zh" });
+            await openPresetState(page, state);
+            return inFrame(page, contrastProbe);
+        };
+        let tp = await tiersIn("list");
+        run.check(
+            tp.some((i) => i.tier === "A" && /拍击回声/.test(i.text) && /in-pm__name/.test(i.sel)) &&
+                tp.some((i) => i.tier === "C" && /工厂预设/.test(i.text)),
+            `预设面板的条目应按 A、标签按 C，实得 ${JSON.stringify(tp.filter((i) => /in-pm/.test(i.sel)).map((i) => [i.tier, i.text]))}`,
+        );
+        tp = await tiersIn("dupe");
+        run.check(
+            tp.some((i) => i.tier === "B" && /同名/.test(i.text)),
+            `重名提示（琥珀）应按 B，实得 ${JSON.stringify(tp.filter((i) => /同名/.test(i.text)).map((i) => [i.tier, i.text]))}`,
+        );
+        tp = await tiersIn("saveFail");
+        run.check(
+            tp.some((i) => i.tier === "A" && /保存失败/.test(i.text)),
+            `保存失败提示（红）应按 A，实得 ${JSON.stringify(tp.filter((i) => /保存失败/.test(i.text)).map((i) => [i.tier, i.text]))}`,
+        );
+        tp = await tiersIn("deleteConfirm");
+        run.check(
+            tp.some((i) => i.tier === "A" && /无法恢复/.test(i.text)),
+            `删除确认应按 A，实得 ${JSON.stringify(tp.filter((i) => /无法恢复/.test(i.text)).map((i) => [i.tier, i.text]))}`,
+        );
 
         // 确认框要不透明；改成透明时判据必须判红
         await openInput(page, server, "in-limiter-confirm", { lang: "zh" });
