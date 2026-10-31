@@ -17,7 +17,7 @@ import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 import { SCENES as ALL_SCENES } from "../mock/scenarios.js";
-import { findLeaks } from "./shared-measure.mjs";
+import { HIDE_TEXT_STYLE, decodePng, findLeaks, itemsDrift, rectsDrift, worstContrast } from "./shared-measure.mjs";
 
 export { findLeaks };
 export const LANGS = Object.freeze(["zh", "en", "fr"]);
@@ -515,6 +515,114 @@ export async function openPresetState(page, state) {
     });
     const want = state === "longCurrent" ? "list" : state;
     if (got !== want) throw new Error(`预设面板应摆在 ${want} 态，实得 ${got}`);
+}
+
+// ---------------------------------------------------------------- 对比度量尺（对比度冒烟与预设子态对比度冒烟共用）
+
+const raf2 = (page) =>
+    inFrame(page, (doc, win) => new Promise((r) => win.requestAnimationFrame(() => win.requestAnimationFrame(r))));
+const dropHide = (page) =>
+    inFrame(page, (doc) => {
+        const s = doc.getElementById("fx-hide-text");
+        if (s) s.remove();
+    });
+
+/**
+ * 量到低于门槛时附在失败信息后面的页面现场，下次再红时一眼分清是量尺的问题还是页面状态：
+ * 外壳是否在旁路、内容层是否带等待态（data-pending）、哪些块在 inert 之内、还有哪些动画和过渡在跑（循环的脉冲带 ∞）。
+ * 只描述，不参与判据。
+ */
+const sceneState = (page) =>
+    inFrame(page, (doc) => {
+        const label = (e) =>
+            e.getAttribute("data-gb") || (typeof e.className === "string" && e.className.split(" ")[0]) || e.tagName;
+        const shell = doc.querySelector('[data-gb="input.shell"]');
+        const content = doc.querySelector('[data-part="content"]');
+        return {
+            bypass: Boolean(shell && shell.hasAttribute("data-bypass")),
+            pending: content ? content.getAttribute("data-pending") : null,
+            inert: [...doc.querySelectorAll("[inert]")].map(label),
+            anims: doc
+                .getAnimations()
+                .filter((a) => a.playState === "running")
+                .map((a) => {
+                    const t = a.effect && a.effect.getComputedTiming();
+                    return (
+                        (a.transitionProperty || a.animationName || a.constructor.name) +
+                        (t && t.iterations === Infinity ? "∞" : "")
+                    );
+                }),
+        };
+    });
+
+/** 把一段文字的有效不透明度（沿祖先连乘）和 sceneState 的结果写成一行。 */
+export const describeFailure = async (page, it) => {
+    const s = await sceneState(page);
+    return (
+        `有效不透明度 ${it.op.toFixed(2)}（沿祖先连乘）、data-bypass=${s.bypass ? 1 : 0}、data-pending=${s.pending === null ? "无" : s.pending}、` +
+        `inert ${s.inert.length} 处[${s.inert.join(" ")}]、进行中的动画 ${s.anims.length} 条[${s.anims.join(" ")}]`
+    );
+};
+
+/** 截 iframe 里某个矩形（iframe 内坐标），返回解码后的 PNG。 */
+async function shotRect(page, origin, r) {
+    const x = Math.max(0, Math.floor(r.x));
+    const y = Math.max(0, Math.floor(r.y));
+    const w = Math.max(1, Math.ceil(r.x + r.w) - x);
+    const h = Math.max(1, Math.ceil(r.y + r.h) - y);
+    const shot = await page.send("Page.captureScreenshot", {
+        format: "png",
+        clip: { x: origin.x + x, y: origin.y + y, width: w, height: h, scale: 1 },
+    });
+    return { png: decodePng(Buffer.from(shot.data, "base64")), x, y };
+}
+
+/** 页面静止后量出每段文字的最差对比度。 */
+export async function measure(page) {
+    const origin = await frameRect(page);
+    let items;
+    let whole;
+    let last = "";
+    for (let attempt = 0; attempt < 5; attempt++) {
+        await dropHide(page);
+        const first = await inFrame(page, contrastProbe);
+        await raf2(page);
+        items = await inFrame(page, contrastProbe);
+        last = itemsDrift(first, items);
+        if (!last) {
+            await inFrame(
+                page,
+                (doc, win, css) => {
+                    const s = doc.createElement("style");
+                    s.id = "fx-hide-text";
+                    s.textContent = css;
+                    doc.head.append(s);
+                },
+                HIDE_TEXT_STYLE,
+            );
+            await raf2(page);
+            whole = (await shotRect(page, origin, { x: 0, y: 0, w: origin.w, h: origin.h })).png;
+            last = rectsDrift(items, await inFrame(page, (doc, win) => win.__cpRects()));
+            if (!last) break;
+            await dropHide(page);
+        }
+        await settle(page);
+    }
+    if (last) throw new Error(`页面量不到静止画面：${last}`);
+    const out = [];
+    for (const it of items) {
+        if (!it.scrolled) {
+            if (it.r.w < 1 || it.r.h < 1) continue;
+            out.push({ ...it, worst: worstContrast(whole, it) });
+            continue;
+        }
+        const r = await inFrame(page, (doc, win, i) => win.__cpPlace(i), it.idx);
+        if (!r || r.w < 1 || r.h < 1) continue;
+        const { png, x, y } = await shotRect(page, origin, r);
+        out.push({ ...it, r, worst: worstContrast(png, { ...it, r: { x: r.x - x, y: r.y - y, w: r.w, h: r.h } }) });
+    }
+    await dropHide(page);
+    return out;
 }
 
 // ---------------------------------------------------------------- 自检
