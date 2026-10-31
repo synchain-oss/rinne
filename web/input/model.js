@@ -330,6 +330,9 @@ const NOTE_BEATS = Object.freeze({
     n1: 4,
 });
 
+/** delay_note 的十六档取值，顺序与 UI_BRIDGE 的取值表一致（时值下拉按这个顺序列，不另排）。 */
+export const NOTE_IDS = Object.freeze(Object.keys(NOTE_BEATS));
+
 /** 一个时值占几拍；未知时值给 1。 */
 export function noteBeats(id) {
     return Object.prototype.hasOwnProperty.call(NOTE_BEATS, id) ? NOTE_BEATS[id] : 1;

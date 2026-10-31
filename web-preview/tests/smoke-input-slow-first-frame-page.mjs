@@ -15,6 +15,8 @@
 //      解锁后 inert 与置灰撤掉，同一套刺激这时能写到桥上（防空转）。
 //   ⑥ 对照：没有关闭过导出提示的同一快照，导出提示会弹出（说明 ⑤ 里「不弹」是真的被基线压住，不是看不见）；
 //   ⑦ 只来了 state、pair 还没到（场景 E）：仍算没就绪，继续锁着、刺激写不到桥；pair 补上才放行。
+//   ⑧ 关于面板在 400 ms 兜底揭幕之前就打开（场景 F，用钩子把兜底定时器扣住，保证先后顺序而不靠计时）：
+//      首批快照到后，高级设置那几行放开、版本号写上。
 // 另：预设槽与消息位整块在 inert 之内（里面暂时没有控件也一样），页脚版本号写「—」。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
@@ -38,10 +40,16 @@ const { GATED_WRITES } = await import(u("web/input/bridge-gate.js"));
 const RECORDED = [...GATED_WRITES, "panic", "setLang", "setUiScale", "requestInitialState"];
 const PANIC = '[data-gb="input.panic"]';
 
-/** 把 requestInitialState 扣住：壳页在建会话时给 mock 装上钩子（addScriptToEvaluateOnNewDocument 在壳页脚本之前跑）。 */
+/**
+ * 把 requestInitialState 扣住：壳页在建会话时给 mock 装上钩子（addScriptToEvaluateOnNewDocument 在壳页脚本之前跑）。
+ * 放行有两种：测试经 CDP 把 __hold 置假；或设 __releaseAtCall = N，钩子自己数次数，从第 N 次调用起放行（不经 CDP，
+ * 不受往返延迟影响）。__heldCalls 数的是被扣住（没发首帧）的调用次数。
+ */
 const HOLD_HOOK = `(() => {
     window.__hold = true;
     window.__initialCalls = 0;
+    window.__heldCalls = 0;
+    window.__releaseAtCall = 0;
     let session;
     Object.defineProperty(window, "__RINNE_PREVIEW__", {
         configurable: true,
@@ -54,17 +62,52 @@ const HOLD_HOOK = `(() => {
             window.__origInitial = () => orig.apply(m, []);
             m.requestInitialState = function () {
                 window.__initialCalls++;
-                return window.__hold ? { ok: true } : orig.apply(m, arguments);
+                const release = window.__releaseAtCall > 0 && window.__initialCalls >= window.__releaseAtCall;
+                if (window.__hold && !release) {
+                    window.__heldCalls++;
+                    return { ok: true };
+                }
+                return orig.apply(m, arguments);
             };
         },
     });
 })()`;
 
-/** 打开 Input 页面并扣住首批快照；返回时页面已建好外壳。 */
-async function openHeld(browser, server, scenario) {
+/**
+ * 把页面的 400 ms 兜底揭幕（showPending）扣住直到放行：用它造出「快照没到、也还没揭幕」的窗口，
+ * 不靠真实计时。只在 Input 页面所在的帧里装，只扣名为 showPending 的那一个定时器。
+ */
+const HOLD_FALLBACK_HOOK = `(() => {
+    if (!location.pathname.endsWith("/web/input/index.html")) return;
+    const orig = window.setTimeout;
+    const held = [];
+    window.__heldFallback = held;
+    window.setTimeout = function (fn, ms, ...rest) {
+        if (ms === 400 && typeof fn === "function" && fn.name === "showPending" && !window.__fallbackReleased) {
+            held.push([fn, rest]);
+            return 0;
+        }
+        return orig.call(window, fn, ms, ...rest);
+    };
+    window.__releaseFallback = () => {
+        window.__fallbackReleased = true;
+        for (const [fn, rest] of held.splice(0)) orig.call(window, fn, 0, ...rest);
+    };
+})()`;
+
+/**
+ * 打开 Input 页面并扣住首批快照；返回时页面已建好外壳。holdFallback 为真时连兜底揭幕也扣住；
+ * releaseAtCall 大于 0 时，钩子从第 N 次 requestInitialState 起自己放行。
+ */
+async function openHeld(browser, server, scenario, { holdFallback = false, releaseAtCall = 0 } = {}) {
     const page = await browser.newPage();
     await page.setViewport(VIEW.w, VIEW.h, 1);
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_HOOK });
+    if (releaseAtCall > 0)
+        await page.send("Page.addScriptToEvaluateOnNewDocument", {
+            source: `window.__releaseAtCall = ${releaseAtCall}`,
+        });
+    if (holdFallback) await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_FALLBACK_HOOK });
     const q = new URLSearchParams({ fresh: "1", auto: "0", lang: "zh", scenario });
     await page.goto(`${server.url}/web-preview/input.html?${q}`);
     await page.waitFor(
@@ -574,19 +617,75 @@ try {
         await page.close();
     }
 
+    // ====== 场景 F：关于面板在兜底揭幕之前打开；首批快照到后高级设置放开、版本写上
+    {
+        const page = await openHeld(browser, server, "in-playing", { holdFallback: true });
+        const rec = await recordBridge(page, RECORDED);
+        // 远超 400 ms：兜底被钩子扣着，页面既没有快照也没有揭幕
+        await sleep(page, 700);
+        const held = await inFrame(page, (doc, win) => ({
+            queued: win.__heldFallback ? win.__heldFallback.length : -1,
+            pending: doc.querySelector('[data-part="content"]').getAttribute("data-pending"),
+        }));
+        run.eq(held, { queued: 1, pending: null }, "F：兜底揭幕应被扣住（防空转：先后顺序是造出来的，不是等出来的）");
+        const vb = await centerOf(page, '[data-gb="input.footer.version"]');
+        await click(page, vb.x, vb.y);
+        const aboutProbe = (doc) => {
+            const panel = doc.querySelector('[data-gb="input.about"]');
+            const adv = [...doc.querySelectorAll("[data-adv], [data-tail]")];
+            return {
+                open: !!panel && !panel.hidden,
+                adv: adv.length,
+                enabled: adv.filter((b) => !b.disabled).length,
+                build: (doc.querySelector(".rn-about__build") || { textContent: "" }).textContent,
+            };
+        };
+        const before = await inFrame(page, aboutProbe);
+        run.check(before.open, "F：兜底之前点版本按钮，关于面板应打开");
+        run.check(before.adv >= 4, `F：关于面板应有高级设置的几行（防空转），实得 ${before.adv}`);
+        run.eq(before.enabled, 0, "F：快照没到时高级设置那几行应置灰");
+        run.check(
+            !before.build.includes("0.0.0-preview"),
+            `F：快照没到时版本不应是真值，实得 ${JSON.stringify(before.build)}`,
+        );
+        // 放行首批快照，不放行兜底：面板开着，S.pending 从没置过位
+        await page.eval(`(() => { window.__hold = false; window.__origInitial(); })()`);
+        await page.waitFor(
+            `(() => { const f = document.querySelector("iframe"); const p = f.contentDocument.querySelector('[data-gb="input.pair.pill"]'); return !!p && p.hasAttribute("data-state"); })()`,
+            { timeout: 8000, label: "F：放行后页面应画出首批快照" },
+        );
+        await settle(page);
+        const after = await inFrame(page, aboutProbe);
+        run.check(after.open, "F：首批快照到后关于面板仍开着");
+        run.eq(after.enabled, after.adv, "F：首批快照到后，高级设置那几行应全部放开（即使揭幕兜底从没触发过）");
+        run.check(
+            after.build.includes("0.0.0-preview"),
+            `F：首批快照到后版本应写上宿主的值，实得 ${JSON.stringify(after.build)}`,
+        );
+        const left = await inFrame(page, (doc, win) => (win.__heldFallback ? win.__heldFallback.length : -1));
+        run.eq(left, 1, "F：整个过程兜底揭幕一直被扣着（它没有参与这次放开）");
+        const ab = await rec.calls();
+        run.eq(
+            ab.filter((c) => GATED_WRITES.includes(c[0])),
+            [],
+            "F：打开关于面板、放行快照都不应写桥",
+        );
+        run.check(page.errors.length === 0, `F：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
+        await page.close();
+    }
+
     // ====== 场景 D：重发能把快照拉回来；快照到了就不再重发
     {
-        const page = await openHeld(browser, server, "in-playing");
-        await sleep(page, 600);
-        const c0 = await page.eval(`window.__initialCalls`);
-        run.check(c0 >= 2, `D：到 600 ms 时应已重发过至少一次，实得共 ${c0} 次`);
-        // 放行但不手动补发：下一次重发应当把首批快照拉回来
-        await page.eval(`window.__hold = false`);
+        // 放行由钩子在页内数次数：第 3 次调用（第二次重发）起放行，前两次被扣住。页面只重发三次、间隔 400 ms，
+        // 所以放行必须赶在重发用完之前；经 CDP 放行的话，负载高时放行晚于约 1.2 s，之后没有重发，永远等不到
+        const page = await openHeld(browser, server, "in-playing", { releaseAtCall: 3 });
         await page.waitFor(
             `(() => { const f = document.querySelector("iframe"); const p = f.contentDocument.querySelector('[data-gb="input.pair.pill"]'); return !!p && p.hasAttribute("data-state"); })()`,
             { timeout: 5000, label: "D：宿主恢复后，下一次重发应拉回首批快照" },
         );
+        run.eq(await page.eval(`window.__heldCalls`), 2, "D：前两次请求被扣住（没有首帧），第三次起才放行");
         const c1 = await page.eval(`window.__initialCalls`);
+        run.check(c1 >= 3, `D：首批快照是重发拉回来的，请求应至少有三次，实得 ${c1} 次`);
         await sleep(page, 1500);
         const c2 = await page.eval(`window.__initialCalls`);
         run.eq(c2, c1, "D：快照到了之后不应再重发 requestInitialState");

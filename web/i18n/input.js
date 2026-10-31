@@ -2,9 +2,12 @@
 //
 // Rinne Input 页面的界面词条：键前缀 in.*（元件与页脚）和 band.in.*（消息位）。
 // 与 common.js 由 web/shared/i18n.js 的 mergeDicts 合并，键不得重名。
-// 页面自己的三条轻提示（toast.restored、toast.over100、toast.moved）也在这里；预设相关的轻提示归预设面板那张卡。
-// 预设面板（in.preset.*）与时值下拉的提示（in.dly.noteTip*）归预设面板那张卡，首启与引导归首启那张卡，这里不放，
-// check-i18n --strict-unused 要求每个键都有页面代码引用。
+// 页面自己的轻提示（toast.restored、toast.over100、toast.moved，以及预设的 toast.presetLoaded、presetSaved、presetDeleted、
+// presetBroken）也在这里。预设面板（in.preset.*）与时值下拉的提示（in.dly.noteTip*）同在这里；
+// 工厂预设的名字不在词条表里：它们随原生侧的预设文件经 rinne.presets 到页面，页面按当前语言原样显示。
+// 首启与引导归首启那张卡，这里不放，check-i18n --strict-unused 要求每个键都有页面代码引用。
+// in.preset.badChars 的字符清单：zh 照规格逐字写（含直双引号）；en 与 fr 受「不得用直引号」的限制，那一个字符写成弯双引号 “ ”。
+// 页面拦的那一组字符在 preset-menu.js 的 BAD_CHARS，冒烟核对词条里列的与它一致。
 // 导出不一致的提示按原因拆成四条（band.in.exportViolation、exportOverrun、exportPeer、exportResync），
 // 只有宿主违约与读头补零两种带「调大 D 可避免」；对端违约要说明是 Output 那一端的宿主。
 // 末尾 params 一节是 11 个参数的显示名，键就是参数 ID，gen-docs 的参数表按它取。
@@ -85,6 +88,8 @@ export default {
         "in.dly.note.n2": "1/2",
         "in.dly.note.n2d": "1/2 附点",
         "in.dly.note.n1": "1/1",
+        "in.dly.noteTipT": "三连音：时值的 2/3",
+        "in.dly.noteTipD": "附点：时值的 1.5 倍",
         // in.tone
         "in.tone.eyebrow": "回送音色",
         "in.tone.eyebrowTip": "只作用于回送，干声不受影响",
@@ -199,10 +204,36 @@ export default {
         "band.in.highCutClamped": "高切已按采样率截断到 {f} kHz。",
         "band.in.limiterCap100": "限制器关闭：设定 {s}%，有效 100%。",
         "band.in.takeover": "组 {g} 被一个已停用的实例占用，要接管吗？",
+        // in.preset
+        "in.preset.label": "预设",
+        "in.preset.dirtyTip": "有未保存的改动",
+        "in.preset.factory": "工厂预设",
+        "in.preset.user": "我的预设",
+        "in.preset.empty": "还没有自己的预设",
+        "in.preset.saveAs": "保存为新预设…",
+        "in.preset.overwrite": "覆盖「{name}」",
+        "in.preset.delete": "删除「{name}」…",
+        "in.preset.defaultName": "我的预设 {n}",
+        "in.preset.namePlaceholder": "预设名称",
+        "in.preset.dupe": "已有同名预设，保存会覆盖它。",
+        "in.preset.badChars": '名称不能包含 \\ / : * ? " < > |',
+        "in.preset.deleteConfirm": "删除后无法恢复。",
+        "in.preset.saveFail": "保存失败：{reason}",
+        "in.preset.reason.writeFailed": "无法写入文件",
+        "in.preset.reason.notFound": "这个预设已不存在",
+        "in.preset.reason.notReady": "插件还没准备好",
+        "in.preset.reason.unknown": "原因未知",
+        "in.preset.deleteFail": "删除失败：{reason}",
+        "in.preset.note": "预设不含环路开关、组号、限制器开关与上限。",
         // toast
         "toast.restored": "回送已恢复，从 0 淡入",
         "toast.over100": "超过 100%：混合在 50% 及以上时环路会自激，由限制器压住",
         "toast.moved": "已移到空闲组 {g}。再到本轨的 Rinne Output 点「重新配对」。",
+        "toast.presetLoaded": "已载入「{name}」，回送从 0 淡入",
+        "toast.presetSaved": "已保存预设「{name}」",
+        "toast.presetDeleted": "已删除预设「{name}」",
+        "toast.presetBroken": "预设文件无法读取，未载入",
+        "toast.presetLoadFail": "载入失败：{reason}",
         // params
         feedback: "反馈量",
         loop_on: "环路开关",
@@ -292,6 +323,8 @@ export default {
         "in.dly.note.n2": "1/2",
         "in.dly.note.n2d": "1/2 dotted",
         "in.dly.note.n1": "1/1",
+        "in.dly.noteTipT": "Triplet: 2/3 of the note value",
+        "in.dly.noteTipD": "Dotted: 1.5 × the note value",
         // in.tone
         "in.tone.eyebrow": "RETURN TONE",
         "in.tone.eyebrowTip": "Return only; the dry signal is untouched",
@@ -411,10 +444,36 @@ export default {
         "band.in.highCutClamped": "High cut clamped to {f} kHz at this rate.",
         "band.in.limiterCap100": "Limiter off: set {s}%, effective 100%.",
         "band.in.takeover": "Take over group {g} from an idle instance?",
+        // in.preset
+        "in.preset.label": "PRESET",
+        "in.preset.dirtyTip": "Unsaved changes",
+        "in.preset.factory": "FACTORY",
+        "in.preset.user": "MY PRESETS",
+        "in.preset.empty": "No presets of your own yet",
+        "in.preset.saveAs": "Save as new preset…",
+        "in.preset.overwrite": "Overwrite “{name}”",
+        "in.preset.delete": "Delete “{name}”…",
+        "in.preset.defaultName": "My preset {n}",
+        "in.preset.namePlaceholder": "Preset name",
+        "in.preset.dupe": "A preset with this name exists; saving replaces it.",
+        "in.preset.badChars": "Names can’t contain \\ / : * ? “ ” < > |",
+        "in.preset.deleteConfirm": "This can’t be undone.",
+        "in.preset.saveFail": "Couldn’t save: {reason}",
+        "in.preset.reason.writeFailed": "the file could not be written",
+        "in.preset.reason.notFound": "this preset no longer exists",
+        "in.preset.reason.notReady": "the plug-in isn’t ready yet",
+        "in.preset.reason.unknown": "unknown reason",
+        "in.preset.deleteFail": "Couldn’t delete: {reason}",
+        "in.preset.note": "Presets don’t include Loop, the group, or the limiter switch and ceiling.",
         // toast
         "toast.restored": "Return restored, fading in from 0",
         "toast.over100": "Above 100%: with Mix at 50% or more the loop self-oscillates and the limiter holds it",
         "toast.moved": "Moved to free group {g}. Now click Re-pair on this track’s Rinne Output.",
+        "toast.presetLoaded": "Loaded “{name}”; the return fades back in from 0",
+        "toast.presetSaved": "Preset “{name}” saved",
+        "toast.presetDeleted": "Preset “{name}” deleted",
+        "toast.presetBroken": "That preset file can’t be read, so it wasn’t loaded",
+        "toast.presetLoadFail": "Couldn’t load: {reason}",
         // params
         feedback: "Feedback",
         loop_on: "Loop",
@@ -505,6 +564,8 @@ export default {
         "in.dly.note.n2": "1/2",
         "in.dly.note.n2d": "1/2 pointée",
         "in.dly.note.n1": "1/1",
+        "in.dly.noteTipT": "Triolet : 2/3 de la valeur de note",
+        "in.dly.noteTipD": "Pointée : 1,5 × la valeur de note",
         // in.tone
         "in.tone.eyebrow": "TIMBRE DU RETOUR",
         "in.tone.eyebrowTip": "Retour uniquement ; le signal sec n’est pas affecté",
@@ -625,12 +686,39 @@ export default {
         "band.in.highCutClamped": "Coupe-haut limité à {f} kHz à cette fréquence.",
         "band.in.limiterCap100": "Limiteur désactivé : réglée {s} %, effective 100 %.",
         "band.in.takeover": "Groupe {g} tenu par une instance inactive.",
+        // in.preset
+        "in.preset.label": "PRÉRÉGLAGE",
+        "in.preset.dirtyTip": "Modifications non enregistrées",
+        "in.preset.factory": "USINE",
+        "in.preset.user": "MES PRÉRÉGLAGES",
+        "in.preset.empty": "Aucun préréglage perso",
+        "in.preset.saveAs": "Enregistrer comme nouveau préréglage…",
+        "in.preset.overwrite": "Écraser « {name} »",
+        "in.preset.delete": "Supprimer « {name} »…",
+        "in.preset.defaultName": "Mon préréglage {n}",
+        "in.preset.namePlaceholder": "Nom du préréglage",
+        "in.preset.dupe": "Un préréglage de ce nom existe ; l’enregistrer le remplace.",
+        "in.preset.badChars": "Le nom ne peut pas contenir \\ / : * ? “ ” < > |",
+        "in.preset.deleteConfirm": "Action irréversible.",
+        "in.preset.saveFail": "Échec de l’enregistrement : {reason}",
+        "in.preset.reason.writeFailed": "le fichier n’a pas pu être écrit",
+        "in.preset.reason.notFound": "ce préréglage n’existe plus",
+        "in.preset.reason.notReady": "le plug-in n’est pas encore prêt",
+        "in.preset.reason.unknown": "raison inconnue",
+        "in.preset.deleteFail": "Suppression impossible : {reason}",
+        "in.preset.note":
+            "Les préréglages n’incluent pas Boucle, le groupe, ni l’interrupteur et le plafond du limiteur.",
         // toast
         "toast.restored": "Retour rétabli, il revient en fondu depuis 0",
         "toast.over100":
             "Au-delà de 100 % : avec le mix à 50 % ou plus, la boucle auto-oscille et le limiteur la contient",
         "toast.moved":
             "Déplacé vers le groupe libre {g}. Cliquez ensuite sur Réappairer dans le Rinne Output de cette piste.",
+        "toast.presetLoaded": "« {name} » chargé ; le retour revient en fondu depuis 0",
+        "toast.presetSaved": "Préréglage « {name} » enregistré",
+        "toast.presetDeleted": "Préréglage « {name} » supprimé",
+        "toast.presetBroken": "Ce fichier de préréglage est illisible, il n’a pas été chargé",
+        "toast.presetLoadFail": "Chargement impossible : {reason}",
         // params
         feedback: "Réinjection",
         loop_on: "Boucle",

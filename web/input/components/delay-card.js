@@ -3,13 +3,16 @@
 // 环路延迟卡（中栏下，248×243）：毫秒 / 采样 / 节拍三档、读数、对数滑杆（1–4000 ms）和四行说明（实际值、最小值、
 // 本会话最大块长、总延迟）加原因徽标。
 //   毫秒与采样是同一个参数（delay_ms）的两种读法，选哪种只在页面内存里（cfg 里目前没有写入它的桥函数），
-//   节拍档把 delay_mode 切到 sync，时值由 delay_note 决定；节拍档的时值下拉另有一张卡接手，这里只留槽位。
+//   节拍档把 delay_mode 切到 sync，时值由 delay_note 决定，由滑杆位置上的十六档下拉选（选项顺序即取值表的顺序，
+//   选中走 setParam 一套；三连音与附点档的悬停说明挂在下拉上）。
 //   D 低于最小值时滑杆左段画斜纹、把手变琥珀；实际值高于设定值时第一行变琥珀并带向上箭头。
 
 import { el, svg } from "../../shared/dom.js";
+import { icon } from "../../shared/icons.js";
 import {
     DELAY_MAX_MS,
     DELAY_MIN_MS,
+    NOTE_IDS,
     delayFromPos,
     delayPos,
     delayView,
@@ -76,7 +79,22 @@ export function createDelayCard(ctx) {
         tickLabel,
         knob,
     );
-    const noteSlot = el("div", { class: "in-dly__note", "data-slot": "note-select" });
+    const noteSelect = el(
+        "select",
+        { class: "in-dly__select", "data-part": "dly.note" },
+        ...NOTE_IDS.map((id) => el("option", { value: id })),
+    );
+    noteSelect.addEventListener("change", () => {
+        if (!ctx.locked() && note.value() !== noteSelect.value) note.commit(noteSelect.value);
+        // 没写成（快照没到、宿主不认）就把下拉拉回当前值，选项不留在没生效的档上
+        renderAll();
+    });
+    const noteSlot = el(
+        "div",
+        { class: "in-dly__note", "data-slot": "note-select" },
+        noteSelect,
+        el("span", { class: "in-dly__selchev" }, icon("chev", 10, "currentColor")),
+    );
     const control = el("div", { class: "in-dly__control" }, slider, noteSlot);
 
     const up = svg(
@@ -204,6 +222,7 @@ export function createDelayCard(ctx) {
         // 滑杆（节拍档换成时值下拉的槽位）
         setHidden(slider, m.sync);
         setHidden(noteSlot, !m.sync);
+        renderNoteSelect(t, note.value() || "n4");
         setVar(slider, "--v", `${m.sliderPct}%`);
         setAttr(slider, "aria-valuenow", fmtFixed(m.setMs, 1));
         setAttr(slider, "aria-valuetext", `${fmtFixed(m.setMs, 1)} ms`);
@@ -233,6 +252,20 @@ export function createDelayCard(ctx) {
         setHidden(badge, !m.badge);
         if (m.badge) setText(badge, t("in.dly.badge." + m.badge));
         setAttr(root, "data-state", m.state);
+    }
+
+    /** 十六档时值下拉：标签三语，选中项跟 delay_note，三连音与附点档带一句悬停说明。 */
+    function renderNoteSelect(t, cur) {
+        const opts = noteSelect.options;
+        for (let i = 0; i < opts.length; i += 1) setText(opts[i], t("in.dly.note." + opts[i].value));
+        if (noteSelect.value !== cur) noteSelect.value = cur;
+        setAttr(noteSelect, "aria-label", t("in.dly.eyebrow"));
+        setAttr(
+            noteSelect,
+            "title",
+            /t$/.test(cur) ? t("in.dly.noteTipT") : /d$/.test(cur) ? t("in.dly.noteTipD") : null,
+        );
+        if (noteSelect.disabled !== ctx.locked()) noteSelect.disabled = ctx.locked();
     }
 
     /** 宿主的快照还没到：标签照写，读数写「—」，其余各行留空，滑杆与单位分段关着。 */

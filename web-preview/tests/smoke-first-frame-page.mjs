@@ -7,7 +7,9 @@
 //      期间没有 boot 错误，也没有控制台错误（缺字体、缺样式都会在这里露出来）；
 //   ② 没有 PerformanceObserver：回落到 DOMContentLoaded 触发，不许变成永不放行；
 //   ③ 没有 requestAnimationFrame：直接发信号；
-//   ④ rAF 永不回调（合成停摆，窗口最小化或被完全遮挡的情形）：2.5 s 的保险发信号，且只发一次；
+//   ④ rAF 永不回调（合成停摆，窗口最小化或被完全遮挡的情形）：2.5 s 的保险发信号，且只发一次。放行时刻的窗口 [2200, 4500] ms
+//      量的是「从导航开始到页面把信号交给宿主」，用页内时钟（performance.now，起点是 performance.timeOrigin）：假宿主收消息时
+//      当场打上时间戳（__at）。不在测试进程里用墙钟量：那样会把 CDP 开页、加载等待的耗时也算进窗口，本机忙时能多出几秒；
 //   ⑤ 页面脚本报错：boot 守卫在首帧之前上报 __rinne__bootError，并且只报第一条；
 //   ⑥ 只有 postMessage 的假 __JUCE__、没有 mock（纯浏览器直接打开、真宿主桥没接上的情形）：页面要么干净地起来
 //      （首帧恰好一次、__rinneBooted 置位、没有 boot 错误），要么响亮地失败（boot 错误上报），不许既没起来也不吭声；
@@ -96,10 +98,10 @@ async function retryCase(okAt, policy) {
     }
 }
 
-/** 假的 JUCE 宿主：只收 postMessage，记到 window.__posted。 */
+/** 假的 JUCE 宿主：只收 postMessage，记到 window.__posted；每条带上收到时的页内时钟 __at（performance.now()，起点是 performance.timeOrigin）。 */
 const FAKE_HOST = `
     window.__posted = [];
-    window.__JUCE__ = { postMessage(text) { window.__posted.push(JSON.parse(text)); } };
+    window.__JUCE__ = { postMessage(text) { window.__posted.push(Object.assign(JSON.parse(text), { __at: performance.now() })); } };
 `;
 
 /** 最小的 mock 后端：addEventListener 是空操作，其余任何名字都是回「没准备好」的异步函数（createBridge 只校名，不校行为）。 */
@@ -197,7 +199,6 @@ try {
 
         // ④ rAF 永不回调：只有 2.5 s 的保险能放行
         {
-            const t0 = Date.now();
             const page = await open(url, "window.requestAnimationFrame = function () { return 1; };");
             await sleep(1200);
             run.eq((await posted(page, "__rinne__firstFrame")).length, 0, `${role}（rAF 停摆）：保险到点之前不应放行`);
@@ -205,8 +206,12 @@ try {
                 timeout: 4000,
                 label: `${role}：保险放行`,
             });
-            const dt = Date.now() - t0;
-            run.check(dt >= 2200 && dt <= 4500, `${role}（rAF 停摆）：保险应在约 2.5 s 放行，实得 ${dt} ms`);
+            // 放行时刻取页内时钟（导航开始起算），不含测试进程开页、等加载的耗时；窗口数值不随量法改
+            const dt = (await posted(page, "__rinne__firstFrame"))[0]?.__at;
+            run.check(
+                Number.isFinite(dt) && dt >= 2200 && dt <= 4500,
+                `${role}（rAF 停摆）：保险应在约 2.5 s 放行（页内时钟，自导航开始起），实得 ${dt} ms`,
+            );
             await sleep(600);
             run.eq((await posted(page, "__rinne__firstFrame")).length, 1, `${role}（rAF 停摆）：保险只发一次`);
             await page.close();

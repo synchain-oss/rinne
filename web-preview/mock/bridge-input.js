@@ -59,14 +59,29 @@ const PRESET_EXEMPT = ["loop_on", "limiter", "ceiling"];
 /** tail 模式取值。 */
 const TAIL_MODES = ["auto", "infinite", "30s"];
 
+/** 载入预设后回送淡入的时长，毫秒（核心侧 500 ms，加 10 ms 的先降到 0）。 */
+const PRESET_FADE_MS = 510;
+
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
-/** 预设名清洗：去控制字符、首尾空白，按字符（码点）截到上限。 */
+/** 预设名清洗：去控制字符、首尾空白，按字符（码点）截到上限，截后再去尾部空白（与原生预设库同一规则）。 */
 export function cleanPresetName(name) {
     const s = String(name ?? "")
         .replace(CONTROL_CHARS, "")
         .trim();
     return Array.from(s).slice(0, PRESET_NAME_MAX).join("").trim();
+}
+
+/** 当前模型值里进预设的那部分（不含环路开关、限制器和上限）。 */
+function presetValues(model) {
+    const values = {};
+    for (const id of PARAM_IDS) if (!PRESET_EXEMPT.includes(id)) values[id] = model.values[id];
+    return values;
+}
+
+/** 按当前模型值造一条用户预设（还没放进列表）；id 取 u-<12 位十六进制>，与原生预设库同形。 */
+export function makeUserPreset(model, name) {
+    return { id: `u-${(model.nextUserId++).toString(16).padStart(12, "0")}`, name, values: presetValues(model) };
 }
 
 /** 把值按参数定义夹取或校验；不合法返回 undefined。 */
@@ -94,6 +109,8 @@ const defaultValues = () => Object.fromEntries(PARAM_IDS.map((id) => [id, PARAM_
 export function createInputBackend({ storage, timers, opts, now = () => Date.now() } = {}) {
     const store = storage || { local: memoryStorage(), session: memoryStorage() };
     const core = createCore({ role: "input", events: EVENTS, storage: store, timers, opts });
+    /** 载入后淡入标签的计时器；再次载入时取消上一个。 */
+    let fadeTimer = null;
 
     const model = {
         version: "0.0.0-preview",
@@ -136,6 +153,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         notices: [], // [{ id, a?, b? }]，id 取 ipcSandbox、outOfOrder、unstable、newerProject、stateDecodeFailed
         fadeIn: false,
         userPresets: [],
+        nextUserId: 1,
         dismissed: new Set(),
     };
     try {
@@ -260,7 +278,9 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
     }));
     core.register("rinne.presets", () => ({
         factory: FACTORY_PRESETS.map((p) => ({ id: p.id, name: { ...p.name } })),
-        user: model.userPresets.map((p) => ({ id: p.id, name: p.name })),
+        user: [...model.userPresets]
+            .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || (a.id < b.id ? -1 : 1))
+            .map((p) => ({ id: p.id, name: p.name })),
         current: model.presetId,
     }));
 
@@ -352,10 +372,19 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         loadPreset(id) {
             const f = FACTORY_PRESETS.find((p) => p.id === id);
             const u = model.userPresets.find((p) => p.id === id);
-            if (!f && !u) return { ok: false, reason: "no-preset" };
+            if (!f && !u) return { ok: false, reason: "not-found" };
             applyValues((f || u).values);
             model.presetId = id;
             model.presetDirty = false;
+            // 载入后回送从 0 淡入：页面据此显示「淡入中」，过了淡入时长撤掉
+            // 再次载入时先取消上一次的计时器，标签从最后一次载入算起满淡入时长才撤掉
+            model.fadeIn = true;
+            if (fadeTimer !== null) core.timers.clearTimeout(fadeTimer);
+            fadeTimer = core.timers.setTimeout(() => {
+                fadeTimer = null;
+                model.fadeIn = false;
+                core.scheduleEcho();
+            }, PRESET_FADE_MS);
             core.scheduleEcho();
             core.emit("rinne.params", { seq: core.nextSeq(), values: { ...model.values } });
             return { ok: true };
@@ -363,12 +392,11 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         savePreset(name, overwrite) {
             const clean = cleanPresetName(name);
             if (clean === "") return { ok: false, reason: "bad-name" };
-            const values = {};
-            for (const id of PARAM_IDS) if (!PRESET_EXEMPT.includes(id)) values[id] = model.values[id];
-            const same = model.userPresets.find((p) => p.name === clean);
+            // 重名按去空白后的显示名不分大小写比较；允许覆盖时沿用原 id 与原名
+            const same = model.userPresets.find((p) => p.name.toLowerCase() === clean.toLowerCase());
             if (same && overwrite !== true) return { ok: false, reason: "exists" };
-            const entry = same || { id: `user:${clean}`, name: clean, values };
-            entry.values = values;
+            const entry = same || makeUserPreset(model, clean);
+            entry.values = presetValues(model);
             if (!same) model.userPresets.push(entry);
             model.presetId = entry.id;
             model.presetDirty = false;
@@ -377,10 +405,15 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
             return { ok: true, id: entry.id };
         },
         deletePreset(id) {
+            if (FACTORY_PRESETS.some((p) => p.id === id)) return { ok: false, reason: "factory" };
             const i = model.userPresets.findIndex((p) => p.id === id);
-            if (i < 0) return { ok: false, reason: "no-preset" };
+            if (i < 0) return { ok: false, reason: "not-found" };
             model.userPresets.splice(i, 1);
-            if (model.presetId === id) model.presetId = "init";
+            // 删掉的是当前预设：参数不动，没有当前预设了
+            if (model.presetId === id) {
+                model.presetId = null;
+                model.presetDirty = false;
+            }
             core.scheduleEcho();
             core.push("rinne.presets");
             return { ok: true };

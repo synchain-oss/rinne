@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Input 页面文字对比度冒烟（无头浏览器）：范围内的 30 个 in-* 场景 × 中 / 英 / 法。
+// Input 页面文字对比度冒烟（无头浏览器）：范围内的 32 个 in-* 场景 × 中 / 英 / 法。
 // 量法与共享件的对比度冒烟相同：页内采样每段可见文字的矩形、计算色与各层不透明度，把页面文字改成透明后截图得到合成底，
 // 逐像素把文字色合成上去，取矩形内最差的一格。分档：
 //   A（≥ 4.5）：危险与确认横幅、模态里的文字（含限制器关闭确认框）、横幅与消息位里的按钮、紧急切断；
 //   B（≥ 3.0）：琥珀 / 灰 / 紫横幅、配对状态灯；
 //   C：其余只记录不判（mono 小标等按规范不设门禁）。
+// 预设面板：场景表只有列表与重名两态，其余子态逐语言逐子态摆出来量，那一段在 smoke-input-contrast-presets-page.mjs（拆出去是为了让两个文件
+//   各自跑在 run-all 单项 300 秒的上限之内，判据一条没动）。这里留下场景表里两个 in-preset-* 场景与一个预设红字提示的坏样例。
+//   分档：条目、动作与按钮名按 A，红字提示按 A，琥珀提示按 B，预设按钮在内容层里（旁路时随内容层降级）也按 B，标签与两处说明文字（设计稿给的 --txt-3）按 C 只记录，置灰的不判。
 // 宿主旁路：设计稿把内容层降到 0.55（等同停用的界面），这一层的文字按 C 档只记录不判；
 //   但紧急切断、消息位（红字、恢复按钮）、危险描边不在降级层里，照 A / B 档判，并用有效不透明度断言它们没被降级。
 //   场景表里的旁路场景之外，另有「旁路 + 紧急切断」「旁路 + 沙盒拒绝共享内存」两个红字用例，要求量到 A 档红字并过线。
@@ -21,20 +24,22 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { HIDE_TEXT_STYLE, TIER_MIN, decodePng, itemsDrift, rectsDrift, worstContrast } from "./shared-measure.mjs";
-import { LANGS, SCENES, VIEW, contrastProbe, frameRect, inFrame, openInput, settle } from "./smoke-input-kit-page.mjs";
+import { TIER_MIN, worstContrast } from "./shared-measure.mjs";
+import {
+    LANGS,
+    SCENES,
+    VIEW,
+    describeFailure,
+    inFrame,
+    measure,
+    openInput,
+    openPresetState,
+    settle,
+} from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("Input 页面对比度");
 if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
-
-const raf2 = (page) =>
-    inFrame(page, (doc, win) => new Promise((r) => win.requestAnimationFrame(() => win.requestAnimationFrame(r))));
-const dropHide = (page) =>
-    inFrame(page, (doc) => {
-        const s = doc.getElementById("fx-hide-text");
-        if (s) s.remove();
-    });
 
 /**
  * 宿主旁路时被设计稿降到 0.55 的内容层文字：不是消息位里的字、不是 A 档，且有效不透明度明显低于 1。
@@ -75,104 +80,6 @@ const safetyNotDegraded = (page) =>
             problems.push(`旁路下页眉应仍按设计稿降到 0.55，实得 ${eff(header).toFixed(2)}`);
         return problems;
     });
-
-/**
- * 量到低于门槛时附在失败信息后面的页面现场，下次再红时一眼分清是量尺的问题还是页面状态：
- * 外壳是否在旁路、内容层是否带等待态（data-pending）、哪些块在 inert 之内、还有哪些动画和过渡在跑（循环的脉冲带 ∞）。
- * 只描述，不参与判据。
- */
-const sceneState = (page) =>
-    inFrame(page, (doc) => {
-        const label = (e) =>
-            e.getAttribute("data-gb") || (typeof e.className === "string" && e.className.split(" ")[0]) || e.tagName;
-        const shell = doc.querySelector('[data-gb="input.shell"]');
-        const content = doc.querySelector('[data-part="content"]');
-        return {
-            bypass: Boolean(shell && shell.hasAttribute("data-bypass")),
-            pending: content ? content.getAttribute("data-pending") : null,
-            inert: [...doc.querySelectorAll("[inert]")].map(label),
-            anims: doc
-                .getAnimations()
-                .filter((a) => a.playState === "running")
-                .map((a) => {
-                    const t = a.effect && a.effect.getComputedTiming();
-                    return (
-                        (a.transitionProperty || a.animationName || a.constructor.name) +
-                        (t && t.iterations === Infinity ? "∞" : "")
-                    );
-                }),
-        };
-    });
-
-/** 把一段文字的有效不透明度（沿祖先连乘）和 sceneState 的结果写成一行。 */
-const describeFailure = async (page, it) => {
-    const s = await sceneState(page);
-    return (
-        `有效不透明度 ${it.op.toFixed(2)}（沿祖先连乘）、data-bypass=${s.bypass ? 1 : 0}、data-pending=${s.pending === null ? "无" : s.pending}、` +
-        `inert ${s.inert.length} 处[${s.inert.join(" ")}]、进行中的动画 ${s.anims.length} 条[${s.anims.join(" ")}]`
-    );
-};
-
-/** 截 iframe 里某个矩形（iframe 内坐标），返回解码后的 PNG。 */
-async function shotRect(page, origin, r) {
-    const x = Math.max(0, Math.floor(r.x));
-    const y = Math.max(0, Math.floor(r.y));
-    const w = Math.max(1, Math.ceil(r.x + r.w) - x);
-    const h = Math.max(1, Math.ceil(r.y + r.h) - y);
-    const shot = await page.send("Page.captureScreenshot", {
-        format: "png",
-        clip: { x: origin.x + x, y: origin.y + y, width: w, height: h, scale: 1 },
-    });
-    return { png: decodePng(Buffer.from(shot.data, "base64")), x, y };
-}
-
-/** 页面静止后量出每段文字的最差对比度。 */
-async function measure(page) {
-    const origin = await frameRect(page);
-    let items;
-    let whole;
-    let last = "";
-    for (let attempt = 0; attempt < 5; attempt++) {
-        await dropHide(page);
-        const first = await inFrame(page, contrastProbe);
-        await raf2(page);
-        items = await inFrame(page, contrastProbe);
-        last = itemsDrift(first, items);
-        if (!last) {
-            await inFrame(
-                page,
-                (doc, win, css) => {
-                    const s = doc.createElement("style");
-                    s.id = "fx-hide-text";
-                    s.textContent = css;
-                    doc.head.append(s);
-                },
-                HIDE_TEXT_STYLE,
-            );
-            await raf2(page);
-            whole = (await shotRect(page, origin, { x: 0, y: 0, w: origin.w, h: origin.h })).png;
-            last = rectsDrift(items, await inFrame(page, (doc, win) => win.__cpRects()));
-            if (!last) break;
-            await dropHide(page);
-        }
-        await settle(page);
-    }
-    if (last) throw new Error(`页面量不到静止画面：${last}`);
-    const out = [];
-    for (const it of items) {
-        if (!it.scrolled) {
-            if (it.r.w < 1 || it.r.h < 1) continue;
-            out.push({ ...it, worst: worstContrast(whole, it) });
-            continue;
-        }
-        const r = await inFrame(page, (doc, win, i) => win.__cpPlace(i), it.idx);
-        if (!r || r.w < 1 || r.h < 1) continue;
-        const { png, x, y } = await shotRect(page, origin, r);
-        out.push({ ...it, r, worst: worstContrast(png, { ...it, r: { x: r.x - x, y: r.y - y, w: r.w, h: r.h } }) });
-    }
-    await dropHide(page);
-    return out;
-}
 
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser({ width: VIEW.w, height: VIEW.h });
@@ -227,6 +134,7 @@ try {
         `  共量 ${pages} 页；A 档 ${tally.A} 段、B 档 ${tally.B} 段、C 档 ${tally.C} 段（只记录）；旁路降级层 ${degraded} 段按 C 档只记录`,
     );
     run.check(tally.A > 0 && tally.B > 0, "A 档与 B 档都应采到文字（防空转）");
+
     run.eq([...new Set(bypassScenes)], ["in-bypassed"], "场景表里只有 in-bypassed 带宿主旁路");
     run.check(degraded > 0, "旁路场景里应有被降级的内容层文字（防止旁路降级悄悄失效）");
 
@@ -353,6 +261,21 @@ try {
         run.check(
             panic.some((i) => i.worst.min < TIER_MIN.A),
             `坏样例：把紧急切断改成浅红后对比度应低于 ${TIER_MIN.A}，实得 ${JSON.stringify(panic.map((i) => +i.worst.min.toFixed(2)))}`,
+        );
+    }
+    // ---- 坏样例：预设面板里的红字提示（A 档）改成与底近似的颜色，量尺必须量出低于门槛
+    await openInput(page, server, "in-playing", { lang: "zh" });
+    await openPresetState(page, "saveFail");
+    await inFrame(page, (doc) => {
+        doc.querySelector(".in-pm__msg").style.setProperty("color", "rgba(255, 200, 200, 0.6)", "important");
+    });
+    {
+        const items = await measure(page);
+        const msg = items.filter((i) => i.tier === "A" && /保存失败/.test(i.text));
+        run.check(msg.length > 0, "坏样例：应采到预设面板的保存失败提示");
+        run.check(
+            msg.some((i) => i.worst.min < TIER_MIN.A),
+            `坏样例：把保存失败提示改成浅红后对比度应低于 ${TIER_MIN.A}，实得 ${JSON.stringify(msg.map((i) => +i.worst.min.toFixed(2)))}`,
         );
     }
     // ---- 坏样例：强加等待态（内容层 data-pending、配对行 inert），配对 pill 的文字被压暗到 0.6，量尺必须量出低于 B 档门槛；

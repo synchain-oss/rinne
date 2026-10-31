@@ -2,7 +2,8 @@
 //
 // Input 页面可访问性冒烟（无头浏览器），真源页面经预览壳页装载。
 //   ① 名称：页上每个可交互件都有非空的可访问名称（aria-labelledby > aria-label > 文字 > title）；
-//      30 个 in-* 场景的中文页全量审计，英文与法文页审计最有代表性的几个场景；
+//      32 个 in-* 场景的中文页全量审计，英文与法文页审计最有代表性的几个场景；预设面板的八个子态（场景表只有两个）逐语言审计；
+//      对话框、列表框、原生下拉、输入框的名称只能由作者给；
 //   ② 角色与状态：滑块（反馈量、Mix、低切、高切、延迟、上限）有 valuemin / valuemax / valuenow / valuetext 且取值合理，
 //      开关有 aria-checked，单位分段是 tablist，电平管是 meter（-60 到 0），紧急切断是有名称的按钮，
 //      限制器关闭确认是 alertdialog 且两颗按钮有名称；
@@ -16,7 +17,16 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { LANGS, SCENES, VIEW, inFrame, openInput, recordBridge } from "./smoke-input-kit-page.mjs";
+import {
+    LANGS,
+    PRESET_STATES,
+    SCENES,
+    VIEW,
+    inFrame,
+    openInput,
+    openPresetState,
+    recordBridge,
+} from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("Input 页面可访问性");
@@ -45,14 +55,23 @@ function nameAudit(doc, win) {
         }
         const al = (e.getAttribute("aria-label") || "").trim();
         if (al) return al;
+        // 原生下拉的名称只认作者给的（上面两种，或关联的 label），不取 title：title 是悬停说明，
+        // 且时值下拉只在三连音与附点档才有，别的档位会没有名字；也不取选项文字（那是当前值，不是名称）
+        if (e.tagName === "SELECT")
+            return Array.from(e.labels || [])
+                .map((l) => (l.textContent || "").trim())
+                .join(" ")
+                .trim();
         // 滑块、电平管、对话框与分组容器的名称只能由作者给（aria-label 或 aria-labelledby），不取里面的文字
-        const authorOnly = /^(slider|meter|dialog|alertdialog|tablist|radiogroup)$/.test(e.getAttribute("role") || "");
+        const authorOnly = /^(slider|meter|dialog|alertdialog|tablist|radiogroup|listbox)$/.test(
+            e.getAttribute("role") || "",
+        );
         const tc = (e.textContent || "").trim();
-        if (tc && e.tagName !== "SELECT" && !authorOnly) return tc;
+        if (tc && !authorOnly) return tc;
         return (e.getAttribute("title") || "").trim();
     };
     const SEL =
-        'button, select, input, a[href], [role="button"], [role="radio"], [role="tab"], [role="switch"], [role="link"], [role="checkbox"], [role="slider"], [role="meter"], [role="dialog"], [role="alertdialog"], [tabindex="0"]';
+        'button, select, input, a[href], [role="button"], [role="radio"], [role="tab"], [role="switch"], [role="link"], [role="checkbox"], [role="slider"], [role="meter"], [role="dialog"], [role="alertdialog"], [role="listbox"], [role="option"], [tabindex="0"]';
     const missing = [];
     let n = 0;
     for (const e of shell.querySelectorAll(SEL)) {
@@ -249,6 +268,30 @@ try {
         }
     }
     run.log(`  名称审计共 ${audited} 页`);
+
+    // 预设面板的子态：逐语言逐子态摆出来审计；面板、列表框、条目、输入框、各按钮都要有名称，下拉也要
+    let presetAudited = 0;
+    for (const lang of LANGS) {
+        for (const state of PRESET_STATES) {
+            const tag = `预设面板 ${state}/${lang}`;
+            await openInput(page, server, "in-playing", { lang });
+            await openPresetState(page, state);
+            const audit = await inFrame(page, nameAudit);
+            presetAudited++;
+            run.check(audit.interactive >= 30, `${tag}：整窗可交互件应不少于 30 个，实得 ${audit.interactive}`);
+            run.eq(audit.missing, [], `${tag}：这些可交互件没有可访问名称`);
+            const roles = await inFrame(page, (doc) => ({
+                dialog: [...doc.querySelectorAll('.in-pm[role="dialog"]')].filter((e) => !e.hidden).length,
+                listbox: [...doc.querySelectorAll('.in-pm [role="listbox"]')].filter((e) => !e.closest("[hidden]"))
+                    .length,
+                options: doc.querySelectorAll('.in-pm [role="option"]').length,
+            }));
+            run.eq(roles.dialog, 1, `${tag}：面板应是一个 role=dialog`);
+            run.eq(roles.listbox, 1, `${tag}：列表应是一个 role=listbox`);
+            run.check(roles.options >= 8, `${tag}：列表里应至少有 8 个 role=option，实得 ${roles.options}`);
+        }
+    }
+    run.log(`  预设面板子态名称审计共 ${presetAudited} 页`);
 
     // ---- ② 角色与状态
     for (const lang of LANGS) {

@@ -629,6 +629,114 @@
     "ceiling": {
       "fr": "Plafond",
       "status": "待抽检"
+    },
+    "in.preset.label": {
+      "fr": "PRÉRÉGLAGE",
+      "status": "待抽检"
+    },
+    "in.preset.dirtyTip": {
+      "fr": "Modifications non enregistrées",
+      "status": "待抽检"
+    },
+    "in.preset.factory": {
+      "fr": "USINE",
+      "status": "待抽检"
+    },
+    "in.preset.user": {
+      "fr": "MES PRÉRÉGLAGES",
+      "status": "待抽检"
+    },
+    "in.preset.empty": {
+      "fr": "Aucun préréglage perso",
+      "status": "待抽检"
+    },
+    "in.preset.saveAs": {
+      "fr": "Enregistrer comme nouveau préréglage…",
+      "status": "待抽检"
+    },
+    "in.preset.overwrite": {
+      "fr": "Écraser « {name} »",
+      "status": "待抽检"
+    },
+    "in.preset.delete": {
+      "fr": "Supprimer « {name} »…",
+      "status": "待抽检"
+    },
+    "in.preset.defaultName": {
+      "fr": "Mon préréglage {n}",
+      "status": "待抽检"
+    },
+    "in.preset.namePlaceholder": {
+      "fr": "Nom du préréglage",
+      "status": "待抽检"
+    },
+    "in.preset.dupe": {
+      "fr": "Un préréglage de ce nom existe ; l’enregistrer le remplace.",
+      "status": "待抽检"
+    },
+    "in.preset.badChars": {
+      "fr": "Le nom ne peut pas contenir \\ / : * ? “ ” < > |",
+      "status": "待抽检"
+    },
+    "in.preset.deleteConfirm": {
+      "fr": "Action irréversible.",
+      "status": "待抽检"
+    },
+    "in.preset.saveFail": {
+      "fr": "Échec de l’enregistrement : {reason}",
+      "status": "待抽检"
+    },
+    "in.preset.reason.writeFailed": {
+      "fr": "le fichier n’a pas pu être écrit",
+      "status": "待抽检"
+    },
+    "in.preset.reason.notFound": {
+      "fr": "ce préréglage n’existe plus",
+      "status": "待抽检"
+    },
+    "in.preset.reason.notReady": {
+      "fr": "le plug-in n’est pas encore prêt",
+      "status": "待抽检"
+    },
+    "in.preset.reason.unknown": {
+      "fr": "raison inconnue",
+      "status": "待抽检"
+    },
+    "in.preset.deleteFail": {
+      "fr": "Suppression impossible : {reason}",
+      "status": "待抽检"
+    },
+    "in.preset.note": {
+      "fr": "Les préréglages n’incluent pas Boucle, le groupe, ni l’interrupteur et le plafond du limiteur.",
+      "status": "待抽检"
+    },
+    "in.dly.noteTipT": {
+      "fr": "Triolet : 2/3 de la valeur de note",
+      "status": "待抽检"
+    },
+    "in.dly.noteTipD": {
+      "fr": "Pointée : 1,5 × la valeur de note",
+      "status": "待抽检"
+    },
+    "toast.presetLoaded": {
+      "fr": "« {name} » chargé ; le retour revient en fondu depuis 0",
+      "status": "待抽检"
+    },
+    "toast.presetSaved": {
+      "fr": "Préréglage « {name} » enregistré",
+      "status": "待抽检"
+    },
+    "toast.presetDeleted": {
+      "fr": "Préréglage « {name} » supprimé",
+      "status": "待抽检"
+    },
+    "toast.presetBroken": {
+      "fr": "Ce fichier de préréglage est illisible, il n’a pas été chargé",
+      "status": "待抽检"
+    },
+    "toast.presetLoadFail": {
+      "fr": "Chargement impossible : {reason}",
+      "status": "待抽检"
     }
   }
 }

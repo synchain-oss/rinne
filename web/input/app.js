@@ -11,7 +11,7 @@
 // 启动：真宿主的第一批快照到齐之前，页面不替宿主编造任何值。400 ms 内没有快照，只把界面揭出来（标签与「—」，所有
 // 写入与手势关着，缩放下拉也置灰，紧急切断、语言、关于照常可用），同时按间隔重发 requestInitialState；快照到了走正常的首帧路径。
 // 只有完全没有桥（离线模式）才用默认快照显示。
-// 预览专用：浏览器预览里从 mock 读场景描述，用来直接摆出限制器确认、关于面板、缩放确认这几种覆盖层；
+// 预览专用：浏览器预览里从 mock 读场景描述，用来直接摆出限制器确认、关于面板、缩放确认、预设面板这几种覆盖层；
 // 真宿主没有 previewScene，这些分支不会走到。
 
 import { createBridge } from "../shared/bridge.js";
@@ -54,6 +54,7 @@ import { createDelayCard } from "./components/delay-card.js";
 import { createSafetyCard } from "./components/safety-card.js";
 import { createMeterCard } from "./components/meter-card.js";
 import { createPeerRow } from "./components/peer-row.js";
+import { createPresetMenu } from "./preset-menu.js";
 import { createPanic, createLimiterConfirm } from "./components/safety-layer.js";
 import { setHidden, setVar } from "./components/util.js";
 import { createOfflineBridge, defaultFrames } from "./offline.js";
@@ -116,6 +117,7 @@ function boot() {
         renderQueued: false,
         scaleState: { confirming: false, left: 0 },
         sceneApplied: false,
+        menuSceneApplied: false,
         pending: false,
         pendingLang: "zh",
         uiLocked: true,
@@ -306,6 +308,7 @@ function boot() {
     };
     const pairRow = el("div", { class: "in-pairrow" }, group.el, pairPill.el);
     const presetSlot = el("div", { class: "in-preset-slot", "data-slot": "preset-trigger" });
+    const presetMenu = createPresetMenu(ctx, { slot: presetSlot, host: shell.layer });
     shell.content.append(
         at(header.el, 20, 17),
         at(presetSlot, 314, 21, 200, 30),
@@ -395,6 +398,7 @@ function boot() {
             t,
         });
         for (const card of Object.values(cards)) card.render();
+        presetMenu.render();
         panic.update({ cut: Boolean(safety.cut), overScrim: about.isOpen() || S.scaleState.confirming, t });
         limiterConfirm.retext(t);
         renderMessages();
@@ -547,6 +551,7 @@ function boot() {
         if (about.isOpen()) about.close();
         if (S.scaleState.confirming) scaleUi.revert();
         limiterConfirm.close();
+        presetMenu.close();
         numEdit.close();
         renderShellState();
     }
@@ -593,6 +598,7 @@ function boot() {
         enforceZoomLock(f.uiScale, (s) => opened.bridge.setUiScale(s));
         if (changed) scheduleRender();
         maybeApplyScene();
+        maybeApplyMenuScene();
     };
     const onPair = (f) => {
         if (!fresh("pair", f)) return;
@@ -600,6 +606,7 @@ function boot() {
         S.pair = f;
         if (changed) scheduleRender();
         maybeApplyScene();
+        maybeApplyMenuScene();
     };
     const onParams = (f) => {
         if (!fresh("params", f) || !f.values) return;
@@ -625,7 +632,10 @@ function boot() {
     bridge.on("rinne.pair", onPair);
     bridge.on("rinne.params", onParams);
     bridge.on("rinne.meters", onMeters);
-    bridge.on("rinne.presets", () => {});
+    bridge.on("rinne.presets", (f) => {
+        presetMenu.setPresets(f);
+        maybeApplyMenuScene();
+    });
     bridge.on("rinne.error", () => {});
 
     /** 智能默认刚认领了组：10 秒内给一条可关的提示。 */
@@ -661,6 +671,17 @@ function boot() {
         });
     }
 
+    /** 预览专用：预设面板的场景要等 rinne.presets 到了才摆（面板在它之前不开）。 */
+    function maybeApplyMenuScene() {
+        if (S.menuSceneApplied || !scene || scene.overlay !== "presetMenu") return;
+        if (!isReady() || !presetMenu.hasPresets()) return;
+        S.menuSceneApplied = true;
+        queueMicrotask(() => {
+            renderAll();
+            presetMenu.showState(scene.presetState || "list", scene.name);
+        });
+    }
+
     // ---- 快照没到时的界面
     const pendingLang = () => {
         const l = S.state && S.state.lang;
@@ -683,6 +704,7 @@ function boot() {
         langCap.update({ lang, t });
         group.update({ group: null, auto: false, peers: [], unassigned: false, autoGroup: null, disabled: true, t });
         for (const card of Object.values(cards)) card.renderPending(t);
+        presetMenu.renderPending(t);
         panic.update({ cut: false, overScrim: about.isOpen() || S.scaleState.confirming, t });
         // 缩放：宿主的档位还不知道，下拉里只有一项「—」且置灰（选档要记下选档前的档位，快照没到时那是编出来的）。
         // 下拉是共享页脚的节点，页脚的 update 在 locked 为假时会把它重新打开，所以每次 update 之后再关一次；
@@ -700,12 +722,15 @@ function boot() {
         scaleConfirm.update({ ...S.scaleState, t });
     }
 
-    /** 第一批真快照到了：撤掉「—」状态，打开操作；关于面板若开着，换成宿主的值。 */
+    /**
+     * 第一批真快照到了：撤掉「—」状态，打开操作；关于面板若开着，换成宿主的值。
+     * 关于面板在 400 ms 兜底揭幕之前就可能被打开（此时 S.pending 还没置位），所以不看之前是不是处在揭幕态，
+     * 只要面板开着且快照在手就刷新：高级设置才会放开、版本才会写上。
+     */
     function leavePending() {
-        const wasPending = S.pending;
         S.pending = false;
         setLocked(false);
-        if (wasPending && about.isOpen() && S.state) {
+        if (about.isOpen() && S.state) {
             const st = S.state;
             const lang = LANGS.includes(st.lang) ? st.lang : "zh";
             about.update({
