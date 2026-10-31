@@ -40,10 +40,16 @@ const { GATED_WRITES } = await import(u("web/input/bridge-gate.js"));
 const RECORDED = [...GATED_WRITES, "panic", "setLang", "setUiScale", "requestInitialState"];
 const PANIC = '[data-gb="input.panic"]';
 
-/** 把 requestInitialState 扣住：壳页在建会话时给 mock 装上钩子（addScriptToEvaluateOnNewDocument 在壳页脚本之前跑）。 */
+/**
+ * 把 requestInitialState 扣住：壳页在建会话时给 mock 装上钩子（addScriptToEvaluateOnNewDocument 在壳页脚本之前跑）。
+ * 放行有两种：测试经 CDP 把 __hold 置假；或设 __releaseAtCall = N，钩子自己数次数，从第 N 次调用起放行（不经 CDP，
+ * 不受往返延迟影响）。__heldCalls 数的是被扣住（没发首帧）的调用次数。
+ */
 const HOLD_HOOK = `(() => {
     window.__hold = true;
     window.__initialCalls = 0;
+    window.__heldCalls = 0;
+    window.__releaseAtCall = 0;
     let session;
     Object.defineProperty(window, "__RINNE_PREVIEW__", {
         configurable: true,
@@ -56,7 +62,12 @@ const HOLD_HOOK = `(() => {
             window.__origInitial = () => orig.apply(m, []);
             m.requestInitialState = function () {
                 window.__initialCalls++;
-                return window.__hold ? { ok: true } : orig.apply(m, arguments);
+                const release = window.__releaseAtCall > 0 && window.__initialCalls >= window.__releaseAtCall;
+                if (window.__hold && !release) {
+                    window.__heldCalls++;
+                    return { ok: true };
+                }
+                return orig.apply(m, arguments);
             };
         },
     });
@@ -84,11 +95,18 @@ const HOLD_FALLBACK_HOOK = `(() => {
     };
 })()`;
 
-/** 打开 Input 页面并扣住首批快照；返回时页面已建好外壳。holdFallback 为真时连兜底揭幕也扣住。 */
-async function openHeld(browser, server, scenario, { holdFallback = false } = {}) {
+/**
+ * 打开 Input 页面并扣住首批快照；返回时页面已建好外壳。holdFallback 为真时连兜底揭幕也扣住；
+ * releaseAtCall 大于 0 时，钩子从第 N 次 requestInitialState 起自己放行。
+ */
+async function openHeld(browser, server, scenario, { holdFallback = false, releaseAtCall = 0 } = {}) {
     const page = await browser.newPage();
     await page.setViewport(VIEW.w, VIEW.h, 1);
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_HOOK });
+    if (releaseAtCall > 0)
+        await page.send("Page.addScriptToEvaluateOnNewDocument", {
+            source: `window.__releaseAtCall = ${releaseAtCall}`,
+        });
     if (holdFallback) await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_FALLBACK_HOOK });
     const q = new URLSearchParams({ fresh: "1", auto: "0", lang: "zh", scenario });
     await page.goto(`${server.url}/web-preview/input.html?${q}`);
@@ -658,17 +676,16 @@ try {
 
     // ====== 场景 D：重发能把快照拉回来；快照到了就不再重发
     {
-        const page = await openHeld(browser, server, "in-playing");
-        await sleep(page, 600);
-        const c0 = await page.eval(`window.__initialCalls`);
-        run.check(c0 >= 2, `D：到 600 ms 时应已重发过至少一次，实得共 ${c0} 次`);
-        // 放行但不手动补发：下一次重发应当把首批快照拉回来
-        await page.eval(`window.__hold = false`);
+        // 放行由钩子在页内数次数：第 3 次调用（第二次重发）起放行，前两次被扣住。页面只重发三次、间隔 400 ms，
+        // 所以放行必须赶在重发用完之前；经 CDP 放行的话，负载高时放行晚于约 1.2 s，之后没有重发，永远等不到
+        const page = await openHeld(browser, server, "in-playing", { releaseAtCall: 3 });
         await page.waitFor(
             `(() => { const f = document.querySelector("iframe"); const p = f.contentDocument.querySelector('[data-gb="input.pair.pill"]'); return !!p && p.hasAttribute("data-state"); })()`,
             { timeout: 5000, label: "D：宿主恢复后，下一次重发应拉回首批快照" },
         );
+        run.eq(await page.eval(`window.__heldCalls`), 2, "D：前两次请求被扣住（没有首帧），第三次起才放行");
         const c1 = await page.eval(`window.__initialCalls`);
+        run.check(c1 >= 3, `D：首批快照是重发拉回来的，请求应至少有三次，实得 ${c1} 次`);
         await sleep(page, 1500);
         const c2 = await page.eval(`window.__initialCalls`);
         run.eq(c2, c1, "D：快照到了之后不应再重发 requestInitialState");
