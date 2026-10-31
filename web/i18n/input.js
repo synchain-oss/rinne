@@ -219,6 +219,8 @@ export default {
         "in.preset.badChars": '名称不能包含 \\ / : * ? " < > |',
         "in.preset.deleteConfirm": "删除后无法恢复。",
         "in.preset.saveFail": "保存失败：{reason}",
+        "in.preset.reason.writeFailed": "无法写入文件",
+        "in.preset.deleteFail": "删除失败：{reason}",
         "in.preset.note": "预设不含环路开关、组号、限制器开关与上限。",
         // toast
         "toast.restored": "回送已恢复，从 0 淡入",
@@ -453,6 +455,8 @@ export default {
         "in.preset.badChars": "Names can’t contain \\ / : * ? “ ” < > |",
         "in.preset.deleteConfirm": "This can’t be undone.",
         "in.preset.saveFail": "Couldn’t save: {reason}",
+        "in.preset.reason.writeFailed": "the file could not be written",
+        "in.preset.deleteFail": "Couldn’t delete: {reason}",
         "in.preset.note": "Presets don’t include Loop, the group, or the limiter switch and ceiling.",
         // toast
         "toast.restored": "Return restored, fading in from 0",
@@ -689,6 +693,8 @@ export default {
         "in.preset.badChars": "Le nom ne peut pas contenir \\ / : * ? “ ” < > |",
         "in.preset.deleteConfirm": "Action irréversible.",
         "in.preset.saveFail": "Échec de l’enregistrement : {reason}",
+        "in.preset.reason.writeFailed": "le fichier n’a pas pu être écrit",
+        "in.preset.deleteFail": "Suppression impossible : {reason}",
         "in.preset.note":
             "Les préréglages n’incluent pas Boucle, le groupe, ni l’interrupteur et le plafond du limiteur.",
         // toast

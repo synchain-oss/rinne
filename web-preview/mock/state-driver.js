@@ -11,7 +11,7 @@
 // 模块顶层不碰 window，存储与计时器从外面注入。
 
 import { memoryStorage } from "./bridge-common.js";
-import { createInputBackend } from "./bridge-input.js";
+import { createInputBackend, makeUserPreset } from "./bridge-input.js";
 import { createOutputBackend } from "./bridge-output.js";
 import { LANG_CODES, PAIR_STATES, PARAM_DEFS, PARAM_IDS } from "./contract.js";
 import { sceneById } from "./scenarios.js";
@@ -93,6 +93,13 @@ function applyInputState(model, st) {
     if (typeof st.sr === "string") model.sampleRate = (parseNum(st.sr) ?? 48) * 1000;
     if (st.peerDots) model.pair.groupMask = st.peerDots.reduce((m, g) => m | (1 << "ABCDEFGH".indexOf(g)), 0);
     if (st.preset) model.presetDirty = String(st.preset).endsWith("*");
+}
+
+/** 场景的用户预设段：字符串数组按名字造成和 savePreset 同形的条目，参数取此刻的模型值（要在场景底座套完之后调）。 */
+function applyUserPresets(model, st) {
+    if (!Array.isArray(st.user)) return;
+    for (const name of st.user)
+        if (typeof name === "string" && name !== "") model.userPresets.push(makeUserPreset(model, name));
 }
 
 // ---- Input 场景底座 ----
@@ -253,6 +260,7 @@ function applyInput(model, st, sceneId) {
     const merged = base && base.role === "input" ? { ...base.state, ...st } : st;
     applyInputState(model, merged);
     if (sceneId) applyInputBase(model, { id: base && base.role === "input" ? base.id : sceneId, state: merged });
+    applyUserPresets(model, merged);
 }
 
 /** 套用一个场景的 state 到 Output 后端模型。 */

@@ -72,6 +72,18 @@ export function cleanPresetName(name) {
     return Array.from(s).slice(0, PRESET_NAME_MAX).join("").trim();
 }
 
+/** 当前模型值里进预设的那部分（不含环路开关、限制器和上限）。 */
+function presetValues(model) {
+    const values = {};
+    for (const id of PARAM_IDS) if (!PRESET_EXEMPT.includes(id)) values[id] = model.values[id];
+    return values;
+}
+
+/** 按当前模型值造一条用户预设（还没放进列表）；id 取 u-<12 位十六进制>，与原生预设库同形。 */
+export function makeUserPreset(model, name) {
+    return { id: `u-${(model.nextUserId++).toString(16).padStart(12, "0")}`, name, values: presetValues(model) };
+}
+
 /** 把值按参数定义夹取或校验；不合法返回 undefined。 */
 export function coerceParam(id, value) {
     const d = Object.prototype.hasOwnProperty.call(PARAM_DEFS, id) ? PARAM_DEFS[id] : null;
@@ -375,17 +387,11 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         savePreset(name, overwrite) {
             const clean = cleanPresetName(name);
             if (clean === "") return { ok: false, reason: "bad-name" };
-            const values = {};
-            for (const id of PARAM_IDS) if (!PRESET_EXEMPT.includes(id)) values[id] = model.values[id];
             // 重名按去空白后的显示名不分大小写比较；允许覆盖时沿用原 id 与原名
             const same = model.userPresets.find((p) => p.name.toLowerCase() === clean.toLowerCase());
             if (same && overwrite !== true) return { ok: false, reason: "exists" };
-            const entry = same || {
-                id: `u-${(model.nextUserId++).toString(16).padStart(12, "0")}`,
-                name: clean,
-                values,
-            };
-            entry.values = values;
+            const entry = same || makeUserPreset(model, clean);
+            entry.values = presetValues(model);
             if (!same) model.userPresets.push(entry);
             model.presetId = entry.id;
             model.presetDirty = false;

@@ -686,6 +686,14 @@
       "fr": "Échec de l’enregistrement : {reason}",
       "status": "待抽检"
     },
+    "in.preset.reason.writeFailed": {
+      "fr": "le fichier n’a pas pu être écrit",
+      "status": "待抽检"
+    },
+    "in.preset.deleteFail": {
+      "fr": "Suppression impossible : {reason}",
+      "status": "待抽检"
+    },
     "in.preset.note": {
       "fr": "Les préréglages n’incluent pas Boucle, le groupe, ni l’interrupteur et le plafond du limiteur.",
       "status": "待抽检"

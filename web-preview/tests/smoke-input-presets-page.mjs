@@ -240,6 +240,9 @@ function probe(doc, win) {
               cancel: btn(conf.querySelectorAll("button")[0]),
               go: btn(conf.querySelectorAll("button")[1]),
               tone: conf.getAttribute("data-tone"),
+              msg: shown(part("preset.delete.msg"))
+                  ? { text: txt(part("preset.delete.msg")), tone: part("preset.delete.msg").getAttribute("data-tone") }
+                  : null,
           }
         : null;
     const field = part("preset.name.input");
@@ -328,7 +331,7 @@ try {
     for (const lang of LANGS) {
         const t = T(lang);
         const tag = `[${lang}]`;
-        await fresh(page, server, "in-playing", lang);
+        const rec = await fresh(page, server, "in-playing", lang);
 
         // 按钮
         let p = await P(page);
@@ -494,11 +497,27 @@ try {
         p = await P(page);
         run.eq(
             p.save.msg,
-            { text: t("in.preset.saveFail", { reason: "write-failed" }), tone: "red" },
-            `${tag}保存失败提示（红，带原因码）`,
+            { text: t("in.preset.saveFail", { reason: t("in.preset.reason.writeFailed") }), tone: "red" },
+            `${tag}保存失败提示（红，write-failed 写人话，不露原因码）`,
         );
+        run.check(!p.save.msg.text.includes("write-failed"), `${tag}保存失败提示里不应出现原因码 write-failed`);
         run.eq(p.open, true, `${tag}保存失败时面板不收起`);
         await restoreSave();
+        // 不认识的码原样显示
+        const restoreWeird = await forceResult(page, "savePreset", { ok: false, reason: "weird-code" });
+        await clickSel(page, ".in-pm__save .sc-btn--cta");
+        await waitMenu(
+            page,
+            `r.querySelector('[data-part="preset.msg"]').textContent.includes("weird-code")`,
+            `${tag}不认识的原因码应原样显示`,
+        );
+        p = await P(page);
+        run.eq(
+            p.save.msg,
+            { text: t("in.preset.saveFail", { reason: "weird-code" }), tone: "red" },
+            `${tag}不认识的保存失败原因码原样显示`,
+        );
+        await restoreWeird();
         await typeInto(page, '[data-part="preset.name.input"]', "New one!");
         run.eq((await P(page)).state, "saveInput", `${tag}改动名字后失败提示应消失`);
 
@@ -545,6 +564,48 @@ try {
         );
         run.eq(p.active.part, null, `${tag}删除确认里焦点不在条目上`);
         run.eq(p.active.inside, true, `${tag}删除确认的默认焦点在面板里（取消键）`);
+        run.eq(p.del.msg, null, `${tag}刚进删除确认时没有失败提示`);
+        // 删除失败：留在确认态，红字写人话；再进确认态时提示已清；不认识的码原样显示
+        const DEL_MSG = '[data-part="preset.delete.msg"]';
+        const waitDelMsg = (needle, label) =>
+            waitMenu(
+                page,
+                `!!r.querySelector('${DEL_MSG}') && !r.querySelector('${DEL_MSG}').hidden && r.querySelector('${DEL_MSG}').textContent.includes(${JSON.stringify(needle)})`,
+                label,
+            );
+        const delId = await model(page, "m.presetId");
+        await rec.clear();
+        let restoreDelFail = await forceResult(page, "deletePreset", { ok: false, reason: "write-failed" });
+        await clickSel(page, '[data-part="preset.delete.confirm"] button:last-of-type');
+        await waitDelMsg(t("in.preset.reason.writeFailed"), `${tag}删除失败应显示红字提示`);
+        p = await P(page);
+        run.eq(
+            p.del.msg,
+            { text: t("in.preset.deleteFail", { reason: t("in.preset.reason.writeFailed") }), tone: "red" },
+            `${tag}删除失败提示（红，write-failed 写人话）`,
+        );
+        run.eq([p.state, p.open], ["deleteConfirm", true], `${tag}删除失败留在删除确认态，面板不收起`);
+        run.check(!p.toast || p.toast.state !== "presetDeleted", `${tag}删除失败不应出「已删除」toast`);
+        run.eq(
+            await bridgeCalls(page, ["deletePreset"]),
+            [["deletePreset", delId]],
+            `${tag}删除失败时桥收到过一次 deletePreset(当前预设 ID)`,
+        );
+        await restoreDelFail();
+        await clickSel(page, '[data-part="preset.delete.confirm"] button:first-of-type');
+        await waitMenu(page, `r.getAttribute("data-state") === "list"`, `${tag}取消回列表`);
+        await clickSel(page, '[data-part="preset.delete"]');
+        await waitMenu(page, `r.getAttribute("data-state") === "deleteConfirm"`, `${tag}再进删除确认`);
+        run.eq((await P(page)).del.msg, null, `${tag}取消后再进删除确认，上一次的失败提示已清掉`);
+        restoreDelFail = await forceResult(page, "deletePreset", { ok: false, reason: "boom" });
+        await clickSel(page, '[data-part="preset.delete.confirm"] button:last-of-type');
+        await waitDelMsg("boom", `${tag}不认识的删除失败原因码应原样显示`);
+        run.eq(
+            (await P(page)).del.msg,
+            { text: t("in.preset.deleteFail", { reason: "boom" }), tone: "red" },
+            `${tag}不认识的删除失败原因码原样显示`,
+        );
+        await restoreDelFail();
         await clickSel(page, '[data-part="preset.delete.confirm"] button:last-of-type');
         await waitToast(page, "presetDeleted", `${tag}删除成功应出 toast`);
         p = await P(page);
@@ -768,12 +829,17 @@ try {
         const curId = await model(page, "m.presetId");
         await clickSel(page, '[data-part="preset.delete"]');
         await waitMenu(page, `r.getAttribute("data-state") === "deleteConfirm"`, "删除确认");
-        // 删除失败：留在确认态，不出 toast
+        // 删除失败：留在确认态，不出 toast，红字提示
         const restoreDel = await forceResult(page, "deletePreset", { ok: false, reason: "write-failed" });
         await clickSel(page, '[data-part="preset.delete.confirm"] button:last-of-type');
         await sleep(page, 300);
         p = await P(page);
         run.eq(p.state, "deleteConfirm", "删除失败应留在确认态");
+        run.eq(
+            p.del.msg,
+            { text: T("zh")("in.preset.deleteFail", { reason: T("zh")("in.preset.reason.writeFailed") }), tone: "red" },
+            "删除失败应显示红字提示",
+        );
         run.check(!p.toast || p.toast.state !== "presetDeleted", "删除失败不应出「已删除」toast");
         await restoreDel();
         await rec.clear();
@@ -1052,6 +1118,38 @@ try {
             "in-preset-menu：当前预设是 slapback",
         );
         run.check(p.rect.r <= 524.5, `in-preset-menu：面板右缘不过 524，实得 ${p.rect.r.toFixed(1)}`);
+        // 场景里写的三个用户预设（state-driver 映射成 mock 的用户预设）：摆在用户段、长名省略带 title、三行刚好放下不滚动；再添三个就在段内滚动
+        const LONG = "我的超长预设名称用于测试截断效果甲乙";
+        const sceneUsers = p.rows.filter((r) => r.kind === "user");
+        run.eq(
+            sceneUsers.map((r) => r.text).sort(),
+            ["Long tail 2", "Vox 回旋", LONG].sort(),
+            "in-preset-menu：用户段摆出场景给的三个用户预设",
+        );
+        run.check(
+            sceneUsers.every((r) => /^u-[0-9a-f]{12}$/.test(r.id)),
+            "in-preset-menu：场景里的用户预设 ID 形如 u-<12 位十六进制>",
+        );
+        run.eq(p.userList && p.userList.clientH, 72, "in-preset-menu：用户段高 72（刚好 3 行）");
+        run.check(
+            p.userList && p.userList.scrollH <= 72.5,
+            `in-preset-menu：三个用户预设刚好放下，不需要滚动，实得 scrollHeight ${p.userList && p.userList.scrollH}`,
+        );
+        const sceneLong = sceneUsers.find((r) => r.text === LONG);
+        run.check(sceneLong && sceneLong.ellipsis, "in-preset-menu：场景里的超长用户预设名被省略号截断");
+        run.eq(sceneLong && sceneLong.title, LONG, "in-preset-menu：被截断的用户预设名带完整 title");
+        const sceneH = p.rect.h;
+        await seedUsers(page, ["Aa 1", "Bb 2", "Cc 3"]);
+        const p6s = await P(page);
+        run.check(
+            p6s.userList.scrollH > 72 + 20,
+            `in-preset-menu：场景里再添三个，内容应超出而在用户段内滚动，实得 scrollHeight ${p6s.userList.scrollH}`,
+        );
+        run.eq(
+            [p6s.userList.clientH, p6s.userList.overflowY, p6s.rect.h],
+            [72, "auto", sceneH],
+            "in-preset-menu：超过三行时用户段仍高 72、内部滚动，面板整体不长高",
+        );
         await openInput(page, server, "in-preset-save", { lang: "zh" });
         await waitMenu(page, "!r.hidden", "in-preset-save 应摆出展开的面板");
         p = await P(page);

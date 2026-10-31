@@ -451,7 +451,7 @@ export function contrastProbe(doc, win) {
 
 /** 设计稿给的三个用户预设名（第三个超长，用来量截断）。 */
 export const PRESET_USERS = Object.freeze(["Vox 回旋", "Long tail 2", "我的超长预设名称用于测试截断效果甲乙"]);
-/** openPresetState 认的子态：list（工厂当前）、longCurrent（超长用户名当前）、saveInput、empty、badChars、dupe、saveFail、deleteConfirm。 */
+/** openPresetState 认的子态：list（工厂当前）、longCurrent（超长用户名当前）、saveInput、empty、badChars、dupe、saveFail、deleteConfirm、deleteFail。 */
 export const PRESET_STATES = Object.freeze([
     "list",
     "longCurrent",
@@ -461,11 +461,13 @@ export const PRESET_STATES = Object.freeze([
     "dupe",
     "saveFail",
     "deleteConfirm",
+    "deleteFail",
 ]);
 
 /**
  * 在已就绪的页面（场景 in-playing 之类）上摆出预设面板的某个子态，走真实交互：经 mock 造三个用户预设，按子态载入工厂或用户预设，
- * 点开面板、点动作、往输入框里写字；saveFail 让宿主对保存回 write-failed。摆好后等页面静下来再返回。
+ * 点开面板、点动作、往输入框里写字；saveFail 让宿主对保存回 write-failed，deleteFail 让宿主对删除回 write-failed（面板留在删除确认态）。
+ * 摆好后等页面静下来再返回。
  */
 export async function openPresetState(page, state) {
     if (!PRESET_STATES.includes(state)) throw new Error(`未知的预设子态 ${state}`);
@@ -488,13 +490,24 @@ export async function openPresetState(page, state) {
     const users = await page.eval(`window.__RINNE_PREVIEW__.model.userPresets.map((p) => [p.id, p.name])`);
     const idOf = (name) => users.find((u) => u[1] === name)[0];
     const cur =
-        state === "deleteConfirm" ? idOf("Long tail 2") : state === "longCurrent" ? idOf(PRESET_USERS[2]) : "slapback";
+        state === "deleteConfirm" || state === "deleteFail"
+            ? idOf("Long tail 2")
+            : state === "longCurrent"
+              ? idOf(PRESET_USERS[2])
+              : "slapback";
     await mock("loadPreset", cur);
     await nap(300);
     await click('[data-gb="input.preset.trigger"]');
     await nap(150);
-    if (state === "deleteConfirm") await click('[data-part="preset.delete"]');
-    else if (state !== "list" && state !== "longCurrent") {
+    if (state === "deleteConfirm" || state === "deleteFail") {
+        await click('[data-part="preset.delete"]');
+        if (state === "deleteFail") {
+            await page.eval(
+                `(() => { const m = window.__RINNE_PREVIEW__.mock; m.deletePreset = () => ({ ok: false, reason: "write-failed" }); })()`,
+            );
+            await click(".in-pm__confirm .in-btn--darkred");
+        }
+    } else if (state !== "list" && state !== "longCurrent") {
         await click('[data-part="preset.saveAs"]');
         if (state === "empty") await write("");
         else if (state === "badChars") await write("Vox/回旋");
@@ -513,7 +526,7 @@ export async function openPresetState(page, state) {
         const e = doc.querySelector(".in-pm");
         return e && !e.hidden ? e.getAttribute("data-state") : null;
     });
-    const want = state === "longCurrent" ? "list" : state;
+    const want = state === "longCurrent" ? "list" : state === "deleteFail" ? "deleteConfirm" : state;
     if (got !== want) throw new Error(`预设面板应摆在 ${want} 态，实得 ${got}`);
 }
 
@@ -784,6 +797,11 @@ if (isMain) {
         run.check(
             tp.some((i) => i.tier === "A" && /无法恢复/.test(i.text)),
             `删除确认应按 A，实得 ${JSON.stringify(tp.filter((i) => /无法恢复/.test(i.text)).map((i) => [i.tier, i.text]))}`,
+        );
+        tp = await tiersIn("deleteFail");
+        run.check(
+            tp.some((i) => i.tier === "A" && /删除失败/.test(i.text)),
+            `删除失败提示（红）应按 A，实得 ${JSON.stringify(tp.filter((i) => /删除失败/.test(i.text)).map((i) => [i.tier, i.text]))}`,
         );
 
         // 确认框要不透明；改成透明时判据必须判红

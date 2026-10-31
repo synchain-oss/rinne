@@ -98,6 +98,8 @@ export function createPresetMenu(ctx, o) {
     /** null | dupe | badChars | saveFail */
     let msg = null;
     let failReason = "";
+    /** 删除失败的原因码（null：没有失败提示）；只在删除确认态下显示。 */
+    let delFail = null;
     /** 宿主回过 exists 的名字（页面手里的列表已经旧了）：下次保存按覆盖发。 */
     const staleDupes = new Set();
     let rowSig = "";
@@ -168,6 +170,13 @@ export function createPresetMenu(ctx, o) {
         el("div", { class: "in-pm__btns" }, delCancel, delGo),
     );
 
+    const delMsgEl = el("div", {
+        class: "in-pm__delfail",
+        role: "status",
+        "data-tone": "red",
+        "data-part": "preset.delete.msg",
+    });
+
     const input = el("input", {
         class: "in-pm__input",
         type: "text",
@@ -200,6 +209,7 @@ export function createPresetMenu(ctx, o) {
         sep(),
         actList,
         actDelete,
+        delMsgEl,
         actSave,
         note,
     );
@@ -222,6 +232,8 @@ export function createPresetMenu(ctx, o) {
     };
     const isDupe = (name) => userNames().some((u) => sameName(u, name)) || staleDupes.has(String(name).toLowerCase());
     const usable = () => presets !== null && !ctx.locked();
+    /** 失败原因码换成人话；表里没有的码原样显示。 */
+    const reasonText = (code) => (code === "write-failed" ? tr()("in.preset.reason.writeFailed") : code);
 
     // ---- 渲染
     function stateName() {
@@ -383,10 +395,13 @@ export function createPresetMenu(ctx, o) {
         setAttr(saveGo, "data-disabled", blocked ? "1" : null);
         if (msg === "dupe") setText(msgEl, t("in.preset.dupe"));
         else if (msg === "badChars") setText(msgEl, t("in.preset.badChars"));
-        else if (msg === "saveFail") setText(msgEl, t("in.preset.saveFail", { reason: failReason }));
+        else if (msg === "saveFail") setText(msgEl, t("in.preset.saveFail", { reason: reasonText(failReason) }));
         else setText(msgEl, "");
         setHidden(msgEl, msg === null);
         setAttr(msgEl, "data-tone", msg === "saveFail" ? "red" : msg ? "amber" : null);
+
+        setText(delMsgEl, delFail === null ? "" : t("in.preset.deleteFail", { reason: reasonText(delFail) }));
+        setHidden(delMsgEl, view !== "delete" || delFail === null);
 
         setHidden(actList, view !== "list");
         setHidden(actDelete, view !== "delete");
@@ -406,6 +421,7 @@ export function createPresetMenu(ctx, o) {
         view = "list";
         msg = null;
         failReason = "";
+        delFail = null;
         staleDupes.clear();
         // 每次打开都从当前预设起步（上次停在哪个条目不算）
         rovingRow = null;
@@ -422,6 +438,7 @@ export function createPresetMenu(ctx, o) {
         isOpen = false;
         view = "list";
         msg = null;
+        delFail = null;
         setHidden(root, true);
         document.removeEventListener("pointerdown", onOutside, true);
         renderTrigger();
@@ -438,6 +455,7 @@ export function createPresetMenu(ctx, o) {
     function toList() {
         view = "list";
         msg = null;
+        delFail = null;
         renderPanel();
         setRoving(rovingRow, true);
     }
@@ -464,6 +482,7 @@ export function createPresetMenu(ctx, o) {
     function toDelete() {
         if (!curUser() || !can("deletePreset")) return;
         view = "delete";
+        delFail = null;
         renderPanel();
         delCancel.focus({ preventScroll: true });
     }
@@ -555,8 +574,12 @@ export function createPresetMenu(ctx, o) {
         if (r && r.ok) {
             ctx.toast("toast.presetDeleted", { name }, "green");
             if (isOpen) toList();
+            return;
         }
-        // 失败时留在确认态：规格没有给删除失败的提示文案，页面不自己编
+        // 失败时留在确认态，红字写原因（表里没有的码原样显示），可以再点删除重试
+        if (!isOpen || view !== "delete") return;
+        delFail = r && typeof r.reason === "string" && r.reason !== "" ? r.reason : NO_NAME;
+        renderPanel();
     }
 
     saveAsBtn.addEventListener("click", () => toSave());

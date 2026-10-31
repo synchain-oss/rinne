@@ -256,6 +256,53 @@ const stores = () => ({ local: memoryStorage(), session: memoryStorage() });
     s.stop();
 }
 
+// ---------------------------------------------------------------- 预览场景：用户预设段
+{
+    const open = (scenario) => {
+        const s = createPreviewSession({ role: "input", params: `auto=0&scenario=${scenario}`, storage: stores() });
+        s.mock.requestInitialState();
+        const got = { presets: null, state: null };
+        s.mock.addEventListener("rinne.presets", (p) => (got.presets = p));
+        s.mock.addEventListener("rinne.state", (p) => (got.state = p));
+        s.core.push("rinne.presets");
+        s.core.push("rinne.state");
+        return { s, ...got };
+    };
+    const NAMES = ["Vox 回旋", "Long tail 2", "我的超长预设名称用于测试截断效果甲乙"];
+    const menu = open("in-preset-menu");
+    run.eq(
+        menu.presets.user.map((p) => p.name).sort(),
+        [...NAMES].sort(),
+        "场景 in-preset-menu：场景里写的三个用户预设都进了 rinne.presets.user",
+    );
+    run.check(
+        menu.presets.user.every((p) => /^u-[0-9a-f]{12}$/.test(p.id)) &&
+            new Set(menu.presets.user.map((p) => p.id)).size === NAMES.length,
+        "场景 in-preset-menu：用户预设 ID 形如 u-<12 位十六进制>且互不相同",
+    );
+    run.eq(menu.presets.current, "slapback", "场景 in-preset-menu：当前预设是工厂的 slapback");
+    const exempt = ["loop_on", "limiter", "ceiling"];
+    const entries = menu.s.model.userPresets;
+    run.check(
+        entries.every(
+            (e) =>
+                exempt.every((k) => !(k in e.values)) &&
+                e.values.feedback === menu.s.model.values.feedback &&
+                e.values.mix === menu.s.model.values.mix,
+        ),
+        "场景 in-preset-menu：用户预设的参数取场景套完底座后的模型值，且不含环路开关、限制器与上限",
+    );
+    run.eq(
+        menu.s.mock.savePreset("Fresh take", false).id,
+        "u-000000000004",
+        "场景造的三个预设占了前三个编号，之后保存的接着往下排",
+    );
+    menu.s.stop();
+    const plain = open("in-playing");
+    run.eq(plain.presets.user, [], "场景 in-playing 没写 user：用户预设段是空的");
+    plain.s.stop();
+}
+
 // ---------------------------------------------------------------- 时值：delay_note 十六档的顺序
 {
     const doc = fs.readFileSync(path.join(ROOT, "docs/UI_BRIDGE.md"), "utf8");

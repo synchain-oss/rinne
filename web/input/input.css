@@ -1923,10 +1923,19 @@ html[lang="fr"] .in-pt__label {
     color: var(--sem-amber-ink);
 }
 
-.in-pm__msg[data-tone="red"] {
+.in-pm__msg[data-tone="red"],
+.in-pm__delfail {
     font-family: var(--ff-grotesk);
     font-weight: 600;
     color: var(--sem-red-ink);
+}
+
+/* 删除失败的红字：放在删除确认条下面，写法和保存失败的红字一样 */
+.in-pm__delfail {
+    margin: 5px 2px 0;
+    padding: 0 8px;
+    font-size: var(--fs-110);
+    line-height: 1.35;
 }
 
 .in-pm__note {
