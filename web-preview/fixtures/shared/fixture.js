@@ -35,6 +35,11 @@ const scene = q.get("scene") || "window";
 const overlay = q.get("overlay") || "";
 const st = q.get("st") || "";
 const defect = q.get("defect") || "";
+// 轻提示的计时器。量文字、量对比度、查读屏角色的冒烟都要等字体、入场动画和浏览器往返，机器慢的时候从弹出到量的那一刻
+// 可以超过 TOAST_MS，提示自己收了就量不到。所以缺省给 createToast 一对不触发的计时器，提示一直留着；
+// 只有 ?toast=live 才用真计时器，专给「4 秒后自己收」那一组。
+const toastLive = q.get("toast") === "live";
+const HELD_TIMERS = { setTimeout: () => 0, clearTimeout: () => {} };
 const box = DESIGN[role];
 
 installDicts(common, PAGE_DICT);
@@ -224,7 +229,7 @@ function buildWindow() {
             scaleUi.revert();
         },
     });
-    toast = createToast({ host: shell.layer, role });
+    toast = createToast({ host: shell.layer, role, timers: toastLive ? undefined : HELD_TIMERS });
     about = createAbout({
         role,
         host: shell.top,
