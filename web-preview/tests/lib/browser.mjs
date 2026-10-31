@@ -111,6 +111,15 @@ class Page {
         await this.send("Runtime.enable");
         await this.send("Log.enable");
         await this.setViewport(width, height);
+        // 动效设定固定下来：不固定时跟着本机系统的「显示动画」开关走，同一份代码换台机器或关了开关结果就不同。要量 reduce 分支的用例自己切
+        await this.setReducedMotion(false);
+    }
+
+    /** 固定 prefers-reduced-motion：真 = reduce，假 = no-preference。 */
+    setReducedMotion(reduce) {
+        return this.send("Emulation.setEmulatedMedia", {
+            features: [{ name: "prefers-reduced-motion", value: reduce ? "reduce" : "no-preference" }],
+        });
     }
 
     setViewport(width, height, deviceScaleFactor = 1) {
