@@ -159,6 +159,8 @@ public:
     bool isInput() const noexcept { return config_.role == ipc::Role::kInput; }
     // 引擎的读出（原子快照）在任何线程读；lastBlockResult 一类块间状态只许音频线程（测试里就是调 process 的线程）读
     const engine::InputEngine& inputEngine() const noexcept { return input_; }
+    // 电平峰值读走即清零，读方要写：只给 Input 的原生桥用（消息线程），它是这些峰值唯一的读方，不碰引擎的其余部分
+    engine::Meters& inputMeters() noexcept { return input_.meters(); }
     const engine::OutputEngine& outputEngine() const noexcept { return output_; }
     // 会合本身（测试读绑定快照与槽观察者）；非实时线程，不与 tick 并发
     const ipc::Rendezvous& rendezvous() const noexcept { return *rendezvous_; }

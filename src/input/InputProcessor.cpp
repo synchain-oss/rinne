@@ -2,6 +2,8 @@
 
 #include "InputProcessor.h"
 
+#include <utility>
+
 #include "InputBridgeApi.h"
 #include "util/RinneVersion.h"
 
@@ -10,10 +12,10 @@ namespace rinne
 
 InputProcessor::InputProcessor() : InputProcessor(InstanceHostConfig{}) {}
 
-InputProcessor::InputProcessor(const InstanceHostConfig& config)
+InputProcessor::InputProcessor(const InstanceHostConfig& config, const juce::File& presetDirectory)
 {
     if constexpr (!build::kProbeBuild)
-        wiring_.emplace(*this);
+        wiring_.emplace(*this, presetDirectory);
     attachHost(Side::Input, config);
     // 新实例的命令计数都从 0 起，基线就是当时的值
     if constexpr (!build::kProbeBuild)
@@ -47,6 +49,7 @@ void InputProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce
 
 void InputProcessor::process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcept
 {
+    hostBypassed_.store(bypassed, std::memory_order_relaxed);
     if constexpr (build::kProbeBuild)
     {
         processProbe(buffer, bypassed);
@@ -74,6 +77,16 @@ void InputProcessor::setStateInformation(const void* data, int sizeInBytes)
         RinneProcessorBase::setStateInformation(data, sizeInBytes);
     else
         loadHostState(wiring_->glue, data, sizeInBytes);
+}
+
+void InputProcessor::updateTrackProperties(const TrackProperties& properties)
+{
+    // 名字与颜色各自独立：宿主这次没给的项沿用上次的（AU 只给名字），空名字不算给了
+    if (properties.name.has_value() && properties.name->isNotEmpty())
+        trackLabel_.name = properties.name;
+    if (properties.colour.has_value())
+        trackLabel_.colour = properties.colour;
+    RinneProcessorBase::updateTrackProperties(properties);
 }
 
 void InputProcessor::panic() noexcept
@@ -153,6 +166,74 @@ RinneProcessorBase::RepairOutcome InputProcessor::repairGroup(bool confirmTakeov
     {
         return repairWith(wiring_->glue, confirmTakeover);
     }
+}
+
+bool InputProcessor::takeOverGroup(int group)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        juce::ignoreUnused(group);
+        return false;
+    }
+    else
+    {
+        if (group < 1 || group > static_cast<int>(ipc::kGroupCount))
+            return false;
+        wiring_->glue.editConfigs([group](state::Configs& configs) {
+            configs.group = static_cast<std::uint8_t>(group);
+            configs.groupOrigin = state::GroupOrigin::User;
+        });
+        instanceHost().setGroup(static_cast<std::uint32_t>(group), ipc::ClaimIntent::kManualConfirmed);
+        wiring_->glue.markUserAction();
+        wiring_->glue.markStateDirty();
+        return true;
+    }
+}
+
+template<typename Edit>
+bool InputProcessor::applyUserConfig(Edit&& edit)
+{
+    if constexpr (build::kProbeBuild)
+    {
+        juce::ignoreUnused(edit);
+        return false;
+    }
+    else
+    {
+        wiring_->glue.editConfigs(std::forward<Edit>(edit));
+        wiring_->glue.markUserAction();
+        wiring_->glue.markStateDirty();
+        return true;
+    }
+}
+
+bool InputProcessor::selectTailMode(state::TailMode mode)
+{
+    if (!applyUserConfig([mode](state::Configs& configs) { configs.tailMode = mode; }))
+        return false;
+    // 外壳的 TailMode 与 state::TailMode 逐值相同（RinneProcessorBase.cpp 里有逐值断言）
+    setTailMode(static_cast<TailMode>(static_cast<int>(mode)));
+    return true;
+}
+
+bool InputProcessor::selectGuardOn(bool on)
+{
+    return applyUserConfig([on](state::Configs& configs) { configs.guardOn = on; });
+}
+
+bool InputProcessor::selectResetOnPlay(bool on)
+{
+    return applyUserConfig([on](state::Configs& configs) { configs.resetOnPlay = on; });
+}
+
+bool InputProcessor::selectFbUnit(state::FbUnit unit)
+{
+    return applyUserConfig([unit](state::Configs& configs) { configs.fbUnit = unit; });
+}
+
+bool InputProcessor::selectDelayUnit(state::DelayUnit unit)
+{
+    return applyUserConfig([unit](state::Configs& configs) { configs.delayUnit = unit; });
 }
 
 std::string InputProcessor::diagnosticsText() const
