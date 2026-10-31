@@ -109,6 +109,8 @@ const defaultValues = () => Object.fromEntries(PARAM_IDS.map((id) => [id, PARAM_
 export function createInputBackend({ storage, timers, opts, now = () => Date.now() } = {}) {
     const store = storage || { local: memoryStorage(), session: memoryStorage() };
     const core = createCore({ role: "input", events: EVENTS, storage: store, timers, opts });
+    /** 载入后淡入标签的计时器；再次载入时取消上一个。 */
+    let fadeTimer = null;
 
     const model = {
         version: "0.0.0-preview",
@@ -375,8 +377,11 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
             model.presetId = id;
             model.presetDirty = false;
             // 载入后回送从 0 淡入：页面据此显示「淡入中」，过了淡入时长撤掉
+            // 再次载入时先取消上一次的计时器，标签从最后一次载入算起满淡入时长才撤掉
             model.fadeIn = true;
-            core.timers.setTimeout(() => {
+            if (fadeTimer !== null) core.timers.clearTimeout(fadeTimer);
+            fadeTimer = core.timers.setTimeout(() => {
+                fadeTimer = null;
                 model.fadeIn = false;
                 core.scheduleEcho();
             }, PRESET_FADE_MS);

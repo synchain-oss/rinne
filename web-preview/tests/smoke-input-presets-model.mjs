@@ -303,6 +303,64 @@ const stores = () => ({ local: memoryStorage(), session: memoryStorage() });
     plain.s.stop();
 }
 
+// ---------------------------------------------------------------- mock：载入后「淡入中」标签的计时
+{
+    // 假定时器，手动推进；setInterval 只占个号（回声不在这里测）
+    let now = 0;
+    let id = 0;
+    const q = new Map();
+    const timers = {
+        setTimeout(fn, ms) {
+            q.set(++id, { at: now + ms, fn });
+            return id;
+        },
+        clearTimeout(i) {
+            q.delete(i);
+        },
+        setInterval: () => ++id,
+        clearInterval() {},
+        tick(ms) {
+            const end = now + ms;
+            for (;;) {
+                const next = [...q.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+                if (!next) break;
+                q.delete(next[0]);
+                now = next[1].at;
+                next[1].fn();
+            }
+            now = end;
+        },
+    };
+    const s = createPreviewSession({ role: "input", params: "auto=0", storage: stores(), timers });
+    const m = s.mock;
+    m.requestInitialState();
+    let state = null;
+    m.addEventListener("rinne.state", (p) => (state = p));
+    const fade = () => {
+        s.core.push("rinne.state");
+        return state.safety.fadeIn;
+    };
+    run.eq(fade(), false, "淡入标签：没载入过时没有");
+    m.loadPreset("slapback");
+    run.eq(fade(), true, "淡入标签：载入后出现");
+    timers.tick(509);
+    run.eq(fade(), true, "淡入标签：只载入一次时，509 ms 还在");
+    timers.tick(1);
+    run.eq(fade(), false, "淡入标签：只载入一次时，510 ms 撤掉");
+
+    // 相隔 300 ms 载入两次：第一次的计时器不能抢先撤掉标签，要从最后一次载入算起满 510 ms
+    m.loadPreset("slapback");
+    timers.tick(300);
+    m.loadPreset("pingPong");
+    timers.tick(300);
+    run.eq(fade(), true, "淡入标签：相隔 300 ms 载入两次，第一次载入后 600 ms 时标签还在");
+    timers.tick(209);
+    run.eq(fade(), true, "淡入标签：第二次载入后 509 ms 标签还在");
+    timers.tick(1);
+    run.eq(fade(), false, "淡入标签：第二次载入后满 510 ms 才撤掉");
+    s.stop();
+}
+
 // ---------------------------------------------------------------- 时值：delay_note 十六档的顺序
 {
     const doc = fs.readFileSync(path.join(ROOT, "docs/UI_BRIDGE.md"), "utf8");

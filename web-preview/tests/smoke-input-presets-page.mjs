@@ -645,6 +645,36 @@ try {
         );
         await restoreLoad();
 
+        // 其余失败按原因出带原因的琥珀 toast（bad-file 才是「预设文件无法读取」）；相邻两条的文字不同，免得读到上一条的残留
+        const loadFails = [
+            ["not-found", { ok: false, reason: "not-found" }, t("in.preset.reason.notFound")],
+            ["桥抛异常（回 null）", null, t("in.preset.reason.unknown")],
+            ["not-ready", { ok: false, reason: "not-ready" }, t("in.preset.reason.notReady")],
+            ["没有原因码", { ok: false }, t("in.preset.reason.unknown")],
+            ["不认识的原因码", { ok: false, reason: "weird-code" }, "weird-code"],
+        ];
+        for (const [what, result, shown] of loadFails) {
+            const restoreOne = await forceResult(page, "loadPreset", result);
+            await clickSel(page, '.in-pm__opt[data-id="init"]');
+            const want = t("toast.presetLoadFail", { reason: shown });
+            await page.waitFor(
+                `(() => { const d = document.querySelector("iframe").contentDocument; const x = d.querySelector('[data-gb="input.toast"]'); return !!x && !x.hidden && x.getAttribute("data-state") === "presetLoadFail" && x.querySelector(".rn-toast__text").textContent === ${JSON.stringify(want)}; })()`,
+                { timeout: 6000, label: `${tag}载入失败（${what}）应出带原因的 toast` },
+            );
+            p = await P(page);
+            run.eq([p.toast.text, p.toast.tone], [want, "amber"], `${tag}载入失败（${what}）：带原因的琥珀 toast`);
+            run.check(
+                !p.toast.text.includes(t("toast.presetBroken")),
+                `${tag}载入失败（${what}）：不是「预设文件无法读取」那一条`,
+            );
+            run.eq(
+                [p.open, p.trig.name],
+                [true, factoryName("pingPong", lang)],
+                `${tag}载入失败（${what}）：面板不收起，当前预设不变`,
+            );
+            await restoreOne();
+        }
+
         // 底注与整体高度（有 1 个用户预设之后）
         p = await P(page);
         run.check(p.rect.h > 300 && p.rect.h < 440, `${tag}面板整体高度应在 300–440 之间，实得 ${p.rect.h.toFixed(1)}`);

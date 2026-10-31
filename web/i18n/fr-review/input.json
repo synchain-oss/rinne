@@ -690,6 +690,18 @@
       "fr": "le fichier n’a pas pu être écrit",
       "status": "待抽检"
     },
+    "in.preset.reason.notFound": {
+      "fr": "ce préréglage n’existe plus",
+      "status": "待抽检"
+    },
+    "in.preset.reason.notReady": {
+      "fr": "le plug-in n’est pas encore prêt",
+      "status": "待抽检"
+    },
+    "in.preset.reason.unknown": {
+      "fr": "raison inconnue",
+      "status": "待抽检"
+    },
     "in.preset.deleteFail": {
       "fr": "Suppression impossible : {reason}",
       "status": "待抽检"
@@ -720,6 +732,10 @@
     },
     "toast.presetBroken": {
       "fr": "Ce fichier de préréglage est illisible, il n’a pas été chargé",
+      "status": "待抽检"
+    },
+    "toast.presetLoadFail": {
+      "fr": "Chargement impossible : {reason}",
       "status": "待抽检"
     }
   }

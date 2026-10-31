@@ -220,6 +220,9 @@ export default {
         "in.preset.deleteConfirm": "删除后无法恢复。",
         "in.preset.saveFail": "保存失败：{reason}",
         "in.preset.reason.writeFailed": "无法写入文件",
+        "in.preset.reason.notFound": "这个预设已不存在",
+        "in.preset.reason.notReady": "插件还没准备好",
+        "in.preset.reason.unknown": "原因未知",
         "in.preset.deleteFail": "删除失败：{reason}",
         "in.preset.note": "预设不含环路开关、组号、限制器开关与上限。",
         // toast
@@ -230,6 +233,7 @@ export default {
         "toast.presetSaved": "已保存预设「{name}」",
         "toast.presetDeleted": "已删除预设「{name}」",
         "toast.presetBroken": "预设文件无法读取，未载入",
+        "toast.presetLoadFail": "载入失败：{reason}",
         // params
         feedback: "反馈量",
         loop_on: "环路开关",
@@ -456,6 +460,9 @@ export default {
         "in.preset.deleteConfirm": "This can’t be undone.",
         "in.preset.saveFail": "Couldn’t save: {reason}",
         "in.preset.reason.writeFailed": "the file could not be written",
+        "in.preset.reason.notFound": "this preset no longer exists",
+        "in.preset.reason.notReady": "the plug-in isn’t ready yet",
+        "in.preset.reason.unknown": "unknown reason",
         "in.preset.deleteFail": "Couldn’t delete: {reason}",
         "in.preset.note": "Presets don’t include Loop, the group, or the limiter switch and ceiling.",
         // toast
@@ -466,6 +473,7 @@ export default {
         "toast.presetSaved": "Preset “{name}” saved",
         "toast.presetDeleted": "Preset “{name}” deleted",
         "toast.presetBroken": "That preset file can’t be read, so it wasn’t loaded",
+        "toast.presetLoadFail": "Couldn’t load: {reason}",
         // params
         feedback: "Feedback",
         loop_on: "Loop",
@@ -694,6 +702,9 @@ export default {
         "in.preset.deleteConfirm": "Action irréversible.",
         "in.preset.saveFail": "Échec de l’enregistrement : {reason}",
         "in.preset.reason.writeFailed": "le fichier n’a pas pu être écrit",
+        "in.preset.reason.notFound": "ce préréglage n’existe plus",
+        "in.preset.reason.notReady": "le plug-in n’est pas encore prêt",
+        "in.preset.reason.unknown": "raison inconnue",
         "in.preset.deleteFail": "Suppression impossible : {reason}",
         "in.preset.note":
             "Les préréglages n’incluent pas Boucle, le groupe, ni l’interrupteur et le plafond du limiteur.",
@@ -707,6 +718,7 @@ export default {
         "toast.presetSaved": "Préréglage « {name} » enregistré",
         "toast.presetDeleted": "Préréglage « {name} » supprimé",
         "toast.presetBroken": "Ce fichier de préréglage est illisible, il n’a pas été chargé",
+        "toast.presetLoadFail": "Chargement impossible : {reason}",
         // params
         feedback: "Réinjection",
         loop_on: "Boucle",

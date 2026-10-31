@@ -18,6 +18,12 @@ export const NAME_MAX = 24;
 export const BAD_CHARS = Object.freeze(["\\", "/", ":", "*", "?", '"', "<", ">", "|"]);
 /** 没有当前预设时按钮上写这个。 */
 const NO_NAME = "—";
+/** 有人话词条的失败原因码（表里没有的码原样显示）。 */
+const REASON_KEYS = Object.freeze({
+    "write-failed": "in.preset.reason.writeFailed",
+    "not-found": "in.preset.reason.notFound",
+    "not-ready": "in.preset.reason.notReady",
+});
 
 /** C0（含制表、换行）、DEL、C1。码位判，不写 \u 区间：字体检查会把源码里的转义当必需字符。 */
 const isControl = (cp) => cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
@@ -232,8 +238,11 @@ export function createPresetMenu(ctx, o) {
     };
     const isDupe = (name) => userNames().some((u) => sameName(u, name)) || staleDupes.has(String(name).toLowerCase());
     const usable = () => presets !== null && !ctx.locked();
-    /** 失败原因码换成人话；表里没有的码原样显示。 */
-    const reasonText = (code) => (code === "write-failed" ? tr()("in.preset.reason.writeFailed") : code);
+    /** 失败原因码换成人话；表里没有的码原样显示，没有原因码时写「原因未知」。 */
+    const reasonText = (code) => {
+        if (typeof code !== "string" || code === "") return tr()("in.preset.reason.unknown");
+        return Object.prototype.hasOwnProperty.call(REASON_KEYS, code) ? tr()(REASON_KEYS[code]) : code;
+    };
 
     // ---- 渲染
     function stateName() {
@@ -513,8 +522,10 @@ export function createPresetMenu(ctx, o) {
         if (r && r.ok) {
             ctx.toast("toast.presetLoaded", { name: label }, "green");
             close(true);
-        } else {
+        } else if (r && r.reason === "bad-file") {
             ctx.toast("toast.presetBroken", undefined, "amber");
+        } else {
+            ctx.toast("toast.presetLoadFail", { reason: reasonText(r && r.reason) }, "amber");
         }
     }
 
