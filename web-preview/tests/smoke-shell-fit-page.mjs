@@ -10,6 +10,7 @@
 //
 // 用法：node web-preview/tests/smoke-shell-fit-page.mjs [仓库根]
 
+import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { createRun, repoRoot } from "./lib/harness.mjs";
@@ -112,15 +113,45 @@ try {
     run.eq(await size(), [`${DESIGN.output.w}px`, `${DESIGN.output.h}px`], "Output：iframe 为 Output 设计盒");
     run.eq(await probe("last['rinne.pair'].state"), "connected", "场景 out-connected 的配对状态");
 
-    // 占位页（还没接桥）：工具条如实说明，不当作失败
+    // 没接桥的页面：工具条如实说明，不当作失败。壳页只认真源页面与探针页，所以经 CDP 把真源页面的请求换成测试自带的空页面
+    // （web-preview/fixtures/input/no-bridge.html：不建桥、不注册事件），壳页本身原样跑
+    const emptyPage = fs.readFileSync(path.join(ROOT, "web-preview/fixtures/input/no-bridge.html"));
+    let swapped = 0;
+    const swap = (ev) => {
+        const m = JSON.parse(ev.data);
+        if (m.method !== "Fetch.requestPaused") return;
+        swapped++;
+        page.send("Fetch.fulfillRequest", {
+            requestId: m.params.requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: "Content-Type", value: "text/html; charset=utf-8" }],
+            body: emptyPage.toString("base64"),
+        }).catch(() => {});
+    };
+    page.ws.addEventListener("message", swap);
+    await page.send("Fetch.enable", {
+        patterns: [{ urlPattern: `${server.url}/web/input/index.html*`, requestStage: "Request" }],
+    });
     await page.goto(`${server.url}/web-preview/input.html`);
     await page.waitFor(
         `document.querySelector(".pv-status")?.dataset.ok === "wait" && document.querySelector(".pv-status").textContent.includes("尚未接桥")`,
         {
-            label: "占位页：工具条应显示「页面尚未接桥」",
+            label: "没接桥的页面：工具条应显示「页面尚未接桥」",
         },
     );
-    run.check(true, "占位页：工具条显示「页面尚未接桥」，不判失败");
+    await page.send("Fetch.disable");
+    page.ws.removeEventListener("message", swap);
+    run.check(swapped >= 1, `没接桥的页面：真源页面的请求应被换成空页面，实际拦下 ${swapped} 次`);
+    run.eq(
+        await page.eval(`document.querySelector("iframe").contentDocument.title`),
+        "no-bridge",
+        "没接桥的页面：iframe 里装的是空页面",
+    );
+    run.eq(
+        await page.eval(`document.querySelector(".pv-status").dataset.ok`),
+        "wait",
+        "没接桥的页面：工具条状态是等待而不是失败，页面也没有错误",
+    );
 
     run.check(page.errors.length === 0, `页面不应有错误：${page.errors.join("；")}`);
     const foreign = requests.filter((u) => !/^(data|blob|about):/.test(u) && new URL(u).origin !== server.url);
