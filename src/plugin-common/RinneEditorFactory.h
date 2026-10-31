@@ -40,8 +40,9 @@ struct Options
     // 探针身份才用，由插件壳注入。返回新建的探针编辑器（调用方接管所有权）。身份是探针而这里为空时造不出编辑器
     std::function<juce::AudioProcessorEditor*()> probeEditorFactory;
 
-    // 网页编辑器的构造缝，单测注入替身，避开真实的浏览器组件。为空时造真正的网页编辑器
-    // （只有开了浏览器组件的构建里才有，宿主测试目标里没有）
+    // 网页编辑器的构造缝：插件壳经它造带角色专属桥函数的子类（Output 的 OutputEditor），单测注入替身，
+    // 避开真实的浏览器组件。为空时造通用的网页编辑器（只有开了浏览器组件的构建里才有，宿主测试目标里没有），
+    // 那样只有共用的四个桥函数。探针身份不走这条，见 probeEditorFactory
     std::function<juce::AudioProcessorEditor*(juce::AudioProcessor&)> webViewEditorMaker;
 };
 

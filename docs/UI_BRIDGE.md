@@ -37,16 +37,16 @@ The bridge between the web UI and the native plugin: function names, event names
 | `setLang` | `code`：`zh` / `en` / `fr` | `{ ok, lang }` | 写全局位，所有实例共用；不是这三个字符串之一回 `{ ok: false, reason: "bad-lang" }`，不写；兜底面板在场时回 `{ ok: false, reason: "not-ready" }`（见下），先于参数校验，不写。 |
 | `setUiScale` | `f`：该角色设计盒的档位之一 | `{ ok, scale }` | 档位不在表内回 `{ ok: false, reason: "bad-scale" }`；缩放被锁定（系统 WebKit 过旧，窗口钉在 100%）时回 `{ ok: false, reason: "scale-locked" }`，窗口不变；兜底面板在场时回 `{ ok: false, reason: "not-ready" }`（见下），先于其余判断，窗口不变；应用后进入 10 秒确认。 |
 | `commitUiScale` | 无 | `{ ok, scale }` | 确认保留当前档位并落盘；没有待确认的档位回 `{ ok: false, reason: "no-pending" }`；缩放被锁定时回 `{ ok: false, reason: "scale-locked" }`，不落盘；兜底面板在场时回 `{ ok: false, reason: "not-ready" }`（见下），先于其余判断，不落盘。 |
-| `setRulesAck` | `version`：非负整数 | `{ ok }` | 记下已确认的规则页版本，写全局位。 |
-| `setGuideSeen` | `true` | `{ ok }` | 记下本角色的引导已看，写全局位；Output 据此判断是否跳过自己的引导。 |
-| `setGroup` | `g`：`A` 到 `H` | `{ ok, group }` | 手动选组，之后永不自动迁组；`groupOrigin` 变为 `manual`。 |
-| `copyDiagnostics` | `commit`：布尔 | `{ ok, copied, text }` | `false` 只返回预览文本，`true` 才写剪贴板。文本是 `rinne-diag v1`，只含下面「诊断文本」一节名字表里的字段，末行 `ui:` 段已包含在 `text` 里。 |
-| `openExternal` | `url` | `{ ok }` | 原生侧解析后精确匹配：scheme 为 `https`，host 为 `synchain.ca`，或 host 为 `github.com` 且路径等于 `/synchain-oss/rinne` 或以 `/synchain-oss/rinne/` 开头。其余一律回 `{ ok: false, reason: "not-allowed" }`。 |
-| `setDiagLog` | `on`：布尔 | `{ ok, value }` | 诊断日志开关，本机设置，写全局位，不进工程。 |
-| `resolveTakeover` | `accept`：布尔 | `{ ok, accepted }` | 休眠实例占着本组时的确认条：`true` 接管，`false` 取消。没有待确认的接管回 `{ ok: false, reason: "no-pending" }`。 |
-| `showLicense` | 无 | `{ ok }` | 查看许可证：原生侧用系统方式打开嵌入的 LICENSE。 |
+| `setRulesAck` | `version`：非负整数 | `{ ok }` | 记下已确认的规则页版本，写全局位；不是非负整数回 `{ ok: false, reason: "bad-version" }`，不写。 |
+| `setGuideSeen` | `true` | `{ ok }` | 记下本角色的引导已看，写全局位；Output 据此判断是否跳过自己的引导。参数不是 `true` 回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `setGroup` | `g`：`A` 到 `H` | `{ ok, group }` | 手动选组，之后永不自动迁组；`groupOrigin` 变为 `manual`。不是 `A` 到 `H` 之一的单个字母（或这一构建选不了组）回 `{ ok: false, reason: "bad-group" }`，不改。 |
+| `copyDiagnostics` | `commit`：布尔 | `{ ok, copied, text }` | 恰为 `true` 才写剪贴板，其余只返回预览文本。文本是 `rinne-diag v1`，只含下面「诊断文本」一节名字表里的字段，末行 `ui:` 段已包含在 `text` 里。失败回 `{ ok: false, copied: false, reason: "clipboard" \| "not-ready" }`：诊断文本还拿不到（处理器还没备好）是 `reason: "not-ready"`，预览与写剪贴板都一样；写了剪贴板但回读对不上是 `reason: "clipboard"`。 |
+| `openExternal` | `url` | `{ ok }` | 原生侧逐字节核对、不解码：scheme 为 `https`；host 整段等于 `synchain.ca` 或 `github.com`（带端口、userinfo、子域都不算）；路径只含字母、数字与 `-._~/`，没有 `.`、`..` 段；`github.com` 的路径等于 `/synchain-oss/rinne` 或以 `/synchain-oss/rinne/` 开头；全长不超过 2048。查询串与片段一律不放行，连空的 `?`、`#` 也拒；百分号编码、空白、反斜杠在哪里都拒。其余一律回 `{ ok: false, reason: "not-allowed" }`；地址放行了但系统没能打开（没有默认浏览器）回 `{ ok: false, reason: "unavailable" }`。 |
+| `setDiagLog` | `on`：布尔 | `{ ok, value }` | 诊断日志开关，本机设置，写全局位，不进工程；参数不是布尔回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `resolveTakeover` | `accept`：布尔 | `{ ok, accepted }` | 休眠实例占着本组时的确认条：`true` 接管，`false` 取消。参数不是布尔回 `{ ok: false, reason: "bad-value" }`，先于其余判断，不动；没有待确认的接管回 `{ ok: false, reason: "no-pending" }`；`true` 而没能接管（这一构建接管不了组）同样回 `{ ok: false, reason: "no-pending" }`，那一份已经接管不了，待确认的记录作废，确认条随下一帧收起。 |
+| `showLicense` | 无 | `{ ok }` | 查看许可证：原生侧用系统方式打开嵌入的 LICENSE；拿不到嵌入的 LICENSE 或系统没能打开回 `{ ok: false, reason: "unavailable" }`。 |
 
-兜底面板在场：运行时缺失、前端启动失败或加载超时后，原生侧换上兜底面板并把网页隐藏，用户看不到网页。此时万一还有页面请求到达（切面板之前已排进队列的调用，或 WebView2 的控制器在超时之后才建好、页面在隐藏状态下加载完），会改窗口、改设置文件或改内存状态的函数一律先拒：`setLang`、`setUiScale`、`commitUiScale` 回 `{ ok: false, reason: "not-ready" }`，先于参数校验，不改窗口、不写设置文件、不改语言与缩放、不发事件。窗口在切面板时已放大到不小于设计盒，拒绝也是为了不再把它缩回去。`requestInitialState` 在这种情形下只回 `{ ok: true }`：不发首帧（网页不可见，首帧没有收件人），也不当作桥已就绪，上面时序里「立刻发首帧」这一条对它不适用。用户点重试后入口页整页重新加载，之后一切照常。页面只判 `ok`，不依赖具体原因。
+兜底面板在场：运行时缺失、前端启动失败或加载超时后，原生侧换上兜底面板并把网页隐藏，用户看不到网页。此时万一还有页面请求到达（切面板之前已排进队列的调用，或 WebView2 的控制器在超时之后才建好、页面在隐藏状态下加载完），除 `requestInitialState` 之外的桥函数一律先拒，两个角色的共用函数与专用函数都一样：回 `{ ok: false, reason: "not-ready" }`，先于参数校验与其余判断，什么都不做，不改窗口、不写设置文件、不改内存状态、不碰剪贴板与系统浏览器、不发事件。这一条对上面与各角色函数表里的每一行都成立，各行不逐一重复。这时网页不可见，紧急切断与恢复回送走兜底面板上的原生按钮，不经桥。窗口在切面板时已放大到不小于设计盒，拒绝也是为了不再把它缩回去。`requestInitialState` 在这种情形下只回 `{ ok: true }`：不发首帧（网页不可见，首帧没有收件人），也不当作桥已就绪，上面时序里「立刻发首帧」这一条对它不适用。用户点重试后入口页整页重新加载，之后一切照常。页面只判 `ok`，不依赖具体原因。
 
 ### 事件（原生推给界面，两个角色共用）
 
@@ -313,7 +313,7 @@ Input 页面把 `peer.color` 当作 `#rrggbb` 字符串（宿主不给时为 `nu
 
 ## output：Rinne Output
 
-Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
+Output 用共用的十二个函数加 `repairPair`、`setTailMode`，以及三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
 
 ### 专用函数
 
@@ -321,7 +321,8 @@ Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有
 
 | 函数 | 参数 | 回执 | 说明 |
 |---|---|---|---|
-| `repairPair` | 无 | `{ ok, group }` | `conflict` 时的一键修复，按钮文案「重新配对」：按智能默认重选组；不在冲突态回 `{ ok: false, reason: "not-conflict" }`。 |
+| `repairPair` | 无 | `{ ok, group }` | `conflict` 时的一键修复，按钮文案「重新配对」：按智能默认重选组；不在冲突态回 `{ ok: false, reason: "not-conflict" }`，冲突里没有可去的组回 `{ ok: false, reason: "no-free-group" }`。要去的组被一个休眠实例占着时先不动，回 `{ ok: false, reason: "needs-confirm" }`，`rinne.state` 随后带 `takeover: true` 与 `takeoverGroup`，用户经 `resolveTakeover` 确认或取消。 |
+| `setTailMode` | `mode`：`auto`、`infinite`、`30s` | `{ ok, value }` | tail 模式（`cfg.tailMode`，随工程走），在关于面板的高级设置里；其余取值回 `{ ok: false, reason: "bad-value" }`，不改。改值后工程标脏。 |
 
 ### rinne.state 的 Output 字段
 
@@ -329,8 +330,14 @@ Output 用共用的十二个函数加 `repairPair`，以及三个事件，没有
 |---|---|
 | `send` | 发送状态：`channels`（`ST` 或 `MONO`）、`sampleRate`、`bypassed`（旁路写入静音）、`hostPaused`。 |
 | `inputGuideSeen` | Input 的引导是否已看；已看时 Output 首次打开跳过自己的引导。 |
-| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）、`outOfOrder`（错序证据成立）之一。这四条没有对应的配对状态，只能由这个字段带；缺省、非数组、未知 `id` 一律当没有。 |
-| `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；缺省时只显示版本号。 |
+| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝）、`newerProject`（工程由更新的版本存下；`a`、`b` 都是 state 的 abi，写成 `"ABI N"`，`a` 是被拒那份工程的、`b` 是本构建的）、`stateDecodeFailed`（state 解码失败）、`outOfOrder`（错序证据成立）之一。这四条没有对应的配对状态，只能由这个字段带；缺省、非数组、未知 `id` 一律当没有。 |
+| `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；缺省时只显示版本号。三项各自拿不到时不发。 |
+| `cfg` | 非参数的工程状态，Output 只有 `tailMode`（`auto`、`infinite`、`30s`，默认 `auto`）。 |
+| `takeoverGroup` | 可缺省，没有待接管的组时不发。`takeover` 为真时等待接管的组（`A` 到 `H`）；确认条里的组号读它，缺省时读 `group`。一键修复要接管的是别的组时才和 `group` 不同。 |
+
+### rinne.error 的 Output 取值
+
+Output 目前只发一种：保存工程时 state 编码失败（交出了空块），`code` 是 `stateEncode`，不带 `detail`。编辑器打开之前发生的不补报；页面不显示它，累计次数在诊断文本里。
 
 ### 配对卡
 

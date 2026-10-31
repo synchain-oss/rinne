@@ -23,7 +23,7 @@ namespace rinne::webview
 {
 // 两个插件共用的网页编辑器：装配 WebView、资源提供者、桥函数、看门狗、兜底面板与开窗遮挡闸。
 // 角色（Input 或 Output）只决定设计盒尺寸、页面入口与存储的键；角色专属的桥函数与状态事件，
-// 由 Config::augmentOptions 追加原生函数，并覆写 buildSnapshot 与 emitTick 补充。
+// 由 Config::augmentOptions 追加原生函数，并覆写 buildSnapshot、emitTick 与 emitFirstFrames 补充。
 //
 // 缩放：固定设计盒加页面里的缩放，窗口大小跟着档位走。
 //   - 开窗时按显示器可用区夹取档位，只影响本次开窗，不写回已保存的值；
@@ -34,10 +34,10 @@ namespace rinne::webview
 // 切面板时网页被隐藏，而 JUCE 在隐藏时默认把页面卸载（导航到空白页；本宿主不开保留页面的选项，
 // 那会改变宿主隐藏窗口等所有隐藏场景的资源与重载行为），所以慢页面在看门狗超时那一刻就被卸掉了，面板不会自己收回。
 // 面板在场时迟到的桥请求只回执，不当作就绪：不置位、不计入活着的桥、不发首帧（见 handleRequestInitialState）。
-// 会改窗口、改设置文件或改内存状态的桥函数（setLang、setUiScale、commitUiScale）在面板在场时回 not-ready：
+// 除 requestInitialState 之外的桥函数在面板在场时一律回 not-ready，先于参数校验（通则见 docs/UI_BRIDGE.md）：
 // 不改窗口、不落盘、不改语言与缩放、不发状态。守卫写在每个桥函数的开头，源码扫描逐个核对（见宿主测试的源码卫生用例）；
 // 新增桥函数（含经 augmentOptions 追加的角色专属函数）或覆写 handleSetLang 的子类，也要在开头加同样的守卫：
-// 日志一行、回 not-ready、返回。宿主之外拿不到私有的面板成员，要先给宿主加一个受保护的 panelShown() 访问器，
+// 日志一行、回 not-ready、返回。宿主之外拿不到私有的面板成员，经受保护的 panelShown() 与 logDiag 写守卫，
 // 守卫写成 if (panelShown())；源码扫描认这个写法，找不到合格守卫的角色专属桥函数会让宿主测试变红。
 // 面板在场期间定时器照跑，面板上的环路开关与恢复冷却靠它刷新。
 // 页面和内核交上来的文字（启动失败的阶段与细节、导航错误说明、地址）写日志、上面板之前一律先整形成一行，
@@ -143,6 +143,18 @@ protected:
     // 推一帧 rinne.state 全量快照，帧序号单调递增
     void emitState();
 
+    // 首帧钩子：消息线程上，handleRequestInitialState 回执并发完首帧 rinne.state（emitState）之后紧接着调用一次，
+    // 每次 requestInitialState 一次（页面重载后重来一次就再调一次）。子类在这里补发本角色其余的状态类事件
+    // （桥契约时序：收到请求立刻把本角色所有状态类事件各发一帧）。默认空实现，基类自己的首帧顺序与揭幕门不受影响；
+    // 兜底面板在场时那次请求只回执，不发首帧，也不调用它
+    virtual void emitFirstFrames() {}
+
+    // 兜底面板是否在场。角色专属桥函数开头的守卫写成 if (panelShown())（见文件头注释）
+    bool panelShown() const noexcept { return fallback_ != nullptr; }
+
+    // 既有日志通道，加一份平台文件日志。角色专属桥函数的守卫用它记一行
+    void logDiag(const juce::String& line) const;
+
     // 通用桥函数：两个角色共用
     void handleRequestInitialState(const juce::Array<juce::var>& args,
                                    juce::WebBrowserComponent::NativeFunctionCompletion complete);
@@ -206,7 +218,6 @@ private:
     // 兜底面板的诊断文本。basenameOnly 为真时用户数据目录只给末级目录名（面板上的字会被截图转发），
     // 为假时给完整路径（只进本机日志）
     juce::String buildDiagnostics(bool basenameOnly) const;
-    void logDiag(const juce::String& line) const; // 既有日志通道，加一份平台文件日志
 
     Config config_;
     ResourceProvider provider_;

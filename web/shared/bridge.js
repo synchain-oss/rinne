@@ -58,6 +58,7 @@ export const BRIDGE_FUNCTIONS = {
         "resolveTakeover",
         "showLicense",
         "repairPair",
+        "setTailMode",
     ],
     input: [
         "requestInitialState",

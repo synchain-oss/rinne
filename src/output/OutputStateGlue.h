@@ -10,11 +10,12 @@
 //     下次保存写回。以最后一份为准。
 //   · 已定型、成功读入：什么都不改（Output 没有参数可取）。写回保留照样按结果更新，回调照样调用。
 //   · RejectedNewer：不应用，写回保留接管原字节，保存时原样交回，直到下一份成功读入的 state 取代它。
+//     保留期间记下那份 state 头里的 abi（heldNewerAbi），界面据此提示「工程来自更新版本」。
 //   · Empty / Corrupt / IgnoredProbe：什么都不动，保持当前（不是回到默认）。
 // getState：正在保留原字节时原样交出；否则编码当前的文档。编码失败交出空块，并累加 encodeFailures。
 //
 // 定型（markUserAction）：只由界面上真实的用户点击或拖动触发，一次性，不可撤销；页面自己发起的调用不算。
-//   算定型：setGroup；resolveTakeover（accept = true）；repairPair；commitUiScale。
+//   算定型：setGroup；resolveTakeover（accept = true）；repairPair；setTailMode；commitUiScale。
 //   不算：  requestInitialState；setLang、setRulesAck、setGuideSeen、setDiagLog（写本机的全局设置，不进工程）；
 //           setUiScale（10 秒内可能回退，等 commitUiScale 才算）；resolveTakeover（accept = false）；
 //           copyDiagnostics、openExternal、showLicense；任何认领。
@@ -92,6 +93,8 @@ public:
     // ---- 状态位（任何线程，无锁） ----
     std::optional<state::StateLoadStatus> lastLoadStatus() const noexcept;
     bool holdingNewerState() const noexcept { return holding_.load(std::memory_order_relaxed); }
+    // 正在保留的那份更新版本 state 头里的 abi；没有保留时为 0
+    std::uint32_t heldNewerAbi() const noexcept { return heldAbi_.load(std::memory_order_relaxed); }
     std::uint32_t encodeFailures() const noexcept { return encodeFailures_.load(std::memory_order_relaxed); }
 
     // ---- 音频线程（无锁） ----
@@ -119,6 +122,7 @@ private:
     std::atomic<std::uint8_t> tailMode_{0};
     std::atomic<std::uint8_t> lastLoad_{kNoLoad};
     std::atomic<bool> holding_{false};
+    std::atomic<std::uint32_t> heldAbi_{0};
     std::atomic<std::uint32_t> encodeFailures_{0};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OutputStateGlue)

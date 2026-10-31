@@ -23,7 +23,8 @@
 //   ⑧ 桥回执的失败原因：C++ 的 BridgeBase.h 里有哪几个原因，docs/UI_BRIDGE.md 里能返回它的函数行就写哪几个，
 //      预览里的 mock 也真的回同样的原因（含缩放锁定：全局位 scaleLocked 为真时，选档与确认回 scale-locked，没确认的预览作废；
 //      含兜底面板在场：全局位 fallbackShown 为真时，setLang、setUiScale、commitUiScale 先于参数校验回 not-ready 且什么都不改，
-//      requestInitialState 只回 ok、不发首帧）。
+//      requestInitialState 只回 ok、不发首帧）；文档里「兜底面板在场」那一段写成对每个桥函数都成立的通则（除了
+//      requestInitialState 一律回 not-ready），不退回点名几个函数的清单。
 //   ⑨ 打包与接线：cmake/RinneWebAssets.cmake 的 glob 与这里的 packagedFiles 同口径（逐条解析对拍）；每个角色的
 //      src/<角色>/sources-webview.cmake 以对的角色目录、命名空间调用 rinne_add_web_assets，嵌入根目录的 LICENSE，
 //      并把生成的目标链进该插件；插件入口文件包含同名头、把四个成员原样交给编辑器工厂；工厂把资源、角色、钩子原样转给网页编辑器。
@@ -512,13 +513,31 @@ for (const role of roles) {
 // ---------------------------------------------------------------- ⑧ 桥回执的失败原因
 // 哪个函数能回哪个原因，是契约表（docs/UI_BRIDGE.md 的函数表）的内容；这里把「C++ 有哪些原因」「文档的行里写没写」
 // 「mock 回不回」三方对起来。C++ 多出一个原因而这张表没跟上，会判红，逼着同批改文档与 mock。
+// 登记的是原生真会回这个原因的函数（以 C++ 的实际返回为准），不是「文档里愿意写的」那几个。
+// 函数键不带节名时取文档里第一处函数行（common 节的共用函数表在最前面）；「节名:函数名」只在那一节里找，
+// 给两个角色各有一行、而原因只写在其中一节的函数用（如 output:setTailMode，input 节另有一行 setTailMode）。
 const REASON_FUNCTIONS = {
     "bad-lang": ["setLang"],
     "bad-scale": ["setUiScale"],
     "scale-locked": ["setUiScale", "commitUiScale"],
-    "no-pending": ["commitUiScale"],
-    "not-ready": ["setLang", "setUiScale", "commitUiScale"],
+    "no-pending": ["commitUiScale", "resolveTakeover"],
+    // copyDiagnostics：诊断文本还拿不到
+    "not-ready": ["setLang", "setUiScale", "commitUiScale", "copyDiagnostics"],
+    "bad-value": ["setGuideSeen", "setDiagLog", "resolveTakeover", "output:setTailMode"],
+    "bad-version": ["setRulesAck"],
+    "bad-group": ["setGroup"],
+    "not-allowed": ["openExternal"],
+    // copyDiagnostics：写了剪贴板但回读对不上
+    clipboard: ["copyDiagnostics"],
+    // 地址或文件已通过校验，系统没能打开
+    unavailable: ["openExternal", "showLicense"],
 };
+
+// 通则段落：common 节里以「名字：」起头的一段，写明一个失败原因对例外之外的每个桥函数都成立（兜底面板在场时的
+// not-ready：原生侧每个处理函数开头都有这道守卫，由宿主测试的源码卫生用例核对）。函数行里写了这个原因的函数照上表登记，
+// 正向、反向核对不变；这里另核对段落本身：common 节里恰有一段、写了这个原因、写明「除例外之外的桥函数一律」，例外都是
+// 函数表里的函数，而且例外之外不点名任何函数（点了名就又成了清单，读的人会以为只有那几个会拒）。
+const REASON_RULES = [{ reason: "not-ready", paragraph: "兜底面板在场", except: ["requestInitialState"] }];
 
 /** 从 BridgeBase.h 抽 namespace Reason 里的字符串值（先去注释）；抽不到 namespace 给 null。 */
 function extractCppReasons(rawText) {
@@ -532,6 +551,69 @@ function extractCppReasons(rawText) {
 function docFunctionRow(docText, fn) {
     const prefix = `| \`${fn}\` |`;
     return docText.split("\n").find((line) => line.startsWith(prefix)) ?? null;
+}
+
+/** 文档里的一节：从「## 节名：」那行之后起，到下一个二级标题为止；找不到给 null。 */
+function docSection(docText, name) {
+    const lines = docText.split("\n");
+    const start = lines.findIndex((line) => line.startsWith(`## ${name}：`));
+    if (start < 0) return null;
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex((line) => line.startsWith("## "));
+    return (end < 0 ? rest : rest.slice(0, end)).join("\n");
+}
+
+/** 文档里每一节的函数行与它们写的失败原因：common 节的键是函数名，其余节是「节名:函数名」（与登记表同口径）。 */
+function docFunctionRows(docText) {
+    const rows = [];
+    let section = null;
+    for (const line of docText.split("\n")) {
+        // 每个二级标题都换节；不是「## 节名：」形式的（如 Summary）不算任何一节
+        if (line.startsWith("## ")) section = /^## ([A-Za-z]+)：/.exec(line)?.[1] ?? null;
+        const fn = /^\| `([^`]+)` \|/.exec(line)?.[1];
+        if (!section || !fn) continue;
+        const reasons = [...new Set([...line.matchAll(/reason:\s*"([^"]+)"/g)].map((m) => m[1]))].sort();
+        rows.push({ key: section === "common" ? fn : `${section}:${fn}`, reasons });
+    }
+    return rows;
+}
+
+/** 登记表里的函数键对应的文档行：「节名:函数名」只在那一节里找，不带节名的取全文第一处；找不到给 null。 */
+function docFunctionRowFor(docText, key) {
+    const at = key.indexOf(":");
+    if (at < 0) return docFunctionRow(docText, key);
+    const section = docSection(docText, key.slice(0, at));
+    return section === null ? null : docFunctionRow(section, key.slice(at + 1));
+}
+
+/** 一节里以「名字：」起头的段落（整行）；只认行首，正文中间提到的不算。 */
+function docParagraphs(sectionText, name) {
+    return sectionText.split("\n").filter((line) => line.startsWith(`${name}：`));
+}
+
+/** 一段文字里用反引号点了名的函数（只认 known 里有的整个名字），去重、按出现顺序。 */
+function namedFunctions(text, known) {
+    return [...new Set([...text.matchAll(/`([A-Za-z]+)`/g)].map((m) => m[1]).filter((name) => known.has(name)))];
+}
+
+/**
+ * 通则段落的毛病，空数组是没毛病。每项是一个短码：count=N（common 节里起头的段落不是恰好一段）、cpp（原因不在 C++ 里）、
+ * reason（段落没写这个原因）、scope（没写成「除例外之外的桥函数一律」）、except:函数（例外不在任何函数表里）、
+ * named:函数（例外之外点了名）。
+ */
+function ruleProblems(docText, rule, cppReasons) {
+    const problems = [];
+    const paras = docParagraphs(docSection(docText, "common") ?? "", rule.paragraph);
+    if (paras.length !== 1) problems.push(`count=${paras.length}`);
+    const para = paras[0] ?? "";
+    if (!cppReasons.includes(rule.reason)) problems.push("cpp");
+    if (!para.includes(`reason: "${rule.reason}"`)) problems.push("reason");
+    const scope = `除 ${rule.except.map((fn) => `\`${fn}\``).join("、")} 之外的桥函数一律`;
+    if (!para.includes(scope)) problems.push("scope");
+    const known = new Set(docFunctionRows(docText).map(({ key }) => key.slice(key.indexOf(":") + 1)));
+    for (const fn of rule.except) if (!known.has(fn)) problems.push(`except:${fn}`);
+    for (const fn of namedFunctions(para, known)) if (!rule.except.includes(fn)) problems.push(`named:${fn}`);
+    return problems;
 }
 
 {
@@ -551,6 +633,83 @@ function docFunctionRow(docText, fn) {
         "抽取器自测：文档行按整个函数名匹配",
     );
     run.eq(docFunctionRow("| `setLangX` | b |", "setLang"), null, "抽取器自测：只是前缀相同的函数名不算");
+    {
+        const twoSections =
+            "## common：c\n| `f` | c |\n## input：i\n| `f` | i |\n## output：o\n| `g` | o |\n| `f` | o |\n";
+        run.eq(docFunctionRowFor(twoSections, "output:f"), "| `f` | o |", "抽取器自测：带节名的键只在那一节里找");
+        run.eq(docFunctionRowFor(twoSections, "input:f"), "| `f` | i |", "抽取器自测：两节各有一行时各取各的");
+        run.eq(docFunctionRowFor(twoSections, "f"), "| `f` | c |", "抽取器自测：不带节名仍取第一处");
+        run.eq(
+            docFunctionRowFor(twoSections, "input:g"),
+            null,
+            "抽取器自测：节到下一个二级标题为止，节内没有这一行给 null（后面判红）",
+        );
+        run.eq(docFunctionRowFor(twoSections, "nosuch:f"), null, "抽取器自测：没有这一节给 null（后面判红）");
+        run.eq(
+            docFunctionRows(
+                '| `x` | 节外 reason: "a" |\n' +
+                    twoSections.replace("| `g` | o |", '| `g` | reason: "a" reason: "b" |'),
+            ),
+            [
+                { key: "f", reasons: [] },
+                { key: "input:f", reasons: [] },
+                { key: "output:g", reasons: ["a", "b"] },
+                { key: "output:f", reasons: [] },
+            ],
+            "抽取器自测：逐节列函数行与它写的原因，common 节用函数名、其余节带节名，节外的行不算",
+        );
+    }
+    {
+        const rows = "| `requestInitialState` | 无 |\n| `setLang` | x |\n";
+        const doc = (commonTail, outputTail = "") =>
+            `## common：c\n${rows}\n${commonTail}\n## output：o\n| \`repairPair\` | y |\n${outputTail}\n`;
+        const rule = { reason: "not-ready", paragraph: "面板", except: ["requestInitialState"] };
+        const good =
+            '面板：除 `requestInitialState` 之外的桥函数一律回 `{ ok: false, reason: "not-ready" }`；' +
+            "`requestInitialState` 只回 `{ ok: true }`。";
+        run.eq(ruleProblems(doc(good), rule, ["not-ready"]), [], "抽取器自测：通则段落的正例");
+        run.eq(
+            ruleProblems(doc(good.replace("。", "，`repairPair` 也一样。")), rule, ["not-ready"]),
+            ["named:repairPair"],
+            "抽取器自测：例外之外点了别节的函数也算点名",
+        );
+        run.eq(
+            ruleProblems(
+                doc('面板：`setLang` 回 `{ ok: false, reason: "not-ready" }`；`requestInitialState` 只回 ok。'),
+                rule,
+                ["not-ready"],
+            ),
+            ["scope", "named:setLang"],
+            "抽取器自测：退回点名清单的写法判红",
+        );
+        run.eq(
+            ruleProblems(doc(good.replace('reason: "not-ready"', 'reason: "x"')), rule, ["not-ready"]),
+            ["reason"],
+            "抽取器自测：段落没写这个原因判红",
+        );
+        run.eq(ruleProblems(doc(good), rule, []), ["cpp"], "抽取器自测：原因不在 C++ 里判红");
+        run.eq(ruleProblems(doc(`${good}\n\n${good}`), rule, ["not-ready"]), ["count=2"], "抽取器自测：两段都起头判红");
+        run.eq(
+            ruleProblems(doc(`另：${good}`), rule, ["not-ready"]),
+            ["count=0", "reason", "scope"],
+            "抽取器自测：只认行首，正文中间提到的不算",
+        );
+        run.eq(
+            ruleProblems(doc("", good), rule, ["not-ready"]),
+            ["count=0", "reason", "scope"],
+            "抽取器自测：只在 common 节里找，别节的同名段落不算",
+        );
+        run.eq(
+            ruleProblems(doc(good).replace("| `requestInitialState` | 无 |\n", ""), rule, ["not-ready"]),
+            ["except:requestInitialState"],
+            "抽取器自测：例外不在函数表里判红",
+        );
+        run.eq(
+            namedFunctions("`setLang`、`setLangX`、`{ ok }`、`setLang`", new Set(["setLang"])),
+            ["setLang"],
+            "抽取器自测：点名按整个函数名认，去重",
+        );
+    }
 
     const cppReasons = extractCppReasons(read("src/plugin-common/BridgeBase.h"));
     run.check(cppReasons !== null, "⑧ BridgeBase.h 里找不到 namespace Reason");
@@ -563,7 +722,7 @@ function docFunctionRow(docText, fn) {
     const doc = read("docs/UI_BRIDGE.md");
     for (const [reason, fns] of Object.entries(REASON_FUNCTIONS)) {
         for (const fn of fns) {
-            const row = docFunctionRow(doc, fn);
+            const row = docFunctionRowFor(doc, fn);
             run.check(row !== null, `⑧ UI_BRIDGE.md 的函数表里找不到 ${fn}`);
             run.check(
                 row !== null && row.includes(`reason: "${reason}"`),
@@ -574,7 +733,7 @@ function docFunctionRow(docText, fn) {
 
     // 反向：文档行里写的每个失败原因，登记表里也得有。表里漏登记一个，上面的正向核对就永远核对不到它
     for (const fn of new Set(Object.values(REASON_FUNCTIONS).flat())) {
-        const row = docFunctionRow(doc, fn);
+        const row = docFunctionRowFor(doc, fn);
         if (row === null) continue; // 上面已判红
         const inDoc = [...new Set([...row.matchAll(/reason:\s*"([^"]+)"/g)].map((m) => m[1]))].sort();
         const registered = Object.entries(REASON_FUNCTIONS)
@@ -582,6 +741,27 @@ function docFunctionRow(docText, fn) {
             .map(([reason]) => reason)
             .sort();
         run.eq(inDoc, registered, `⑧ UI_BRIDGE.md 里 ${fn} 一行写的失败原因与本断言登记的不一致`);
+    }
+
+    // 反向（全文）：任何一节的函数行写了 C++ 有的失败原因，这个函数就得为这个原因登记。只核对登记过的函数不够：
+    // 一个真会回某原因的函数整个漏登记，它那一行就永远核对不到
+    const unregistered = docFunctionRows(doc)
+        .map(({ key, reasons }) => ({
+            key,
+            reasons: reasons.filter(
+                (r) => (cppReasons ?? []).includes(r) && !(REASON_FUNCTIONS[r] ?? []).includes(key),
+            ),
+        }))
+        .filter((row) => row.reasons.length > 0);
+    run.eq(unregistered, [], "⑧ UI_BRIDGE.md 的函数行写了 C++ 有的失败原因，登记表里却没有这个函数");
+
+    // 通则段落（见 REASON_RULES）
+    for (const rule of REASON_RULES) {
+        run.eq(
+            ruleProblems(doc, rule, cppReasons ?? []),
+            [],
+            `⑧ UI_BRIDGE.md 的「${rule.paragraph}」一段不是 ${rule.reason} 的通则（短码见 ruleProblems）`,
+        );
     }
 
     // mock 的行为：同一批原因，同样的函数
