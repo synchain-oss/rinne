@@ -228,9 +228,9 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | `panic` | 无 | `{ ok, cut }` | 紧急切断。连点不会恢复。 |
 | `resumeLoop` | 无 | `{ ok }` | 恢复回送，唯一入口。切断后 1.5 s 冷却，冷却内回 `{ ok: false, reason: "cooldown", remainingMs }`。 |
 | `dismissHint` | `id` | `{ ok }` | 关闭一条提示，每实例有效，不进工程。 |
-| `loadPreset` | `id`：工厂或用户预设 ID | `{ ok }` | 载入后从首个有效读样本起 500 ms 淡入。 |
-| `savePreset` | `name`、`overwrite` | `{ ok, id }` | 名字去控制字符、首尾空白，限 24 个字符；重名且未允许覆盖回 `{ ok: false, reason: "exists" }`。 |
-| `deletePreset` | `id` | `{ ok }` | 只删用户预设。 |
+| `loadPreset` | `id`：工厂或用户预设 ID | `{ ok }` | 载入后从首个有效读样本起 500 ms 淡入。失败回 `{ ok: false, reason }`，什么都不改：`not-found`（没有这个 ID）、`bad-file`（预设文件在，但解析不过）、`not-ready`（参数树缺声音参数，接线错误）。 |
+| `savePreset` | `name`、`overwrite` | `{ ok, id }` | 名字去控制字符（C0、DEL、C1）、首尾空白（含 NBSP 与全角空格），限 24 个 Unicode 码点；重名按去空白后的显示名不分大小写比较，允许覆盖时沿用原 `id`。成功后当前预设变为所存的这一个，`dirty` 为假。失败回 `{ ok: false, reason }`：`exists`（重名且 `overwrite` 不为真）、`bad-name`（清洗后为空）、`write-failed`（目录或文件写不进去，原文件不动）。 |
+| `deletePreset` | `id` | `{ ok }` | 只删用户预设。失败回 `{ ok: false, reason }`：`not-found`（没有这个 ID）、`factory`（工厂预设不能删）、`write-failed`（文件删不掉）。删掉的是当前预设时参数不动，`state.preset` 变为 `{ id: null, dirty: false, name: null }`。 |
 | `setGuardOn` | `on`：布尔 | `{ ok, value }` | 失控保护开关（`cfg.guardOn`，默认开）。 |
 | `setResetOnPlay` | `on`：布尔 | `{ ok, value }` | 起播时清空环路（`cfg.resetOnPlay`，默认开），在关于面板的高级设置里。 |
 | `setTailMode` | `mode`：`auto`、`infinite`、`30s` | `{ ok, value }` | tail 模式（`cfg.tailMode`），在高级设置里。 |
@@ -244,7 +244,7 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 |---|---|
 | `rinne.params` | 参数值的宿主回声，`{ seq, values }`；首帧必发。宿主自动化回放时，指针用 rAF 指数逼近最新回声，时间常数 40 ms，不用 CSS 过渡。 |
 | `rinne.meters` | 25 Hz，先 diff 再发：`in`、`ret`（增益前）、`out` 三条电平（dBFS，静音为 `null`）、Mix 推子的两路分量 `dryPart`、`retPart`（dBFS，静音为 `null`）、增益缩减 `gr`、高切截断位 `highCutLimited`、三盏灯 `lamps`（`dc`、`nonfinite`、`guard`，另带可选的 `nonfiniteCount`、`guardDb`）。字段含义见下面「电平帧补充字段」。 |
-| `rinne.presets` | 预设列表：`factory`（8 个，三语名）、`user`、`current`。 |
+| `rinne.presets` | 预设列表：`factory`（8 个，`{ id, name: { zh, en, fr } }`）、`user`（`{ id, name }`，`name` 是字符串，按名字不分大小写排序）、`current`（当前预设的 ID，与 `state.preset.id` 同值，页面读后者）。首帧与 `rinne.state`、`rinne.pair` 一起发，保存与删除成功后重发；页面在它到之前不开预设面板。工厂预设的名字由原生侧的预设文件给，页面按当前语言原样显示。 |
 
 ### 参数（11 个）
 
@@ -271,12 +271,12 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | 字段 | 含义 |
 |---|---|
 | `cfg` | 非参数的工程状态：`resetOnPlay`（默认开）、`tailMode`、`delayUnit`（ms 或样本）、`fbUnit`（% 或 dB）、`guardOn`（失控保护，默认开）。 |
-| `preset` | `{ id, dirty, name }`；`dirty` 为真时界面在名字后加「 *」。工厂预设的 `name` 是 `{ zh, en, fr }`，用户预设是字符串。 |
+| `preset` | `{ id, dirty, name }`；`dirty` 为真时界面在名字后加「 *」。工厂预设的 `name` 是 `{ zh, en, fr }`，用户预设是字符串；没有当前预设时（删掉了当前的用户预设）`id` 与 `name` 为 `null`，界面写「—」。 |
 | `delay` | 环路延迟卡：`actualMs`、`minMs`、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长），另带可选的 `bpm`（同步档换算用的速度）与 `noTempo`（真为宿主没给速度、`bpm` 是兜底的 120；缺席按有速度处理，`bpm` 缺席按 120）。 |
 | `safety` | `{ cut, cooldownMs, l2 }`，另带可选的 `fadeIn`（布尔，回送正在 500 ms 淡入：新配对、恢复回送、载入预设之后；缺席按假）。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`l2` 为真表示有任一 L2 条件。 |
 | `dismissedHints` | 本实例已关闭的提示 ID，不进工程。 |
 | `exportCauses` | 导出不一致的锁存信息：`{ bits, count }`。`bits` 是自上次确认起各原因位的并集（1 = 宿主违约，2 = 主读头补 0，4 = 对端报告违约，8 = 重同步），`count` 是自上次确认起被计入的事件数（无符号 32 位，回绕无碍，只用「不等」比较）。`count` 为 0 表示没有锁存。 |
-| `silentCause` | 可选。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停）、`stalled`（块序号停滞）。只在 `rinne.pair.state` 为 `connectedStill` 或 `connectedUnverified` 时有意义；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
+| `silentCause` | 可选。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停）、`stalled`（块序号停滞）。页面按值使用，与配对态无关（外壳的旁路降级读 `hostBypass`，消息推导读全部取值）；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
 | `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝；出现时界面不再另报泛泛的共享内存不可用）、`outOfOrder`（错序证据成立）、`unstable`（宿主时序不稳定，已切到容忍模式）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）之一。这五条没有对应的配对状态，只能由这个字段带；缺省、非数组、元素残缺、未知 `id` 一律当没有，同一个 `id` 只取第一条。导出不一致的原因位不走这里，仍在 `exportCauses`。 |
 
 ### 电平帧补充字段
