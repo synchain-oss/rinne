@@ -518,6 +518,27 @@ try {
             `${tag}不认识的保存失败原因码原样显示`,
         );
         await restoreWeird();
+        // 桥抛异常（回 null）或没有原因码：写「未知原因」，不写占位的横杠
+        for (const [i, what, result] of [
+            [1, "桥抛异常（回 null）", null],
+            [2, "没有原因码", { ok: false }],
+            [3, "原因码是空串", { ok: false, reason: "" }],
+        ]) {
+            const restoreOne = await forceResult(page, "savePreset", result);
+            await typeInto(page, '[data-part="preset.name.input"]', `Fail ${i}`);
+            await clickSel(page, ".in-pm__save .sc-btn--cta");
+            await waitMenu(
+                page,
+                `r.getAttribute("data-state") === "saveFail"`,
+                `${tag}保存失败（${what}）应进入 saveFail 态`,
+            );
+            run.eq(
+                (await P(page)).save.msg,
+                { text: t("in.preset.saveFail", { reason: t("in.preset.reason.unknown") }), tone: "red" },
+                `${tag}保存失败（${what}）：写未知原因`,
+            );
+            await restoreOne();
+        }
         await typeInto(page, '[data-part="preset.name.input"]', "New one!");
         run.eq((await P(page)).state, "saveInput", `${tag}改动名字后失败提示应消失`);
 
@@ -606,6 +627,25 @@ try {
             `${tag}不认识的删除失败原因码原样显示`,
         );
         await restoreDelFail();
+        // 桥抛异常（回 null）或没有原因码：写「未知原因」，不写占位的横杠
+        for (const [what, result] of [
+            ["桥抛异常（回 null）", null],
+            ["没有原因码", { ok: false }],
+        ]) {
+            await clickSel(page, '[data-part="preset.delete.confirm"] button:first-of-type');
+            await waitMenu(page, `r.getAttribute("data-state") === "list"`, `${tag}取消回列表（${what}）`);
+            await clickSel(page, '[data-part="preset.delete"]');
+            await waitMenu(page, `r.getAttribute("data-state") === "deleteConfirm"`, `${tag}再进删除确认（${what}）`);
+            const restoreOne = await forceResult(page, "deletePreset", result);
+            await clickSel(page, '[data-part="preset.delete.confirm"] button:last-of-type');
+            await waitDelMsg(t("in.preset.reason.unknown"), `${tag}删除失败（${what}）应写未知原因`);
+            run.eq(
+                (await P(page)).del.msg,
+                { text: t("in.preset.deleteFail", { reason: t("in.preset.reason.unknown") }), tone: "red" },
+                `${tag}删除失败（${what}）：写未知原因`,
+            );
+            await restoreOne();
+        }
         await clickSel(page, '[data-part="preset.delete.confirm"] button:last-of-type');
         await waitToast(page, "presetDeleted", `${tag}删除成功应出 toast`);
         p = await P(page);
@@ -825,6 +865,18 @@ try {
         let p = await P(page);
         run.eq([p.save.value, p.save.msg.tone], ["Echo A", "red"], "覆盖失败：保存行带着当前预设名，提示为红色");
         await restoreOw();
+        // 覆盖时桥抛异常：同样写未知原因，不写占位的横杠
+        await clickSel(page, ".in-pm__save .in-pm__btn:first-of-type");
+        await waitMenu(page, `r.getAttribute("data-state") === "list"`, "覆盖失败后取消回列表");
+        const restoreOwNull = await forceResult(page, "savePreset", null);
+        await clickSel(page, '[data-part="preset.overwrite"]');
+        await waitMenu(page, `r.getAttribute("data-state") === "saveFail"`, "覆盖时桥抛异常应进入 saveFail 态");
+        run.eq(
+            (await P(page)).save.msg.text,
+            T(lang)("in.preset.saveFail", { reason: T(lang)("in.preset.reason.unknown") }),
+            "覆盖时桥抛异常：写未知原因",
+        );
+        await restoreOwNull();
 
         // 宿主回 exists（页面手里的列表旧了）：按重名处理，下一次保存按覆盖发
         await clickSel(page, ".in-pm__save .in-pm__btn:first-of-type");

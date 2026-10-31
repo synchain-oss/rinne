@@ -129,14 +129,20 @@ function boot() {
     const params = new Map();
     const mem = { fbUnit: "pct", delayUnit: "ms" };
     /**
-     * 单位（反馈 %/dB、延迟 ms/样本）写进页面内存的唯一落点：用户点分段控件和首帧采纳宿主快照都走这里。
-     * 目前选择只留在页面内存；原生桥补上 setFbUnit / setDelayUnit 之后，在这里把用户的选择转发给宿主即可。
+     * 单位（反馈 %/dB、延迟 ms/样本）写进页面内存的唯一落点：用户点分段控件和采纳宿主快照都走这里。
+     * 用户的选择转发给宿主存进工程；宿主给的值（fromHost）不回写，不然回声又写回去，首帧之前还会把默认值写给宿主。
      * @param {"fb"|"delay"} kind
      * @param {string} value 反馈 "pct" | "db"；延迟 "ms" | "samples"
+     * @param {{fromHost?:boolean}} [opt]
      */
-    const setUnit = (kind, value) => {
-        if (kind === "fb") mem.fbUnit = value === "db" ? "db" : "pct";
-        else if (kind === "delay") mem.delayUnit = value === "samples" ? "samples" : "ms";
+    const setUnit = (kind, value, { fromHost = false } = {}) => {
+        if (kind === "fb") {
+            mem.fbUnit = value === "db" ? "db" : "pct";
+            if (!fromHost) bridge.setFbUnit(mem.fbUnit);
+        } else if (kind === "delay") {
+            mem.delayUnit = value === "samples" ? "samples" : "ms";
+            if (!fromHost) bridge.setDelayUnit(mem.delayUnit);
+        }
     };
     const scene = readPreviewScene();
 
@@ -523,11 +529,16 @@ function boot() {
         bridge.openExternal(docLink(docRef(version), "docs/USER_GUIDE.zh-CN.md"));
     }
 
+    /** 关于面板的构建行：版本号加 rinne.state.build（三项各自可缺省，缺的写「—」）。 */
+    function buildInfo(state) {
+        return { version: state.version, ...(state.build || {}) };
+    }
+
     function openAbout() {
         const v = ctx.view;
         if (v) {
             const { t, lang, state, cfg } = v;
-            about.open({ t, lang, build: { version: state.version }, cfg, diagLog: state.diagLog === true });
+            about.open({ t, lang, build: buildInfo(state), cfg, diagLog: state.diagLog === true });
             lockAboutAdvanced(false);
             renderShellState();
             panic.update({ cut: Boolean((state.safety || {}).cut), overScrim: true, t });
@@ -575,16 +586,26 @@ function boot() {
         return true;
     };
 
+    // 旧 WebKit 把缩放钉在 100% 时，宿主若按存档的档位开了窗，请回 1。用的是宿主自己给的 state.uiScale，只改窗口、不存档；
+    // 这也是一次写入，所以等两路首帧齐了才发（state 与 pair 谁后到都走这里），口径同 Output 页面
+    const applyZoomLock = () => {
+        if (!isReady()) return;
+        enforceZoomLock(S.state.uiScale, (s) => opened.bridge.setUiScale(s));
+    };
+
     const onState = (f) => {
         if (!fresh("state", f)) return;
         const first = S.state === null;
         // 守卫开关的乐观覆盖要在下一帧回声里收回：即便内容没变也得重画一次，把界面拉回宿主的值
         const changed = changedSince("state", f) || S.guardOverride !== undefined;
+        const prevCfg = first ? null : S.state.cfg;
         S.state = f;
         S.guardOverride = undefined;
+        // 宿主的值变了才采纳（首帧、工程恢复、撤销）。用户刚点过、回声还没到的那几帧宿主的值没变，不会把用户的选择拉回去
+        if (first || fbUnitOf(prevCfg) !== fbUnitOf(f.cfg)) setUnit("fb", fbUnitOf(f.cfg), { fromHost: true });
+        if (first || delayUnitOf(prevCfg) !== delayUnitOf(f.cfg))
+            setUnit("delay", delayUnitOf(f.cfg), { fromHost: true });
         if (first) {
-            setUnit("fb", fbUnitOf(f.cfg));
-            setUnit("delay", delayUnitOf(f.cfg));
             // 本实例此前已经关掉过导出提示：以当前的锁存为基线，出现新原因或更多事件才重新提示
             if (Array.isArray(f.dismissedHints) && f.dismissedHints.includes("exportMismatch")) {
                 const cur = f.exportCauses || { bits: 0, count: 0 };
@@ -593,9 +614,7 @@ function boot() {
         }
         if (S.exportRec && !exportHint(f.exportCauses, S.exportRec).rec) S.exportRec = null;
         trackSmartDefault(f);
-        // 旧 WebKit 把缩放钉在 100% 时，宿主若按存档的档位开了窗，请回 1。这里用的是宿主自己给的 state.uiScale，不是
-        // 页面编的值，只改窗口、不存档，所以不经写入闸（快照没到齐时也要能钉住）
-        enforceZoomLock(f.uiScale, (s) => opened.bridge.setUiScale(s));
+        applyZoomLock();
         if (changed) scheduleRender();
         maybeApplyScene();
         maybeApplyMenuScene();
@@ -604,6 +623,7 @@ function boot() {
         if (!fresh("pair", f)) return;
         const changed = changedSince("pair", f);
         S.pair = f;
+        applyZoomLock();
         if (changed) scheduleRender();
         maybeApplyScene();
         maybeApplyMenuScene();
@@ -736,7 +756,7 @@ function boot() {
             about.update({
                 t: makeT(lang),
                 lang,
-                build: { version: st.version },
+                build: buildInfo(st),
                 cfg: st.cfg || {},
                 diagLog: st.diagLog === true,
             });

@@ -994,6 +994,14 @@ const messages = ({ M, ok, eq }) => {
         { key: "band.in.takeover", vals: { g: "A" } },
         "接管确认条",
     );
+    eq(
+        derive(M, (c) => {
+            c.state.takeover = true;
+            c.state.takeoverGroup = "C";
+        }).confirm,
+        { key: "band.in.takeover", vals: { g: "C" } },
+        "接管确认条：要接管的是别的组时写那个组，不写本端的组",
+    );
     eq(derive(M, () => {}).confirm, null, "平时没有确认条");
     // 占位符绝不原样出现
     const all = derive(M, (c) => {
