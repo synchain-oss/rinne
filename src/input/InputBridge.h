@@ -40,6 +40,8 @@
 
 #include "BridgeBase.h"
 #include "InputProcessor.h"
+#include "diag/DiagReport.h"
+#include "ipc/SlotObserver.h"
 #include "loop/LoopStatus.h"
 
 namespace rinne::input
@@ -73,6 +75,12 @@ struct SilentFacts
 // 回送为什么静音；没有原因时是空指针（桥上写 null）。优先级：本端旁路 > 宿主暂停 > 对端旁路 > 断档。
 // 宿主停了回调时对端的旁路位与断档都可能是陈旧的结论，所以排在宿主暂停之后
 const char* silentCauseOf(const SilentFacts& facts) noexcept;
+
+// 本组 Output 槽上的旁路位算不算数：槽要读稳了、是活的。休眠或正在换主人的槽上的是旧账
+bool peerBypassOf(const ipc::SlotSample& peer) noexcept;
+
+// rinne.pair 的 peer 里来自槽的两项，拿不到就不发。对端不在时槽里剩下的值是旧账
+void addPeerAudioFacts(juce::DynamicObject& peer, const diag::DiagPeer& facts);
 
 // 三盏灯的判据输入，cut 取 safety.cut 的同一个字符串（没切断是空指针）
 struct LampFacts

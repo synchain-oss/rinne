@@ -351,6 +351,21 @@ const char* silentCauseOf(const SilentFacts& facts) noexcept
     return nullptr;
 }
 
+bool peerBypassOf(const ipc::SlotSample& peer) noexcept
+{
+    return peer.stable && ipc::ctlPhase(peer.ctl) == ipc::kCtlPhaseActive && (peer.rtFlags & ipc::kRtBypassed) != 0u;
+}
+
+void addPeerAudioFacts(juce::DynamicObject& peer, const diag::DiagPeer& facts)
+{
+    if (!facts.present)
+        return;
+    if (facts.channels == 1u || facts.channels == 2u)
+        peer.setProperty("channels", static_cast<int>(facts.channels));
+    if (facts.sampleRate > 0u)
+        peer.setProperty("sampleRate", static_cast<int>(facts.sampleRate));
+}
+
 juce::var buildLamps(const LampFacts& facts)
 {
     const juce::String cut = facts.cut != nullptr ? juce::String(facts.cut) : juce::String();
@@ -988,15 +1003,10 @@ SilentFacts InputBridge::silentFacts()
     const InstanceHost& host = processor_.instanceHost();
     facts.hostBypass = processor_.hostBypassed();
     facts.hostPaused = lastSamples_ > 0 && t - lastAdvanceMs_ >= kHostPausedMs;
-    // 会合的观察者只在 tick 里扫，tick
-    // 与这里都在消息线程。槽要读稳了、是活的才算数：休眠或正在换主人的槽上的旁路位是旧账
+    // 会合的观察者只在 tick 里扫，tick 与这里都在消息线程
     const std::uint32_t group = host.group();
     if (group >= 1u && group <= ipc::kGroupCount)
-    {
-        const ipc::SlotSample& peer = host.rendezvous().observer().sample(group, ipc::Role::kOutput);
-        facts.peerBypass =
-            peer.stable && ipc::ctlPhase(peer.ctl) == ipc::kCtlPhaseActive && (peer.rtFlags & ipc::kRtBypassed) != 0u;
-    }
+        facts.peerBypass = peerBypassOf(host.rendezvous().observer().sample(group, ipc::Role::kOutput));
     const std::uint32_t word = meters().safety.load(std::memory_order_relaxed);
     facts.stalled = engine::PackedSafety::state(word) == engine::SafetyState::Stalled;
     return facts;
@@ -1154,12 +1164,9 @@ juce::var InputBridge::pairBody() const
     auto* peer = new juce::DynamicObject();
     peer->setProperty("name", m.peerName.empty() ? juce::var() : juce::var(fromUtf8(m.peerName)));
     peer->setProperty("color", m.peerColourArgb != 0u ? juce::var(colourText(m.peerColourArgb)) : juce::var());
-    if (d.peer.present && (d.peer.channels == 1u || d.peer.channels == 2u))
-        peer->setProperty("channels", static_cast<int>(d.peer.channels));
     peer->setProperty("version", m.peerVersion.empty() ? juce::var() : juce::var(fromUtf8(m.peerVersion)));
     peer->setProperty("holder", m.occupantName.empty() ? juce::var() : juce::var(fromUtf8(m.occupantName)));
-    if (d.peer.present && d.peer.sampleRate > 0u)
-        peer->setProperty("sampleRate", static_cast<int>(d.peer.sampleRate));
+    addPeerAudioFacts(*peer, d.peer);
 
     auto* self = new juce::DynamicObject();
     self->setProperty("name", label.name.has_value() ? juce::var(*label.name) : juce::var());

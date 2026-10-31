@@ -29,6 +29,7 @@ namespace
 using namespace rinne::pairing_test;
 using rinne::InputProcessor;
 using rinne::OutputProcessor;
+using rinne::input::addPeerAudioFacts;
 using rinne::input::buildInfo;
 using rinne::input::buildLamps;
 using rinne::input::buildNotices;
@@ -38,8 +39,10 @@ using rinne::input::isL2;
 using rinne::input::LampFacts;
 using rinne::input::levelDb;
 using rinne::input::NoticeFacts;
+using rinne::input::peerBypassOf;
 using rinne::input::silentCauseOf;
 using rinne::input::SilentFacts;
+namespace diag = rinne::diag;
 namespace engine = rinne::engine;
 namespace uidefaults = rinne::uidefaults;
 namespace wiring_test = rinne::wiring_test;
@@ -386,6 +389,20 @@ TEST_CASE("input bridge: moveToFreeGroup re-pairs a duplicated Input", "[host][i
     CHECK_FALSE(static_cast<bool>(safetyOf(bridge).getProperty("l2", {})));
 }
 
+TEST_CASE("input bridge: taking over only accepts a real group", "[host][input_bridge]")
+{
+    formalOnly();
+    Rig rig;
+    const auto before = configsOf(rig.input).group;
+    for (const int bad : {0, -1, static_cast<int>(ipc::kGroupCount) + 1})
+    {
+        INFO(bad);
+        CHECK_FALSE(rig.input.takeOverGroup(bad));
+    }
+    CHECK(configsOf(rig.input).group == before);
+    CHECK_FALSE(settled(rig.input));
+}
+
 TEST_CASE("input bridge: a repair onto a dormant slot asks first, then takes it over or cancels",
           "[host][input_bridge][takeover]")
 {
@@ -568,6 +585,19 @@ TEST_CASE("input bridge: the setParam receipt and the echo frame carry the same 
     const auto echo = bridge.poll(rig.ui);
     REQUIRE_FALSE(echo.params.isVoid());
     CHECK(echo.params.getProperty("seq", {}) == again.getProperty("seq", {}));
+
+    // 回执之后页面重发了请求：回声跟着首帧走，用的还是回执的 seq，下一拍不再补一帧
+    const auto beforeFirst = bridge.setParam(args({juce::var("mix"), juce::var(41)}));
+    const auto first = bridge.firstFrames(rig.ui);
+    CHECK(first.params.getProperty("seq", {}) == beforeFirst.getProperty("seq", {}));
+    CHECK(bridge.poll(rig.ui).params.isVoid());
+
+    // 落在两个步进正中间：回执报的是参数实际落到的值，不是自己换算的，与回声逐字相同
+    const auto tie = bridge.setParam(args({juce::var("ceiling"), juce::var(-3.25)}));
+    REQUIRE(isOk(tie));
+    const auto tieEcho = bridge.poll(rig.ui);
+    REQUIRE_FALSE(tieEcho.params.isVoid());
+    CHECK(tie.getProperty("value", {}) == tieEcho.params.getProperty("values", {}).getProperty("ceiling", {}));
 
     // 自动化没有回执，帧自己取下一个 seq
     auto* feedback = rig.input.parameterLayer()->tree().getParameter("feedback");
@@ -775,7 +805,11 @@ TEST_CASE("input bridge: the cut stays what it was and the cooldown is an estima
     // 冷却位一来就从 1500 倒数；到点而位还在，写 1 不写 0
     setSafety(rig.input, engine::SafetyState::Tripped, engine::TripReason::Panic, true);
     CHECK(static_cast<int>(safetyOf(bridge).getProperty("cooldownMs", {})) == 1500);
-    rig.bench.idle(500);
+    // state 里向上取整到 100 ms，免得每拍都因为这个数变了多发一帧；回执不取整
+    rig.bench.idle(10);
+    CHECK(static_cast<int>(safetyOf(bridge).getProperty("cooldownMs", {})) == 1500);
+    CHECK(static_cast<int>(bridge.resumeLoop().getProperty("remainingMs", {})) == 1490);
+    rig.bench.idle(490);
     CHECK(static_cast<int>(bridge.resumeLoop().getProperty("remainingMs", {})) == 1000);
     CHECK(static_cast<int>(safetyOf(bridge).getProperty("cooldownMs", {})) == 1000);
     rig.bench.idle(1500);
@@ -893,6 +927,13 @@ TEST_CASE("input bridge: confirming the export hint clears the fields and new ev
     oversizedBlock();
     CHECK(static_cast<int>(causes().getProperty("bits", {})) == 1);
     CHECK(static_cast<int>(causes().getProperty("count", {})) == 1);
+
+    // 确认的是「到现在为止」：上次读 state 之后才来的事件也算进去，不留到下一帧再弹
+    REQUIRE(isOk(rig.bridge.dismissHint(args({juce::var("exportMismatch")}))));
+    oversizedBlock();
+    REQUIRE(isOk(rig.bridge.dismissHint(args({juce::var("exportMismatch")}))));
+    CHECK(static_cast<int>(causes().getProperty("bits", {})) == 0);
+    CHECK(static_cast<int>(causes().getProperty("count", {})) == 0);
 }
 
 // ---------------------------------------------------------------- 工程设置与单位
@@ -945,6 +986,8 @@ TEST_CASE("input bridge: the project settings validate, settle, mark dirty and s
     CHECK_FALSE(static_cast<bool>(bridge.setResetOnPlay(args({juce::var(false)})).getProperty("value", {})));
     CHECK(bridge.setTailMode(args({juce::var("30s")})).getProperty("value", {}).toString() == "30s");
     CHECK(dirty.dirtyMarks == 5);
+    // 外壳跟上：宿主问尾长读的是外壳那一份
+    CHECK(rig.input.getTailLengthSeconds() == 30.0);
 
     // 写进工程：换一个实例读回来还是这些
     const auto saved = savedState(rig.input);
@@ -1055,6 +1098,24 @@ TEST_CASE("input bridge: loading a preset goes through the fade and tracks the c
         CHECK_FALSE(static_cast<bool>(stateFields(bridge).getProperty("preset", {}).getProperty("dirty", {})));
     }
     rig.input.removeListener(&dirty);
+}
+
+TEST_CASE("input bridge: a dirty bit with no current preset to hang on does not count", "[host][input_bridge][presets]")
+{
+    formalOnly();
+    Rig rig;
+    rig.input.stateGlue()->editConfigs([](state::Configs& next) { next.presetDirty = true; });
+    CHECK_FALSE(static_cast<bool>(stateFields(rig.bridge).getProperty("preset", {}).getProperty("dirty", {})));
+}
+
+TEST_CASE("input bridge: only a save that went through settles the instance", "[host][input_bridge][presets]")
+{
+    formalOnly();
+    Rig rig;
+    CHECK(reasonOf(rig.bridge.savePreset(args({juce::var("")}))) == "bad-name");
+    CHECK_FALSE(settled(rig.input));
+    REQUIRE(isOk(rig.bridge.savePreset(args({juce::var("Mine")}))));
+    CHECK(settled(rig.input));
 }
 
 TEST_CASE("input bridge: saving filters the name and answers the documented reasons", "[host][input_bridge][presets]")
@@ -1405,6 +1466,31 @@ TEST_CASE("input bridge: silentCause reads its four sources by value, whatever t
     }
 }
 
+TEST_CASE("input bridge: the bypass bit only counts on a slot that reads stable and is active",
+          "[host][input_bridge][silent]")
+{
+    ipc::SlotSample slot;
+    slot.stable = true;
+    slot.ctl = ipc::kCtlPhaseActive;
+    slot.rtFlags = ipc::kRtBypassed;
+    CHECK(peerBypassOf(slot));
+
+    auto notStable = slot;
+    notStable.stable = false;
+    CHECK_FALSE(peerBypassOf(notStable));
+
+    for (const auto phase : {ipc::kCtlPhaseFree, ipc::kCtlPhaseClaiming, ipc::kCtlPhaseDormant})
+    {
+        auto other = slot;
+        other.ctl = phase;
+        CHECK_FALSE(peerBypassOf(other));
+    }
+
+    auto notBypassed = slot;
+    notBypassed.rtFlags = ipc::kRtStalled;
+    CHECK_FALSE(peerBypassOf(notBypassed));
+}
+
 TEST_CASE("input bridge: peerBypass reads the bypass bit of the Output slot", "[host][input_bridge][silent]")
 {
     formalOnly();
@@ -1590,6 +1676,32 @@ TEST_CASE("input bridge: outOfOrder follows the order evidence of the Input engi
 
 // ---------------------------------------------------------------- rinne.pair
 
+TEST_CASE("input bridge: the peer's channels and sample rate only count while the peer is there",
+          "[host][input_bridge][pair]")
+{
+    const auto factsOf = [](const diag::DiagPeer& facts) {
+        auto* o = new juce::DynamicObject();
+        juce::var v(o);
+        addPeerAudioFacts(*o, facts);
+        return v;
+    };
+    diag::DiagPeer peer;
+    peer.channels = 2u;
+    peer.sampleRate = 48000u;
+    CHECK(keysOf(factsOf(peer)).empty());
+
+    peer.present = true;
+    CHECK(keysOf(factsOf(peer)) == std::set<std::string>{"channels", "sampleRate"});
+    peer.channels = 1u;
+    CHECK(static_cast<int>(factsOf(peer).getProperty("channels", {})) == 1);
+    // 处理器只接受单声道与立体声：别的值不是真的声道数；采样率没给就不发
+    peer.channels = 0u;
+    peer.sampleRate = 0u;
+    CHECK(keysOf(factsOf(peer)).empty());
+    peer.channels = 3u;
+    CHECK(keysOf(factsOf(peer)).empty());
+}
+
 TEST_CASE("input bridge: rinne.pair has the documented fields and only the optional ones it knows",
           "[host][input_bridge][pair]")
 {
@@ -1634,6 +1746,10 @@ TEST_CASE("input bridge: rinne.pair has the documented fields and only the optio
         const auto self = frame.getProperty("self", {});
         CHECK(keysOf(self) == std::set<std::string>{"name", "color", "channels"});
         CHECK(self.getProperty("color", {}).toString() == "#2d79c6");
+        CHECK(self.getProperty("name", {}).toString() == "Vox Lead");
+        // 宿主这次给了空名字：不算给了，沿用上次的
+        setTrack(input, juce::String(), juce::Colour(0xff2d79c6));
+        CHECK(bridge.firstFrames(ui).pair.getProperty("self", {}).getProperty("name", {}).toString() == "Vox Lead");
     }
     SECTION("a mono insert reports one channel")
     {
@@ -1967,6 +2083,12 @@ TEST_CASE("input bridge: changes go out on the same beat", "[host][input_bridge]
 
     // 全局位签名看不见，桥函数改了照样当拍发
     REQUIRE(isOk(bridge.setRulesAck(args({juce::var(7)}))));
+    CHECK(bridge.poll(ui).state);
+    CHECK_FALSE(bridge.poll(ui).state);
+    REQUIRE(isOk(bridge.setGuideSeen(args({juce::var(true)}))));
+    CHECK(bridge.poll(ui).state);
+    CHECK_FALSE(bridge.poll(ui).state);
+    REQUIRE(isOk(bridge.setDiagLog(args({juce::var(false)}))));
     CHECK(bridge.poll(ui).state);
     CHECK_FALSE(bridge.poll(ui).state);
 
