@@ -722,12 +722,15 @@ function boot() {
         scaleConfirm.update({ ...S.scaleState, t });
     }
 
-    /** 第一批真快照到了：撤掉「—」状态，打开操作；关于面板若开着，换成宿主的值。 */
+    /**
+     * 第一批真快照到了：撤掉「—」状态，打开操作；关于面板若开着，换成宿主的值。
+     * 关于面板在 400 ms 兜底揭幕之前就可能被打开（此时 S.pending 还没置位），所以不看之前是不是处在揭幕态，
+     * 只要面板开着且快照在手就刷新：高级设置才会放开、版本才会写上。
+     */
     function leavePending() {
-        const wasPending = S.pending;
         S.pending = false;
         setLocked(false);
-        if (wasPending && about.isOpen() && S.state) {
+        if (about.isOpen() && S.state) {
             const st = S.state;
             const lang = LANGS.includes(st.lang) ? st.lang : "zh";
             about.update({

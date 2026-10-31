@@ -15,6 +15,8 @@
 //      解锁后 inert 与置灰撤掉，同一套刺激这时能写到桥上（防空转）。
 //   ⑥ 对照：没有关闭过导出提示的同一快照，导出提示会弹出（说明 ⑤ 里「不弹」是真的被基线压住，不是看不见）；
 //   ⑦ 只来了 state、pair 还没到（场景 E）：仍算没就绪，继续锁着、刺激写不到桥；pair 补上才放行。
+//   ⑧ 关于面板在 400 ms 兜底揭幕之前就打开（场景 F，用钩子把兜底定时器扣住，保证先后顺序而不靠计时）：
+//      首批快照到后，高级设置那几行放开、版本号写上。
 // 另：预设槽与消息位整块在 inert 之内（里面暂时没有控件也一样），页脚版本号写「—」。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
@@ -60,11 +62,34 @@ const HOLD_HOOK = `(() => {
     });
 })()`;
 
-/** 打开 Input 页面并扣住首批快照；返回时页面已建好外壳。 */
-async function openHeld(browser, server, scenario) {
+/**
+ * 把页面的 400 ms 兜底揭幕（showPending）扣住直到放行：用它造出「快照没到、也还没揭幕」的窗口，
+ * 不靠真实计时。只在 Input 页面所在的帧里装，只扣名为 showPending 的那一个定时器。
+ */
+const HOLD_FALLBACK_HOOK = `(() => {
+    if (!location.pathname.endsWith("/web/input/index.html")) return;
+    const orig = window.setTimeout;
+    const held = [];
+    window.__heldFallback = held;
+    window.setTimeout = function (fn, ms, ...rest) {
+        if (ms === 400 && typeof fn === "function" && fn.name === "showPending" && !window.__fallbackReleased) {
+            held.push([fn, rest]);
+            return 0;
+        }
+        return orig.call(window, fn, ms, ...rest);
+    };
+    window.__releaseFallback = () => {
+        window.__fallbackReleased = true;
+        for (const [fn, rest] of held.splice(0)) orig.call(window, fn, 0, ...rest);
+    };
+})()`;
+
+/** 打开 Input 页面并扣住首批快照；返回时页面已建好外壳。holdFallback 为真时连兜底揭幕也扣住。 */
+async function openHeld(browser, server, scenario, { holdFallback = false } = {}) {
     const page = await browser.newPage();
     await page.setViewport(VIEW.w, VIEW.h, 1);
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_HOOK });
+    if (holdFallback) await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_FALLBACK_HOOK });
     const q = new URLSearchParams({ fresh: "1", auto: "0", lang: "zh", scenario });
     await page.goto(`${server.url}/web-preview/input.html?${q}`);
     await page.waitFor(
@@ -571,6 +596,63 @@ try {
         const r = await inFrame(page, readyProbe);
         run.eq([r.pending, r.inerts, r.disabledAny], [null, 0, 0], "E：pair 补上后应撤掉 data-pending、inert 与置灰");
         run.check(page.errors.length === 0, `E：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
+        await page.close();
+    }
+
+    // ====== 场景 F：关于面板在兜底揭幕之前打开；首批快照到后高级设置放开、版本写上
+    {
+        const page = await openHeld(browser, server, "in-playing", { holdFallback: true });
+        const rec = await recordBridge(page, RECORDED);
+        // 远超 400 ms：兜底被钩子扣着，页面既没有快照也没有揭幕
+        await sleep(page, 700);
+        const held = await inFrame(page, (doc, win) => ({
+            queued: win.__heldFallback ? win.__heldFallback.length : -1,
+            pending: doc.querySelector('[data-part="content"]').getAttribute("data-pending"),
+        }));
+        run.eq(held, { queued: 1, pending: null }, "F：兜底揭幕应被扣住（防空转：先后顺序是造出来的，不是等出来的）");
+        const vb = await centerOf(page, '[data-gb="input.footer.version"]');
+        await click(page, vb.x, vb.y);
+        const aboutProbe = (doc) => {
+            const panel = doc.querySelector('[data-gb="input.about"]');
+            const adv = [...doc.querySelectorAll("[data-adv], [data-tail]")];
+            return {
+                open: !!panel && !panel.hidden,
+                adv: adv.length,
+                enabled: adv.filter((b) => !b.disabled).length,
+                build: (doc.querySelector(".rn-about__build") || { textContent: "" }).textContent,
+            };
+        };
+        const before = await inFrame(page, aboutProbe);
+        run.check(before.open, "F：兜底之前点版本按钮，关于面板应打开");
+        run.check(before.adv >= 4, `F：关于面板应有高级设置的几行（防空转），实得 ${before.adv}`);
+        run.eq(before.enabled, 0, "F：快照没到时高级设置那几行应置灰");
+        run.check(
+            !before.build.includes("0.0.0-preview"),
+            `F：快照没到时版本不应是真值，实得 ${JSON.stringify(before.build)}`,
+        );
+        // 放行首批快照，不放行兜底：面板开着，S.pending 从没置过位
+        await page.eval(`(() => { window.__hold = false; window.__origInitial(); })()`);
+        await page.waitFor(
+            `(() => { const f = document.querySelector("iframe"); const p = f.contentDocument.querySelector('[data-gb="input.pair.pill"]'); return !!p && p.hasAttribute("data-state"); })()`,
+            { timeout: 8000, label: "F：放行后页面应画出首批快照" },
+        );
+        await settle(page);
+        const after = await inFrame(page, aboutProbe);
+        run.check(after.open, "F：首批快照到后关于面板仍开着");
+        run.eq(after.enabled, after.adv, "F：首批快照到后，高级设置那几行应全部放开（即使揭幕兜底从没触发过）");
+        run.check(
+            after.build.includes("0.0.0-preview"),
+            `F：首批快照到后版本应写上宿主的值，实得 ${JSON.stringify(after.build)}`,
+        );
+        const left = await inFrame(page, (doc, win) => (win.__heldFallback ? win.__heldFallback.length : -1));
+        run.eq(left, 1, "F：整个过程兜底揭幕一直被扣着（它没有参与这次放开）");
+        const ab = await rec.calls();
+        run.eq(
+            ab.filter((c) => GATED_WRITES.includes(c[0])),
+            [],
+            "F：打开关于面板、放行快照都不应写桥",
+        );
+        run.check(page.errors.length === 0, `F：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
         await page.close();
     }
 
