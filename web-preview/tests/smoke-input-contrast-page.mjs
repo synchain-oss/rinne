@@ -11,7 +11,9 @@
 //   场景表里的旁路场景之外，另有「旁路 + 紧急切断」「旁路 + 沙盒拒绝共享内存」两个红字用例，要求量到 A 档红字并过线。
 // 采样两遍、截图前后核对矩形，页面没静止就不量（不拿一张拼凑的画面去量）。
 // 坏样例：把一段 A 档文字改成与底近似的颜色，量尺必须量出低于门槛；采样为空必须报错（防空转）；
-//   把消息位或紧急切断挪进降级层、或把内容层整体降回 0.55，旁路断言必须报出来。
+//   把消息位或紧急切断挪进降级层、或把内容层整体降回 0.55，旁路断言必须报出来；
+//   强加等待态把配对 pill 压暗到 0.6，量尺必须量出低于门槛，失败信息必须带出有效不透明度、旁路、等待态、inert 与进行中的动画。
+// 量到低于门槛时，失败信息后面附页面现场（见 describeFailure），下次再红时分得清是量尺的问题还是页面状态。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
 // 用法：node web-preview/tests/smoke-input-contrast-page.mjs [仓库根]
@@ -73,6 +75,43 @@ const safetyNotDegraded = (page) =>
             problems.push(`旁路下页眉应仍按设计稿降到 0.55，实得 ${eff(header).toFixed(2)}`);
         return problems;
     });
+
+/**
+ * 量到低于门槛时附在失败信息后面的页面现场，下次再红时一眼分清是量尺的问题还是页面状态：
+ * 外壳是否在旁路、内容层是否带等待态（data-pending）、哪些块在 inert 之内、还有哪些动画和过渡在跑（循环的脉冲带 ∞）。
+ * 只描述，不参与判据。
+ */
+const sceneState = (page) =>
+    inFrame(page, (doc) => {
+        const label = (e) =>
+            e.getAttribute("data-gb") || (typeof e.className === "string" && e.className.split(" ")[0]) || e.tagName;
+        const shell = doc.querySelector('[data-gb="input.shell"]');
+        const content = doc.querySelector('[data-part="content"]');
+        return {
+            bypass: Boolean(shell && shell.hasAttribute("data-bypass")),
+            pending: content ? content.getAttribute("data-pending") : null,
+            inert: [...doc.querySelectorAll("[inert]")].map(label),
+            anims: doc
+                .getAnimations()
+                .filter((a) => a.playState === "running")
+                .map((a) => {
+                    const t = a.effect && a.effect.getComputedTiming();
+                    return (
+                        (a.transitionProperty || a.animationName || a.constructor.name) +
+                        (t && t.iterations === Infinity ? "∞" : "")
+                    );
+                }),
+        };
+    });
+
+/** 把一段文字的有效不透明度（沿祖先连乘）和 sceneState 的结果写成一行。 */
+const describeFailure = async (page, it) => {
+    const s = await sceneState(page);
+    return (
+        `有效不透明度 ${it.op.toFixed(2)}（沿祖先连乘）、data-bypass=${s.bypass ? 1 : 0}、data-pending=${s.pending === null ? "无" : s.pending}、` +
+        `inert ${s.inert.length} 处[${s.inert.join(" ")}]、进行中的动画 ${s.anims.length} 条[${s.anims.join(" ")}]`
+    );
+};
 
 /** 截 iframe 里某个矩形（iframe 内坐标），返回解码后的 PNG。 */
 async function shotRect(page, origin, r) {
@@ -174,9 +213,11 @@ try {
                     degraded++;
                     continue;
                 }
+                const ok = it.worst.min >= min;
                 run.check(
-                    it.worst.min >= min,
-                    `${tag}：${it.tier} 档文字 ${JSON.stringify(it.text)}（${it.sel}）对比度 ${it.worst.min.toFixed(2)} 低于 ${min}`,
+                    ok,
+                    `${tag}：${it.tier} 档文字 ${JSON.stringify(it.text)}（${it.sel}）对比度 ${it.worst.min.toFixed(2)} 低于 ${min}；` +
+                        (ok ? "" : await describeFailure(page, it)),
                 );
             }
             if (bypass) run.eq(await safetyNotDegraded(page), [], `${tag}：旁路下安全层与消息位不得被降级`);
@@ -221,9 +262,11 @@ try {
                     it.op >= 0.99,
                     `${tag}：红字 ${JSON.stringify(it.text)} 的有效不透明度 ${it.op.toFixed(2)} 应为 1`,
                 );
+                const ok = it.worst.min >= TIER_MIN.A;
                 run.check(
-                    it.worst.min >= TIER_MIN.A,
-                    `${tag}：红字 ${JSON.stringify(it.text)} 对比度 ${it.worst.min.toFixed(2)} 低于 ${TIER_MIN.A}`,
+                    ok,
+                    `${tag}：红字 ${JSON.stringify(it.text)} 对比度 ${it.worst.min.toFixed(2)} 低于 ${TIER_MIN.A}；` +
+                        (ok ? "" : await describeFailure(page, it)),
                 );
             }
             if (c.wantButton) {
@@ -310,6 +353,32 @@ try {
         run.check(
             panic.some((i) => i.worst.min < TIER_MIN.A),
             `坏样例：把紧急切断改成浅红后对比度应低于 ${TIER_MIN.A}，实得 ${JSON.stringify(panic.map((i) => +i.worst.min.toFixed(2)))}`,
+        );
+    }
+    // ---- 坏样例：强加等待态（内容层 data-pending、配对行 inert），配对 pill 的文字被压暗到 0.6，量尺必须量出低于 B 档门槛；
+    //      失败信息要带得出现场：有效不透明度 0.60、data-pending=1、inert 里有配对行、进行中的动画（这一页的脉冲带 ∞）
+    await openInput(page, server, "in-playing", { lang: "zh" });
+    await inFrame(page, (doc) => {
+        doc.querySelector('[data-part="content"]').setAttribute("data-pending", "1");
+        doc.querySelector(".in-pairrow").setAttribute("inert", "");
+    });
+    await settle(page);
+    {
+        const items = await measure(page);
+        const pill = items.filter((i) => i.tier === "B" && /rn-pair__text/.test(i.sel));
+        run.check(pill.length > 0, "坏样例：应采到配对 pill 的文字");
+        run.check(
+            pill.length > 0 && pill.every((i) => i.worst.min < TIER_MIN.B && Math.abs(i.op - 0.6) < 0.01),
+            `坏样例：强加等待态后配对 pill 的对比度应低于 ${TIER_MIN.B}、有效不透明度应是 0.60，实得 ${JSON.stringify(pill.map((i) => [+i.worst.min.toFixed(2), +i.op.toFixed(2)]))}`,
+        );
+        const msg = pill.length ? await describeFailure(page, pill[0]) : "";
+        run.check(
+            /有效不透明度 0\.60/.test(msg) &&
+                /data-pending=1/.test(msg) &&
+                /data-bypass=0/.test(msg) &&
+                /inert 1 处\[in-pairrow\]/.test(msg) &&
+                /进行中的动画 [1-9]\d* 条\[[^\]]*∞/.test(msg),
+            `坏样例：失败信息应带出有效不透明度、等待态、旁路、inert 与进行中的动画，实得 ${JSON.stringify(msg)}`,
         );
     }
     // 坏样例：矩形在截图之外时一个像素都没采到，必须抛错而不是悄悄通过
