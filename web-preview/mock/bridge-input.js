@@ -112,21 +112,29 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         presetDirty: false,
         cut: null,
         cutAt: 0,
-        delay: { actualMs: 100, minMs: 10.7, reason: "ok", maxBlock: 512 },
+        delay: { actualMs: 100, minMs: 10.7, reason: "ok", maxBlock: 512, bpm: 120, noTempo: false },
         pair: {
             state: "searching",
             groupMask: 0,
-            peer: { name: null, color: null, channels: null, version: null, holder: null },
-            self: { name: null },
+            peer: { name: null, color: null, channels: null, version: null, holder: null, sampleRate: null },
+            self: { name: null, channels: null },
             verify: "unknown",
         },
+        // dryPart / retPart / highCutLimited 为 undefined 时按 in、ret、Mix 和高切现算（deriveParts）；给 null 或数值就原样发
         meters: {
             in: null,
             ret: null,
             out: null,
+            dryPart: undefined,
+            retPart: undefined,
             gr: 0,
-            lamps: { dc: "ok", nonfinite: "ok", nonfiniteCount: 0, guard: "ok" },
+            highCutLimited: undefined,
+            lamps: { dc: "ok", nonfinite: "ok", nonfiniteCount: 0, guard: "ok", guardDb: 0 },
         },
+        exportCauses: { bits: 0, count: 0 },
+        silentCause: null,
+        notices: [], // [{ id, a?, b? }]，id 取 ipcSandbox、outOfOrder、unstable、newerProject、stateDecodeFailed
+        fadeIn: false,
         userPresets: [],
         dismissed: new Set(),
     };
@@ -230,8 +238,11 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         cfg: { ...model.cfg },
         preset: { id: model.presetId, dirty: model.presetDirty, name: presetName(model.presetId) },
         delay: { ...model.delay },
-        safety: { cut: model.cut, cooldownMs: cooldownLeft(), l2: model.cut !== null },
+        safety: { cut: model.cut, cooldownMs: cooldownLeft(), l2: model.cut !== null, fadeIn: model.fadeIn },
         dismissedHints: [...model.dismissed],
+        exportCauses: { ...model.exportCauses },
+        silentCause: model.silentCause,
+        notices: model.notices.map((n) => ({ ...n })),
     }));
     core.register("rinne.pair", () => ({
         seq: core.nextSeq(),
@@ -242,7 +253,11 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         verify: model.pair.verify,
     }));
     core.register("rinne.params", () => ({ seq: core.nextSeq(), values: { ...model.values } }));
-    core.register("rinne.meters", () => ({ seq: core.nextSeq(), ...structuredCloneSafe(model.meters) }));
+    core.register("rinne.meters", () => ({
+        seq: core.nextSeq(),
+        ...structuredCloneSafe(model.meters),
+        ...deriveParts(model),
+    }));
     core.register("rinne.presets", () => ({
         factory: FACTORY_PRESETS.map((p) => ({ id: p.id, name: { ...p.name } })),
         user: model.userPresets.map((p) => ({ id: p.id, name: p.name })),
@@ -375,6 +390,34 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
     const mock = { addEventListener: core.addEventListener };
     for (const name of FUNCTIONS) mock[name] = fns[name];
     return { role: "input", core, model, mock, cutReasons: CUT_REASONS };
+}
+
+// ---- 电平帧的派生分量 ----
+// 场景底座与场景描述的映射在 state-driver.js 的 applyInput，这里只管把模型变成桥载荷。
+
+const dbOf = (ratio) => (ratio > 0 ? 20 * Math.log10(ratio) : null);
+const round1 = (x) => Math.round(x * 10) / 10;
+/**
+ * Mix 推子的两路分量：干声 = 输入电平 + 干声比例，回送 = 回送电平 + 回送比例（与设计稿的 mixLevels 同式，
+ * 比例 g_dry = min(1, 2(1 - m))、g_ret = min(1, 2m)）；静音、环路关闭或比例为 0 的一路给 null。
+ * 高切截断位：设定高于 0.45 倍采样率而又不是「关」。meters 里显式给了值就用它的。
+ */
+export function deriveParts(model) {
+    const mx = Math.max(0, Math.min(100, model.values.mix)) / 100;
+    const dry = dbOf(Math.min(1, 2 * (1 - mx)));
+    const wet = dbOf(Math.min(1, 2 * mx));
+    const { in: lvIn, ret: lvRet, dryPart, retPart, highCutLimited } = model.meters;
+    const hc = model.values.high_cut;
+    return {
+        dryPart: dryPart !== undefined ? dryPart : lvIn !== null && dry !== null ? round1(lvIn + dry) : null,
+        retPart:
+            retPart !== undefined
+                ? retPart
+                : model.values.loop_on && lvRet !== null && wet !== null
+                  ? round1(lvRet + wet)
+                  : null,
+        highCutLimited: highCutLimited !== undefined ? highCutLimited : hc < 20000 && hc > 0.45 * model.sampleRate,
+    };
 }
 
 function structuredCloneSafe(o) {

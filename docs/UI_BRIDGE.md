@@ -83,8 +83,8 @@ The bridge between the web UI and the native plugin: function names, event names
 | `seq` | 帧序号。 |
 | `state` | 下面 15 个状态之一。 |
 | `groupMask` | 八位位图，第 n 位为 1 表示第 n 个组里有未配对的对端在等待。 |
-| `peer` | 对端信息：`name`（轨道名，宿主不给时为 `null`）、`color`、`channels`、`version`、`holder`（占组者的轨道名）。 |
-| `self` | 本端信息：`name`。 |
+| `peer` | 对端信息：`name`（轨道名，宿主不给时为 `null`）、`color`、`channels`、`version`、`holder`（占组者的轨道名），另带可选的 `sampleRate`（对端采样率，`srMismatch` 的提示用它；缺席显示「—」）。 |
+| `self` | 本端信息：`name`，另带可选的 `channels`（本端声道数，1 或 2，与 `peer.channels` 比较决定声道徽标；缺席只显示对端声道）。 |
 | `verify` | 两端轨道名核验：`match`、`diff` 或 `unknown`。 |
 
 ### 配对状态
@@ -243,7 +243,7 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | 事件 | 内容与频率 |
 |---|---|
 | `rinne.params` | 参数值的宿主回声，`{ seq, values }`；首帧必发。宿主自动化回放时，指针用 rAF 指数逼近最新回声，时间常数 40 ms，不用 CSS 过渡。 |
-| `rinne.meters` | 25 Hz，先 diff 再发：`in`、`ret`（增益前）、`out` 三条电平（dBFS，静音为 `null`）、增益缩减 `gr`、三盏灯 `lamps`（`dc`、`nonfinite`、`guard`）。 |
+| `rinne.meters` | 25 Hz，先 diff 再发：`in`、`ret`（增益前）、`out` 三条电平（dBFS，静音为 `null`）、Mix 推子的两路分量 `dryPart`、`retPart`（dBFS，静音为 `null`）、增益缩减 `gr`、高切截断位 `highCutLimited`、三盏灯 `lamps`（`dc`、`nonfinite`、`guard`，另带可选的 `nonfiniteCount`、`guardDb`）。字段含义见下面「电平帧补充字段」。 |
 | `rinne.presets` | 预设列表：`factory`（8 个，三语名）、`user`、`current`。 |
 
 ### 参数（11 个）
@@ -272,9 +272,35 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 |---|---|
 | `cfg` | 非参数的工程状态：`resetOnPlay`（默认开）、`tailMode`、`delayUnit`（ms 或样本）、`fbUnit`（% 或 dB）、`guardOn`（失控保护，默认开）。 |
 | `preset` | `{ id, dirty, name }`；`dirty` 为真时界面在名字后加「 *」。工厂预设的 `name` 是 `{ zh, en, fr }`，用户预设是字符串。 |
-| `delay` | 环路延迟卡：`actualMs`、`minMs`、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长）。 |
-| `safety` | `{ cut, cooldownMs, l2 }`。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`l2` 为真表示有任一 L2 条件。 |
+| `delay` | 环路延迟卡：`actualMs`、`minMs`、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长），另带可选的 `bpm`（同步档换算用的速度）与 `noTempo`（真为宿主没给速度、`bpm` 是兜底的 120；缺席按有速度处理，`bpm` 缺席按 120）。 |
+| `safety` | `{ cut, cooldownMs, l2 }`，另带可选的 `fadeIn`（布尔，回送正在 500 ms 淡入：新配对、恢复回送、载入预设之后；缺席按假）。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`l2` 为真表示有任一 L2 条件。 |
 | `dismissedHints` | 本实例已关闭的提示 ID，不进工程。 |
+| `exportCauses` | 导出不一致的锁存信息：`{ bits, count }`。`bits` 是自上次确认起各原因位的并集（1 = 宿主违约，2 = 主读头补 0，4 = 对端报告违约，8 = 重同步），`count` 是自上次确认起被计入的事件数（无符号 32 位，回绕无碍，只用「不等」比较）。`count` 为 0 表示没有锁存。 |
+| `silentCause` | 可选。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停）、`stalled`（块序号停滞）。只在 `rinne.pair.state` 为 `connectedStill` 或 `connectedUnverified` 时有意义；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
+| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝；出现时界面不再另报泛泛的共享内存不可用）、`outOfOrder`（错序证据成立）、`unstable`（宿主时序不稳定，已切到容忍模式）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）之一。这五条没有对应的配对状态，只能由这个字段带；缺省、非数组、元素残缺、未知 `id` 一律当没有，同一个 `id` 只取第一条。导出不一致的原因位不走这里，仍在 `exportCauses`。 |
+
+### 电平帧补充字段
+
+| 字段 | 含义 |
+|---|---|
+| `dryPart` | Mix 推子的干声分量峰值（dBFS，静音为 `null`），即 g_dry 作用之后的干声。 |
+| `retPart` | Mix 推子的回送分量峰值（dBFS，静音为 `null`），即加到干声上的那一项。输出是这两路逐样本相加，两路的峰值不一定同时出现，所以各自的峰值不能相加还原 `out`；推子从左填干声、从右填回送，各占一半量程。 |
+| `highCutLimited` | 布尔。高切设定高于采样率允许的上限（0.45 倍采样率）而又不是「关」，实际按上限截断；界面据此给一条中性提示。 |
+| `lamps.nonfiniteCount` | 环里读到并已置 0 的非有限样本累计数，`lamps.nonfinite` 为 `zeroed` 时界面显示它。 |
+| `lamps.guardDb` | 可选，非负数。失控保护当前把回送压低了多少 dB（核心侧的增益值取负）；`lamps.guard` 为 `reduced` 时界面显示它，缺席则只写「自动降低」不带数。 |
+
+### Input 页面读到的配对补充字段
+
+Input 页面把 `peer.color` 当作 `#rrggbb` 字符串（宿主不给时为 `null`），格式不对的值一律当没有；`peer.channels` 是数字 1 或 2。
+
+### 首批快照到齐之前，Input 页面不写桥
+
+页面把「`rinne.state` 与 `rinne.pair` 都收到过一帧」当作就绪。就绪之前页面手里没有宿主的真值，所以不编造默认值，也不对宿主写任何东西：
+装载后调 `requestInitialState`，400 ms 内没等到就揭幕外壳（标签照常，没有值的地方写「—」，操作全部关着，页脚缩放下拉置灰、里面只有「—」），并每 400 ms 重发一次 `requestInitialState`，最多再重发 3 次；两个事件都到了就进正常的首帧路径，按宿主的值显示并开放操作。
+就绪之前，参数写入（`beginParamGesture`、`setParam`、`endParamGesture`）、限制器与失控保护开关、组选择、恢复与接管、预设、缩放（`setUiScale`、`commitUiScale`）、关于面板里的高级设置这些函数页面一律不发，被拦下的调用在页面内回 `{ ok: false, reason: "not-ready" }`，不到桥。
+缩放也在被挡之列：选档要记下选档前的档位，倒计时到点或点「取消」时写回去，宿主的档位还不知道时那个回退目标是编的。唯一的例外是旧 WebKit 把缩放钉在 100 % 时，页面按宿主自己给的 `uiScale` 请回 1（`setUiScale(1)`，只改窗口、不存档），那个值是宿主的，不是页面编的。
+照常可用的是 `requestInitialState`、`panic`（任何时刻都必须能切断）、`setLang`（写的是用户刚选的语言，没有要回退的旧值）、`setRulesAck`、`setGuideSeen`、`copyDiagnostics`、`openExternal`、`showLicense`。
+所以原生侧首帧要把 `rinne.state` 与 `rinne.pair` 一起发出（上面时序第 2 条），只发其中一个页面会继续等另一个。
 
 ### 反馈安全在桥上的体现
 

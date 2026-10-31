@@ -7,8 +7,8 @@
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <title>Rinne Input</title>
         <!--
-          占位页：只有下面三件套和一个空白外壳。真实页面由后续的页面实现替换，
-          但三件套要保留，宿主侧的开窗遮挡闸与启动看门狗依赖它们。
+          页面入口：下面三件套之后是样式表与页面模块（app.js）。三件套必须保留，
+          宿主侧的开窗遮挡闸与启动看门狗依赖它们。
 
           一、开窗占位渐变。内联、字面量，不依赖任何外链请求的结果；必须是字面量，
           因为自定义属性都定义在 tokens.css 里，写成 var() 就又回到「等外链」那条路上。
@@ -96,6 +96,18 @@
                 var sent = false;
                 var armed = false;
                 var guard = null;
+                // 「页面起来了」= 首帧信号已发 且 主模块初始化完成，两件事谁先谁后都行（见下面 settleBooted）
+                var firstFrameSent = false;
+                var mainReady = false;
+                function settleBooted() {
+                    if (firstFrameSent && mainReady) window.__rinneBooted = true;
+                }
+                // 主模块（app.js）初始化完成后调用：占位底色可能在模块加载失败之前就已经画出来，
+                // 把「起来了」绑在首帧上，会让这类失败不再被 boot 守卫上报
+                window.__rinneMarkReady = function () {
+                    mainReady = true;
+                    settleBooted();
+                };
                 function signal() {
                     if (sent) return;
                     try {
@@ -107,10 +119,9 @@
                         // 撤网必须落在 postMessage 之后：撤在它之前的话，__JUCE__ 缺席时上面的 return
                         // 会在网已经撤了、信号却没真的发出去的状态下退出，保险彻底空转。
                         sent = true;
-                        // 占位页没有页面模块，首帧即视为起来了。接入页面模块的实现要把这个标志改成由主模块
-                        // 初始化完成后再置位（例如入口末尾）：占位底色可能在模块加载失败之前就已经画出来，
-                        // 绑在首帧上会让这类失败不再被上报。
-                        window.__rinneBooted = true;
+                        // 首帧已发；主模块也初始化完了才算「起来了」，之后 boot 守卫不再上报运行期小错
+                        firstFrameSent = true;
+                        settleBooted();
                         if (guard !== null) {
                             clearTimeout(guard);
                             guard = null;
@@ -160,6 +171,8 @@
         </script>
         <link rel="stylesheet" href="../shared/tokens.css" />
         <link rel="stylesheet" href="../shared/base.css" />
+        <link rel="stylesheet" href="../shared/rinne.css" />
+        <link rel="stylesheet" href="./input.css" />
         <style>
             html,
             body {
@@ -173,5 +186,6 @@
     </head>
     <body>
         <div class="sc-shell" id="shell"></div>
+        <script type="module" src="./app.js"></script>
     </body>
 </html>
