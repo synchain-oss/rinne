@@ -774,7 +774,12 @@ try {
         const fbPct = await centerOf(page, '[data-part="fb.unit"] [data-seg="pct"]');
         await click(page, fbPct.x, fbPct.y);
         await waitUnits("pct", "samples", "G：点回 %");
-        await page.eval(`void window.__RINNE_PREVIEW__.core.push("rinne.state")`);
+        // 帧内容要变（真宿主的 state 也一直在变）：内容不变不重画，冲没冲掉都看不出来
+        await page.eval(`(() => {
+            const s = window.__RINNE_PREVIEW__;
+            s.model.build = { sha: "aaa1111", fmt: "VST3", arch: "x64" };
+            s.core.push("rinne.state");
+        })()`);
         await settle(page);
         run.eq(await units(), ["pct", "samples"], "G：宿主的值没变的那一帧不应冲掉用户刚点的单位");
         run.eq(await unitCalls(), [["setFbUnit", "pct"]], "G：那一帧也不应多写");
@@ -828,6 +833,8 @@ try {
             const s = window.__RINNE_PREVIEW__;
             s.core.push = window.__pushOrig;
             s.core.push(${JSON.stringify(last)});
+            // 周期回声不许替它补：两路齐了的那一拍就要发，不靠下一帧
+            s.core.push = () => false;
         })()`);
         await page.waitFor(
             `(() => { const f = document.querySelector("iframe"); return f.contentDocument.querySelector('[data-part="content"]').getAttribute("data-pending") === null; })()`,
@@ -842,6 +849,7 @@ try {
         // 之后的帧不再发
         await page.eval(`(() => {
             const s = window.__RINNE_PREVIEW__;
+            s.core.push = window.__pushOrig;
             s.core.push("rinne.state");
             s.core.push("rinne.pair");
         })()`);
