@@ -39,6 +39,12 @@ OutputStateGlue::SetStateResult OutputStateGlue::setState(const void* data, int 
         result.mode = step.mode;
         lastLoad_.store(static_cast<std::uint8_t>(step.status), std::memory_order_relaxed);
         holding_.store(writeBack_.holding(), std::memory_order_relaxed);
+        // 被拒的那份就是这次交来的字节：头里的 abi 在拒载之前已经读出过，这里只为提示再读一次
+        state::Header header;
+        if (step.status == state::StateLoadStatus::RejectedNewer && state::parseHeader(bytes, size, header))
+            heldAbi_.store(header.abi, std::memory_order_relaxed);
+        if (!writeBack_.holding())
+            heldAbi_.store(0u, std::memory_order_relaxed);
         hook = confirmClaim_;
     }
     callHook(hook);

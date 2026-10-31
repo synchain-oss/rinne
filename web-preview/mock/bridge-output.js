@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Rinne Output 的 mock 后端：十二个共用函数加一个 Output 专用函数，三个事件。Output 只做分组与配对，没有参数。
+// Rinne Output 的 mock 后端：十二个共用函数加两个 Output 专用函数（repairPair、setTailMode），三个事件。
+// Output 只做分组与配对，没有参数；随工程走的非参数设置只有 tail 模式（cfg.tailMode）。
 // 名表与 docs/UI_BRIDGE.md、src/output/OutputBridgeApi.h、web/shared/bridge.js 逐名相等，由 check-bridge-parity 对拍。
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据。
 //
 // 场景（?scenario=）里 state-driver 管不到的几项，在首次造帧时由本文件补上，只做一次、之后交给用户操作：
 //   groupAuto 缺省 = 手动选的组（模型默认是「自动」）；scale: "150%" 这种档位；msg 里的 crossTrack 在配对状态不是
-//   crossTrack 时靠核验结果「不同」表达；msg 里属于 notices 的四条（ipcSandbox 等）进 rinne.state 的 notices；
+//   crossTrack 时靠核验结果「不同」表达；msg 里属于 notices 的四条（ipcSandbox 等）进 rinne.state 的 notices
+//   （newerProject 的 a / b 照原生写成 "ABI N"：a 是工程 state 的 abi，b 是本构建的 abi）；
 //   有名字的轨道配上预览用的颜色。真桥上没有 previewScene，这些补丁在真宿主里不存在。
 
 import { GROUPS, PAIR_STATES } from "./contract.js";
@@ -34,12 +36,17 @@ export const FUNCTIONS = [
     "resolveTakeover",
     "showLicense",
     "repairPair",
+    "setTailMode",
 ];
 
 export const EVENTS = ["rinne.state", "rinne.pair", "rinne.error"];
 
 /** 契约里没有独立状态的四条消息，经 rinne.state 的 notices 字段带给页面。 */
 const NOTICE_IDS = ["ipcSandbox", "newerProject", "stateDecodeFailed", "outOfOrder"];
+/** setTailMode 收的三个值，与 Input 同一张表。 */
+const TAIL_MODES = ["auto", "infinite", "30s"];
+/** newerProject 的 a / b：预览里假定工程比本构建新一版 abi。 */
+const PREVIEW_NEWER_ABI = { a: "ABI 2", b: "ABI 1" };
 /** 预览里有名字的轨道用的颜色（设计稿的示例蓝）。 */
 const PREVIEW_TRACK_COLOR = "rgb(45,121,198)";
 const PREVIEW_TRACK_NAME = "Vox Lead";
@@ -71,6 +78,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         send: { channels: "ST", sampleRate: 48000, bypassed: false, hostPaused: false },
         notices: [], // [{ id, a?, b? }]，id 取 NOTICE_IDS
         build: { sha: "a1b2c3d", fmt: "VST3", arch: "Windows x64" },
+        cfg: { tailMode: "auto" },
         pair: {
             state: "searching",
             groupMask: 0,
@@ -135,7 +143,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         if (msgs.includes("crossTrack") && model.pair.state !== "crossTrack") model.pair.verify = "diff";
         for (const id of msgs) {
             if (NOTICE_IDS.includes(id))
-                model.notices.push({ id, a: id === "newerProject" ? "0.11.0" : undefined, b: model.version });
+                model.notices.push(id === "newerProject" ? { id, ...PREVIEW_NEWER_ABI } : { id });
         }
         fillDesignTracks(sc);
         if (model.pair.self.name) model.pair.self.color = PREVIEW_TRACK_COLOR;
@@ -196,6 +204,8 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             uiScale: model.scale,
             restored: model.restored,
             takeover: model.takeover,
+            // 待接管的组：预览里休眠实例占着的就是本组；没有待接管时不发
+            ...(model.takeover && model.group ? { takeoverGroup: model.group } : {}),
             group: model.group,
             groupOrigin: model.groupOrigin,
             diagLog: core.ui.diagLog,
@@ -203,6 +213,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             send: { ...model.send },
             notices: model.notices.map((n) => ({ ...n })),
             build: { ...model.build },
+            cfg: { ...model.cfg },
         };
     });
     core.register("rinne.pair", () => {
@@ -230,6 +241,12 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             model.pair.state = "searching";
             core.scheduleEcho();
             return { ok: true, group: free };
+        },
+        setTailMode(mode) {
+            if (!TAIL_MODES.includes(mode)) return { ok: false, reason: "bad-value" };
+            model.cfg.tailMode = mode;
+            core.scheduleEcho();
+            return { ok: true, value: mode };
         },
     };
     for (const name of FUNCTIONS) mock[name] = fns[name];

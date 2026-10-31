@@ -6,7 +6,7 @@
 //   消息位：红色优先、「+n」轮换与回位、动作按钮、冷却态不触发、✕ 关闭、确认条的两枚按钮、空闲态；
 //   页脚：缩放下拉 → 确认框 → 倒计时在走 → 保存 / 取消 / Esc 各自的桥调用，超屏档位置灰，锁定态；
 //   关于面板：诊断预览先取（不写剪贴板）、复制 → commit 取一次并出轻提示、四个链接只发白名单内的地址、开关与 tail 行；
-//   轻提示：4 秒后自己收；外壳危险描边；发光圆心在 0.5 / 1.25 / 2 三档缩放下仍落在指针下。
+//   轻提示：用真计时器时 4 秒后自己收，夹具缺省（量尺用）不收；外壳危险描边；发光圆心在 0.5 / 1.25 / 2 三档缩放下仍落在指针下。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-scenarios-shared-page.mjs [仓库根]
@@ -507,7 +507,8 @@ try {
     }
 
     // ============================================================ 轻提示 4 秒后自己收（只在 Input 量一次，要等真实时间）
-    await openScene(page, server, design, "input", "zh", scene("toast-group"));
+    // toast=live：夹具缺省给轻提示一对不触发的计时器（量文字的冒烟靠它不被慢机器收走提示），这一组要的就是真计时器
+    await openScene(page, server, design, "input", "zh", scene("toast-group"), "&toast=live");
     const toastSel = '[data-gb="input.toast"]';
     run.eq(await page.eval(`!document.querySelector('${toastSel}').hidden`), true, "轻提示：刚弹出时可见");
     // 时间从夹具弹出轻提示的那一刻算起：openScene 要等字体与入场动画静止，返回的快慢不能算进 4 秒里
@@ -518,6 +519,14 @@ try {
     run.eq(await page.eval(`!document.querySelector('${toastSel}').hidden`), true, "轻提示：3.2 秒时还在");
     await sleep(page, Math.max(0, 4300 - (await shownAge())));
     run.eq(await page.eval(`!document.querySelector('${toastSel}').hidden`), false, "轻提示：4.3 秒时已收");
+    // 缺省（不带 toast=live）的轻提示不自己收：fit、contrast、a11y 靠这一条不被慢机器收走提示。同样等到 4.3 秒，仍在
+    await openScene(page, server, design, "input", "zh", scene("toast-group"));
+    await sleep(page, Math.max(0, 4300 - (await shownAge())));
+    run.eq(
+        await page.eval(`!document.querySelector('${toastSel}').hidden`),
+        true,
+        "轻提示：夹具缺省（量尺用）4.3 秒时仍在，不自己收",
+    );
 
     // ============================================================ 模态的 inert 按节点计数：两个模态共用一个 content 节点
     await openScene(page, server, design, "input", "zh", scene("window"));

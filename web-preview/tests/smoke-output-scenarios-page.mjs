@@ -4,11 +4,14 @@
 //   ① 场景表：15 个场景各自的配对状态灯、色语义、副行、轨道行（名字 / 无名 / 插入链）、核验与声道徽标、消息位、发送行、
 //      页脚提示、外壳状态与危险描边、组选择、覆盖层；
 //   ② 三语：状态灯与核验徽标的文字取自词典，不是写死；<html lang> 跟界面语言；
-//   ③ 交互：选组（同组不重复调用、成功后弹提示）、接管确认条的两个按钮、重新配对、「查看说明」只发白名单里的地址、
-//      语言胶囊、缩放确认的保存与取消、关于面板的开关与复制诊断、「?」在首启链接入前不动作也不报错；
+//   ③ 交互：选组（同组不重复调用、成功后弹提示）、接管确认条的两个按钮与组号（读 takeoverGroup，缺省或不认识时读 group）、
+//      重新配对、「查看说明」只发白名单里的地址、语言胶囊、缩放确认的保存与取消、关于面板（只有 tail 一个选项组、备注跟着
+//      tail 行、没有起播清空）与复制诊断、「?」在首启链接入前不动作也不报错；
 //   ④ 重绘纪律：回声每秒来好几次同样的状态（含乱序的旧帧），页面不写任何 DOM；乱序旧帧与未知配对状态整帧丢弃；
 //   ⑤ 外壳：冲突与版本不匹配是危险描边、旁路是旁路态且只降内容层（常驻红字不降）、覆盖层打开时内容 inert、脉冲只在音频流动时；
-//   ⑥ 桥不通：requestInitialState 一直失败时 400 ms 兜底揭幕、重试 3 次；无桥模式不报错；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
+//   ⑥ 桥不通：requestInitialState 一直失败时 400 ms 兜底揭幕、重试 3 次；无桥模式不报错、照常能选组；首帧慢：兜底揭幕后两路
+//      首帧到齐前组胶囊、重新配对、接管确认与缩放都不写（缩放下拉置灰只显示「—」，语言照常），到齐后照常选组与选档；旧 WebKit
+//      的缩放锁请回 1 也等两路首帧齐了才发（先 state 后 pair、先 pair 后 state 各一遍）；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
 //   ⑦ 坏样例：把红字挪进内容层、把危险描边关掉，上面对应的断言必须变红（见各自的替身断言）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
@@ -319,6 +322,50 @@ try {
     await openOutput(page, server, box, "zh", "out-takeover-confirm");
     await click(page, `${gb("band")} [data-part="confirm.cancel"]`);
     run.eq(await callsOf(page, "resolveTakeover"), [[false]], "点「取消」应调 resolveTakeover(false)");
+    // 确认条的组号：读 takeoverGroup（与 group 不同时也读它），缺省或不认识时读 group；takeover 为假时 takeoverGroup 不起作用。
+    // 同一次求值里先让 mock 现造一帧当底稿，再逐个改字段同步发出、立刻读（镜像回声每 250 ms 覆盖一次）
+    await openOutput(page, server, box, "zh", "out-takeover-confirm");
+    {
+        const shown = await page.eval(`(() => {
+            const core = window.__fx.session.core;
+            let base = null;
+            core.addEventListener("rinne.state", (p) => { if (!base) base = p; });
+            core.push("rinne.state");
+            const read = (extra) => {
+                core.emit("rinne.state", { ...base, seq: core.nextSeq(), ...extra });
+                const b = document.querySelector('${gb("band")}');
+                return { confirm: Boolean(b.querySelector('[data-part="confirm.cancel"]')), text: b.textContent };
+            };
+            return {
+                mock: [base.group, base.takeoverGroup],
+                other: read({ takeoverGroup: "E" }),
+                missing: read({ takeoverGroup: undefined }),
+                bogus: read({ takeoverGroup: "Z" }),
+                off: read({ takeover: false, takeoverGroup: "E" }),
+            };
+        })()`);
+        const bar = (g) => outDict.zh["band.out.takeover"].replace("{g}", g);
+        run.eq(shown.mock, ["A", "A"], "mock：待接管时 rinne.state 带 takeoverGroup（预览里就是本组）");
+        run.check(
+            shown.other.confirm && shown.other.text.includes(bar("E")),
+            "确认条的组号读 takeoverGroup（E，不是 group 的 A）",
+        );
+        run.check(shown.missing.confirm && shown.missing.text.includes(bar("A")), "takeoverGroup 缺省：组号读 group");
+        run.check(shown.bogus.confirm && shown.bogus.text.includes(bar("A")), "takeoverGroup 不认识：组号读 group");
+        run.eq(shown.off.confirm, false, "takeover 为假：带了 takeoverGroup 也不出确认条");
+    }
+    await openOutput(page, server, box, "zh", "out-connected");
+    run.eq(
+        await page.eval(`(() => {
+            const core = window.__fx.session.core;
+            let f = null;
+            core.addEventListener("rinne.state", (p) => { if (!f) f = p; });
+            core.push("rinne.state");
+            return [f.takeover, "takeoverGroup" in f];
+        })()`),
+        [false, false],
+        "mock：没有待接管的组时 rinne.state 不带 takeoverGroup",
+    );
 
     // 重新配对：冲突态的动作按钮 → repairPair；成功后切到新组并弹提示
     await openOutput(page, server, box, "zh", "out-conflict");
@@ -414,12 +461,26 @@ try {
         (await textOf(page, `${gb("about")} .rn-about__build`)).includes("a1b2c3d"),
         "关于面板的构建行取自 rinne.state 的 build 载荷",
     );
-    // Output 没有起播清空与 tail：这两项开关不该出现（原生桥还没有对应函数）
-    run.eq(
-        await page.eval(`document.querySelectorAll('${gb("about")} [role="radiogroup"]').length`),
-        0,
-        "Output 关于面板没有 tail 选项组",
-    );
+    // Output 有 tail 行（setTailMode），没有起播清空；备注是 Output 那句，并且只跟着 tail 行出现
+    {
+        const adv = await page.eval(`(() => {
+            const a = document.querySelector('${gb("about")}');
+            const note = a.querySelector('[data-part="about.advNote"]');
+            const tailRow = a.querySelector('[data-row="tail"]');
+            return {
+                groups: a.querySelectorAll('[role="radiogroup"]').length,
+                tailGroups: a.querySelectorAll('[data-row="tail"] [role="radiogroup"]').length,
+                reset: a.querySelectorAll('[data-adv="resetOnPlay"]').length,
+                note: note && !note.hidden ? note.textContent : null,
+                noteWithTail: Boolean(note && !note.hidden) === Boolean(tailRow),
+            };
+        })()`);
+        run.eq(
+            adv,
+            { groups: 1, tailGroups: 1, reset: 0, note: common.zh["about.adv.noteOut"], noteWithTail: true },
+            "Output 关于面板：有且只有一个 tail 选项组，备注是 Output 那句且跟着 tail 行，没有起播清空开关",
+        );
+    }
     const copyBtn = `${gb("about")} [data-part="about.copy"]`;
     if (await page.eval(`Boolean(document.querySelector('${copyBtn}'))`)) {
         await click(page, copyBtn);
@@ -610,13 +671,209 @@ try {
             document.body.append(host);
             const bridge = { role: "output", isPreview: false, on: () => () => {} };
             for (const n of ["requestInitialState", "setUiScale", "commitUiScale", "setLang", "setGroup", "openExternal", "copyDiagnostics", "setDiagLog", "setRulesAck", "setGuideSeen", "resolveTakeover", "showLicense", "repairPair"]) bridge[n] = async () => ({ ok: false, reason: "not-ready" });
+            let picked = 0;
+            bridge.setGroup = async () => { picked++; return { ok: false, reason: "not-ready" }; };
             const page = mountOutputPage({ host, bridge, offline: true });
-            const out = { revealed: page.isRevealed(), texts: host.textContent.length > 20 };
+            const pills = [...host.querySelectorAll('[data-gb="output.group"] [role="radio"]')];
+            const out = { revealed: page.isRevealed(), texts: host.textContent.length > 20, disabled: pills.filter((n) => n.hasAttribute("aria-disabled")).length };
+            pills[2].click();
+            await new Promise((r) => setTimeout(r, 30));
+            out.picked = picked;
             page.destroy();
             host.remove();
             return out;
         })()`);
-        run.eq(r, { revealed: true, texts: true }, "无桥模式：立即揭幕并按默认状态显示");
+        run.eq(
+            r,
+            { revealed: true, texts: true, disabled: 0, picked: 1 },
+            "无桥模式：立即揭幕、按默认状态显示，组胶囊照常可点（没有首帧可等）",
+        );
+    }
+    {
+        // 首帧慢：requestInitialState 回执成功但帧迟迟不来。兜底揭幕只为显示外壳，两路首帧到齐前组胶囊、重新配对、
+        // 接管确认与缩放这几处写入都不发（都基于默认值）；语言照常；到齐后照常选组、选档。三个小页各验一处，帧由测试手动派发
+        const r = await page.eval(`(async () => {
+            const { mountOutputPage } = await import("/web/output/page.js");
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const mount = () => {
+                const host = document.createElement("div");
+                document.body.append(host);
+                const calls = [];
+                const handlers = {};
+                const rec = (name) => async () => { calls.push(name); return { ok: true }; };
+                const bridge = { role: "output", isPreview: false, on: (name, cb) => { handlers[name] = cb; return () => { delete handlers[name]; }; } };
+                for (const n of ["requestInitialState", "setUiScale", "commitUiScale", "setLang", "setGroup", "openExternal", "copyDiagnostics", "setDiagLog", "setRulesAck", "setGuideSeen", "resolveTakeover", "showLicense", "repairPair", "setTailMode"]) bridge[n] = rec(n);
+                const p = mountOutputPage({ host, bridge });
+                const $ = (s) => host.querySelector(s);
+                const pill = (g) => $('[data-gb="output.group"] [role="radio"][data-group="' + g + '"]');
+                const action = () => $('[data-gb="output.band"] [data-part="band.action"]');
+                const scaleSel = () => $('[data-gb="output.footer.scale"] select');
+                const scaleConfirmShown = () => { const c = $('[data-gb="output.scale.confirm"]'); return Boolean(c && !c.closest("[hidden]")); };
+                const count = (name) => calls.filter((n) => n === name).length;
+                return { host, handlers, p, $, pill, action, scaleSel, scaleConfirmShown, count, done: () => { p.destroy(); host.remove(); } };
+            };
+            const state = (extra) => ({ seq: 1, role: "output", group: "A", lang: "zh", version: "1.0.0", ...extra });
+            const out = {};
+            // 组胶囊：兜底揭幕后整排禁用，点了不发 setGroup；语言照常；两路首帧到齐后解禁、能选组
+            const A = mount();
+            await sleep(650);
+            out.revealed = A.p.isRevealed();
+            out.disabled = [...A.host.querySelectorAll('[data-gb="output.group"] [role="radio"]')].filter((n) => n.getAttribute("aria-disabled") === "true").length;
+            const sel = A.scaleSel();
+            const enabledOptions = () => [...sel.options].filter((n) => !n.disabled).length;
+            out.scaleBefore = { disabled: sel.disabled, shown: sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].textContent : null, enabled: enabledOptions() };
+            A.pill("C").click();
+            A.$('[data-gb="output.lang"] [data-lang="en"]').click();
+            // 下拉置灰之外再验页面自己这一道：即使来了一次选档（合成的 change），首帧前也不进缩放预览
+            const probe = document.createElement("option");
+            probe.value = "1.5";
+            sel.append(probe);
+            sel.value = "1.5";
+            sel.dispatchEvent(new Event("change"));
+            probe.remove();
+            await sleep(30);
+            out.before = { setGroup: A.count("setGroup"), setLang: A.count("setLang"), asked: A.count("requestInitialState"), setUiScale: A.count("setUiScale"), commitUiScale: A.count("commitUiScale"), scaleConfirm: A.scaleConfirmShown() };
+            A.handlers["rinne.state"](state());
+            await sleep(30);
+            A.pill("C").click();
+            await sleep(30);
+            out.stateOnly = A.count("setGroup");
+            A.handlers["rinne.pair"]({ seq: 1, state: "searching" });
+            out.disabledAfter = A.pill("C").hasAttribute("aria-disabled");
+            A.pill("C").click();
+            await sleep(30);
+            out.after = A.count("setGroup");
+            out.scaleAfter = { disabled: sel.disabled, value: sel.value, enabled: enabledOptions() };
+            const pick = [...sel.options].find((n) => !n.disabled && n.value !== sel.value);
+            if (pick) {
+                sel.value = pick.value;
+                sel.dispatchEvent(new Event("change"));
+            }
+            await sleep(30);
+            out.scalePicked = { setUiScale: A.count("setUiScale"), scaleConfirm: A.scaleConfirmShown() };
+            A.done();
+            // 重新配对：只来了 rinne.pair（冲突）时不发 repairPair，rinne.state 也到了才发
+            const B = mount();
+            B.handlers["rinne.pair"]({ seq: 1, state: "conflict" });
+            await sleep(450);
+            out.repairAction = B.action() ? B.action().getAttribute("data-action") : null;
+            if (B.action()) B.action().click();
+            await sleep(30);
+            out.repairBefore = B.count("repairPair");
+            B.handlers["rinne.state"](state());
+            if (B.action()) B.action().click();
+            await sleep(30);
+            out.repairAfter = B.count("repairPair");
+            B.done();
+            // 接管确认：只来了 rinne.state（待接管）时两个按钮都不发 resolveTakeover，rinne.pair 也到了才发
+            const C = mount();
+            C.handlers["rinne.state"](state({ takeover: true }));
+            await sleep(450);
+            out.confirmAction = C.action() ? C.action().getAttribute("data-action") : null;
+            if (C.action()) C.action().click();
+            const cancel = C.$('[data-gb="output.band"] [data-part="confirm.cancel"]');
+            if (cancel) cancel.click();
+            await sleep(30);
+            out.takeoverBefore = C.count("resolveTakeover");
+            C.handlers["rinne.pair"]({ seq: 1, state: "searching" });
+            if (C.action()) C.action().click();
+            await sleep(30);
+            out.takeoverAfter = C.count("resolveTakeover");
+            C.done();
+            return out;
+        })()`);
+        run.eq(r.revealed, true, "首帧慢：400 ms 兜底揭幕照常（外壳不能一直空着）");
+        run.eq(r.disabled, 8, "首帧慢：兜底揭幕后两路首帧到齐前组胶囊整排禁用");
+        run.eq(
+            r.scaleBefore,
+            { disabled: true, shown: "—", enabled: 0 },
+            "首帧慢：缩放下拉置灰，读数是「—」（不显示默认的 100%），没有可选的档位",
+        );
+        run.eq(
+            r.before,
+            { setGroup: 0, setLang: 1, asked: 1, setUiScale: 0, commitUiScale: 0, scaleConfirm: false },
+            "首帧慢：点组胶囊不发 setGroup、选档不发 setUiScale / commitUiScale 也不出缩放确认条，语言照常发 setLang（回执成功不重试）",
+        );
+        run.eq(r.stateOnly, 0, "首帧慢：只到了 rinne.state 仍不发 setGroup");
+        run.eq([r.disabledAfter, r.after], [false, 1], "首帧慢：两路首帧到齐后组胶囊解禁，点 C 发 setGroup");
+        run.eq(
+            [r.scaleAfter.disabled, r.scaleAfter.value, r.scaleAfter.enabled > 1],
+            [false, "1", true],
+            "首帧慢：两路首帧到齐后缩放下拉可用，读数是快照里的档位",
+        );
+        run.eq(r.scalePicked, { setUiScale: 1, scaleConfirm: true }, "首帧慢：就绪后选档发 setUiScale 并出缩放确认条");
+        run.eq(r.repairAction, "repair", "首帧慢（对照）：只到了冲突的 rinne.pair 时消息位已有「重新配对」");
+        run.eq([r.repairBefore, r.repairAfter], [0, 1], "首帧慢：rinne.state 没到时不发 repairPair，到了才发");
+        run.eq(r.confirmAction, "takeover", "首帧慢（对照）：只到了待接管的 rinne.state 时确认条已展开");
+        run.eq([r.takeoverBefore, r.takeoverAfter], [0, 1], "首帧慢：rinne.pair 没到时接管确认不发，到了才发");
+    }
+    {
+        // 首帧慢 + 旧 WebKit 的缩放锁：存档档位不是 1 时页面要请回 1（setUiScale(1)），这也是写入，两路首帧齐了才发。
+        // 缩放锁按文档量一次语义，本页的文档早已量成新语义，所以挂在一个新 iframe 的窗口上，并让探针量出旧语义
+        const r = await page.eval(`(async () => {
+            const { mountOutputPage } = await import("/web/output/page.js");
+            const { zoomLocked } = await import("/web/shared/shell-fit.js");
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const mount = () => {
+                const frame = document.createElement("iframe");
+                frame.style.cssText = "position:absolute;left:-2000px;top:0;width:400px;height:300px;border:0";
+                document.body.append(frame);
+                const fw = frame.contentWindow;
+                const realRect = fw.Element.prototype.getBoundingClientRect;
+                // 旧语义：rect 不含 zoom，探针（zoom 2、宽 100 px）量回 100
+                fw.Element.prototype.getBoundingClientRect = function () {
+                    return this.style.zoom === "2" ? { width: this.offsetWidth } : realRect.call(this);
+                };
+                const host = document.createElement("div");
+                document.body.append(host);
+                const scales = [];
+                const handlers = {};
+                const bridge = { role: "output", isPreview: false, on: (name, cb) => { handlers[name] = cb; return () => { delete handlers[name]; }; } };
+                for (const n of ["requestInitialState", "setUiScale", "commitUiScale", "setLang", "setGroup", "openExternal", "copyDiagnostics", "setDiagLog", "setRulesAck", "setGuideSeen", "resolveTakeover", "showLicense", "repairPair", "setTailMode"]) bridge[n] = async () => ({ ok: true });
+                bridge.setUiScale = async (f) => { scales.push(f); return { ok: true, scale: f }; };
+                const p = mountOutputPage({ host, bridge, win: fw });
+                return { handlers, scales, locked: zoomLocked(), done: () => { p.destroy(); host.remove(); frame.remove(); } };
+            };
+            const state = (extra) => ({ seq: 1, role: "output", group: "A", lang: "zh", version: "1.0.0", uiScale: 1.25, ...extra });
+            const out = {};
+            // 先 state 后 pair：只有 state 时（等过兜底揭幕也一样）不发，pair 一到发一次 1，之后同档位的帧不再发
+            const D = mount();
+            out.lockedD = D.locked;
+            D.handlers["rinne.state"](state());
+            await sleep(450);
+            out.stateOnly = [...D.scales];
+            // 这几帧在同一个任务里同步派发：缩放锁的记账是模块级的，夹具页面自己的回声（档位 1）会把它清掉，
+            // 中间不能让它插进来；setUiScale 在派发当下就调到替身
+            D.handlers["rinne.pair"]({ seq: 1, state: "searching" });
+            out.ready = [...D.scales];
+            D.handlers["rinne.state"](state({ seq: 2 }));
+            D.handlers["rinne.pair"]({ seq: 2, state: "searching" });
+            out.later = [...D.scales];
+            await sleep(30);
+            D.done();
+            out.unlockedAfter = zoomLocked();
+            // 先 pair 后 state：pair 时还没有档位可看，不发；state 一到两路齐了，按它的档位发一次 1
+            const E = mount();
+            out.lockedE = E.locked;
+            E.handlers["rinne.pair"]({ seq: 1, state: "searching" });
+            await sleep(30);
+            out.pairOnly = [...E.scales];
+            E.handlers["rinne.state"](state());
+            await sleep(30);
+            out.stateAfterPair = [...E.scales];
+            E.done();
+            return out;
+        })()`);
+        run.eq(
+            [r.lockedD, r.lockedE, r.unlockedAfter],
+            [true, true, false],
+            "首帧慢 + 缩放锁（对照）：挂在旧语义的文档上时缩放确实锁住，销毁后解锁",
+        );
+        run.eq(r.stateOnly, [], "首帧慢 + 缩放锁：只到了 rinne.state（存档档位 1.25）时不发 setUiScale");
+        run.eq(r.ready, [1], "首帧慢 + 缩放锁：rinne.pair 一到发一次 setUiScale(1)");
+        run.eq(r.later, [1], "首帧慢 + 缩放锁：之后同档位的帧不再重发");
+        run.eq(r.pairOnly, [], "首帧慢 + 缩放锁：只到了 rinne.pair 时不发");
+        run.eq(r.stateAfterPair, [1], "首帧慢 + 缩放锁：先 pair 后 state，state 一到发一次 setUiScale(1)");
     }
 
     {

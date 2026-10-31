@@ -849,6 +849,7 @@ void WebViewHost::handleRequestInitialState(const juce::Array<juce::var>&, WBC::
             " ms");
     complete(bridge::okResponse());
     emitState(); // 首帧必发
+    emitFirstFrames();
 }
 
 void WebViewHost::handleSetLang(const juce::Array<juce::var>& args, WBC::NativeFunctionCompletion complete)

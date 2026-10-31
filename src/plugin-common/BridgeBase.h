@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Derived from synchain-oss/scvb; see upstream/plugin-common.json
 //
-// 两个插件共用的桥常量与助手：函数名、事件名、首帧预置键、缩放夹取与档位换算、回执构造。
+// 两个插件共用的桥常量与助手：函数名、事件名、首帧预置键、缩放夹取与档位换算、回执构造，
+// 以及两端都有的几个桥函数（openExternal、copyDiagnostics 等）的参数校验与回执。
 // 只放两端共用的几个名字（首帧、语言、缩放）；各角色专属的函数、事件与参数 ID 在 src/{input,output}/*BridgeApi.h。
-// 只依赖 juce_core 与设计盒常量，不碰任何组件，所以宿主测试可以直接编它。
+// 只依赖 juce_core、设计盒常量与 core 的诊断清洗，不碰任何组件，所以宿主测试可以直接编它。
 // 线程：全部纯计算，任意线程可用；UiScaleModel 非线程安全，只在消息线程用。
 #pragma once
 
@@ -47,15 +48,28 @@ inline constexpr const char* Role = "role"; // "input" 或 "output"
 
 // 失败回执里的 reason。名字与 docs/UI_BRIDGE.md 的函数表一致，预览里的 mock 回同样的原因：
 //   setLang 回 bad-lang、not-ready；setUiScale 回 bad-scale、scale-locked、not-ready；
-//   commitUiScale 回 no-pending、scale-locked、not-ready
+//   commitUiScale 回 no-pending、scale-locked、not-ready；
+//   setRulesAck 回 bad-version；setGuideSeen、setDiagLog 回 bad-value；setGroup 回 bad-group；
+//   resolveTakeover 回 bad-value、no-pending；openExternal 回 not-allowed；copyDiagnostics 回 not-ready、clipboard。
+// 角色函数共用同一张表：会改状态的角色函数在兜底面板在场时同样回 not-ready
 namespace Reason
 {
 inline constexpr const char* BadScale = "bad-scale";
 inline constexpr const char* BadLang = "bad-lang";
 inline constexpr const char* NoPending = "no-pending";
 inline constexpr const char* ScaleLocked = "scale-locked";
-// 宿主此刻在显示兜底面板，网页是隐藏的，页面的请求不当真：不改窗口、不写设置文件、不改内存状态
+// 宿主此刻在显示兜底面板，网页是隐藏的，页面的请求不当真：不改窗口、不写设置文件、不改内存状态。
+// copyDiagnostics 也用它：诊断文本还拿不到（探针构建、处理器还没备好）
 inline constexpr const char* NotReady = "not-ready";
+inline constexpr const char* BadValue = "bad-value";
+inline constexpr const char* BadVersion = "bad-version";
+inline constexpr const char* BadGroup = "bad-group";
+// openExternal：地址不在白名单
+inline constexpr const char* NotAllowed = "not-allowed";
+// copyDiagnostics：剪贴板没写进去（写完回读对不上）
+inline constexpr const char* Clipboard = "clipboard";
+// 地址或文件已通过校验，但系统没能打开（没有默认浏览器、临时文件写不进去）
+inline constexpr const char* Unavailable = "unavailable";
 } // namespace Reason
 
 // 缩放的硬边界；可选档位的真源是设计盒的档位表
@@ -324,6 +338,49 @@ juce::var respondCommitUiScale(UiScaleModel& model, const std::function<void(flo
 
 // setLang：参数必须是字符串且在白名单内（zh、en、fr），否则回 bad-lang 且不调用 accepted；成功回 {ok, lang}
 juce::var respondSetLang(const juce::Array<juce::var>& args, const std::function<void(const juce::String&)>& accepted);
+
+// ---- 两个角色共用的几个桥函数（纯逻辑；落到系统上的动作由调用方注入） ----
+
+// 严格的 JS 布尔：只认 true / false。缺参、数字、字符串一律不算（与 mock 的 typeof === "boolean" 同口径）
+bool jsBoolArg(const juce::Array<juce::var>& args, bool& out);
+
+// setRulesAck 的版本：非负整数（整数值的双精度也算，页面里的 Number.isInteger 同口径），不超过 int 上限
+bool parseRulesAckArg(const juce::Array<juce::var>& args, int& outVersion);
+
+// 组的字母与组号互换：A 到 H 对应 1 到 8。parseGroupArg 只认恰好一个大写字母；groupLetter 给 0 或越界时返回空串
+bool parseGroupArg(const juce::Array<juce::var>& args, int& outGroup);
+juce::String groupLetter(std::uint32_t group);
+
+// openExternal 的白名单：原生侧的最后一道，页面里的 links.js 与离线扫描是同一口径的镜像。逐字节看原串，不做任何解码：
+//   - 以 https:// 开头（scheme 不分大小写），authority 是 // 之后到下一个 / 之前的全部，必须整段等于 synchain.ca 或
+//     github.com（不分大小写）：用户信息、端口、IPv6 字面量、末尾的点都因此不放行；
+//   - 路径（第一个 / 起到串尾）只收字母、数字与 - . _ ~ /，不得有 . 或 .. 段
+//     （浏览器会先折叠它们再请求，前缀就被绕过了）；
+//   - github.com 的路径必须等于 /synchain-oss/rinne 或以 /synchain-oss/rinne/ 开头（区分大小写），
+//     synchain.ca 的路径不限；
+//   - 不超过 2048 字节。
+// 原串的每个字节都落在 scheme、authority、路径三段之一，三段又都是逐字节的白名单，所以 ? 与 #（含空的查询串与片段）、
+// %（百分号编码可以把 / 与 .. 藏进路径）、空白、控制字符、反斜杠与非 ASCII 无论出现在哪里都不放行，不另设一道黑名单
+bool isAllowedExternalUrl(const juce::String& url);
+
+// openExternal：参数不是字符串或不在白名单回 not-allowed，不调用 launch；launch 返回假回 unavailable；成功回 {ok}
+juce::var respondOpenExternal(const juce::Array<juce::var>& args,
+                              const std::function<bool(const juce::String&)>& launch);
+
+// copyDiagnostics：commit 恰好是 true 才写剪贴板，其余（含缺参与非布尔）只预览。
+// 文本为空回 {ok: false, copied: false, reason: "not-ready"}，不调用 write；write 返回假回同形的 "clipboard"；
+// 成功回 {ok: true, copied, text}
+juce::var respondCopyDiagnostics(const juce::Array<juce::var>& args, const juce::String& text,
+                                 const std::function<bool(const juce::String&)>& write);
+
+// 诊断文本末行的 ui 段：ui: webview=<运行时> scale=<档位，两位小数> lang=<语言>。
+// webview 是界面层交来的运行时描述（例如 "WebView2 131.0.2903.70"），过 core 的 sanitizeText，空格换成 -，
+// 清洗后为空写 unknown；scale 用整数运算格式化，与区域设置无关；lang 只出 zh、en、fr（不认识的按中文）
+juce::String uiDiagLine(const juce::String& webview, float scale, const juce::String& lang);
+
+// core 生成的诊断文本接上 ui 段：core 文本不以换行结尾时先补一个；ui 段是最后一行，后面没有换行。
+// core 文本为空时返回空串（交给 copyDiagnostics 回 not-ready）
+juce::String withUiDiagLine(const std::string& coreText, const juce::String& uiLine);
 
 // 首帧信号载荷里的诊断字段，整理成日志后缀。字段缺失、不是数、或是无穷与非数时给 " (no paint record)"；
 // 否则给 " (signal-firstPaint +N ms)"，N 夹在正负 60 秒内。
