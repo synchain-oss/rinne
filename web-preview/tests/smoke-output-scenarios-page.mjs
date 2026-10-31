@@ -10,7 +10,8 @@
 //   ④ 重绘纪律：回声每秒来好几次同样的状态（含乱序的旧帧），页面不写任何 DOM；乱序旧帧与未知配对状态整帧丢弃；
 //   ⑤ 外壳：冲突与版本不匹配是危险描边、旁路是旁路态且只降内容层（常驻红字不降）、覆盖层打开时内容 inert、脉冲只在音频流动时；
 //   ⑥ 桥不通：requestInitialState 一直失败时 400 ms 兜底揭幕、重试 3 次；无桥模式不报错、照常能选组；首帧慢：兜底揭幕后两路
-//      首帧到齐前组胶囊、重新配对、接管确认与缩放都不写（缩放下拉置灰只显示「—」，语言照常），到齐后照常选组与选档；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
+//      首帧到齐前组胶囊、重新配对、接管确认与缩放都不写（缩放下拉置灰只显示「—」，语言照常），到齐后照常选组与选档；旧 WebKit
+//      的缩放锁请回 1 也等两路首帧齐了才发（先 state 后 pair、先 pair 后 state 各一遍）；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
 //   ⑦ 坏样例：把红字挪进内容层、把危险描边关掉，上面对应的断言必须变红（见各自的替身断言）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
@@ -805,6 +806,74 @@ try {
         run.eq([r.repairBefore, r.repairAfter], [0, 1], "首帧慢：rinne.state 没到时不发 repairPair，到了才发");
         run.eq(r.confirmAction, "takeover", "首帧慢（对照）：只到了待接管的 rinne.state 时确认条已展开");
         run.eq([r.takeoverBefore, r.takeoverAfter], [0, 1], "首帧慢：rinne.pair 没到时接管确认不发，到了才发");
+    }
+    {
+        // 首帧慢 + 旧 WebKit 的缩放锁：存档档位不是 1 时页面要请回 1（setUiScale(1)），这也是写入，两路首帧齐了才发。
+        // 缩放锁按文档量一次语义，本页的文档早已量成新语义，所以挂在一个新 iframe 的窗口上，并让探针量出旧语义
+        const r = await page.eval(`(async () => {
+            const { mountOutputPage } = await import("/web/output/page.js");
+            const { zoomLocked } = await import("/web/shared/shell-fit.js");
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const mount = () => {
+                const frame = document.createElement("iframe");
+                frame.style.cssText = "position:absolute;left:-2000px;top:0;width:400px;height:300px;border:0";
+                document.body.append(frame);
+                const fw = frame.contentWindow;
+                const realRect = fw.Element.prototype.getBoundingClientRect;
+                // 旧语义：rect 不含 zoom，探针（zoom 2、宽 100 px）量回 100
+                fw.Element.prototype.getBoundingClientRect = function () {
+                    return this.style.zoom === "2" ? { width: this.offsetWidth } : realRect.call(this);
+                };
+                const host = document.createElement("div");
+                document.body.append(host);
+                const scales = [];
+                const handlers = {};
+                const bridge = { role: "output", isPreview: false, on: (name, cb) => { handlers[name] = cb; return () => { delete handlers[name]; }; } };
+                for (const n of ["requestInitialState", "setUiScale", "commitUiScale", "setLang", "setGroup", "openExternal", "copyDiagnostics", "setDiagLog", "setRulesAck", "setGuideSeen", "resolveTakeover", "showLicense", "repairPair", "setTailMode"]) bridge[n] = async () => ({ ok: true });
+                bridge.setUiScale = async (f) => { scales.push(f); return { ok: true, scale: f }; };
+                const p = mountOutputPage({ host, bridge, win: fw });
+                return { handlers, scales, locked: zoomLocked(), done: () => { p.destroy(); host.remove(); frame.remove(); } };
+            };
+            const state = (extra) => ({ seq: 1, role: "output", group: "A", lang: "zh", version: "1.0.0", uiScale: 1.25, ...extra });
+            const out = {};
+            // 先 state 后 pair：只有 state 时（等过兜底揭幕也一样）不发，pair 一到发一次 1，之后同档位的帧不再发
+            const D = mount();
+            out.lockedD = D.locked;
+            D.handlers["rinne.state"](state());
+            await sleep(450);
+            out.stateOnly = [...D.scales];
+            // 这几帧在同一个任务里同步派发：缩放锁的记账是模块级的，夹具页面自己的回声（档位 1）会把它清掉，
+            // 中间不能让它插进来；setUiScale 在派发当下就调到替身
+            D.handlers["rinne.pair"]({ seq: 1, state: "searching" });
+            out.ready = [...D.scales];
+            D.handlers["rinne.state"](state({ seq: 2 }));
+            D.handlers["rinne.pair"]({ seq: 2, state: "searching" });
+            out.later = [...D.scales];
+            await sleep(30);
+            D.done();
+            out.unlockedAfter = zoomLocked();
+            // 先 pair 后 state：pair 时还没有档位可看，不发；state 一到两路齐了，按它的档位发一次 1
+            const E = mount();
+            out.lockedE = E.locked;
+            E.handlers["rinne.pair"]({ seq: 1, state: "searching" });
+            await sleep(30);
+            out.pairOnly = [...E.scales];
+            E.handlers["rinne.state"](state());
+            await sleep(30);
+            out.stateAfterPair = [...E.scales];
+            E.done();
+            return out;
+        })()`);
+        run.eq(
+            [r.lockedD, r.lockedE, r.unlockedAfter],
+            [true, true, false],
+            "首帧慢 + 缩放锁（对照）：挂在旧语义的文档上时缩放确实锁住，销毁后解锁",
+        );
+        run.eq(r.stateOnly, [], "首帧慢 + 缩放锁：只到了 rinne.state（存档档位 1.25）时不发 setUiScale");
+        run.eq(r.ready, [1], "首帧慢 + 缩放锁：rinne.pair 一到发一次 setUiScale(1)");
+        run.eq(r.later, [1], "首帧慢 + 缩放锁：之后同档位的帧不再重发");
+        run.eq(r.pairOnly, [], "首帧慢 + 缩放锁：只到了 rinne.pair 时不发");
+        run.eq(r.stateAfterPair, [1], "首帧慢 + 缩放锁：先 pair 后 state，state 一到发一次 setUiScale(1)");
     }
 
     {

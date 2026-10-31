@@ -17,7 +17,8 @@
 // 页面不依赖具体桥：只用 createBridge 返回的对象，所以预览（mock）、真宿主与「没有桥」的纯浏览器三种情形走同一份代码。
 // 首帧前禁写：有桥时，rinne.state 与 rinne.pair 两路首帧都到之前，400 ms 兜底揭幕只为把外壳显示出来（内容是默认状态的
 // 占位），组胶囊、重新配对、接管确认与缩放这几处写入都不发：它们都基于默认值，点了会把默认值写进宿主（缩放的回退目标是
-// 默认的 100%，取消或倒计时到点就会 setUiScale(1)）。缩放下拉只剩一项置灰的「—」，不显示编出来的档位。语言与关于照常
+// 默认的 100%，取消或倒计时到点就会 setUiScale(1)）。缩放下拉只剩一项置灰的「—」，不显示编出来的档位。旧 WebKit 下把缩放
+// 请回 1 的那一下也是写入：只来了 rinne.state 时不发，rinne.pair 一到、两路齐了按当时的档位补一次。语言与关于照常
 // （setLang 不依赖旧值，没有回退目标），requestInitialState 照旧重试。没有桥（纯浏览器）时没有首帧可等，按默认状态照常。
 //
 // 防回环纪律：这里没有任何参数拖动；setGroup / setLang 的回执只用来触发提示，显示一律以快照为准。
@@ -303,8 +304,7 @@ export function mountOutputPage(o) {
         cfg = { tailMode: TAIL_MODES.includes(rawCfg.tailMode) ? rawCfg.tailMode : "auto" };
         // 只在确认条展开（takeover 为真）时用得上；原生没有待接管的组时不发
         takeoverGroup = GROUP_LETTERS.includes(raw.takeoverGroup) ? raw.takeoverGroup : null;
-        // 旧 WebKit 把缩放锁在 100%：宿主按存档开了别的档位时请回 1（走现有 setUiScale，不新增桥函数）
-        enforceZoomLock(state.uiScale, (f) => Promise.resolve(bridge.setUiScale(f)).catch(noop));
+        applyZoomLock();
         afterFrame();
     }
 
@@ -313,7 +313,16 @@ export function mountOutputPage(o) {
         if (!next) return;
         pair = next;
         gotPair = true;
+        // rinne.state 先到时它那一次被首帧前禁写挡下了，两路齐了在这里补上；之后的帧再调只是空转
+        // （enforceZoomLock 每离开 1 档只请求一次）
+        applyZoomLock();
         afterFrame();
+    }
+
+    /** 旧 WebKit 把缩放锁在 100%：宿主按存档开了别的档位时请回 1（走现有 setUiScale，不新增桥函数）。首帧前不写。 */
+    function applyZoomLock() {
+        if (writesLocked()) return;
+        enforceZoomLock(state.uiScale, (f) => Promise.resolve(bridge.setUiScale(f)).catch(noop));
     }
 
     function afterFrame() {
