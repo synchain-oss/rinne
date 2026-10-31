@@ -52,7 +52,7 @@ OutputEditor::OutputEditor(OutputProcessor& processor, webview::ResourceProvider
                            }()),
       processor_(processor), resources_(resources),
       bridge_(processor,
-              OutputBridge::Hooks{{}, &writeSystemClipboard, &launchInBrowser, [this] { return openLicense(); }})
+              OutputBridge::Hooks{{}, &writeSystemClipboard, &launchInBrowser, [this] { return openLicense(); }, {}})
 {
 }
 
