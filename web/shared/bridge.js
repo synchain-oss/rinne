@@ -87,6 +87,8 @@ export const BRIDGE_FUNCTIONS = {
         "setResetOnPlay",
         "setTailMode",
         "moveToFreeGroup",
+        "setFbUnit",
+        "setDelayUnit",
     ],
 };
 

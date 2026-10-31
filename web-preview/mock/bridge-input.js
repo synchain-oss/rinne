@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Rinne Input 的 mock 后端：十二个共用函数加十四个 Input 专用函数，六个事件。
+// Rinne Input 的 mock 后端：十二个共用函数加十六个 Input 专用函数，六个事件。
 // 名表与 docs/UI_BRIDGE.md、src/input/InputBridgeApi.h、web/shared/bridge.js 逐名相等，由 check-bridge-parity 对拍。
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据，不模拟 DSP。
 
@@ -49,6 +49,8 @@ export const FUNCTIONS = [
     "setResetOnPlay",
     "setTailMode",
     "moveToFreeGroup",
+    "setFbUnit",
+    "setDelayUnit",
 ];
 
 export const EVENTS = ["rinne.state", "rinne.pair", "rinne.error", "rinne.params", "rinne.meters", "rinne.presets"];
@@ -58,6 +60,10 @@ const PRESET_EXEMPT = ["loop_on", "limiter", "ceiling"];
 
 /** tail 模式取值。 */
 const TAIL_MODES = ["auto", "infinite", "30s"];
+
+/** 两个显示单位的取值。 */
+const FB_UNITS = ["pct", "db"];
+const DELAY_UNITS = ["ms", "samples"];
 
 /** 载入预设后回送淡入的时长，毫秒（核心侧 500 ms，加 10 ms 的先降到 0）。 */
 const PRESET_FADE_MS = 510;
@@ -164,6 +170,10 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
     }
 
     const env = {
+        // 诊断失败开关：model.diagFail 设成 "not-ready" 或 "clipboard"，预览与冒烟专用
+        get diagFail() {
+            return model.diagFail;
+        },
         get scale() {
             return model.scale;
         },
@@ -254,6 +264,7 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         diagLog: core.ui.diagLog,
         sampleRate: model.sampleRate,
         cfg: { ...model.cfg },
+        ...(model.build ? { build: { ...model.build } } : {}),
         preset: { id: model.presetId, dirty: model.presetDirty, name: presetName(model.presetId) },
         delay: { ...model.delay },
         safety: { cut: model.cut, cooldownMs: cooldownLeft(), l2: model.cut !== null, fadeIn: model.fadeIn },
@@ -352,6 +363,18 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
             core.scheduleEcho();
             return { ok: true, value: mode };
         },
+        setFbUnit(unit) {
+            if (!FB_UNITS.includes(unit)) return { ok: false, reason: "bad-value" };
+            model.cfg.fbUnit = unit;
+            core.scheduleEcho();
+            return { ok: true, value: unit };
+        },
+        setDelayUnit(unit) {
+            if (!DELAY_UNITS.includes(unit)) return { ok: false, reason: "bad-value" };
+            model.cfg.delayUnit = unit;
+            core.scheduleEcho();
+            return { ok: true, value: unit };
+        },
         moveToFreeGroup() {
             if (model.pair.state !== "conflict") return { ok: false, reason: "not-conflict" };
             const free = GROUPS.find((g) => g !== model.group && !(model.pair.groupMask & (1 << GROUPS.indexOf(g))));
@@ -364,8 +387,13 @@ export function createInputBackend({ storage, timers, opts, now = () => Date.now
         },
         dismissHint(id) {
             if (typeof id !== "string" || id === "") return { ok: false, reason: "bad-id" };
-            model.dismissed.add(id);
-            persistDismissed();
+            if (id === "exportMismatch") {
+                // 与真桥同形：这是确认，原因位与计数清零，不进 dismissedHints
+                model.exportCauses = { bits: 0, count: 0 };
+            } else {
+                model.dismissed.add(id);
+                persistDismissed();
+            }
             core.scheduleEcho();
             return { ok: true };
         },

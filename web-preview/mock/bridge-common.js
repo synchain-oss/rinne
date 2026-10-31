@@ -104,6 +104,8 @@ export function isAllowedExternal(url) {
         return false;
     }
     if (u.protocol !== "https:" || u.username || u.password || u.port) return false;
+    // 查询串与片段一律不放行（同 web/shared/links.js 与原生）。解析后单独的 ? 或 # 看不出来，所以看原串
+    if (/[?#]/.test(String(url))) return false;
     if (u.hostname === "synchain.ca") return true;
     if (u.hostname !== "github.com") return false;
     return u.pathname === "/synchain-oss/rinne" || u.pathname.startsWith("/synchain-oss/rinne/");
@@ -488,6 +490,11 @@ export function commonFunctions(core, env) {
             return { ok: true };
         },
         copyDiagnostics(commit) {
+            // 失败开关（env.diagFail，预览与冒烟专用，真桥没有）：not-ready 是诊断文本还拿不到，预览与写剪贴板都一样；
+            // clipboard 是写了但回读对不上，只有真写的时候才有
+            if (env.diagFail === "not-ready") return { ok: false, copied: false, reason: "not-ready" };
+            if (commit === true && env.diagFail === "clipboard")
+                return { ok: false, copied: false, reason: "clipboard" };
             const text = env.diagnostics();
             if (commit === true) env.clipboard = text;
             return { ok: true, copied: commit === true, text };

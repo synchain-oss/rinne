@@ -29,6 +29,8 @@ export const GATED_WRITES = Object.freeze([
     "deletePreset",
     "setResetOnPlay",
     "setTailMode",
+    "setFbUnit",
+    "setDelayUnit",
     "setDiagLog",
     "setUiScale",
     "commitUiScale",

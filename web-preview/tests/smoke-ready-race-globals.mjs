@@ -88,7 +88,9 @@ const lastState = (session) => {
 // ---- 外链 ----
 for (const [url, want] of [
     ["https://synchain.ca", true],
-    ["https://synchain.ca/docs?x=1", true],
+    ["https://synchain.ca/docs?x=1", false],
+    ["https://synchain.ca/?", false],
+    ["https://synchain.ca/#", false],
     ["https://github.com/synchain-oss/rinne", true],
     ["https://github.com/synchain-oss/rinne/issues/1", true],
     ["http://synchain.ca", false],
