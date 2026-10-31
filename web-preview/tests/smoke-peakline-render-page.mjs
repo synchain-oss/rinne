@@ -11,6 +11,7 @@
 //   阶跃距离不小于 20 px（防空转）。
 // 坏样例：把液柱的过渡改成 0.18 s（SCVB 定谳前的病态值），滞后必须量到 150 ms 以上并被判红；
 //   把峰线的过渡改成 0.18 s，峰线滞后与两者到位时刻的分歧都必须被判红。
+//   坏样例只量得偏小、不会量得偏大（原因见 measureBad），所以最多量 3 次、取滞后最大的一次再比 150 ms，达标就提前结束；门槛不变。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
 // 用法：node web-preview/tests/smoke-peakline-render-page.mjs [仓库根]
@@ -27,6 +28,8 @@ if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 const LAG_MAX_MS = 40;
 const SYNC_MAX_MS = 8;
 const STEP_MIN_PX = 20;
+const BAD_LAG_MIN_MS = 150;
+const BAD_TRIES = 3;
 const FLOOR_START_DB = -56;
 const STEPS_DB = [-43, -30, -17, -4];
 const sleep = (page, ms) => page.eval(`new Promise((r) => setTimeout(r, ${ms}))`);
@@ -125,6 +128,29 @@ const injectStyle = (page, css) =>
         css,
     );
 
+/**
+ * 坏样例的量尺：开页、注入病态过渡、量一次上行阶跃，最多 BAD_TRIES 次，取 key 对应滞后最大的一次；某次超过 BAD_LAG_MIN_MS 就提前结束。
+ * 为什么只会偏小：电平阶跃要经测试进程的两次往返才落到页面上（先在页内睡 90 ms，再推电平），而记录窗口固定 420 ms。
+ * 机器忙、往返被拖长时，变化落在窗口后段，过渡被窗口截断，窗口末帧被当成终点，98% 到位的时刻因此偏小
+ * （变化在第 22 帧、窗口在第 26 帧收尾，恒量出 65.4 ms）；落在窗口之外则量不到变化。两种都不会比真值大，所以取最大值不会放过病态值。
+ * 返回 { best, tries }：best 是滞后最大的一次有效阶跃（一次都没量到为 null），tries 是每次的结果。
+ */
+async function measureBad(page, server, css, key) {
+    const tries = [];
+    let best = null;
+    for (let i = 0; i < BAD_TRIES; i++) {
+        await openInput(page, server, "in-playing", { lang: "zh" });
+        await injectStyle(page, css);
+        await prepare(page);
+        const r = await step(page, STEPS_DB[1]);
+        tries.push(r);
+        if (r.ok && (best === null || r[key] > best[key])) best = r;
+        if (best !== null && best[key] > BAD_LAG_MIN_MS) break;
+    }
+    return { best, tries };
+}
+const triesText = (tries, key) => tries.map((r) => (r.ok ? r[key].toFixed(1) : "没量到")).join(" / ");
+
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser({ width: VIEW.w, height: VIEW.h });
 try {
@@ -156,30 +182,37 @@ try {
     }
 
     // ---- 坏样例：液柱过渡 0.18 s（SCVB 定谳前的病态值）
-    await openInput(page, server, "in-playing", { lang: "zh" });
-    await injectStyle(page, ".sc-tube__liquid { transition: width 0.18s linear !important; }");
-    await prepare(page);
     {
-        const r = await step(page, STEPS_DB[1]);
-        run.check(r.ok, `坏样例（液柱过渡 0.18 s）：应量到阶跃：${r.why || ""}`);
-        if (r.ok) {
+        const { best: r, tries } = await measureBad(
+            page,
+            server,
+            ".sc-tube__liquid { transition: width 0.18s linear !important; }",
+            "liquid",
+        );
+        run.check(r !== null, `坏样例（液柱过渡 0.18 s）：应量到阶跃：${tries.map((t) => t.why).join("；")}`);
+        if (r) {
             run.check(
-                r.liquid > 150,
-                `坏样例（液柱过渡 0.18 s）：液柱滞后应量到 150 ms 以上，实得 ${r.liquid.toFixed(1)}`,
+                r.liquid > BAD_LAG_MIN_MS,
+                `坏样例（液柱过渡 0.18 s）：液柱滞后应量到 ${BAD_LAG_MIN_MS} ms 以上，${tries.length} 次实得 ${triesText(tries, "liquid")}`,
             );
             run.check(r.liquid > LAG_MAX_MS, "坏样例（液柱过渡 0.18 s）：应被 40 ms 的门槛判红");
             run.check(r.gap > SYNC_MAX_MS, `坏样例（液柱过渡 0.18 s）：到位时刻应量出分歧，实得 ${r.gap.toFixed(1)}`);
         }
     }
     // ---- 坏样例：峰线过渡 0.18 s
-    await openInput(page, server, "in-playing", { lang: "zh" });
-    await injectStyle(page, ".sc-tube__peak { transition: left 0.18s linear !important; }");
-    await prepare(page);
     {
-        const r = await step(page, STEPS_DB[1]);
-        run.check(r.ok, `坏样例（峰线过渡 0.18 s）：应量到阶跃：${r.why || ""}`);
-        if (r.ok) {
-            run.check(r.peak > 150, `坏样例（峰线过渡 0.18 s）：峰线滞后应量到 150 ms 以上，实得 ${r.peak.toFixed(1)}`);
+        const { best: r, tries } = await measureBad(
+            page,
+            server,
+            ".sc-tube__peak { transition: left 0.18s linear !important; }",
+            "peak",
+        );
+        run.check(r !== null, `坏样例（峰线过渡 0.18 s）：应量到阶跃：${tries.map((t) => t.why).join("；")}`);
+        if (r) {
+            run.check(
+                r.peak > BAD_LAG_MIN_MS,
+                `坏样例（峰线过渡 0.18 s）：峰线滞后应量到 ${BAD_LAG_MIN_MS} ms 以上，${tries.length} 次实得 ${triesText(tries, "peak")}`,
+            );
             run.check(r.gap > SYNC_MAX_MS, `坏样例（峰线过渡 0.18 s）：到位时刻应量出分歧，实得 ${r.gap.toFixed(1)}`);
         }
     }
