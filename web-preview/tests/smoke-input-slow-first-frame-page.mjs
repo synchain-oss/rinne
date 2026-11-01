@@ -16,7 +16,11 @@
 //   ⑥ 对照：没有关闭过导出提示的同一快照，导出提示会弹出（说明 ⑤ 里「不弹」是真的被基线压住，不是看不见）；
 //   ⑦ 只来了 state、pair 还没到（场景 E）：仍算没就绪，继续锁着、刺激写不到桥；pair 补上才放行。
 //   ⑧ 关于面板在 400 ms 兜底揭幕之前就打开（场景 F，用钩子把兜底定时器扣住，保证先后顺序而不靠计时）：
-//      首批快照到后，高级设置那几行放开、版本号写上。
+//      首批快照到后，高级设置那几行放开、版本号与构建行写上。
+//   ⑨ 单位（场景 G）：首帧与之后宿主给的单位只采纳、不回写；用户点分段控件恰好写一次；用户点过、宿主的值还没变的那一帧
+//      不把用户的选择冲掉；
+//   ⑩ 缩放锁（场景 H、I，用钩子让探针量出旧语义）：存档档位不是 1 时请回 1 也是写入，要等 state 与 pair 都到，谁后到都一样，
+//      只发一次；新语义的文档上（场景 J，对照）不发。
 // 另：预设槽与消息位整块在 inert 之内（里面暂时没有控件也一样），页脚版本号写「—」。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
@@ -95,11 +99,25 @@ const HOLD_FALLBACK_HOOK = `(() => {
     };
 })()`;
 
+/** 让缩放探针量出旧语义（rect 不含 zoom，探针是 zoom 2、宽 100 px，量回 100），只在 Input 页面所在的帧里装。 */
+const LEGACY_ZOOM_HOOK = `(() => {
+    if (!location.pathname.endsWith("/web/input/index.html")) return;
+    const real = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+        return this.style.zoom === "2" ? { width: this.offsetWidth } : real.call(this);
+    };
+})()`;
+
 /**
  * 打开 Input 页面并扣住首批快照；返回时页面已建好外壳。holdFallback 为真时连兜底揭幕也扣住；
  * releaseAtCall 大于 0 时，钩子从第 N 次 requestInitialState 起自己放行。
  */
-async function openHeld(browser, server, scenario, { holdFallback = false, releaseAtCall = 0 } = {}) {
+async function openHeld(
+    browser,
+    server,
+    scenario,
+    { holdFallback = false, releaseAtCall = 0, legacyZoom = false } = {},
+) {
     const page = await browser.newPage();
     await page.setViewport(VIEW.w, VIEW.h, 1);
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_HOOK });
@@ -108,6 +126,7 @@ async function openHeld(browser, server, scenario, { holdFallback = false, relea
             source: `window.__releaseAtCall = ${releaseAtCall}`,
         });
     if (holdFallback) await page.send("Page.addScriptToEvaluateOnNewDocument", { source: HOLD_FALLBACK_HOOK });
+    if (legacyZoom) await page.send("Page.addScriptToEvaluateOnNewDocument", { source: LEGACY_ZOOM_HOOK });
     const q = new URLSearchParams({ fresh: "1", auto: "0", lang: "zh", scenario });
     await page.goto(`${server.url}/web-preview/input.html?${q}`);
     await page.waitFor(
@@ -649,7 +668,11 @@ try {
             `F：快照没到时版本不应是真值，实得 ${JSON.stringify(before.build)}`,
         );
         // 放行首批快照，不放行兜底：面板开着，S.pending 从没置过位
-        await page.eval(`(() => { window.__hold = false; window.__origInitial(); })()`);
+        await page.eval(`(() => {
+            window.__RINNE_PREVIEW__.model.build = { sha: "abc1234", fmt: "VST3", arch: "x64" };
+            window.__hold = false;
+            window.__origInitial();
+        })()`);
         await page.waitFor(
             `(() => { const f = document.querySelector("iframe"); const p = f.contentDocument.querySelector('[data-gb="input.pair.pill"]'); return !!p && p.hasAttribute("data-state"); })()`,
             { timeout: 8000, label: "F：放行后页面应画出首批快照" },
@@ -662,6 +685,11 @@ try {
             after.build.includes("0.0.0-preview"),
             `F：首批快照到后版本应写上宿主的值，实得 ${JSON.stringify(after.build)}`,
         );
+        for (const part of ["abc1234", "VST3", "x64"])
+            run.check(
+                after.build.includes(part),
+                `F：构建行应带 state.build 的 ${part}，实得 ${JSON.stringify(after.build)}`,
+            );
         const left = await inFrame(page, (doc, win) => (win.__heldFallback ? win.__heldFallback.length : -1));
         run.eq(left, 1, "F：整个过程兜底揭幕一直被扣着（它没有参与这次放开）");
         const ab = await rec.calls();
@@ -671,6 +699,163 @@ try {
             "F：打开关于面板、放行快照都不应写桥",
         );
         run.check(page.errors.length === 0, `F：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
+        await page.close();
+    }
+
+    // ====== 场景 G：单位。宿主给的只采纳不回写，用户点的才写给宿主
+    {
+        const page = await openHeld(browser, server, "in-playing");
+        const rec = await recordBridge(page, RECORDED);
+        await sleep(page, 700);
+        const unitCalls = async () =>
+            (await rec.calls()).filter((c) => c[0] === "setFbUnit" || c[0] === "setDelayUnit");
+        const units = () =>
+            inFrame(page, (doc) =>
+                ["fb.unit", "dly.unit"].map((p) => doc.querySelector(`[data-part="${p}"]`).getAttribute("data-state")),
+            );
+        const waitUnits = (fb, dly, label) =>
+            page.waitFor(
+                `(() => { const d = document.querySelector("iframe").contentDocument; const s = (p) => d.querySelector('[data-part="' + p + '"]').getAttribute("data-state"); return s("fb.unit") === ${JSON.stringify(fb)} && s("dly.unit") === ${JSON.stringify(dly)}; })()`,
+                { timeout: 6000, label },
+            );
+        // 首帧就是非默认单位
+        await page.eval(`(() => {
+            const m = window.__RINNE_PREVIEW__.model;
+            m.cfg.fbUnit = "db";
+            m.cfg.delayUnit = "samples";
+            window.__hold = false;
+            window.__origInitial();
+        })()`);
+        await waitUnits("db", "samples", "G：首帧的单位应被采纳");
+        await settle(page);
+        run.eq(await unitCalls(), [], "G：采纳首帧的单位不应写回宿主");
+
+        // 工程恢复、撤销：宿主的值变了要采纳，同样不回写
+        await page.eval(`(() => {
+            const s = window.__RINNE_PREVIEW__;
+            s.model.cfg.fbUnit = "pct";
+            s.model.cfg.delayUnit = "ms";
+            s.core.push("rinne.state");
+        })()`);
+        await waitUnits("pct", "ms", "G：宿主改了单位页面应跟上");
+        await settle(page);
+        run.eq(await unitCalls(), [], "G：采纳宿主改的单位不应写回宿主");
+
+        // 用户点：各写一次，回声回来也不再写
+        const fbDb = await centerOf(page, '[data-part="fb.unit"] [data-seg="db"]');
+        await click(page, fbDb.x, fbDb.y);
+        await waitUnits("db", "ms", "G：点反馈单位应切到 dB");
+        const dlySamples = await centerOf(page, '[data-part="dly.unit"] [data-seg="samples"]');
+        await click(page, dlySamples.x, dlySamples.y);
+        await waitUnits("db", "samples", "G：点延迟单位应切到样本");
+        await settle(page);
+        run.eq(
+            await unitCalls(),
+            [
+                ["setFbUnit", "db"],
+                ["setDelayUnit", "samples"],
+            ],
+            "G：点单位段应恰好写一次",
+        );
+        run.eq(
+            await page.eval(
+                `(() => { const c = window.__RINNE_PREVIEW__.model.cfg; return [c.fbUnit, c.delayUnit]; })()`,
+            ),
+            ["db", "samples"],
+            "G：用户的选择应进到宿主",
+        );
+
+        // 用户刚点过，宿主的值还没变（回声未到）：这一帧不把用户的选择冲掉
+        await rec.clear();
+        await page.eval(`(() => {
+            const m = window.__RINNE_PREVIEW__.mock;
+            m.setFbUnit = (...a) => { window.__calls.push(["setFbUnit", ...a]); return { ok: true, value: a[0] }; };
+        })()`);
+        const fbPct = await centerOf(page, '[data-part="fb.unit"] [data-seg="pct"]');
+        await click(page, fbPct.x, fbPct.y);
+        await waitUnits("pct", "samples", "G：点回 %");
+        // 帧内容要变（真宿主的 state 也一直在变）：内容不变不重画，冲没冲掉都看不出来
+        await page.eval(`(() => {
+            const s = window.__RINNE_PREVIEW__;
+            s.model.build = { sha: "aaa1111", fmt: "VST3", arch: "x64" };
+            s.core.push("rinne.state");
+        })()`);
+        await settle(page);
+        run.eq(await units(), ["pct", "samples"], "G：宿主的值没变的那一帧不应冲掉用户刚点的单位");
+        run.eq(await unitCalls(), [["setFbUnit", "pct"]], "G：那一帧也不应多写");
+
+        // 快照到了之后才打开关于面板：构建行读 state.build（场景 F 走的是面板开着时更新那条路）
+        await page.eval(`(() => {
+            const s = window.__RINNE_PREVIEW__;
+            s.model.build = { sha: "def5678", fmt: "AU", arch: "arm64" };
+            s.core.push("rinne.state");
+        })()`);
+        await settle(page);
+        const version = await centerOf(page, '[data-gb="input.footer.version"]');
+        await click(page, version.x, version.y);
+        await settle(page);
+        const buildLine = await inFrame(
+            page,
+            (doc) => (doc.querySelector(".rn-about__build") || { textContent: "" }).textContent,
+        );
+        for (const part of ["def5678", "AU", "arm64"])
+            run.check(
+                buildLine.includes(part),
+                `G：构建行应带 state.build 的 ${part}，实得 ${JSON.stringify(buildLine)}`,
+            );
+        run.check(page.errors.length === 0, `G：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
+        await page.close();
+    }
+
+    // ====== 场景 H、I、J：缩放锁请回 1 也是写入，两路首帧齐了才发，谁后到都一样；新语义的文档上不发
+    for (const [tag, legacyZoom, first, last] of [
+        ["H", true, "rinne.state", "rinne.pair"],
+        ["I", true, "rinne.pair", "rinne.state"],
+        ["J", false, "rinne.state", "rinne.pair"],
+    ]) {
+        const page = await openHeld(browser, server, "in-playing", { legacyZoom });
+        const rec = await recordBridge(page, RECORDED);
+        await sleep(page, 700);
+        const scaleCalls = async () => (await rec.calls()).filter((c) => c[0] === "setUiScale");
+        // 存档档位是 1.25；只放行先到的那一路（周期回声也走 core.push）
+        await page.eval(`(() => {
+            const s = window.__RINNE_PREVIEW__;
+            s.model.scale = 1.25;
+            const push = s.core.push;
+            window.__pushOrig = push;
+            s.core.push = (name) => (name === ${JSON.stringify(last)} ? false : push.call(s.core, name));
+            window.__hold = false;
+            window.__origInitial();
+        })()`);
+        await sleep(page, 900);
+        run.eq(await scaleCalls(), [], `${tag}：只有 ${first} 时不应发 setUiScale`);
+        await page.eval(`(() => {
+            const s = window.__RINNE_PREVIEW__;
+            s.core.push = window.__pushOrig;
+            s.core.push(${JSON.stringify(last)});
+            // 周期回声不许替它补：两路齐了的那一拍就要发，不靠下一帧
+            s.core.push = () => false;
+        })()`);
+        await page.waitFor(
+            `(() => { const f = document.querySelector("iframe"); return f.contentDocument.querySelector('[data-part="content"]').getAttribute("data-pending") === null; })()`,
+            { timeout: 8000, label: `${tag}：两路都到后应就绪` },
+        );
+        await settle(page);
+        run.eq(
+            await scaleCalls(),
+            legacyZoom ? [["setUiScale", 1]] : [],
+            legacyZoom ? `${tag}：两路都到后应恰好请回 1 一次` : `${tag}：新语义的文档上不应请回 1（对照）`,
+        );
+        // 之后的帧不再发
+        await page.eval(`(() => {
+            const s = window.__RINNE_PREVIEW__;
+            s.core.push = window.__pushOrig;
+            s.core.push("rinne.state");
+            s.core.push("rinne.pair");
+        })()`);
+        await settle(page);
+        run.eq((await scaleCalls()).length, legacyZoom ? 1 : 0, `${tag}：之后的帧不应再发 setUiScale`);
+        run.check(page.errors.length === 0, `${tag}：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
         await page.close();
     }
 

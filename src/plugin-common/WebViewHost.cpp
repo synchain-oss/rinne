@@ -630,6 +630,7 @@ void WebViewHost::showFallback(FallbackReason reason)
     if (getWidth() < design.width || getHeight() < design.height)
         setSize(juce::jmax(getWidth(), design.width), juce::jmax(getHeight(), design.height));
     resized();
+    onFallbackPanelShown();
 }
 
 // 离开兜底面板的唯一出口。beginLoadAttempt 里先让网页重新可见（JUCE 此刻会做一次后退或按旧地址重载，

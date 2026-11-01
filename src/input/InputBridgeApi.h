@@ -38,6 +38,8 @@ inline constexpr const char* kFnSetGuardOn = "setGuardOn";
 inline constexpr const char* kFnSetResetOnPlay = "setResetOnPlay";
 inline constexpr const char* kFnSetTailMode = "setTailMode";
 inline constexpr const char* kFnMoveToFreeGroup = "moveToFreeGroup";
+inline constexpr const char* kFnSetFbUnit = "setFbUnit";
+inline constexpr const char* kFnSetDelayUnit = "setDelayUnit";
 
 // ---- 事件：原生推给界面 ----
 inline constexpr const char* kEvState = "rinne.state";

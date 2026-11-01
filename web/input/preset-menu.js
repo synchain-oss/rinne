@@ -552,7 +552,7 @@ export function createPresetMenu(ctx, o) {
             msg = "dupe";
         } else {
             msg = "saveFail";
-            failReason = r && typeof r.reason === "string" && r.reason !== "" ? r.reason : NO_NAME;
+            failReason = r && typeof r.reason === "string" ? r.reason : "";
         }
         renderPanel();
         input.focus({ preventScroll: true });
@@ -571,7 +571,7 @@ export function createPresetMenu(ctx, o) {
         if (!isOpen) return;
         toSave(name, {
             msg: "saveFail",
-            reason: r && typeof r.reason === "string" && r.reason !== "" ? r.reason : NO_NAME,
+            reason: r && typeof r.reason === "string" ? r.reason : "",
         });
     }
 
@@ -589,7 +589,7 @@ export function createPresetMenu(ctx, o) {
         }
         // 失败时留在确认态，红字写原因（表里没有的码原样显示），可以再点删除重试
         if (!isOpen || view !== "delete") return;
-        delFail = r && typeof r.reason === "string" && r.reason !== "" ? r.reason : NO_NAME;
+        delFail = r && typeof r.reason === "string" ? r.reason : "";
         renderPanel();
     }
 

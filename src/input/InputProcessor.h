@@ -9,6 +9,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -16,6 +17,7 @@
 #include "InputStateGlue.h"
 #include "PresetStore.h"
 #include "RinneProcessorBase.h"
+#include "loop/ExportLatch.h"
 
 namespace rinne
 {
@@ -24,8 +26,9 @@ class InputProcessor final : public RinneProcessorBase
 {
 public:
     InputProcessor();
-    // 测试注入（命名作用域、后端、时钟、定时器、诊断与日志的出口）；role、验证宿主与配对层由基类填
-    explicit InputProcessor(const InstanceHostConfig& config);
+    // 测试注入（命名作用域、后端、时钟、定时器、诊断与日志的出口）；role、验证宿主与配对层由基类填。
+    // presetDirectory 是用户预设目录（测试给临时目录，不碰真实目录）；空 = 默认目录
+    explicit InputProcessor(const InstanceHostConfig& config, const juce::File& presetDirectory = {});
     ~InputProcessor() override;
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
@@ -34,6 +37,8 @@ public:
 
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
+    // 宿主的轨道信息（消息线程）：先记下本轨的名字与颜色给界面的配对卡，再照基类交给接线
+    void updateTrackProperties(const TrackProperties& properties) override;
 
     // 定义在 InputPluginEntry.cpp
     juce::AudioProcessorEditor* createEditor() override;
@@ -55,6 +60,36 @@ public:
     void userParamGestureBegan();
     // 冲突的一键修复「移到空闲组」：定型并标脏（见 RinneProcessorBase::repairWith）。目标是休眠槽时要带确认再调一次
     RepairOutcome repairGroup(bool confirmTakeover = false);
+    // 用户确认接管（1..8）：组里本角色的槽是休眠的，带确认的意图（kManualConfirmed）去拿。写回设置（来源记为用户选的）、
+    // 交给会合、定型、标脏，与一键修复带确认的那一支同口径。越界返回 false，什么都不动
+    bool takeOverGroup(int group);
+    // 关于面板的高级设置与两个显示单位：写进设置（CFGS）、定型、标脏；tail 模式另交给外壳报给宿主。
+    // 探针构建里什么都不做，返回 false
+    bool selectTailMode(state::TailMode mode);
+    bool selectGuardOn(bool on);
+    bool selectResetOnPlay(bool on);
+    bool selectFbUnit(state::FbUnit unit);
+    bool selectDelayUnit(state::DelayUnit unit);
+    // 宿主最近一次给的本轨名字与颜色；没给过的项为空。只在消息线程读写
+    struct TrackLabel
+    {
+        std::optional<juce::String> name;
+        std::optional<juce::Colour> colour;
+    };
+    const TrackLabel& trackLabel() const noexcept { return trackLabel_; }
+    // 最近一块是不是旁路块（processBlockBypassed）。音频线程写、任何线程读；没处理过块时为假
+    bool hostBypassed() const noexcept { return hostBypassed_.load(std::memory_order_relaxed); }
+    // 界面这一侧按实例记的东西，不进工程。编辑器可以反复开关，桥对象随编辑器重建，这几项要活过它，所以放在处理器上。
+    // 只在消息线程读写
+    struct UiSession
+    {
+        juce::StringArray dismissedHints; // 本实例已关闭的提示 ID
+        loop::ExportLatchView exportLatch; // 导出不一致的已读值
+        std::uint32_t exportBits = 0; // 自上次确认起见过的原因位
+        juce::String presetId; // 当前预设的 ID，与 presetName 配对；工程里只有名字，见 InputBridge
+        juce::String presetName;
+    };
+    UiSession& uiSession() noexcept { return uiSession_; }
     // 诊断文本（rinne-diag v1，不含末尾的 ui 段）与复制诊断。探针构建里是空串、什么都不复制
     std::string diagnosticsText() const;
     void copyDiagnosticsToClipboard() const;
@@ -85,15 +120,26 @@ private:
     // 正式构建的参数层、胶水与预设库：先参数树、再建在它上面的胶水（析构反过来）。预设库只在载入时写参数树
     struct Wiring
     {
-        explicit Wiring(juce::AudioProcessor& processor) : params(processor), glue(params.tree()) {}
+        Wiring(juce::AudioProcessor& processor, const juce::File& presetDirectory)
+            : params(processor), glue(params.tree()),
+              presets(presetDirectory == juce::File() ? input::PresetStore::defaultUserDirectory() : presetDirectory)
+        {
+        }
         input::InputParams params;
         input::InputStateGlue glue;
         input::PresetStore presets;
     };
 
     void process(juce::AudioBuffer<float>& buffer, bool bypassed) noexcept;
+    // 非参数设置的一次用户改动：写进设置、定型、标脏。探针构建里什么都不做，返回 false
+    template<typename Edit>
+    bool applyUserConfig(Edit&& edit);
 
     std::optional<Wiring> wiring_;
+    TrackLabel trackLabel_;
+    UiSession uiSession_;
+    static_assert(std::atomic<bool>::is_always_lock_free, "音频线程写宿主旁路位要求 std::atomic<bool> 无锁");
+    std::atomic<bool> hostBypassed_{false};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(InputProcessor)
 };

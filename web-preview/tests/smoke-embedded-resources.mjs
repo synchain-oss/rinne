@@ -522,8 +522,21 @@ const REASON_FUNCTIONS = {
     "scale-locked": ["setUiScale", "commitUiScale"],
     "no-pending": ["commitUiScale", "resolveTakeover"],
     // copyDiagnostics：诊断文本还拿不到
-    "not-ready": ["setLang", "setUiScale", "commitUiScale", "copyDiagnostics"],
-    "bad-value": ["setGuideSeen", "setDiagLog", "resolveTakeover", "output:setTailMode"],
+    // input:panic：面板在场时回这个原因，切断照做
+    "not-ready": ["setLang", "setUiScale", "commitUiScale", "copyDiagnostics", "input:panic"],
+    "bad-value": [
+        "setGuideSeen",
+        "setDiagLog",
+        "resolveTakeover",
+        "output:setTailMode",
+        "input:setParam",
+        "input:setLimiter",
+        "input:setGuardOn",
+        "input:setResetOnPlay",
+        "input:setTailMode",
+        "input:setFbUnit",
+        "input:setDelayUnit",
+    ],
     "bad-version": ["setRulesAck"],
     "bad-group": ["setGroup"],
     "not-allowed": ["openExternal"],
@@ -532,6 +545,10 @@ const REASON_FUNCTIONS = {
     // 地址或文件已通过校验，系统没能打开
     unavailable: ["openExternal", "showLicense"],
 };
+
+// 上表的键与 BridgeBase.h 的 Reason 逐个相等，角色自己的原因（只有那一端的桥回）不进去。登记过的函数行里还写了这种原因时
+// 在这里点名，反向核对一并算上：文档多写或少写一个照样判红
+const ROLE_REASONS = { "input:setParam": ["bad-param"] };
 
 // 通则段落：common 节里以「名字：」起头的一段，写明一个失败原因对例外之外的每个桥函数都成立（兜底面板在场时的
 // not-ready：原生侧每个处理函数开头都有这道守卫，由宿主测试的源码卫生用例核对）。函数行里写了这个原因的函数照上表登记，
@@ -739,6 +756,7 @@ function ruleProblems(docText, rule, cppReasons) {
         const registered = Object.entries(REASON_FUNCTIONS)
             .filter(([, fns]) => fns.includes(fn))
             .map(([reason]) => reason)
+            .concat(ROLE_REASONS[fn] ?? [])
             .sort();
         run.eq(inDoc, registered, `⑧ UI_BRIDGE.md 里 ${fn} 一行写的失败原因与本断言登记的不一致`);
     }

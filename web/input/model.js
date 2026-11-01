@@ -732,7 +732,11 @@ export function deriveMessages(c) {
         );
     }
 
-    const confirm = state.takeover === true ? { key: "band.in.takeover", vals: { g: textOr(state.group) } } : null;
+    // 一键修复要接管的可以是别的组：组号读 takeoverGroup，缺省时读 group
+    const confirm =
+        state.takeover === true
+            ? { key: "band.in.takeover", vals: { g: textOr(state.takeoverGroup ?? state.group) } }
+            : null;
     return { messages: out, confirm };
 }
 

@@ -149,6 +149,10 @@ protected:
     // 兜底面板在场时那次请求只回执，不发首帧，也不调用它
     virtual void emitFirstFrames() {}
 
+    // 刚切到兜底面板之后调用一次（消息线程）：网页已经隐藏并卸载，子类把还挂着的、等页面收尾的事情收掉。默认什么都不做。
+    // 运行时缺失时可能在基类构造里就切面板，那时子类还没建好，这里调到的是基类的空实现，子类也没有要收的东西
+    virtual void onFallbackPanelShown() {}
+
     // 兜底面板是否在场。角色专属桥函数开头的守卫写成 if (panelShown())（见文件头注释）
     bool panelShown() const noexcept { return fallback_ != nullptr; }
 

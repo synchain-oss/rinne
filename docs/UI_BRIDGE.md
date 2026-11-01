@@ -221,20 +221,22 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 
 | 函数 | 参数 | 回执 | 说明 |
 |---|---|---|---|
-| `beginParamGesture` | `id`：参数 ID | `{ ok }` | 手势开始。拖动期间收到的回声只更新显示，不回写。 |
-| `setParam` | `id`、`value` | `{ ok, value, seq }` | 值由原生侧夹取并回报实际值；`seq` 与随后回声帧的 `seq` 对得上。 |
-| `endParamGesture` | `id` | `{ ok }` | 手势结束；这之前发出的回声帧一律丢弃（按 `seq` 比对）。 |
-| `setLimiter` | `on`：布尔 | `{ ok, value, seq }` | 等价于对 `limiter` 调 `setParam`。 |
-| `panic` | 无 | `{ ok, cut }` | 紧急切断。连点不会恢复。 |
-| `resumeLoop` | 无 | `{ ok }` | 恢复回送，唯一入口。切断后 1.5 s 冷却，冷却内回 `{ ok: false, reason: "cooldown", remainingMs }`。 |
-| `dismissHint` | `id` | `{ ok }` | 关闭一条提示，每实例有效，不进工程。 |
+| `beginParamGesture` | `id`：参数 ID | `{ ok }` | 手势开始。拖动期间收到的回声只更新显示，不回写。重复开始同一个参数的手势不重入。不认识的 `id` 回 `{ ok: false, reason: "bad-param" }`。 |
+| `setParam` | `id`、`value` | `{ ok, value, seq }` | 值由原生侧夹取并回报实际值；`seq` 与随后回声帧的 `seq` 对得上。不认识的 `id` 回 `{ ok: false, reason: "bad-param" }`；值的类型不对（连续量要有限的数、开关要布尔、档位要桥上的取值）回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `endParamGesture` | `id` | `{ ok }` | 手势结束；这之前发出的回声帧一律丢弃（按 `seq` 比对）。不认识的 `id` 回 `{ ok: false, reason: "bad-param" }`。还开着的手势在编辑器关闭或切兜底面板时由原生侧补上结束。 |
+| `setLimiter` | `on`：布尔 | `{ ok, value, seq }` | 等价于对 `limiter` 调 `setParam`；不是布尔回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `panic` | 无 | `{ ok, cut }` | 紧急切断。连点不会恢复。`cut` 是回执当下的切断原因：已经切断的报原有原因，否则是 `panic`（下一块生效）。兜底面板在场时仍回 `{ ok: false, reason: "not-ready" }`，但切断照做，也只做切断：切面板之前已排进队列的那一下不能丢，页面已经卸载，不会再发。别的函数没有这个例外。 |
+| `resumeLoop` | 无 | `{ ok }` | 恢复回送，唯一入口。没有切断回 `{ ok: false, reason: "not-cut" }`。切断后 1.5 s 冷却，冷却内回 `{ ok: false, reason: "cooldown", remainingMs }`；是否在冷却只看安全链，`remainingMs` 是估算（从观察到冷却起按消息线程时钟倒数，到点而冷却还在就写 1），只用于显示。 |
+| `dismissHint` | `id` | `{ ok }` | 关闭一条提示，每实例有效，不进工程；不是非空字符串回 `{ ok: false, reason: "bad-id" }`。`exportMismatch` 是确认导出提示：已读值追上当前计数，`exportCauses` 清零，之后的新事件重新锁存；它不进 `dismissedHints`。 |
 | `loadPreset` | `id`：工厂或用户预设 ID | `{ ok }` | 载入后从首个有效读样本起 500 ms 淡入。失败回 `{ ok: false, reason }`，什么都不改：`not-found`（没有这个 ID）、`bad-file`（预设文件在，但解析不过）、`not-ready`（参数树缺声音参数，接线错误）。 |
 | `savePreset` | `name`、`overwrite` | `{ ok, id }` | 名字去控制字符（C0、DEL、C1）、首尾空白（含 NBSP 与全角空格），限 24 个 Unicode 码点；重名按去空白后的显示名不分大小写比较，允许覆盖时沿用原 `id`。成功后当前预设变为所存的这一个，`dirty` 为假。失败回 `{ ok: false, reason }`：`exists`（重名且 `overwrite` 不为真）、`bad-name`（清洗后为空）、`write-failed`（目录或文件写不进去，原文件不动）。 |
 | `deletePreset` | `id` | `{ ok }` | 只删用户预设。失败回 `{ ok: false, reason }`：`not-found`（没有这个 ID）、`factory`（工厂预设不能删）、`write-failed`（文件删不掉）。删掉的是当前预设时参数不动，`state.preset` 变为 `{ id: null, dirty: false, name: null }`。 |
-| `setGuardOn` | `on`：布尔 | `{ ok, value }` | 失控保护开关（`cfg.guardOn`，默认开）。 |
-| `setResetOnPlay` | `on`：布尔 | `{ ok, value }` | 起播时清空环路（`cfg.resetOnPlay`，默认开），在关于面板的高级设置里。 |
-| `setTailMode` | `mode`：`auto`、`infinite`、`30s` | `{ ok, value }` | tail 模式（`cfg.tailMode`），在高级设置里。 |
-| `moveToFreeGroup` | 无 | `{ ok, group }` | `conflict` 时的一键修复：移到空闲组，不自动迁移的纪律不变；不在冲突态回 `{ ok: false, reason: "not-conflict" }`，没有空闲组回 `reason: "no-free-group"`。 |
+| `setGuardOn` | `on`：布尔 | `{ ok, value }` | 失控保护开关（`cfg.guardOn`，默认开）。不是布尔回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `setResetOnPlay` | `on`：布尔 | `{ ok, value }` | 起播时清空环路（`cfg.resetOnPlay`，默认开），在关于面板的高级设置里。不是布尔回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `setTailMode` | `mode`：`auto`、`infinite`、`30s` | `{ ok, value }` | tail 模式（`cfg.tailMode`），在高级设置里。不是这三个之一回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `moveToFreeGroup` | 无 | `{ ok, group }` | `conflict` 时的一键修复：移到空闲组，不自动迁移的纪律不变；不在冲突态回 `{ ok: false, reason: "not-conflict" }`，没有空闲组回 `reason: "no-free-group"`；能去的只剩休眠实例占着的组时先不动，回 `reason: "needs-confirm"`，`takeover` 变真、`takeoverGroup` 给那一组，等 `resolveTakeover`。 |
+| `setFbUnit` | `unit`：`pct`、`db` | `{ ok, value }` | 反馈的显示单位（`cfg.fbUnit`），写进工程。不是这两个之一回 `{ ok: false, reason: "bad-value" }`，不写。 |
+| `setDelayUnit` | `unit`：`ms`、`samples` | `{ ok, value }` | 延迟的显示单位（`cfg.delayUnit`），写进工程。不是这两个之一回 `{ ok: false, reason: "bad-value" }`，不写。 |
 
 ### 专用事件
 
@@ -243,8 +245,8 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | 事件 | 内容与频率 |
 |---|---|
 | `rinne.params` | 参数值的宿主回声，`{ seq, values }`；首帧必发。宿主自动化回放时，指针用 rAF 指数逼近最新回声，时间常数 40 ms，不用 CSS 过渡。 |
-| `rinne.meters` | 25 Hz，先 diff 再发：`in`、`ret`（增益前）、`out` 三条电平（dBFS，静音为 `null`）、Mix 推子的两路分量 `dryPart`、`retPart`（dBFS，静音为 `null`）、增益缩减 `gr`、高切截断位 `highCutLimited`、三盏灯 `lamps`（`dc`、`nonfinite`、`guard`，另带可选的 `nonfiniteCount`、`guardDb`）。字段含义见下面「电平帧补充字段」。 |
-| `rinne.presets` | 预设列表：`factory`（8 个，`{ id, name: { zh, en, fr } }`）、`user`（`{ id, name }`，`name` 是字符串，按名字不分大小写排序）、`current`（当前预设的 ID，与 `state.preset.id` 同值，页面读后者）。首帧与 `rinne.state`、`rinne.pair` 一起发，保存与删除成功后重发；页面在它到之前不开预设面板。工厂预设的名字由原生侧的预设文件给，页面按当前语言原样显示。 |
+| `rinne.meters` | 25 Hz，先 diff 再发，没变化时 1 Hz 兜底；首帧的五路峰值是空的（窗口关着或页面没起来时攒下的最高点不算当前电平），下一拍起才有值：`in`、`ret`（增益前）、`out` 三条电平（dBFS，静音为 `null`）、Mix 推子的两路分量 `dryPart`、`retPart`（dBFS，静音为 `null`）、增益缩减 `gr`、高切截断位 `highCutLimited`、三盏灯 `lamps`（`dc`、`nonfinite`、`guard`，另带可选的 `nonfiniteCount`、`guardDb`）。字段含义见下面「电平帧补充字段」。 |
+| `rinne.presets` | 预设列表：`factory`（8 个，`{ id, name: { zh, en, fr } }`）、`user`（`{ id, name }`，`name` 是字符串，按名字不分大小写排序）、`current`（当前预设的 ID，与 `state.preset.id` 同值，页面读后者）。首帧与 `rinne.state`、`rinne.pair` 一起发，保存与删除成功后重发，没变化时 1 Hz 兜底；页面在它到之前不开预设面板。工厂预设的名字由原生侧的预设文件给，页面按当前语言原样显示。 |
 
 ### 参数（11 个）
 
@@ -271,13 +273,15 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | 字段 | 含义 |
 |---|---|
 | `cfg` | 非参数的工程状态：`resetOnPlay`（默认开）、`tailMode`、`delayUnit`（ms 或样本）、`fbUnit`（% 或 dB）、`guardOn`（失控保护，默认开）。 |
-| `preset` | `{ id, dirty, name }`；`dirty` 为真时界面在名字后加「 *」。工厂预设的 `name` 是 `{ zh, en, fr }`，用户预设是字符串；没有当前预设时（删掉了当前的用户预设）`id` 与 `name` 为 `null`，界面写「—」。 |
-| `delay` | 环路延迟卡：`actualMs`、`minMs`、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长），另带可选的 `bpm`（同步档换算用的速度）与 `noTempo`（真为宿主没给速度、`bpm` 是兜底的 120；缺席按有速度处理，`bpm` 缺席按 120）。 |
-| `safety` | `{ cut, cooldownMs, l2 }`，另带可选的 `fadeIn`（布尔，回送正在 500 ms 淡入：新配对、恢复回送、载入预设之后；缺席按假）。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`l2` 为真表示有任一 L2 条件。 |
+| `preset` | `{ id, dirty, name }`；`dirty` 为真时界面在名字后加「 *」，只有界面上真的改动了预设里的 8 个声音参数才算，宿主自动化不算。工厂预设的 `name` 是 `{ zh, en, fr }`，用户预设是字符串；没有当前预设时（新实例，或删掉了当前的用户预设）`id` 与 `name` 为 `null`，`dirty` 为假，界面写「—」。工程里只存名字：重载之后按名字找回 `id`（先工厂三语、再用户预设不分大小写），找不到时 `id` 为 `null`、`name` 照写。 |
+| `delay` | 环路延迟卡：`actualMs`、`minMs`（prepare 之前不发）、`reason`（`ok`、`raised`、`capped`、`overrun`）、`maxBlock`（本会话最大块长），另带可选的 `bpm`（同步档换算用的速度）与 `noTempo`（真为宿主没给速度、`bpm` 是兜底的 120；缺席按有速度处理，`bpm` 缺席按 120）。 |
+| `safety` | `{ cut, cooldownMs, l2 }`，另带可选的 `fadeIn`（布尔，回送正在 500 ms 淡入：新配对、恢复回送、载入预设之后；缺席按假）。`cut` 是 `null`、`panic`、`nan`、`huge` 或 `runaway`；跳闸淡出后清空延迟线并锁存，只有 `resumeLoop` 或重载工程能清，不设自动恢复。`cooldownMs` 是冷却剩余时长的估算，取整到 100 ms，只用于显示。`l2` 为真表示有任一 L2 条件：切断、`conflict`、`abiMismatch`、限制器关而 `lamps.guard` 不是 `ok`。 |
 | `dismissedHints` | 本实例已关闭的提示 ID，不进工程。 |
 | `exportCauses` | 导出不一致的锁存信息：`{ bits, count }`。`bits` 是自上次确认起各原因位的并集（1 = 宿主违约，2 = 主读头补 0，4 = 对端报告违约，8 = 重同步），`count` 是自上次确认起被计入的事件数（无符号 32 位，回绕无碍，只用「不等」比较）。`count` 为 0 表示没有锁存。 |
-| `silentCause` | 可选。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停）、`stalled`（块序号停滞）。页面按值使用，与配对态无关（外壳的旁路降级读 `hostBypass`，消息推导读全部取值）；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
-| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝；出现时界面不再另报泛泛的共享内存不可用）、`outOfOrder`（错序证据成立）、`unstable`（宿主时序不稳定，已切到容忍模式）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本）、`stateDecodeFailed`（state 解码失败）之一。这五条没有对应的配对状态，只能由这个字段带；缺省、非数组、元素残缺、未知 `id` 一律当没有，同一个 `id` 只取第一条。导出不一致的原因位不走这里，仍在 `exportCauses`。 |
+| `silentCause` | 可选（原生侧恒发）。回送被静音时的原因：`null`、`hostBypass`（本插件被宿主旁路）、`peerBypass`（对端被宿主旁路）、`hostPaused`（宿主暂停，样本计数停了 250 ms 以上）、`stalled`（块序号停滞）；同时成立时按这个顺序取：`hostBypass`、`hostPaused`、`peerBypass`、`stalled`。页面按值使用，与配对态无关（外壳的旁路降级读 `hostBypass`，消息推导读全部取值）；缺席按 `null` 处理，界面只显示通用的「回送静音」而不给原因。 |
+| `notices` | 可缺省。数组，元素 `{ id, a?, b? }`，`id` 取 `ipcSandbox`（后端被沙盒拒绝；出现时界面不再另报泛泛的共享内存不可用）、`outOfOrder`（错序证据成立）、`unstable`（宿主时序不稳定，已切到容忍模式）、`newerProject`（工程由更新的版本存下，`a` 是工程里的版本、`b` 是本插件版本，都写 `ABI n`）、`stateDecodeFailed`（state 解码失败）之一。这五条没有对应的配对状态，只能由这个字段带；缺省、非数组、元素残缺、未知 `id` 一律当没有，同一个 `id` 只取第一条。导出不一致的原因位不走这里，仍在 `exportCauses`。 |
+| `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；三项各自拿不到时不发。 |
+| `takeoverGroup` | 可缺省，没有待接管的组时不发。`takeover` 为真时等待接管的组（`A` 到 `H`）；确认条里的组号读它，缺省时读 `group`。 |
 
 ### 电平帧补充字段
 
@@ -286,7 +290,10 @@ web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`
 | `dryPart` | Mix 推子的干声分量峰值（dBFS，静音为 `null`），即 g_dry 作用之后的干声。 |
 | `retPart` | Mix 推子的回送分量峰值（dBFS，静音为 `null`），即加到干声上的那一项。输出是这两路逐样本相加，两路的峰值不一定同时出现，所以各自的峰值不能相加还原 `out`；推子从左填干声、从右填回送，各占一半量程。 |
 | `highCutLimited` | 布尔。高切设定高于采样率允许的上限（0.45 倍采样率）而又不是「关」，实际按上限截断；界面据此给一条中性提示。 |
-| `lamps.nonfiniteCount` | 环里读到并已置 0 的非有限样本累计数，`lamps.nonfinite` 为 `zeroed` 时界面显示它。 |
+| `lamps.dc` | `ok` 或 `blocked`：回送的直流均值超过 −40 dBFS 持续 1 s。 |
+| `lamps.nonfinite` | `ok`、`zeroed`（环内 NaN 灯亮着）或 `latched`（`cut` 是 `nan`）。 |
+| `lamps.guard` | `ok`、`cut`（`cut` 是 `runaway`）、`reduced`（失控保护正在压低回送）或 `limiting`（限制器开着，回送贴近满幅的连续时长到了失控保护的判定时长；限制器关着时不发这个值）。 |
+| `lamps.nonfiniteCount` | 累计数，读环时置 0 的与写方写环前置 0 的非有限样本数之和，`lamps.nonfinite` 为 `zeroed` 时界面显示它。 |
 | `lamps.guardDb` | 可选，非负数。失控保护当前把回送压低了多少 dB（核心侧的增益值取负）；`lamps.guard` 为 `reduced` 时界面显示它，缺席则只写「自动降低」不带数。 |
 
 ### Input 页面读到的配对补充字段
@@ -297,8 +304,8 @@ Input 页面把 `peer.color` 当作 `#rrggbb` 字符串（宿主不给时为 `nu
 
 页面把「`rinne.state` 与 `rinne.pair` 都收到过一帧」当作就绪。就绪之前页面手里没有宿主的真值，所以不编造默认值，也不对宿主写任何东西：
 装载后调 `requestInitialState`，400 ms 内没等到就揭幕外壳（标签照常，没有值的地方写「—」，操作全部关着，页脚缩放下拉置灰、里面只有「—」），并每 400 ms 重发一次 `requestInitialState`，最多再重发 3 次；两个事件都到了就进正常的首帧路径，按宿主的值显示并开放操作。
-就绪之前，参数写入（`beginParamGesture`、`setParam`、`endParamGesture`）、限制器与失控保护开关、组选择、恢复与接管、预设、缩放（`setUiScale`、`commitUiScale`）、关于面板里的高级设置这些函数页面一律不发，被拦下的调用在页面内回 `{ ok: false, reason: "not-ready" }`，不到桥。
-缩放也在被挡之列：选档要记下选档前的档位，倒计时到点或点「取消」时写回去，宿主的档位还不知道时那个回退目标是编的。唯一的例外是旧 WebKit 把缩放钉在 100 % 时，页面按宿主自己给的 `uiScale` 请回 1（`setUiScale(1)`，只改窗口、不存档），那个值是宿主的，不是页面编的。
+就绪之前，参数写入（`beginParamGesture`、`setParam`、`endParamGesture`）、限制器与失控保护开关、组选择、恢复与接管、预设、两个显示单位、缩放（`setUiScale`、`commitUiScale`）、关于面板里的高级设置这些函数页面一律不发，被拦下的调用在页面内回 `{ ok: false, reason: "not-ready" }`，不到桥。
+缩放也在被挡之列：选档要记下选档前的档位，倒计时到点或点「取消」时写回去，宿主的档位还不知道时那个回退目标是编的。旧 WebKit 把缩放钉在 100 % 时，页面要按宿主自己给的 `uiScale` 请回 1（`setUiScale(1)`，只改窗口、不存档），这也是一次写入，同样等两路首帧到齐才发。
 照常可用的是 `requestInitialState`、`panic`（任何时刻都必须能切断）、`setLang`（写的是用户刚选的语言，没有要回退的旧值）、`setRulesAck`、`setGuideSeen`、`copyDiagnostics`、`openExternal`、`showLicense`。
 所以原生侧首帧要把 `rinne.state` 与 `rinne.pair` 一起发出（上面时序第 2 条），只发其中一个页面会继续等另一个。
 

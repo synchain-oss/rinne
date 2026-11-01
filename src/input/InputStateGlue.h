@@ -25,7 +25,7 @@
 // 调用它；页面自己发起的调用不算（桥调用带一个「用户发起」标志，由页面在真实的点击或拖动处理里置位）。
 //   算定型：beginParamGesture / setParam / endParamGesture（界面发起的参数改动）；
 //           setLimiter、setGroup、moveToFreeGroup；resolveTakeover（accept = true）；commitUiScale；
-//           setGuardOn、setResetOnPlay、setTailMode；loadPreset、savePreset。
+//           setGuardOn、setResetOnPlay、setTailMode、setFbUnit、setDelayUnit；loadPreset、savePreset。
 //   不算：  requestInitialState；setLang、setRulesAck、setGuideSeen、setDiagLog（写本机的全局设置，不进工程）；
 //           setUiScale（10 秒内可能回退，等 commitUiScale 才算）；resolveTakeover（accept = false）；
 //           deletePreset（只动文件，不动本实例）；dismissHint（不进工程）；copyDiagnostics、openExternal、showLicense；
@@ -115,6 +115,8 @@ public:
     std::optional<state::StateLoadStatus> lastLoadStatus() const noexcept;
     // 正在原样回写更高版本的 state：参数与设置的改动都不进 state，界面要常驻说明。
     bool holdingNewerState() const noexcept { return holding_.load(std::memory_order_relaxed); }
+    // 正在保留的那份更新版本 state 头里的 abi；没有保留时为 0。界面据此提示「工程来自更新版本」
+    std::uint32_t heldNewerAbi() const noexcept { return heldAbi_.load(std::memory_order_relaxed); }
     // 保存时为压进上限丢掉的未知参数 id，累计条数。
     std::uint32_t droppedUnknownParams() const noexcept { return dropped_.load(std::memory_order_relaxed); }
     // 保存时编码失败（交出空块）的累计次数。
@@ -161,6 +163,7 @@ private:
     std::atomic<std::uint8_t> tailMode_{0};
     std::atomic<std::uint8_t> lastLoad_{kNoLoad};
     std::atomic<bool> holding_{false};
+    std::atomic<std::uint32_t> heldAbi_{0};
     std::atomic<std::uint32_t> dropped_{0};
     std::atomic<std::uint32_t> encodeFailures_{0};
 
