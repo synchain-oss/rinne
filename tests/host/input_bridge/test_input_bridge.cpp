@@ -403,6 +403,24 @@ TEST_CASE("input bridge: taking over only accepts a real group", "[host][input_b
     CHECK_FALSE(settled(rig.input));
 }
 
+// 接管的写法是两端共用的基类模板（RinneProcessorBase::takeOver）。Output 的桥测试只走「确认接管」那一条路，
+// 不直接调越界的组号，所以 Output 一侧的越界在这里钉
+TEST_CASE("input bridge: the shared takeover also only accepts a real group on the Output side",
+          "[host][input_bridge][output_bridge]")
+{
+    formalOnly();
+    Bench bench;
+    OutputProcessor& output = bench.addOutput();
+    const auto before = configsOf(output).group;
+    for (const int bad : {0, -1, static_cast<int>(ipc::kGroupCount) + 1})
+    {
+        INFO(bad);
+        CHECK_FALSE(output.takeOverGroup(bad));
+    }
+    CHECK(configsOf(output).group == before);
+    CHECK_FALSE(settled(output));
+}
+
 TEST_CASE("input bridge: a repair onto a dormant slot asks first, then takes it over or cancels",
           "[host][input_bridge][takeover]")
 {
@@ -457,6 +475,7 @@ TEST_CASE("input bridge: a repair onto a dormant slot asks first, then takes it 
         CHECK(settled(copy));
         CHECK(dirty.dirtyMarks == 1);
         CHECK(configsOf(copy).group == 2);
+        CHECK(configsOf(copy).groupOrigin == state::GroupOrigin::User);
         CHECK(runUntil(bench, [&] { return holds(copy, 2); }, 4000));
         CHECK_FALSE(stateFields(bridge).hasProperty("takeoverGroup"));
     }
