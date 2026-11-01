@@ -9,7 +9,8 @@
 //   ③ 没有 requestAnimationFrame：直接发信号；
 //   ④ rAF 永不回调（合成停摆，窗口最小化或被完全遮挡的情形）：2.5 s 的保险发信号，且只发一次。放行时刻的窗口 [2200, 4500] ms
 //      量的是「从导航开始到页面把信号交给宿主」，用页内时钟（performance.now，起点是 performance.timeOrigin）：假宿主收消息时
-//      当场打上时间戳（__at）。不在测试进程里用墙钟量：那样会把 CDP 开页、加载等待的耗时也算进窗口，本机忙时能多出几秒；
+//      当场打上时间戳（__at）。不在测试进程里用墙钟量：那样会把 CDP 开页、加载等待的耗时也算进窗口，本机忙时能多出几秒。
+//      「保险到点之前不应放行」也看页内时钟：消息数与 performance.now() 同一次求值取，页内时钟未到 2200 ms 才判；
 //   ⑤ 页面脚本报错：boot 守卫在首帧之前上报 __rinne__bootError，并且只报第一条；
 //   ⑥ 只有 postMessage 的假 __JUCE__、没有 mock（纯浏览器直接打开、真宿主桥没接上的情形）：页面要么干净地起来
 //      （首帧恰好一次、__rinneBooted 置位、没有 boot 错误），要么响亮地失败（boot 错误上报），不许既没起来也不吭声；
@@ -201,7 +202,16 @@ try {
         {
             const page = await open(url, "window.requestAnimationFrame = function () { return 1; };");
             await sleep(1200);
-            run.eq((await posted(page, "__rinne__firstFrame")).length, 0, `${role}（rAF 停摆）：保险到点之前不应放行`);
+            // 消息数与页内时钟在同一次求值里取。sleep 从开页之后才算，机器忙时页面时钟可能已过保险时长，那时放行是按设计来的；
+            // 过了 2200 ms 就不判这一条，提前放行由下面放行时刻的窗口判
+            const early = await page.eval(
+                `({ count: window.__posted.filter((m) => m.eventId === "__rinne__firstFrame").length, at: performance.now() })`,
+            );
+            if (early.at < 2200) run.eq(early.count, 0, `${role}（rAF 停摆）：保险到点之前不应放行`);
+            else
+                run.log(
+                    `  ${role}（rAF 停摆）：读数时页内时钟已到 ${Math.round(early.at)} ms，不判「到点之前」，由放行时刻的窗口判`,
+                );
             await page.waitFor(`window.__posted.some((m) => m.eventId === "__rinne__firstFrame")`, {
                 timeout: 4000,
                 label: `${role}：保险放行`,
