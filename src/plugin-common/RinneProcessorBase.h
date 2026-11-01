@@ -199,6 +199,23 @@ protected:
         return true;
     }
 
+    // 用户确认接管（组号 1..8，不收离组）：组里本角色的槽是休眠的，带确认的意图（kManualConfirmed）去拿。
+    // 其余同 pickGroup，与一键修复带确认的那一支同口径。越界返回 false，什么都不动
+    template<typename Glue>
+    bool takeOver(Glue& glue, int group)
+    {
+        if (group < 1 || group > static_cast<int>(ipc::kGroupCount))
+            return false;
+        glue.editConfigs([group](state::Configs& configs) {
+            configs.group = static_cast<std::uint8_t>(group);
+            configs.groupOrigin = state::GroupOrigin::User;
+        });
+        host_->setGroup(static_cast<std::uint32_t>(group), ipc::ClaimIntent::kManualConfirmed);
+        glue.markUserAction();
+        glue.markStateDirty();
+        return true;
+    }
+
 private:
     // beginStateLoad 与 endStateLoad 成对（胶水抛出时也一样）
     class StateLoadScope

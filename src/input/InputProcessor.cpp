@@ -177,16 +177,7 @@ bool InputProcessor::takeOverGroup(int group)
     }
     else
     {
-        if (group < 1 || group > static_cast<int>(ipc::kGroupCount))
-            return false;
-        wiring_->glue.editConfigs([group](state::Configs& configs) {
-            configs.group = static_cast<std::uint8_t>(group);
-            configs.groupOrigin = state::GroupOrigin::User;
-        });
-        instanceHost().setGroup(static_cast<std::uint32_t>(group), ipc::ClaimIntent::kManualConfirmed);
-        wiring_->glue.markUserAction();
-        wiring_->glue.markStateDirty();
-        return true;
+        return takeOver(wiring_->glue, group);
     }
 }
 
