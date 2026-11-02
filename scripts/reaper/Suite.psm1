@@ -487,7 +487,7 @@ function Invoke-ReaperSmoke {
                 docsListing = [ordered]@{ unchanged = $docs.Same; entriesBefore = $docs.Count; changed = @($docs.Changed | Select-Object -First 8); linkCountUnknown = @($docs.LinkUnknown).Count }
                 analyzer = [ordered]@{ cells = [ordered]@{}; whole = $whole; rejected = $ctx.Probe.Rejected }
             }
-            foreach ($id in $ctx.Probe.Analyses.Keys) { $runRow.probe.analyzer.cells[$id] = $ctx.Probe.Analyses[$id].exit }
+            foreach ($id in $ctx.Probe.Analyses.get_Keys()) { $runRow.probe.analyzer.cells[$id] = $ctx.Probe.Analyses[$id].exit }
         }
         $result.runs += $runRow
         Write-Host ("第 {0}/{1} 轮：{2}，{3} s，REAPER 启动 {4} 次，默认资源目录{5}" -f $k, $Repeat, $verdict, $result.runs[-1].seconds, $ctx.Launches, ($cmp.Same ? '未变' : "变了：$($cmp.Changed -join ', ')"))

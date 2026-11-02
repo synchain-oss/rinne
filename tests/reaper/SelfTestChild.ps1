@@ -346,7 +346,7 @@ function Invoke-WireScenario([string]$Id, $Scenario, [hashtable]$Spec, [string]$
 }
 # 这一格的结果目录里搬进来的日志名（收日志出错、目录没建起来时是空的，不让用例在这里抛错：要的是一条干净的红）
 function Get-WireCellLogs([string]$Cell) { if (Test-Path -LiteralPath $Cell -PathType Container) { @(Get-ChildItem -LiteralPath $Cell -File -Filter 'probe-*.csv' | ForEach-Object { $_.Name } | Sort-Object) } else { @() } }
-function New-WireSpecWith([string]$Id, [hashtable]$Set) { $s = New-WireSpec $Id; foreach ($k in $Set.Keys) { $s[$k] = $Set[$k] }; $s }
+function New-WireSpecWith([string]$Id, [hashtable]$Set) { $s = New-WireSpec $Id; foreach ($k in $Set.get_Keys()) { $s[$k] = $Set[$k] }; $s }
 
 # 稳态格：别人的同名文件不被碰（Save-ProbeLogs 把启动时刻、pid 交给收日志的那一步）
 $plantSpec = New-WireSpec 'play-plant'
@@ -503,7 +503,7 @@ if ($realReaperRunning) {
         '子目录没了' = { param($ownPid, $dir) [IO.Directory]::Delete((Join-Path $dir 'sub')) }
     }
     $k = 0
-    foreach ($what in $touch.Keys) {
+    foreach ($what in $touch.get_Keys()) {
         $k++
         $sp = New-WireSpec "touch$k"; $sp.DuringRun = $touch[$what]
         $sm = Invoke-WireSmoke "touch$k" $sp '^probe-steady-48000-512$' -Repeat 2 -NoNegative

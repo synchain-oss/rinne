@@ -64,8 +64,8 @@ function Get-ReaperProbeStateLines {
     }
     if ([BitConverter]::ToSingle($bytes, $at + 28) -ne 0.0) { throw "探针 $Role 的状态模板里 feedback 不是 0：烟测一律用探针默认的 0" }
     $bytes[$at + 24] = ($Group -lt 0) ? [byte]0xFF : [byte]$Group
-    $text = [Convert]::ToBase64String($bytes)
-    $lines = for ($i = 0; $i -lt $text.Length; $i += 128) { $text.Substring($i, [Math]::Min(128, $text.Length - $i)) }
+    $stateText = [Convert]::ToBase64String($bytes)
+    $lines = for ($i = 0; $i -lt $stateText.Length; $i += 128) { $stateText.Substring($i, [Math]::Min(128, $stateText.Length - $i)) }
     @($p.Header) + @($lines) + @($script:StateTail[1])
 }
 
@@ -104,10 +104,10 @@ function Get-ReaperProbeAutoIndex {
 function Get-ReaperPluginIdentities {
     param([switch]$Probe)
     $table = $Probe ? $script:ProbePlugins : $script:Plugins
-    foreach ($role in 'input', 'output') {
-        $head = $table[$role].Head
+    foreach ($roleName in 'input', 'output') {
+        $head = $table[$roleName].Head
         [pscustomobject]@{
-            Role = $role
+            Role = $roleName
             Bundle = [regex]::Match($head, '"([^"]+\.vst3)"').Groups[1].Value
             ClassId = [regex]::Match($head, '\{([0-9A-Fa-f]{32})\}').Groups[1].Value.ToUpperInvariant()
         }
@@ -201,7 +201,7 @@ function ConvertTo-ReaperLuaValue($Value) {
     if ($Value -is [bool]) { return $Value ? 'true' : 'false' }
     if ($Value -is [string]) { return '"' + ($Value -replace '\\', '\\' -replace '"', '\"' -replace "`r", '\r' -replace "`n", '\n') + '"' }
     if ($Value -is [System.Collections.IDictionary]) {
-        return '{' + ((@($Value.Keys) | Sort-Object | ForEach-Object { "[$(ConvertTo-ReaperLuaValue ([string]$_))]=$(ConvertTo-ReaperLuaValue $Value[$_])" }) -join ',') + '}'
+        return '{' + ((@($Value.get_Keys()) | Sort-Object | ForEach-Object { "[$(ConvertTo-ReaperLuaValue ([string]$_))]=$(ConvertTo-ReaperLuaValue $Value[$_])" }) -join ',') + '}'
     }
     if ($Value -is [System.Collections.IEnumerable]) { return '{' + ((@($Value) | ForEach-Object { ConvertTo-ReaperLuaValue $_ }) -join ',') + '}' }
     if ($Value -is [ValueType]) { return ([double]$Value).ToString('R', [Globalization.CultureInfo]::InvariantCulture) }

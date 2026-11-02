@@ -124,7 +124,7 @@ function Get-CollectCases([string]$Tmp) {
         'notes.txt',
         "probe-I-0$gone-1234.csv" # pid 写成补零的：数值等于本轮的 pid，但探针不会这样写
     )
-    foreach ($n in $others) { $null = & $write $n "keep $n`n" }
+    foreach ($leaf in $others) { $null = & $write $leaf "keep $leaf`n" }
     $old = & $write "probe-O-$gone-dead.csv" "old`n"
     (Get-Item -LiteralPath $old).LastWriteTimeUtc = $since.AddHours(-1) # 修改时间早于这次启动：同号的旧进程留下的
     $future = & $write "probe-O-$gone-fa57.csv" "future`n"
@@ -142,12 +142,12 @@ function Get-CollectCases([string]$Tmp) {
     $before = Get-ReaperProbeLogListing -Dir $logDir
     $own = @{ "probe-I-$gone-abcd.csv" = (New-LogForName "probe-I-$gone-abcd.csv" 'own-in'); "probe-O-$gone-ef01.csv" = (New-LogForName "probe-O-$gone-ef01.csv" 'own-out') }
     $ownSha = @{}
-    foreach ($n in $own.Keys) { $ownSha[$n] = Get-Sha (& $write $n $own[$n]) }
+    foreach ($leaf in $own.get_Keys()) { $ownSha[$leaf] = Get-Sha (& $write $leaf $own[$leaf]) }
     $mid = Get-ReaperProbeLogListing -Dir $logDir # 自己的两份出现之后、搬走之前
     $m = Move-ReaperProbeLogs -LogDir $logDir -Pids @($gone) -SinceUtc $since -DestDir $dest
     $after = Get-ReaperProbeLogListing -Dir $logDir
-    $movedOk = (@($m.Moved | Sort-Object) -join '|') -ceq (@($own.Keys | Sort-Object) -join '|')
-    $copiesOk = @($own.Keys | Where-Object { -not (Test-Path -LiteralPath (Join-Path $logDir $_)) -and (Test-Path -LiteralPath (Join-Path $dest $_)) -and (Get-Sha (Join-Path $dest $_)) -ceq $ownSha[$_] }).Count -eq $own.Count
+    $movedOk = (@($m.Moved | Sort-Object) -join '|') -ceq (@($own.get_Keys() | Sort-Object) -join '|')
+    $copiesOk = @($own.get_Keys() | Where-Object { -not (Test-Path -LiteralPath (Join-Path $logDir $_)) -and (Test-Path -LiteralPath (Join-Path $dest $_)) -and (Get-Sha (Join-Path $dest $_)) -ceq $ownSha[$_] }).Count -eq $own.get_Count()
     & $add '收日志：本轮自己的两份（pid 对、名字对、时间在窗口内）被搬走：复制件 sha256 与原文件相同，原文件删了' $false ($movedOk -and $copiesOk -and $m.Problems.Count -eq 0)
     & $add '收日志：别的 pid 的日志不碰' $true ((Test-Path -LiteralPath (Join-Path $logDir $others[0])) -and $after.Contains($others[0]) -and $after[$others[0]] -ceq $before[$others[0]])
     $namesKept = @($others[1..6] | Where-Object { $after.Contains($_) -and $after[$_] -ceq $before[$_] }).Count -eq 6
@@ -163,7 +163,7 @@ function Get-CollectCases([string]$Tmp) {
     & $add '收日志：日志目录本身还在' $true (Test-Path -LiteralPath $logDir -PathType Container)
     # 列目录时的 IsLink：联接（重解析点）记作链接，普通文件与普通目录不是（符号链接要管理员权限，本机建不了，联接走的是同一个属性）
     $byName = @{}
-    foreach ($x in (& (Get-Module ProbeLogs) { param($d) Get-ReaperDirEntries $d } $logDir)) { $byName[$x.Name] = $x }
+    foreach ($x in (& (Get-Module ProbeLogs) { param($dirPath) Get-ReaperDirEntries $dirPath } $logDir)) { $byName[$x.Name] = $x }
     $juncName = "probe-I-$gone-1b2c.csv"
     & $add "列目录：联接记作链接（IsLink）且不是普通文件，普通文件、普通目录都不是链接$($juncOk ? '' : '（本机建不了联接，联接这半条没能真跑）')" $true (
         ((-not $juncOk) -or ($byName[$juncName].IsLink -and -not $byName[$juncName].IsFile)) -and $byName['notes.txt'].IsFile -and -not $byName['notes.txt'].IsLink -and -not $byName["probe-I-$gone-beef.csv"].IsFile -and -not $byName["probe-I-$gone-beef.csv"].IsLink)
@@ -179,7 +179,7 @@ function Get-CollectCases([string]$Tmp) {
     & $add '清单：Own 里的名字开头就在清单里（自己的文件不可能早于本轮就在：时间与 pid 的筛选选错了）：搬走了判变，不除外' $true (-not $cmpStale.Same -and @($cmpStale.Changed | Where-Object { $_ -like 'removed:*' }).Count -eq 2)
     # 清单比较：别人的文件增、删、改（大小或修改时间）任何一项都判变；本轮新出现的自己的名字才除外
     $b0 = [ordered]@{ 'a.csv' = '1|10'; 'sub' = 'dir' }
-    $edit = { param($k, $v) $x = [ordered]@{}; foreach ($key in $b0.Keys) { $x[$key] = $b0[$key] }; if ($null -eq $v) { $x.Remove($k) } else { $x[$k] = $v }; $x }
+    $edit = { param($k, $v) $x = [ordered]@{}; foreach ($key in $b0.get_Keys()) { $x[$key] = $b0[$key] }; if ($null -eq $v) { $x.Remove($k) } else { $x[$k] = $v }; $x }
     & $add '清单：别人的文件改了（大小或修改时间）判变' $true (-not (Compare-ReaperProbeLogListing -Before $b0 -After (& $edit 'a.csv' '1|11') -Own 'mine.csv').Same)
     & $add '清单：别人的文件没了判变' $true (-not (Compare-ReaperProbeLogListing -Before $b0 -After (& $edit 'a.csv' $null) -Own 'mine.csv').Same)
     & $add '清单：多了别人的文件判变' $true (-not (Compare-ReaperProbeLogListing -Before $b0 -After (& $edit 'new.csv' '3|30') -Own 'mine.csv').Same)
@@ -187,7 +187,7 @@ function Get-CollectCases([string]$Tmp) {
     & $add '清单：本轮新出现的自己的文件算 Own 时不判变' $false (Compare-ReaperProbeLogListing -Before $b0 -After (& $edit 'mine.csv' '2|20') -Own 'mine.csv').Same
     & $add '清单：同一个新文件不算 Own 就是多了文件' $true (-not (Compare-ReaperProbeLogListing -Before $b0 -After (& $edit 'mine.csv' '2|20')).Same)
     $b1 = [ordered]@{ 'a.csv' = '1|10'; 'mine.csv' = '2|20'; 'sub' = 'dir' }
-    $edit1 = { param($k, $v) $x = [ordered]@{}; foreach ($key in $b1.Keys) { $x[$key] = $b1[$key] }; if ($null -eq $v) { $x.Remove($k) } else { $x[$k] = $v }; $x }
+    $edit1 = { param($k, $v) $x = [ordered]@{}; foreach ($key in $b1.get_Keys()) { $x[$key] = $b1[$key] }; if ($null -eq $v) { $x.Remove($k) } else { $x[$k] = $v }; $x }
     & $add '清单：开头就在清单里的名字即使算 Own，没了也判变（不除外）' $true (-not (Compare-ReaperProbeLogListing -Before $b1 -After (& $edit1 'mine.csv' $null) -Own 'mine.csv').Same)
     & $add '清单：开头就在清单里的名字即使算 Own，改了也判变（不除外）' $true (-not (Compare-ReaperProbeLogListing -Before $b1 -After (& $edit1 'mine.csv' '2|21') -Own 'mine.csv').Same)
     & $add '清单：目录不存在是空清单，不报错' $false ((Get-ReaperProbeLogListing -Dir (Join-Path $Tmp 'no-such-logs')).Count -eq 0)
@@ -227,8 +227,8 @@ function Get-CollectCases([string]$Tmp) {
         $script:Attack.Rename = try { [IO.File]::Move($src, "$src.moved"); 'allowed' } catch { 'refused' }
         $script:Attack.Delete = try { [IO.File]::Delete($src); 'allowed' } catch { 'refused' }
     }
-    & $add "收日志：原文件钉住期间，别人追加、覆盖、改名、删除都被拒（$(($script:Attack.Keys | ForEach-Object { "$_=$($script:Attack[$_])" }) -join ' ')）" $true (
-        $script:Attack.Count -eq 4 -and @($script:Attack.Values | Where-Object { $_ -ceq 'refused' }).Count -eq 4)
+    & $add "收日志：原文件钉住期间，别人追加、覆盖、改名、删除都被拒（$(($script:Attack.get_Keys() | ForEach-Object { "$_=$($script:Attack[$_])" }) -join ' ')）" $true (
+        $script:Attack.get_Count() -eq 4 -and @($script:Attack.get_Values() | Where-Object { $_ -ceq 'refused' }).Count -eq 4)
     & $add '收日志：被攻击也不影响正常搬走：复制件与原文件内容相同、原文件删了' $false ($mA.Moved.Count -eq 1 -and $mA.Problems.Count -eq 0 -and -not (Test-Path -LiteralPath $fA) -and [IO.File]::ReadAllText((Join-Path $Tmp "dest-attack/probe-O-$gone-4545.csv")) -ceq (New-LogForName "probe-O-$gone-4545.csv" 'real'))
     # 别的程序正占着写：钉不住就不动，并判红
     $dirW = Join-Path $Tmp 'logs-writer'; $null = New-Item -ItemType Directory -Path $dirW
@@ -279,7 +279,7 @@ function Get-CollectCases([string]$Tmp) {
     & $add '收日志：结果目录里已有同名文件就不覆盖、不删原文件，并判红' $true ((Test-Path -LiteralPath $fT) -and [IO.File]::ReadAllText((Join-Path $destT "probe-O-$gone-4444.csv")) -ceq "earlier`n" -and @($mT.Problems | Where-Object { $_ -like '*同名*' }).Count -eq 1)
     # 纯函数：哪些条目算本轮自己的（修改时间要落在 [SinceUtc, UntilUtc] 里，两端都算）
     $until = [DateTime]::UtcNow.AddSeconds(5)
-    $e = { param($name, [bool]$isFile = $true, [bool]$isLink = $false, $at = [DateTime]::UtcNow) [pscustomobject]@{ Name = $name; IsFile = $isFile; IsLink = $isLink; LastWriteUtc = $at } }
+    $e = { param($entryName, [bool]$isFile = $true, [bool]$isLink = $false, $at = [DateTime]::UtcNow) [pscustomobject]@{ Name = $entryName; IsFile = $isFile; IsLink = $isLink; LastWriteUtc = $at } }
     $sel = Select-ReaperOwnProbeLogs -Entries @((& $e 'probe-I-77-abcd.csv'), (& $e 'probe-O-77-abcd.csv' $true $true), (& $e 'probe-I-78-abcd.csv'), (& $e 'probe-I-77-abcd.csv.tmp')) -Pids @(77) -SinceUtc $since -UntilUtc $until
     & $add '选取：符号链接（重解析点）不算普通文件，不碰' $true ($sel.Own.Count -eq 1 -and $sel.Own[0].Name -ceq 'probe-I-77-abcd.csv' -and @($sel.Skipped | Where-Object { $_ -like 'probe-O-77-abcd.csv*不是普通文件*' }).Count -eq 1)
     & $add '选取：没有给 pid 时一个都不选' $true ((Select-ReaperOwnProbeLogs -Entries @((& $e 'probe-I-77-abcd.csv')) -Pids @() -SinceUtc $since -UntilUtc $until).Own.Count -eq 0)
@@ -304,7 +304,7 @@ function Get-CellCases {
         $logs = @((Read-ReaperProbeLog -Text (New-FakeProbeLogText -Role I @In)), (Read-ReaperProbeLog -Text (New-FakeProbeLogText -Role O -Pings @() @Out)))
         foreach ($x in $Extra) { $logs += Read-ReaperProbeLog -Text $x }
         $want = @{ Pid = 4242; Case = 'CB-01'; Variant = 'steady'; Sr = 48000; Block = 512; MinBlocks = 32; NeedPing = $true }
-        foreach ($k in $Exp.Keys) { $want[$k] = $Exp[$k] }
+        foreach ($k in $Exp.get_Keys()) { $want[$k] = $Exp[$k] }
         Test-ReaperProbeCell -Logs $logs -Expect $want
     }
     $hit = { param($r, [string]$like) @($r.Bad | Where-Object { $_ -like $like }).Count -gt 0 }
@@ -360,7 +360,7 @@ function Get-CellCases {
 function Get-AnalyzerCases([string]$RepoRoot, [string]$Tmp) {
     $cases = [Collections.Generic.List[object]]::new()
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
-    $fake = { param([int]$exit, [hashtable]$v) [pscustomobject]@{ Exit = $exit; Err = 'x'; ParseError = ''; Json = [pscustomobject]@{ items = @($v.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ id = $_; verdict = $v[$_] } }); f1 = [pscustomobject]@{ ok = $false } } } }
+    $fake = { param([int]$fakeExit, [hashtable]$v) [pscustomobject]@{ Exit = $fakeExit; Err = 'x'; ParseError = ''; Json = [pscustomobject]@{ items = @($v.get_Keys() | Sort-Object | ForEach-Object { [pscustomobject]@{ id = $_; verdict = $v[$_] } }); f1 = [pscustomobject]@{ ok = $false } } } }
     $sum = Get-ReaperAnalyzerSummary (& $fake 1 @{ A1 = 'PASS'; A4 = 'PASS'; A7 = 'FAIL'; A8 = 'PASS' }) -MustPass 'A1', 'A4', 'A8'
     & $add '分析器：不计入本格的项（A7）FAIL 不让这一格变红，摘要里照录并打星号' $false ($sum.Fails.Count -eq 0 -and $sum.Short.Count -eq 0 -and $sum.Text -match 'A7=FAIL\*' -and $sum.Text -match 'A1=PASS ')
     $sum = Get-ReaperAnalyzerSummary (& $fake 1 @{ A1 = 'FAIL'; A4 = 'PASS'; A8 = 'PASS' }) -MustPass 'A1', 'A4', 'A8'
@@ -383,15 +383,15 @@ function Get-AnalyzerCases([string]$RepoRoot, [string]$Tmp) {
     $roundCtx = & (Get-Module Suite) { New-ReaperProbeRound ([pscustomobject]@{ ProbeLogDir = 'L'; Python = 'P'; Analyzer = 'A' }) ([pscustomobject]@{ group = 0 }) 'R' }
     & $add '分析器：一轮交给 --redact 的词是本机的用户名与主机名' $false (@($roundCtx.Redact) -ccontains $env:USERNAME -and @($roundCtx.Redact) -ccontains $env:COMPUTERNAME)
     # 比对行
-    $nt = { param($bit, $lag, $whole, $head) "逐位相同：$bit`n对齐偏移（lag）：$lag 样本（正数表示 B 比 A 晚）`n整体残差（480000 帧）：峰值 $whole dBFS，RMS $whole dBFS`n开头 2.00 秒残差（96000 帧）：峰值 $head dBFS，RMS $head dBFS`n" }
+    $nt = { param($bitText, $lagText, $wholeText, $headText) "逐位相同：$bitText`n对齐偏移（lag）：$lagText 样本（正数表示 B 比 A 晚）`n整体残差（480000 帧）：峰值 $wholeText dBFS，RMS $wholeText dBFS`n开头 2.00 秒残差（96000 帧）：峰值 $headText dBFS，RMS $headText dBFS`n" }
     & $add '比对行：逐位相同的报告写成 case,variant,1,-inf,-inf,0' $false ((ConvertTo-ReaperCompareRow -Case 'CB-04' -Variant 'export-offline' -Out (& $nt '是' 0 '-inf' '-inf')) -ceq 'CB-04,export-offline,1,-inf,-inf,0')
     & $add '比对行：有差异的报告照实写残差与 lag' $false ((ConvertTo-ReaperCompareRow -Case 'CB-04' -Variant 'export-offline' -Out (& $nt '否' 3 '-96.5' '-101.25')) -ceq 'CB-04,export-offline,0,-96.5,-101.25,3')
     & $add '比对行：逐位相同却有残差（自相矛盾，分析器会判格式错）不写，返回空' $true ($null -eq (ConvertTo-ReaperCompareRow -Case 'CB-04' -Variant 'export-offline' -Out (& $nt '是' 0 '-90.0' '-inf')))
     & $add '比对行：报告里读不出 lag 不写，返回空' $true ($null -eq (ConvertTo-ReaperCompareRow -Case 'CB-04' -Variant 'export-offline' -Out ((& $nt '是' 0 '-inf' '-inf') -replace '对齐偏移[^\n]*\n', '')))
     # 契约对拍：不跑 Python，直接读分析器源码里的规格常量
     $py = [IO.File]::ReadAllText((Join-Path $RepoRoot 'scripts/probe/analyze-probe.py'))
-    $head = [regex]::Match($py, '(?m)^COMPARE_HEAD = "([^"]+)"').Groups[1].Value
-    & $add '契约：比对表头与 analyze-probe.py 的 COMPARE_HEAD 逐字相同' $false ($head -and $head -ceq (Get-ReaperCompareHead))
+    $headText = [regex]::Match($py, '(?m)^COMPARE_HEAD = "([^"]+)"').Groups[1].Value
+    & $add '契约：比对表头与 analyze-probe.py 的 COMPARE_HEAD 逐字相同' $false ($headText -and $headText -ceq (Get-ReaperCompareHead))
     $blockCols = [regex]::Match($py, 'BLOCK_COLS = \(\s*"([^"]+)"\.split\(\)').Groups[1].Value
     $mine = Get-ReaperProbeLogColumns
     $rowsOk = $blockCols -and ($mine.B -join ' ') -ceq $blockCols
@@ -419,10 +419,10 @@ function Get-RppProbeCases([string]$RepoRoot) {
     & $add '探针状态：每行不超过 128 个字符，首行是 REAPER 的插件头，末行与正式版相同' $false (@($l0 | Where-Object { $_.Length -gt 128 }).Count -eq 0 -and $l0[0] -match '^[A-Za-z0-9+/]+=*$' -and $l0[-1] -ceq 'AAAAAAAA')
     $lOut = @(Get-ReaperProbeStateLines -Role output -Group 7)
     & $add '探针状态：Output 的 role 字段是 2，组 7 写成 7' $false ((& $decode $lOut)[16] -eq 2 -and (& $decode $lOut)[32] -eq 7)
-    $text = New-ReaperProjectText -SourceWav 'S' -RenderDir 'D' -RenderName 'N' -Probe -ProbeGroup 0
+    $bodyText = New-ReaperProjectText -SourceWav 'S' -RenderDir 'D' -RenderName 'N' -Probe -ProbeGroup 0
     $devText = New-ReaperProjectText -SourceWav 'S' -RenderDir 'D' -RenderName 'N'
-    & $add '工程：-Probe 的链上只有两个探针插件（Input 在前），没有正式插件的类 ID' $false ($text.IndexOf('Rinne Probe Input') -lt $text.IndexOf('Rinne Probe Output') -and $text.IndexOf('Rinne Probe Input') -gt 0 -and
-        $text -notmatch $dev[0].ClassId -and $text -notmatch $dev[1].ClassId -and $text -match $probe[0].ClassId)
+    & $add '工程：-Probe 的链上只有两个探针插件（Input 在前），没有正式插件的类 ID' $false ($bodyText.IndexOf('Rinne Probe Input') -lt $bodyText.IndexOf('Rinne Probe Output') -and $bodyText.IndexOf('Rinne Probe Input') -gt 0 -and
+        $bodyText -notmatch $dev[0].ClassId -and $bodyText -notmatch $dev[1].ClassId -and $bodyText -match $probe[0].ClassId)
     & $add '工程：正式的工程里没有探针插件' $false ($devText -notmatch 'Rinne Probe' -and $devText -notmatch $probe[0].ClassId)
     # 渲染速度（RENDER_1X）：0 全速离线；1 是 1x Offline（按实时速度跑，对插件仍报离线模式）；2 是 Online Render（对插件报实时模式）
     $speedOf = { param([string]$t) [regex]::Match($t, '(?m)^\s*RENDER_1X (\d+)\s*$').Groups[1].Value }
@@ -519,25 +519,25 @@ function Get-ProbePreflightCases([string]$Tmp) {
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
     $pwshExe = (Get-Process -Id $PID).Path
     $mi = { param($cid) "{`n  `"Classes`": [`n    {`n      `"CID`": `"$cid`",`n      `"Category`": `"Audio Module Class`",`n    },`n  ],`n}`n" }
-    $root = Join-Path $Tmp 'probe-build'
+    $rootDir = Join-Path $Tmp 'probe-build'
     $ids = @(Get-ReaperPluginIdentities -Probe)
     $devIds = @(Get-ReaperPluginIdentities)
-    $bundles = foreach ($e in $ids) { $d = Join-Path $root $e.Bundle; $null = New-Item -ItemType Directory -Force -Path (Join-Path $d 'Contents/Resources'); $d }
+    $bundles = foreach ($e in $ids) { $dirPath = Join-Path $rootDir $e.Bundle; $null = New-Item -ItemType Directory -Force -Path (Join-Path $dirPath 'Contents/Resources'); $dirPath }
     $manifest = { param($i, $cid) [IO.File]::WriteAllText((Join-Path $bundles[$i] 'Contents/Resources/moduleinfo.json'), (& $mi $cid)) }
     & $manifest 0 $ids[0].ClassId; & $manifest 1 $ids[1].ClassId
-    $info = { param($flavor) [IO.File]::WriteAllText((Join-Path $root 'rinne-build.json'), (@{ sha = 'abcdef0123'; flavor = $flavor; bundles = @($bundles) } | ConvertTo-Json)) }
+    $info = { param($flavor) [IO.File]::WriteAllText((Join-Path $rootDir 'rinne-build.json'), (@{ sha = 'abcdef0123'; flavor = $flavor; bundles = @($bundles) } | ConvertTo-Json)) }
     $fakePy = Join-Path $Tmp 'python-fake.cmd'; [IO.File]::WriteAllText($fakePy, "@echo Python 3.10.11`r`n")
     $oldPy = Join-Path $Tmp 'python-old.cmd'; [IO.File]::WriteAllText($oldPy, "@echo Python 2.7.18`r`n")
     $logs = Join-Path $Tmp 'probe-docs/Rinne Probe Logs'
     $marker = Join-Path $Tmp 'probe-USER_TESTING'
-    $pre = { param($flavor = 'probe', $py = $fakePy, $dir = $logs, $analyzer = $null)
-        $a = @{ ReaperExe = $pwshExe; BuildDir = $root; NullTest = $pwshExe; UserTestingMarker = $marker; Flavor = $flavor; Python = $py; ProbeLogDir = $dir }
+    $pre = { param($flavor = 'probe', $py = $fakePy, $folder = $logs, $analyzer = $null)
+        $a = @{ ReaperExe = $pwshExe; BuildDir = $rootDir; NullTest = $pwshExe; UserTestingMarker = $marker; Flavor = $flavor; Python = $py; ProbeLogDir = $folder }
         if ($analyzer) { $a.Analyzer = $analyzer }
         @((Get-ReaperPreflight @a).Reasons | Where-Object { $_ -notmatch '已有 reaper.exe' }) }
     & $info 'probe'
     $ok = @(& $pre)
     & $add "预检（第二段）：探针构建、类 ID 对、Python 3、分析器在、文档目录取得到时没有缺项（$($ok -join '；')）" $false ($ok.Count -eq 0)
-    & $add '预检（第二段）：-Flavor probe 时 Python 版本照实读出' $false ((Get-ReaperPreflight -ReaperExe $pwshExe -BuildDir $root -NullTest $pwshExe -UserTestingMarker $marker -Flavor probe -Python $fakePy -ProbeLogDir $logs).PythonVersion -ceq '3.10.11')
+    & $add '预检（第二段）：-Flavor probe 时 Python 版本照实读出' $false ((Get-ReaperPreflight -ReaperExe $pwshExe -BuildDir $rootDir -NullTest $pwshExe -UserTestingMarker $marker -Flavor probe -Python $fakePy -ProbeLogDir $logs).PythonVersion -ceq '3.10.11')
     & $add '预检（第二段）：第一段（dev）拿探针构建来跑被拒' $true ((& $pre 'dev') -match '只测 dev')
     & $manifest 0 $devIds[0].ClassId
     & $add '预检（第二段）：探针包的清单里是正式插件的类 ID（产物混了）被拒' $true ((& $pre) -match '类 ID')
@@ -552,7 +552,7 @@ function Get-ProbePreflightCases([string]$Tmp) {
     $denied = Join-Path $env:SystemDrive 'System Volume Information'
     $deniedOk = (Test-Path -LiteralPath $denied -PathType Container) -and $(try { $null = Get-ChildItem -LiteralPath $denied -Force -ErrorAction Stop; $false } catch { $true })
     & $add "预检（第二段）：探针日志目录列不出清单被拒（看不见不能当作没变）$($deniedOk ? '' : '（本机找不到拒绝访问的目录，这条没能真跑）')" $true ((-not $deniedOk) -or ((& $pre 'probe' $fakePy $denied) -match '列不出'))
-    & $add '预检（第一段）：不查 Python 与文档目录' $false (@((Get-ReaperPreflight -ReaperExe $pwshExe -BuildDir $root -NullTest $pwshExe -UserTestingMarker $marker -Flavor dev -Python (Join-Path $Tmp 'no-python.exe') -ProbeLogDir '').Reasons | Where-Object { $_ -match 'Python|文档目录' }).Count -eq 0)
+    & $add '预检（第一段）：不查 Python 与文档目录' $false (@((Get-ReaperPreflight -ReaperExe $pwshExe -BuildDir $rootDir -NullTest $pwshExe -UserTestingMarker $marker -Flavor dev -Python (Join-Path $Tmp 'no-python.exe') -ProbeLogDir '').Reasons | Where-Object { $_ -match 'Python|文档目录' }).Count -eq 0)
     $cases
 }
 
@@ -561,11 +561,11 @@ function Get-ProbePreflightCases([string]$Tmp) {
 function Get-CompleteCellCases([string]$Tmp) {
     $cases = [Collections.Generic.List[object]]::new()
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
-    $root = Join-Path $Tmp 'complete-cell'
-    $null = New-Item -ItemType Directory -Force -Path $root
+    $rootDir = Join-Path $Tmp 'complete-cell'
+    $null = New-Item -ItemType Directory -Force -Path $rootDir
     $judge = {
         param([int]$Exit = 1, [string]$Verdicts = 'A1=PASS A4=PASS A8=PASS', [long[]]$Pings = @(4800), $Moves = @(), [string[]]$Whys = @(), [string[]]$ExtraBad = @())
-        $round = Join-Path $root ([guid]::NewGuid().ToString('N').Substring(0, 8)); $cellDir = Join-Path $round 'cell'
+        $round = Join-Path $rootDir ([guid]::NewGuid().ToString('N').Substring(0, 8)); $cellDir = Join-Path $round 'cell'
         $null = New-Item -ItemType Directory -Force -Path $cellDir
         [IO.File]::WriteAllText((Join-Path $cellDir 'probe-I-4242-abcd.csv'), (New-FakeProbeLogText -Role I -Pings $Pings))
         [IO.File]::WriteAllText((Join-Path $cellDir 'probe-O-4242-ef01.csv'), (New-FakeProbeLogText -Role O -Pings @()))
@@ -657,12 +657,12 @@ function New-FakeNullTest {
 # 合成一份探针构建目录：rinne-build.json（flavor 为 probe）和两个带类 ID 清单的 VST3 包，预检和入口接线用例用
 function New-FakeProbeBuild {
     param([Parameter(Mandatory)][string]$Root)
-    $bundles = foreach ($id in @(Get-ReaperPluginIdentities -Probe)) {
-        $bundle = Join-Path $Root $id.Bundle
+    $bundles = foreach ($identity in @(Get-ReaperPluginIdentities -Probe)) {
+        $bundle = Join-Path $Root $identity.Bundle
         $res = Join-Path $bundle 'Contents/Resources'; $bin = Join-Path $bundle 'Contents/x86_64-win'
         $null = New-Item -ItemType Directory -Force -Path $res, $bin
-        [IO.File]::WriteAllText((Join-Path $res 'moduleinfo.json'), "{`n  `"Classes`": [`n    {`n      `"CID`": `"$($id.ClassId)`",`n      `"Category`": `"Audio Module Class`",`n    },`n  ],`n}`n")
-        [IO.File]::WriteAllText((Join-Path $bin $id.Bundle), 'bits')
+        [IO.File]::WriteAllText((Join-Path $res 'moduleinfo.json'), "{`n  `"Classes`": [`n    {`n      `"CID`": `"$($identity.ClassId)`",`n      `"Category`": `"Audio Module Class`",`n    },`n  ],`n}`n")
+        [IO.File]::WriteAllText((Join-Path $bin $identity.Bundle), 'bits')
         $bundle
     }
     [IO.File]::WriteAllText((Join-Path $Root 'rinne-build.json'), (@{ sha = 'abcdef0123'; flavor = 'probe'; bundles = @($bundles) } | ConvertTo-Json))
@@ -673,10 +673,10 @@ function New-FakeProbeBuild {
 function Get-WholeCases([string]$Tmp) {
     $cases = [Collections.Generic.List[object]]::new()
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
-    $root = Join-Path $Tmp 'whole'
-    $fake = New-FakePython -Dir (Join-Path $root 'fake')
-    $round = Join-Path $root 'round'
-    $put = { param($cell, $name, $text) $d = Join-Path $round "probe-logs/$cell"; $null = New-Item -ItemType Directory -Force -Path $d; [IO.File]::WriteAllText((Join-Path $d $name), $text) }
+    $rootDir = Join-Path $Tmp 'whole'
+    $fake = New-FakePython -Dir (Join-Path $rootDir 'fake')
+    $round = Join-Path $rootDir 'round'
+    $put = { param($cell, $entryName, $bodyText) $dirPath = Join-Path $round "probe-logs/$cell"; $null = New-Item -ItemType Directory -Force -Path $dirPath; [IO.File]::WriteAllText((Join-Path $dirPath $entryName), $bodyText) }
     & $put 'cell-a' 'probe-I-11-aaaa.csv' (New-FakeProbeLogText -Role I -LogPid 11)
     & $put 'cell-a' 'probe-O-11-bbbb.csv' (New-FakeProbeLogText -Role O -LogPid 11 -Pings @())
     & $put 'cell-a' 'compare-reaper.csv' "case,variant,bit_exact,residual_dbfs,head_residual_dbfs,lag_samples`nCB-04,export-offline,1,-inf,-inf,0`n"
@@ -689,12 +689,12 @@ function Get-WholeCases([string]$Tmp) {
     & $add "整轮分析：反例格（Excluded）的日志不并进 all-logs，别的格的日志与比对行都并进去（$($names -join ' ')）" $true (
         ($names -join '|') -ceq 'compare-cell-a-reaper.csv|probe-I-11-aaaa.csv|probe-O-11-bbbb.csv' -and @($w.cells) -join ',' -ceq 'cell-a' -and @($w.excluded) -join ',' -ceq 'neg-cell')
     & $add '整轮分析：原始输出写进 analyze.json，退出码照实记' $false ((Test-Path -LiteralPath (Join-Path $round 'analyze.json')) -and $w.exit -eq 1 -and $w.summary -like '*只作记录*')
-    $probeNone = @{ RoundDir = (Join-Path $root 'round2'); Python = $fake.Python; Analyzer = $fake.Analyzer; Redact = @(); Excluded = [Collections.Generic.List[string]]::new(); Rejected = $false }
-    $d2 = Join-Path $root 'round2/probe-logs/only-neg'; $null = New-Item -ItemType Directory -Force -Path $d2
+    $probeNone = @{ RoundDir = (Join-Path $rootDir 'round2'); Python = $fake.Python; Analyzer = $fake.Analyzer; Redact = @(); Excluded = [Collections.Generic.List[string]]::new(); Rejected = $false }
+    $d2 = Join-Path $rootDir 'round2/probe-logs/only-neg'; $null = New-Item -ItemType Directory -Force -Path $d2
     [IO.File]::WriteAllText((Join-Path $d2 'probe-I-13-eeee.csv'), (New-FakeProbeLogText -Role I -LogPid 13))
     $probeNone.Excluded.Add('only-neg')
     $w2 = & (Get-Module Suite) { param($p) Invoke-ReaperProbeWhole $p } $probeNone
-    & $add '整轮分析：只剩反例格时没有日志可分析，不起分析器、不建 all-logs' $false ($null -eq $w2.exit -and $w2.summary -like '没有日志可分析*' -and -not (Test-Path -LiteralPath (Join-Path $root 'round2/all-logs')))
+    & $add '整轮分析：只剩反例格时没有日志可分析，不起分析器、不建 all-logs' $false ($null -eq $w2.exit -and $w2.summary -like '没有日志可分析*' -and -not (Test-Path -LiteralPath (Join-Path $rootDir 'round2/all-logs')))
     $cases
 }
 
@@ -702,10 +702,10 @@ function Get-WholeCases([string]$Tmp) {
 function Get-ListingCases([string]$Tmp) {
     $cases = [Collections.Generic.List[object]]::new()
     $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
-    $dir = Join-Path $Tmp 'listing'
-    $null = New-Item -ItemType Directory -Force -Path $dir
+    $folder = Join-Path $Tmp 'listing'
+    $null = New-Item -ItemType Directory -Force -Path $folder
     $stamp = [DateTime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
-    $mk = { param($path, $text) [IO.File]::WriteAllText($path, $text); (Get-Item -LiteralPath $path).LastWriteTimeUtc = $stamp }
+    $makeFile = { param($targetPath, $bodyText) [IO.File]::WriteAllText($targetPath, $bodyText); (Get-Item -LiteralPath $targetPath).LastWriteTimeUtc = $stamp }
     $field = { param($v, $i) @($v -split '\|')[$i] }
     # 值的写法（纯函数）
     & $add '清单值：文件写成 大小|修改时间刻度|重解析点(0/1)|硬链接数' $false ((Format-ReaperListingValue -IsDir $false -Length 6 -Ticks 99 -IsReparse $false -Links 1) -ceq '6|99|0|1')
@@ -717,29 +717,29 @@ function Get-ListingCases([string]$Tmp) {
     & $add '清单值：大小与修改时间都相同，只有重解析点标记不同，比较判变' $true (-not (Compare-ReaperProbeLogListing -Before ([ordered]@{ 'x.csv' = $same }) -After ([ordered]@{ 'x.csv' = $asLink })).Same)
     & $add '清单值：大小与修改时间都相同，只有硬链接数不同，比较判变' $true (-not (Compare-ReaperProbeLogListing -Before ([ordered]@{ 'x.csv' = $same }) -After ([ordered]@{ 'x.csv' = $asHard })).Same)
     # 真文件：普通文件记 0|1；换成指向同一份内容的硬链接（大小、修改时间都相同）后硬链接数变成 2，比较看得出来
-    $ld = Join-Path $dir 'real'; $null = New-Item -ItemType Directory -Path $ld
-    & $mk (Join-Path $ld 'a.csv') "hello`n"
+    $ld = Join-Path $folder 'real'; $null = New-Item -ItemType Directory -Path $ld
+    & $makeFile (Join-Path $ld 'a.csv') "hello`n"
     $null = New-Item -ItemType Directory -Path (Join-Path $ld 'sub')
     $l1 = Get-ReaperProbeLogListing -Dir $ld
     & $add '清单：普通文件记 大小|刻度|0|1，普通子目录记 dir' $false ($l1['a.csv'] -cmatch '^6\|[0-9]+\|0\|1$' -and $l1['sub'] -ceq 'dir')
     [IO.File]::Delete((Join-Path $ld 'a.csv'))
-    & $mk (Join-Path $ld 'p.csv') "hello`n"
+    & $makeFile (Join-Path $ld 'p.csv') "hello`n"
     $hardOk = try { $null = New-Item -ItemType HardLink -Path (Join-Path $ld 'a.csv') -Value (Join-Path $ld 'p.csv'); $true } catch { $false }
     $l2 = Get-ReaperProbeLogListing -Dir $ld
     $cmpHard = Compare-ReaperProbeLogListing -Before ([ordered]@{ 'a.csv' = $l1['a.csv']; 'sub' = $l1['sub'] }) -After ([ordered]@{ 'a.csv' = $l2['a.csv']; 'sub' = $l2['sub'] })
     & $add "清单：别人的文件被换成大小、修改时间都相同的硬链接：大小与刻度没变、硬链接数从 1 变 2，比较判变$($hardOk ? '' : '（本机建不了硬链接，这条没能真跑）')" $true (
         (-not $hardOk) -or ((& $field $l1['a.csv'] 0) -ceq (& $field $l2['a.csv'] 0) -and (& $field $l1['a.csv'] 1) -ceq (& $field $l2['a.csv'] 1) -and (& $field $l2['a.csv'] 3) -ceq '2' -and -not $cmpHard.Same))
     # 重解析点文件（符号链接的替身）与联接
-    $rd = Join-Path $dir 'reparse'; $null = New-Item -ItemType Directory -Path $rd
-    & $mk (Join-Path $rd 'r.csv') "hello`n"
+    $rd = Join-Path $folder 'reparse'; $null = New-Item -ItemType Directory -Path $rd
+    & $makeFile (Join-Path $rd 'r.csv') "hello`n"
     $r1 = Get-ReaperProbeLogListing -Dir $rd
     [IO.File]::Delete((Join-Path $rd 'r.csv'))
     $rpOk = New-FakeReparseFile (Join-Path $rd 'r.csv') "hello`n"
     $r2 = Get-ReaperProbeLogListing -Dir $rd
     & $add "清单：普通文件被换成同大小的重解析点文件：重解析点标记从 0 变 1，比较判变$($rpOk ? '' : '（本机造不出重解析点文件，这条没能真跑）')" $true (
         (-not $rpOk) -or ((& $field $r1['r.csv'] 2) -ceq '0' -and (& $field $r2['r.csv'] 2) -ceq '1' -and -not (Compare-ReaperProbeLogListing -Before $r1 -After $r2).Same))
-    $jt = Join-Path $dir 'junction-target'; $null = New-Item -ItemType Directory -Path $jt
-    $jd = Join-Path $dir 'junc'; $null = New-Item -ItemType Directory -Path $jd
+    $jt = Join-Path $folder 'junction-target'; $null = New-Item -ItemType Directory -Path $jt
+    $jd = Join-Path $folder 'junc'; $null = New-Item -ItemType Directory -Path $jd
     $null = New-Item -ItemType Directory -Path (Join-Path $jd 'plain')
     $juncOk = try { $null = New-Item -ItemType Junction -Path (Join-Path $jd 'link') -Value $jt; $true } catch { $false }
     $j1 = Get-ReaperProbeLogListing -Dir $jd
@@ -749,18 +749,18 @@ function Get-ListingCases([string]$Tmp) {
     $named = 'probe-I-4242-abcd.csv'
     $listing = [ordered]@{ 'secret-song.wav' = '5|10|0|1'; 'Cubase Project' = 'dir'; 'Cubase Project\take-1.wav' = '7|11|0|1'; $named = '9|12|0|1'; 'notes.txt' = '3|13|0|1' }
     $safe = ConvertTo-ReaperSafeListing -Listing $listing -Salt $salt
-    $json = $safe | ConvertTo-Json -Depth 5
-    & $add '落盘清单：别人的文件名、子目录名、子目录里的文件名一个都不出现在写出去的 json 里' $true ($json -notmatch 'secret|song|Cubase|take-1|notes')
+    $jsonText = $safe | ConvertTo-Json -Depth 5
+    & $add '落盘清单：别人的文件名、子目录名、子目录里的文件名一个都不出现在写出去的 json 里' $true ($jsonText -notmatch 'secret|song|Cubase|take-1|notes')
     & $add '落盘清单：探针日志命名的条目原样写，其余都是 other-<8 位十六进制>，条目数不变，大小、时间、链接标记原样' $true (
-        $safe.Count -eq 5 -and $safe.Contains($named) -and $safe[$named] -ceq '9|12|0|1' -and @($safe.Keys | Where-Object { $_ -cmatch '^other-[0-9a-f]{8}$' }).Count -eq 4 -and
-        @($safe.Values | Where-Object { $_ -ceq '5|10|0|1' }).Count -eq 1 -and @($safe.Values | Where-Object { $_ -ceq 'dir' }).Count -eq 1)
+        $safe.get_Count() -eq 5 -and $safe.Contains($named) -and $safe[$named] -ceq '9|12|0|1' -and @($safe.get_Keys() | Where-Object { $_ -cmatch '^other-[0-9a-f]{8}$' }).Count -eq 4 -and
+        @($safe.get_Values() | Where-Object { $_ -ceq '5|10|0|1' }).Count -eq 1 -and @($safe.get_Values() | Where-Object { $_ -ceq 'dir' }).Count -eq 1)
     & $add '落盘清单：同一把盐下同一个名字的散列不变（前后两份能对上），不同的名字不同' $false (
         (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -ceq (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -and
         (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -cne (Get-ReaperListingShownName -EntryName 'notes.txt' -Salt $salt))
     $salt2 = New-ReaperListingSalt
     & $add '落盘清单：换一把盐（每轮一把随机盐）同一个名字的散列就不同；盐是 32 位十六进制，两次取的不一样' $true (
         $salt -cmatch '^[0-9a-f]{32}$' -and $salt -cne $salt2 -and (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -cne (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt2))
-    & $add '落盘清单：盐本身不出现在写出去的 json 里' $true ($json -notmatch [regex]::Escape($salt))
+    & $add '落盘清单：盐本身不出现在写出去的 json 里' $true ($jsonText -notmatch [regex]::Escape($salt))
     # 变化报告：别人的文件只写散列与变化类型；探针日志命名的条目照写名字
     $after = [ordered]@{ 'Cubase Project' = 'dir'; 'Cubase Project\take-1.wav' = '7|11|0|1'; $named = '9|12|0|1'; 'notes.txt' = '4|13|0|1'; 'new-secret.wav' = '1|1|0|1' }
     $cmp = Compare-ReaperProbeLogListing -Before $listing -After $after -Salt $salt
@@ -801,11 +801,11 @@ function Get-WriterCases([string]$Tmp) {
     # 搬走的接线：持有者由 ProcessInfo 注入
     $since = $now.AddHours(-1)
     $run = {
-        param([string]$Name, $Holder)
-        $d = Join-Path $Tmp "writer-$Name"; $null = New-Item -ItemType Directory -Force -Path $d
-        $f = Join-Path $d "probe-I-$gone-1a2b.csv"; [IO.File]::WriteAllText($f, (New-LogForName "probe-I-$gone-1a2b.csv" 'log')); (Get-Item -LiteralPath $f).LastWriteTimeUtc = $mtime
-        $h = $Holder
-        $m = Move-ReaperProbeLogs -LogDir $d -Pids @($gone) -SinceUtc $since -DestDir (Join-Path $Tmp "writer-$Name-dest") -ProcessInfo ({ param($p) $h }.GetNewClosure())
+        param([string]$Name, $holderInfo)
+        $dirPath = Join-Path $Tmp "writer-$Name"; $null = New-Item -ItemType Directory -Force -Path $dirPath
+        $f = Join-Path $dirPath "probe-I-$gone-1a2b.csv"; [IO.File]::WriteAllText($f, (New-LogForName "probe-I-$gone-1a2b.csv" 'log')); (Get-Item -LiteralPath $f).LastWriteTimeUtc = $mtime
+        $h = $holderInfo
+        $m = Move-ReaperProbeLogs -LogDir $dirPath -Pids @($gone) -SinceUtc $since -DestDir (Join-Path $Tmp "writer-$Name-dest") -ProcessInfo ({ param($p) $h }.GetNewClosure())
         [pscustomobject]@{ M = $m; File = $f; Dest = (Join-Path $Tmp "writer-$Name-dest/probe-I-$gone-1a2b.csv") }
     }
     $rGone = & $run 'gone' (& $holder $false $null)
@@ -826,19 +826,19 @@ function Get-WriterCases([string]$Tmp) {
     $child = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path, '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 120'))
     try {
         $dc = Join-Path $Tmp 'writer-child'; $null = New-Item -ItemType Directory -Force -Path $dc
-        $fc = Join-Path $dc "probe-O-$($child.Id)-3c4d.csv"; [IO.File]::WriteAllText($fc, "still writing`n")
-        $mc = Move-ReaperProbeLogs -LogDir $dc -Pids @($child.Id) -SinceUtc $sinceLaunch -DestDir (Join-Path $Tmp 'writer-child-dest')
+        $fChild = Join-Path $dc "probe-O-$($child.Id)-3c4d.csv"; [IO.File]::WriteAllText($fChild, "still writing`n")
+        $mChild = Move-ReaperProbeLogs -LogDir $dc -Pids @($child.Id) -SinceUtc $sinceLaunch -DestDir (Join-Path $Tmp 'writer-child-dest')
         & $add '搬走：这次启动之后才开始、正在跑的进程（开始时间晚于启动时刻）：写它的进程还在，不动，判红（不能因为它比启动时刻晚就当成 pid 复用）' $true (
-            $mc.Moved.Count -eq 0 -and (Test-Path -LiteralPath $fc) -and @($mc.Problems | Where-Object { $_ -like '*还没退出*' }).Count -eq 1 -and $mc.Notes.Count -eq 0)
+            $mChild.Moved.Count -eq 0 -and (Test-Path -LiteralPath $fChild) -and @($mChild.Problems | Where-Object { $_ -like '*还没退出*' }).Count -eq 1 -and $mChild.Notes.Count -eq 0)
     } finally { if (-not $child.HasExited) { $child.Kill(); $child.WaitForExit() } }
     # 真进程：本进程的 pid，日志最后一次写入早于本进程开始（同一个 pid 以前属于别的进程）：算复用
     $dr = Join-Path $Tmp 'writer-self-reused'; $null = New-Item -ItemType Directory -Force -Path $dr
-    $fr = Join-Path $dr "probe-I-$PID-5e6f.csv"; [IO.File]::WriteAllText($fr, (New-LogForName "probe-I-$PID-5e6f.csv" 'old owner')); (Get-Item -LiteralPath $fr).LastWriteTimeUtc = $selfStart.AddHours(-1)
-    $mr = Move-ReaperProbeLogs -LogDir $dr -Pids @($PID) -SinceUtc $selfStart.AddHours(-3) -DestDir (Join-Path $Tmp 'writer-self-reused-dest')
-    & $add '搬走：真进程（本进程）的 pid，日志最后一次写入早于它开始之前一小时：算 pid 复用，照常搬走并留备注' $false ($mr.Moved.Count -eq 1 -and $mr.Notes.Count -eq 1 -and -not (Test-Path -LiteralPath $fr))
+    $fReused = Join-Path $dr "probe-I-$PID-5e6f.csv"; [IO.File]::WriteAllText($fReused, (New-LogForName "probe-I-$PID-5e6f.csv" 'old owner')); (Get-Item -LiteralPath $fReused).LastWriteTimeUtc = $selfStart.AddHours(-1)
+    $mReused = Move-ReaperProbeLogs -LogDir $dr -Pids @($PID) -SinceUtc $selfStart.AddHours(-3) -DestDir (Join-Path $Tmp 'writer-self-reused-dest')
+    & $add '搬走：真进程（本进程）的 pid，日志最后一次写入早于它开始之前一小时：算 pid 复用，照常搬走并留备注' $false ($mReused.Moved.Count -eq 1 -and $mReused.Notes.Count -eq 1 -and -not (Test-Path -LiteralPath $fReused))
     # 备注记进这一轮的上下文（Save-ProbeLogs 是各个场景处理器收日志的入口）
     $ds = Join-Path $Tmp 'writer-save'; $null = New-Item -ItemType Directory -Force -Path $ds
-    $fs = Join-Path $ds "probe-O-$PID-7a8b.csv"; [IO.File]::WriteAllText($fs, (New-LogForName "probe-O-$PID-7a8b.csv" 'old owner')); (Get-Item -LiteralPath $fs).LastWriteTimeUtc = $selfStart.AddHours(-1)
+    $fSelf = Join-Path $ds "probe-O-$PID-7a8b.csv"; [IO.File]::WriteAllText($fSelf, (New-LogForName "probe-O-$PID-7a8b.csv" 'old owner')); (Get-Item -LiteralPath $fSelf).LastWriteTimeUtc = $selfStart.AddHours(-1)
     $saveCtx = @{ Probe = @{ LogDir = $ds; Own = [Collections.Generic.List[string]]::new(); Problems = [Collections.Generic.List[string]]::new(); Notes = [Collections.Generic.List[string]]::new(); Moved = 0 } }
     $null = & (Get-Module Scenarios) { param($c, $run, $cell) Save-ProbeLogs $c $run $cell } $saveCtx ([pscustomobject]@{ Status = 'Exited'; Pid = $PID; StartedUtc = $selfStart.AddHours(-3) }) (Join-Path $Tmp 'writer-save-dest')
     & $add '搬走：Save-ProbeLogs 把 pid 复用的备注记进这一轮的 Ctx.Probe.Notes，搬走数照记，没有问题' $false (
@@ -847,8 +847,8 @@ function Get-WriterCases([string]$Tmp) {
     $holderOf = {
         param([bool]$Exited)
         & (Get-Module ProbeLogs) {
-            param($exited)
-            $script:FakeExited = $exited
+            param($exitedAt)
+            $script:FakeExited = $exitedAt
             function script:Get-Process {
                 param($Id, $ErrorAction)
                 $o = [pscustomobject]@{ Id = $Id }
@@ -955,25 +955,25 @@ function Get-PinGuardCases([string]$Tmp) {
     $gone = Get-ExitedPid
     $now = [DateTime]::UtcNow
     $since = $now.AddMinutes(-10)
-    $root = Join-Path $Tmp 'pinguard'
+    $rootDir = Join-Path $Tmp 'pinguard'
     $script:pinSeq = 0
     # 造一个日志目录放一份文件，收一次。Created / Exited 不给就是：创建时间是现在、退出时刻取现在（真日志的样子）
     $try = {
         param([string]$Name, [string]$Text, $Created = $null, $Exited = $null, [scriptblock]$BeforePin = $null)
         $script:pinSeq++
-        $d = Join-Path $root "c$($script:pinSeq)"; $null = New-Item -ItemType Directory -Force -Path $d
-        $f = Join-Path $d $Name; [IO.File]::WriteAllText($f, $Text)
+        $dirPath = Join-Path $rootDir "c$($script:pinSeq)"; $null = New-Item -ItemType Directory -Force -Path $dirPath
+        $f = Join-Path $dirPath $Name; [IO.File]::WriteAllText($f, $Text)
         if ($null -ne $Created) { [IO.File]::SetCreationTimeUtc($f, $Created) }
         $hashBefore = Get-Sha $f
-        $moveArgs = @{ LogDir = $d; Pids = @($gone); SinceUtc = $since; DestDir = (Join-Path $root "c$($script:pinSeq)-dest") }
+        $moveArgs = @{ LogDir = $dirPath; Pids = @($gone); SinceUtc = $since; DestDir = (Join-Path $rootDir "c$($script:pinSeq)-dest") }
         if ($null -ne $Exited) { $moveArgs.ExitedUtc = $Exited }
         if ($BeforePin) { $moveArgs.BeforePin = $BeforePin }
         $m = Move-ReaperProbeLogs @moveArgs
-        [pscustomobject]@{ M = $m; File = $f; Dest = (Join-Path $root "c$($script:pinSeq)-dest/$Name"); HashBefore = $hashBefore }
+        [pscustomobject]@{ M = $m; File = $f; Dest = (Join-Path $rootDir "c$($script:pinSeq)-dest/$Name"); HashBefore = $hashBefore }
     }
     $untouched = { param($r) (Test-Path -LiteralPath $r.File) -and (Get-Sha $r.File) -ceq $r.HashBefore -and -not (Test-Path -LiteralPath $r.Dest) -and $r.M.Moved.Count -eq 0 }
     $why = { param($r, [string]$like) @($r.M.Problems | Where-Object { $_ -like $like }).Count -eq 1 -and @($r.M.Kept | Where-Object { $_ -like $like }).Count -eq 1 }
-    $nm = { param($role, $tok) "probe-$role-$gone-$tok.csv" }
+    $nm = { param($side, $tok) "probe-$side-$gone-$tok.csv" }
 
     $real = & $try (& $nm 'I' 'aa01') (New-LogForName (& $nm 'I' 'aa01') 'real')
     & $add '头两行与创建时间：本轮真日志（H 行 host_kind=other、与文件名一致，创建时间在这次启动里）照常搬走，没有问题' $false (
@@ -1005,19 +1005,19 @@ function Get-PinGuardCases([string]$Tmp) {
     $roleDecoy = & $try $roleName ((New-LogForName $roleName 'decoy') -replace '(?m)^H,I,', 'H,O,')
     & $add '头两行：H 行的 role 与文件名不符不动' $true ((& $untouched $roleDecoy) -and (& $why $roleDecoy '*H 行的 role 与文件名不符*'))
     # H 行读不出来：一律不动
-    $okText = { param($name) New-LogForName $name 'x' }
+    $okText = { param($entryName) New-LogForName $entryName 'x' }
     $unreadable = [ordered]@{
-        '空文件' = { param($name) '' }
-        '只有魔数一行' = { param($name) "rinne-probe-log,1`n" }
-        'H 行没写完（没有换行）' = { param($name) ((& $okText $name) -split "`n")[0] + "`n" + (((& $okText $name) -split "`n")[1]) }
-        '魔数不对' = { param($name) (& $okText $name) -replace 'rinne-probe-log,1', 'something-else,1' }
-        '行尾是 CRLF' = { param($name) (& $okText $name) -replace "`n", "`r`n" }
-        'H 行少一列' = { param($name) (& $okText $name) -replace ',00000000', '' }
-        '第 2 行不是 H 行' = { param($name) (& $okText $name) -replace '(?m)^H,', 'E,' }
-        '一堆不可读的字节' = { param($name) [string]::new([char[]](1..200 | ForEach-Object { [char]($_ + 100) })) }
+        '空文件' = { param($entryName) '' }
+        '只有魔数一行' = { param($entryName) "rinne-probe-log,1`n" }
+        'H 行没写完（没有换行）' = { param($entryName) ((& $okText $entryName) -split "`n")[0] + "`n" + (((& $okText $entryName) -split "`n")[1]) }
+        '魔数不对' = { param($entryName) (& $okText $entryName) -replace 'rinne-probe-log,1', 'something-else,1' }
+        '行尾是 CRLF' = { param($entryName) (& $okText $entryName) -replace "`n", "`r`n" }
+        'H 行少一列' = { param($entryName) (& $okText $entryName) -replace ',00000000', '' }
+        '第 2 行不是 H 行' = { param($entryName) (& $okText $entryName) -replace '(?m)^H,', 'E,' }
+        '一堆不可读的字节' = { param($entryName) [string]::new([char[]](1..200 | ForEach-Object { [char]($_ + 100) })) }
     }
     $u = 0
-    foreach ($what in $unreadable.Keys) {
+    foreach ($what in $unreadable.get_Keys()) {
         $u++
         $uName = & $nm 'O' ('dd{0:x2}' -f $u)
         $r = & $try $uName (& $unreadable[$what] $uName)
@@ -1062,27 +1062,27 @@ function Get-PinGuardCases([string]$Tmp) {
         (Get-ReaperHeaderRefusal -Head $good -LogName 'probe-I-12-ab01.csv' -ExpectHostKind cubase) -like '*host_kind 是 other，不是 cubase*')
     & $add 'H 行判据：名字本身不是探针日志的名字也拒（不会拿别的文件的头去对）' $true ((Get-ReaperHeaderRefusal -Head $good -LogName 'notes.txt') -like '*名字不是探针日志的名字*')
     # 从钉住的流里读头：返回开头、位置放回 0；之后整份文件仍读得全
-    $null = New-Item -ItemType Directory -Force -Path $root
-    $pf = Join-Path $root 'pinned-head.csv'; [IO.File]::WriteAllText($pf, $good + ('Z' * 3000))
+    $null = New-Item -ItemType Directory -Force -Path $rootDir
+    $pf = Join-Path $rootDir 'pinned-head.csv'; [IO.File]::WriteAllText($pf, $good + ('Z' * 3000))
     $pinned = Open-ReaperPinnedFile -Path $pf -Tries 1
     try {
-        $head = Read-ReaperPinnedHead $pinned.Stream
+        $headText = Read-ReaperPinnedHead $pinned.Stream
         $pos = $pinned.Stream.Position
         $all = [IO.StreamReader]::new($pinned.Stream, [Text.Encoding]::ASCII).ReadToEnd()
-        & $add '读头：从钉住的流里读最多 1024 字节、位置放回 0，之后整份文件仍读得全' $false ($head.Length -eq 1024 -and $head.StartsWith($good) -and $pos -eq 0 -and $all.Length -eq $good.Length + 3000)
+        & $add '读头：从钉住的流里读最多 1024 字节、位置放回 0，之后整份文件仍读得全' $false ($headText.Length -eq 1024 -and $headText.StartsWith($good) -and $pos -eq 0 -and $all.Length -eq $good.Length + 3000)
     } finally { Close-ReaperPinnedFile $pinned }
 
     # 接线：Save-ProbeLogs 把 Run 里记的退出时刻交给收日志
-    $wireDir = Join-Path $root 'wire'; $null = New-Item -ItemType Directory -Force -Path $wireDir
+    $wireDir = Join-Path $rootDir 'wire'; $null = New-Item -ItemType Directory -Force -Path $wireDir
     $wName = & $nm 'I' 'ff01'
     [IO.File]::WriteAllText((Join-Path $wireDir $wName), (New-LogForName $wName 'late'))
     $ctxOf = { @{ Probe = @{ LogDir = $wireDir; Own = [Collections.Generic.List[string]]::new(); Problems = [Collections.Generic.List[string]]::new(); Notes = [Collections.Generic.List[string]]::new(); Moved = 0 } } }
     $saveCtx = & $ctxOf
-    $null = & (Get-Module Scenarios) { param($c, $run, $cell) Save-ProbeLogs $c $run $cell } $saveCtx ([pscustomobject]@{ Status = 'Exited'; Pid = $gone; StartedUtc = $since; ExitedUtc = $exited5 }) (Join-Path $root 'wire-dest-a')
+    $null = & (Get-Module Scenarios) { param($c, $run, $cell) Save-ProbeLogs $c $run $cell } $saveCtx ([pscustomobject]@{ Status = 'Exited'; Pid = $gone; StartedUtc = $since; ExitedUtc = $exited5 }) (Join-Path $rootDir 'wire-dest-a')
     & $add '接线：Save-ProbeLogs 把 Run 里记的退出时刻交给收日志：文件是退出之后才建的，不搬，问题记进这一轮' $true (
         $saveCtx.Probe.Moved -eq 0 -and (Test-Path -LiteralPath (Join-Path $wireDir $wName)) -and $saveCtx.Probe.Problems.Count -eq 1 -and $saveCtx.Probe.Problems[0] -like '*创建时间晚于这次启动的 REAPER 退出*')
     $saveCtx2 = & $ctxOf
-    $null = & (Get-Module Scenarios) { param($c, $run, $cell) Save-ProbeLogs $c $run $cell } $saveCtx2 ([pscustomobject]@{ Status = 'Exited'; Pid = $gone; StartedUtc = $since; ExitedUtc = [DateTime]::UtcNow }) (Join-Path $root 'wire-dest-b')
+    $null = & (Get-Module Scenarios) { param($c, $run, $cell) Save-ProbeLogs $c $run $cell } $saveCtx2 ([pscustomobject]@{ Status = 'Exited'; Pid = $gone; StartedUtc = $since; ExitedUtc = [DateTime]::UtcNow }) (Join-Path $rootDir 'wire-dest-b')
     & $add '接线：Run 里记的退出时刻在文件创建之后，同一份文件就照常搬走' $false ($saveCtx2.Probe.Moved -eq 1 -and $saveCtx2.Probe.Problems.Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $wireDir $wName)))
     $cases
 }
@@ -1112,8 +1112,8 @@ function Get-BlockLimitCases {
     & $add '块长上限：n 恰等于 n_decl 不报，大 1 报（边界）' $true ((& $over (& $cell -In @{ N = 512; NDecl = 512 })).Count -eq 0 -and (& $over (& $cell -In @{ NOverride = 513; NOverrideAt = 5 })).Count -eq 1)
     & $add '块长上限：一块都没有时不报，也不抛错' $true ((& $over (& $cell -In @{ Blocks = 0 })).Count -eq 0)
     # 读日志：OverBlocks 的数法
-    $text = New-FakeProbeLogText -Role I -Blocks 10 -NOverride 600 -NOverrideAt 3
-    $read = Read-ReaperProbeLog -Text $text
+    $bodyText = New-FakeProbeLogText -Role I -Blocks 10 -NOverride 600 -NOverrideAt 3
+    $read = Read-ReaperProbeLog -Text $bodyText
     & $add '读日志：OverBlocks 数的是 n 大于该块自己 n_decl 的块，一例写出块序号、n、n_decl；MaxN 与 NDecl 仍照记' $true (
         $read.OverBlocks -eq 1 -and $read.OverExample -ceq '块序号 3 的 n=600 大于它自己的 n_decl=512' -and $read.MaxN -eq 600 -and (@($read.NDecl) -join ',') -ceq '512')
     $cases

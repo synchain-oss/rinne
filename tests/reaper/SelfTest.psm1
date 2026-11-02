@@ -289,8 +289,8 @@ function Get-LintCases([string]$Tmp, [string]$RepoRoot, [string]$CollisionSample
         param($Files)
         $dir = Join-Path $Tmp ('lint-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
         $null = New-Item -ItemType Directory -Path $dir
-        foreach ($name in $Files.Keys) { [IO.File]::WriteAllText((Join-Path $dir $name), $Files[$name]) }
-        try { Test-ReaperScriptLint -Dirs $dir } finally { foreach ($name in $Files.Keys) { Remove-Item -LiteralPath (Join-Path $dir $name) }; Remove-Item -LiteralPath $dir }
+        foreach ($name in $Files.get_Keys()) { [IO.File]::WriteAllText((Join-Path $dir $name), $Files[$name]) }
+        try { Test-ReaperScriptLint -Dirs $dir } finally { foreach ($name in $Files.get_Keys()) { Remove-Item -LiteralPath (Join-Path $dir $name) }; Remove-Item -LiteralPath $dir }
     }
     $hostOk = @{ 'Host.psm1' = "$strict`n`$a = '$word'`n" }
     & $add 'lint：干净的样本没有问题' $false ((& $lint $hostOk).Count -eq 0)
@@ -311,6 +311,21 @@ function Get-LintCases([string]$Tmp, [string]$RepoRoot, [string]$CollisionSample
     & $add '控制字符扫描：报出行、列和码位' $true ($ctl.Count -eq 2 -and $ctl[0] -ceq '第 1 行第 3 列：U+000D' -and $ctl[1] -ceq '第 2 行第 2 列：U+001B')
     & $add '控制字符扫描：干净文本、空文本、CRLF 换行都没有问题' $false ((Find-ReaperControlChars -Text "a`tb${cr}`nc`n").Count -eq 0 -and (Find-ReaperControlChars -Text '').Count -eq 0)
     & $add 'lint：解析不了的脚本判红' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`nif (`n" })) -match '解析失败')
+    # 被扫文本里有名为 keys / values / count 的变量时，扫描自己用的字典里就有同名条目，属性读返回的是条目而不是集合：整份文件等于没扫。
+    # 用例都是「文本里同时有这类变量和只差大小写的另一对变量」，必须仍然报出那一对（且只报这一对）
+    $pair = "`$a = 1`n`$A = 2`n"
+    $pairOnly = { param($Found) @($Found).Count -eq 1 -and $Found[0] -cmatch '^变量名只差大小写：(\$a / \$A|\$A / \$a)$' }
+    & $add '碰撞扫描：文本里有 $keys 变量时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n$pair"))
+    & $add '碰撞扫描：文本里有 $Values 变量时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$Values = 1`n$pair"))
+    & $add '碰撞扫描：文本里有 $Count 变量时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$Count = 1`n$pair"))
+    & $add '碰撞扫描：$keys、$values、$Count 三个都在时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n`$values = 2`n`$Count = 3`n$pair"))
+    $selfPair = @(Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n`$Keys = 2`n")
+    & $add '碰撞扫描：$keys 与 $Keys 自己只差大小写，也报出来' $true ($selfPair.Count -eq 1 -and $selfPair[0] -cmatch '^变量名只差大小写：(\$keys / \$Keys|\$Keys / \$keys)$')
+    & $add '碰撞扫描：有 $keys、$values、$count 变量但没有碰撞时不报' $false ((Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n`$values = 2`n`$count = 3`n`$keys = 4`n").Count -eq 0)
+    & $add 'lint：字典的 .Keys 当属性读判红（外部数据当键时会被同名条目遮住）' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$h = @{}`nforeach (`$k in `$h.Keys) { `$k }`n" })) -match '第 3 行：\.Keys 当属性读')
+    & $add 'lint：字典的 .Values 当属性读判红' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$h = @{}`n@(`$h.Values)`n" })) -match '第 3 行：\.Values 当属性读')
+    & $add 'lint：小写的 .keys 同样判红（成员名不分大小写）' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$h = @{}`n@(`$h.keys)`n" })) -match '当属性读')
+    & $add 'lint：.get_Keys()、.get_Values()、.GetEnumerator() 不判红，注释与字符串里提到 .Keys 也不算' $false ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n# 不读 .Keys`n`$h = @{}`n@(`$h.get_Keys()); @(`$h.get_Values()); `$h.GetEnumerator()`n'.Keys 与 .Values'`n" })).Count -eq 0)
     if ($CollisionSample -and (Test-Path -LiteralPath $CollisionSample)) {
         $sample = [IO.File]::ReadAllText($CollisionSample)
         & $add 'lint：spike 的旧循环脚本（出事故的那份）被查出碰撞' $true ((Find-ReaperVariableCaseCollisions -Text $sample).Count -gt 0)

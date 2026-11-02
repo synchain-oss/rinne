@@ -72,7 +72,7 @@ function Invoke-ReaperLaunch {
     try {
         $Ctx.Launches++
         $envMap = @{}
-        foreach ($src in @($Ctx.Env, $HostArgs['Environment'])) { if ($src) { foreach ($k in $src.Keys) { $envMap[$k] = $src[$k] } } }
+        foreach ($src in @($Ctx.Env, $HostArgs['Environment'])) { if ($src) { foreach ($k in $src.get_Keys()) { $envMap[$k] = $src[$k] } } }
         $extra = @{ Environment = $envMap }
         if ($Ctx.Launcher) { $extra.Launcher = $Ctx.Launcher }
         $rest = @{} + $HostArgs; $null = $rest.Remove('Environment')
@@ -166,8 +166,8 @@ function Invoke-LuaStep {
     param([Parameter(Mandatory)]$Ctx, [string]$Name, [string]$Step, [hashtable]$Job = @{}, [hashtable]$Watch = @{}, [double]$TimeoutSec = 0, [double]$KillAfterSec = 0)
     $jobFile = Join-Path $Ctx.Work "$Name.job.lua"
     $resultFile = Join-Path $Ctx.Work "$Name.result"
-    foreach ($f in @($resultFile) + @($Watch.Values)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
-    $Ctx.Files.Add($jobFile); $Ctx.Files.Add($resultFile); foreach ($f in $Watch.Values) { $Ctx.Files.Add($f) }
+    foreach ($f in @($resultFile) + @($Watch.get_Values())) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
+    $Ctx.Files.Add($jobFile); $Ctx.Files.Add($resultFile); foreach ($f in $Watch.get_Values()) { $Ctx.Files.Add($f) }
     Write-ReaperText -Path $jobFile -Text (ConvertTo-ReaperLuaTable (@{ step = $Step; result = $resultFile } + $Job))
     $hostRun = Invoke-ReaperLaunch -Ctx $Ctx -HostArgs @{
         ReaperArgs = @("`"$($Ctx.Driver)`""); Environment = @{ RINNE_REAPER_JOB = $jobFile }; WatchFiles = $Watch
@@ -436,7 +436,7 @@ function Format-ProbeFacts($Facts) {
     $ping = $Facts.ping ? "Ping $($Facts.ping) 样本 / D $($Facts.d) 样本" : "没有 Ping（D $($Facts.d) 样本）"
     "pid $($Facts.pid)：$ping；块长 n=$($Facts.In.n)（n_decl $($Facts.In.nDecl)）；配对 In=$($Facts.In.paired) Out=$($Facts.Out.paired)；" +
     "块 In $($Facts.In.blocks)/Out $($Facts.Out.blocks)（播放中 $($Facts.In.playingBlocks)/$($Facts.Out.playingBlocks) 块，约 $($Facts.In.playingSeconds) s）；丢记录 $($Facts.In.dropped + $Facts.Out.dropped)；nonrt $($Facts.In.nonrt)（播放中 $($Facts.In.playingNonrt)）" +
-    ($Facts.Contains('driver') ? "；驱动 $(($Facts.driver.Keys | ForEach-Object { "$_=$($Facts.driver[$_])" }) -join ' ')" : '')
+    ($Facts.Contains('driver') ? "；驱动 $(($Facts.driver.get_Keys() | ForEach-Object { "$_=$($Facts.driver[$_])" }) -join ' ')" : '')
 }
 
 # 收完日志、读出事实、过分析器之后给这一格下结论：收日志出错 FAIL；REAPER 这一趟没正常结束 INCOMPLETE；分析器拒收 INCOMPLETE
@@ -456,7 +456,7 @@ function Complete-ProbeCell($Ctx, [string]$Id, [string]$CellDir, $Moves, [string
         $t = Test-ReaperProbeCell -Logs $cellLogs -Expect $e
         foreach ($b in $t.Bad) { $bad.Add("$($e.Variant)：$b") }
         $one = [ordered]@{ variant = $e.Variant }
-        foreach ($k in $t.Facts.Keys) { $one[$k] = $t.Facts[$k] }
+        foreach ($k in $t.Facts.get_Keys()) { $one[$k] = $t.Facts[$k] }
         $factsAll.Add($one)
         if ($t.Facts.Contains('In')) { $parts.Add("$($e.Variant) " + (Format-ProbeFacts $t.Facts)) }
     }
@@ -570,7 +570,7 @@ $script:Handlers = @{
     'probe-play' = ${function:Invoke-ProbePlayScenario}; 'probe-export' = ${function:Invoke-ProbeExportScenario}
 }
 
-function Get-ReaperScenarioKinds { , @($script:Handlers.Keys | Sort-Object) }
+function Get-ReaperScenarioKinds { , @($script:Handlers.get_Keys() | Sort-Object) }
 
 function Invoke-ReaperScenario {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario)

@@ -152,7 +152,7 @@ function Invoke-ReaperHost {
     $psi.Arguments = (($cfgArgs + $ReaperArgs) -join ' ')
     $psi.UseShellExecute = $false
     if ($WorkDir) { $psi.WorkingDirectory = $WorkDir }
-    foreach ($k in $Environment.Keys) { $psi.Environment[[string]$k] = [string]$Environment[$k] }
+    foreach ($k in $Environment.get_Keys()) { $psi.Environment[[string]$k] = [string]$Environment[$k] }
     $startedUtc = [DateTime]::UtcNow # 启动之前取：这次启动的进程写下的文件，修改时间都不早于它
     $proc = $Launcher ? (& $Launcher $psi) : [Diagnostics.Process]::Start($psi)
     $ownPid = $proc.Id
@@ -183,7 +183,7 @@ function Invoke-ReaperHost {
             }
         }
         if ($status) { break }
-        foreach ($label in @($WatchFiles.Keys)) {
+        foreach ($label in @($WatchFiles.get_Keys())) {
             if ($marks.Contains($label) -or $label -in $lost -or -not (Test-Path -LiteralPath $WatchFiles[$label])) { continue }
             $sample = $Sampler ? (& $Sampler $proc) : (Get-ReaperProcessSample $proc)
             if ($sample.Exited) { $lost.Add($label) } else { $marks[$label] = $sample }
@@ -191,7 +191,7 @@ function Invoke-ReaperHost {
     }
     if (-not $status) {
         # 进程退出得比下一次轮询还快：标记文件已经出现、却没来得及取样，同样是「进程在采样前退出」，不混进「没取到」
-        foreach ($label in @($WatchFiles.Keys)) {
+        foreach ($label in @($WatchFiles.get_Keys())) {
             if (-not $marks.Contains($label) -and $label -notin $lost -and (Test-Path -LiteralPath $WatchFiles[$label])) { $lost.Add($label) }
         }
     }
