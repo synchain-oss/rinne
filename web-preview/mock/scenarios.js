@@ -149,7 +149,8 @@ export const SCENES = [
             meters: { in: "−12.4", ret: "−14.8", out: "−9.1" },
             gr: "−2.1",
             highCut: "6.0 kHz",
-            preset: "拍击回声 90 ms *",
+            // 设计稿里是旧译名；工厂预设名以 presets/factory 为准（见 contract.js 的 FACTORY_PRESETS）
+            preset: "Slapback 90 ms *",
         },
         mustShow: S(
             "I-01 I-02 I-03 I-05 I-06 I-07 I-08 I-09 I-10 I-11 I-14 I-15 I-16 I-17 I-18 I-19 I-20 I-21 I-22 I-23 I-25 I-26",

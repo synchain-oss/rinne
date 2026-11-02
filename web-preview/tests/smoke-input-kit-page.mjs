@@ -12,10 +12,13 @@
 //
 // 用法：node web-preview/tests/smoke-input-kit-page.mjs [仓库根]
 
+import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
+import { FACTORY_PRESETS } from "../mock/contract.js";
 import { SCENES as ALL_SCENES } from "../mock/scenarios.js";
 import {
     HIDE_TEXT_STYLE as BASE_HIDE_TEXT_STYLE,
@@ -835,6 +838,37 @@ if (isMain) {
         ["in-preset-menu", "in-preset-save"].every((id) => SCENES.some((s) => s.id === id)),
         "预设面板的两个场景应在范围内",
     );
+    // mock 的 8 个工厂预设名与 presets/factory/*.json 三语逐字相同（按文件序号一一对应）：预设文件改了名而 mock 没跟着改要红
+    {
+        const dir = path.join(ROOT, "presets", "factory");
+        const real = fs
+            .readdirSync(dir)
+            .filter((f) => /^\d\d-.+\.json$/.test(f))
+            .sort()
+            .map((file) => ({ file, name: JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")).name }));
+        const nameDrift = (mock) => {
+            const out = [];
+            if (mock.length !== real.length) out.push(`个数不同：mock ${mock.length} 个，预设文件 ${real.length} 个`);
+            for (let i = 0; i < Math.min(mock.length, real.length); i++)
+                for (const lang of LANGS)
+                    if (mock[i].name[lang] !== real[i].name[lang])
+                        out.push(
+                            `${real[i].file}/${lang}：mock「${mock[i].name[lang]}」，预设文件「${real[i].name[lang]}」`,
+                        );
+            return out;
+        };
+        run.eq(real.length, 8, "presets/factory 下有 8 个工厂预设文件");
+        run.eq(nameDrift(FACTORY_PRESETS), [], "mock 的工厂预设名与 presets/factory/*.json 三语逐字相同");
+        // 比对本身的坏样例：拿预设文件自己的名字当「mock」，不受真 mock 当前有没有漂移的影响
+        const same = real.map(({ name }) => ({ name: { ...name } }));
+        run.eq(nameDrift(same), [], "正例：名字原样照抄的 mock 比不出差异");
+        run.eq(
+            nameDrift(same.map((p, k) => (k === 3 ? { name: { ...p.name, fr: `${p.name.fr}x` } } : p))).length,
+            1,
+            "坏样例：某个预设的某一语言多一个字符，要被比出恰好一处",
+        );
+        run.check(nameDrift(same.slice(0, 7)).length > 0, "坏样例：mock 少一个预设要被比出来");
+    }
     run.check(
         findLeaks("反馈 band.in.neverDefined").length === 1 &&
             findLeaks("{g} 组").length === 1 &&
@@ -983,9 +1017,10 @@ if (isMain) {
             "预设面板压住下面的页面文字不算互压（独立一层）",
         );
         await inFrame(page, (doc) => {
+            // 第三项上移一行（行距 24 px），压在第二项的字上：工厂预设名固定，这两段字横向有交叠
             const names = doc.querySelectorAll(".in-pm__opt .in-pm__name");
-            names[1].style.position = "relative";
-            names[1].style.top = "-24px";
+            names[2].style.position = "relative";
+            names[2].style.top = "-24px";
         });
         menuProbe = await inFrame(page, fitProbe);
         run.check(
@@ -1020,9 +1055,11 @@ if (isMain) {
             await openPresetState(page, state);
             return inFrame(page, contrastProbe);
         };
+        // 预设面板条目的名字从 mock 的合同里取，不在这里写死第二份（工厂预设名与 presets/factory 的对照见上面的自检）
+        const slapbackZh = FACTORY_PRESETS.find((p) => p.id === "slapback").name.zh;
         let tp = await tiersIn("list");
         run.check(
-            tp.some((i) => i.tier === "A" && /拍击回声/.test(i.text) && /in-pm__name/.test(i.sel)) &&
+            tp.some((i) => i.tier === "A" && i.text.includes(slapbackZh) && /in-pm__name/.test(i.sel)) &&
                 tp.some((i) => i.tier === "C" && /工厂预设/.test(i.text)),
             `预设面板的条目应按 A、标签按 C，实得 ${JSON.stringify(tp.filter((i) => /in-pm/.test(i.sel)).map((i) => [i.tier, i.text]))}`,
         );
