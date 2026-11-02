@@ -24,9 +24,9 @@
 
 ## KI-4: two projects, or two instances, on the same group
 
-**EN** Groups A–H are shared by everything running on the machine. If a second project, or a second instance in the same project, uses a group that is taken, its Rinne Input shows CONFLICT and has no return. Use Move to free group, or pick another letter.
+**EN** Groups A–H are shared by everything running in your login session. If a second project, or a second instance in the same project, uses a group that is taken, its Rinne Input shows CONFLICT and has no return. Use Move to free group, or pick another letter.
 
-**中文** A–H 这几个组由整台机器上运行的所有东西共用。第二个工程、或同一工程里的第二个实例用了已被占用的组，它的 Rinne Input 会显示「冲突」，没有回送。用「移到空闲组」，或者换一个字母。
+**中文** A–H 这几个组由你当前登录会话里运行的所有东西共用。第二个工程、或同一工程里的第二个实例用了已被占用的组，它的 Rinne Input 会显示「冲突」，没有回送。用「移到空闲组」，或者换一个字母。
 
 ## KI-5: an export that starts right after load or pairing begins with a fade-in
 

@@ -127,7 +127,7 @@ Read these before you start:
 ## Safety
 
 - Feedback starts at 0, the limiter and the runaway protection are on by default, and the return fades in over 500 ms whenever it (re)starts.
-- Everything fed back is cleaned (non-finite values become 0), blocked of DC, limited and soft-clipped; a failure silences the return and never makes it louder.
+- Everything fed back is cleaned (non-finite values become 0), has its DC removed, and is limited and soft-clipped; a failure silences the return and never makes it louder.
 - Panic cuts only the return; the dry signal keeps playing.
 - Rinne Output passes the host's audio through untouched and writes silence to the loop when bypassed.
 - Rinne cannot know what the plugins you put in the loop do. They can raise the level that reaches your speakers, and sustained high levels are not stopped (see [KNOWN_ISSUES](docs/KNOWN_ISSUES.md)).

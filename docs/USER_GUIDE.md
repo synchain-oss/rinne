@@ -84,23 +84,7 @@ All controls live in Rinne Input. From top to bottom:
 - **LEVELS**: IN, RETURN and OUT meters. RETURN is measured before the feedback gain, so it moves even at 0 % feedback; use it to check that the loop is closed.
 - **PRESET**: factory presets and your own; see "Presets".
 
-The host sees these parameters under the names below. Panic, Restore return, the group and Re-pair are actions in the interface, not host parameters.
-
-<!-- BEGIN gen:params-table:en -->
-| ID | Display name | Range | Default | Unit | Automatable |
-| --- | --- | --- | --- | --- | --- |
-| feedback | Feedback | 0…150 | 0 | % | Yes |
-| loop_on | Loop | 0…1 | 1 |  | Yes |
-| mix | Mix | 0…100 | 25 | % | Yes |
-| delay_mode | Delay Mode | 0…1 | 0 |  | No |
-| delay_ms | Loop Delay | 1…4000 | 100 | ms | No |
-| delay_note | Sync Note | 0…15 | 10 |  | No |
-| low_cut | Low Cut | 20…2000 | 20 | Hz | Yes |
-| high_cut | High Cut | 1000…20000 | 20000 | Hz | Yes |
-| polarity | Invert Polarity | 0…1 | 0 |  | Yes |
-| limiter | Return Limiter | 0…1 | 1 |  | No |
-| ceiling | Ceiling | -24…0 | -6 | dB | No |
-<!-- END gen:params-table:en -->
+The host lists these controls as parameters; their IDs, display names, ranges and defaults are in the [parameter contract](contracts/PARAMETERS.md). Panic, Restore return, the group and Re-pair are actions in the interface, not host parameters.
 
 ## Rinne Output
 
@@ -144,7 +128,7 @@ Steady self-oscillation at a moderate loop gain is held at the limiter ceiling; 
 
 ## Export, render and Freeze
 
-- **Same loop time.** D is a fixed number of samples, so offline export and realtime playback use the same loop time. Rinne does not read whether the host is rendering offline.
+- **Same loop time.** D is a fixed number of samples, so offline export and realtime playback use the same loop time. Rinne’s sound does not depend on whether the host is rendering offline; it only uses that fact to watch for export problems.
 - **Clean start.** By default the loop is cleared when playback starts ("Clear the loop when playback starts" under ADVANCED in About), so every playback or export begins from an empty loop.
 - **Fade-in at the start.** An export that starts within about 0.5 s after the project loads or the pair connects has a faded-in return at its start, unlike later realtime playback. This is the price of the fade-in rule above. Wait a second after loading or re-pairing before you export.
 - **Export notices.** If the host breaks its own limits, the notice bar says "Last export may differ" with the cause: oversized blocks, D below the block size, the Output host broke its limit, or the loop resynced. Raise D and export again.
