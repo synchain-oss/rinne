@@ -122,7 +122,7 @@ Turning Loop back on, or taking Rinne Input out of bypass, is not one of these: 
 
 ### Runaway protection
 
-When the return keeps overloading, RUNAWAY PROTECTION lowers feedback automatically (6 dB per second) and lets it come back after 3 s of calm. It stays out of the way at 90 % feedback or less with no gain in the loop. If it cannot stop the runaway at −24 dB, it cuts the return. A return above +12 dBFS, or a NaN or Inf inside Rinne Input, cuts it at once and clears the loop.
+When the return keeps overloading, RUNAWAY PROTECTION lowers feedback automatically (6 dB per second) and lets it come back after 3 s of calm. It stays out of the way at 90 % feedback or less with no gain in the loop. If it cannot stop the runaway at −24 dB, it cuts the return. A return level that stays above +12 dBFS for 100 ms cuts it and clears the loop. A NaN or Inf produced inside Rinne Input cuts it at once and clears the loop.
 
 ### Limits you should know
 

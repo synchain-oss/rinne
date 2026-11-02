@@ -94,7 +94,7 @@ One mixer channel - inserts (Cubase shown)
 
 1. 从[发布页](https://github.com/synchain-oss/rinne/releases)下载对应系统的 zip，不要下「Source code」。权威的 SHA-256 写在发布说明里，安装前先对照。
 2. Windows：解除 zip 的锁定（下面的命令），解压，把两个 `.vst3` 文件夹复制到 `%COMMONPROGRAMFILES%\VST3\`。
-3. macOS：安装包没有 Apple Developer ID 签名，也未经公证，所以先解锁（下面的命令），运行 zip 里的 `install-macos.sh`，然后才打开宿主。
+3. macOS：安装包没有 Apple Developer ID 签名，也未经公证。把 zip 解压到 `~/Downloads/Rinne`，对这个文件夹解锁（下面的命令），在里面运行 `install-macos.sh`，然后才打开宿主。
 4. 在宿主里重新扫描插件。两个插件都要装，版本必须相同。
 
 ```powershell

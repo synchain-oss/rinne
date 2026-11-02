@@ -88,13 +88,13 @@ Rinne Output goes after the last plugin you want in the loop. Keep it above the 
 | Rosetta hosts | any | macOS | VST3 / AU | Out of scope | Out of scope | Not supported: the host has to run natively. |
 <!-- END gen:daw-tiers:en -->
 
-Tiers go up only with a written test record in [docs/validation/](docs/validation/TEMPLATE.md). Today no record of a real-host test is in the repository: the two hosts being tested first, Cubase Pro 15 on Windows and LUNA on macOS, stand at Tier 3 (CI evidence only), every other host is still waiting for its first test, and the macOS Audio Unit builds are beta. Details, definitions and per-host notes are in [DAW_COMPATIBILITY](docs/DAW_COMPATIBILITY.md).
+Tiers go up only with a written test record in [docs/validation/](docs/validation/TEMPLATE.md). Today no record of a real-host test is in the repository: the two hosts being tested first, Cubase Pro 15 on Windows and LUNA on macOS, stand at Tier 3 (CI evidence only), every other host is still waiting for its first test, and the macOS Audio Unit builds are beta. Definitions and per-host notes: [DAW_COMPATIBILITY](docs/DAW_COMPATIBILITY.md).
 
 ## Install
 
 1. Download the zip for your system from the [Releases page](https://github.com/synchain-oss/rinne/releases), not "Source code". The authoritative SHA-256 is in the release notes; compare it before you install.
 2. Windows: unblock the zip (the command below), extract it and copy both `.vst3` folders to `%COMMONPROGRAMFILES%\VST3\`.
-3. macOS: the builds are not signed with an Apple Developer ID and not notarized, so unlock them first (the command below), run `install-macos.sh` from the zip, and only then open your host.
+3. macOS: the builds are not signed with an Apple Developer ID and not notarized. Extract the zip to `~/Downloads/Rinne`, unlock that folder (the command below), run `install-macos.sh` in it, and only then open your host.
 4. Rescan plugins in your host. Install both plugins, always the same version.
 
 ```powershell

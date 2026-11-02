@@ -162,10 +162,10 @@ refused by an older one, and its bytes are kept untouched.
 
 ## Uninstall
 
-**EN** Windows: delete the two `.vst3` folders you copied. macOS: run `uninstall-macos.sh` from the zip the same way as
-`install-macos.sh`.
+**EN** Windows: delete the two `.vst3` folders you copied. macOS: run `uninstall-macos.sh` from the extracted `Rinne` folder the
+same way as `install-macos.sh`.
 
-**中文** Windows：删除你复制过去的两个 `.vst3` 文件夹。macOS：用与 `install-macos.sh` 相同的方式运行 zip 里的
+**中文** Windows：删除你复制过去的两个 `.vst3` 文件夹。macOS：用与 `install-macos.sh` 相同的方式运行解压出的 `Rinne` 文件夹里的
 `uninstall-macos.sh`。
 
 ## Build from source (short)
