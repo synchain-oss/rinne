@@ -681,7 +681,34 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '结果文本打码：路径后面紧跟的 < 是边界（路径里不可能有）' $true ((& $hide 'C:\a b\c<br>') -ceq '<path><br>')
     & $add '结果文本打码：只有开引号、没有闭引号的路径照样整段打码（宁可多打码）' $true ((& $hide '用户 ''C:\Work\John Smith\x') -notmatch 'John|Smith')
     & $add '结果文本打码：闭引号后面紧跟字母（撇号）不算闭引号，但双引号照旧是边界' $false (((& $hide '"C:\x y\a"之后') -ceq '"<path>"之后') -and ((& $hide '''C:\Work\O''Brien Smith\x'' 之后') -notmatch 'Brien|Smith'))
+    # 目录名以撇号结尾（James'）时，闭引号不能提前收尾：带引号那一遍在 James' 处停下，后面的 Music\x 没有盘符起点，不带引号那一遍也打不到，路径后半段就漏出来。
+    # 到下一个引号之间的第一个路径分隔符不是新路径的起点（X:\、X:/、\\、//）就不算收尾。正例对照放在后面：该收尾的照旧收尾，后面的说明文字不被吞
+    & $add '结果文本打码：目录名以撇号结尾（''C:\Work\James'' Music\x'' 之后），Music\x 不漏，闭引号在 x'' 处收尾' $true (
+        ((& $hide '''C:\Work\James'' Music\x'' 之后') -ceq '''<path>'' 之后') -and ((& $hide '读 ''C:\Work\James'' Music\x''。') -ceq '读 ''<path>''。'))
+    & $add '结果文本打码：同样的写法换成正斜杠（''C:/Work/James'' Music/x'' 之后）、UNC（''\\srv\share\James'' Music\x''）也不漏' $true (
+        ((& $hide '''C:/Work/James'' Music/x'' 之后') -ceq '''<path>'' 之后') -and ((& $hide '''\\srv\share\James'' Music\x'' 之后') -ceq '''<path>'' 之后') -and ((& $hide '''//srv/share/James'' Music/x'' 之后') -ceq '''<path>'' 之后'))
+    & $add '结果文本打码：双引号的变体（"C:\Work\Say" Hi\x" 之后）同样不在第一个双引号处提前收尾' $true ((& $hide '"C:\Work\Say" Hi\x" 之后') -ceq '"<path>" 之后')
+    & $add '结果文本打码：撇号结尾的目录名后面没有闭引号（''C:\Work\James'' Music\x 无结尾引号）：认不出收尾，整段落到不带引号那一遍，Music 不留' $true ((& $hide '''C:\Work\James'' Music\x 无结尾引号') -cnotmatch 'Music|James')
+    & $add '结果文本打码：该收尾的照旧在闭引号处收尾，后面的说明文字不被吞（''C:\a\b'' 之后、"C:\a\b" 之后、''C:\a\b'' 与 ''D:\c\d'' 不同）' $false (
+        ((& $hide '''C:\a\b'' 之后') -ceq '''<path>'' 之后') -and ((& $hide '"C:\a\b" 之后') -ceq '"<path>" 之后') -and ((& $hide '''C:\a\b'' 与 ''D:\c\d'' 不同') -ceq '''<path>'' 与 ''<path>'' 不同'))
+    & $add '结果文本打码：闭引号后面的第一个分隔符是新路径的起点（''C:\a\b'' 与 D:/James'' Music 不符）：第一条路径照旧收尾，第二条交给不带引号那一遍，James 与 Music 都不留' $false (
+        ((& $hide '''C:\a\b'' 与 D:/James'' Music 不符') -ceq '''<path>'' 与 <path>') -and ((& $hide '''C:\a\b'' 与 \\srv\share\James'' Music 不符') -ceq '''<path>'' 与 <path>'))
+    & $add '结果文本打码：闭引号后面紧跟字母或汉字（''D:\p q\b''之后）认不出闭引号，整段落到不带引号那一遍：往严里错、不泄漏，加了前瞻之后行为不变' $false (
+        ((& $hide '''D:\p q\b''之后') -ceq '''<path>') -and ((& $hide '''D:\p q\b''之后 与 ''E:\r s\t'' 不同') -ceq '''<path>'' 不同'))
+    & $add '标题打码：单引号括起来、目录名以撇号结尾的路径（Error ''C:\Work\James'' Music\x'' now）没有提前收尾的问题：撇号不是边界，一直打到标题末尾' $true (
+        ((ConvertTo-ReaperSafeTitle 'Error ''C:\Work\James'' Music\x'' now') -ceq 'Error ''<path>') -and ((ConvertTo-ReaperSafeTitle 'Open ''C:/Work/James'' Music/x''') -ceq 'Open ''<path>'))
     & $add '结果文本打码：换行是边界，每一行的路径各自打码' $true ((& $hide "C:\a b\c`nD:\d e\f`n完") -ceq "<path>`n<path>`n完")
+    # 没能结束的进程的说明（Get-StuckDescription）：结束动作的原始报错在生成处先打码一次，返回值本身就不含路径；只打码报错，路径后面的「它可能还在运行」留着
+    $stuck = { param($err) Get-StuckDescription ([pscustomobject]@{ Pid = 4321; StillRunning = $true; KillError = $err }) }
+    & $add '没能结束的说明：结束动作的报错里带空格的路径（Access is denied: C:\Work\John Smith\reaper.exe），返回值本身不含路径，报错后面的「它可能还在运行」留着' $true (
+        (& $stuck 'Access is denied: C:\Work\John Smith\reaper.exe') -ceq 'REAPER 进程 4321 没能结束（结束动作报错：Access is denied: <path>），它可能还在运行')
+    & $add '没能结束的说明：报错里的路径是撇号结尾的单引号写法（''C:\Work\James'' Music\x''）、UNC 正斜杠写法，返回值同样不含路径' $true (
+        ((& $stuck 'cannot kill ''C:\Work\James'' Music\x'' now') -cnotmatch 'James|Music|Work') -and ((& $stuck 'denied //srv/share/John Smith/reaper.exe') -cnotmatch 'John|Smith|srv'))
+    & $add '没能结束的说明：Get-HostFailure 拼出来的原因（进程没能结束）同样不含路径' $true (
+        (Get-HostFailure ([pscustomobject]@{ Pid = 4321; StillRunning = $true; Status = 'Timeout'; Seconds = 3; KillError = 'Access is denied: C:\Work\John Smith\reaper.exe' })) -cnotmatch 'John|Smith|Work')
+    & $add '没能结束的说明：报错里没有路径时原样（Access is denied），没有结束动作的报错时写「结束之后 5 秒仍未退出」' $false (
+        ((& $stuck 'Access is denied') -ceq 'REAPER 进程 4321 没能结束（结束动作报错：Access is denied），它可能还在运行') -and
+        ((Get-StuckDescription ([pscustomobject]@{ Pid = 4321; StillRunning = $true })) -ceq 'REAPER 进程 4321 没能结束（结束之后 5 秒仍未退出），它可能还在运行'))
     & $add '结果文本打码：没有路径的文字原样（单个斜杠、冒号不算）' $false ((& $hide '没有路径 a/b c: d') -ceq '没有路径 a/b c: d')
     $nt = { param($bit, $lag, $head) "逐位相同：$bit`n对齐偏移（lag）：$lag 样本（正数表示 B 比 A 晚）`n开头 2.00 秒残差（96000 帧）：峰值 $head dBFS，RMS $head dBFS`n" }
     $good = & $nt '是' '0' '-inf'
