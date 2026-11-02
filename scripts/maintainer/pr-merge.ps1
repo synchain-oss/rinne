@@ -206,7 +206,7 @@ function Get-MergeFacts {
     [pscustomobject]@{
         Pr = $Pr; Card = $card; Pull = $pull; Head = $head; Files = @($files); Activity = $activity
         State = $state; Items = @(Get-RinneCommentItems -Activity $activity -State $state); Threads = @($activity.Threads)
-        Run = $run; Jobs = $jobs; Posted = $posted; Checks = Get-RinneCheckRuns $head; Required = Get-RinneRequiredChecks
+        Run = $run; Jobs = $jobs; Posted = $posted; Checks = Get-RinneCheckRuns $head -PullRequestEventOnly; Required = Get-RinneRequiredChecks
         Gates = $gates; Records = Read-Records $Pr
         MainClone = [pscustomobject]@{
             Head = [string]$clone.Sha
@@ -1136,6 +1136,8 @@ function Invoke-SelfTest {
         $prFixture = $pull
         # GraphQL 的 review 修改时间可以按 id 改写（造「回复之后又改过」）
         $reviewEdits = @{}
+        # check run 与「某 head 上 pull_request 事件的运行列表」可以按用例改写（造手动 dispatch 的同名结果）
+        $checkOverride = @{ Runs = $null; Wf = $null }
         # 锁的假实现记下持有顺序与当前持有的锁，构建与 wt/tip-<n> 的 git 操作据此断言自己在哪些锁里
         $lockLog = [System.Collections.Generic.List[string]]::new()
         $held = [System.Collections.Generic.List[string]]::new()
@@ -1161,7 +1163,8 @@ function Invoke-SelfTest {
             'actions/runs/\d+$'                = { Read-RinneFixture 'pr3-run.json' }
             '^gh run view \d+ --repo \S+ --log( --job \d+)?$' = { $runLog.Text }
             'actions/workflows/build\.yml/runs' = { @{ workflow_runs = @() } }
-            'check-runs'                       = { if ($plant.Facts) { $plant.Facts = $false; & $putMarker }; Read-RinneFixture 'pr3-check-runs.json' }
+            'check-runs'                       = { if ($plant.Facts) { $plant.Facts = $false; & $putMarker }; if ($checkOverride.Runs) { return $checkOverride.Runs }; Read-RinneFixture 'pr3-check-runs.json' }
+            'actions/runs\?'                   = { if ($checkOverride.Wf) { return $checkOverride.Wf }; Read-RinneFixture 'pr3-runs.json' }
             '^git .* fetch '                   = { '' }
             '^git .* rev-parse refs/remotes/origin/pr/3' = { $head }
             '^git .* rev-parse (HEAD|origin/feature/v1)$' = { $tipSha }
@@ -1413,6 +1416,61 @@ function Invoke-SelfTest {
         $vm = Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid)
         $pullState.Nulls = 0
         Add-RinneCase $cases 'mergeable 一直是 null 判不可合并' $true ($vm.Code -eq 'not-ready' -and @($vm.Failures | Where-Object { $_ -match '不可合并' }).Count -eq 1)
+        # check run 按触发事件取：同名 check 只认 pull_request 事件触发、head sha 等于当前 head 的运行，同名多次取其中最新的。
+        # 经 Get-MergeFacts 走一遍真的取数路径；check-runs 与运行列表由 $checkOverride 改写
+        $crBase = { Copy-RinneObject (Read-RinneFixture 'pr3-check-runs.json') }
+        $runBase = { Copy-RinneObject (Read-RinneFixture 'pr3-runs.json') }
+        $newCheck = { param($id, $name, $conclusion, $run) [pscustomobject]@{ id = [long]$id; name = $name; status = 'completed'; conclusion = $conclusion; head_sha = $head; details_url = "https://github.com/synchain-oss/rinne/actions/runs/$run/job/$id"; app = [pscustomobject]@{ id = $null; slug = 'github-actions' } } }
+        $newRun = { param($id, $event = 'pull_request', $sha = $head) [pscustomobject]@{ id = [long]$id; name = 'x'; event = $event; head_sha = $sha; status = 'completed'; conclusion = 'success' } }
+        $setCheck = { param($cr, $name, $conclusion) foreach ($c in $cr.check_runs) { if ($c.name -eq $name) { $c.conclusion = $conclusion } } }
+        $viaFacts = {
+            param([string]$label, [scriptblock]$edit, [string]$expect, [scriptblock]$also = { param($r) $true })
+            $checkOverride.Runs = & $crBase; $checkOverride.Wf = & $runBase
+            & $edit $checkOverride.Runs $checkOverride.Wf
+            $r = Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid)
+            $checkOverride.Runs = $null; $checkOverride.Wf = $null
+            if ($env:RINNE_SELFTEST_VERBOSE) { [Console]::Error.WriteLine("$label => $($r.Code) | $(@($r.Failures) + @($r.Needs | ForEach-Object Reason) -join ' ; ')") }
+            Add-RinneCase $cases $label ($expect -ne 'ready') ($(if ($expect -eq 'ready') { $r.Code -ne 'ready' } else { $r.Code -eq $expect -and (& $also $r) }))
+        }
+        $docsRed = { param($r) @($r.Failures | Where-Object { $_ -match 'check docs-truth 在当前 head 上不是 success' }).Count -eq 1 }
+        & $viaFacts 'PR 事件上 docs-truth 红、后来手动 dispatch 的同名绿：判红' {
+            param($cr, $wf) & $setCheck $cr 'docs-truth' 'failure'
+            $cr.check_runs += & $newCheck 114662999001 'docs-truth' 'success' 38209999001
+        } 'not-ready' $docsRed
+        & $viaFacts 'PR 事件上 docs-truth 红、后来的绿在运行列表里标 workflow_dispatch（接口没按事件过滤）：判红' {
+            param($cr, $wf) & $setCheck $cr 'docs-truth' 'failure'
+            $cr.check_runs += & $newCheck 114662999001 'docs-truth' 'success' 38209999001
+            $wf.workflow_runs += & $newRun 38209999001 'workflow_dispatch'
+        } 'not-ready' $docsRed
+        & $viaFacts 'docs-truth 只有手动 dispatch 的绿、没有 PR 事件的运行：判红' {
+            param($cr, $wf)
+            $cr.check_runs = @($cr.check_runs | Where-Object { $_.name -ne 'docs-truth' }) + (& $newCheck 114662999001 'docs-truth' 'success' 38209999001)
+        } 'not-ready' $docsRed
+        & $viaFacts 'docs-truth 只有没带运行编号的 check（不是 Actions 发的）：不算' {
+            param($cr, $wf)
+            $other = & $newCheck 114662999005 'docs-truth' 'success' 0
+            $other.details_url = 'https://ci.example.com/builds/1'
+            $cr.check_runs = @($cr.check_runs | Where-Object { $_.name -ne 'docs-truth' }) + $other
+        } 'not-ready' $docsRed
+        & $viaFacts '运行列表里的运行 head 不是当前 head：它的 check 不算' {
+            param($cr, $wf) foreach ($w in $wf.workflow_runs) { if ($w.id -eq 38203700245) { $w.head_sha = 'e' * 40 } }
+        } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'check (docs-truth|clang-format) 在当前 head 上不是 success' }).Count -eq 2 }
+        & $viaFacts 'claude-pr-review 在 PR 事件上红、后来 dispatch 的同名绿：判红' {
+            param($cr, $wf) & $setCheck $cr 'claude-pr-review' 'failure'
+            $cr.check_runs += & $newCheck 114662999002 'claude-pr-review' 'success' 38209999002
+        } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'claude-pr-review check' }).Count -eq 1 }
+        & $viaFacts 'PR 事件红、之后 PR 事件重跑变绿放行（新的一次运行，同名取最新）' {
+            param($cr, $wf) & $setCheck $cr 'docs-truth' 'failure'
+            $cr.check_runs += & $newCheck 114662999003 'docs-truth' 'success' 38209999003
+            $wf.workflow_runs += & $newRun 38209999003
+        } 'ready'
+        & $viaFacts 'PR 事件绿、之后手动 dispatch 的同名红：不受它影响放行' {
+            param($cr, $wf) $cr.check_runs += & $newCheck 114662999004 'docs-truth' 'failure' 38209999004
+        } 'ready'
+        $checkOverride.Wf = @{ Code = 1; Out = ''; Err = 'HTTP 502' }
+        $threw = Test-Throws { Get-MergeFacts -Pr 3 -CardId $cid }
+        $checkOverride.Wf = $null
+        Add-RinneCase $cases '取不到 pull_request 事件的运行列表：抛错，不退回不分事件的取法' $true $threw
         $v = Get-MergeVerdict $base
         Add-RinneCase $cases '干净的 PR 判 ready' $false ($v.Code -ne 'ready')
         if ($v.Code -ne 'ready') { [Console]::Error.WriteLine((ConvertTo-RinneJsonText $v)) }

@@ -724,12 +724,30 @@ function Test-RinneResponded {
     return $explicit
 }
 
-<# 当前 head 上各个 check 的最新一次结果：name → { status; conclusion; details_url }。 #>
+<#
+  当前 head 上各个 check 的最新一次结果：name → { status; conclusion; details_url }。同名多次取 id 最大的那次。
+  默认不分触发事件；合并判据用 -PullRequestEventOnly：只认 pull_request 事件触发、head sha 等于 $Sha 的运行产生的 check，
+  同名多次取其中最新的。手动 dispatch、push 等事件触发的同名 check 不算，否则晚到的一次绿能盖掉 PR 事件上的红。
+  check run 自己不带触发事件，check suite 也没有事件字段，所以经 details_url 里的运行编号对到
+  actions/runs?event=pull_request&head_sha=$Sha 列出的运行（事件与 head sha 在本地再核一遍，不全信接口的过滤）；
+  对不到的（没有运行编号的 check，比如不是 Actions 发的）不算。取不到运行列表就抛错，不退回不分事件的取法。
+#>
 function Get-RinneCheckRuns {
-    param([Parameter(Mandatory)][string]$Sha)
+    param([Parameter(Mandatory)][string]$Sha, [switch]$PullRequestEventOnly)
     $pages = Get-RinneApi "repos/$($script:Repo)/commits/$Sha/check-runs?per_page=100" -Paginate
+    $prRuns = @{}
+    if ($PullRequestEventOnly) {
+        $runPages = Get-RinneApi "repos/$($script:Repo)/actions/runs?event=pull_request&head_sha=$Sha&per_page=100" -Paginate
+        foreach ($w in @($runPages | ForEach-Object { $_.workflow_runs } | ForEach-Object { $_ })) {
+            if ([string](Get-RinneProp $w 'event') -eq 'pull_request' -and [string](Get-RinneProp $w 'head_sha') -eq $Sha) { $prRuns[[string]$w.id] = $true }
+        }
+    }
     $latest = @{}
     foreach ($c in @($pages | ForEach-Object { $_.check_runs } | ForEach-Object { $_ })) {
+        if ($PullRequestEventOnly) {
+            $runId = if ([string](Get-RinneProp $c 'details_url') -match '/actions/runs/(\d+)(?:/|$)') { $Matches[1] } else { '' }
+            if (-not $runId -or -not $prRuns.ContainsKey($runId)) { continue }
+        }
         if (-not $latest.ContainsKey($c.name) -or [long]$c.id -gt [long]$latest[$c.name].id) { $latest[$c.name] = $c }
     }
     return $latest
