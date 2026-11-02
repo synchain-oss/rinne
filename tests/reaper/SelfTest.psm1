@@ -367,6 +367,20 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '模态框：主窗口等非对话框不管' $false ((& $v 'REAPERwnd' $true 'REAPER v7').Action -eq 'Ignore')
     & $add '标题里的路径被打码' $false ((ConvertTo-ReaperSafeTitle 'Error in D:\scratch\proj.rpp now') -notmatch 'scratch')
     & $add '结果文本里的盘符路径与 UNC 被打码' $false ((Hide-LocalPaths 'a D:\scratch\y.wav b \\host\share\z c') -notmatch 'scratch|host')
+    # 标题打码：路径里常有空格（C:\Work\John Smith），从盘符 / UNC 起要一直打码到下一个引号或标题末尾，不能在第一个空格处停。
+    # 用例的坏样例都让泄漏出现在结果的前 40 个字符以内（超过的会被截断，看不出来）
+    $safe = { param($text) ConvertTo-ReaperSafeTitle $text }
+    & $add '标题打码：用户目录带空格（C:\Work\John Smith\a.rpp），空格后面的目录名与文件名不留进结果' $true ((& $safe 'Error in C:\Work\John Smith\a.rpp now') -ceq 'Error in <path>')
+    & $add '标题打码：UNC 路径带空格也整段打码' $true ((& $safe 'Cannot open \\srv\share\John Smith\a.rpp') -ceq 'Cannot open <path>')
+    & $add '标题打码：正斜杠写法、路径里有多个空格也整段打码' $true ((& $safe 'D:/My Music/John Smith/x y.wav') -ceq '<path>')
+    & $add '标题打码：路径后面跟着 REAPER 自己的标题后缀（- REAPER v…/win64）：路径整段打码，后缀留着' $true ((& $safe 'C:\Work\John Smith\a.rpp - REAPER v7.82/win64') -ceq '<path> - REAPER v7.82/win64')
+    & $add '标题打码：只有路径加 - REAPER 两个词（没有版本）时后缀同样留着' $true ((& $safe 'C:\Work\John Smith\a.rpp - REAPER') -ceq '<path> - REAPER')
+    & $add '标题打码：目录名里就带 - REAPER 的路径（后缀不在末尾）整段打码，不信中间的「后缀」' $true ((& $safe 'C:\Work\John - REAPER\secret box\a.rpp') -ceq '<path>')
+    & $add '标题打码：认不出的结尾（- REAPER 后面不是版本号）宁可一起打码' $true ((& $safe 'C:\p q\r - REAPER s0meth') -ceq '<path>')
+    & $add '标题打码：同一个标题里有两段路径，第一段起整段打码，第二段的目录名也不留' $true ((& $safe 'Copy C:\a b\one.rpp to D:\c d\two.rpp') -ceq 'Copy <path>')
+    & $add '标题打码：带引号的路径各自打到引号为止，引号后面的文字保留' $false ((& $safe 'Cannot open "C:\Work\John Smith\a.rpp" (gone)') -ceq 'Cannot open "<path>" (gone)')
+    & $add '标题打码：两段带引号的路径各自打码' $false ((& $safe '"C:\x y\a.rpp" and "\\h\s t\b.wav"') -ceq '"<path>" and "<path>"')
+    & $add '标题打码：没有路径的标题原样，超过 40 个字符仍截断' $false (((& $safe 'Brand New Box') -ceq 'Brand New Box') -and ((& $safe ('x' * 60)).Length -eq 40))
     $nt = { param($bit, $lag, $head) "逐位相同：$bit`n对齐偏移（lag）：$lag 样本（正数表示 B 比 A 晚）`n开头 2.00 秒残差（96000 帧）：峰值 $head dBFS，RMS $head dBFS`n" }
     $good = & $nt '是' '0' '-inf'
     & $add '对拍结论：四项都满足才 PASS' $false ((Get-CompareVerdict 0 $good).Status -eq 'PASS')
