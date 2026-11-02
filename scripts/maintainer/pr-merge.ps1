@@ -8,7 +8,8 @@
 #                                 重新核对，ready 才合并：squash，钉住审过的 head（sha=…），显式写 subject「<标题> (#n)」
 #                                 与 body（摘要段 + 空行 + 唯一一行签名）
 #   -After -Pr <n> -Card <卡>     回读 squash 提交（DCO、作者与提交者、恰好一行签名）、核对远端与本地子支线的尖都等于 PR 合并时的
-#                                 head（对不上就抛错、什么都不删）、删远端子支线、持 git 锁移除 worktree 与 wt/tip-<n>、本地分支
+#                                 head（对不上就抛错、什么都不删）、删远端子支线（带 lease：核对之后远端尖又变了，git 拒绝）、
+#                                 持 git 锁移除 worktree 与 wt/tip-<n>、本地分支（update-ref 带旧值）
 #   -SelfTest                     用 fixtures/ 里录制的 PR 响应离线跑，对每条判据给反例
 # 只从主 clone 运行，而且主 clone 必须正好在刚取回的 origin/feature/v1 上、工作树干净：判据取自 feature 线，
 # 而不是待合并 PR 自己的版本。gates 的结果 json 是自报的：最低档按 PR 的文件清单与卡片在这里重算（定档规则取自
@@ -267,13 +268,15 @@ function Get-RowCell {
 }
 
 <#
-  这一行是不是【红旗】【重要】：级别列存在时，只认以「【红旗】」「【重要】」「红旗」「重要」开头的级别格（「重要 / 建议」算）；
-  「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」这类只是子串命中的不算。认不出级别列（或这一格是空的）时，任何一格里有【红旗】或【重要】。
+  这一行是不是【红旗】【重要】：级别列存在时，只认以「【红旗】」「【重要】」「红旗」「重要」开头的级别格（「重要 / 建议」算）。
+  不带【】的两种写法再加边界：「红旗」后面不能紧跟（可有空白）数字，「重要」后面不能紧跟「度」「性」或（可有空白）数字
+  （「红旗 0」「重要 0」「重要度低」「重要性一般」是计数、描述，不是级别）；带【】的写法不变（「【重要】度」照旧算）。
+  「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」这类只是子串命中的更不算。认不出级别列（或这一格是空的）时，任何一格里有【红旗】或【重要】。
 #>
 function Test-SevereRow {
     param($Row)
     $level = Get-RowCell $Row '级别'
-    if ($level) { return [bool]($level -match '^(?:【红旗】|【重要】|红旗|重要)') }
+    if ($level) { return [bool]($level -match '^(?:【红旗】|【重要】|红旗(?!\s*\d)|重要(?![度性]|\s*\d))') }
     @($Row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0
 }
 
@@ -1008,9 +1011,11 @@ function Invoke-AfterUnlocked {
     if ($localTip -and $localTip -ne $headSha) {
         throw "本地子支线 $branch 的尖 $localTip 不是 #$Pr 合并时的 head $headSha：分支上有没合入的提交，什么都没删（worktree 也不移除）"
     }
-    # 删远端子支线（pre-push hook 放行 feat/* 的删除），再持锁移除 worktree 与本地分支
+    # 删远端子支线（pre-push hook 放行 feat/* 的删除），再持锁移除 worktree 与本地分支。上面的核对到这一步之间还有一小段时间：
+    # 删除也交给 git 比对，--force-with-lease=<ref>:<合并时的 head> 在远端尖已经不是那个值时拒绝（stale info），
+    # 这里抛错，发生在移除 worktree 之前，什么都没删（lease 只比对旧值，对删除同样生效；不会覆盖任何东西，不是强推）
     if ($remoteTip) {
-        Invoke-RinneGit @('push', 'origin', '--delete', "refs/heads/$branch") | Out-Null
+        Invoke-RinneGit @('push', "--force-with-lease=refs/heads/${branch}:${headSha}", 'origin', '--delete', "refs/heads/$branch") | Out-Null
     }
     $tip = Join-Path (Get-RinneRoot) "wt/tip-$Pr"
     Invoke-RinneGitLocked {
@@ -1025,8 +1030,9 @@ function Invoke-AfterUnlocked {
             # rinne-delete-ok: 路径已由上一行 Assert-RinneWtDir 核对为 wt 下的 tip-<n>，且是 worktree
             Invoke-RinneGit @('worktree', 'remove', '--force', $tip) | Out-Null
         }
+        # 本地分支由 git 带旧值删（update-ref -d <ref> <旧值>）：核对之后它又移动了，git 拒绝。worktree 已经移走，不存在「分支还被检出」的问题
         if ($localTip) {
-            Invoke-RinneGit @('branch', '-D', $branch) | Out-Null
+            Invoke-RinneGit @('update-ref', '-d', "refs/heads/$branch", $headSha) | Out-Null
         }
     } | Out-Null
     Write-Output "#$Pr 已合入 $($sha.Substring(0, 7))「$($pull.title)」；回读通过，远端子支线、worktree 与合并后构建目录已清理"
@@ -1751,10 +1757,10 @@ function Invoke-SelfTest {
         } 'ready'
         # 级别格收紧：级别列存在时，只有以「【红旗】」「【重要】」「红旗」「重要」开头的单元格才是严重行。
         # 「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」只是子串命中，不是严重行（以前会被当成严重行：既冒出一条挂账，又能给第 2 项凑条数）
-        foreach ($lv in '汇总（红旗 0、重要 0、建议 0）', '总结', '信息：重要度低', '建议（重要的事另列）') {
+        foreach ($lv in '汇总（红旗 0、重要 0、建议 0）', '总结', '信息：重要度低', '建议（重要的事另列）', '红旗 0', '红旗0', '重要度低', '重要性一般', '重要 0') {
             & $bad "级别格写「$lv」、处置「不改」：不是严重行，不要用户豁免" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'ready'
         }
-        foreach ($lv in '【红旗】', '【重要】', '红旗', '重要', '重要 / 建议', '**重要**', '重要（既有）') {
+        foreach ($lv in '【红旗】', '【重要】', '红旗', '重要', '重要 / 建议', '**重要**', '重要（既有）', '【重要】度', '【红旗】 0') {
             & $bad "级别格写「$lv」、处置「不改」：是严重行，挂账" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'needs-user'
         }
         & $bad '尾注 important=2 的一轮，处置汇总只有 1 条真严重行，再加一行级别写「汇总（红旗 0、重要 0、建议 0）」凑数：仍判红' { param($f) & $onlyRows $f $run1 '1', '3', '5'; & $addRow $f 1 (& $deferCell '汇总（红旗 0、重要 0、建议 0）' '无需另外动作' '—') } 'not-ready' (& $notEnough $run1 2 1)
@@ -2373,7 +2379,7 @@ function Invoke-SelfTest {
         Set-RinneLockImpl { param($name, $sb) $locks.Add($name); & $sb }
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
         Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
-        $tips = @{ Remote = $head; RemoteCode = 0; Local = $head; LocalGone = $false }
+        $tips = @{ Remote = $head; RemoteCode = 0; Local = $head; LocalGone = $false; LeaseFails = $false; RefMoved = $false }
         $after = [ordered]@{
             'pulls/3$'                       = { $merged }
             'merge-base --is-ancestor'       = { '' }
@@ -2382,7 +2388,10 @@ function Invoke-SelfTest {
             ' symbolic-ref --quiet --short HEAD' = { $wtBranch }
             # 远端 / 本地子支线的尖：默认就是 PR 合并时的 head；用例改它们造「分支上有没合入的提交」。RemoteCode 2 是 ls-remote 找不到
             'ls-remote --exit-code'          = { if ($tips.RemoteCode -eq 0) { "$($tips.Remote)`trefs/heads/feat/review-bot" } else { @{ Code = $tips.RemoteCode; Out = ''; Err = 'x' } } }
-            ' push origin --delete refs/heads/feat/review-bot' = { '' }
+            # 远端删除带 lease（旧值 = PR 合并时的 head）：核对之后远端尖又变了，git 拒绝（stale info）。LeaseFails 造这种情形
+            ' push --force-with-lease=refs/heads/feat/review-bot:[0-9a-f]{40} origin --delete refs/heads/feat/review-bot$' = {
+                if ($tips.LeaseFails) { @{ Code = 1; Out = ''; Err = ' ! [rejected]        (delete) -> feat/review-bot (stale info)' } } else { '' }
+            }
             # 假的 worktree remove：挪进自测的临时目录（不递归删参数给的路径），最后随临时目录一起删。挪之前核对给的路径按真实路径
             # 在这个临时目录里面，不在就抛错、不动它（Get-RinneRoot 的取值以后变了，也挪不到真的 wt/ 下的目录）
             ' worktree remove '              = {
@@ -2391,7 +2400,10 @@ function Invoke-SelfTest {
                 Move-Item -LiteralPath $argv[-1] -Destination (Join-Path $tmp "removed-$([guid]::NewGuid().ToString('N'))"); ''
             }
             'rev-parse --verify --quiet refs/heads/feat/review-bot' = { if ($tips.LocalGone) { @{ Code = 1; Out = ''; Err = '' } } else { $tips.Local } }
-            ' branch -D feat/review-bot'     = { '' }
+            # 本地分支由 git 比对旧值再删：核对之后它又移动了，update-ref 拒绝。RefMoved 造这种情形
+            ' update-ref -d refs/heads/feat/review-bot [0-9a-f]{40}$' = {
+                if ($tips.RefMoved) { @{ Code = 1; Out = ''; Err = 'error: cannot lock ref ''refs/heads/feat/review-bot'': is at x but expected y' } } else { '' }
+            }
             '^git .* fetch '                 = { '' }
         }
         $log.Clear()
@@ -2399,8 +2411,13 @@ function Invoke-SelfTest {
         New-Item -ItemType Directory -Force -Path $tip | Out-Null
         Set-Content -LiteralPath (Join-Path $tip '.git') -Value 'gitdir: x'
         $line = Invoke-After -Pr 3 -CardId $cid
+        # 删除命令的参数：远端 push 带 --force-with-lease=<ref>:<合并时的 head> 与 --delete，本地 update-ref -d <ref> <合并时的 head>
+        $leaseLine = "push --force-with-lease=refs/heads/feat/review-bot:${head} origin --delete refs/heads/feat/review-bot"
+        $updateLine = "update-ref -d refs/heads/feat/review-bot ${head}"
         Add-RinneCase $cases '-After：持 merge 锁；回读通过后删远端子支线、持 git 锁移除 worktree 与本地分支' $false (-not (
-                $line -match '已合入 fffffff' -and @($log | Where-Object { $_ -match 'push origin --delete refs/heads/feat/review-bot' }).Count -eq 1 -and
+                $line -match '已合入 fffffff' -and @($log | Where-Object { $_ -match ([regex]::Escape($leaseLine) + '$') }).Count -eq 1 -and
+                @($log | Where-Object { $_ -match ([regex]::Escape($updateLine) + '$') }).Count -eq 1 -and
+                -not @($log | Where-Object { $_ -match ' branch -D | push origin --delete ' }).Count -and
                 @($log | Where-Object { $_ -match "worktree remove $([regex]::Escape((Join-Path (Get-RinneRoot) "wt/$cid")))$" }).Count -eq 1 -and
                 $locks[0] -eq 'merge' -and @($locks | Where-Object { $_ -eq 'git' }).Count -ge 2))
         Add-RinneCase $cases '-After：一并强制移除这个 PR 的 wt/tip-3' $false (-not (
@@ -2415,7 +2432,7 @@ function Invoke-SelfTest {
         $tryAfter = { $log.Clear(); try { Invoke-After -Pr 3 -CardId $cid | Out-Null; $null } catch { $_.Exception.Message } }
         $nothingDeleted = {
             (Test-Path -LiteralPath (Join-Path $tmp "wt/$cid")) -and (Test-Path -LiteralPath $tip) -and
-            -not @($log | Where-Object { $_ -match ' push origin --delete | worktree remove | branch -D ' }).Count
+            -not @($log | Where-Object { $_ -match ' push .*--delete | worktree remove | update-ref -d | branch -D ' }).Count
         }
         $extra = 'b' * 40
         & $remake
@@ -2434,16 +2451,30 @@ function Invoke-SelfTest {
         & $remake
         $err = & $tryAfter
         Add-RinneCase $cases '-After：远端子支线已经删了（ls-remote 找不到）：只清本地（worktree、wt/tip-3、本地分支）' $false (-not (
-                -not $err -and -not @($log | Where-Object { $_ -match ' push origin --delete ' }).Count -and
-                @($log | Where-Object { $_ -match ' branch -D feat/review-bot$' }).Count -eq 1 -and -not (Test-Path -LiteralPath $tip)))
+                -not $err -and -not @($log | Where-Object { $_ -match ' push .*--delete ' }).Count -and
+                @($log | Where-Object { $_ -match ([regex]::Escape($updateLine) + '$') }).Count -eq 1 -and -not (Test-Path -LiteralPath $tip)))
         $tips.RemoteCode = 0
         $tips.LocalGone = $true
         & $remake
         $err = & $tryAfter
-        Add-RinneCase $cases '-After：本地分支已经不在（远端对得上）：删远端、移除 worktree，不再 branch -D' $false (-not (
-                -not $err -and @($log | Where-Object { $_ -match ' push origin --delete refs/heads/feat/review-bot$' }).Count -eq 1 -and
-                -not @($log | Where-Object { $_ -match ' branch -D ' }).Count -and -not (Test-Path -LiteralPath $tip)))
+        Add-RinneCase $cases '-After：本地分支已经不在（远端对得上）：删远端、移除 worktree，不再 update-ref -d' $false (-not (
+                -not $err -and @($log | Where-Object { $_ -match ([regex]::Escape($leaseLine) + '$') }).Count -eq 1 -and
+                -not @($log | Where-Object { $_ -match ' update-ref -d | branch -D ' }).Count -and -not (Test-Path -LiteralPath $tip)))
         $tips.LocalGone = $false
+        # 核对之后远端尖又变了（别人推了新提交）：lease 失败，git 拒绝删除；抛错，而且发生在移除 worktree 之前，什么都没删
+        $tips.LeaseFails = $true
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：核对之后远端尖又变了（lease 失败）：抛错，worktree、wt/tip-3、本地分支都留着' $true ([bool]($err -and @($log | Where-Object { $_ -match ' push --force-with-lease=' }).Count -eq 1 -and
+                (Test-Path -LiteralPath (Join-Path $tmp "wt/$cid")) -and (Test-Path -LiteralPath $tip) -and
+                -not @($log | Where-Object { $_ -match ' worktree remove | update-ref -d | branch -D ' }).Count))
+        $tips.LeaseFails = $false
+        # 核对之后本地分支又移动了：update-ref 带旧值，git 拒绝，抛错（此时远端与 worktree 已经按核对过的尖处理完，本地分支留着）
+        $tips.RefMoved = $true
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：核对之后本地分支又移动了（update-ref 的旧值不符）：抛错，本地分支留着' $true ([bool]($err -and @($log | Where-Object { $_ -match ' update-ref -d ' }).Count -eq 1))
+        $tips.RefMoved = $false
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
         Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
         $wtBranch = 'feat/other-card'
