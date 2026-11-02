@@ -100,6 +100,22 @@ function ConvertTo-ReaperSafeTitle([string]$Title) {
     $t.Length -gt 40 ? $t.Substring(0, 40) : $t
 }
 
+# 结果文本的路径一律打码：结果 json 与控制台都要能过隐私检查。场景模块也要用它（Get-StuckDescription 在生成处先打码一次），所以放在这里，Suite 再导出。
+# 路径从盘符 / UNC（反斜杠或正斜杠写法）起。紧跟在开引号（" 或 '）后面的路径打到对应的闭引号为止，但下面两种不算闭引号：
+#   - 后面紧跟字母或数字：是 O'Brien 这样的撇号；
+#   - 到下一个引号（" 或 '）或行尾之间的第一个路径分隔符（\ 或 /）不是新路径的起点（X:\、X:/、\\、//）：目录名以撇号结尾的 'C:\Work\James' Music\x' 里，
+#     James' 之后的 Music\x 还是路径，提前收尾会让它没有盘符起点、第二遍打不到。第一个分隔符是新路径的起点时（'C:\a\b' 与 D:\c\d），
+#     后面是另一条路径，这里照旧收尾，那一条交给不带引号那一遍；不然引号会一路吞到下一条路径的撇号上，撇号后面的目录名反而漏出来。
+#     这样认不出收尾的，整段落到不带引号那一遍，宁可多打码。
+# 不带引号的路径只在 "、换行和路径里不可能有的字符（< > | ? *）处停。
+# 路径里常有空格、撇号、全角标点（C:\Work\John Smith\x、C:\Work\O'Brien Smith\x、含顿号或括号的目录名），所以空白、' 和全角标点都不是边界，
+# 路径后面紧跟的说明文字也宁可一起打码。
+function Hide-LocalPaths([string]$Text) {
+    $pathStart = '(?:[A-Za-z]:[\\/]|\\\\|(?<!/)//)'
+    $quotedHidden = $Text -replace ('(?<q>["'']){0}[^\r\n]*?\k<q>(?![\p{{L}}\p{{N}}])(?![^\r\n"''\\/]*(?<![A-Za-z]:)(?!\\\\|//)[\\/])' -f $pathStart), '${q}<path>${q}'
+    $quotedHidden -replace ($pathStart + '[^"\r\n<>|?*]*'), '<path>'
+}
+
 # 进程的句柄数与内存。进程刚退出时只认这一种情况，返回 Exited = $true（调用方照实写「进程在采样前退出」）：
 # 计数用 get_ 方法读：进程已退出时 .NET 抛 InvalidOperationException（PowerShell 包成 MethodInvocationException），在这里捕获。
 # 不用属性读：属性的 getter 抛错会被 PowerShell 吞成空值（句柄数 $null、内存 0），差值就成了「没增长」。
@@ -310,5 +326,5 @@ function Invoke-ReaperHost {
 # 本机现有的 reaper.exe 进程数（启动前后各取一次：有别人的 REAPER 在跑就不跑；跑完不该留下自己的）。
 function Get-ReaperProcessIds { Get-Process -Name reaper -ErrorAction SilentlyContinue | ForEach-Object { $_.Id } }
 
-Export-ModuleMember -Function Get-ReaperModalVerdict, ConvertTo-ReaperSafeTitle, Resolve-ReaperExitedUtc, Invoke-ReaperHost, Get-ReaperProcessIds, Get-ReaperProcessSample, Get-ReaperMarkProblem,
+Export-ModuleMember -Function Get-ReaperModalVerdict, ConvertTo-ReaperSafeTitle, Hide-LocalPaths, Resolve-ReaperExitedUtc, Invoke-ReaperHost, Get-ReaperProcessIds, Get-ReaperProcessSample, Get-ReaperMarkProblem,
     Get-ReaperProcessModulePaths, Test-ReaperSameFile, Get-ReaperFileSha256, Get-ReaperModuleVerdict

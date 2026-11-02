@@ -26,6 +26,8 @@ import {
     isFirstRunSceneId,
     overlayA11yProbe,
 } from "../first-run/measure.mjs";
+// 「文字矩形里有可量的像素」的判定：与 Input 的量尺是同一个函数（宽、高都至少 1 px），跳过要记账的口径也照 Input 的 measure
+import { hasPixels } from "../../tests/smoke-input-kit-page.mjs";
 
 /** 裸词条键、占位符、null 的扫描：共用的那一份，再加首启词条的前缀（rules.、tour.、hint.），见 fixtures/first-run/measure.mjs。 */
 export { findLeaks };
@@ -228,6 +230,8 @@ const COLOR_ANCHOR = "const c = parse(getComputedStyle(p).color);";
 const RECT_ANCHOR = "return { x: left, y: top, w: right - left, h: bottom - top };";
 const LAYER_ANCHOR = 'e.closest(".rn-scrim") ? "modal"';
 const ITEM_ANCHOR = 'tone: toneEl ? toneEl.getAttribute("data-tone") : "", text: text.slice(0, 48),';
+const CP_INIT_ANCHOR = "window.__cp = [];";
+const ZERO_SKIP_ANCHOR = "if (!sc && (r.w < 1 || r.h < 1)) continue;";
 
 /** 在共享探针上按锚点改写；锚点变了就抛错，不悄悄放过（共享探针另有人改时，这里必须跟着看一眼）。 */
 function derive(base, edits) {
@@ -274,7 +278,20 @@ export const OUT_CONTRAST_PROBE = derive(CONTRAST_PROBE, [
     [
         ITEM_ANCHOR,
         // 在叠层里、在按钮里：首启冒烟据此断言「叠层打开时只量叠层自己的字」与「按钮的分档」
-        `${ITEM_ANCHOR} inOverlay: Boolean(p.closest(".rn-scrim, .rn-tour")), inBtn: Boolean(p.closest("button")),`,
+        // el：所在元素的标签，跳过记账与 SKIP_OK 的判定认它
+        `${ITEM_ANCHOR} inOverlay: Boolean(p.closest(".rn-scrim, .rn-tour")), inBtn: Boolean(p.closest("button")), el: p.tagName.toLowerCase(),`,
+    ],
+    [
+        CP_INIT_ANCHOR,
+        // 整段没有可量像素的文字（矩形宽或高不足 1 px：字号为零、整段被裁掉，以及本来就不上屏的下拉选项与 SVG 提示）：
+        // 不进采样表，但记下来，由 measureOutputContrast 带出去
+        `${CP_INIT_ANCHOR}
+    window.__cpSkipped = [];`,
+    ],
+    [
+        ZERO_SKIP_ANCHOR,
+        // 共用探针在这里静默跳过：Output 改成记账，判定不变，条目的形状与 Input 的探针一样（前 48 字加所在元素的标签）
+        "if (!sc && (r.w < 1 || r.h < 1)) { window.__cpSkipped.push({ text: text.slice(0, 48), el: p.tagName.toLowerCase() }); continue; }",
     ],
     [
         COLOR_ANCHOR,
@@ -302,6 +319,8 @@ const dropHideText = (page) =>
 /**
  * 页内量尺的完整一遍（与 shared-measure 的 measureContrastOnPage 同做法：采样两遍确认静止 → 文字透明 → 整页截图量最差点 →
  * 核对截图期间没挪位 → 滚动区里的文字逐段滚进视野单独截图），区别只是用 Output 的分档。
+ * 返回的数组上带 skipped：这一画面里因为没有可量像素而跳过的文字 [{ text（前 48 字）, el（所在元素的标签）}]，与 Input 的量尺同一个口径。
+ * 跳过不是通过：Output 的对比度冒烟把按画面的跳过数打进输出，并断言跳过的只出自下拉选项与 SVG 提示（SKIP_OK）。
  */
 export async function measureOutputContrast(page, probe = OUT_CONTRAST_PROBE) {
     let items;
@@ -326,6 +345,8 @@ export async function measureOutputContrast(page, probe = OUT_CONTRAST_PROBE) {
         await settleScene(page);
     }
     if (last) throw new Error(`页面量不到静止画面：${last}`);
+    // 页内探针已经跳过的（没有可量像素的文字，最后一遍采样时记下的），再加下面按位置量时发现没有像素的
+    const skipped = await page.eval("[...window.__cpSkipped]");
     const out = [];
     if (items.some((it) => it.scrolled)) {
         await page.eval(
@@ -334,13 +355,19 @@ export async function measureOutputContrast(page, probe = OUT_CONTRAST_PROBE) {
     }
     for (const it of items) {
         if (!it.scrolled) {
-            if (it.r.w < 1 || it.r.h < 1) continue;
+            if (!hasPixels(it.r)) {
+                skipped.push({ text: it.text, el: it.el });
+                continue;
+            }
             out.push({ ...it, worst: worstContrast(png, it) });
             continue;
         }
         // 关于面板正文在滚动区里：逐段滚进视野，只截那一小块再量（此时页内文字仍是透明的）
         const r = await page.eval(`window.__cpPlace(${it.idx})`);
-        if (!r || r.w < 1 || r.h < 1) continue;
+        if (!hasPixels(r)) {
+            skipped.push({ text: it.text, el: it.el });
+            continue;
+        }
         const cx = Math.max(0, Math.floor(r.x));
         const cy = Math.max(0, Math.floor(r.y));
         const cw = Math.max(1, Math.ceil(r.x + r.w) - cx);
@@ -353,6 +380,7 @@ export async function measureOutputContrast(page, probe = OUT_CONTRAST_PROBE) {
         out.push({ ...it, r, worst: worstContrast(small, { ...it, r: { x: r.x - cx, y: r.y - cy, w: r.w, h: r.h } }) });
     }
     await dropHideText(page);
+    out.skipped = skipped;
     return out;
 }
 

@@ -12,6 +12,9 @@
 //   规则页旁插入链示意是 SVG，字的颜色取 fill，量的时候连同它自己的描边一起藏掉（理由见 fixtures/first-run/measure.mjs）；
 //   置灰的控件（规则页未放行时的两颗按钮、导览第 1 步的「上一步」）整体按 0.4 降级、本来就是不可用的画面，沿用 Input 页面冒烟「置灰的不判」的口径按 C 只记录；
 //   规则页另摆一个「放行后」（滚到底）的画面，两颗按钮恢复可用后照 A 档判。Output 没有紧急切断，叠层之上没有需要另量的东西。
+// 没有可量像素的文字（矩形宽或高不足 1 px：字号为零、整段被滚动区裁掉，以及本来就不上屏的下拉选项与 SVG 提示）不量，但不静默，口径与 Input 的对比度冒烟相同：
+//   每个画面的跳过数打进输出，并断言跳过的只出自下拉选项与 SVG 提示；别处的字被跳过要报。坏样例：规则页标题与正文里各摆一段字号为零的字，
+//   被跳过并记账、并被断言报出来；正例对照：同样没有像素的字摆在下拉选项与 SVG 提示里，记账但不算意外。
 // 无头浏览器的光栅路径与真机有极小差异，设计验收以真机为准。浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-output-contrast-page.mjs [仓库根]
@@ -20,6 +23,8 @@ import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 import { TIER_MIN } from "./shared-measure.mjs";
+// 跳过记账的口径与 Input 的对比度冒烟共用一份（SKIP_OK、unexpectedSkips、skipSummary 在 Input 的公共件里），不另写
+import { SKIP_OK, skipSummary, unexpectedSkips } from "./smoke-input-kit-page.mjs";
 import {
     LANGS,
     MESSAGE_CASES,
@@ -50,8 +55,26 @@ const worstOf = { A: null, B: null, C: null };
 const counts = { A: 0, B: 0, C: 0 };
 /** 按出处（选择器前缀）记每一类 A / B 档文字的最差值，防止某一类被别的类的高分盖住。 */
 const bySel = new Map();
+/** 按画面记没有可量像素而跳过的文字：[画面名, measureOutputContrast 返回的 skipped]。 */
+const skips = [];
+
+/**
+ * 没有可量像素的文字不量，但不静默：断言跳过的只出自下拉选项与 SVG 提示；别处的字被跳过是新情况，要有人看一眼。
+ * sink 缺省是本套的记录器；坏样例传一个替身，看同一条断言在坏页面上报不报红（不让本套真的失败）。
+ */
+function checkSkips(items, tag, sink = run) {
+    return sink.eq(
+        unexpectedSkips(items.skipped),
+        [],
+        `${tag}：没有可量像素而跳过的文字只许出自 ${SKIP_OK.join("、")}，别的元素里的字被跳过要报出来`,
+    );
+}
+/** 替身记录器：eq 只回答「相等吗」，不记失败。 */
+const probeSink = { eq: (got, want) => JSON.stringify(got) === JSON.stringify(want) };
 
 function judge(items, tag) {
+    skips.push([tag, items.skipped]);
+    checkSkips(items, tag);
     for (const it of items) {
         counts[it.tier]++;
         const v = it.worst.min;
@@ -138,6 +161,7 @@ try {
         );
     }
     run.log(`  C 档（只记录）：${counts.C} 段，最差 ${worstOf.C ? worstOf.C.v.toFixed(2) : "—"}:1`);
+    run.log(`  ${skipSummary(skips)}`);
     for (const [key, rec] of [...bySel].sort((a, b) => a[1].v - b[1].v).slice(0, 8)) {
         run.log(`    ${key}：最差 ${rec.v.toFixed(2)}:1（${rec.tag}）`);
     }
@@ -151,6 +175,76 @@ try {
         run.check(
             place.some((i) => i.tier === "A" && i.worst.min < TIER_MIN.A),
             `坏样例 lowcontrast：压低字色后常驻红字应低于 ${TIER_MIN.A}:1，实得 ${JSON.stringify(place.map((i) => i.worst.min.toFixed(2)))}`,
+        );
+    }
+
+    // ---- 跳过记账的坏样例：整段没有可量像素的文字不能被量尺悄悄丢掉 ----
+    // 字号为零的字：量尺不能崩（worstContrast 对一个像素都没采到的矩形会抛错），也不能悄悄放过：要被跳过、记进 measureOutputContrast 返回的 skipped，
+    // 并被「跳过的只许出自下拉选项与 SVG 提示」的断言报出来。滚动区外（规则页标题，页内探针跳过）与滚动区里（规则页正文，量的时候才发现没有像素）
+    // 各摆一段，两条跳过路径都走；先量一遍没摆之前的页面，确认本来一段都没跳过
+    await openOutput(page, server, box, "zh", "out-rules");
+    await releaseRules(page);
+    run.eq((await measureOutputContrast(page)).skipped, [], "坏样例前提：规则页放行后本来没有被跳过的文字");
+    await page.eval(
+        `(() => {
+            const zero = (text) => { const e = document.createElement("span"); e.style.setProperty("font-size", "0", "important"); e.textContent = text; return e; };
+            document.querySelector(".rn-rules__title").append(zero("零号外"));
+            document.querySelector('[data-part="rules.body"] .rn-rules__text').append(zero("零号内"));
+        })()`,
+    );
+    {
+        const items = await measureOutputContrast(page);
+        run.eq(
+            items.skipped.map((x) => `${x.el}:${x.text}`).sort(),
+            ["span:零号内", "span:零号外"],
+            "坏样例：字号为零的两段字（滚动区外、滚动区里各一段）应被跳过并记账",
+        );
+        run.eq(
+            unexpectedSkips(items.skipped).sort(),
+            ["span:零号内", "span:零号外"],
+            "坏样例：被跳过的字在 span 里，不在下拉选项与 SVG 提示之内，应被点名",
+        );
+        run.check(
+            !checkSkips(items, "坏样例", probeSink),
+            "坏样例：每个画面都过的那条断言（跳过的只出自下拉选项与 SVG 提示）在这张页面上应报红",
+        );
+        run.check(!items.some((i) => /零号/.test(i.text)), "坏样例：被跳过的字不该出现在量出来的结果里");
+        run.check(items.length > 10, `坏样例：其余的字照常量到，实得 ${items.length} 段`);
+    }
+    // 正例对照：同样没有可量像素的字，摆在下拉选项和 SVG 提示里，照样记账，但不算意外
+    await openOutput(page, server, box, "zh", "out-connected");
+    {
+        const before = await measureOutputContrast(page);
+        run.check(before.skipped.length > 0, "前提：普通画面里缩放下拉的选项被记账（记账通道是通的）");
+        await page.eval(
+            `(() => {
+                const host = document.querySelector('[data-part="track.this.name"]').parentElement;
+                const sel = document.createElement("select");
+                const opt = document.createElement("option");
+                opt.textContent = "零号选项";
+                sel.append(opt);
+                host.append(sel);
+                const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+                svg.setAttribute("width", "4");
+                svg.setAttribute("height", "4");
+                const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+                title.textContent = "零号提示";
+                svg.append(title);
+                host.append(svg);
+            })()`,
+        );
+        const after = await measureOutputContrast(page);
+        run.eq(
+            after.skipped
+                .map((x) => `${x.el}:${x.text}`)
+                .filter((x) => /零号/.test(x))
+                .sort(),
+            ["option:零号选项", "title:零号提示"],
+            "正例对照：摆在下拉选项与 SVG 提示里的字同样被跳过并记账",
+        );
+        run.check(
+            checkSkips(after, "正例对照", probeSink),
+            "正例对照：出自下拉选项与 SVG 提示的跳过不算意外，同一条断言不报红",
         );
     }
 

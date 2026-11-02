@@ -107,8 +107,8 @@ Windows：`Get-FileHash -Algorithm SHA256 .\{{WIN_FILE}}`；macOS：`shasum -a 2
 ## Unsigned on macOS
 
 The macOS plug-ins are not signed with an Apple Developer ID and not notarized. Unlock first, then open your DAW:
-run `install-macos.sh` from the zip. If macOS says it cannot verify the plug-in, do not click "Move to Trash" —
-click "Done", run the installer again, retry. Steps in `INSTALL.md` at the tag.
+run `install-macos.sh` from the extracted `Rinne` folder. If macOS says it cannot verify the plug-in, do not click
+"Move to Trash" — click "Done", run the installer again, retry. Steps in `INSTALL.md` at the tag.
 
 ## Hosts tested and known issues
 
@@ -135,7 +135,7 @@ A published release is never rewritten. If this version is bad, publish a PATCH 
 
 - 两个插件一起升级，版本必须相同；工程文件的兼容性见 CHANGELOG。
 - 下载后先校验 SHA-256：Windows `Get-FileHash -Algorithm SHA256`，macOS `shasum -a 256 -c`。
-- macOS 的包没有签名也没有公证：先解锁再打开 DAW（运行 zip 里的 `install-macos.sh`）；弹出无法验证时
+- macOS 的包没有签名也没有公证：先解锁再打开 DAW（运行解压出的 `Rinne` 文件夹里的 `install-macos.sh`）；弹出无法验证时
   不要点「移到废纸篓」，点「完成」再重跑安装脚本。
 - 测试过的宿主见 `docs/DAW_COMPATIBILITY.md`，已知问题见 `docs/KNOWN_ISSUES.md`。
 - 对应源码：Rinne 的 tag `{{TAG}}`（commit `{{SOURCE_COMMIT}}`）、JUCE `{{JUCE_VERSION}}`（commit `{{JUCE_COMMIT}}`）、

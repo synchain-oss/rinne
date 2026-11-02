@@ -543,24 +543,33 @@ try {
 
     // 乱序旧帧与未知配对状态整帧丢弃
     await openOutput(page, server, box, "zh", "out-connected");
-    // emit 是同步派发：在同一次求值里发完立刻读，镜像回声（每 250 ms 覆盖一次）不会把「被错收的帧」悄悄冲掉
+    // emit 是同步派发：在同一次求值里发完立刻读，镜像回声（每 250 ms 覆盖一次）不会把「被错收的帧」悄悄冲掉。
+    // 补发的帧必须真的送到了页面（__fx.emit 返回 true）：没送到时「被丢弃」和「没发出去」分不开，断言会空转
     {
         const shown = await page.eval(`(() => {
-            window.__fx.emit("rinne.state", { seq: 1, role: "output", group: "H", lang: "en", version: "9.9.9" });
-            window.__fx.emit("rinne.pair", { seq: 99999, state: "notARealState", peer: { name: "evil" } });
+            const sent = [
+                window.__fx.emit("rinne.state", { seq: 1, role: "output", group: "H", lang: "en", version: "9.9.9" }),
+                window.__fx.emit("rinne.pair", { seq: 99999, state: "notARealState", peer: { name: "evil" } }),
+            ];
             const sel = document.querySelector('${gb("group")} [role="radio"][aria-checked="true"]');
             return [
+                sent,
                 sel ? sel.getAttribute("data-group") : null,
                 document.documentElement.lang,
                 document.querySelector('${gb("pair.pill")}').getAttribute("data-state"),
             ];
         })()`);
-        run.eq(shown, ["A", "zh", "connected"], "seq 更小的旧状态帧与未知配对状态都被丢弃");
+        run.eq(shown[0], [true, true], "前提：补发的旧状态帧与未知配对状态帧都送到了页面（__fx.emit 返回 true）");
+        run.eq(shown.slice(1), ["A", "zh", "connected"], "seq 更小的旧状态帧与未知配对状态都被丢弃");
     }
     // 坏载荷：缺字段、错类型不抛错、不白屏
-    await page.eval(`window.__fx.emit("rinne.state", { seq: 99998, send: "oops", notices: 7, build: [] })`);
-    await page.eval(
-        `window.__fx.emit("rinne.pair", { seq: 99999, state: "connected", peer: 5, self: "x", verify: 7 })`,
+    run.eq(
+        await page.eval(`[
+            window.__fx.emit("rinne.state", { seq: 99998, send: "oops", notices: 7, build: [] }),
+            window.__fx.emit("rinne.pair", { seq: 99999, state: "connected", peer: 5, self: "x", verify: 7 }),
+        ]`),
+        [true, true],
+        "前提：两帧坏载荷都送到了页面（__fx.emit 返回 true）",
     );
     await sleep(page, 120);
     run.eq((await readPage(page)).pill, "connected", "坏载荷不影响显示，页面不抛错");

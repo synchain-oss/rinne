@@ -102,9 +102,11 @@ function Invoke-ReaperLaunch {
 function Test-HostStuck($Run) { $p = $Run.PSObject.Properties['StillRunning']; [bool]($p -and $p.Value) }
 
 # 没能结束的进程的说明：进程号加原因（结束动作报的错，或结束之后 5 秒仍未退出）。
+# 结束动作的报错是原始文字，可能带本机路径：在这里先打码一次。下游的场景说明、haltedBecause、停手原因与控制台还会各过一次 Hide-LocalPaths，这是纵深防护；
+# 只打码报错本身，不打码整句，免得路径后面的「它可能还在运行」被不带引号的那一遍一起吞掉。
 function Get-StuckDescription($Run) {
     $killError = $Run.PSObject.Properties['KillError']
-    $why = ($killError -and $killError.Value) ? "结束动作报错：$($killError.Value)" : '结束之后 5 秒仍未退出'
+    $why = ($killError -and $killError.Value) ? "结束动作报错：$(Hide-LocalPaths "$($killError.Value)")" : '结束之后 5 秒仍未退出'
     "REAPER 进程 $(Get-RunPid $Run) 没能结束（$why），它可能还在运行"
 }
 
@@ -662,6 +664,6 @@ function Invoke-ReaperScenario {
     $o | Add-Member -NotePropertyName Seconds -NotePropertyValue ([math]::Round($sw.Elapsed.TotalSeconds, 1)) -PassThru
 }
 
-Export-ModuleMember -Function New-Outcome, Invoke-Native, New-ReaperContext, Get-ReaperScenarioKinds, Invoke-ReaperScenario, Invoke-ReaperLaunch, Get-HostFailure, Test-HostStuck, Get-CompareVerdict,
+Export-ModuleMember -Function New-Outcome, Invoke-Native, New-ReaperContext, Get-ReaperScenarioKinds, Invoke-ReaperScenario, Invoke-ReaperLaunch, Get-HostFailure, Test-HostStuck, Get-StuckDescription, Get-CompareVerdict,
     Get-ReaperLockMutexName, Test-RinneLockFree, Test-ReaperProbeCell, Get-ReaperAnalyzerSummary,
     ConvertTo-ReaperCompareRow, Get-ReaperCompareHead, Invoke-ReaperProbeAnalyzer, Add-ReaperModuleEvidence, ConvertTo-ReaperModuleShown

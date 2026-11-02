@@ -13,7 +13,8 @@
 // 末尾是坏样例：夹具的 ?defect=overflow / place3 / rawkey 必须被上面各项抓出来（量尺本身可信）；首启另有：
 //   普通页面上没有叠层要报、第 N 步按第 M 步查要报、导览说明框里两段字互压要报、首启词条的裸键要扫出来、
 //   首启画面带上危险态（配对冲突）或环路在流动（已连接）要报（夹具喂首启控制器的运行态写死为假，与真页面的判断分叉时要发现），
-//   环路是否在流动按桥上收到的原帧求（只改原帧、不改页面快照，断言要跟着原帧走）。
+//   环路是否在流动按桥上收到的原帧求（只改原帧、不改页面快照，断言要跟着原帧走），
+//   序号更小的旧帧不顶掉原帧（先断言补发的帧确实送到了，再用同一帧改成更大的序号对照：发出去之后原帧被顶掉，旧帧没翻是因为序号，不是因为没送到）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-output-fit-page.mjs [仓库根]
@@ -280,10 +281,12 @@ try {
             );
         }
         // 求环路是否在流动用的是桥上收到的原帧（和真页面一样），不是页面规范化之后的快照：只改其中一边，断言要跟着原帧走。
-        // 每条都把「改原帧」和「求值」放进同一次页内求值：周期回声每 250 ms 会发一帧新帧顶掉原帧，分成两次求值会夹进回声
+        // 每条都把「改原帧」和「求值」放进同一次页内求值：周期回声每 250 ms 会发一帧新帧顶掉原帧，分成两次求值会夹进回声。
+        // 经 __fx.emit 补发帧的写法把返回值记进 emitted（夹具约定：帧送到了页面才返回 true，没送到返回 false），
+        // 没发帧的写法 emitted 保持 null；补发帧的断言要同时看 emitted，不然「没送到」和「送到了但被序号拦下」分不开
         const feedAfter = (edit) =>
             page.eval(
-                `(() => { ${edit}; const f = ${FIRST_RUN_FEED_PROBE}; f.snapBypassed = window.__fx.page.snapshot().state.send.bypassed; return f; })()`,
+                `(() => { let emitted = null; ${edit}; const f = ${FIRST_RUN_FEED_PROBE}; f.snapBypassed = window.__fx.page.snapshot().state.send.bypassed; f.emitted = emitted; return f; })()`,
             );
         const rawBypassed = (v) =>
             `const r = window.__fx.raw; r.state = { ...r.state, send: { ...r.state.send, bypassed: ${v} } };`;
@@ -301,13 +304,26 @@ try {
             run.eq(f.snapBypassed, true, "前提：只改了原帧，页面规范化之后的快照仍是旁路");
             run.eq(f.flowing, true, "坏样例：原帧说没旁路，环路就在流动（断言跟着原帧走，不是跟着页面快照走）");
         }
-        // 乱序的旧帧不算（和真页面一样只认序号递增的帧）：补发一个序号更小、说旁路了的旧 rinne.state，原帧不该被它顶掉
+        // 乱序的旧帧不算（和真页面一样只认序号递增的帧）：补发一个序号更小、说旁路了的旧 rinne.state，原帧不该被它顶掉。
+        // 「没顶掉」只有在帧确实送到了页面时才说明序号拦住了它：先断言 emit 返回 true；再用同一帧改成更大的序号对照，
+        // 它发出去之后原帧被顶掉、环路不再流动，证明这条通道真能改变结果，旧帧没翻是因为序号，不是因为没送到
+        const staleOrNewer = (delta) =>
+            `const r = window.__fx.raw.state; emitted = window.__fx.emit("rinne.state", { ...r, seq: r.seq ${delta}, send: { ...r.send, bypassed: true } });`;
         await setModel(page, { state: "connected", send: { bypassed: false } });
         {
-            const f = await feedAfter(
-                `const r = window.__fx.raw.state; window.__fx.emit("rinne.state", { ...r, seq: r.seq - 5, send: { ...r.send, bypassed: true } });`,
-            );
+            const f = await feedAfter(staleOrNewer("- 5"));
+            run.eq(f.emitted, true, "前提：序号更小的旧帧确实送到了页面（__fx.emit 返回 true），不是没发出去");
             run.eq(f.flowing, true, "坏样例：序号更小的旧帧（说旁路了）不该顶掉原帧，已连接的环路仍在流动");
+        }
+        await setModel(page, { state: "connected", send: { bypassed: false } });
+        {
+            const f = await feedAfter(staleOrNewer("+ 1"));
+            run.eq(f.emitted, true, "对照：序号更大的同一帧也送到了页面（__fx.emit 返回 true）");
+            run.eq(
+                f.flowing,
+                false,
+                "对照：同一帧改用更大的序号，原帧被顶掉、说旁路了，环路不再流动（通道真能改变结果）",
+            );
         }
     }
     {
