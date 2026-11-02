@@ -1,6 +1,6 @@
 {
   "page": "guide",
-  "note": "fr 已由 AI 逐条复核，改动与理由见 docs/validation/i18n-review-log.md；待维护者抽检，抽检通过后清空 entries。 四条规则（rules.r<N>.lead / body）的 fr 由 docs/hard-rules.i18n.json 的 frReview 记录，不在这里。",
+  "note": "fr 已逐条复核，改动与理由见 docs/validation/i18n-review-log.md；待维护者抽检，抽检通过后清空 entries。 四条规则（rules.r<N>.lead / body）的 fr 由 docs/hard-rules.i18n.json 的 frReview 记录，不在这里。",
   "entries": {
     "rules.title": {
       "fr": "À lire avant d’utiliser Rinne : ces quatre règles déterminent si la boucle se ferme — et si elle peut abîmer vos oreilles ou vos enceintes.",

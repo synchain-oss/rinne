@@ -1,6 +1,6 @@
 {
   "page": "input",
-  "note": "fr 已由 AI 逐条复核，改动与理由见 docs/validation/i18n-review-log.md；待维护者抽检，抽检通过后清空 entries。",
+  "note": "fr 已逐条复核，改动与理由见 docs/validation/i18n-review-log.md；待维护者抽检，抽检通过后清空 entries。",
   "entries": {
     "in.pair.searching": {
       "fr": "AUCUN OUTPUT",

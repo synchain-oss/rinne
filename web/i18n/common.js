@@ -347,7 +347,7 @@ export default {
         "about.adv.tail.infinite": "Infini",
         "about.adv.tail.s30": "30\u00a0s",
         "about.adv.tailTip":
-            "Indique à l’hôte la durée de queue (tail) de ce plug-in, pour qu’il ne le suspende pas pendant le silence et n’interrompe pas la boucle. Auto = infini en VST3, 30 s en AU.",
+            "Indique à l’hôte la durée de queue (tail) de ce plug-in, pour qu’il ne le suspende pas pendant le silence et n’interrompe pas la boucle. Auto = infini en VST3, 30\u00a0s en AU.",
         "about.adv.diagLog": "Enregistrer un journal de diagnostic",
         "about.adv.diagLogTip":
             "Ajoute les événements récents de la boucle aux diagnostics pour les rapports de bug\u00a0; désactivé par défaut. Réglage propre à cet ordinateur, valable pour tous les projets.",

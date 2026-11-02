@@ -6,7 +6,7 @@
 - **Result**: 32 UI strings and the lead paragraph of the hard rules were changed (wording, terminology, grammar, decimal point); the other 303 registered strings and the four rule bodies were kept as they were. No Chinese or English text was touched.
 - **Length**: compared with the first-draft French, 31 of the 32 changed strings grew by 15 % or less (several are shorter); the one that grows more is explained below. Every string stays inside its text budget, and `check-i18n`, `check-text-fit` and the font coverage check all pass.
 - **Factory presets**: typography only in four preset names (curly apostrophe, no-break space before `ms` / `%`); wording unchanged.
-- **Status**: AI cross-check finished; the maintainer spot-check is **still pending**. `frReview.status` in `docs/hard-rules.i18n.json` stays `pending`, and the four `web/i18n/fr-review/*.json` files keep their entries (status "已复核，待用户抽检") until the spot-check comment arrives.
+- **Status**: cross-check finished; the maintainer spot-check is **still pending**. `frReview.status` in `docs/hard-rules.i18n.json` stays `pending`, and the four `web/i18n/fr-review/*.json` files keep their entries (status "已复核，待用户抽检") until the spot-check comment arrives.
 
 ## 范围与口径
 
@@ -62,7 +62,7 @@
 |---|---|---|---|
 | `common.footer.helpTip` | Revoir les règles et le guide | Revoir les règles et la visite | 导览在 fr 里统一叫「visite」（规则页按钮、导览全文都是），这里的「guide」与它不一致 |
 | `band.action.takeoverTip` | Cette instance perdra le groupe. | L’autre instance perdra ce groupe. | 「Cette instance」会被读成当前实例；zh / en 指的是被接管的那个实例 |
-| `common.pair.srMismatch` | FRÉQ. INCOHÉRENTE | ÉCHANT. DIFFÉRENT | 「FRÉQ. INCOHÉRENTE」可被读成音频频率不一致；改成明确指采样率的「ÉCHANT. DIFFÉRENT」（缩写是状态灯短标签的宽度所迫，与下面两条消息的「Échantillonnage différent」同词），字数与原文相同 |
+| `common.pair.srMismatch` | FRÉQ. INCOHÉRENTE | ÉCHANT. DIFFÉRENT | 「FRÉQ. INCOHÉRENTE」可被读成音频频率不一致；改成明确指采样率的「ÉCHANT. DIFFÉRENT」（缩写是状态灯短标签的宽度所迫，与下面两条消息的「Échant. différent」同词），字数与原文相同 |
 | `about.adv.tailTip` | Indique à l’hôte la durée de queue de ce plug-in, pour qu’il ne le suspende pas pendant le silence et n’interrompe pas la boucle. Auto = infini en VST3, 30 s en AU. | Indique à l’hôte la durée de queue (tail) de ce plug-in, pour qu’il ne le suspende pas pendant le silence et n’interrompe pas la boucle. Auto = infini en VST3, 30 s en AU. | 选项名按业内说法保留英文 Tail，说明里补上 (tail) 让两处对得上 |
 
 ### Input（`web/i18n/input.js`）
@@ -146,6 +146,7 @@
 5. **状态灯 stale 写作 LIAISON PERDUE**（术语表初稿是 PERDU），因为单写「perdu」不说什么丢了。
 6. 工厂预设的 fr 名（下表）：用字照旧稿，只修了排版，请看名字是否可以。
 7. **采样率不一致用了缩写「Échant.」**（`common.pair.srMismatch`、`band.in.srMismatch`、`band.out.srMismatch`，三条在下面抽检表里单列一行）。为不比初译长 15 % 用了缩写，全写会让 `band.out.srMismatch` 超 24 %；状态灯和两条消息用同一个词。要保留缩写还是全写（Échantillonnage），请你定。
+8. **小数点**：三语统一用「.」，还是 fr 按法语习惯用「,」？我按三语统一用「.」定稿（与 zh、en 一致）。词条里受影响的只有两条（下面抽检表里同一行）：`in.dly.noteTipD`（「1.5 ×」）和 `in.lim.ceilingTip`（步进「0.1」）；其余带点的数字是版本号和许可名（GPL-3.0、26.4、1.1），不受影响。要改成「,」的话，这两条一并改，零碎改法我来做。
 
 | id | zh | en | fr |
 |---|---|---|---|
