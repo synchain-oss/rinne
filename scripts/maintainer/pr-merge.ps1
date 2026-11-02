@@ -259,11 +259,29 @@ function Get-DispositionRows {
     $rows.ToArray()
 }
 
+<# 处置汇总表的一行里取某一列的单元格（认不出表头、或这一列不存在时为 $null）。 #>
+function Get-RowCell {
+    param($Row, [Parameter(Mandatory)][string]$Name)
+    if ($Row.Cols -and $Row.Cols.ContainsKey($Name) -and $Row.Cols[$Name] -lt $Row.Cells.Count) { return $Row.Cells[$Row.Cols[$Name]] }
+    return $null
+}
+
+<# 这一行是不是【红旗】【重要】：级别列写红旗或重要（带不带【】都认）；认不出级别列时，任何一格里有【红旗】或【重要】。 #>
+function Test-SevereRow {
+    param($Row)
+    $level = Get-RowCell $Row '级别'
+    if ($level) { return [bool]($level -match '红旗|重要') }
+    @($Row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0
+}
+
 <#
-  处置汇总表里判为「不改」「不采纳」「挂账」「暂不」「维持」的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。
-  同一条意见按「位置」认（去掉 markdown 标记；没有位置列时按摘要），以最后一次处置为准：后来写了「已修」并附提交的，
-  不再要用户豁免；后来才判为不改 / 挂账的，照样列出。单元格先去掉 * _ 与反引号再认决定词（「**不改**」也认得出来），
-  决定词出现在处置列任意位置都算；「采纳」「已采纳」不是拒绝。
+  处置汇总表里没有清掉的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。
+  严重行默认挂账：只有处置列（去掉 * _ 与反引号之后）以「已修」「修复」「已改」「采纳」「已采纳」开头、不含拒绝词
+  （「不改」「不采纳」「挂账」「暂不」「维持」「未修」「搁置」「驳回」「不处理」「延后」「暂缓」「忽略」等），而且处置列或它右边的
+  列里附了提交号，这一行才算清掉。别的写法一律挂账：词表外的词（「无需修改」「误报」「设计如此」「待修复」「已处理」）、
+  空处置、只写「采纳」没有提交号，以及认不出处置列的表（逐格扫描没法确定哪一格是处置）。
+  同一条意见按「位置 + 摘要」认（去掉 markdown 标记），以最后一次处置为准：后来写了已修并附提交的，不再要用户豁免；
+  后来才改成别的写法的，照样列出。
 #>
 function Get-DeferredSevere {
     param([object[]]$Items)
@@ -275,29 +293,23 @@ function Get-DeferredSevere {
         $rounds.Add([pscustomobject]@{ Round = [int]$m.Round; Order = $order; Rows = @(Get-DispositionRows $i.Body) })
         $order++
     }
+    $reject = '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略'
     # 同一个位置以轮次靠后的那一行为准；同一轮里以行序靠后的为准
     $latest = @{}
     foreach ($r in @($rounds | Sort-Object Round, Order)) {
         foreach ($row in @($r.Rows)) {
-            $cell = { param($name) if ($row.Cols -and $row.Cols.ContainsKey($name) -and $row.Cols[$name] -lt $row.Cells.Count) { $row.Cells[$row.Cols[$name]] } else { $null } }
-            $level = & $cell '级别'
-            $severe = if ($level) { $level -match '红旗|重要' } else { @($row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0 }
-            if (-not $severe) { continue }
-            $loc, $sum = (& $cell '位置'), (& $cell '摘要')
+            if (-not (Test-SevereRow $row)) { continue }
+            $loc, $sum = (Get-RowCell $row '位置'), (Get-RowCell $row '摘要')
             # 「位置 + 摘要」才算同一条：同一个位置上的两条不同意见（或位置写成 —、全局）不会互相冲掉；
             # 改写了摘要的行认不成同一条，已修清不掉原来的挂账——宁可多问用户一次
             $key = (@($loc, $sum) | Where-Object { $_ }) -join ' | '
             if (-not $key) { $key = $row.Line }
             $at = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) { $row.Cols['处置'] } else { -1 }
-            $decision = if ($at -ge 0) { $row.Cells[$at] } else { $row.Cells -join ' ' }
+            $decision = if ($at -ge 0) { $row.Cells[$at] } else { '' }
             # 「附提交」只在处置列和它右边的列里找，而且串里至少有一个 a-f 字母（评论编号、运行编号这类纯数字不算）
-            $proof = @($row.Cells | Select-Object -Skip ([Math]::Max($at, 0)) | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count
-            if (-not $decision -or $decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略') {
-                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $true }
-            } elseif (($decision -match '已修|修复|已改|采纳') -and $proof) {
-                # 后来写明已修 / 采纳并附提交：这条不再要用户豁免
-                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $false }
-            }
+            $proof = $at -ge 0 -and @($row.Cells | Select-Object -Skip $at | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count -gt 0
+            $cleared = $decision -and $decision -notmatch $reject -and $decision -match '^(?:已修|修复|已改|已?采纳)' -and $proof
+            $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = -not $cleared }
         }
     }
     @($latest.Values | Where-Object Deferred | ForEach-Object Line)
@@ -1570,6 +1582,24 @@ function Invoke-SelfTest {
         & $bad '处置列是空的：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '') } 'needs-user'
         & $bad '处置写不修复（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '不修复' 'd62c5dc') } 'needs-user'
         & $bad '先挂账、后写已修但没附提交：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修') } 'needs-user'
+        # 严重行默认挂账：只有「处置列以已修 / 修复 / 已改 / 采纳开头、不含拒绝词、处置列及右侧有提交号」才算清掉，
+        # 别的写法（词表外的词、空处置、没提交号、没有处置列）一律要用户豁免。下面四种措辞各一例，加空处置与只写「采纳」没提交号
+        foreach ($w in '无需修改', '误报', '设计如此', '待修复', '计划修复', '已处理') {
+            & $bad "【重要】处置写「$w」（词表外，没提交号）：默认挂账" { param($f) & $addRow $f 1 (& $deferCell '【重要】' $w) } 'needs-user'
+        }
+        & $bad '【红旗】处置写「误报」：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【红旗】' '误报') } 'needs-user'
+        & $bad '【重要】处置写「待修复」且附了提交串（含「修复」二字）：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '待修复' 'd62c5dc') } 'needs-user'
+        & $bad '【重要】处置写「无需修改」且附了提交串：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '无需修改' 'd62c5dc') } 'needs-user'
+        & $bad '【重要】处置只写「采纳」没有提交号：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '采纳') } 'needs-user'
+        & $bad '【重要】处置写「已修，其余不改」且附了提交串：含拒绝词，默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修，其余不改' 'd62c5dc') } 'needs-user'
+        & $bad '【重要】处置写「已修」但提交串在处置列左边：默认挂账' { param($f) & $addRow $f 1 '| abc1234 | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
+        & $bad '【重要】写在没有表头（认不出处置列）的表里，即使写「已修」并附提交串：默认挂账' { param($f) $a = (@($f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' }) | Where-Object { (Get-AgentMarker $_.Body).Round -eq 1 })[0]; $a.Body += "`n`n| 9 | bot | 【重要】 | a.mjs:1 | x | 已修 | d62c5dc |" } 'needs-user'
+        # 清得掉的写法：已修 / 修复 / 已改 / 采纳 / 已采纳（带不带 markdown 标记都行），处置列或右侧附提交号
+        foreach ($w in '已修', '已修复', '修复', '已改', '采纳', '已采纳', '**已修**', '采纳：补了用例') {
+            & $bad "【重要】处置写「$w」并附提交号：清掉，不要豁免" { param($f) & $addRow $f 1 (& $deferCell '【重要】' $w 'd62c5dc') } 'ready'
+        }
+        & $bad '【红旗】处置写「已修」并附提交号：清掉' { param($f) & $addRow $f 1 (& $deferCell '【红旗】' '已修' 'd62c5dc') } 'ready'
+        & $bad '提交号写在处置格里（处置列自己带 sha）：清掉' { param($f) & $addRow $f 1 '| 9 | bot | 【重要】 | a.mjs:1 | x | 已修 d62c5dc | 理由 |' } 'ready'
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
         & $bad '缺 gates json' { param($f) $f.Gates = $null }
         & $bad 'gates 的 sha 不是 head' { param($f) $f.Gates.sha40 = 'e' * 40 }
