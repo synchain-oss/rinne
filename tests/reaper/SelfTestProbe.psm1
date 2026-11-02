@@ -757,6 +757,21 @@ function Get-ListingCases([string]$Tmp) {
     & $add '落盘清单：同一把盐下同一个名字的散列不变（前后两份能对上），不同的名字不同' $false (
         (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -ceq (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -and
         (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -cne (Get-ReaperListingShownName -EntryName 'notes.txt' -Salt $salt))
+    # 清单的键是别人的文件名：文档目录里有叫 Keys、Count、Values 的文件时，字典里就有同名条目，属性读返回的是条目而不是集合，前后比较会悄悄比错
+    $shadowBefore = [ordered]@{ 'Keys' = '5|10|0|1'; 'Count' = '6|10|0|1'; 'Values' = '7|10|0|1'; 'plain.txt' = '8|10|0|1' }
+    $shadowAfter = [ordered]@{}
+    foreach ($shadowName in $shadowBefore.get_Keys()) { $shadowAfter[$shadowName] = $shadowBefore[$shadowName] }
+    $shadowSame = Compare-ReaperProbeLogListing -Before $shadowBefore -After $shadowAfter -Salt $salt
+    & $add '清单比较：条目名叫 Keys、Count、Values 时，前后没变不判变，条目数是 4' $false ($shadowSame.Same -and $shadowSame.Count -eq 4)
+    $shadowAfter['Count'] = '6|10|0|2'
+    $shadowChanged = Compare-ReaperProbeLogListing -Before $shadowBefore -After $shadowAfter -Salt $salt
+    & $add '清单比较：叫 Count 的条目变了照样判变，只报这一项，名字只写散列' $true (
+        -not $shadowChanged.Same -and @($shadowChanged.Changed).Count -eq 1 -and $shadowChanged.Changed[0] -ceq ('changed:' + (Get-ReaperListingShownName -EntryName 'Count' -Salt $salt)))
+    $shadowAfter.Remove('Keys'); $shadowAfter['Extra'] = '1|1|0|1'
+    $shadowMoved = Compare-ReaperProbeLogListing -Before $shadowBefore -After $shadowAfter -Salt $salt
+    & $add '清单比较：叫 Keys 的条目被删、新增一个条目，照样各报一项' $true (@($shadowMoved.Changed | Where-Object { $_ -cmatch '^removed:other-' }).Count -eq 1 -and @($shadowMoved.Changed | Where-Object { $_ -cmatch '^added:other-' }).Count -eq 1)
+    $shadowSafe = ConvertTo-ReaperSafeListing -Listing $shadowBefore -Salt $salt
+    & $add '落盘清单：条目名叫 Keys、Count、Values 时，条目一个不少（4 项），值原样' $false ($shadowSafe.get_Count() -eq 4 -and @($shadowSafe.get_Values() | Where-Object { $_ -ceq '6|10|0|1' }).Count -eq 1)
     $salt2 = New-ReaperListingSalt
     & $add '落盘清单：换一把盐（每轮一把随机盐）同一个名字的散列就不同；盐是 32 位十六进制，两次取的不一样' $true (
         $salt -cmatch '^[0-9a-f]{32}$' -and $salt -cne $salt2 -and (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt) -cne (Get-ReaperListingShownName -EntryName 'secret-song.wav' -Salt $salt2))

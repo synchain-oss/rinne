@@ -276,6 +276,21 @@ function Get-SnapshotCases([string]$Tmp) {
     $s4 = Get-ReaperDefaultCfgSnapshot -Root $root
     (Get-Item -LiteralPath (Join-Path $root 'sub')).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-5)
     & $add '清单：只有目录自己的时间戳变了不报（它滞后，会误报；目录里的变动看文件项）' $false ((Compare-ReaperDefaultCfgSnapshot -Before $s4 -After (Get-ReaperDefaultCfgSnapshot -Root $root)).Same)
+    # 目录里有叫 Keys、Count、Values 的文件：快照字典里就有同名条目，属性读返回的是条目而不是集合，前后比较会悄悄比错
+    $namesRoot = Join-Path $Tmp 'snap-names'
+    $null = New-Item -ItemType Directory -Path $namesRoot
+    foreach ($fileName in 'Keys', 'Count', 'Values') { Set-Content -LiteralPath (Join-Path $namesRoot $fileName) -Value $fileName }
+    $n0 = Get-ReaperDefaultCfgSnapshot -Root $namesRoot
+    $nSame = Compare-ReaperDefaultCfgSnapshot -Before $n0 -After (Get-ReaperDefaultCfgSnapshot -Root $namesRoot)
+    & $add '清单：目录里有叫 Keys、Count、Values 的文件，没变时不报，条目数是 3' $false ($nSame.Same -and $nSame.Count -eq 3)
+    Add-Content -LiteralPath (Join-Path $namesRoot 'Count') -Value 'more'
+    $n1 = Get-ReaperDefaultCfgSnapshot -Root $namesRoot
+    $nChanged = Compare-ReaperDefaultCfgSnapshot -Before $n0 -After $n1
+    & $add '清单：叫 Count 的文件变了照样判变，只报这一项' $true (-not $nChanged.Same -and @($nChanged.Changed).Count -eq 1 -and $nChanged.Changed[0] -ceq 'changed:Count')
+    Remove-Item -LiteralPath (Join-Path $namesRoot 'Keys')
+    Set-Content -LiteralPath (Join-Path $namesRoot 'Values2') -Value 'v2'
+    $nMoved = Compare-ReaperDefaultCfgSnapshot -Before $n1 -After (Get-ReaperDefaultCfgSnapshot -Root $namesRoot)
+    & $add '清单：叫 Keys 的文件被删、新增一个文件，照样各报一项' $true (-not $nMoved.Same -and (@($nMoved.Changed | Sort-Object) -join ',') -ceq 'added:Values2,removed:Keys')
     & $add '清单：目录不存在是空清单，不报错' $false ((Get-ReaperDefaultCfgSnapshot -Root (Join-Path $Tmp 'nope')).Count -eq 0)
     $cases
 }
@@ -379,6 +394,8 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '工程：采样率、声道、1x 与轨道音量写进去了' $false ($chain -match 'RENDER_FMT 0 1 44100' -and $chain -match 'RENDER_1X 1' -and $chain -match 'VOLPAN 0.5 ')
     & $add '工程：空链没有 FXCHAIN' $false ((New-ReaperProjectText -SourceWav 'S' -RenderDir 'D' -RenderName 'N' -Chain @()) -notmatch 'FXCHAIN')
     & $add 'Lua 任务：反斜杠与引号被转义' $false ((ConvertTo-ReaperLuaTable @{ p = 'a\b"c' }) -ceq "return {[`"p`"]=`"a\\b\`"c`"}`n")
+    # 键是外面给的名字：叫 Keys、Values、Count 的键，字典的属性读返回的是它们的值而不是集合，整张表会写错
+    & $add 'Lua 任务：键叫 Keys、Values、Count 时一个不少、值对得上' $false ((ConvertTo-ReaperLuaTable @{ Keys = 'k'; Values = 'v'; Count = 3; p = 'x' }) -ceq "return {[`"Count`"]=3,[`"Keys`"]=`"k`",[`"p`"]=`"x`",[`"Values`"]=`"v`"}`n")
     $cfgPath = Join-Path $RepoRoot 'tests/reaper/scenarios.json'
     $config = Get-ReaperSmokeConfig $cfgPath
     & $add 'scenarios.json 通过结构校验' $false ((Test-ReaperScenarioConfig $config).Count -eq 0)
@@ -589,22 +606,23 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
         if ($facts) { $evOutcome | Add-Member -NotePropertyName Facts -NotePropertyValue $facts }
         Add-ReaperModuleEvidence -Ctx @{ Installed = $installed; PluginsDir = $evPlugins; LaunchLog = $evLog } -Outcome $evOutcome -From $from
     }
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok } # 取不到 Facts 之类的成员时算这一条没过，不让整个自测抛错
     $evGood = & $evRun (& $evLaunch $evSeenGood)
-    & $add '加载来源核对：来源对得上，场景的 PASS 原样保留，说明不改，证据写进 Facts.modules' $false (
+    & $addSafe '加载来源核对：来源对得上，场景的 PASS 原样保留，说明不改，证据写进 Facts.modules' $false {
         $evGood.Status -ceq 'PASS' -and $evGood.Detail -ceq '场景自己的说明' -and $evGood.Facts.modules.Count -eq 1 -and $evGood.Facts.modules[0].verdict -ceq 'Proven' -and
-        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].state -ceq 'Private' -and $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].sha256 -ceq $evFiles['Rinne Input.vst3'].Sha256.Substring(0, 12))
-    & $add '加载来源核对：证据里的位置是 <cfg>\plugins\…，没有盘符路径' $false (
-        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].loaded[0] -like '<cfg>\plugins\Rinne Input.vst3\*' -and (ConvertTo-Json $evGood.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\')
+        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].state -ceq 'Private' -and $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].sha256 -ceq $evFiles['Rinne Input.vst3'].Sha256.Substring(0, 12)}
+    & $addSafe '加载来源核对：证据里的位置是 <cfg>\plugins\…，没有盘符路径' $false {
+        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].loaded[0] -like '<cfg>\plugins\Rinne Input.vst3\*' -and (ConvertTo-Json $evGood.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\'}
     $evForeign = & $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) })
-    & $add '加载来源核对：Input 是别处的同名模块，场景的 PASS 改判 INCOMPLETE，原因点名，场景自己的说明保留' $true (
-        $evForeign.Status -ceq 'INCOMPLETE' -and $evForeign.Detail -match '插件加载来源没核实' -and $evForeign.Detail -match '被测副本以外' -and $evForeign.Detail -match '场景自己的说明' -and $evForeign.Facts.modules[0].verdict -ceq 'Foreign')
-    & $add '加载来源核对：别处的同名模块在结果里不带盘符路径' $false ((ConvertTo-Json $evForeign.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\')
+    & $addSafe '加载来源核对：Input 是别处的同名模块，场景的 PASS 改判 INCOMPLETE，原因点名，场景自己的说明保留' $true {
+        $evForeign.Status -ceq 'INCOMPLETE' -and $evForeign.Detail -match '插件加载来源没核实' -and $evForeign.Detail -match '被测副本以外' -and $evForeign.Detail -match '场景自己的说明' -and $evForeign.Facts.modules[0].verdict -ceq 'Foreign'}
+    & $addSafe '加载来源核对：别处的同名模块在结果里不带盘符路径' $false {(ConvertTo-Json $evForeign.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\'}
     & $add '加载来源核对：场景的 FAIL 同样改判 INCOMPLETE（测的可能是另一份构建，红的原因不一定在被测副本上）' $true ((& $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }) 'FAIL').Status -ceq 'INCOMPLETE')
     $evUnseen = & $evRun (& $evLaunch @{})
-    & $add '加载来源核对：一个被测模块都没见到，场景的 PASS 改判 INCOMPLETE' $true ($evUnseen.Status -ceq 'INCOMPLETE' -and $evUnseen.Detail -match '没有在进程的模块列表里见到' -and $evUnseen.Facts.modules[0].verdict -ceq 'Unseen')
+    & $addSafe '加载来源核对：一个被测模块都没见到，场景的 PASS 改判 INCOMPLETE' $true {$evUnseen.Status -ceq 'INCOMPLETE' -and $evUnseen.Detail -match '没有在进程的模块列表里见到' -and $evUnseen.Facts.modules[0].verdict -ceq 'Unseen'}
     $evWrongSha = @{ 'Rinne Input.vst3' = @{ Path = $evFiles['Rinne Input.vst3'].Path; Sha256 = ('f' * 64) }; 'Rinne Output.vst3' = $evFiles['Rinne Output.vst3'] }
     $evChanged = & $evRun (& $evLaunch $evSeenGood) 'PASS' 0 $null $evWrongSha
-    & $add '加载来源核对：路径对、但 sha256 与复制时算的不同，场景的 PASS 改判 INCOMPLETE' $true ($evChanged.Status -ceq 'INCOMPLETE' -and $evChanged.Facts.modules[0].verdict -ceq 'Changed')
+    & $addSafe '加载来源核对：路径对、但 sha256 与复制时算的不同，场景的 PASS 改判 INCOMPLETE' $true {$evChanged.Status -ceq 'INCOMPLETE' -and $evChanged.Facts.modules[0].verdict -ceq 'Changed'}
     & $add '加载来源核对：读不到进程的模块列表（ModuleScans=0），场景的 PASS 改判 INCOMPLETE' $true ((& $evRun (& $evLaunch $evSeenGood 0)).Status -ceq 'INCOMPLETE')
     $evNoLaunch = & $evRun @()
     & $add '加载来源核对：这个场景里没有一次会加载插件的启动被核对，场景的 PASS 改判 INCOMPLETE（没有证明）' $true ($evNoLaunch.Status -ceq 'INCOMPLETE' -and $evNoLaunch.Detail -match '没有一次会加载插件')
@@ -614,9 +632,9 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '加载来源核对：锁等不到（LockBusy，REAPER 没有启动）的那次不计入，不拖累其余启动的核对' $false ((& $evRun @((& $evLaunch $evSeenGood), (& $evLaunch @{} 0 $true 'LockBusy'))).Status -ceq 'PASS')
     & $add '加载来源核对：只看本场景开始之后的启动（From），之前场景里的坏启动不连累' $false ((& $evRun @((& $evLaunch @{} 0), (& $evLaunch $evSeenGood)) 'PASS' 1).Status -ceq 'PASS')
     $evOwn = & $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }) 'INCOMPLETE'
-    & $add '加载来源核对：场景自己已经是 INCOMPLETE 的不改它的说明（不盖掉超时、卡对话框这些自己的原因），但证据照写' $false ($evOwn.Status -ceq 'INCOMPLETE' -and $evOwn.Detail -ceq '场景自己的说明' -and $evOwn.Facts.modules[0].verdict -ceq 'Foreign')
+    & $addSafe '加载来源核对：场景自己已经是 INCOMPLETE 的不改它的说明（不盖掉超时、卡对话框这些自己的原因），但证据照写' $false {$evOwn.Status -ceq 'INCOMPLETE' -and $evOwn.Detail -ceq '场景自己的说明' -and $evOwn.Facts.modules[0].verdict -ceq 'Foreign'}
     $evKeep = & $evRun (& $evLaunch $evSeenGood) 'PASS' 0 ([ordered]@{ other = 1 })
-    & $add '加载来源核对：场景已有的 Facts 保留，modules 加在旁边' $false ($evKeep.Facts.other -eq 1 -and $evKeep.Facts.modules.Count -eq 1)
+    & $addSafe '加载来源核对：场景已有的 Facts 保留，modules 加在旁边' $false {$evKeep.Facts.other -eq 1 -and $evKeep.Facts.modules.Count -eq 1}
     # 接线：不带插件链的参照渲染必须声明「不加载插件」（-LoadsPlugins $false），别的渲染调用不能带；否则参照渲染会被当成加载被测插件的启动，
     # 每个渲染场景都因为「没见到被测模块」判 INCOMPLETE。看语法树里的命令调用，不比文本
     $scenarioFile = Join-Path $script:Scripts 'Scenarios.psm1'
