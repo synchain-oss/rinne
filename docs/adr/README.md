@@ -3,7 +3,7 @@
 ## Summary (EN)
 
 Architecture decision records for Rinne. Each record is written in Chinese, starts with an English summary and stays
-under 4 KB. Records marked "planned" are not written yet.
+under 4 KB.
 
 ## 约定
 
@@ -21,7 +21,7 @@ under 4 KB. Records marked "planned" are not written yet.
 | [0003](0003-safety-model.md) | 安全模型：安全状态机、限幅、淡变与锁存 | accepted |
 | [0004](0004-pairing.md) | 配对：组 A–H、智能默认与对端轨道名核验 | accepted |
 | [0005](0005-platform-toolchain.md) | 平台、格式与工具链；macOS 不签名不公证 | accepted |
-| 0006 | 冻结面与版本策略 | planned |
+| [0006](0006-freeze-versioning.md) | 冻结面与版本策略：契约状态、变更文档、永不改的标识、音频特化的 SemVer 表 | accepted |
 | [0007](0007-licensing.md) | 许可与合规口径 | accepted |
 | [0008](0008-shared-code.md) | 与 SCVB 共享代码：复制并登记来源，不抽共享库 | accepted |
 | [0009](0009-loop-evidence.md) | 错序与导出不一致的判据：每块判一次、连续 3 次定案、容忍时间戳回退；离线块计数与已读值锁存 | accepted |

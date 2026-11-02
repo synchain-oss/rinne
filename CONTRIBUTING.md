@@ -52,7 +52,7 @@ are accepted under the project licence, GPL-3.0-or-later: what comes in goes out
 
 ## 4. Building and checking
 
-- Build steps are in `docs/BUILDING.md` (added together with the build system). JUCE is pinned by `.juce-version` and
+- Build steps for Windows and macOS are in [docs/BUILDING.md](docs/BUILDING.md). JUCE is pinned by `.juce-version` and
   `.juce-commit` and passed with `-DJUCE_PATH=<your JUCE checkout>`.
 - Before opening a pull request, run the local gates (PowerShell 7) and the static checks (Node, version in
   `.node-version`):
