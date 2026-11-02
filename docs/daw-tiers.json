@@ -22,10 +22,10 @@
       "versions": "15",
       "os": "windows",
       "formats": ["VST3"],
-      "tier": null,
+      "tier": 3,
       "targetTier": 1,
-      "status": "awaiting-test",
-      "evidence": [],
+      "status": "partial",
+      "evidence": ["ci:build-win"],
       "checks": {
         "realtime": false,
         "offline": false,
@@ -36,8 +36,8 @@
         "loopPeriod": false
       },
       "notes": {
-        "en": "Not tested on a real host yet.",
-        "zh": "尚未在真机上测试。"
+        "en": "CI evidence only (build, tests, pluginval). No acceptance record from a real host yet.",
+        "zh": "只有 CI 证据（构建、测试、pluginval）。还没有真机验收记录。"
       }
     },
     {
@@ -45,10 +45,10 @@
       "versions": "3.x",
       "os": "macos",
       "formats": ["VST3", "AU"],
-      "tier": null,
+      "tier": 3,
       "targetTier": 2,
-      "status": "awaiting-test",
-      "evidence": [],
+      "status": "partial",
+      "evidence": ["ci:build-mac"],
       "checks": {
         "realtime": false,
         "offline": false,
@@ -59,8 +59,8 @@
         "loopPeriod": false
       },
       "notes": {
-        "en": "Not tested on a real host yet.",
-        "zh": "尚未在真机上测试。"
+        "en": "CI evidence only (build, tests, auval, pluginval). No acceptance record from a real host yet. The Audio Unit build is beta.",
+        "zh": "只有 CI 证据（构建、测试、auval、pluginval）。还没有真机验收记录。Audio Unit 版本是 beta。"
       }
     },
     {

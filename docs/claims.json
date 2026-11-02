@@ -30,15 +30,15 @@
       "id": "safe-defaults",
       "strong": ["starts with feedback at zero", "starts at 0% feedback", "默认反馈为 0", "反馈量是 0"],
       "hedge": ["designed so", "按设计"],
-      "evidence": [],
-      "pending": ["golden:tests/golden/params-input.json#feedback.default == 0"]
+      "evidence": ["golden:tests/golden/params-input.json#feedback.default == 0"],
+      "pending": []
     },
     {
       "id": "limiter-default-on",
       "strong": ["limiter (?:and runaway protection )?(?:is|are) on by default", "限制器(?:和失控保护)?默认开启"],
       "hedge": ["designed so", "按设计"],
-      "evidence": [],
-      "pending": ["golden:tests/golden/params-input.json#limiter.default == 1"]
+      "evidence": ["golden:tests/golden/params-input.json#limiter.default == 1"],
+      "pending": []
     },
     {
       "id": "runaway-protection-default-on",
@@ -62,6 +62,51 @@
       "hedgeWhilePending": true,
       "evidence": [],
       "pending": ["validation:docs/validation/*-luna-macos.md"]
+    },
+    {
+      "id": "host-audio-untouched",
+      "strong": ["passes the host['’]s audio through untouched", "把宿主的音频原样直通"],
+      "hedge": [],
+      "evidence": ["ci:build-win", "ci:build-mac"],
+      "pending": [],
+      "note": "tests/host/wiring/test_wiring_audio.cpp: invariant 8 (the Output never changes the host buffer, negative zero and NaN payloads included); tests/host/shell/test_shell_passthrough.cpp: stereo and mono audio pass through bit for bit at every block size"
+    },
+    {
+      "id": "no-latency-reported",
+      "strong": ["report no (?:plugin )?latency", "不向宿主上报(?:插件)?延迟", "不上报延迟"],
+      "hedge": [],
+      "evidence": ["ci:build-win", "ci:build-mac"],
+      "pending": [],
+      "note": "tests/host/shell/test_shell_contract.cpp: latency is always zero"
+    },
+    {
+      "id": "failure-silences-return",
+      "strong": [
+        "a failure silences the return",
+        "the return becomes 0 and the dry signal keeps playing",
+        "任何失败只会让回送静音",
+        "回送都变成 0，干声照常播放"
+      ],
+      "hedge": [],
+      "evidence": ["ci:core-sanitizers", "ci:build-win"],
+      "pending": [],
+      "note": "tests/core/safety/test_safety_chain.cpp: every failure leaves the return at exactly zero; tests/core/engine/test_input_wiring.cpp: the dry signal passes bit for bit"
+    },
+    {
+      "id": "fade-in-500ms",
+      "strong": ["fades in over 500 ms", "500 ms 内淡入"],
+      "hedge": [],
+      "evidence": ["ci:core-sanitizers", "ci:build-win"],
+      "pending": [],
+      "note": "tests/core/safety/test_safety_machine.cpp: a new instance stays silent until paired, then fades in over 500 ms from the first valid sample"
+    },
+    {
+      "id": "no-network",
+      "strong": ["makes no network connections", "不发起任何网络连接"],
+      "hedge": [],
+      "evidence": ["ci:compliance"],
+      "pending": [],
+      "note": "the offline check (scripts/checks.d/offline.mjs): no network API in src/, no external resources in web/. The WebView2 Runtime and the system WebKit are operating-system components outside this claim"
     }
   ]
 }
