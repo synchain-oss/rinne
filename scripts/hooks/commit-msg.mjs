@@ -2,14 +2,14 @@
 //
 // commit-msg hook 的判据（外壳是同目录的 commit-msg）。在 check-commits 同仓档之上再严两条：
 // 作者与提交者都必须是维护者身份；签名恰好一行。消息过通用规则与个人针，
-// git 写进编辑器的注释行也一起扫（-m 提交时以 # 开头的行会原样进历史）。
+// git 写进编辑器的注释行也一起扫个人针与 AI 署名尾注（-m 提交时以 # 开头的行会原样进历史）。
 //   node scripts/hooks/commit-msg.mjs <消息文件>
 //   node scripts/hooks/commit-msg.mjs --self-test    纯函数夹具，加上在临时仓里经真实 hook 提交
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MAINTAINER, SIGNOFF, checkMessage } from "../check-commits.mjs";
+import { MAINTAINER, SIGNOFF, checkMessage, hasAiTrailer } from "../check-commits.mjs";
 import { FAKE_NEEDLE, loadPersonalNeedles, redact, scan } from "../lib/privacy-needles.mjs";
 import { assertNodeVersion, caseResult, git, isMain, j, tempRepo } from "../lib/check-kit.mjs";
 
@@ -32,6 +32,7 @@ export function checkCommitMsg(raw, { authorIdent, committerIdent, personal = []
     const message = `${kept.join("\n").trim()}\n`;
     errors.push(...checkMessage(message, { exactlyOne: true, personal }).errors);
     for (const f of scan(comments.join("\n"), {}, { personal })) errors.push(`注释行 [${f.rule.id}] ${redact(f)}`);
+    if (hasAiTrailer(comments)) errors.push("注释行：不允许 AI 署名尾注");
     return errors;
 }
 
@@ -59,6 +60,10 @@ export function selfTest() {
     t("卡号", true, `ci(hooks): ${j("R", "N01")} 收尾\n\n${SIGNOFF}\n`);
     t("注释行里的卡号", true, `${good}# On branch ${j("feat/r", "n-01a")}\n`);
     t("个人针", true, `ci(hooks): 加入钩子\n\n${FAKE_NEEDLE}\n\n${SIGNOFF}\n`);
+    // -m 会保留 # 开头的行：写成注释行的 AI 署名尾注同样进历史
+    t("注释行里的 AI 署名尾注", true, `${good}# ${j("Co-authored", "-by: Someone <s@example.com>")}\n`);
+    t("注释行里 ## 与空白之后的 AI 署名尾注", true, `${good}##  ${j("Cla", "ude-Session: abc")}\n`);
+    t("普通的注释行不误报", false, `${good}# 1 of 2: see the issue\n`);
 
     // 端到端：临时仓经真实的 sh 外壳与本文件提交
     const repo = tempRepo();
@@ -76,6 +81,9 @@ export function selfTest() {
         c("缺签名", true, ["-m", "ci(test): 无签名"]);
         c("卡号", true, ["-s", "-m", `ci(test): ${j("R", "N-01a")}`]);
         c("个人针", true, ["-s", "-m", `ci(test): ${FAKE_NEEDLE}`]);
+        const hashed = j("# Co-authored", "-by: Someone <s@example.com>");
+        c("-m 保留的 # 行里有 AI 署名尾注", true, ["-s", "-m", `ci(test): 注释行\n\n${hashed}`]);
+        c("-m 里普通的 # 行", false, ["-s", "-m", "ci(test): 注释行\n\n# 1 of 2: see the issue"]);
         c("作者不是维护者", true, ["-s", "-m", "ci(test): 换人"], ["-c", "user.email=other@example.com"]);
         const ci = { RINNE_PRIVACY_LOCAL: "", CI: "true", GITHUB_ACTIONS: "true" };
         c("没有个人针时 CI=true 也不放行", true, ["-s", "-m", "ci(test): 无针"], [], ci);
