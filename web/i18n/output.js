@@ -3,7 +3,7 @@
 // Rinne Output 页面自己的界面词条：页眉、常驻位置提示、组徽标说明、配对卡、发送状态行、页脚提示、
 // 消息位的 14 条消息与接管确认条。键前缀有 out.* 和 band.out.*。
 // 两个插件共用的词条在 common.js，键不得重名；由 web/shared/i18n.js 的 mergeDicts 合并。
-// fr 已逐条复核，登记在 fr-review/output.json，待维护者抽检后清空。
+// fr 已逐条复核，并经维护者抽检通过（见 docs/validation/i18n-review-log.md）。
 //
 // 排版规则（scripts/check-i18n.mjs 检查）：
 //   - zh 用全角标点，en 用弯引号和弯撇号；
@@ -160,7 +160,7 @@ export default {
         "band.out.conflict": "Groupe {g} pris par un autre Output.",
         "band.out.unassigned": "Les 8 groupes sont pris : libérez-en un.",
         "band.out.abi": "Versions incompatibles (Out {a} / In {b}).",
-        "band.out.srMismatch": "Échant. différent ({a} / {b} Hz) : retour arrêté.",
+        "band.out.srMismatch": "Échantillonnage différent ({a} / {b} Hz) : retour arrêté.",
         "band.out.ipc": "Pas de mémoire partagée : audio transmis tel quel.",
         "band.out.ipcSandbox": "Hôte en bac à sable : non pris en charge.",
         "band.out.newerProject": "Projet plus récent ({a} / {b}) : valeurs par défaut.",

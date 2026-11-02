@@ -4,7 +4,7 @@
 // 两个插件共用的词条在 common.js（语言选择卡也在那里），键不得重名；由 web/shared/i18n.js 的 mergeDicts 合并。
 // 四条规则的引导词与正文（rules.r<N>.lead / body）不在这里手写：真源是 docs/USER_GUIDE.zh-CN.md 的「使用前必读」
 // 与 docs/hard-rules.i18n.json，由 gen-docs 的 hard-rules 块写进下面的生成段，改真源后运行 node scripts/gen-docs.mjs --write。
-// 其余 fr 已逐条复核，登记在 fr-review/guide.json，待维护者抽检后清空；规则的 fr 由 hard-rules.i18n.json 的 frReview 记录。
+// 其余 fr 已逐条复核，并经维护者抽检通过（见 docs/validation/i18n-review-log.md）；规则的 fr 由 hard-rules.i18n.json 的 frReview 记录。
 //
 // 排版规则（scripts/check-i18n.mjs 检查）：
 //   - zh 用全角标点，en 用弯引号和弯撇号；

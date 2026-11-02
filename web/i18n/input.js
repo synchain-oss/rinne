@@ -650,7 +650,7 @@ export default {
         "band.in.ipc": "Pas de mémoire partagée : sec seul.",
         "band.in.ipcSandbox": "Hôte en bac à sable : non pris en charge.",
         "band.in.abi": "Versions incompatibles (In {a} / Out {b}).",
-        "band.in.srMismatch": "Échant. différent ({a} / {b} Hz) : retour arrêté.",
+        "band.in.srMismatch": "Échantillonnage différent ({a} / {b} Hz) : retour arrêté.",
         "band.in.conflict": "Groupe {g} pris par un autre Input.",
         "band.in.unassigned": "Les 8 groupes sont pris : libérez-en un.",
         "band.in.unsupportedBlock": "Bloc {n} > 32768 : boucle arrêtée, réduisez le tampon.",

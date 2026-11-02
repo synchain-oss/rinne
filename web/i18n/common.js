@@ -270,7 +270,7 @@ export default {
         "common.pair.validator": "MODE VALIDATION",
         "common.pair.ipcUnavailable": "CONNEXION IMPOSSIBLE",
         "common.pair.abiMismatch": "VERSION INCOMPATIBLE",
-        "common.pair.srMismatch": "ÉCHANT. DIFFÉRENT",
+        "common.pair.srMismatch": "ÉCHANTILLONNAGE DIFFÉRENT",
         "common.pair.conflict": "CONFLIT",
         "common.pair.unassigned": "SANS GROUPE",
         "common.pair.stale": "LIAISON PERDUE",
