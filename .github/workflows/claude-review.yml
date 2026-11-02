@@ -33,7 +33,7 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     # 写权限只有评论两项：pull-requests 给 inline comment，issues 给审查总结（issue comments 接口）。
     # 真正挡住推送的是 contents: read，不要改成 write。不给 id-token（github_token 已传入，不走 OIDC 换 App token），
@@ -198,7 +198,9 @@ jobs:
           # - 读取用 deny 规则收紧：工作区 .git/（action 会把 token 写进 origin 的 remote URL，persist-credentials 管不到）、
           #   /proc（进程环境变量）、/sys、/run 与 /var/run、/tmp、/etc、runner 安装目录（含凭据与诊断日志）、
           #   runner 的 _temp、家目录根上的点文件与点目录。已知前提：_actions 下 action 自己的公开代码可读，其中没有 secret。
-          # - 黑名单与路径要随 action 升级、runner 镜像变化复查；改动经 review-bot.mjs 的结构核对（docs-truth）把关。
+          # - 黑名单与路径要随 action 升级、runner 的系统大版本变化复查。runs-on 钉的是系统大版本（ubuntu-24.04，不用
+          #   *-latest）：大版本内的镜像 GitHub 仍按周滚动，目录布局不变；换大版本要改本文件的 runs-on 并复核这份黑名单。
+          #   改动经 review-bot.mjs 的结构核对（docs-truth）把关。
           claude_args: |
             --model claude-opus-5-5
             --tools "Read,Glob,Grep"
