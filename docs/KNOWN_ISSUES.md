@@ -30,9 +30,9 @@
 
 ## KI-5: an export that starts right after load or pairing begins with a fade-in
 
-**EN** The return fades in over 500 ms whenever it starts, which is a safety rule. An export that starts within about 0.5 s after the project loads or the pair connects therefore has a faded-in return at its start, unlike later realtime playback. Wait a second after loading or re-pairing before you export.
+**EN** The return fades in over 500 ms after a new pairing, a new writer, a preset or project load, and Restore return, which is a safety rule. An export that starts within about 0.5 s after the project loads or the pair connects therefore has a faded-in return at its start, unlike later realtime playback. Wait a second after loading or re-pairing before you export. Turning Loop back on, or taking Rinne Input out of bypass, is not one of these: the return comes back to its previous level within about 10 ms.
 
-**中文** 回送每次开始都会在 500 ms 内淡入，这是安全规则。所以工程刚加载、配对后约 0.5 秒内就开始的导出，开头的回送是淡入的，与之后的实时播放不同。加载或重新配对之后，等一秒再导出。
+**中文** 回送在新配对、换了写入方、载入预设或工程、「恢复回送」之后，都会在 500 ms 内淡入，这是安全规则。所以工程刚加载、配对后约 0.5 秒内就开始的导出，开头的回送是淡入的，与之后的实时播放不同。加载或重新配对之后，等一秒再导出。重新打开「环路」、或取消 Rinne Input 的旁路不在其列：回送会在约 10 ms 内回到原来的电平。
 
 ## KI-6: steady self-oscillation at moderate loop gain is held at the ceiling
 
@@ -72,9 +72,9 @@
 
 ## KI-12: without a usable web view the plugins show a fallback panel
 
-**EN** The interface is drawn by the Microsoft Edge WebView2 Runtime on Windows. If it is missing or too old, or the interface fails to start, the plugins show a simple panel instead. Its Panic, Resume and Loop buttons work without the web interface; it also offers Install WebView2 Runtime and Retry. Install the runtime from Microsoft.
+**EN** The interface is drawn by the Microsoft Edge WebView2 Runtime on Windows. If it is missing or too old, or the interface fails to start, the plugins show a simple panel instead. Its Panic, Resume and Loop buttons work without the web interface, but only on Rinne Input; on Rinne Output they are disabled. The panel also offers Install WebView2 Runtime and Retry. Install the runtime from Microsoft.
 
-**中文** Windows 上的界面由 Microsoft Edge WebView2 运行时绘制。它缺失或过旧、或界面启动失败时，插件会改为显示一个简易面板。面板上的 Panic、Resume 和 Loop 按钮不依赖网页界面也能用，另有 Install WebView2 Runtime 和 Retry。请从微软安装该运行时。
+**中文** Windows 上的界面由 Microsoft Edge WebView2 运行时绘制。它缺失或过旧、或界面启动失败时，插件会改为显示一个简易面板。面板上的 Panic、Resume 和 Loop 按钮不依赖网页界面也能用，但只在 Rinne Input 上可用，Rinne Output 的面板上它们是禁用的。面板上另有 Install WebView2 Runtime 和 Retry。请从微软安装该运行时。
 
 ## KI-13: older WebKit fixes the zoom at 100 %
 

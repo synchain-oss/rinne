@@ -126,7 +126,7 @@ Read these before you start:
 
 ## Safety
 
-- Feedback starts at 0, the limiter and the runaway protection are on by default, and the return fades in over 500 ms whenever it (re)starts.
+- Feedback starts at 0, the limiter and the runaway protection are on by default, and the return fades in over 500 ms after pairing, a new writer, a preset or project load, or Restore return.
 - Everything fed back is cleaned (non-finite values become 0), has its DC removed, and is limited and soft-clipped; a failure silences the return and never makes it louder.
 - Panic cuts only the return; the dry signal keeps playing.
 - Rinne Output passes the host's audio through untouched and writes silence to the loop when bypassed.

@@ -116,7 +116,9 @@ Panic is a button in the interface, not a host parameter, so it cannot be mapped
 
 ### Fade-in
 
-The return fades in over 500 ms, starting from the first valid sample, whenever it starts: after a new pairing, when a new writer takes over, after loading a preset, and after Restore return. Feedback starts at 0 in a new instance.
+The return fades in over 500 ms, starting from the first valid sample, after each of these: the plugin first becoming ready, a new pairing, a new writer taking over, loading a preset or the host restoring a saved state (a project, A/B or undo), and Restore return. Feedback starts at 0 in a new instance.
+
+Turning Loop back on, or taking Rinne Input out of bypass, is not one of these: there is no 500 ms fade-in, and the return comes back to its previous level within about 10 ms, with whatever the loop still holds. If Feedback is set high, lower it before you turn Loop back on.
 
 ### Runaway protection
 
@@ -187,7 +189,7 @@ Copy diagnostics puts text on the clipboard; nothing is sent. It contains versio
 
 ### Map LOOP to a Quick Control
 
-LOOP is a host parameter named "Loop", so most hosts let you assign it to a controller button; Cubase calls this Quick Controls, other hosts call it remote control or MIDI learn. Set the button so that it turns Loop off. Then one press fades the return out.
+LOOP is a host parameter named "Loop", so most hosts let you assign it to a controller button; Cubase calls this Quick Controls, other hosts call it remote control or MIDI learn. Set the button so that it turns Loop off. Then one press fades the return out. Pressing it again brings the return back within about 10 ms, with no 500 ms fade-in, so lower Feedback first if it is high.
 
 Know what it is and is not. Loop off fades the return out; it is not latched and it does not clear the loop, and turning Loop on again lets the return come back. For real trouble use PANIC: it cuts and clears, and it needs Restore return. Panic itself cannot be mapped.
 
@@ -196,7 +198,7 @@ Know what it is and is not. Loop off fades the return out; it is not latched and
 - **Howling or a fast build-up.** Press PANIC, lower Feedback, and check which plugin in the loop adds gain.
 - **The loop is longer than D.** Plugins in the loop add their own latency to D.
 - **A silent or odd start in an export.** See "Export, render and Freeze".
-- **Only a simple panel.** If the Microsoft Edge WebView2 Runtime is missing or too old, or the interface fails to start, Rinne shows a simple panel. Its Panic, Resume and Loop buttons work without the interface; use Install WebView2 Runtime or Retry.
+- **Only a simple panel.** If the Microsoft Edge WebView2 Runtime is missing or too old, or the interface fails to start, Rinne shows a simple panel. Its Panic, Resume and Loop buttons work without the interface, but only on Rinne Input; on Rinne Output they are disabled. Use Install WebView2 Runtime or Retry.
 
 ## FAQ
 
