@@ -84,7 +84,7 @@ export const SCOPE_FILE = "docs/wording-scope.json";
 /**
  * 核心用户面文件（底线）：仓里已经存在的所有公开用户面文档——两份 README、更新日志、安全策略、贡献指南、安装说明、
  * 中英两份用户指南、宿主兼容性、已知问题与硬规则词条。任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，
- * 这是它的底线）。以实际存在为准：以后再新增面向用户的公开文档，落地的同一个 PR 要把路径加进这张清单。
+ * 这是它的底线）。以实际存在为准：以后再新增面向用户的公开文档，落地的同一个 PR 要把路径加进这张清单（同时加进自测里的 CORE_FILES，不然自测里「两个方向都一致」那条正例会红）。
  */
 export const REQUIRED_SCOPE = [
     "README.md",
@@ -998,7 +998,8 @@ export async function selfTest() {
     );
     // 底线清单里的每一个文件：挪出 scope 判红（单纯删掉，或者挪进排除清单，两种写法都拦）。
     // 遍历的是这里逐字写出的期望清单，不是 REQUIRED_SCOPE 本身：从 REQUIRED_SCOPE 里去掉任何一份，对应的坏样例就变红，
-    // 而不是随着遍历对象一起消失
+    // 而不是随着遍历对象一起消失。反方向由下面那条正例核：往 REQUIRED_SCOPE 加一份而忘了加进这里，
+    // 新文件就没有「挪出 scope」的坏样例，那条正例会变红提醒同步
     const CORE_FILES = [
         "README.md",
         "README.zh-CN.md",
@@ -1028,9 +1029,12 @@ export async function selfTest() {
         );
     }
     cases.push({
-        label: "核心用户面文件清单覆盖仓里已有的公开用户面文档（两份 README、更新日志、安全策略、贡献指南、安装说明、中英用户指南、宿主兼容性、已知问题、硬规则词条）",
+        label: "核心用户面文件清单与自测里逐字写出的期望清单两个方向都一致（两份 README、更新日志、安全策略、贡献指南、安装说明、中英用户指南、宿主兼容性、已知问题、硬规则词条）：从 REQUIRED_SCOPE 删一份、或往里加一份而不同步 CORE_FILES，这条都变红",
         bad: false,
-        passed: CORE_FILES.every((p) => REQUIRED_SCOPE.includes(p)),
+        passed:
+            REQUIRED_SCOPE.length === CORE_FILES.length &&
+            CORE_FILES.every((p) => REQUIRED_SCOPE.includes(p)) &&
+            REQUIRED_SCOPE.every((p) => CORE_FILES.includes(p)),
         expect: [],
     });
     badTable(
