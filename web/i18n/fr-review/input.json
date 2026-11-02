@@ -435,7 +435,7 @@
       "status": "已复核，待用户抽检"
     },
     "band.in.srMismatch": {
-      "fr": "Échantillonnage différent ({a} / {b} Hz) : retour arrêté.",
+      "fr": "Échant. différent ({a} / {b} Hz) : retour arrêté.",
       "status": "已复核，待用户抽检"
     },
     "band.in.conflict": {
@@ -495,7 +495,7 @@
       "status": "已复核，待用户抽检"
     },
     "band.in.unstable": {
-      "fr": "Cadencement instable : mode tolérant, délai fixe non garanti.",
+      "fr": "Cadencement instable : mode tolérant, le délai peut varier.",
       "status": "已复核，待用户抽检"
     },
     "band.in.limiterOff": {
@@ -503,11 +503,11 @@
       "status": "已复核，待用户抽检"
     },
     "band.in.crossProcess": {
-      "fr": "Autre processus : délai fixe non garanti.",
+      "fr": "Autre processus : le délai peut varier.",
       "status": "已复核，待用户抽检"
     },
     "band.in.crossTrack": {
-      "fr": "Noms de piste différents : délai fixe non garanti.",
+      "fr": "Noms de piste différents : le délai peut varier.",
       "status": "已复核，待用户抽检"
     },
     "band.in.newerProject": {

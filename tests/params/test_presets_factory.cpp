@@ -85,14 +85,14 @@ std::array<Expected, kFactoryPresetCount> designTable()
     const int note4 = choiceIndex("delay_note", "1/4"); // 默认档
     return {{
         {"f-init", "Init", "Init", "Initialisation", 0, 25, 0, 100, note4},
-        {"f-slapback-90", "Slapback 90 ms", "Slapback 90 ms", "Slapback 90 ms", 50, 25, 0, 90, note4},
+        {"f-slapback-90", "Slapback 90 ms", "Slapback 90 ms", "Slapback 90\xC2\xA0ms", 50, 25, 0, 90, note4},
         {"f-dub-quarter-dotted", "Dub 1/4D", "Dub 1/4D", "Dub 1/4D", 65, 50, sync, 100, note4d},
         {"f-ping-pong-eighth", "Ping-Pong 1/8", "Ping-Pong 1/8", "Ping-pong 1/8", 60, 25, sync, 100, note8},
         {"f-shortest-comb", "Shortest Comb", "Shortest Comb", "Peigne minimal", 80, 50, 0, 1, note4},
-        {"f-long-hold-92", "Long Hold 92 %", "Long Hold 92 %", "Maintien long 92 %", 92, 50, 0, 100, note4},
-        {"f-edge-95", "Edge 95 %", "Edge 95 %", "Bord d'oscillation 95 %", 95, 50, 0, 100, note4},
-        {"f-light-mix-30", "Light Mix 30 %", "Light Mix 30 %", "M\xC3\xA9lange l\xC3\xA9ger 30 %", 75, 30, 0, 100,
-         note4},
+        {"f-long-hold-92", "Long Hold 92 %", "Long Hold 92 %", "Maintien long 92\xC2\xA0%", 92, 50, 0, 100, note4},
+        {"f-edge-95", "Edge 95 %", "Edge 95 %", "Bord d\xE2\x80\x99oscillation 95\xC2\xA0%", 95, 50, 0, 100, note4},
+        {"f-light-mix-30", "Light Mix 30 %", "Light Mix 30 %", "M\xC3\xA9lange l\xC3\xA9ger 30\xC2\xA0%", 75, 30, 0,
+         100, note4},
     }};
 }
 

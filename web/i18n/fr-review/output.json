@@ -115,7 +115,7 @@
       "status": "已复核，待用户抽检"
     },
     "band.out.srMismatch": {
-      "fr": "Échantillonnage différent ({a} / {b} Hz) : retour arrêté.",
+      "fr": "Échant. différent ({a} / {b} Hz) : retour arrêté.",
       "status": "已复核，待用户抽检"
     },
     "band.out.ipc": {
@@ -139,11 +139,11 @@
       "status": "已复核，待用户抽检"
     },
     "band.out.crossProcess": {
-      "fr": "Autre processus : délai fixe non garanti.",
+      "fr": "Autre processus : le délai peut varier.",
       "status": "已复核，待用户抽检"
     },
     "band.out.crossTrack": {
-      "fr": "Noms de piste différents : délai fixe non garanti.",
+      "fr": "Noms de piste différents : le délai peut varier.",
       "status": "已复核，待用户抽检"
     },
     "band.out.outOfOrder": {

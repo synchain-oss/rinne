@@ -4,7 +4,8 @@
 
 - **Scope**: every French UI string registered for review (335 keys in four pages) plus the four hard rules and their lead paragraph, checked against the Chinese and English text.
 - **Result**: 32 UI strings and the lead paragraph of the hard rules were changed (wording, terminology, grammar, decimal point); the other 303 registered strings and the four rule bodies were kept as they were. No Chinese or English text was touched.
-- **Length**: no string was lengthened beyond what its design box allows; `check-i18n`, `check-text-fit` and the font coverage check all pass.
+- **Length**: compared with the first-draft French, 31 of the 32 changed strings grew by 15 % or less (several are shorter); the one that grows more is explained below. Every string stays inside its text budget, and `check-i18n`, `check-text-fit` and the font coverage check all pass.
+- **Factory presets**: typography only in four preset names (curly apostrophe, no-break space before `ms` / `%`); wording unchanged.
 - **Status**: AI cross-check finished; the maintainer spot-check is **still pending**. `frReview.status` in `docs/hard-rules.i18n.json` stays `pending`, and the four `web/i18n/fr-review/*.json` files keep their entries (status "已复核，待用户抽检") until the spot-check comment arrives.
 
 ## 范围与口径
@@ -27,7 +28,9 @@
 | 硬约束引导词与四条规则 | 5 | 1 | 4 |
 | 合计 | 340 | 33 | 307 |
 
-没改的条目不逐条列。没有为压长度而缩短任何条目：改动都是措辞、术语、语法或小数点问题，变长的都还在各自的预算里（`check-text-fit` 通过）。
+没改的条目不逐条列。
+
+**长度**：改动都是措辞、术语、语法或小数点问题。与初译相比，32 条里 31 条的增幅不超过 15 %（其中 4 条反而更短），都在各自的预算里（`check-text-fit` 通过）。增幅超过 15 % 的只剩一条，`band.out.newerProject`（41 → 52 个字符，+27 %）：初译的「défauts」在法语里是「缺陷」，必须写成「valeurs par défaut」，且与 Input 一侧已有的同一句保持同文；更短的写法只有省掉名词的「par défaut」，读不通。这条在 Output 的三行消息框里只占一行。
 
 ## 术语决定
 
@@ -59,7 +62,7 @@
 |---|---|---|---|
 | `common.footer.helpTip` | Revoir les règles et le guide | Revoir les règles et la visite | 导览在 fr 里统一叫「visite」（规则页按钮、导览全文都是），这里的「guide」与它不一致 |
 | `band.action.takeoverTip` | Cette instance perdra le groupe. | L’autre instance perdra ce groupe. | 「Cette instance」会被读成当前实例；zh / en 指的是被接管的那个实例 |
-| `common.pair.srMismatch` | FRÉQ. INCOHÉRENTE | ÉCHANTILLONNAGE DIFFÉRENT | 「FRÉQ. INCOHÉRENTE」可被读成音频频率不一致；改成明确指采样率，与下面两条消息同词 |
+| `common.pair.srMismatch` | FRÉQ. INCOHÉRENTE | ÉCHANT. DIFFÉRENT | 「FRÉQ. INCOHÉRENTE」可被读成音频频率不一致；改成明确指采样率的「ÉCHANT. DIFFÉRENT」（缩写是状态灯短标签的宽度所迫，与下面两条消息的「Échantillonnage différent」同词），字数与原文相同 |
 | `about.adv.tailTip` | Indique à l’hôte la durée de queue de ce plug-in, pour qu’il ne le suspende pas pendant le silence et n’interrompe pas la boucle. Auto = infini en VST3, 30 s en AU. | Indique à l’hôte la durée de queue (tail) de ce plug-in, pour qu’il ne le suspende pas pendant le silence et n’interrompe pas la boucle. Auto = infini en VST3, 30 s en AU. | 选项名按业内说法保留英文 Tail，说明里补上 (tail) 让两处对得上 |
 
 ### Input（`web/i18n/input.js`）
@@ -67,7 +70,7 @@
 | key | 原 fr | 定稿 fr | 理由 |
 |---|---|---|---|
 | `band.in.abi` | Versions différentes (In {a} / Out {b}). | Versions incompatibles (In {a} / Out {b}). | 状态灯是「VERSION INCOMPATIBLE」，消息里的「différentes」不是同一个词；对齐用词，语义也更接近「已拒绝」 |
-| `band.in.srMismatch` | Fréquences différentes ({a} / {b} Hz) : retour arrêté. | Échantillonnage différent ({a} / {b} Hz) : retour arrêté. | 「Fréquences différentes」单独出现像是音频频率；改成明确指采样率 |
+| `band.in.srMismatch` | Fréquences différentes ({a} / {b} Hz) : retour arrêté. | Échant. différent ({a} / {b} Hz) : retour arrêté. | 「Fréquences différentes」单独出现像是音频频率；改成明确指采样率的「Échant. différent」，与状态灯的「ÉCHANT. DIFFÉRENT」同词，比旧稿还短 |
 | `in.fb.capNote` | Réglé {s} %, effectif 100 % | Réglage {s} %, effectif 100 % | 「Réglé」缺主语、词性悬空；改成名词「Réglage」与「effectif」相配 |
 | `band.in.limiterCap100` | Limiteur désactivé : réglée {s} %, effective 100 %. | Limiteur désactivé : réglage {s} %, effectif 100 %. | 「réglée … effective」阴性形容词没有对应的名词，语法错误 |
 | `in.dly.noteTipD` | Pointée : 1,5 × la valeur de note | Pointée : 1.5 × la valeur de note | 小数点三语统一用「.」，原文用了「,」 |
@@ -78,9 +81,9 @@
 | `band.in.stateDecodeFailed` | Réglages illisibles : valeurs par défaut (réinj. 0). | Réglages illisibles : valeurs par défaut (réinjection 0). | 去掉缩写「réinj.」，宽度够就写全，与全界面的「réinjection」一致 |
 | `band.in.nextStep` | Ensuite : Rinne Output (dernier slot pré-fader), groupe {g}. | Ensuite : insérez Rinne Output (dernier slot pré-fader), groupe {g}. | 原文没有动词，zh / en 都是「插入 / add」；补上「insérez」 |
 | `band.in.takeover` | Groupe {g} tenu par une instance inactive. | Groupe {g} : instance inactive. Reprendre ? | zh / en 是问句（要接管吗），原文变成了陈述；问句里的「Reprendre」就是旁边按钮的文字 |
-| `band.in.crossProcess` | Processus différents : délai variable. | Autre processus : délai fixe non garanti. | zh「不保证固定」；「délai variable」成了断言；同时与状态灯「AUTRE PROCESSUS」同词 |
-| `band.in.crossTrack` | Noms de piste différents : délai variable. | Noms de piste différents : délai fixe non garanti. | 同上，zh「不保证固定」 |
-| `band.in.unstable` | Cadencement instable : mode tolérant, délai variable. | Cadencement instable : mode tolérant, délai fixe non garanti. | 同上，zh「不再保证固定」 |
+| `band.in.crossProcess` | Processus différents : délai variable. | Autre processus : le délai peut varier. | zh「不保证固定」、en「may vary」说的都是「可能」，原稿的「délai variable」成了断言；改成「le délai peut varier」，与状态灯的「AUTRE PROCESSUS」同词 |
+| `band.in.crossTrack` | Noms de piste différents : délai variable. | Noms de piste différents : le délai peut varier. | 同上，zh「不保证固定」 |
+| `band.in.unstable` | Cadencement instable : mode tolérant, délai variable. | Cadencement instable : mode tolérant, le délai peut varier. | 同上，zh「不再保证固定」 |
 | `band.in.exportViolation` | L’export peut différer : blocs trop grands ; augmentez D. | Dernier export peut différer : gros blocs ; relevez D. | 补回 zh / en 的「上次」。消息位是单行（约 290 px），「blocs trop grands」放不下，改成「gros blocs」，补救动作写「relevez D」（对应 en 的 raise D，两条导出提示用同一说法） |
 | `band.in.exportOverrun` | L’export peut différer : D trop court ; augmentez D. | Dernier export peut différer : D trop court ; relevez D. | 补回「上次」；同上，补救动作写「relevez D」，宽度也因此放得下 |
 | `band.in.exportPeer` | L’export peut différer : l’hôte d’Output déborde. | Dernier export peut différer : l’hôte d’Output déborde. | 补回「上次」；四条导出提示统一以「Dernier export peut différer」开头 |
@@ -91,10 +94,10 @@
 | key | 原 fr | 定稿 fr | 理由 |
 |---|---|---|---|
 | `band.out.abi` | Versions différentes (Out {a} / In {b}). | Versions incompatibles (Out {a} / In {b}). | 同上 |
-| `band.out.srMismatch` | Fréquences différentes ({a} / {b} Hz) : arrêt. | Échantillonnage différent ({a} / {b} Hz) : retour arrêté. | 同上；zh 的「回送已停止」补回，并与 Input 一侧同词 |
+| `band.out.srMismatch` | Fréquences différentes ({a} / {b} Hz) : arrêt. | Échant. différent ({a} / {b} Hz) : retour arrêté. | 同上；zh 的「回送已停止」补回（旧稿只有「arrêt」，没说什么停了），并与 Input 一侧同文 |
 | `band.out.takeover` | Groupe {g} tenu par une instance inactive. | Groupe {g} : instance inactive. Reprendre ? | 同上，与 Input 一侧同词 |
-| `band.out.crossProcess` | Processus différents : délai variable. | Autre processus : délai fixe non garanti. | 同上 |
-| `band.out.crossTrack` | Noms de piste différents : délai variable. | Noms de piste différents : délai fixe non garanti. | 同上 |
+| `band.out.crossProcess` | Processus différents : délai variable. | Autre processus : le délai peut varier. | 同上 |
+| `band.out.crossTrack` | Noms de piste différents : délai variable. | Noms de piste différents : le délai peut varier. | 同上 |
 | `band.out.ipc` | Pas de mémoire partagée : audio direct seul. | Pas de mémoire partagée : audio transmis tel quel. | 「audio direct seul」读不通；改成明确的「直通」说法 |
 | `band.out.newerProject` | Projet plus récent ({a} / {b}) : défauts. | Projet plus récent ({a} / {b}) : valeurs par défaut. | 「défauts」不是规范说法，与 Input 一侧统一 |
 
@@ -126,13 +129,13 @@
 
 - 规则页四条规则正文里，`: ;` 和 « » 旁用的是窄不换行空格 U+202F，其余条目用 U+00A0；两种都通过 `check-i18n`，字体里都有字形，所以没有动。统一成 U+00A0 要重新生成规则页的生成物，不在本次范围内。
 - 四条导出不一致的消息（`band.in.export*`）没有登记文本宽度预算，`check-text-fit` 看不到它们；改动后的四条按同一消息位的预算（`band.in.exportMismatch`，302 px，一行）用同一套量宽方法手算过，都在范围内（最长一条约 283 px，上限约 290 px）；写法是按这个宽度选的（例如「blocs trop grands」放不下，用了「gros blocs」）。这四个键应补上预算条目，这样以后改动才有检查兜底。
-- 工厂预设的 fr 名在 `presets/factory/*.json` 里，不在词条表中，本次没有改动，列在抽检清单末尾；其中 `f-edge-95` 的名字用了直撇号，数字与 % 之间是普通空格，不合本仓的排版规则（预设文件不在词条表的检查范围内），留待单独修正。
+- 工厂预设的 fr 名在 `presets/factory/*.json` 里，不在词条表中，也不在 `check-i18n` 的检查范围内。本次只修了排版、用字不变：`f-edge-95` 的直撇号改成弯撇号 ’；`f-slapback-90`、`f-long-hold-92`、`f-edge-95`、`f-light-mix-30` 里数字与 `ms` / `%` 之间的普通空格改成 U+00A0。钉住预设名的测试（`tests/params/test_presets_factory.cpp` 的设计表）同步改成新排版。名字列在抽检清单末尾。
 
 ## 抽检清单
 
 **怎么回**：在 PR 上评论：通过；或列出要改的 key 与建议。
 
-★ 表示本次改过的条目。表中法语里的空格都是 U+00A0（不换行空格），看起来和普通空格一样。表共 51 行、86 个键，按风险排序：规则与安全相关 → 首启链与导览 → 本次改动较大的条目 → 其余抽样 → 请你表态的几处。
+★ 表示本次改过的条目。表中法语里的空格都是 U+00A0（不换行空格），看起来和普通空格一样。表共 51 行、87 个键，按风险排序：规则与安全相关 → 首启链与导览 → 本次改动较大的条目 → 其余抽样 → 请你表态的几处。
 
 **请你先看这几处（我拿不准）**
 
@@ -141,18 +144,19 @@
 3. **关于面板的许可短口径 `about.license` 的 fr 保持英文**（设计稿里就是逐字英文，法律措辞以英文为准）。如果想要法语，建议译为：Code source : GPL-3.0-or-later. Le binaire dans son ensemble est distribué sous GPLv3 ; sa partie JUCE relève de l’AGPLv3 (GPLv3 §13). Aucune garantie.
 4. **Reprendre**（接管另一个实例的组）与 **Rétablir**（恢复回送）是两个不同的动词，故意分开，免得「恢复」与「接管」混淆。
 5. **状态灯 stale 写作 LIAISON PERDUE**（术语表初稿是 PERDU），因为单写「perdu」不说什么丢了。
-6. 工厂预设的 fr 名（下表）按旧稿原样，请看名字是否可以。
+6. 工厂预设的 fr 名（下表）：用字照旧稿，只修了排版，请看名字是否可以。
+7. **采样率不一致用了缩写「Échant.」**（`common.pair.srMismatch`、`band.in.srMismatch`、`band.out.srMismatch`，三条在下面抽检表里单列一行）。为不比初译长 15 % 用了缩写，全写会让 `band.out.srMismatch` 超 24 %；状态灯和两条消息用同一个词。要保留缩写还是全写（Échantillonnage），请你定。
 
 | id | zh | en | fr |
 |---|---|---|---|
 | `f-init` | Init | Init | Initialisation |
-| `f-slapback-90` | Slapback 90 ms | Slapback 90 ms | Slapback 90 ms |
+| `f-slapback-90` | Slapback 90 ms | Slapback 90 ms | Slapback 90 ms |
 | `f-dub-quarter-dotted` | Dub 1/4D | Dub 1/4D | Dub 1/4D |
 | `f-ping-pong-eighth` | Ping-Pong 1/8 | Ping-Pong 1/8 | Ping-pong 1/8 |
 | `f-shortest-comb` | Shortest Comb | Shortest Comb | Peigne minimal |
-| `f-long-hold-92` | Long Hold 92 % | Long Hold 92 % | Maintien long 92 % |
-| `f-edge-95` | Edge 95 % | Edge 95 % | Bord d'oscillation 95 % |
-| `f-light-mix-30` | Light Mix 30 % | Light Mix 30 % | Mélange léger 30 % |
+| `f-long-hold-92` | Long Hold 92 % | Long Hold 92 % | Maintien long 92 % |
+| `f-edge-95` | Edge 95 % | Edge 95 % | Bord d’oscillation 95 % |
+| `f-light-mix-30` | Light Mix 30 % | Light Mix 30 % | Mélange léger 30 % |
 
 | key | 所在界面 | zh | en | fr |
 |---|---|---|---|---|
@@ -194,9 +198,9 @@
 | `hint.firstUseRestored` | 恢复出来的实例上，页脚提示本机还没确认过规则 | 本机未确认使用规则：点版本号查看 | Rules not yet confirmed: click the version | Règles à confirmer : cliquez sur la version |
 | ★ `common.footer.helpTip` | 页脚问号按钮的悬停提示 | 重看使用规则与引导 | Show the rules and guide again | Revoir les règles et la visite |
 | ★ `band.in.takeover`<br>★ `band.action.takeoverTip` | 消息位的接管确认（Output 一侧同文），以及接管按钮的悬停提示 | 组 {g} 被一个已停用的实例占用，要接管吗？<br>接管后那个实例会失去这个组。 | Take over group {g} from an idle instance?<br>That instance will lose the group. | Groupe {g} : instance inactive. Reprendre ?<br>L’autre instance perdra ce groupe. |
-| ★ `common.pair.srMismatch`<br>★ `band.in.srMismatch` | 配对状态灯：采样率不一致；Input 消息位同一情形（Output 同文） | 采样率不一致<br>采样率不一致（{a} / {b} Hz）：回送已停止。 | SAMPLE RATE MISMATCH<br>Sample rates differ ({a} / {b} Hz): return stopped. | ÉCHANTILLONNAGE DIFFÉRENT<br>Échantillonnage différent ({a} / {b} Hz) : retour arrêté. |
+| ★ `common.pair.srMismatch`<br>★ `band.in.srMismatch`<br>★ `band.out.srMismatch` | 请你定（见上面第 7 点）：配对状态灯的采样率不一致；Input 与 Output 消息位的同一情形 | 采样率不一致<br>采样率不一致（{a} / {b} Hz）：回送已停止。<br>采样率不一致（{a} / {b} Hz）：回送已停止。 | SAMPLE RATE MISMATCH<br>Sample rates differ ({a} / {b} Hz): return stopped.<br>Sample rates differ ({a} / {b} Hz): stopped. | ÉCHANT. DIFFÉRENT<br>Échant. différent ({a} / {b} Hz) : retour arrêté.<br>Échant. différent ({a} / {b} Hz) : retour arrêté. |
 | ★ `band.in.abi`<br>★ `band.out.abi` | 消息位：两端版本不匹配（状态灯是 VERSION INCOMPATIBLE 的 fr） | 版本不匹配（In {a} / Out {b}），已拒绝。<br>版本不匹配（Out {a} / In {b}），已拒绝。 | Versions differ (In {a} / Out {b}).<br>Versions differ (Out {a} / In {b}). | Versions incompatibles (In {a} / Out {b}).<br>Versions incompatibles (Out {a} / In {b}). |
-| ★ `band.in.crossProcess`<br>★ `band.in.crossTrack`<br>★ `band.in.unstable` | 消息位：两端不在同一进程 / 轨道名不同 / 宿主时序不稳（Output 一侧前两条同文） | 两端在不同进程：延迟不保证固定。<br>两端轨道名不同：环路延迟不保证固定。<br>宿主时序不稳定，已切到容忍模式：延迟不再保证固定。 | Different processes: delay may vary.<br>Track names differ: loop delay may vary.<br>Unstable host timing: tolerant mode, delay not fixed. | Autre processus : délai fixe non garanti.<br>Noms de piste différents : délai fixe non garanti.<br>Cadencement instable : mode tolérant, délai fixe non garanti. |
+| ★ `band.in.crossProcess`<br>★ `band.in.crossTrack`<br>★ `band.in.unstable` | 消息位：两端不在同一进程 / 轨道名不同 / 宿主时序不稳（Output 一侧前两条同文） | 两端在不同进程：延迟不保证固定。<br>两端轨道名不同：环路延迟不保证固定。<br>宿主时序不稳定，已切到容忍模式：延迟不再保证固定。 | Different processes: delay may vary.<br>Track names differ: loop delay may vary.<br>Unstable host timing: tolerant mode, delay not fixed. | Autre processus : le délai peut varier.<br>Noms de piste différents : le délai peut varier.<br>Cadencement instable : mode tolérant, le délai peut varier. |
 | ★ `band.in.exportViolation`<br>★ `band.in.exportPeer` | 消息位：上次导出可能与播放不同（共四种原因，另两条 exportOverrun、exportResync 只换了原因） | 上次导出可能与播放不同：宿主违约，调大 D 可避免。<br>上次导出可能与播放不同：Output 端宿主违约。 | Last export may differ: oversized blocks; raise D.<br>Last export may differ: the Output host broke its limit. | Dernier export peut différer : gros blocs ; relevez D.<br>Dernier export peut différer : l’hôte d’Output déborde. |
 | ★ `band.in.nextStep`<br>★ `band.in.stateDecodeFailed` | 消息位：下一步提示（插入 Output）；工程设置无法读取 | 下一步：插入 Rinne Output（最简单：推子前区最后一格），组 {g}。<br>工程里的 Rinne 设置无法读取：已按默认值运行（反馈量 0）。 | Next: add Rinne Output (last pre-fader slot), group {g}.<br>Settings unreadable: defaults in use (feedback 0). | Ensuite : insérez Rinne Output (dernier slot pré-fader), groupe {g}.<br>Réglages illisibles : valeurs par défaut (réinjection 0). |
 | ★ `band.out.ipc`<br>★ `band.out.newerProject` | Output 消息位：无法建立共享内存；工程来自更新版本 | 无法建立共享内存：环路不可用，只直通音频。<br>工程来自更新版本（{a} / {b}）：暂用默认值。 | No shared memory: loop off, pass-through.<br>Project from a newer Rinne ({a} / {b}): defaults. | Pas de mémoire partagée : audio transmis tel quel.<br>Projet plus récent ({a} / {b}) : valeurs par défaut. |
