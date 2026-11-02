@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Input 页面「紧急切断」冒烟（无头浏览器）：它是独立的安全层，任何遮罩、模态与确认框都盖不住它。
-//   ① 命中：范围内 32 个 in-* 场景（含关于面板、缩放确认、限制器关闭确认、接管确认等遮罩场景）里，
-//      紧急切断按钮内五个点的 elementFromPoint 都落在按钮自己身上；
-//   ② 点击：遮罩与模态打开时真点一下，桥恰好收到一次 panic；
+//   ① 命中：范围内 40 个 in-* 场景（含关于面板、缩放确认、限制器关闭确认、接管确认等遮罩场景，以及首启的语言卡、规则页、导览六步）里，
+//      紧急切断按钮内五个点的 elementFromPoint 都落在按钮自己身上；首启的 8 个场景必须在这一轮里（下面按数量断言，防被筛掉）；
+//   ② 点击：遮罩与模态打开时真点一下，桥恰好收到一次 panic；首启的三种叠层（语言卡、规则页、导览）也各点一次，
+//      叠层随之关掉。真走完整条首启链时在导览中点切断，由 smoke-first-run-page 断言，这里只补静态场景；
 //   ③ 连点不恢复：切断后再点紧急切断不再调桥，也不触发恢复；恢复只有消息位的「恢复回送」一个入口，
 //      且切断后 1.5 s 内按钮处于冷却态、点了不调桥，冷却过后才调一次 resumeLoop；
 //   ④ 坏样例：在按钮上盖一层透明的全窗元素，命中判据必须判红；把按钮的 z-index 压到遮罩之下，点击判据必须判红。
@@ -14,7 +15,16 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { SCENES, VIEW, centerOf, inFrame, openInput, recordBridge } from "./smoke-input-kit-page.mjs";
+import {
+    FIRST_RUN_SCENES,
+    SCENES,
+    VIEW,
+    centerOf,
+    inFrame,
+    isFirstRunScene,
+    openInput,
+    recordBridge,
+} from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("Input 页面紧急切断");
@@ -61,7 +71,16 @@ try {
     const page = await browser.newPage();
 
     // ---- ① 命中：每个场景
-    const MODAL = new Set(["in-limiter-confirm", "in-about", "in-scale-confirm", "in-takeover-confirm"]);
+    const MODAL = new Set([
+        "in-limiter-confirm",
+        "in-about",
+        "in-scale-confirm",
+        "in-takeover-confirm",
+        // 首启的三种叠层各取一个：语言卡、规则页、导览（取第 3 步，说明框在页面中部）
+        "in-lang",
+        "in-rules",
+        "in-tour-3",
+    ]);
     for (const scene of SCENES) {
         await openInput(page, server, scene.id, { lang: "zh" });
         const h = await inFrame(page, hitProbe, PANIC);
@@ -71,8 +90,17 @@ try {
         );
     }
     run.log(`  命中检查共 ${SCENES.length} 个场景`);
+    // 首启的场景必须在这一轮里：紧急切断在语言卡、规则页、导览之上也要点得到（量尺不能悄悄把它们筛掉）
+    run.eq(SCENES.filter(isFirstRunScene).length, 8, "命中检查应含首启的 8 个场景（语言卡、规则页、导览六步）");
+    run.eq(FIRST_RUN_SCENES.length, 8, "首启场景应有 8 个");
 
     // ---- ② 点击：遮罩与模态之下真点
+    // 首启的三种叠层（语言卡、规则页、导览）都要在点击集里，不能被悄悄挪掉
+    run.eq(
+        [...MODAL].filter((id) => isFirstRunScene({ id })).length,
+        3,
+        "点击集应含首启的三种叠层（语言卡、规则页、导览各一个）",
+    );
     for (const id of MODAL) {
         await openInput(page, server, id, { lang: "zh" });
         // 这几个场景确有遮罩或确认层：先确认层在（防空转）

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Input 页面文字对比度冒烟（无头浏览器）：范围内的 32 个 in-* 场景 × 中 / 英 / 法。
+// Input 页面文字对比度冒烟（无头浏览器）：范围内的 32 个非首启 in-* 场景 × 中 / 英 / 法。
+// 首启的 8 个场景（语言卡、规则页、导览 6 步）加规则页放行后的画面另在 smoke-input-contrast-first-run-page.mjs 量：
+//   拆出去是为了让两个文件各自跑在 run-all 单项 300 秒的上限之内（合在一起实测 267 秒，没有余量），判据一条没动；
+//   本页排除的集合在下面按数量精确断言（恰好 9 个画面），不多排也不少排。
 // 量法与共享件的对比度冒烟相同：页内采样每段可见文字的矩形、计算色与各层不透明度，把页面文字改成透明后截图得到合成底，
 // 逐像素把文字色合成上去，取矩形内最差的一格。分档：
 //   A（≥ 4.5）：危险与确认横幅、模态里的文字（含限制器关闭确认框）、横幅与消息位里的按钮、紧急切断；
 //   B（≥ 3.0）：琥珀 / 灰 / 紫横幅、配对状态灯；
-//   C：其余只记录不判（mono 小标等按规范不设门禁）。
+//   C：其余只记录不判（mono 小标等按规范不设门禁；置灰的控件也按 C，见下）。
 // 预设面板：场景表只有列表与重名两态，其余子态逐语言逐子态摆出来量，那一段在 smoke-input-contrast-presets-page.mjs（拆出去是为了让两个文件
 //   各自跑在 run-all 单项 300 秒的上限之内，判据一条没动）。这里留下场景表里两个 in-preset-* 场景与一个预设红字提示的坏样例。
 //   分档：条目、动作与按钮名按 A，红字提示按 A，琥珀提示按 B，预设按钮在内容层里（旁路时随内容层降级）也按 B，标签与两处说明文字（设计稿给的 --txt-3）按 C 只记录，置灰的不判。
@@ -26,12 +29,16 @@ import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 import { TIER_MIN, worstContrast } from "./shared-measure.mjs";
 import {
+    FRAMES,
     LANGS,
     SCENES,
     VIEW,
     describeFailure,
+    frameTag,
     inFrame,
+    isFirstRunScene,
     measure,
+    openFrame,
     openInput,
     openPresetState,
     settle,
@@ -39,6 +46,8 @@ import {
 
 const ROOT = repoRoot();
 const run = createRun("Input 页面对比度");
+/** 本页量的画面：首启的画面（语言卡、规则页未放行 / 放行后、导览各步）另在 smoke-input-contrast-first-run-page 量。 */
+const MAIN_FRAMES = FRAMES.filter((f) => !isFirstRunScene(f.scene));
 if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 
 /**
@@ -90,9 +99,10 @@ try {
     const bypassScenes = [];
     let degraded = 0;
     for (const lang of LANGS) {
-        for (const scene of SCENES) {
-            const tag = `${scene.id}/${lang}`;
-            await openInput(page, server, scene.id, { lang });
+        for (const frame of MAIN_FRAMES) {
+            const { scene } = frame;
+            const tag = frameTag(frame, lang);
+            await openFrame(page, server, frame, { lang });
             // 缩放确认的 10 秒倒计时每秒重写一次文本，量尺的取样窗口会和它共振；量的是画面不是倒计时，冻结页内定时器
             if (scene.id === "in-scale-confirm")
                 await inFrame(page, (doc, win) => {
@@ -134,6 +144,13 @@ try {
         `  共量 ${pages} 页；A 档 ${tally.A} 段、B 档 ${tally.B} 段、C 档 ${tally.C} 段（只记录）；旁路降级层 ${degraded} 段按 C 档只记录`,
     );
     run.check(tally.A > 0 && tally.B > 0, "A 档与 B 档都应采到文字（防空转）");
+    run.eq(
+        FRAMES.length - MAIN_FRAMES.length,
+        9,
+        "本页排除的恰好是首启的 9 个画面（8 个场景加规则页放行后一个），它们由 smoke-input-contrast-first-run-page 量",
+    );
+    run.eq(MAIN_FRAMES.length, 32, "本页量 32 个非首启场景，每个一个画面（防新增场景漏测）");
+    run.eq(FRAMES.length, SCENES.length + 1, "每个场景一个画面，规则页多一个放行后的画面（防新增场景漏测）");
 
     run.eq([...new Set(bypassScenes)], ["in-bypassed"], "场景表里只有 in-bypassed 带宿主旁路");
     run.check(degraded > 0, "旁路场景里应有被降级的内容层文字（防止旁路降级悄悄失效）");
