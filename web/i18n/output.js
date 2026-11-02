@@ -3,7 +3,7 @@
 // Rinne Output 页面自己的界面词条：页眉、常驻位置提示、组徽标说明、配对卡、发送状态行、页脚提示、
 // 消息位的 14 条消息与接管确认条。键前缀有 out.* 和 band.out.*。
 // 两个插件共用的词条在 common.js，键不得重名；由 web/shared/i18n.js 的 mergeDicts 合并。
-// fr 为初译，登记在 fr-review/output.json，发布前抽检。
+// fr 已逐条复核，登记在 fr-review/output.json，待维护者抽检后清空。
 //
 // 排版规则（scripts/check-i18n.mjs 检查）：
 //   - zh 用全角标点，en 用弯引号和弯撇号；
@@ -159,18 +159,18 @@ export default {
         // 消息位：Output 的 14 条消息与接管确认条
         "band.out.conflict": "Groupe {g} pris par un autre Output.",
         "band.out.unassigned": "Les 8 groupes sont pris : libérez-en un.",
-        "band.out.abi": "Versions différentes (Out {a} / In {b}).",
-        "band.out.srMismatch": "Fréquences différentes ({a} / {b} Hz) : arrêt.",
-        "band.out.ipc": "Pas de mémoire partagée : audio direct seul.",
+        "band.out.abi": "Versions incompatibles (Out {a} / In {b}).",
+        "band.out.srMismatch": "Échantillonnage différent ({a} / {b} Hz) : retour arrêté.",
+        "band.out.ipc": "Pas de mémoire partagée : audio transmis tel quel.",
         "band.out.ipcSandbox": "Hôte en bac à sable : non pris en charge.",
-        "band.out.newerProject": "Projet plus récent ({a} / {b}) : défauts.",
+        "band.out.newerProject": "Projet plus récent ({a} / {b}) : valeurs par défaut.",
         "band.out.stateDecodeFailed": "Réglages illisibles : valeurs par défaut.",
         "band.out.stale": "Rinne Input muet depuis 2 s ; envoi maintenu.",
-        "band.out.crossProcess": "Processus différents : délai variable.",
-        "band.out.crossTrack": "Noms de piste différents : délai variable.",
+        "band.out.crossProcess": "Autre processus : délai fixe non garanti.",
+        "band.out.crossTrack": "Noms de piste différents : délai fixe non garanti.",
         "band.out.outOfOrder": "Ordre inversé : déplacez ce plug-in plus bas.",
         "band.out.waitingAudio": "En attente d’audio : lisez ou choisissez un groupe.",
         "band.out.validator": "Outil de validation : boucle désactivée.",
-        "band.out.takeover": "Groupe {g} tenu par une instance inactive.",
+        "band.out.takeover": "Groupe {g} : instance inactive. Reprendre ?",
     },
 };
