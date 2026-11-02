@@ -601,9 +601,9 @@ function Get-RinneRunLog {
   把四个来源摊成一张表。Kind：agent（有写权限且首行带 agent 标记）、bot-summary、bot、pr-agent（github-actions[bot]
   发的 pr-agent 审查输出，判据见 Test-RinnePrAgentComment）、user（有写权限、没有标记：维护者本人的意见）、
   external（既不是 bot 也没有写权限；账号已删除、login 为空的也算）。
-  review comment 带上所在线程、是否已 resolve 与所属 review。review 只收 COMMENTED 与 CHANGES_REQUESTED（正文为空的也收：
-  inline 评论都挂在一个空正文的 COMMENTED review 下，「Request changes」也可以不写正文）；空正文、只装着我方回复的 review
-  算 agent 的。CHANGES_REQUESTED 记下同一作者之后有没有 APPROVED。
+  review comment 带上所在线程、是否已 resolve 与所属 review。review 收 COMMENTED、CHANGES_REQUESTED 与 APPROVED（正文为空的也收：
+  inline 评论都挂在一个空正文的 COMMENTED review 下，「Request changes」「Approve」也可以不写正文；外部人的 Approve 同样
+  是外部评论，要交用户）；空正文、只装着我方回复的 review 算 agent 的。CHANGES_REQUESTED 记下同一作者之后有没有 APPROVED。
   IsNew：updated_at 晚于 Since（追踪评论是原地编辑的，按更新时间判新）。InReplyTo：agent 标记里 in-reply-to 列出的编号。
 #>
 function Get-RinneCommentItems {
@@ -648,7 +648,7 @@ function Get-RinneCommentItems {
     $reviews = @($Activity.Reviews)
     foreach ($c in $reviews) {
         $state = [string](Get-RinneProp $c 'state')
-        if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $state) { continue }
+        if (@('COMMENTED', 'CHANGES_REQUESTED', 'APPROVED') -notcontains $state) { continue }
         $rid = [string]$c.id
         $inline = @($items | Where-Object { $_.Source -eq 'review-comment' -and $_.ReviewId -eq $rid })
         $author = [string](Get-RinneProp (Get-RinneProp $c 'user') 'login')
@@ -671,7 +671,8 @@ function Get-RinneCommentItems {
     只 resolve 不算；bot 的 inline 评论在处置汇总里逐条处置过，线程里没有我方回复的，线程已 resolve 也算；
   - 其余（issue comment、review 正文、CHANGES_REQUESTED）：我方评论的 agent 标记里用 in-reply-to 点名了它
     （-Reply 自动带上），不认正文里碰巧出现的数字。空正文、只装着 inline 评论的 review 看它那些评论；
-    CHANGES_REQUESTED 也可以由同一作者之后的 APPROVED 解除（驳回的 review 不再出现在表里）。
+    CHANGES_REQUESTED 也可以由同一作者之后的 APPROVED 解除（驳回的 review 不再出现在表里）；
+    APPROVED 的 review 带正文（且没有 agent 标记）的要点名回复，空正文的没有可回应的内容，免回应。
 #>
 function Test-RinneResponded {
     param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, $State)
@@ -703,6 +704,7 @@ function Test-RinneResponded {
             }
             return $true
         }
+        if ($Item.State -eq 'APPROVED' -and -not $Item.Body.Trim()) { return $true }
     }
     return $explicit
 }
