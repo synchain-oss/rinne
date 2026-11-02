@@ -76,7 +76,12 @@ try {
         });
         shell.setOverlaySource(() => firstRun.isOpen());
         firstRun.disableAuto();
-        const st = page.snapshot().state;
+        const { state: st, view } = page.snapshot();
+        // 喂给控制器的运行态与 web/output/app.js 的 feed 是同一套判断：l2 取页面视图模型的 danger（和真页面一样现读）；
+        // guardLit 真页面也恒为 false；loopActive 在真页面里由 outputFlowing 判断（app.js 是带副作用的入口模块，不能 import），
+        // 这里写死 false。静态的首启场景不带危险态（配对不是冲突 / 版本不匹配），也没有环路活动（没有已连接的配对在回送），
+        // 所以真页面在这些场景里喂的也是 false。这一点不靠这里的注释：fixtures/output/lib.mjs 的 overlayFailures 在每个首启画面上
+        // 用真页面同一个判断（view.danger 与 outputFlowing）断言，夹具与真页面分叉会被发现
         firstRun.update(
             {
                 lang: st.lang,
@@ -86,7 +91,7 @@ try {
                 inputGuideSeen: st.inputGuideSeen,
                 restored: st.restored,
             },
-            { l2: false, guardLit: false, loopActive: false },
+            { l2: view.danger === true, guardLit: false, loopActive: false },
         );
         firstRun.showScene(sc);
     };

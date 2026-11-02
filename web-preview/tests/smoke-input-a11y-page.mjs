@@ -16,7 +16,8 @@
 //      导览第 1 步的「上一步」禁用；规则页正文区能用键盘到达；紧急切断在三种叠层下都不在 inert 里、有名称、能聚焦，
 //      Tab 走一圈每一站只落在叠层或紧急切断上、且有看得见的焦点环；用键盘（空格）在三种叠层下触发紧急切断，桥收到一次 panic、叠层关掉。
 //      已在 smoke-first-run-page 断言过的不重复：Esc 的去留、按钮放行的时机、红字、紧急切断的命中点与导览中真点切断。
-//      坏样例：去掉叠层名称、去掉内容层 inert、把焦点移出叠层、把规则页按钮改成可用、让紧急切断落进 inert、关掉叠层里的焦点环，各项必须判红。
+//      坏样例：去掉叠层名称、去掉内容层 inert、把焦点移出叠层、把规则页按钮改成可用、让紧急切断落进 inert、关掉叠层里的焦点环，各项必须判红；
+//      反例：只有 aria-labelledby 的按钮（没有文字、没有 aria-label）不算没有名称，叠层按钮的名称与名称审计取法同一个函数。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
 // 用法：node web-preview/tests/smoke-input-a11y-page.mjs [仓库根]
@@ -39,7 +40,7 @@ import {
     overlayProbeFailures,
     recordBridge,
 } from "./smoke-input-kit-page.mjs";
-import { overlayA11yProbe, overlayProblems } from "../fixtures/first-run/measure.mjs";
+import { overlayA11yProbe, overlayProblems, stripToLabelledBy } from "../fixtures/first-run/measure.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("Input 页面可访问性");
@@ -653,6 +654,25 @@ try {
             },
             overlayHas(/langStart\.en 没有名称/, "语言按钮没有名称"),
         );
+        // 反例：按钮没有文字、没有 aria-label，只有 aria-labelledby（指到两个有字的节点）：名称就是那两段字，
+        // 叠层探针不能把它判成「没有名称」（取名称的顺序与写法同名称审计，是同一个函数，见 accessibleName）
+        {
+            const frame = { scene: SCENES.find((s) => s.id === "in-lang"), sub: "" };
+            await openFrame(page, server, frame, { lang: "zh" });
+            const want = await inFrame(page, stripToLabelledBy, '[data-part="langStart.en"]');
+            const o = await inFrame(page, overlayA11yProbe, "input");
+            run.eq(
+                o.buttons.find((b) => b.part === "langStart.en").name,
+                want,
+                "反例：只有 aria-labelledby 的按钮，叠层探针取到的名称",
+            );
+            run.eq(overlayProblems(o, frame, TOUR_STEPS), [], "反例：只有 aria-labelledby 的按钮不算没有名称");
+            run.eq(
+                (await inFrame(page, nameAudit)).missing,
+                [],
+                "反例：整页名称审计也不能把只有 aria-labelledby 的按钮判成缺名称",
+            );
+        }
         // 紧急切断落进 inert：panicProblems 要报
         await openInput(page, server, "in-rules", { lang: "zh" });
         await inFrame(page, (doc) => doc.querySelector('[data-gb="input.panic"]').setAttribute("inert", ""));

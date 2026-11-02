@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 首启场景（语言卡、规则页、导览）进适配 / 对比度 / 无障碍套件时，Input 与 Output 两边共用的常量。
+// 首启场景（语言卡、规则页、导览）进适配 / 对比度 / 无障碍套件时，Input 与 Output 两边共用的常量与页内函数。
 // 探针本身两边各写各的（Input 的探针在 smoke-input-kit-page.mjs，Output 的由 fixtures/output/lib.mjs 在共用探针上改出来），
-// 这里只放两边必须一致的东西，免得两边各抄一份慢慢漂开。
+// 这里只放两边必须一致的东西，免得两边各抄一份慢慢漂开；探针里两边必须取同一种算法的小块（滚动区裁剪、可访问名称）
+// 也写成页内函数放在这里，两边都从这一份源码带进页面（见 inlineProbe）。
 
 import { findLeaks as findBaseLeaks } from "../../tests/shared-measure.mjs";
 
@@ -31,6 +32,55 @@ export function expectedOverlay(id) {
 }
 
 /**
+ * 文字在祖先的滚动区里（规则页正文）：字框只取滚动区露出来的那一段（纵向）。段落比滚动区还高时（法文的规则页），
+ * 越出去的部分被裁掉，那里露出来的是滚动区外面的东西（页脚的按钮），不是这段字的底，量进去就是假红。
+ * box 是 { left, top, right, bottom }，sc 是最近的滚动祖先（没有则 null，原样返回）；返回裁过的同形状的 box。
+ * Input、Output 两边的对比度探针都用这一个函数；页内求值，不能引用外面的变量。
+ */
+export function clipToAncestorScroller(box, sc) {
+    if (!sc) return box;
+    const sr = sc.getBoundingClientRect();
+    return {
+        left: box.left,
+        top: Math.max(box.top, sr.top),
+        right: box.right,
+        bottom: Math.min(box.bottom, sr.bottom),
+    };
+}
+
+/**
+ * 简化版可访问名称，取法与 Output 名称审计（fixtures/output/lib.mjs 的 NAME_AUDIT）一致：
+ * aria-labelledby 指到的文字 > aria-label > 文字 > title；原生下拉不取文字（那是当前值，不是名称）。
+ * 叠层按钮的名称（overlayA11yProbe）与名称审计用这一个函数，顺序不会各写各的；页内求值，不能引用外面的变量。
+ */
+export function accessibleName(e, doc) {
+    const by = e.getAttribute("aria-labelledby");
+    if (by) {
+        const txt = by
+            .split(/\s+/)
+            .map((id) => (doc.getElementById(id) || {}).textContent || "")
+            .join(" ")
+            .trim();
+        if (txt) return txt;
+    }
+    const al = (e.getAttribute("aria-label") || "").trim();
+    if (al) return al;
+    const tc = (e.textContent || "").trim();
+    if (tc && e.tagName !== "SELECT") return tc;
+    return (e.getAttribute("title") || "").trim();
+}
+
+/**
+ * 把一个页内函数序列化成一段求值为该函数的表达式源码。函数靠 toString 送进页面，引用不到模块里的东西；
+ * 它用到的共用函数（clipToAncestorScroller、accessibleName）挂在 fn.deps 上，这里把它们的源码先声明在函数外面一层，
+ * 函数里就能按名字用。没有 deps 的函数原样返回。用法：`(${inlineProbe(fn)})(实参...)`。
+ */
+export function inlineProbe(fn) {
+    const deps = (fn.deps || []).map((d) => d.toString()).join("\n");
+    return deps ? `(() => { ${deps}\n return (${fn.toString()}); })()` : `(${fn.toString()})`;
+}
+
+/**
  * 叠层的无障碍现状（页内求值，两边的无障碍冒烟共用：Input 经 iframe，Output 直接在夹具页里；函数不能引用外面的变量）。
  * 返回 { open, kind, role, modal, name, contentInert, focusIn, step, buttons, rules }：
  *   open        此刻打开着的叠层种类（应恰好一个）；kind 是其中唯一的那个；
@@ -38,7 +88,7 @@ export function expectedOverlay(id) {
  *   contentInert 外壳的内容层是否 inert（叠层之下的页面不能被点到、Tab 到）；
  *   focusIn     键盘焦点是否在叠层根节点之内；
  *   step        导览当前步（data-state=step-N），其余为 null；
- *   buttons     叠层里的按钮 [{ part, name, disabled, title }]（名称按 aria-label 或文字，没有则空串）；
+ *   buttons     叠层里的按钮 [{ part, name, disabled, title }]（名称取法同名称审计，见 accessibleName，没有则空串）；
  *   rules       规则页的 data-state 与正文区能否用键盘到达（tabindex 为 0），其余为 null。
  */
 export function overlayA11yProbe(doc, win, role) {
@@ -62,7 +112,7 @@ export function overlayA11yProbe(doc, win, role) {
     const buttons = root
         ? [...root.querySelectorAll("button")].map((b) => ({
               part: b.getAttribute("data-part") || "",
-              name: (b.getAttribute("aria-label") || b.textContent || "").trim(),
+              name: accessibleName(b, doc),
               disabled: b.disabled,
               title: b.getAttribute("title") || "",
           }))
@@ -80,6 +130,32 @@ export function overlayA11yProbe(doc, win, role) {
         buttons,
         rules: body ? { state: root.getAttribute("data-state"), bodyTabbable: body.tabIndex === 0 } : null,
     };
+}
+
+overlayA11yProbe.deps = [accessibleName];
+
+/**
+ * 「只有 aria-labelledby 的按钮不算没有名称」这条反例的摆法（页内求值，两边的无障碍冒烟共用）：
+ * 把 sel 选中的按钮改成没有文字、没有 aria-label、没有 title，只靠 aria-labelledby 指到两个有字的节点
+ * （两个 id 用空白隔开、都带字母 s：按空白切分的写法才取得到，错切成按字母 s 切就取不到）。返回此时应得的名称。
+ */
+export function stripToLabelledBy(doc, win, sel) {
+    const b = doc.querySelector(sel);
+    b.textContent = "";
+    b.removeAttribute("aria-label");
+    b.removeAttribute("title");
+    for (const [id, text] of [
+        ["fx-lbl-s1", "甲"],
+        ["fx-lbl-s2", "乙"],
+    ]) {
+        const e = doc.createElement("span");
+        e.id = id;
+        e.hidden = true;
+        e.textContent = text;
+        doc.body.append(e);
+    }
+    b.setAttribute("aria-labelledby", "fx-lbl-s1 fx-lbl-s2");
+    return "甲 乙";
 }
 
 /**

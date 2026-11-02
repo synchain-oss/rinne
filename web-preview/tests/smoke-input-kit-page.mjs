@@ -26,8 +26,11 @@ import {
 } from "./shared-measure.mjs";
 import {
     SVG_HIDE_STYLE,
+    accessibleName,
+    clipToAncestorScroller,
     expectedOverlay,
     findLeaks,
+    inlineProbe,
     isFirstRunSceneId,
     overlayA11yProbe,
 } from "../fixtures/first-run/measure.mjs";
@@ -151,10 +154,13 @@ export async function overlayProbeFailures(page, frame) {
     return out;
 }
 
-/** 在页面所在的 iframe 里求值：fn 是 (doc, win, ...args) => 可序列化的值（可以是 async），不能引用外面的变量。 */
+/**
+ * 在页面所在的 iframe 里求值：fn 是 (doc, win, ...args) => 可序列化的值（可以是 async），不能引用外面的变量；
+ * 唯一的例外是挂在 fn.deps 上的共用函数（见 inlineProbe），它们的源码会一并送进页面。
+ */
 export function inFrame(page, fn, ...args) {
     return page.eval(
-        `(() => { const f = document.querySelector("iframe"); return (${fn.toString()})(f.contentDocument, f.contentWindow, ...${JSON.stringify(args)}); })()`,
+        `(() => { const f = document.querySelector("iframe"); return (${inlineProbe(fn)})(f.contentDocument, f.contentWindow, ...${JSON.stringify(args)}); })()`,
     );
 }
 
@@ -489,7 +495,9 @@ export function contrastProbe(doc, win) {
         // SVG 文字（规则页旁的插入链示意，字号 7.5 到 8.5）的字框是整行的行盒，四周各有一圈没有墨迹的留白，
         // 留白的四角会落到圆角槽的外面；只取中间的墨迹区（四周各收 1.5 px），免得把槽外的底量成字的底
         const k = p.namespaceURI === "http://www.w3.org/2000/svg" ? 1.5 : 0;
-        return { x: left + k, y: top + k, w: right - left - 2 * k, h: bottom - top - 2 * k };
+        // 文字在祖先的滚动区里（规则页正文）：只取滚动区露出来的那一段；函数与 Output 的量尺是同一份源码（理由见该函数）
+        const box = clipToAncestorScroller({ left, top, right, bottom }, scrollerOf(p));
+        return { x: box.left + k, y: box.top + k, w: box.right - box.left - 2 * k, h: box.bottom - box.top - 2 * k };
     };
     win.__cp = [];
     win.__cpPlace = (i) => {
@@ -536,6 +544,8 @@ export function contrastProbe(doc, win) {
     }
     return out;
 }
+
+contrastProbe.deps = [clipToAncestorScroller];
 
 // ---------------------------------------------------------------- 预设面板子态
 
@@ -780,6 +790,34 @@ if (isMain) {
             findLeaks("环路已关闭：回送不会加入输出。").length === 0,
         "裸键、占位符、undefined 要扫得出，正常文案不误报",
     );
+    // 可访问名称的取法（叠层按钮与名称审计共用的 accessibleName）：aria-labelledby > aria-label > 文字 > title，用假节点逐条验顺序
+    {
+        const nameOf = (attrs, text, ids = {}, tag = "BUTTON") =>
+            accessibleName(
+                { tagName: tag, textContent: text, getAttribute: (k) => (k in attrs ? attrs[k] : null) },
+                { getElementById: (id) => (id in ids ? { textContent: ids[id] } : null) },
+            );
+        const all = { "aria-labelledby": "s1 s2", "aria-label": "标签", title: "提示" };
+        const ids = { s1: "甲", s2: "乙" };
+        run.eq(nameOf(all, "文字", ids), "甲 乙", "名称：aria-labelledby 排第一，多个 id 用空白隔开、各取一段拼起来");
+        run.eq(
+            nameOf({ ...all, "aria-labelledby": "没有" }, "文字", ids),
+            "标签",
+            "名称：aria-labelledby 指不到字时退到 aria-label",
+        );
+        run.eq(nameOf({ "aria-label": "标签", title: "提示" }, "文字"), "标签", "名称：aria-label 排在文字前面");
+        run.eq(nameOf({ title: "提示" }, " 文字 "), "文字", "名称：文字排在 title 前面，两端空白去掉");
+        run.eq(nameOf({ title: "提示" }, ""), "提示", "名称：没有别的才取 title");
+        run.eq(nameOf({}, ""), "", "名称：什么都没有就是空串");
+        run.eq(nameOf({ title: "提示" }, "当前值", {}, "SELECT"), "提示", "名称：原生下拉不取文字（那是当前值）");
+        // 页内函数的序列化：挂了 deps 的函数，源码里带上依赖的声明；没挂的原样
+        run.check(
+            inlineProbe(contrastProbe).includes("function clipToAncestorScroller") &&
+                inlineProbe(overlayA11yProbe).includes("function accessibleName") &&
+                !inlineProbe(fitProbe).includes("function accessibleName"),
+            "页内函数的序列化：挂了 deps 的探针带上共用函数，没挂的不带",
+        );
+    }
     if (!findBrowser()) {
         // 纯函数部分有失败照报失败；全过才按「没有浏览器」整套跳过，跳过不是通过
         if (!run.finish()) process.exit(1);

@@ -3,6 +3,7 @@
 // Output 页面级冒烟的公共件：场景表、开页（夹具 web-preview/fixtures/output/index.html）、Output 的对比度分档与量尺。
 // 只放可复用的函数，不自己跑断言；smoke-output-*.mjs 各自引用。探针与 PNG 解码复用 shared-measure.mjs，不另写一份。
 
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import {
@@ -17,8 +18,11 @@ import {
 } from "../../tests/shared-measure.mjs";
 import {
     SVG_HIDE_STYLE,
+    accessibleName,
+    clipToAncestorScroller,
     expectedOverlay,
     findLeaks,
+    inlineProbe,
     isFirstRunSceneId,
     overlayA11yProbe,
 } from "../first-run/measure.mjs";
@@ -126,17 +130,39 @@ export async function releaseRules(page) {
 }
 
 /** 叠层的无障碍现状（页内求值 overlayA11yProbe，角色取 output）。 */
-export const overlayState = (page) => page.eval(`(${overlayA11yProbe.toString()})(document, window, "output")`);
+export const overlayState = (page) => page.eval(`(${inlineProbe(overlayA11yProbe)})(document, window, "output")`);
+
+/**
+ * 真页面（web/output/app.js）喂给首启控制器的两个判断：危险描边 view.danger（页面自己的视图模型）与「环路这头正在回送」outputFlowing。
+ * outputFlowing 在带副作用的入口模块里、不能 import，所以按源码原样取下来在页内求值（不另写一份）；
+ * 源码的形状变了就抛错，不悄悄放过（和上面 derive 的锚点同一个做法）。
+ */
+const APP_SRC = readFileSync(new URL("../../../web/output/app.js", import.meta.url), "utf8");
+const FLOWING_SRC =
+    (/const FLOWING = new Set\(\[[^\]]*\]\);\s*function outputFlowing\(state, pair\) \{[\s\S]*?\n\}/.exec(APP_SRC) ||
+        [])[0];
+if (!FLOWING_SRC)
+    throw new Error("web/output/app.js 里的 outputFlowing 变了，请同步 web-preview/fixtures/output/lib.mjs");
+export const FIRST_RUN_FEED_PROBE = `(() => {
+    ${FLOWING_SRC}
+    const { state, pair, view } = window.__fx.page.snapshot();
+    return { danger: view.danger === true, flowing: outputFlowing(state, pair) };
+})()`;
 
 /**
  * 首启画面的叠层必须真的摆出来（量尺不能在一张没有叠层的普通页面上空转）：叠层恰好一个、种类与导览步号对得上，
- * 规则页的放行状态与子态一致。返回问题列表，空表示都对；不是首启场景的画面直接返回空表。
+ * 规则页的放行状态与子态一致；静态首启场景不带危险态与环路活动（夹具喂首启控制器的运行态据此写死，
+ * 真页面在这些场景里喂的也是假；此刻真页面的判断若为真，夹具摆的就不是真页面会摆的画面）。
+ * 返回问题列表，空表示都对；不是首启场景的画面直接返回空表。
  */
 export async function overlayFailures(page, frame) {
     const want = expectedOverlay(frame.scene.id);
     if (!want) return [];
     const o = await overlayState(page);
     const out = [];
+    const feed = await page.eval(FIRST_RUN_FEED_PROBE);
+    if (feed.danger) out.push("首启画面不该带危险态：真页面的 view.danger 为真");
+    if (feed.flowing) out.push("首启画面的环路不该在流动：真页面的 outputFlowing 为真");
     if (o.kind !== want.kind) out.push(`叠层应是 ${want.kind}，实得 ${JSON.stringify(o.open)}`);
     if (want.kind === "tour" && o.step !== want.step) out.push(`导览应在第 ${want.step} 步，实得 ${o.step}`);
     if (want.kind === "rules") {
@@ -257,13 +283,10 @@ export const OUT_CONTRAST_PROBE = derive(CONTRAST_PROBE, [
         `// SVG 文字（插入链示意，字号 7.5 到 8.5）的字框是整行的行盒，四周各有一圈没有墨迹的留白，
         // 留白的四角会落到圆角槽的外面；只取中间的墨迹区（四周各收 1.5 px），免得把槽外的底量成字的底
         const k = p.namespaceURI === "http://www.w3.org/2000/svg" ? 1.5 : 0;
-        // 文字在祖先的滚动区里（规则页正文）：只取滚动区露出来的那一段。段落比滚动区还高时（法文的规则页），
-        // 越出去的部分被裁掉，那里露出来的是滚动区外面的东西（页脚的按钮），不是这段字的底，量进去就是假红
-        const sc0 = scrollerOf(p);
-        const sr0 = sc0 ? sc0.getBoundingClientRect() : null;
-        const top2 = sr0 ? Math.max(top, sr0.top) : top;
-        const bottom2 = sr0 ? Math.min(bottom, sr0.bottom) : bottom;
-        return { x: left + k, y: top2 + k, w: right - left - 2 * k, h: bottom2 - top2 - 2 * k };`,
+        // 文字在祖先的滚动区里（规则页正文）：只取滚动区露出来的那一段，函数与 Input 的量尺是同一份源码（理由见该函数）
+        ${clipToAncestorScroller.toString()}
+        const box = clipToAncestorScroller({ left, top, right, bottom }, scrollerOf(p));
+        return { x: box.left + k, y: box.top + k, w: box.right - box.left - 2 * k, h: box.bottom - box.top - 2 * k };`,
     ],
 ]);
 
@@ -370,18 +393,9 @@ export const NAME_AUDIT = `(() => {
         }
         return true;
     };
-    const nameOf = (e) => {
-        const by = e.getAttribute("aria-labelledby");
-        if (by) {
-            const txt = by.split(/\s+/).map((id) => (document.getElementById(id) || {}).textContent || "").join(" ").trim();
-            if (txt) return txt;
-        }
-        const al = (e.getAttribute("aria-label") || "").trim();
-        if (al) return al;
-        const tc = (e.textContent || "").trim();
-        if (tc && e.tagName !== "SELECT") return tc;
-        return (e.getAttribute("title") || "").trim();
-    };
+    // 名称的取法写在 fixtures/first-run/measure.mjs 的 accessibleName，叠层按钮的名称（overlayA11yProbe）用同一个函数
+    ${accessibleName.toString()}
+    const nameOf = (e) => accessibleName(e, document);
     const SEL = 'button, select, input, a[href], [role="button"], [role="radio"], [role="tab"], [role="switch"], [role="link"], [role="checkbox"], [tabindex="0"]';
     const missing = [];
     let n = 0;

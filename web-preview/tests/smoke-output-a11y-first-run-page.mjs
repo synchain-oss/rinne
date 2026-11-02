@@ -9,7 +9,8 @@
 //      导览第 1 步的「上一步」禁用；规则页正文区能用键盘到达；Tab 走一圈每一站只落在叠层里、且有看得见的焦点环。
 //      Output 没有紧急切断，所以没有「叠层之上的紧急切断」这一项（Input 那边另有）。已在 smoke-first-run-page 断言过的不重复：
 //      Esc 的去留、按钮放行的时机、红字。
-//      坏样例：去掉叠层名称、去掉内容层 inert、把焦点移出叠层、把规则页按钮改成可用、关掉叠层里的焦点环，各项必须判红。
+//      坏样例：去掉叠层名称、去掉内容层 inert、把焦点移出叠层、把规则页按钮改成可用、关掉叠层里的焦点环，各项必须判红；
+//      反例：只有 aria-labelledby 的按钮（没有文字、没有 aria-label）不算没有名称，叠层探针与名称审计都不能判它缺名称（两处取名函数是同一个）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-output-a11y-first-run-page.mjs [仓库根]
@@ -31,7 +32,7 @@ import {
     overlayState,
     tabWalk,
 } from "../fixtures/output/lib.mjs";
-import { overlayProblems } from "../fixtures/first-run/measure.mjs";
+import { overlayProblems, stripToLabelledBy } from "../fixtures/first-run/measure.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("Output 页面可访问性（首启）");
@@ -159,6 +160,27 @@ try {
         `document.querySelector('[data-part="langStart.en"]').textContent = ""`,
         /langStart\.en 没有名称/,
     );
+    // 反例：按钮没有文字、没有 aria-label，只有 aria-labelledby（指到两个有字的节点）：名称就是那两段字，
+    // 叠层探针与名称审计都不能把它判成「没有名称」（两处取名称的顺序与写法是同一个函数，见 accessibleName）
+    {
+        const frame = frameOf("out-lang");
+        await openOutputFrame(page, server, box, "zh", frame);
+        const want = await page.eval(
+            `(${stripToLabelledBy.toString()})(document, window, '[data-part="langStart.en"]')`,
+        );
+        const o = await overlayState(page);
+        run.eq(
+            o.buttons.find((b) => b.part === "langStart.en").name,
+            want,
+            "反例：只有 aria-labelledby 的按钮，叠层探针取到的名称",
+        );
+        run.eq(overlayProblems(o, frame, TOUR_STEPS), [], "反例：只有 aria-labelledby 的按钮不算没有名称");
+        run.eq(
+            (await page.eval(NAME_AUDIT)).missing,
+            [],
+            "反例：名称审计也不能把只有 aria-labelledby 的按钮判成缺名称",
+        );
+    }
     // 内容层不 inert：Tab 一圈会走进内容层，「只该落在叠层里」要报红
     await openOutputFrame(page, server, box, "zh", frameOf("out-tour-2"));
     await page.eval(

@@ -11,7 +11,8 @@
 //   裸键扫描认 rules.、tour.、hint. 前缀（共用的那一份认不出）。
 // 场景之外再造最坏组合：14 条消息逐条上屏（三语）、超长轨道名、多条消息同时在场（「+n」）、单声道与采样率最宽的写法。
 // 末尾是坏样例：夹具的 ?defect=overflow / place3 / rawkey 必须被上面各项抓出来（量尺本身可信）；首启另有：
-//   普通页面上没有叠层要报、第 N 步按第 M 步查要报、导览说明框里两段字互压要报、首启词条的裸键要扫出来。
+//   普通页面上没有叠层要报、第 N 步按第 M 步查要报、导览说明框里两段字互压要报、首启词条的裸键要扫出来、
+//   首启画面带上危险态（配对冲突）或环路在流动（已连接）要报（夹具喂首启控制器的运行态写死为假，与真页面的判断分叉时要发现）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-output-fit-page.mjs [仓库根]
@@ -257,6 +258,25 @@ try {
             (await overlayFailures(page, frameOf("out-rules", "ready"))).length > 0,
             "坏样例：未放行的规则页按「放行后」画面查，应报出放行状态不对",
         );
+        // 夹具喂首启控制器的运行态写死「无危险态、无环路活动」：真页面的判断（view.danger、outputFlowing）为真时必须报出来，
+        // 夹具与真页面才不会悄悄分叉。配对冲突是危险态、已连接且没旁路是环路在流动，两项各摆一次，且互不牵连
+        await openOutput(page, server, box, "zh", "out-tour-3");
+        await setModel(page, { state: "conflict" });
+        {
+            const got = await overlayFailures(page, frameOf("out-tour-3"));
+            run.check(
+                got.some((m) => /危险态/.test(m)) && !got.some((m) => /环路/.test(m)),
+                `坏样例：配对冲突的首启画面，应只报带危险态，实得 ${JSON.stringify(got)}`,
+            );
+        }
+        await setModel(page, { state: "connected" });
+        {
+            const got = await overlayFailures(page, frameOf("out-tour-3"));
+            run.check(
+                got.some((m) => /环路/.test(m)) && !got.some((m) => /危险态/.test(m)),
+                `坏样例：已连接的首启画面，应只报环路在流动，实得 ${JSON.stringify(got)}`,
+            );
+        }
     }
     {
         // 导览说明框与模态一样是浮在内容上面的一层：说明框里两段字互压必须量出 overlap

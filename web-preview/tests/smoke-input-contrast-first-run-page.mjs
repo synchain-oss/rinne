@@ -14,7 +14,8 @@
 //   置灰的口径不是空设（未放行的按钮确实低于 A 档门槛）、放行后回到 A 档并过线、可用的按钮被压淡到 0.4 照判；
 //   导览说明框的字改成暗灰、叠层之上的紧急切断改成浅红，都必须量出低于门槛；
 //   叠层摘掉之后下面的页面文字被量到（「叠层打开时只量叠层」的断言在这样的页面上有话说）；
-//   普通页面上没有叠层要报；SVG 标签的 fill 改暗要量出明显偏低、好页面上的标签不能是 1:1（藏字样式与按 fill 读色生效）。
+//   普通页面上没有叠层要报；SVG 标签的 fill 改暗要量出明显偏低、好页面上的标签不能是 1:1（藏字样式与按 fill 读色生效）；
+//   规则页正文区压矮到比段落还矮：越出滚动区的部分下面是页脚的按钮，不是这段字的底，量尺只取露出来的一段，正文仍要过 A 档（没有这条裁剪会量出 1.20）。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
 // 用法：node web-preview/tests/smoke-input-contrast-first-run-page.mjs [仓库根]
@@ -195,6 +196,32 @@ try {
         run.check(
             dim.length === svgGood.length && dim.every((i) => i.worst.min < goodMin - 0.5),
             `坏样例：把 SVG 标签的 fill 改暗，对比度应明显低于好页面的最低 ${goodMin.toFixed(2)}，实得 ${JSON.stringify(dim.map((i) => [i.text, +i.worst.min.toFixed(2)]))}`,
+        );
+    }
+
+    // 坏样例：规则页正文区压矮，段落比滚动区还高。越出去的那截落在页脚按钮上，量进去就是假红（1.20）；
+    // 量尺只取滚动区露出来的一段，所以正文仍应过 A 档。先断言页面真的摆成了「段落比滚动区高」，样例不是空设
+    for (const lang of ["zh", "fr"]) {
+        const tag = `规则页压矮/${lang}`;
+        await openInput(page, server, "in-rules", { lang });
+        await releaseRules(page);
+        const shape = await inFrame(page, (doc) => {
+            const body = doc.querySelector('[data-part="rules.body"]');
+            body.style.setProperty("flex", "none", "important");
+            body.style.setProperty("height", "48px", "important");
+            body.style.setProperty("max-height", "48px", "important");
+            body.scrollTop = 0;
+            const tallest = Math.max(
+                ...[...body.querySelectorAll(".rn-rules__text")].map((e) => e.getBoundingClientRect().height),
+            );
+            return { view: body.clientHeight, tallest };
+        });
+        run.check(shape.tallest > shape.view, `${tag}：压矮后应有段落比滚动区还高，实得 ${JSON.stringify(shape)}`);
+        const scrolled = (await measure(page)).filter((i) => i.scrolled && i.tier === "A");
+        run.check(scrolled.length >= 4, `${tag}：滚动区里应量到 A 档的正文，实得 ${scrolled.length} 段`);
+        run.check(
+            scrolled.every((i) => i.worst.min >= TIER_MIN.A),
+            `${tag}：滚动区里的正文只取露出来的一段，应仍过 ${TIER_MIN.A}，实得 ${JSON.stringify(scrolled.map((i) => [i.text.slice(0, 12), +i.worst.min.toFixed(2)]))}`,
         );
     }
 
