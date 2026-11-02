@@ -335,18 +335,21 @@ function Get-WorstStatus([string[]]$StatusList) {
     'PASS'
 }
 
-# 一轮的结局：各场景里最差的；默认资源目录变了、或结束后还留着 reaper.exe、或探针日志目录里别人的文件变了，一律 FAIL（不论场景多绿）。
+# 一轮的结局：各场景里最差的；默认资源目录变了、或结束后还留着 reaper.exe、或探针日志目录里别人的文件变了、或有 REAPER 进程到点没能结束（Halted），
+# 一律 FAIL（不论场景多绿）。
 function Get-RunVerdict {
-    param([string[]]$RowStatuses, [bool]$CfgUnchanged, [int]$Residual, [bool]$DocsUnchanged = $true)
-    if (-not $CfgUnchanged -or $Residual -gt 0 -or -not $DocsUnchanged) { return 'FAIL' }
+    param([string[]]$RowStatuses, [bool]$CfgUnchanged, [int]$Residual, [bool]$DocsUnchanged = $true, [bool]$Halted = $false)
+    if (-not $CfgUnchanged -or $Residual -gt 0 -or -not $DocsUnchanged -or $Halted) { return 'FAIL' }
     Get-WorstStatus $RowStatuses
 }
 
 # 纯函数：这一轮之后还接不接着跑。默认资源目录变了、探针日志目录里别人的文件变了，立刻停手，不再启动 REAPER；
 # 分析器拒收真日志（日志与分析器的契约对不上）再跑也是一样，同样停下。返回停下的原因，接着跑返回空串。
+# Halted：有 REAPER 进程到点没能结束（原因文字，空串是没有）：它可能还活着，一律最先停手，不再启动新的 REAPER。
 # CfgUnreadable：默认资源目录没变的证据缺了（有列不出来的子目录），能比的部分没有差别；这时不是「变了」，是「证明不了没被碰过」，按可能被碰过处理。
 function Get-ReaperRoundStop {
-    param([bool]$CfgUnchanged, [bool]$DocsUnchanged = $true, [bool]$Rejected = $false, [bool]$CfgUnreadable = $false)
+    param([bool]$CfgUnchanged, [bool]$DocsUnchanged = $true, [bool]$Rejected = $false, [bool]$CfgUnreadable = $false, [string]$Halted = '')
+    if ($Halted) { return "有 REAPER 进程没能结束，不再启动新的 REAPER：$Halted" }
     if (-not $CfgUnchanged) { return $CfgUnreadable ? '默认资源目录里有读不了的子目录，没法证明它没被碰过（按可能被碰过处理）' : '默认资源目录变了' }
     if (-not $DocsUnchanged) { return '探针日志目录里别人的文件变了' }
     if ($Rejected) { return '分析器拒收真日志' }
@@ -481,7 +484,7 @@ function Invoke-ReaperSmoke {
         [string]$CfgDir = '', [Parameter(Mandatory)][string]$ReaperExe, [Parameter(Mandatory)][string]$BuildDir, [string]$NullTest = '',
         [Parameter(Mandatory)][string]$LogDir, [Parameter(Mandatory)][string]$UserTestingMarker, [Parameter(Mandatory)][string]$ScenarioFile,
         [string]$Only = '', [int]$Repeat = 1, [switch]$NoNegative, [switch]$Probe, [string]$Python = '',
-        [hashtable]$SelfTestHooks = @{} # 只给自测注入：ProbeLogDir（假的文档目录里的日志目录）、Analyzer（分析器路径）、Launcher（代替 REAPER 的替身）、ModuleSampler（代替读进程模块列表）
+        [hashtable]$SelfTestHooks = @{} # 只给自测注入：ProbeLogDir（假的文档目录里的日志目录）、Analyzer（分析器路径）、Launcher（代替 REAPER 的替身）、ModuleSampler（代替读进程模块列表）、Terminator（代替结束进程的动作）
     )
     $cfg = Initialize-ReaperCfg $CfgDir # 不满足就抛 REFUSED，什么都还没动
     $scenarioConfig = Get-ReaperSmokeConfig $ScenarioFile
@@ -522,6 +525,7 @@ function Invoke-ReaperSmoke {
         $ctx = New-ReaperContext -ReaperExe $ReaperExe -NullTest $pre.NullTest -WorkDir $work -Driver $driver -Config $section -Installed $expected -PluginsDir (Join-Path $cfg.Dir 'plugins')
         if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
         if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
+        if ($SelfTestHooks['Terminator']) { $ctx.Terminator = $SelfTestHooks['Terminator'] }
         if ($Probe) {
             $roundDir = Join-Path $LogDir "$stamp-probe-run$k"
             $null = New-Item -ItemType Directory -Force -Path $roundDir
@@ -564,7 +568,7 @@ function Invoke-ReaperSmoke {
         $cmp = Compare-ReaperDefaultCfgSnapshot -Before $before -After $after
         $strayCount = @(Get-ReaperProcessIds).Count
         $statuses = @($rows | ForEach-Object { $_.status })
-        $verdict = Get-RunVerdict -RowStatuses $statuses -CfgUnchanged $cmp.Same -Residual $strayCount -DocsUnchanged $docsSame
+        $verdict = Get-RunVerdict -RowStatuses $statuses -CfgUnchanged $cmp.Same -Residual $strayCount -DocsUnchanged $docsSame -Halted ([bool]$ctx.Halted)
         $runRow = [ordered]@{
             index = $k; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); verdict = $verdict; launches = $ctx.Launches
             counts = [ordered]@{ PASS = @($statuses | Where-Object { $_ -eq 'PASS' }).Count; FAIL = @($statuses | Where-Object { $_ -eq 'FAIL' }).Count; INCOMPLETE = @($statuses | Where-Object { $_ -eq 'INCOMPLETE' }).Count; SKIPPED = @($statuses | Where-Object { $_ -eq 'SKIPPED' }).Count }
@@ -582,12 +586,13 @@ function Invoke-ReaperSmoke {
             }
             foreach ($id in $ctx.Probe.Analyses.get_Keys()) { $runRow.probe.analyzer.cells[$id] = $ctx.Probe.Analyses[$id].exit }
         }
+        if ($ctx.Halted) { $runRow.haltedBecause = Hide-LocalPaths $ctx.Halted }
         $result.runs += $runRow
         Write-Host ("第 {0}/{1} 轮：{2}，{3} s，REAPER 启动 {4} 次，默认资源目录{5}" -f $k, $Repeat, $verdict, $result.runs[-1].seconds, $ctx.Launches, ($cmp.Same ? '未变' : ($cmp.Differences -eq 0 ? "有读不了的子目录，证明不了没变：$($cmp.Changed -join ', ')" : "变了：$($cmp.Changed -join ', ')")))
         if ($Probe) {
             Write-Host ("  探针日志：搬走 {0} 份，文档目录除本轮自己的文件外{1}{2}；整轮分析 {3}" -f $ctx.Probe.Moved, ($docs.Same ? '未变' : "变了：$($docs.Changed -join ', ')"), (@($docs.LinkUnknown).Count ? "（有 $(@($docs.LinkUnknown).Count) 项硬链接数没取到，只比了大小、修改时间与重解析点）" : ''), $whole.summary)
         }
-        $stop = Get-ReaperRoundStop -CfgUnchanged $cmp.Same -DocsUnchanged $docsSame -Rejected ($Probe -and $ctx.Probe.Rejected) -CfgUnreadable ($cmp.Differences -eq 0 -and @($cmp.Unreadable).Count -gt 0)
+        $stop = Get-ReaperRoundStop -CfgUnchanged $cmp.Same -DocsUnchanged $docsSame -Rejected ($Probe -and $ctx.Probe.Rejected) -CfgUnreadable ($cmp.Differences -eq 0 -and @($cmp.Unreadable).Count -gt 0) -Halted ([string]$ctx.Halted)
         if ($stop) { $runRow.stoppedBecause = $stop; Write-Host "  停止后续轮次：$stop"; break }
     }
     $result.launches = $launches

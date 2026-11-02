@@ -47,6 +47,19 @@ function New-BadExitTimeStandIn([string]$Command) {
     $launch = New-StandIn $Command @{}
     { param($psi) New-BadExitTimeProcess (& $launch $psi) }.GetNewClosure()
 }
+# 结束不了的进程：把真进程包一层，WaitForExit 说「还没退出」（不真等 5 秒）。Seen.Pids 记下每个替身的进程号，用例结束后自己清掉
+function New-StuckProcess($Wrapped) {
+    $w = [pscustomobject]@{ Real = $Wrapped }
+    foreach ($member in 'Id', 'HasExited', 'ExitCode') { Add-Member -InputObject $w -MemberType ScriptProperty -Name $member -Value ([scriptblock]::Create("`$this.Real.$member")) }
+    Add-Member -InputObject $w -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+    $w
+}
+function New-StuckStandIn([string]$Command, [hashtable]$Seen) {
+    $launch = New-StandIn $Command $Seen
+    { param($psi) $p = & $launch $psi; $Seen.Pids.Add($p.Id); New-StuckProcess $p }.GetNewClosure()
+}
+function Stop-StuckStandIns([hashtable]$Seen) { foreach ($stuckPid in @($Seen.Pids)) { Stop-Process -Id $stuckPid -Force -ErrorAction SilentlyContinue } }
+
 function New-BoxCommand([string]$Title, [string]$Buttons, [string]$OutFile) {
     "Add-Type -AssemblyName System.Windows.Forms; `$r = [System.Windows.Forms.MessageBox]::Show('x', '$Title', '$Buttons'); Set-Content -LiteralPath '$OutFile' -Value `$r"
 }
@@ -109,6 +122,35 @@ Write-Case '启动记录：进程自报的退出时刻是 1601 年（自己退�
 $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 -Launcher (New-BadExitTimeStandIn 'Start-Sleep -Seconds 60')
 Write-Case '启动记录：进程自报的退出时刻是 1601 年（被结束的进程）：ExitedUtc 同样取检测到退出的当下' $true (
     $run.Status -eq 'Killed' -and $run.ExitedUtc -gt $run.StartedUtc.AddSeconds(1) -and $run.ExitedUtc -le [DateTime]::UtcNow.AddSeconds(1))
+# ---- 结束不了的进程（StillRunning）：杀不掉，或杀了之后 5 秒还没退出，不能静默吞掉 ----
+$denyKill = { param($ProcessId) throw 'Access is denied' }
+$noopKill = { param($ProcessId) }
+$killThenThrow = { param($ProcessId) Stop-Process -Id $ProcessId -Force; throw 'late error' }
+$stuckSeen = @{ Pids = [Collections.Generic.List[int]]::new() }
+try {
+    $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 1 -Terminator $denyKill -Launcher (New-StuckStandIn 'Start-Sleep -Seconds 60' $stuckSeen)
+    Write-Case '结束不了的进程：结束动作报错、进程没退出，StillRunning，带着结束动作的报错，进程确实还活着' $true (
+        $run.Status -eq 'Timeout' -and $run.StillRunning -eq $true -and $run.KillError -like '*Access is denied*' -and -not (& $gone $run.Pid))
+    $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1 -Terminator $denyKill -Launcher (New-StuckStandIn 'Start-Sleep -Seconds 60' $stuckSeen)
+    Write-Case '结束不了的进程：到点被结束（Killed）时同样记 StillRunning' $true ($run.Status -eq 'Killed' -and $run.StillRunning -eq $true -and $run.KillError -like '*Access is denied*')
+    $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 1 -Launcher (New-StuckStandIn 'Start-Sleep -Seconds 60' $stuckSeen)
+    Write-Case '结束不了的进程：杀成功了但 WaitForExit(5000) 返回 false（退出卡住），StillRunning，没有结束动作的报错' $true (
+        $run.Status -eq 'Timeout' -and $run.StillRunning -eq $true -and -not $run.KillError)
+    $run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 1 -Terminator $noopKill -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+    $noopPid = $run.Pid
+    Write-Case '结束不了的进程：结束动作什么都没做（没报错），真等 5 秒后进程还活着：StillRunning' $true (
+        $run.Status -eq 'Timeout' -and $run.StillRunning -eq $true -and -not $run.KillError -and -not (& $gone $noopPid))
+    Stop-Process -Id $noopPid -Force -ErrorAction SilentlyContinue
+} finally { Stop-StuckStandIns $stuckSeen }
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 1 -Terminator $killThenThrow -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '结束动作报了错但进程已经没了：不算 StillRunning（看进程退没退出，不看有没有报错），报错照实记' $false (
+    $run.Status -eq 'Timeout' -and $run.StillRunning -eq $false -and $run.KillError -like '*late error*' -and (& $gone $run.Pid))
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 1 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '正常结束的进程：超时被结束后 StillRunning 为 false，没有 KillError' $false ($run.Status -eq 'Timeout' -and $run.StillRunning -eq $false -and $null -eq $run.KillError -and (& $gone $run.Pid))
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1 -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '正常结束的进程：到点被结束后 StillRunning 为 false' $false ($run.Status -eq 'Killed' -and $run.StillRunning -eq $false)
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -Launcher (New-StandIn 'exit 0' @{})
+Write-Case '正常结束的进程：自己退出的 StillRunning 为 false' $false ($run.Status -eq 'Exited' -and $run.StillRunning -eq $false)
 $seenB = @{ Called = $false }
 $sentinelFile = Join-Path $pinned.Dir (Get-ReaperSentinel).Name
 $sentinelText = Get-Content -LiteralPath $sentinelFile -Raw
@@ -152,6 +194,54 @@ Write-Case 'gui 锁：REAPER 运行期间别的进程取不到' $true ($during.E
 Write-Case 'gui 锁：超时被结束后锁已释放，进程已没了' $true ($run.Status -eq 'Timeout' -and (& $probeExit) -eq 0 -and (& $gone $run.Pid))
 $ctx.Launcher = { param($psi) throw 'boom' }
 Write-Case 'gui 锁：启动过程抛错时锁照样释放' $true ((Test-Throws { $null = Invoke-ReaperLaunch -Ctx $ctx -HostArgs @{ TimeoutSec = 2 } } 'boom') -and (& $probeExit) -eq 0)
+# ---- REAPER 结束不了：Invoke-ReaperLaunch 记下 Halted、锁照样放开；之后一律不再启动；场景据此 INCOMPLETE ----
+$stuckConfig = [pscustomobject]@{ limits = [pscustomobject]@{ luaTimeoutSec = 30; renderTimeoutSec = 1 }; signal = [pscustomobject]@{ seconds = 4; kind = 'x' } }
+$stuckSeenL = @{ Pids = [Collections.Generic.List[int]]::new() }
+try {
+    $stuckCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $stuckConfig
+    $stuckCtx.Signals['48000-2-0'] = Join-Path $Work 'sig.wav'
+    $stuckCtx.Launcher = New-StuckStandIn 'Start-Sleep -Seconds 60' $stuckSeenL
+    $stuckCtx.Terminator = $denyKill
+    Write-Case '上下文：新建时 Halted 为空，没有 Terminator' $false ($null -eq (New-ReaperContext -ReaperExe 'x' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $stuckConfig).Halted)
+    $r1 = Invoke-ReaperLaunch -Ctx $stuckCtx -HostArgs @{ TimeoutSec = 1 }
+    Write-Case 'REAPER 结束不了：Invoke-ReaperLaunch 返回 StillRunning，上下文记下 Halted（点名进程号和原因），gui 锁照样放开' $true (
+        $r1.StillRunning -eq $true -and "$($stuckCtx.Halted)" -like "*进程 $($r1.Pid) 没能结束*Access is denied*" -and (& $probeExit) -eq 0 -and (Test-HostStuck $r1))
+    Write-Case 'REAPER 结束不了：Get-HostFailure 写明进程没能结束、可能还在运行、本轮不再启动' $true ((Get-HostFailure $r1) -like "*进程 $($r1.Pid) 没能结束*可能还在运行*不再启动*")
+    $startedBefore = $stuckSeenL.Pids.Count; $launchesBefore = $stuckCtx.Launches; $logBeforeH = $stuckCtx.LaunchLog.Count
+    $r2 = Invoke-ReaperLaunch -Ctx $stuckCtx -HostArgs @{ TimeoutSec = 1 }
+    Write-Case '已停止的一轮：再要启动 REAPER，状态 Halted，没有启动进程、没有拿锁、没有记启动次数与启动日志' $true (
+        $r2.Status -eq 'Halted' -and $stuckSeenL.Pids.Count -eq $startedBefore -and $stuckCtx.Launches -eq $launchesBefore -and $stuckCtx.LaunchLog.Count -eq $logBeforeH -and (& $probeExit) -eq 0 -and (Get-HostFailure $r2) -like '*已停止*没有启动*')
+    $moved = try { & (Get-Module Scenarios) { param($c, $run) Save-ProbeLogs $c $run (Join-Path $Work 'stuck-cell') } ([pscustomobject]@{ Probe = [pscustomobject]@{} }) $r1 } catch { "THREW: $($_.Exception.Message)" }
+    Write-Case '没能结束的进程不收它的日志（它可能还活着、还在写）：Save-ProbeLogs 直接返回空，不碰日志目录' $true ($null -eq $moved)
+    # 场景层：第一个场景撞上结束不了的进程，INCOMPLETE 点名；第二个场景根本不跑
+    $stuckCtx2 = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $stuckConfig
+    $stuckCtx2.Signals['48000-2-0'] = Join-Path $Work 'sig.wav'
+    $stuckCtx2.Launcher = New-StuckStandIn 'Start-Sleep -Seconds 60' $stuckSeenL
+    $stuckCtx2.Terminator = $denyKill
+    $renderStuck = [pscustomobject]@{ id = 'render-stuck'; kind = 'render'; sr = 48000; block = 512 }
+    $o1 = Invoke-ReaperScenario -Ctx $stuckCtx2 -Scenario $renderStuck
+    Write-Case '场景撞上结束不了的进程：INCOMPLETE，原因写进程没能结束，上下文记下 Halted' $true (
+        $o1.Status -eq 'INCOMPLETE' -and $o1.Detail -like '*没能结束*' -and "$($stuckCtx2.Halted)" -like '*没能结束*')
+    $startedBefore2 = $stuckSeenL.Pids.Count
+    $o2 = Invoke-ReaperScenario -Ctx $stuckCtx2 -Scenario ([pscustomobject]@{ id = 'render-after'; kind = 'render'; sr = 48000; block = 512 })
+    Write-Case '已停止的一轮里的下一个场景：INCOMPLETE，写明本轮已停止、没有启动 REAPER，真的一个进程都没起' $true (
+        $o2.Status -eq 'INCOMPLETE' -and $o2.Detail -like '*本轮已停止*没有启动 REAPER*没能结束*' -and $stuckSeenL.Pids.Count -eq $startedBefore2 -and $o2.PSObject.Properties.Name -contains 'Seconds')
+    # 看门狗反例（hang）撞上结束不了的进程：这正是它要查的东西，FAIL 而不是 INCOMPLETE
+    $stuckCtx3 = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $stuckConfig
+    $stuckCtx3.Signals['48000-2-0'] = Join-Path $Work 'sig.wav'
+    $stuckCtx3.Launcher = New-StuckStandIn 'Start-Sleep -Seconds 60' $stuckSeenL
+    $stuckCtx3.Terminator = $denyKill
+    # 直接调场景处理器：经 Invoke-ReaperScenario 时，加载来源核对会把没证明的 FAIL 一律改判 INCOMPLETE（这个上下文没有被测插件），这里要看的是处理器自己的结局
+    $oh = & (Get-Module Scenarios) { param($c, $sc) Invoke-HangScenario $c $sc } $stuckCtx3 ([pscustomobject]@{ id = 'hang-stuck'; kind = 'hang'; timeoutSec = 1; killAfterSec = 0 })
+    Write-Case '看门狗反例撞上结束不了的进程：FAIL，写明看门狗没能结束进程（不是 INCOMPLETE，更不是 PASS）' $true ($oh.Status -eq 'FAIL' -and $oh.Detail -like '*看门狗没能结束进程*')
+    $oh2 = Invoke-ReaperScenario -Ctx $stuckCtx3 -Scenario ([pscustomobject]@{ id = 'hang-after'; kind = 'hang'; timeoutSec = 1; killAfterSec = 0 })
+    Write-Case '看门狗反例在已停止的一轮里：INCOMPLETE，不启动 REAPER' $true ($oh2.Status -eq 'INCOMPLETE' -and $oh2.Detail -like '*本轮已停止*')
+    # 处理器本身撞上已停止的一轮（不经 Invoke-ReaperScenario 的早退）：Run 里没有进程号，要写成 REAPER 没有启动，不能落成「场景抛错」
+    $startedBeforeH = $stuckSeenL.Pids.Count
+    $oh3 = try { & (Get-Module Scenarios) { param($c, $sc) Invoke-HangScenario $c $sc } $stuckCtx3 ([pscustomobject]@{ id = 'hang-direct'; kind = 'hang'; timeoutSec = 1; killAfterSec = 0 }) } catch { [pscustomobject]@{ Status = 'THREW'; Detail = $_.Exception.Message } }
+    Write-Case '看门狗反例的处理器遇到已停止的一轮：INCOMPLETE，写明 REAPER 没有启动、看门狗没能验证，不是「场景抛错」，没起进程' $true (
+        $oh3.Status -eq 'INCOMPLETE' -and $oh3.Detail -like '*REAPER 没有启动*' -and $oh3.Detail -notlike '*场景抛错*' -and $stuckSeenL.Pids.Count -eq $startedBeforeH)
+} finally { Stop-StuckStandIns $stuckSeenL }
 $holder = & $lockChild 'if (-not (Enter-RinneLock gui -TimeoutSeconds 5 -Quiet)) { exit 2 }; Start-Sleep -Seconds 60'
 try {
     $until = (Get-Date).AddSeconds(10)
@@ -603,12 +693,13 @@ if ($realReaperRunning) {
 } else {
     $build = New-FakeProbeBuild -Root (Join-Path $wire 'probe-build')
     $results = Join-Path $wire 'results'
-    function Invoke-WireSmoke([string]$Id, [hashtable]$Spec, [string]$Only, [int]$Repeat = 1, [switch]$NoNegative) {
+    function Invoke-WireSmoke([string]$Id, [hashtable]$Spec, [string]$Only, [int]$Repeat = 1, [switch]$NoNegative, [hashtable]$ExtraHooks = @{}, [string]$ScenarioOverride = '') {
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $Spec.LogDir 'sub')
         [IO.File]::WriteAllText((Join-Path $Spec.LogDir 'foreign-a.csv'), "foreign-a`n") # 别人的文件（用户在宿主里写的）
         [IO.File]::WriteAllText((Join-Path $Spec.LogDir 'notes.txt'), "notes`n")
         $hooks = @{ ProbeLogDir = $Spec.LogDir; Analyzer = $fakePy.Analyzer; Launcher = (New-FakeReaperLauncher $Spec); ModuleSampler = (New-WireModuleSampler $Spec (Join-Path $pinned.Dir 'plugins')) }
-        $p = @{ CfgDir = $CfgA; ReaperExe = $pwshExe; BuildDir = $build.Root; NullTest = $fakeNull; LogDir = (Join-Path $results $Id); UserTestingMarker = $marker; ScenarioFile = $scenarioFile
+        foreach ($hookName in $ExtraHooks.get_Keys()) { $hooks[$hookName] = $ExtraHooks[$hookName] }
+        $p = @{ CfgDir = $CfgA; ReaperExe = $pwshExe; BuildDir = $build.Root; NullTest = $fakeNull; LogDir = (Join-Path $results $Id); UserTestingMarker = $marker; ScenarioFile = ($ScenarioOverride ? $ScenarioOverride : $scenarioFile)
                 Only = $Only; Repeat = $Repeat; Probe = $true; Python = $fakePy.Python; SelfTestHooks = $hooks }
         if ($NoNegative) { $p.NoNegative = $true }
         $env:FAKE_COMPARE_FILE = ''
@@ -617,6 +708,9 @@ if ($realReaperRunning) {
         $console = (@($all | Where-Object { $_ -is [Management.Automation.InformationRecord] } | ForEach-Object { "$($_.MessageData)" }) -join "`n")
         [pscustomobject]@{ R = $r; Results = (Join-Path $results $Id); Console = $console }
     }
+    # 整轮用例跑到一半，本机冒出别人的 reaper.exe（预检整套 SKIPPED、没有 runs）：降级成一条占位用例，不在 runs[0] 上抛错。
+    # 只认「SKIPPED 且原因是本机已有 reaper.exe」，别的原因照旧让用例红
+    function Test-WireSkippedByRealReaper($WireResult) { $WireResult.R.verdict -eq 'SKIPPED' -and "$($WireResult.R.skipReasons)" -like '*本机已有 reaper.exe*' }
     # 整轮入口装插件时去掉被测插件在扫描缓存里的条目（探针的两个包名），别的条目原样
     $wireCache = Join-Path $CfgA 'reaper-vstplugins64.ini'
     $wireCacheKept = "[vstcache]`nOther.vst3=1112131415161718,2{CD,Other`n"
@@ -686,12 +780,37 @@ if ($realReaperRunning) {
         if ($canList) { Write-Case '（本机没能造出读不了的目录：默认资源目录有读不了的子目录的整轮用例没能真跑）' $true $true }
         else {
             $smU = Invoke-WireSmoke 'unreadable-default' (New-WireSpec 'unreadable-default') '^probe-steady-48000-512$' -Repeat 2 -NoNegative
-            $rowU = $smU.R.runs[0]
-            Write-Case "整轮入口：默认资源目录里有读不了的子目录，场景全绿也判 FAIL，记为证明不了没变，停手，-Repeat 2 只跑了 $(@($smU.R.runs).Count) 轮" $true (
-                $rowU.scenarios[0].status -eq 'PASS' -and $rowU.verdict -eq 'FAIL' -and $smU.R.verdict -eq 'FAIL' -and -not $rowU.defaultCfgDir.unchanged -and @($rowU.defaultCfgDir.unreadable) -ceq 'rn-locked' -and
-                $rowU.stoppedBecause -like '*读不了*' -and $rowU.stoppedBecause -like '*可能被碰过*' -and @($smU.R.runs).Count -eq 1 -and $smU.R.launches -eq 1 -and $smU.Console -like '*读不了的子目录*')
+            if (Test-WireSkippedByRealReaper $smU) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：默认资源目录有读不了的子目录的整轮用例没能真跑）' $true $true }
+            else {
+                $rowU = $smU.R.runs[0]
+                Write-Case "整轮入口：默认资源目录里有读不了的子目录，场景全绿也判 FAIL，记为证明不了没变，停手，-Repeat 2 只跑了 $(@($smU.R.runs).Count) 轮" $true (
+                    $rowU.scenarios[0].status -eq 'PASS' -and $rowU.verdict -eq 'FAIL' -and $smU.R.verdict -eq 'FAIL' -and -not $rowU.defaultCfgDir.unchanged -and $rowU.defaultCfgDir.Contains('unreadable') -and @($rowU.defaultCfgDir['unreadable']) -ceq 'rn-locked' -and
+                    $rowU.stoppedBecause -like '*读不了*' -and $rowU.stoppedBecause -like '*可能被碰过*' -and @($smU.R.runs).Count -eq 1 -and $smU.R.launches -eq 1 -and $smU.Console -like '*读不了的子目录*')
+            }
         }
     } finally { & icacls.exe $lockedDefault /remove:d "*$sidU" 2>&1 | Out-Null; Remove-Item -LiteralPath $lockedDefault -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # ---- 结束不了的进程（整轮）：第一个场景撞上 → 它 INCOMPLETE、后面的场景不再启动 REAPER、整轮 FAIL 并停手，-Repeat 2 只跑一轮，gui 锁放开 ----
+    $shortCfg = Get-Content -LiteralPath $scenarioFile -Raw | ConvertFrom-Json
+    $shortCfg.probe.limits.luaTimeoutSec = 2
+    $shortScenarioFile = Join-Path $wire 'scenarios-short-timeout.json'
+    [IO.File]::WriteAllText($shortScenarioFile, ($shortCfg | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+    $stuckSeenW = @{ Pids = [Collections.Generic.List[int]]::new() }
+    try {
+        $smW = Invoke-WireSmoke 'stuck-round' (New-WireSpec 'stuck-round') '^probe-steady-48000-(512|1024)$' -Repeat 2 -NoNegative -ScenarioOverride $shortScenarioFile `
+            -ExtraHooks @{ Launcher = (New-StuckStandIn 'Start-Sleep -Seconds 120' $stuckSeenW); Terminator = $denyKill }
+        if (Test-WireSkippedByRealReaper $smW) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：REAPER 结束不了的整轮用例没能真跑）' $true $true }
+        else {
+            $rowW = $smW.R.runs[0]
+            Write-Case "整轮入口：REAPER 结束不了，第一个场景 INCOMPLETE 点名，后面的场景 INCOMPLETE 写本轮已停止，只启动过 $($stuckSeenW.Pids.Count) 个进程" $true (
+                @($rowW.scenarios).Count -eq 2 -and $rowW.scenarios[0].status -eq 'INCOMPLETE' -and $rowW.scenarios[0].detail -like '*没能结束*' -and
+                $rowW.scenarios[1].status -eq 'INCOMPLETE' -and $rowW.scenarios[1].detail -like '*本轮已停止*' -and $stuckSeenW.Pids.Count -eq 1 -and $smW.R.launches -eq 1)
+            Write-Case '整轮入口：REAPER 结束不了，整轮判 FAIL（不论场景），记下原因，停手，-Repeat 2 只跑了一轮，没有别的 reaper.exe 残留，进程确实还活着' $true (
+                $rowW.verdict -eq 'FAIL' -and $smW.R.verdict -eq 'FAIL' -and $rowW.Contains('haltedBecause') -and "$($rowW['haltedBecause'])" -like '*没能结束*' -and $rowW.stoppedBecause -like '*没能结束*' -and
+                @($smW.R.runs).Count -eq 1 -and $rowW.reaperProcessesLeft -eq 0 -and -not (& $gone $stuckSeenW.Pids[0]) -and $smW.Console -like '*停止后续轮次*没能结束*')
+            Write-Case '整轮入口：REAPER 结束不了，gui 锁照样放开；结果 json 里没有盘符路径' $true ((Test-RinneLockFree gui) -and (($smW.R | ConvertTo-Json -Depth 12) -cnotmatch '[A-Za-z]:\\\\'))
+        }
+    } finally { Stop-StuckStandIns $stuckSeenW }
 
     # 硬链接数一时取不到（OneDrive 正在同步、杀毒软件短暂独占……）：前一份清单是 1、后一份记 ?。列清单在 Suite 模块里换成替身，
     # 这一轮里「放行文件」出现之后，别人的 foreign-a.csv 的硬链接数就记成 ?

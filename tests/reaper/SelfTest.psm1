@@ -577,6 +577,10 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '一轮结局：场景全绿但默认资源目录变了判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $false -Residual 0) -eq 'FAIL')
     & $add '一轮结局：场景全绿但结束后还留着 reaper.exe 判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 1) -eq 'FAIL')
     & $add '一轮结局：全绿、目录没变、没有残留才是 PASS' $false ((Get-RunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $true -Residual 0) -eq 'PASS')
+    & $add '一轮结局：场景全绿但有 REAPER 进程没能结束（本轮已停）判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 0 -Halted $true) -eq 'FAIL')
+    & $add '一轮结局：没有进程卡住时 -Halted $false 不影响 PASS' $false ((Get-RunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 0 -Halted $false) -eq 'PASS')
+    & $add '停手：REAPER 进程没能结束，不再启动新的 REAPER，原因点名进程' $true ((Get-ReaperRoundStop -CfgUnchanged $true -Halted '进程 123 没能结束') -like '*没能结束*123*')
+    & $add '停手：进程没能结束优先于别的原因（有活着的 REAPER 时先说这个）' $true ((Get-ReaperRoundStop -CfgUnchanged $false -Rejected $true -Halted '进程 1 没能结束') -like '*没能结束*')
     & $add '停手：默认资源目录有读不了的子目录（别的都没变），说的是证明不了、可能被碰过，不说「变了」' $true (
         ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $true) -like '*读不了*') -and ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $true) -like '*可能*'))
     & $add '停手：默认资源目录真的变了（哪怕同时有读不了的），说「变了」' $true ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $false) -like '*默认资源目录变了*')

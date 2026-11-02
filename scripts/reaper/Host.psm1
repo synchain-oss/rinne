@@ -201,8 +201,10 @@ function Get-ReaperModuleVerdict {
 # WatchFiles：标签 → 路径，文件一出现就记一次进程的句柄与内存（Lua 用它标出循环的开头与结尾）。
 # WatchModules：模块文件名（如 Rinne Input.vst3）。每次轮询读一次进程加载的模块，名字在这里面的记下完整路径（Modules：文件名 → 见到过的路径；
 # ModuleScans：读到模块列表的次数；结束或超时前再读一次）。读不到的那次不计，不抛错。
+# StillRunning：到点要结束进程（Timeout / Killed / Modal）时，结束之后 5 秒进程还没退出，它可能还活着，调用方不得再启动新的 REAPER；KillError：结束动作
+# 自己报的错（没报错是 $null）。结束动作报错但进程已经没了不算 StillRunning。
 # Launcher 只给自测注入：收到准备好的 ProcessStartInfo，返回已启动的 Process。Sampler、ModuleSampler 也只给自测注入：代替 Get-ReaperProcessSample、
-# Get-ReaperProcessModulePaths。
+# Get-ReaperProcessModulePaths。Terminator 同样只给自测注入：收进程号，代替 Stop-Process 去结束进程（用来造「杀不掉」）。
 function Invoke-ReaperHost {
     param(
         [Parameter(Mandatory)][string]$ReaperExe,
@@ -215,7 +217,8 @@ function Invoke-ReaperHost {
         [string[]]$WatchModules = @(),
         [scriptblock]$Launcher = $null,
         [scriptblock]$Sampler = $null,
-        [scriptblock]$ModuleSampler = $null
+        [scriptblock]$ModuleSampler = $null,
+        [scriptblock]$Terminator = $null
     )
     $cfgArgs = @('-nosplash', '-newinst', '-cfgfile', (Get-ReaperCfgArgument))
     $psi = [Diagnostics.ProcessStartInfo]::new($ReaperExe)
@@ -280,10 +283,14 @@ function Invoke-ReaperHost {
             if (-not $marks.Contains($label) -and $label -notin $lost -and (Test-Path -LiteralPath $WatchFiles[$label])) { $lost.Add($label) }
         }
     }
+    $stillRunning = $false
+    $killError = $null
     if ($status) {
-        # 只结束自己启动的那个 PID
-        try { Stop-Process -Id $ownPid -Force -ErrorAction Stop } catch { }
-        $null = $proc.WaitForExit(5000)
+        # 只结束自己启动的那个 PID。结束动作报错、或结束之后 5 秒还没退出，都不能当没发生：进程还在，调用方据此不再启动新的 REAPER
+        try {
+            if ($Terminator) { & $Terminator $ownPid } else { Stop-Process -Id $ownPid -Force -ErrorAction Stop }
+        } catch { $killError = $_.Exception.Message -replace '\s+', ' ' }
+        $stillRunning = -not $proc.WaitForExit(5000)
     }
     $exit = ($proc.HasExited -and -not $status) ? $proc.ExitCode : $null
     # 进程退出的时刻：收日志用它认文件是不是这次启动的进程在世时新建的。进程自己报的（ExitTime）取不到（进程没退出、替身没有这个属性）
@@ -296,6 +303,7 @@ function Invoke-ReaperHost {
     [pscustomobject]@{
         Status = $status ?? 'Exited'; ExitCode = $exit; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); Pid = $ownPid; StartedUtc = $startedUtc; ExitedUtc = $exitedUtc
         Modal = $modal; Dismissed = $dismissed.ToArray(); Windows = @($titles); Marks = $marks; SampleLost = $lost.ToArray(); Modules = $modules; ModuleScans = $modScans
+        StillRunning = $stillRunning; KillError = $killError
     }
 }
 
