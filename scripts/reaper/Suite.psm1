@@ -3,12 +3,18 @@
 # REAPER 烟测的编排：校验配置目录 → 预检 → 把本机构建的插件复制进私有 VST3 目录 → 逐轮跑场景与反例 → 前后核对默认资源目录。
 #   Get-ReaperSmokeConfig / Test-ReaperScenarioConfig   读并校验 scenarios.json
 #   Get-ReaperPreflight                                 缺什么就 SKIPPED，写明原因（doctor 同用）
+#   Get-ReaperPluginPathValue                           vstpath64 的新值：私有插件目录排在最后（纯函数）
+#   Remove-ReaperScanCacheEntries / Clear-ReaperScanCache   去掉扫描缓存里被测插件的条目（纯函数 / 对私有配置目录做）
 #   Install-ReaperPlugins                               只复制本机构建（flavor 与这一段相符）的两个 VST3 到 <CfgDir>\plugins
 #   Invoke-ReaperSmoke                                  整套；返回结果对象，Write-ReaperSmokeResult 写 json
 # 两段：第一段（默认）测正式的 dev 构建，场景在 scenarios.json 顶层；第二段（-Probe）测探针构建，场景、信号与上限在 probe 一节。
 # 第二段每轮另有一个结果目录 <LogDir>\<时刻>-probe-run<k>：probe-logs\<场景>（搬来的日志与比对行）、analyze-<场景>.json（每格的
 # 分析器原始输出）、all-logs 与 analyze.json（整轮合在一起再过一次分析器）、docs-listing-before/after.json（文档目录的前后清单：
 # 比较看全部条目，落盘时不是探针日志命名的条目只留每轮随机盐的短散列，不留别人的文件名；变化报告同样只写散列与变化类型）。
+# 加载来源：REAPER 对同名的 VST3 包只留 vstpath64 里最后扫到的那个，而系统 VST3 目录里装着同名同类 ID 的发布版，所以私有目录排在最后；
+# 每次会加载插件的 REAPER 启动还要读进程实际加载的模块，核对它们都是私有目录里这次复制进去的那份（Scenarios.psm1 的 Add-ReaperModuleEvidence），
+# 核不上这个场景就是 INCOMPLETE。结果里的 sha256 只证明复制了哪份文件，不证明 REAPER 加载了哪份。
+# 扫描缓存里留着发布版的时间戳时，REAPER 不管 vstpath64 怎么排都用发布版，所以装插件时还要去掉被测插件在缓存里的条目（Clear-ReaperScanCache）。
 # 结局词汇：PASS / FAIL / SKIPPED / INCOMPLETE。INCOMPLETE 不当 PASS。反例的 status 要同时满足两条才是 PASS：观察到的结局等于期望，
 # 并且原因对得上（Detail 匹配 scenarios.json 里这条反例的 expectDetail）；没启动、没执行凑出来的同名结局不算（Get-NegativeVerdict）。
 
@@ -211,15 +217,93 @@ function Get-ReaperPreflight {
     [pscustomobject]$out
 }
 
-# 复制到 <CfgDir>\plugins，内容相同就不动。返回每个文件的 sha256 前 12 位，写进结果里证明测的就是这次构建。
+# 纯函数：vstpath64 的新值。REAPER 对同名的 VST3 包只留扫描顺序里最后的那个（实测：私有目录在前时，系统 VST3 目录里同名同类 ID 的发布版盖掉了私有副本），
+# 所以私有插件目录必须排在最后。REAPER 发现缺系统目录会自己补在最后，所以两个系统目录显式写在私有目录之前（写法见 Get-ReaperSystemVst3Dirs）。
+# Current 是 ini 里现在的值（可能为空）：别的目录原样保留、保持原来的相对顺序；和私有目录是同一个目录的（环境变量展开后比，不分大小写，不看结尾斜杠）
+# 与重复项只留一份。已经是这个顺序的，结果与 Current 相同（重复安装不改写 ini）。
+function Get-ReaperPluginPathValue {
+    param([AllowEmptyString()][string]$Current = '', [Parameter(Mandatory)][string]$Private)
+    $same = {
+        param($First, $Second)
+        $norm = { param($Spelling) [Environment]::ExpandEnvironmentVariables($Spelling).Replace('/', '\').TrimEnd('\') }
+        [string]::Equals((& $norm $First), (& $norm $Second), [StringComparison]::OrdinalIgnoreCase)
+    }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @($Current -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        if (& $same $entry $Private) { continue }
+        if (-not ($parts | Where-Object { & $same $_ $entry })) { $parts.Add($entry) }
+    }
+    foreach ($systemDir in (Get-ReaperSystemVst3Dirs)) { if (-not ($parts | Where-Object { & $same $_ $systemDir })) { $parts.Add($systemDir) } }
+    $parts.Add($Private)
+    $parts -join ';'
+}
+
+# REAPER 扫描缓存（<CfgDir>\reaper-vstplugins64.ini 的 [vstcache] 一节）里一个插件文件的键：文件名里除 ASCII 字母、数字、点以外的字符都换成 _
+# （对着 REAPER 自己写出的缓存核过：Rinne Input.vst3 的键是 Rinne_Input.vst3）。含非 ASCII 字符的名字，对应关系没核过，返回 $null，不猜。
+function Get-ReaperScanCacheKey([Parameter(Mandatory)][string]$FileName) {
+    if ($FileName -match '[^\x20-\x7e]') { return $null }
+    $FileName -replace '[^A-Za-z0-9.]', '_'
+}
+
+# 纯函数：从缓存文本里去掉被测插件的条目。缓存按文件名记「时间戳,类 ID,名字」，REAPER 信缓存：同名文件里时间戳和缓存相符的那一份就当已经扫过、直接用它。
+# 系统 VST3 目录里的发布版与私有副本同名，缓存里的时间戳一旦是发布版的（上一次它赢了留下的），不管 vstpath64 怎么排，REAPER 用的都是发布版，
+# 并且一直这样（真机上：条目是发布版的时间戳时，私有目录排在最后也加载了发布版；去掉条目后同样的设置加载的是私有副本）。
+# 所以每次装插件都去掉被测插件的条目，让 REAPER 重新扫描它们，由 vstpath64 的顺序（私有目录最后）定谁赢。
+# 只动 [vstcache] 一节里键等于被测文件的键的行（含 "键<序号=" 这种外壳插件的子条目），别的字节原样不动，换行风格不变。
+# Removed：去掉了几行；Unkeyed：有几个文件名没有已知的键（没法清，核对环节照样会拦住加载错的）。
+function Remove-ReaperScanCacheEntries {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$FileNames)
+    $wanted = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $unkeyed = 0
+    foreach ($pluginFile in $FileNames) {
+        $cacheKey = Get-ReaperScanCacheKey $pluginFile
+        if ($null -eq $cacheKey) { $unkeyed++ } else { $null = $wanted.Add($cacheKey) }
+    }
+    $kept = [Text.StringBuilder]::new()
+    $removed = 0
+    $inCache = $false
+    foreach ($line in [regex]::Split($Text, '(?<=\n)')) {
+        $bare = $line.TrimEnd("`r", "`n").Trim()
+        if ($bare.StartsWith('[')) { $inCache = [string]::Equals($bare, '[vstcache]', [StringComparison]::OrdinalIgnoreCase) }
+        elseif ($inCache) {
+            $equals = $line.IndexOf('=')
+            if ($equals -ge 1) {
+                $left = $line.Substring(0, $equals)
+                $shell = $left.IndexOf('<')
+                if ($wanted.Contains(($shell -ge 0) ? $left.Substring(0, $shell) : $left)) { $removed++; continue }
+            }
+        }
+        $null = $kept.Append($line)
+    }
+    [pscustomobject]@{ Text = $kept.ToString(); Removed = $removed; Unkeyed = $unkeyed }
+}
+
+# 对私有配置目录里的扫描缓存做上面的清理，有变化才写回（Latin1 读写，字节原样）。缓存文件不存在就什么都不做（REAPER 第一次扫描时自己建）。
+# 返回 @{ Removed; Unkeyed }。
+function Clear-ReaperScanCache {
+    param([Parameter(Mandatory)][string]$CfgDir, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$FileNames)
+    $null = Get-ReaperCfgArgument
+    $cachePath = Join-Path $CfgDir 'reaper-vstplugins64.ini'
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { return [pscustomobject]@{ Removed = 0; Unkeyed = 0 } }
+    $cacheText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($cachePath))
+    $cleaned = Remove-ReaperScanCacheEntries -Text $cacheText -FileNames $FileNames
+    if ($cleaned.Removed) { [IO.File]::WriteAllBytes($cachePath, [Text.Encoding]::Latin1.GetBytes($cleaned.Text)) }
+    [pscustomobject]@{ Removed = $cleaned.Removed; Unkeyed = $cleaned.Unkeyed }
+}
+
+# 复制到 <CfgDir>\plugins，内容相同就不动。每个 .vst3 文件一行：file、sha256（前 12 位，写进结果里证明复制了哪份构建）、copied，另带 path（复制进去的那一份）
+# 与 sha256Full（完整的），后两项给加载来源核对用，不写进结果。
 function Install-ReaperPlugins {
     param([Parameter(Mandatory)][string]$CfgDir, [Parameter(Mandatory)][string[]]$Bundles)
     $null = Get-ReaperCfgArgument
     $dest = Join-Path $CfgDir 'plugins'
     $null = New-Item -ItemType Directory -Force -Path $dest
-    # 私有 VST3 目录要排在 vstpath64 的最前（REAPER 自己会补上系统目录）
+    # 私有 VST3 目录要排在 vstpath64 的最后（REAPER 自己会补上系统目录，所以系统目录显式写在它前面），已经是这个顺序就不改写 ini
     $iniText = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes((Join-Path $CfgDir 'reaper.ini')))
-    if ($iniText -notmatch ('(?m)^vstpath64=' + [regex]::Escape($dest) + '(;|\r?$)')) { $null = Set-ReaperIniValue -Section REAPER -Key vstpath64 -Value $dest }
+    $listed = [regex]::Match($iniText, '(?im)^vstpath64=(.*)$')
+    $listedValue = $listed.Success ? $listed.Groups[1].Value.TrimEnd("`r") : ''
+    $want = Get-ReaperPluginPathValue -Current $listedValue -Private $dest
+    if (-not $listed.Success -or $listedValue -cne $want) { $null = Set-ReaperIniValue -Section REAPER -Key vstpath64 -Value $want }
     $report = [Collections.Generic.List[object]]::new()
     foreach ($bundle in $Bundles) {
         $root = [IO.Path]::GetFullPath($bundle).TrimEnd('\') + '\'
@@ -231,7 +315,9 @@ function Install-ReaperPlugins {
                 $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target)
                 Copy-Item -LiteralPath $f.FullName -Destination $target -Force
             }
-            if ($f.Extension -eq '.vst3') { $report.Add([ordered]@{ file = $f.Name; sha256 = $new.Substring(0, 12).ToLowerInvariant(); copied = ($new -ne $old) }) }
+            if ($f.Extension -eq '.vst3') {
+                $report.Add([ordered]@{ file = $f.Name; sha256 = $new.Substring(0, 12).ToLowerInvariant(); copied = ($new -ne $old); path = $target; sha256Full = $new.ToLowerInvariant() })
+            }
         }
     }
     , $report.ToArray()
@@ -394,7 +480,7 @@ function Invoke-ReaperSmoke {
         [string]$CfgDir = '', [Parameter(Mandatory)][string]$ReaperExe, [Parameter(Mandatory)][string]$BuildDir, [string]$NullTest = '',
         [Parameter(Mandatory)][string]$LogDir, [Parameter(Mandatory)][string]$UserTestingMarker, [Parameter(Mandatory)][string]$ScenarioFile,
         [string]$Only = '', [int]$Repeat = 1, [switch]$NoNegative, [switch]$Probe, [string]$Python = '',
-        [hashtable]$SelfTestHooks = @{} # 只给自测注入：ProbeLogDir（假的文档目录里的日志目录）、Analyzer（分析器路径）、Launcher（代替 REAPER 的替身）
+        [hashtable]$SelfTestHooks = @{} # 只给自测注入：ProbeLogDir（假的文档目录里的日志目录）、Analyzer（分析器路径）、Launcher（代替 REAPER 的替身）、ModuleSampler（代替读进程模块列表）
     )
     $cfg = Initialize-ReaperCfg $CfgDir # 不满足就抛 REFUSED，什么都还没动
     $scenarioConfig = Get-ReaperSmokeConfig $ScenarioFile
@@ -412,12 +498,17 @@ function Invoke-ReaperSmoke {
     $result = [ordered]@{
         schema = 1; phase = ($Probe ? 2 : 1); startedUtc = [DateTime]::UtcNow.ToString('o'); build = [ordered]@{ sha7 = $pre.Sha7; flavor = $pre.Flavor }
         reaper = $pre.ReaperVersion; verdict = 'SKIPPED'; launches = 0; skipReasons = @($pre.Reasons | ForEach-Object { Hide-LocalPaths $_ })
-        plugins = @(); runs = @()
+        plugins = @(); scanCache = [ordered]@{ removedEntries = 0; unkeyed = 0 }; runs = @()
     }
     if ($Probe) { $result.python = $pre.PythonVersion }
     if ($pre.Reasons.Count) { return [pscustomobject]$result }
 
-    $result.plugins = Install-ReaperPlugins -CfgDir $cfg.Dir -Bundles $pre.Bundles
+    $installed = Install-ReaperPlugins -CfgDir $cfg.Dir -Bundles $pre.Bundles # 返回值带逗号包了一层，直接赋值才是行数组，外面再套 @() 就成了单元素的嵌套数组
+    $result.plugins = @($installed | ForEach-Object { [ordered]@{ file = $_.file; sha256 = $_.sha256; copied = $_.copied } })
+    $cacheCleared = Clear-ReaperScanCache -CfgDir $cfg.Dir -FileNames @($pre.Bundles | ForEach-Object { Split-Path -Leaf $_ }) # 缓存里别处同名发布版留下的条目会让 REAPER 不管 vstpath64 的顺序直接用它
+    $result.scanCache = [ordered]@{ removedEntries = $cacheCleared.Removed; unkeyed = $cacheCleared.Unkeyed }
+    $expected = @{} # 被测的 .vst3 模块文件名 → 复制进私有目录的那一份（路径与完整 sha256），每次启动后据此核对 REAPER 实际加载的模块
+    foreach ($row in $installed) { $expected[$row.file] = @{ Path = $row.path; Sha256 = $row.sha256Full } }
     $stamp = [DateTime]::Now.ToString('yyyyMMdd-HHmmss')
     $positive = $picked.Positive
     $negative = $picked.Negative
@@ -427,8 +518,9 @@ function Invoke-ReaperSmoke {
         $work = Join-Path $LogDir "work/$stamp-run$k"
         $null = New-Item -ItemType Directory -Force -Path $work
         $before = Get-ReaperDefaultCfgSnapshot
-        $ctx = New-ReaperContext -ReaperExe $ReaperExe -NullTest $pre.NullTest -WorkDir $work -Driver $driver -Config $section
+        $ctx = New-ReaperContext -ReaperExe $ReaperExe -NullTest $pre.NullTest -WorkDir $work -Driver $driver -Config $section -Installed $expected -PluginsDir (Join-Path $cfg.Dir 'plugins')
         if ($SelfTestHooks['Launcher']) { $ctx.Launcher = $SelfTestHooks['Launcher'] }
+        if ($SelfTestHooks['ModuleSampler']) { $ctx.ModuleSampler = $SelfTestHooks['ModuleSampler'] }
         if ($Probe) {
             $roundDir = Join-Path $LogDir "$stamp-probe-run$k"
             $null = New-Item -ItemType Directory -Force -Path $roundDir
@@ -487,7 +579,7 @@ function Invoke-ReaperSmoke {
                 docsListing = [ordered]@{ unchanged = $docs.Same; entriesBefore = $docs.Count; changed = @($docs.Changed | Select-Object -First 8); linkCountUnknown = @($docs.LinkUnknown).Count }
                 analyzer = [ordered]@{ cells = [ordered]@{}; whole = $whole; rejected = $ctx.Probe.Rejected }
             }
-            foreach ($id in $ctx.Probe.Analyses.Keys) { $runRow.probe.analyzer.cells[$id] = $ctx.Probe.Analyses[$id].exit }
+            foreach ($id in $ctx.Probe.Analyses.get_Keys()) { $runRow.probe.analyzer.cells[$id] = $ctx.Probe.Analyses[$id].exit }
         }
         $result.runs += $runRow
         Write-Host ("第 {0}/{1} 轮：{2}，{3} s，REAPER 启动 {4} 次，默认资源目录{5}" -f $k, $Repeat, $verdict, $result.runs[-1].seconds, $ctx.Launches, ($cmp.Same ? '未变' : "变了：$($cmp.Changed -join ', ')"))
@@ -511,6 +603,6 @@ function Write-ReaperSmokeResult {
     $jsonPath
 }
 
-Export-ModuleMember -Function Get-ReaperSmokeConfig, Test-ReaperScenarioConfig, Test-ReaperPluginClassIds, Get-ReaperPreflight, Install-ReaperPlugins, Hide-LocalPaths, Select-ReaperScenarios,
+Export-ModuleMember -Function Get-ReaperSmokeConfig, Test-ReaperScenarioConfig, Test-ReaperPluginClassIds, Get-ReaperPreflight, Get-ReaperPluginPathValue, Get-ReaperScanCacheKey, Remove-ReaperScanCacheEntries, Clear-ReaperScanCache, Install-ReaperPlugins, Hide-LocalPaths, Select-ReaperScenarios,
     Resolve-ReaperPython, Get-ReaperPythonLead, Test-ReaperNumber, Test-ReaperProbeScenarioFields, Get-ReaperRoundStop,
     Get-WorstStatus, Get-RunVerdict, Get-NegativeVerdict, Invoke-GuardNegative, Invoke-ReaperNegativeRow, Invoke-ReaperSmoke, Write-ReaperSmokeResult

@@ -10,8 +10,10 @@
 #   Get-ReaperDefaultCfgSnapshot / Compare-ReaperDefaultCfgSnapshot
 #                              只读地取 %APPDATA%\REAPER 下全部条目的大小与修改时间，前后比较
 #   Get-ReaperFileIdentity     目录的文件身份（卷序列号 + 文件 ID）：路径写法再怎么绕，指到同一个目录身份就相同
+#   Get-ReaperSystemVst3Dirs   REAPER 自己总会补进 vstpath64 的两个系统 VST3 目录（reaper.ini 里的写法）
 #   Find-ReaperVariableCaseCollisions / Find-ReaperControlChars / Test-ReaperScriptLint
-#                              变量名不得只靠大小写区分（PowerShell 变量名不分大小写，$c 会盖掉 $C）；脚本里不得夹不可见的控制字符
+#                              变量名不得只靠大小写区分（PowerShell 变量名不分大小写，$c 会盖掉 $C）；脚本里不得夹不可见的控制字符；
+#                              字典的 .Keys / .Values 不当属性读（会被同名条目遮住）
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -56,6 +58,10 @@ function Stop-Refuse([string]$Why) { throw [System.InvalidOperationException]::n
 
 # 路径指到的目录（或文件）的文件身份字符串；路径不存在返回 $null；存在却打不开返回 'ERROR:<错误码>'（调用方要当作「证明不了」处理）。
 function Get-ReaperFileIdentity([string]$Path) { [RinneReaperFileId]::Get($Path) }
+
+# REAPER 自己总会补进 vstpath64 的两个系统 VST3 目录，写成它在 reaper.ini 里的写法（环境变量不展开，写成别的写法它认不出，会再补一份排在最后）。
+# 放在这里是因为第二个目录的写法里有 APPDATA 字样，而全仓只有 Guard 与自测可以提到它（Test-ReaperScriptLint）；这里只是目录名，不读也不写那个目录。
+function Get-ReaperSystemVst3Dirs { , @('%COMMONPROGRAMFILES%\VST3', '%LOCALAPPDATA%\Programs\Common\VST3') }
 
 # 逐级解析 junction 与符号链接，返回真实路径；路径不存在的部分照字面接上。
 function Resolve-ReaperRealPath([string]$Path, [int]$Depth = 0) {
@@ -233,12 +239,12 @@ function Get-ReaperDefaultCfgSnapshot {
 function Compare-ReaperDefaultCfgSnapshot {
     param([Parameter(Mandatory)]$Before, [Parameter(Mandatory)]$After)
     $changed = [Collections.Generic.List[string]]::new()
-    foreach ($k in $Before.Keys) {
+    foreach ($k in $Before.get_Keys()) {
         if (-not $After.Contains($k)) { $changed.Add("removed:$k") }
         elseif ($After[$k] -cne $Before[$k]) { $changed.Add("changed:$k") }
     }
-    foreach ($k in $After.Keys) { if (-not $Before.Contains($k)) { $changed.Add("added:$k") } }
-    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.Count; Changed = $changed.ToArray() }
+    foreach ($k in $After.get_Keys()) { if (-not $Before.Contains($k)) { $changed.Add("added:$k") } }
+    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.get_Count(); Changed = $changed.ToArray() }
 }
 
 # 一段脚本文本里只差大小写的变量名（整个文件范围，比 PowerShell 的作用域规则更严）。解析失败也算问题，不放过。
@@ -256,8 +262,9 @@ function Find-ReaperVariableCaseCollisions {
         if (-not $spellings.ContainsKey($lower)) { $spellings[$lower] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
         $null = $spellings[$lower].Add($name)
     }
-    foreach ($lower in $spellings.Keys) {
-        if ($spellings[$lower].Count -gt 1) { $out.Add('变量名只差大小写：' + (($spellings[$lower] | Sort-Object | ForEach-Object { '$' + $_ }) -join ' / ')) }
+    # 不读 $spellings.Keys：被扫文件里有名为 keys 的变量时，字典里就有一个叫 keys 的条目，.Keys 返回这个条目而不是键集合，整份文件等于没扫
+    foreach ($entry in $spellings.GetEnumerator()) {
+        if ($entry.Value.Count -gt 1) { $out.Add('变量名只差大小写：' + (($entry.Value | Sort-Object | ForEach-Object { '$' + $_ }) -join ' / ')) }
     }
     , $out.ToArray()
 }
@@ -278,12 +285,19 @@ function Find-ReaperControlChars {
 
 # 扫一组目录里的 .ps1 / .psm1。除了变量大小写碰撞，还要：每个文件都 Set-StrictMode -Version Latest；-cfgfile 字面量全局恰好
 # 一处且在 Host.psm1 里；APPDATA 只许在 Guard 与自测里出现（别的文件连读都不该读）。注释不算。
+# 字典的 .Keys / .Values 不当属性读：字典里有名为 Keys / Values 的条目时（键来自配置、文件名、变量名这类外部数据），属性读返回的是这个条目而不是
+# 键集合，遍历悄悄变成遍历一个值，检查等于没做；.get_Keys() / .get_Values() / .GetEnumerator() 不会被条目遮住。
 # 另外 .ps1 / .psm1 / .lua / .json 都不许夹不可见的控制字符。
 function Test-ReaperScriptLint {
     param([Parameter(Mandatory)][string[]]$Dirs)
     $problems = [Collections.Generic.List[string]]::new()
     $sites = 0
     $isStrict = { param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ieq 'Set-StrictMode' -and $n.Extent.Text -imatch '-Version\s+Latest' }
+    $isShadowable = {
+        param($n)
+        $n -is [System.Management.Automation.Language.MemberExpressionAst] -and $n -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $n.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.Member.Value -in 'Keys', 'Values'
+    }
     $word = 'cfg' + 'file' # 分开拼：本文件自己的判据字面量不能算作一处 -cfgfile
     $isCfg = {
         param($n)
@@ -302,6 +316,9 @@ function Test-ReaperScriptLint {
             foreach ($c in (Find-ReaperVariableCaseCollisions -Text $source)) { $problems.Add("$($f.Name)：$c") }
             $tokens = $null; $parseErrors = $null
             $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+            foreach ($m in $ast.FindAll($isShadowable, $true)) {
+                $problems.Add("$($f.Name)：第 $($m.Extent.StartLineNumber) 行：.$($m.Member.Value) 当属性读（字典里有同名条目时返回条目而不是集合）：改用 .get_$($m.Member.Value)()")
+            }
             if (@($ast.FindAll($isStrict, $true)).Count -eq 0) { $problems.Add("$($f.Name)：缺 Set-StrictMode -Version Latest") }
             $n = @($ast.FindAll($isCfg, $true)).Count
             $sites += $n
@@ -317,4 +334,4 @@ function Test-ReaperScriptLint {
 
 Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Resolve-ReaperRealPath, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
     Get-ReaperCfgArgument, Set-ReaperIniText, Set-ReaperIniValue, Get-ReaperDefaultCfgDir, Get-ReaperDefaultCfgSnapshot, Compare-ReaperDefaultCfgSnapshot,
-    Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint
+    Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint, Get-ReaperSystemVst3Dirs

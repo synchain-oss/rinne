@@ -21,6 +21,7 @@ Import-Module (Join-Path $scripts 'Scenarios.psm1') -ErrorAction Stop
 Import-Module (Join-Path $scripts 'Suite.psm1') -ErrorAction Stop
 Import-Module (Join-Path $RepoRoot 'scripts/lib/Locks.psm1') -ErrorAction Stop
 Import-Module (Join-Path $scripts 'ProbeLogs.psm1') -ErrorAction Stop
+Import-Module (Join-Path $RepoRoot 'tests/reaper/Rpp.psm1') -ErrorAction Stop
 Import-Module (Join-Path $RepoRoot 'tests/reaper/SelfTestProbe.psm1') -ErrorAction Stop # 替身（分析器、nulltest、探针构建目录）与假日志文本
 
 function Write-Case([string]$Label, [bool]$Bad, [bool]$Passed) { Write-Output ("RESULT`t{0}`t{1}`t{2}" -f [int]$Bad, [int]$Passed, $Label) }
@@ -156,9 +157,10 @@ try {
     $until = (Get-Date).AddSeconds(10)
     while ((& $probeExit) -ne 1 -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }
     $ctx.Launcher = New-StandIn 'exit 0' $during
-    $during.Called = $false; $ctx.LockWaitSec = 1; $before = $ctx.Launches
+    $during.Called = $false; $ctx.LockWaitSec = 1; $before = $ctx.Launches; $logBefore = $ctx.LaunchLog.Count
     $run = Invoke-ReaperLaunch -Ctx $ctx -HostArgs @{ TimeoutSec = 5 }
     Write-Case 'gui 锁：别人占着时等不到，状态 LockBusy，不无锁硬跑' $true ($run.Status -eq 'LockBusy' -and -not $during.Called -and $ctx.Launches -eq $before -and (Get-HostFailure $run) -eq 'gui 锁等不到')
+    Write-Case 'gui 锁：等不到的那次不记进启动日志（REAPER 没有启动，加载来源没有可核对的东西）' $true ($ctx.LaunchLog.Count -eq $logBefore)
     # 反例场景（hang）在锁等不到时：REAPER 没启动，Run 里没有进程号。原因要写准，不能落成「场景抛错」
     $hangConfig = [pscustomobject]@{ limits = [pscustomobject]@{ luaTimeoutSec = 30 }; signal = [pscustomobject]@{ seconds = 4; kind = 'x' } }
     $hangCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $hangConfig -LockWaitSec 1
@@ -241,6 +243,56 @@ $negUser = @($realConfig.negative | Where-Object { $_.id -eq 'neg-user-testing' 
 $rowUser = Invoke-ReaperNegativeRow -Context $genCtx -Scenario $negUser -GuardParams $withKey -TempRoot $Work
 Write-Case '守卫反例 neg-user-testing 走完整的反例这一行（真实的 scenarios.json）：PASS' $true ($rowUser.status -eq 'PASS' -and $rowUser.observed -eq 'SKIPPED')
 
+# ---- 进程里加载的模块（WatchModules / ModuleSampler）----
+$watchLeaves = 'Rinne Input.vst3', 'Rinne Output.vst3'
+$modCalls = @{ N = 0 }
+$modSampler = { param($proc) $modCalls.N++; , @('C:\Windows\System32\kernel32.dll', 'C:\x\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3', 'D:\y\RINNE OUTPUT.VST3', 'C:\x\Other.vst3') }.GetNewClosure()
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 2 -WatchModules $watchLeaves -ModuleSampler $modSampler -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '模块取样：每次轮询取一次、结束前再取一次，名字对上的（不分大小写）记下完整路径，不在关注名单里的不记' $false (
+    $run.Status -eq 'Timeout' -and $run.ModuleScans -eq $modCalls.N -and $run.ModuleScans -ge 3 -and $run.Modules.get_Count() -eq 2 -and
+    @($run.Modules['Rinne Input.vst3']).Count -eq 1 -and @($run.Modules['Rinne Input.vst3'])[0] -ceq 'C:\x\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3' -and
+    @($run.Modules['Rinne Output.vst3']).Count -eq 1 -and @($run.Modules['Rinne Output.vst3'])[0] -ceq 'D:\y\RINNE OUTPUT.VST3')
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -KillAfterSec 1.5 -WatchModules $watchLeaves -ModuleSampler $modSampler -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '模块取样：到点被杀的启动也留着被杀之前见到的模块' $false ($run.Status -eq 'Killed' -and $run.ModuleScans -ge 2 -and @($run.Modules['Rinne Input.vst3']).Count -eq 1)
+$modCalls.N = 0
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -WatchModules $watchLeaves -ModuleSampler $modSampler -Launcher (New-StandIn 'exit 0' @{})
+Write-Case '模块取样：进程退出得比第一次轮询还快，结束后那一次取样照样记下（取样次数至少 1）' $false ($run.Status -eq 'Exited' -and $run.ModuleScans -ge 1 -and @($run.Modules['Rinne Input.vst3']).Count -eq 1)
+$modNull = { param($proc) $null }
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 2 -WatchModules $watchLeaves -ModuleSampler $modNull -Launcher (New-StandIn 'Start-Sleep -Seconds 60' @{})
+Write-Case '模块取样：一次也读不到模块列表时取样次数是 0，两个模块都是空的，不抛错' $true ($run.ModuleScans -eq 0 -and @($run.Modules['Rinne Input.vst3']).Count -eq 0 -and @($run.Modules['Rinne Output.vst3']).Count -eq 0)
+$modCalls.N = 0
+$run = Invoke-ReaperHost -ReaperExe 'stand-in' -TimeoutSec 30 -Launcher (New-StandIn 'exit 0' @{}) -ModuleSampler $modSampler
+Write-Case '模块取样：没给关注名单就一次也不取样，Modules 是空的' $false ($modCalls.N -eq 0 -and $run.ModuleScans -eq 0 -and $run.Modules.get_Count() -eq 0)
+$modProc = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($pwshExe, '-NoProfile -Command Start-Sleep -Seconds 30'))
+try {
+    $listed = $null; $untilMod = (Get-Date).AddSeconds(15)
+    while (-not $listed -and (Get-Date) -lt $untilMod) { $listed = Get-ReaperProcessModulePaths $modProc; if (-not $listed) { Start-Sleep -Milliseconds 200 } }
+    Write-Case '读进程模块（真进程）：列得出完整路径，里面有进程自己的可执行文件' $false ([bool]$listed -and @($listed | Where-Object { [IO.Path]::GetFileName($_) -ieq (Split-Path -Leaf $pwshExe) }).Count -ge 1)
+} finally { if (-not $modProc.HasExited) { $modProc.Kill(); $modProc.WaitForExit() } }
+Write-Case '读进程模块（真进程）：进程已退出时返回 $null，不抛错，不当作空列表' $true ($null -eq (Get-ReaperProcessModulePaths $modProc))
+
+# Invoke-ReaperLaunch：会加载插件的启动取样并记进启动日志，不加载插件的（参照渲染）不取样，也不会被当成被测插件的启动
+$launchInstalled = @{ 'Rinne Input.vst3' = @{ Path = 'C:\x\Rinne Input.vst3'; Sha256 = ('a' * 64) }; 'Rinne Output.vst3' = @{ Path = 'D:\y\RINNE OUTPUT.VST3'; Sha256 = ('b' * 64) } }
+$launchCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $ctxConfig -Installed $launchInstalled -PluginsDir (Join-Path $Work 'plugins')
+$launchCtx.Launcher = New-StandIn 'exit 0' @{}
+$launchCtx.ModuleSampler = $modSampler
+$modCalls.N = 0
+$null = Invoke-ReaperLaunch -Ctx $launchCtx -HostArgs @{ TimeoutSec = 30 } -Label 'with-plugins'
+$sampledWith = $modCalls.N
+$modCalls.N = 0
+$null = Invoke-ReaperLaunch -Ctx $launchCtx -HostArgs @{ TimeoutSec = 30 } -Label 'no-plugins' -LoadsPlugins $false
+Write-Case '启动日志：会加载插件的启动取样了模块，并记下标签、状态、见到的路径与取样次数' $false (
+    $sampledWith -ge 1 -and $launchCtx.LaunchLog.Count -eq 2 -and $launchCtx.LaunchLog[0].Label -ceq 'with-plugins' -and $launchCtx.LaunchLog[0].LoadsPlugins -and $launchCtx.LaunchLog[0].Status -eq 'Exited' -and
+    $launchCtx.LaunchLog[0].ModuleScans -ge 1 -and @($launchCtx.LaunchLog[0].Modules['Rinne Input.vst3']).Count -eq 1)
+Write-Case '启动日志：不加载插件的启动（参照渲染）一次也不取样，记为不加载插件，没有模块' $true (
+    $modCalls.N -eq 0 -and -not $launchCtx.LaunchLog[1].LoadsPlugins -and $launchCtx.LaunchLog[1].ModuleScans -eq 0 -and $launchCtx.LaunchLog[1].Modules.get_Count() -eq 0)
+$emptyCtx = New-ReaperContext -ReaperExe 'stand-in' -NullTest 'x' -WorkDir $Work -Driver 'x' -Config $ctxConfig
+$emptyCtx.Launcher = New-StandIn 'exit 0' @{}
+$emptyCtx.ModuleSampler = $modSampler
+$modCalls.N = 0
+$null = Invoke-ReaperLaunch -Ctx $emptyCtx -HostArgs @{ TimeoutSec = 30 }
+Write-Case '启动日志：上下文里没有被测副本的清单（没给 Installed）时不取样' $true ($modCalls.N -eq 0 -and $emptyCtx.LaunchLog.Count -eq 1)
+
 # ---- 插件复制 ----
 $bundles = foreach ($name in 'Rinne Input', 'Rinne Output') {
     $dir = Join-Path $Work "$name.vst3"
@@ -254,18 +306,59 @@ $second = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
 Set-Content -LiteralPath (Join-Path $bundles[0] 'Contents/x86_64-win/Rinne Input.vst3') -Value 'bits-new'
 $third = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
 $iniNow = [IO.File]::ReadAllText($pinned.Ini)
-# vstpath64 已经含私有目录时不再改写 ini：LF 行尾、CRLF 行尾、后面还跟别的目录（分号）三种写法都要认
-Write-Case '插件复制：重复安装不改写 ini（vstpath64 已含私有目录，LF 行尾）' $false ($iniNow -ceq $iniFirst)
+# vstpath64 已经是「系统 VST3 目录在前、私有目录排在最后」时不再改写 ini：LF 行尾、CRLF 行尾、前面还有别的目录（分号）都要认。
+# 旧写法（私有目录排在最前、只有私有目录、没有这一行）必须被改写成新写法，否则 REAPER 会让系统目录里同名同类 ID 的发布版盖掉私有副本
+Write-Case '插件复制：重复安装不改写 ini（vstpath64 已是新写法，LF 行尾）' $false ($iniNow -ceq $iniFirst)
 $pluginsDir = Join-Path $pinned.Dir 'plugins'
+$systemDirs = '%COMMONPROGRAMFILES%\VST3;%LOCALAPP' + 'DATA%\Programs\Common\VST3'
+$elsewhereDir = Join-Path $Work 'elsewhere'
 $iniRaw = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($pinned.Ini)) # 前面的用例往 ini 里写过非 UTF-8 的字节，按 Latin-1 读才能原样往返
-foreach ($variant in @(@('CRLF 行尾', "`r`n", ''), @('后面跟着别的目录', "`n", ';' + (Join-Path $Work 'elsewhere')), @('CRLF 行尾且后面跟着别的目录', "`r`n", ';' + (Join-Path $Work 'elsewhere')))) {
-    $text = (($iniRaw -replace "`r?`n", "`n") -replace '(?m)^vstpath64=.*$', ('vstpath64=' + $pluginsDir + $variant[2])) -replace "`n", $variant[1]
+$vstLine = { [regex]::Match([Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($pinned.Ini)), '(?im)^vstpath64=(.*)$').Groups[1].Value.TrimEnd("`r") }
+Write-Case '插件复制：vstpath64 是两个系统 VST3 目录在前、私有目录排在最后' $false ((& $vstLine) -ceq "$systemDirs;$pluginsDir")
+foreach ($variant in @(@('CRLF 行尾', "`r`n", ''), @('前面还有别的目录', "`n", "$elsewhereDir;"), @('CRLF 行尾且前面还有别的目录', "`r`n", "$elsewhereDir;"))) {
+    $text = (($iniRaw -replace "`r?`n", "`n") -replace '(?m)^vstpath64=.*$', ('vstpath64=' + $variant[2] + $systemDirs + ';' + $pluginsDir)) -replace "`n", $variant[1]
     [IO.File]::WriteAllBytes($pinned.Ini, [Text.Encoding]::Latin1.GetBytes($text))
     $null = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
     Write-Case "插件复制：重复安装不改写 ini（$($variant[0])）" $false ([Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($pinned.Ini)) -ceq $text)
 }
+$legacyOrdered = @(
+    @('私有目录排在最前（旧写法）', "$pluginsDir;$systemDirs", "$systemDirs;$pluginsDir"),
+    @('只有私有目录（旧写法）', $pluginsDir, "$systemDirs;$pluginsDir"),
+    @('私有目录在前、后面还有别的目录', "$pluginsDir;$elsewhereDir", "$elsewhereDir;$systemDirs;$pluginsDir"),
+    @('私有目录用大小写不同的写法并带结尾反斜杠', ($pluginsDir.ToUpperInvariant() + '\'), "$systemDirs;$pluginsDir"),
+    @('私有目录夹在两个系统目录中间', ('%COMMONPROGRAMFILES%\VST3;' + $pluginsDir + ';%LOCALAPP' + 'DATA%\Programs\Common\VST3'), "$systemDirs;$pluginsDir")
+)
+foreach ($legacy in $legacyOrdered) {
+    [IO.File]::WriteAllBytes($pinned.Ini, [Text.Encoding]::Latin1.GetBytes((($iniRaw -replace "`r?`n", "`n") -replace '(?m)^vstpath64=.*$', ('vstpath64=' + $legacy[1]))))
+    $null = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
+    Write-Case "插件复制：vstpath64 是$($legacy[0])，安装后改写成新写法" $true ((& $vstLine) -ceq $legacy[2])
+}
+$strippedIni = ($iniRaw -replace "`r?`n", "`n") -replace '(?m)^vstpath64=.*\n', ''
+[IO.File]::WriteAllBytes($pinned.Ini, [Text.Encoding]::Latin1.GetBytes($strippedIni))
+$null = Install-ReaperPlugins -CfgDir $pinned.Dir -Bundles $bundles
+Write-Case '插件复制：ini 里没有 vstpath64 这一行时，安装后写出新写法' $true ($strippedIni -notmatch 'vstpath64' -and (& $vstLine) -ceq "$systemDirs;$pluginsDir")
+Write-Case '插件复制：报告里带复制进去的那一份的路径与完整 sha256（加载来源核对用），都与磁盘上的文件对得上' $false (
+    @($third | Where-Object { $_.path -and (Test-Path -LiteralPath $_.path -PathType Leaf) -and $_.sha256Full -ceq (Get-FileHash -LiteralPath $_.path -Algorithm SHA256).Hash.ToLowerInvariant() -and $_.sha256Full.StartsWith($_.sha256) }).Count -eq 2)
 Write-Case '插件复制：第一次全复制，内容相同第二次不动，改了的再复制' $false (@($first | Where-Object { $_.copied }).Count -eq 2 -and @($second | Where-Object { $_.copied }).Count -eq 0 -and @($third | Where-Object { $_.copied }).Count -eq 1)
-Write-Case '插件复制：私有 VST3 目录排在 vstpath64 最前，目标里只有这次的构建' $false ($iniNow.Contains('vstpath64=' + (Join-Path $pinned.Dir 'plugins')) -and (Get-Content -LiteralPath (Join-Path $pinned.Dir 'plugins/Rinne Input.vst3/Contents/x86_64-win/Rinne Input.vst3') -Raw).Trim() -eq 'bits-new')
+Write-Case '插件复制：私有 VST3 目录排在 vstpath64 最后，目标里只有这次的构建' $false ($iniNow -match ('(?m)^vstpath64=' + [regex]::Escape($systemDirs) + ';' + [regex]::Escape($pluginsDir) + '\r?$') -and (Get-Content -LiteralPath (Join-Path $pinned.Dir 'plugins/Rinne Input.vst3/Contents/x86_64-win/Rinne Input.vst3') -Raw).Trim() -eq 'bits-new')
+
+# ---- 扫描缓存：装插件时去掉被测插件的条目（真文件，Latin-1 字节原样往返）----
+$cacheFile = Join-Path $pinned.Dir 'reaper-vstplugins64.ini'
+$cacheNames = 'Rinne Input.vst3', 'Rinne Output.vst3'
+if (Test-Path -LiteralPath $cacheFile) { Remove-Item -LiteralPath $cacheFile }
+$noCache = Clear-ReaperScanCache -CfgDir $pinned.Dir -FileNames $cacheNames
+Write-Case '扫描缓存：缓存文件不存在时什么都不做，也不建这个文件' $false ($noCache.Removed -eq 0 -and -not (Test-Path -LiteralPath $cacheFile))
+$cacheKept = "[vstcache]`r`nOther.vst3=0102030405060708,11{FF,Caf" + [char]0xE9 + " " + [char]0xFF + "`r`n"
+$cacheStaleText = "[vstcache]`r`nRinne_Output.vst3=525EE8DD736ADD01,1{AB,Rinne Output (Synchain)`r`nOther.vst3=0102030405060708,11{FF,Caf" + [char]0xE9 + " " + [char]0xFF + "`r`nRinne_Input.vst3=BCE5AEDD736ADD01,1{AB,Rinne Input (Synchain)`r`n"
+[IO.File]::WriteAllBytes($cacheFile, [Text.Encoding]::Latin1.GetBytes($cacheStaleText))
+$cleared = Clear-ReaperScanCache -CfgDir $pinned.Dir -FileNames $cacheNames
+Write-Case '扫描缓存：留着旧时间戳的两个被测条目从文件里去掉了，别的行（含非 ASCII 字节）与 CRLF 原样，返回去掉 2 行' $true (
+    $cleared.Removed -eq 2 -and [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($cacheFile)) -ceq $cacheKept)
+(Get-Item -LiteralPath $cacheFile).LastWriteTimeUtc = [DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+$clearedAgain = Clear-ReaperScanCache -CfgDir $pinned.Dir -FileNames $cacheNames
+Write-Case '扫描缓存：没有要去掉的条目时不写文件（内容与修改时间都不变）' $false (
+    $clearedAgain.Removed -eq 0 -and [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($cacheFile)) -ceq $cacheKept -and (Get-Item -LiteralPath $cacheFile).LastWriteTimeUtc -eq [DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc))
+Remove-Item -LiteralPath $cacheFile
 
 # ---- 第二段接线：替身 REAPER 走真正的场景处理器、收日志与入口 ----
 # 替身先起一个马上退出的进程，拿它（已退出）的 pid 写两份探针日志、结果文件和导出的 wav，像一次正常结束的 REAPER；
@@ -319,18 +412,45 @@ function New-FakeReaperLauncher([hashtable]$Spec) {
     }.GetNewClosure()
 }
 
+# 替身 REAPER 里「进程加载的模块」：Spec.Modules 选一种。good：被测的两个插件都从私有目录加载；foreign：Input 来自别处的同名模块；none：一个被测模块都没有；
+# unreadable：读不到模块列表。每次取样时才看 Spec.Modules，所以用例可以在中途改
+$wireLeaves = @(Get-ReaperPluginIdentities -Probe | ForEach-Object { $_.Bundle })
+function New-WireModuleSampler([hashtable]$Spec, [string]$ModulesRoot) {
+    $leaves = $wireLeaves
+    $foreignDir = Join-Path $wire 'foreign-vst3'
+    {
+        param($proc)
+        $own = @($leaves | ForEach-Object { Join-Path $ModulesRoot (Join-Path $_ "Contents\x86_64-win\$_") })
+        switch ($Spec.Modules) {
+            'unreadable' { $null }
+            'none' { , @('C:\Windows\System32\kernel32.dll') }
+            'foreign' { , @((Join-Path $foreignDir (Join-Path $leaves[0] "Contents\x86_64-win\$($leaves[0])")), $own[1]) }
+            default { , (@('C:\Windows\System32\kernel32.dll') + $own) }
+        }
+    }.GetNewClosure()
+}
+
 function New-WireSpec([string]$Id) {
     $logDir = Join-Path $wire "$Id-docs/Rinne Probe Logs"
     $null = New-Item -ItemType Directory -Force -Path $logDir
-    @{ Pwsh = $pwshExe; NewLog = $newLog; LogDir = $logDir; Seen = [Collections.Generic.List[object]]::new(); NoPing = @(); NoWav = @(); PingFor = @{}; NonRt = @{}; Plant = $null; DuringRun = $null; AfterExit = $null; BadExitTime = $false }
+    @{ Modules = 'good'; Pwsh = $pwshExe; NewLog = $newLog; LogDir = $logDir; Seen = [Collections.Generic.List[object]]::new(); NoPing = @(); NoWav = @(); PingFor = @{}; NonRt = @{}; Plant = $null; DuringRun = $null; AfterExit = $null; BadExitTime = $false }
 }
 
 # 一个场景的上下文：假的文档目录、本轮结果目录、替身启动器
 function New-WireContext([string]$Id, [hashtable]$Spec) {
     $roundDir = Join-Path $wire "$Id-round"; $workDir = Join-Path $wire "$Id-work"
     $null = New-Item -ItemType Directory -Force -Path $roundDir, $workDir
-    $c = New-ReaperContext -ReaperExe 'stand-in' -NullTest $fakeNull -WorkDir $workDir -Driver 'x' -Config $probeSection -LockWaitSec 20
+    $installedHere = @{}
+    $pluginsHere = Join-Path $workDir 'plugins'
+    foreach ($leaf in $wireLeaves) {
+        $binFile = Join-Path $pluginsHere (Join-Path $leaf "Contents\x86_64-win\$leaf")
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $binFile)
+        [IO.File]::WriteAllText($binFile, "bits-$leaf")
+        $installedHere[$leaf] = @{ Path = $binFile; Sha256 = (Get-FileHash -LiteralPath $binFile -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $c = New-ReaperContext -ReaperExe 'stand-in' -NullTest $fakeNull -WorkDir $workDir -Driver 'x' -Config $probeSection -LockWaitSec 20 -Installed $installedHere -PluginsDir $pluginsHere
     $c.Launcher = New-FakeReaperLauncher $Spec
+    $c.ModuleSampler = New-WireModuleSampler $Spec $pluginsHere
     $c.Probe = & (Get-Module Suite) { param($pre, $sec, $dir) New-ReaperProbeRound $pre $sec $dir } ([pscustomobject]@{ ProbeLogDir = $Spec.LogDir; Python = $fakePy.Python; Analyzer = $fakePy.Analyzer }) $probeSection $roundDir
     $c
 }
@@ -346,7 +466,7 @@ function Invoke-WireScenario([string]$Id, $Scenario, [hashtable]$Spec, [string]$
 }
 # 这一格的结果目录里搬进来的日志名（收日志出错、目录没建起来时是空的，不让用例在这里抛错：要的是一条干净的红）
 function Get-WireCellLogs([string]$Cell) { if (Test-Path -LiteralPath $Cell -PathType Container) { @(Get-ChildItem -LiteralPath $Cell -File -Filter 'probe-*.csv' | ForEach-Object { $_.Name } | Sort-Object) } else { @() } }
-function New-WireSpecWith([string]$Id, [hashtable]$Set) { $s = New-WireSpec $Id; foreach ($k in $Set.Keys) { $s[$k] = $Set[$k] }; $s }
+function New-WireSpecWith([string]$Id, [hashtable]$Set) { $s = New-WireSpec $Id; foreach ($k in $Set.get_Keys()) { $s[$k] = $Set[$k] }; $s }
 
 # 稳态格：别人的同名文件不被碰（Save-ProbeLogs 把启动时刻、pid 交给收日志的那一步）
 $plantSpec = New-WireSpec 'play-plant'
@@ -443,6 +563,24 @@ Write-Case '导出格：在线那趟没产出 wav 判 INCOMPLETE' $true ($w.Out.
 $w = Invoke-WireScenario 'export-diff' $exportScenario (New-WireSpec 'export-diff') $diffReport
 Write-Case '导出格：离线与在线两份渲染有差异（nulltest 报逐位不同）判 FAIL，比对行照写' $true ($w.Out.Status -eq 'FAIL' -and $w.Out.Detail -like '*离线对在线对拍不通过*' -and (Test-Path -LiteralPath (Join-Path $w.Cell 'compare-reaper.csv')))
 
+# 加载来源（接线）：替身 REAPER 报的模块列表走真正的场景处理器与核对。其余判据全绿时，来源对得上才 PASS；
+# 别处的同名模块、没见到、读不到模块列表都得是 INCOMPLETE，并且说明里写着场景自己本来是 PASS
+$srcGood = Invoke-WireScenario 'src-good' $playScenario (New-WireSpec 'src-good')
+Write-Case '加载来源（稳态格）：模块都从私有目录加载时 PASS，证据写进 Facts.modules（Proven，每次启动一条，位置是 <cfg>\plugins\…）' $false (
+    $srcGood.Out.Status -eq 'PASS' -and $srcGood.Out.Facts.modules.Count -eq $srcGood.Spec.Seen.Count -and $srcGood.Out.Facts.modules[0].verdict -ceq 'Proven' -and
+    $srcGood.Out.Facts.modules[0].binaries[$wireLeaves[0]].loaded[0] -like '<cfg>\plugins\*')
+$srcReason = [ordered]@{ foreign = '被测副本以外'; none = '没有在进程的模块列表里见到'; unreadable = '一次也没读到' }
+foreach ($mode in $srcReason.get_Keys()) {
+    $srcBad = Invoke-WireScenario "src-$mode" $playScenario (New-WireSpecWith "src-$mode" @{ Modules = $mode })
+    Write-Case "加载来源（稳态格，模块列表：$mode）：场景自己本来是 PASS，来源核不上改判 INCOMPLETE，原因写明" $true (
+        $srcBad.Out.Status -eq 'INCOMPLETE' -and $srcBad.Out.Detail -like '*插件加载来源没核实*场景自己的结局是 PASS*' -and $srcBad.Out.Detail -like "*$($srcReason[$mode])*")
+}
+$srcExport = Invoke-WireScenario 'src-export-foreign' $exportScenario (New-WireSpecWith 'src-export-foreign' @{ Modules = 'foreign' })
+Write-Case '加载来源（导出格，离线与在线各启动一次）：每次启动都核对，别处的同名模块让整格 INCOMPLETE' $true (
+    $srcExport.Out.Status -eq 'INCOMPLETE' -and $srcExport.Out.Facts.modules.Count -eq 2 -and $srcExport.Out.Facts.modules[0].verdict -ceq 'Foreign' -and $srcExport.Out.Facts.modules[1].verdict -ceq 'Foreign')
+$srcExportGood = Invoke-WireScenario 'src-export-good' $exportScenario (New-WireSpec 'src-export-good')
+Write-Case '加载来源（导出格）：两次启动的来源都对得上时 PASS，证据两条' $false ($srcExportGood.Out.Status -eq 'PASS' -and $srcExportGood.Out.Facts.modules.Count -eq 2)
+
 # gui 锁被别人占着、等不到：REAPER 没启动，Run 里没有进程号。两种场景都判 INCOMPLETE，原因写锁，不落成「场景抛错」，也没有收日志
 $holder2 = & $lockChild 'if (-not (Enter-RinneLock gui -TimeoutSeconds 5 -Quiet)) { exit 2 }; Start-Sleep -Seconds 60'
 try {
@@ -469,7 +607,7 @@ if ($realReaperRunning) {
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $Spec.LogDir 'sub')
         [IO.File]::WriteAllText((Join-Path $Spec.LogDir 'foreign-a.csv'), "foreign-a`n") # 别人的文件（用户在宿主里写的）
         [IO.File]::WriteAllText((Join-Path $Spec.LogDir 'notes.txt'), "notes`n")
-        $hooks = @{ ProbeLogDir = $Spec.LogDir; Analyzer = $fakePy.Analyzer; Launcher = (New-FakeReaperLauncher $Spec) }
+        $hooks = @{ ProbeLogDir = $Spec.LogDir; Analyzer = $fakePy.Analyzer; Launcher = (New-FakeReaperLauncher $Spec); ModuleSampler = (New-WireModuleSampler $Spec (Join-Path $pinned.Dir 'plugins')) }
         $p = @{ CfgDir = $CfgA; ReaperExe = $pwshExe; BuildDir = $build.Root; NullTest = $fakeNull; LogDir = (Join-Path $results $Id); UserTestingMarker = $marker; ScenarioFile = $scenarioFile
                 Only = $Only; Repeat = $Repeat; Probe = $true; Python = $fakePy.Python; SelfTestHooks = $hooks }
         if ($NoNegative) { $p.NoNegative = $true }
@@ -479,10 +617,23 @@ if ($realReaperRunning) {
         $console = (@($all | Where-Object { $_ -is [Management.Automation.InformationRecord] } | ForEach-Object { "$($_.MessageData)" }) -join "`n")
         [pscustomobject]@{ R = $r; Results = (Join-Path $results $Id); Console = $console }
     }
+    # 整轮入口装插件时去掉被测插件在扫描缓存里的条目（探针的两个包名），别的条目原样
+    $wireCache = Join-Path $CfgA 'reaper-vstplugins64.ini'
+    $wireCacheKept = "[vstcache]`nOther.vst3=1112131415161718,2{CD,Other`n"
+    [IO.File]::WriteAllBytes($wireCache, [Text.Encoding]::Latin1.GetBytes("[vstcache]`nRinne_Probe_Input.vst3=0102030405060708,1{AB,Rinne Probe Input`n" + "Other.vst3=1112131415161718,2{CD,Other`n" + "Rinne_Probe_Output.vst3=2122232425262728,3{EF,Rinne Probe Output`n"))
     $smoke1 = Invoke-WireSmoke 'clean' (New-WireSpec 'clean') '^probe-steady-48000-512$' -NoNegative
     $run1 = $smoke1.R.runs[0]
+    Write-Case '整轮入口：被测插件在扫描缓存里的条目被去掉，别的条目原样，结果里记下去掉了 2 条' $true (
+        $smoke1.R.scanCache.removedEntries -eq 2 -and $smoke1.R.scanCache.unkeyed -eq 0 -and [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($wireCache)) -ceq $wireCacheKept)
     Write-Case "整轮入口（第二段）：干净的一轮 PASS，文档目录除本轮自己的文件外没变，搬走 2 份，没留 reaper 进程（$($smoke1.R.verdict)）" $false (
         $smoke1.R.verdict -eq 'PASS' -and $run1.probe.docsListing.unchanged -and $run1.probe.moved -eq 2 -and @($run1.probe.notes).Count -eq 0 -and $run1.reaperProcessesLeft -eq 0 -and -not ($run1.PSObject.Properties.Name -contains 'stoppedBecause'))
+
+    Write-Case '整轮入口：来源对得上时，场景行带 Facts.modules（位置是 <cfg>\plugins\…，没有盘符路径），结果里的插件清单仍是 file、sha256、copied' $false (
+        $run1.scenarios[0].facts.modules[0].verdict -ceq 'Proven' -and $run1.scenarios[0].facts.modules[0].binaries.get_Count() -eq 2 -and (ConvertTo-Json $run1.scenarios[0].facts -Depth 8) -notmatch '[A-Za-z]:\\\\' -and
+        (@($smoke1.R.plugins[0].get_Keys()) -join ',') -ceq 'file,sha256,copied')
+    $smokeSrc = Invoke-WireSmoke 'src-foreign' (New-WireSpecWith 'src-foreign' @{ Modules = 'foreign' }) '^probe-steady-48000-512$' -NoNegative
+    Write-Case "整轮入口：加载的是别处的同名模块时，场景与整轮都是 INCOMPLETE，不是 PASS（$($smokeSrc.R.verdict)）" $true (
+        $smokeSrc.R.verdict -eq 'INCOMPLETE' -and $smokeSrc.R.runs[0].scenarios[0].status -eq 'INCOMPLETE' -and $smokeSrc.R.runs[0].scenarios[0].detail -like '*被测副本以外*' -and $smokeSrc.R.runs[0].scenarios[0].facts.modules[0].verdict -ceq 'Foreign')
 
     # 文档目录的前后清单落盘时，别人的文件名（文件、子目录）只留散列；比较用的是全部条目，所以清单里条目一个不少
     $roundDir1 = Join-Path $smoke1.Results $run1.probe.roundDir
@@ -503,7 +654,7 @@ if ($realReaperRunning) {
         '子目录没了' = { param($ownPid, $dir) [IO.Directory]::Delete((Join-Path $dir 'sub')) }
     }
     $k = 0
-    foreach ($what in $touch.Keys) {
+    foreach ($what in $touch.get_Keys()) {
         $k++
         $sp = New-WireSpec "touch$k"; $sp.DuringRun = $touch[$what]
         $sm = Invoke-WireSmoke "touch$k" $sp '^probe-steady-48000-512$' -Repeat 2 -NoNegative

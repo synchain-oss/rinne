@@ -276,6 +276,21 @@ function Get-SnapshotCases([string]$Tmp) {
     $s4 = Get-ReaperDefaultCfgSnapshot -Root $root
     (Get-Item -LiteralPath (Join-Path $root 'sub')).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-5)
     & $add '清单：只有目录自己的时间戳变了不报（它滞后，会误报；目录里的变动看文件项）' $false ((Compare-ReaperDefaultCfgSnapshot -Before $s4 -After (Get-ReaperDefaultCfgSnapshot -Root $root)).Same)
+    # 目录里有叫 Keys、Count、Values 的文件：快照字典里就有同名条目，属性读返回的是条目而不是集合，前后比较会悄悄比错
+    $namesRoot = Join-Path $Tmp 'snap-names'
+    $null = New-Item -ItemType Directory -Path $namesRoot
+    foreach ($fileName in 'Keys', 'Count', 'Values') { Set-Content -LiteralPath (Join-Path $namesRoot $fileName) -Value $fileName }
+    $n0 = Get-ReaperDefaultCfgSnapshot -Root $namesRoot
+    $nSame = Compare-ReaperDefaultCfgSnapshot -Before $n0 -After (Get-ReaperDefaultCfgSnapshot -Root $namesRoot)
+    & $add '清单：目录里有叫 Keys、Count、Values 的文件，没变时不报，条目数是 3' $false ($nSame.Same -and $nSame.Count -eq 3)
+    Add-Content -LiteralPath (Join-Path $namesRoot 'Count') -Value 'more'
+    $n1 = Get-ReaperDefaultCfgSnapshot -Root $namesRoot
+    $nChanged = Compare-ReaperDefaultCfgSnapshot -Before $n0 -After $n1
+    & $add '清单：叫 Count 的文件变了照样判变，只报这一项' $true (-not $nChanged.Same -and @($nChanged.Changed).Count -eq 1 -and $nChanged.Changed[0] -ceq 'changed:Count')
+    Remove-Item -LiteralPath (Join-Path $namesRoot 'Keys')
+    Set-Content -LiteralPath (Join-Path $namesRoot 'Values2') -Value 'v2'
+    $nMoved = Compare-ReaperDefaultCfgSnapshot -Before $n1 -After (Get-ReaperDefaultCfgSnapshot -Root $namesRoot)
+    & $add '清单：叫 Keys 的文件被删、新增一个文件，照样各报一项' $true (-not $nMoved.Same -and (@($nMoved.Changed | Sort-Object) -join ',') -ceq 'added:Values2,removed:Keys')
     & $add '清单：目录不存在是空清单，不报错' $false ((Get-ReaperDefaultCfgSnapshot -Root (Join-Path $Tmp 'nope')).Count -eq 0)
     $cases
 }
@@ -289,8 +304,8 @@ function Get-LintCases([string]$Tmp, [string]$RepoRoot, [string]$CollisionSample
         param($Files)
         $dir = Join-Path $Tmp ('lint-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
         $null = New-Item -ItemType Directory -Path $dir
-        foreach ($name in $Files.Keys) { [IO.File]::WriteAllText((Join-Path $dir $name), $Files[$name]) }
-        try { Test-ReaperScriptLint -Dirs $dir } finally { foreach ($name in $Files.Keys) { Remove-Item -LiteralPath (Join-Path $dir $name) }; Remove-Item -LiteralPath $dir }
+        foreach ($name in $Files.get_Keys()) { [IO.File]::WriteAllText((Join-Path $dir $name), $Files[$name]) }
+        try { Test-ReaperScriptLint -Dirs $dir } finally { foreach ($name in $Files.get_Keys()) { Remove-Item -LiteralPath (Join-Path $dir $name) }; Remove-Item -LiteralPath $dir }
     }
     $hostOk = @{ 'Host.psm1' = "$strict`n`$a = '$word'`n" }
     & $add 'lint：干净的样本没有问题' $false ((& $lint $hostOk).Count -eq 0)
@@ -311,6 +326,21 @@ function Get-LintCases([string]$Tmp, [string]$RepoRoot, [string]$CollisionSample
     & $add '控制字符扫描：报出行、列和码位' $true ($ctl.Count -eq 2 -and $ctl[0] -ceq '第 1 行第 3 列：U+000D' -and $ctl[1] -ceq '第 2 行第 2 列：U+001B')
     & $add '控制字符扫描：干净文本、空文本、CRLF 换行都没有问题' $false ((Find-ReaperControlChars -Text "a`tb${cr}`nc`n").Count -eq 0 -and (Find-ReaperControlChars -Text '').Count -eq 0)
     & $add 'lint：解析不了的脚本判红' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`nif (`n" })) -match '解析失败')
+    # 被扫文本里有名为 keys / values / count 的变量时，扫描自己用的字典里就有同名条目，属性读返回的是条目而不是集合：整份文件等于没扫。
+    # 用例都是「文本里同时有这类变量和只差大小写的另一对变量」，必须仍然报出那一对（且只报这一对）
+    $pair = "`$a = 1`n`$A = 2`n"
+    $pairOnly = { param($Found) @($Found).Count -eq 1 -and $Found[0] -cmatch '^变量名只差大小写：(\$a / \$A|\$A / \$a)$' }
+    & $add '碰撞扫描：文本里有 $keys 变量时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n$pair"))
+    & $add '碰撞扫描：文本里有 $Values 变量时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$Values = 1`n$pair"))
+    & $add '碰撞扫描：文本里有 $Count 变量时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$Count = 1`n$pair"))
+    & $add '碰撞扫描：$keys、$values、$Count 三个都在时，另一对只差大小写的变量照样报出' $true (& $pairOnly (Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n`$values = 2`n`$Count = 3`n$pair"))
+    $selfPair = @(Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n`$Keys = 2`n")
+    & $add '碰撞扫描：$keys 与 $Keys 自己只差大小写，也报出来' $true ($selfPair.Count -eq 1 -and $selfPair[0] -cmatch '^变量名只差大小写：(\$keys / \$Keys|\$Keys / \$keys)$')
+    & $add '碰撞扫描：有 $keys、$values、$count 变量但没有碰撞时不报' $false ((Find-ReaperVariableCaseCollisions -Text "`$keys = 1`n`$values = 2`n`$count = 3`n`$keys = 4`n").Count -eq 0)
+    & $add 'lint：字典的 .Keys 当属性读判红（外部数据当键时会被同名条目遮住）' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$h = @{}`nforeach (`$k in `$h.Keys) { `$k }`n" })) -match '第 3 行：\.Keys 当属性读')
+    & $add 'lint：字典的 .Values 当属性读判红' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$h = @{}`n@(`$h.Values)`n" })) -match '第 3 行：\.Values 当属性读')
+    & $add 'lint：小写的 .keys 同样判红（成员名不分大小写）' $true ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n`$h = @{}`n@(`$h.keys)`n" })) -match '当属性读')
+    & $add 'lint：.get_Keys()、.get_Values()、.GetEnumerator() 不判红，注释与字符串里提到 .Keys 也不算' $false ((& $lint ($hostOk + @{ 'x.ps1' = "$strict`n# 不读 .Keys`n`$h = @{}`n@(`$h.get_Keys()); @(`$h.get_Values()); `$h.GetEnumerator()`n'.Keys 与 .Values'`n" })).Count -eq 0)
     if ($CollisionSample -and (Test-Path -LiteralPath $CollisionSample)) {
         $sample = [IO.File]::ReadAllText($CollisionSample)
         & $add 'lint：spike 的旧循环脚本（出事故的那份）被查出碰撞' $true ((Find-ReaperVariableCaseCollisions -Text $sample).Count -gt 0)
@@ -364,6 +394,8 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '工程：采样率、声道、1x 与轨道音量写进去了' $false ($chain -match 'RENDER_FMT 0 1 44100' -and $chain -match 'RENDER_1X 1' -and $chain -match 'VOLPAN 0.5 ')
     & $add '工程：空链没有 FXCHAIN' $false ((New-ReaperProjectText -SourceWav 'S' -RenderDir 'D' -RenderName 'N' -Chain @()) -notmatch 'FXCHAIN')
     & $add 'Lua 任务：反斜杠与引号被转义' $false ((ConvertTo-ReaperLuaTable @{ p = 'a\b"c' }) -ceq "return {[`"p`"]=`"a\\b\`"c`"}`n")
+    # 键是外面给的名字：叫 Keys、Values、Count 的键，字典的属性读返回的是它们的值而不是集合，整张表会写错
+    & $add 'Lua 任务：键叫 Keys、Values、Count 时一个不少、值对得上' $false ((ConvertTo-ReaperLuaTable @{ Keys = 'k'; Values = 'v'; Count = 3; p = 'x' }) -ceq "return {[`"Count`"]=3,[`"Keys`"]=`"k`",[`"p`"]=`"x`",[`"Values`"]=`"v`"}`n")
     $cfgPath = Join-Path $RepoRoot 'tests/reaper/scenarios.json'
     $config = Get-ReaperSmokeConfig $cfgPath
     & $add 'scenarios.json 通过结构校验' $false ((Test-ReaperScenarioConfig $config).Count -eq 0)
@@ -471,6 +503,182 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     $clearAt = @($selfCalls | Where-Object { $_.Name -eq 'Clear-ReaperSelftestSubst' } | ForEach-Object { $_.At })
     $makeAt = @($selfCalls | Where-Object { $_.Name -eq 'New-RinneTempDir' } | ForEach-Object { $_.At })
     & $add '接线：自测入口在建 scratch 目录之前先清 subst 残留' $false ($clearAt.Count -eq 1 -and $makeAt.Count -eq 1 -and $clearAt[0] -lt $makeAt[0])
+    # 加载来源 1：vstpath64 的新值（纯函数，表驱动）。REAPER 对同名的 VST3 包只留扫描顺序里最后的那个，私有目录必须排在最后，系统 VST3 目录显式写在它前面
+    $sysDirs = '%COMMONPROGRAMFILES%\VST3;%LOCALAPPDATA%\Programs\Common\VST3'
+    $privateDir = 'C:\cfg\plugins'
+    $commonExpanded = [Environment]::ExpandEnvironmentVariables('%COMMONPROGRAMFILES%') + '\VST3'
+    $pathTable = @(
+        @{ Name = '没有 vstpath64 这一行（当前值为空）'; Current = ''; Want = "$sysDirs;$privateDir" }
+        @{ Name = '只有私有目录'; Current = $privateDir; Want = "$sysDirs;$privateDir" }
+        @{ Name = '已经是新顺序（重复安装）原样不动'; Current = "$sysDirs;$privateDir"; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录大小写写法不同，换成给定的写法并排到最后'; Current = "c:\CFG\Plugins;$sysDirs"; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录带结尾反斜杠'; Current = "$privateDir\;$sysDirs"; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录用正斜杠并带结尾斜杠'; Current = 'C:/cfg/plugins/'; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录夹在两个系统目录中间'; Current = '%COMMONPROGRAMFILES%\VST3;C:\cfg\plugins;%LOCALAPPDATA%\Programs\Common\VST3'; Want = "$sysDirs;$privateDir" }
+        @{ Name = '别的目录原样保留、相对顺序不变'; Current = "D:\mine;$privateDir;E:\other"; Want = "D:\mine;E:\other;$sysDirs;$privateDir" }
+        @{ Name = '系统目录已按展开后的写法写过，不再追加另一种写法'; Current = "$commonExpanded;$privateDir"; Want = "$commonExpanded;%LOCALAPPDATA%\Programs\Common\VST3;$privateDir" }
+        @{ Name = '重复项与空段只留一份'; Current = "D:\mine;;d:\MINE\;$privateDir;"; Want = "D:\mine;$sysDirs;$privateDir" }
+    )
+    foreach ($tableRow in $pathTable) {
+        $pathGot = Get-ReaperPluginPathValue -Current $tableRow.Current -Private $privateDir
+        & $add "vstpath64：$($tableRow.Name)" $false ($pathGot -ceq $tableRow.Want)
+        & $add "vstpath64：再算一遍结果不变，最后一段是私有目录、私有目录只出现一次（$($tableRow.Name)）" $false (
+            ((Get-ReaperPluginPathValue -Current $pathGot -Private $privateDir) -ceq $pathGot) -and ($pathGot.Split(';')[-1] -ceq $privateDir) -and (@($pathGot.Split(';') | Where-Object { $_ -ieq $privateDir }).Count -eq 1))
+    }
+    $oldLayout = Get-ReaperPluginPathValue -Current "$privateDir;$sysDirs" -Private $privateDir
+    & $add 'vstpath64：旧写法（私有目录排在最前）必须被改写，不能原样放行' $true ($oldLayout -cne "$privateDir;$sysDirs" -and $oldLayout.Split(';')[0] -cne $privateDir)
+
+    # 加载来源 1b：扫描缓存里被测插件的条目要去掉。缓存里留着系统目录发布版的时间戳时，REAPER 不管 vstpath64 怎么排都用发布版（真机上见过），
+    # 而且赢一次就一直赢；所以装插件时清掉被测插件的条目，让 REAPER 重扫，由私有目录排在最后来定
+    $cacheNames = 'Rinne Input.vst3', 'Rinne Output.vst3'
+    $cacheOther = "Other.vst3=0102030405060708,11{FF,Other plugin`n"
+    $cacheStale = "[vstcache]`nRinne_Output.vst3=525EE8DD736ADD01,1668839456{AB,Rinne Output (Synchain)`n" + $cacheOther + "Rinne_Input.vst3=BCE5AEDD736ADD01,1769505170{AB,Rinne Input (Synchain)`n"
+    $cacheCut = Remove-ReaperScanCacheEntries -Text $cacheStale -FileNames $cacheNames
+    & $add '扫描缓存：键是文件名里除字母、数字、点以外的字符换成 _' $false (
+        (Get-ReaperScanCacheKey 'Rinne Input.vst3') -ceq 'Rinne_Input.vst3' -and (Get-ReaperScanCacheKey 'a-b (c).vst3') -ceq 'a_b__c_.vst3' -and $null -eq (Get-ReaperScanCacheKey ('插件' + '.vst3')))
+    & $add '扫描缓存：留着发布版时间戳的两个被测条目都被去掉，别的条目一字不动，记下去掉 2 行' $true (
+        $cacheCut.Text -ceq ("[vstcache]`n" + $cacheOther) -and $cacheCut.Removed -eq 2 -and $cacheCut.Unkeyed -eq 0)
+    & $add '扫描缓存：再清一遍不再有变化（去掉 0 行，文本原样）' $false ((Remove-ReaperScanCacheEntries -Text $cacheCut.Text -FileNames $cacheNames) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq $cacheCut.Text })
+    & $add '扫描缓存：外壳插件的子条目（键<序号=）跟着去掉，键只是前缀相同的别的文件不动' $true (
+        (Remove-ReaperScanCacheEntries -Text "[vstcache]`nRinne_Input.vst3=1,1{A,x`nRinne_Input.vst3<1=2,2{B,y`nRinne_Input.vst3.bak=3,3{C,z`nRinne_Input2.vst3=4,4{D,w`n" -FileNames $cacheNames).Text -ceq "[vstcache]`nRinne_Input.vst3.bak=3,3{C,z`nRinne_Input2.vst3=4,4{D,w`n")
+    & $add '扫描缓存：键的大小写不同也认（Windows 文件名不分大小写）' $true (
+        (Remove-ReaperScanCacheEntries -Text "[vstcache]`nrinne_input.vst3=1,1{A,x`n" -FileNames $cacheNames).Removed -eq 1)
+    & $add '扫描缓存：只动 [vstcache] 一节，别的节里同名的键不动' $true (
+        (Remove-ReaperScanCacheEntries -Text "[other]`nRinne_Input.vst3=a`n[vstcache]`nRinne_Input.vst3=1,1{A,x`n[xvst3_compat]`nRinne_Input.vst3=b`n" -FileNames $cacheNames).Text -ceq "[other]`nRinne_Input.vst3=a`n[vstcache]`n[xvst3_compat]`nRinne_Input.vst3=b`n")
+    $cacheCrlf = Remove-ReaperScanCacheEntries -Text $cacheStale.Replace("`n", "`r`n") -FileNames $cacheNames
+    & $add '扫描缓存：CRLF 换行的缓存去掉条目后仍是 CRLF，别的行不变' $true ($cacheCrlf.Text -ceq ("[vstcache]`n" + $cacheOther).Replace("`n", "`r`n") -and $cacheCrlf.Removed -eq 2)
+    & $add '扫描缓存：条目在最后一行且没有结尾换行也能去掉，前一行的换行保留' $true (
+        (Remove-ReaperScanCacheEntries -Text "[vstcache]`nOther.vst3=1,1{A,x`nRinne_Input.vst3=1,1{A,x" -FileNames $cacheNames).Text -ceq "[vstcache]`nOther.vst3=1,1{A,x`n")
+    & $add '扫描缓存：没有 [vstcache] 一节、空文本、没有文件名，都原样返回、去掉 0 行' $false (
+        ((Remove-ReaperScanCacheEntries -Text "[x]`nRinne_Input.vst3=1`n" -FileNames $cacheNames) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq "[x]`nRinne_Input.vst3=1`n" }) -and
+        ((Remove-ReaperScanCacheEntries -Text '' -FileNames $cacheNames) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq '' }) -and
+        ((Remove-ReaperScanCacheEntries -Text $cacheStale -FileNames @()) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq $cacheStale }))
+    $cacheWide = Remove-ReaperScanCacheEntries -Text $cacheStale -FileNames @('插件.vst3')
+    & $add '扫描缓存：文件名含非 ASCII 字符时没有已知的键，记进 Unkeyed、不猜着删' $true ($cacheWide.Unkeyed -eq 1 -and $cacheWide.Removed -eq 0 -and $cacheWide.Text -ceq $cacheStale)
+
+    # 加载来源 2：被测的 .vst3 模块是不是都从私有目录里这次复制进去的那份加载的。纯函数，同路径比较与 sha256 用注入的替身
+    $inPath = 'C:\cfg\plugins\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    $outPath = 'C:\cfg\plugins\Rinne Output.vst3\Contents\x86_64-win\Rinne Output.vst3'
+    $sysInPath = 'C:\Program Files\Common Files\VST3\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    $verdictWant = @{ 'Rinne Input.vst3' = @{ Path = $inPath; Sha256 = ('a' * 64) }; 'Rinne Output.vst3' = @{ Path = $outPath; Sha256 = ('b' * 64) } }
+    $liveHashes = @{ $inPath = ('a' * 64); $outPath = ('b' * 64) }
+    $sameFake = { param($first, $second) [string]::Equals($first, $second, [StringComparison]::OrdinalIgnoreCase) }
+    $hashFake = { param($file) $liveHashes.ContainsKey($file) ? $liveHashes[$file] : $null }.GetNewClosure()
+    $hashDrifted = { param($file) 'c' * 64 }
+    $hashUnreadable = { param($file) $null }
+    $modVerdict = { param($seen, $scans = 3, $hashOf = $hashFake, $want = $verdictWant) Get-ReaperModuleVerdict -Expected $want -Seen $seen -Scans $scans -SameFile $sameFake -HashOf $hashOf }
+    $seenGood = @{ 'Rinne Input.vst3' = @($inPath); 'Rinne Output.vst3' = @($outPath) }
+    $good = & $modVerdict $seenGood
+    & $add '加载来源：两个插件都只从私有目录加载、sha256 对得上才是 Proven，没有原因' $false (
+        $good.Verdict -ceq 'Proven' -and $good.Reasons.Count -eq 0 -and $good.Binaries['Rinne Input.vst3'].State -ceq 'Private' -and $good.Binaries['Rinne Output.vst3'].State -ceq 'Private')
+    & $add '加载来源：路径写法只差大小写（同一个文件）仍是 Proven，用同文件判定而不是比字符串' $false ((& $modVerdict @{ 'Rinne Input.vst3' = @($inPath.ToUpperInvariant()); 'Rinne Output.vst3' = @($outPath) }).Verdict -ceq 'Proven')
+    $foreign = & $modVerdict @{ 'Rinne Input.vst3' = @($sysInPath); 'Rinne Output.vst3' = @($outPath) }
+    & $add '加载来源：Input 是从系统 VST3 目录加载的同名模块，判 Foreign 并点名' $true (
+        $foreign.Verdict -ceq 'Foreign' -and $foreign.Binaries['Rinne Input.vst3'].State -ceq 'Foreign' -and ($foreign.Reasons -match 'Rinne Input.vst3 从被测副本以外'))
+    & $add '加载来源：私有副本也见到了、但同名的别处模块同样加载过，仍判 Foreign' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @($inPath, $sysInPath); 'Rinne Output.vst3' = @($outPath) }).Verdict -ceq 'Foreign')
+    $unseen = & $modVerdict @{}
+    & $add '加载来源：一个被测模块都没见到，判 Unseen 并点名两个' $true ($unseen.Verdict -ceq 'Unseen' -and @($unseen.Reasons -match '没有在进程的模块列表里见到').Count -eq 2)
+    & $add '加载来源：只见到 Input 没见到 Output，判 Unseen' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @($inPath) }).Verdict -ceq 'Unseen')
+    & $add '加载来源：见到的是别的模块（同名以外的文件）不算见到被测模块，判 Unseen' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @(); 'Rinne Output.vst3' = @() }).Verdict -ceq 'Unseen')
+    $drifted = & $modVerdict $seenGood 3 $hashDrifted
+    & $add '加载来源：路径对、但文件现在的 sha256 与复制时不同，判 Changed' $true ($drifted.Verdict -ceq 'Changed' -and $drifted.Binaries['Rinne Input.vst3'].State -ceq 'Changed' -and ($drifted.Reasons -match 'sha256'))
+    & $add '加载来源：路径对、但文件读不出来（算不出 sha256），判 Changed，不当作对得上' $true ((& $modVerdict $seenGood 3 $hashUnreadable).Verdict -ceq 'Changed')
+    $unreadable = & $modVerdict $seenGood 0
+    & $add '加载来源：一次也没读到模块列表（Scans=0）判 Unreadable，即便 Seen 看着是对的' $true ($unreadable.Verdict -ceq 'Unreadable' -and ($unreadable.Reasons -match '一次也没读到'))
+    & $add '加载来源：没有被测副本的清单判 NoExpected，不判 Proven' $true ((& $modVerdict @{} 3 $hashFake @{}).Verdict -ceq 'NoExpected')
+    & $add '加载来源：Foreign 排在 Unseen 之前（一个别处加载、一个没见到，整体判 Foreign）' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @($sysInPath) }).Verdict -ceq 'Foreign')
+
+    # 同一个文件的判定与 sha256 用真文件：路径只差大小写、硬链接是同一个文件，复制出来的另一份不是
+    $sameDir = Join-Path $Tmp 'same-file'
+    $null = New-Item -ItemType Directory -Path $sameDir
+    $fileA = Join-Path $sameDir 'a.bin'; $fileCopy = Join-Path $sameDir 'copy.bin'; $fileLink = Join-Path $sameDir 'link.bin'
+    [IO.File]::WriteAllText($fileA, 'same bytes')
+    Copy-Item -LiteralPath $fileA -Destination $fileCopy
+    $linkOk = try { $null = New-Item -ItemType HardLink -Path $fileLink -Target $fileA; $true } catch { $false } # 本机建不了硬链接（文件系统不支持、权限）时只让硬链接这一条降级
+    & $add '同一个文件：路径只差大小写是同一个' $false (Test-ReaperSameFile $fileA $fileA.ToUpperInvariant())
+    & $add "同一个文件：硬链接指向同一个文件$($linkOk ? '' : '（本机建不了硬链接，这条没能真跑）')" $false ((-not $linkOk) -or (Test-ReaperSameFile $fileA $fileLink))
+    & $add '同一个文件：内容相同的另一份拷贝不是同一个' $true (-not (Test-ReaperSameFile $fileA $fileCopy))
+    & $add '同一个文件：有一边不存在、或为空，不算同一个' $true (-not (Test-ReaperSameFile $fileA (Join-Path $sameDir 'nope.bin')) -and -not (Test-ReaperSameFile $fileA '') -and -not (Test-ReaperSameFile $null $fileA))
+    $goneFile = Join-Path $sameDir 'gone.bin'
+    & $add '同一个文件：文件已经不存在时（读不出文件身份），完整路径只差大小写仍认作同一个，差一个字符不认' $false ((Test-ReaperSameFile $goneFile $goneFile.ToUpperInvariant()) -and -not (Test-ReaperSameFile $goneFile ($goneFile + 'x')))
+    & $add 'sha256：与 Get-FileHash 一致（小写），读不出的文件返回 $null' $false (
+        ((Get-ReaperFileSha256 $fileA) -ceq (Get-FileHash -LiteralPath $fileA -Algorithm SHA256).Hash.ToLowerInvariant()) -and $null -eq (Get-ReaperFileSha256 (Join-Path $sameDir 'nope.bin')))
+
+    # 结果里写的模块位置：私有目录、系统 VST3 目录用占位前缀，别处只留文件名，盘符路径与用户名目录不进结果
+    $shownPlugins = Join-Path $Tmp 'shown-plugins'
+    $shownLeaf = 'Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    & $add '模块位置：私有插件目录下的写成 <cfg>\plugins\…' $false ((ConvertTo-ReaperModuleShown (Join-Path $shownPlugins $shownLeaf) $shownPlugins) -ceq "<cfg>\plugins\$shownLeaf")
+    & $add '模块位置：系统 VST3 目录下的写成 <CommonProgramFiles>\…' $false ((ConvertTo-ReaperModuleShown (Join-Path $env:CommonProgramFiles "VST3\$shownLeaf") $shownPlugins) -ceq "<CommonProgramFiles>\VST3\$shownLeaf")
+    $localRoot = [Environment]::GetFolderPath('LocalApplicationData')
+    & $add '模块位置：本机用户的 VST3 目录下的写成 <LocalProfile>\…，不带用户名' $false ((ConvertTo-ReaperModuleShown (Join-Path $localRoot "Programs\Common\VST3\$shownLeaf") $shownPlugins) -ceq "<LocalProfile>\Programs\Common\VST3\$shownLeaf")
+    $elsewhere = ConvertTo-ReaperModuleShown 'D:\work\someone\build\Rinne Input.vst3' $shownPlugins
+    & $add '模块位置：别处的只留文件名，不留盘符路径与用户名' $true ($elsewhere -ceq '<其他目录>\Rinne Input.vst3' -and $elsewhere -notmatch 'someone|D:')
+
+    # 场景处理完后核对加载来源（Add-ReaperModuleEvidence）：用真文件，路径与 sha256 都按真的算
+    $evPlugins = Join-Path $Tmp 'ev-plugins'
+    $evFiles = @{}
+    foreach ($evLeaf in 'Rinne Input.vst3', 'Rinne Output.vst3') {
+        $evFile = Join-Path $evPlugins (Join-Path $evLeaf "Contents\x86_64-win\$evLeaf")
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $evFile)
+        [IO.File]::WriteAllText($evFile, "binary of $evLeaf")
+        $evFiles[$evLeaf] = @{ Path = $evFile; Sha256 = (Get-FileHash -LiteralPath $evFile -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $evElsewhere = Join-Path $Tmp 'ev-elsewhere\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    $evSeenGood = @{ 'Rinne Input.vst3' = @($evFiles['Rinne Input.vst3'].Path); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }
+    $evLaunch = { param($seen, $scans = 3, $loads = $true, $status = 'Exited') [pscustomobject]@{ Label = 'ev'; LoadsPlugins = $loads; Status = $status; Modules = $seen; ModuleScans = $scans } }
+    $evRun = {
+        param($launches, $status = 'PASS', $from = 0, $facts = $null, $installed = $evFiles)
+        $evLog = [Collections.Generic.List[object]]::new()
+        foreach ($oneLaunch in @($launches)) { $evLog.Add($oneLaunch) }
+        $evOutcome = [pscustomobject]@{ Status = $status; Detail = '场景自己的说明' }
+        if ($facts) { $evOutcome | Add-Member -NotePropertyName Facts -NotePropertyValue $facts }
+        Add-ReaperModuleEvidence -Ctx @{ Installed = $installed; PluginsDir = $evPlugins; LaunchLog = $evLog } -Outcome $evOutcome -From $from
+    }
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok } # 取不到 Facts 之类的成员时算这一条没过，不让整个自测抛错
+    $evGood = & $evRun (& $evLaunch $evSeenGood)
+    & $addSafe '加载来源核对：来源对得上，场景的 PASS 原样保留，说明不改，证据写进 Facts.modules' $false {
+        $evGood.Status -ceq 'PASS' -and $evGood.Detail -ceq '场景自己的说明' -and $evGood.Facts.modules.Count -eq 1 -and $evGood.Facts.modules[0].verdict -ceq 'Proven' -and
+        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].state -ceq 'Private' -and $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].sha256 -ceq $evFiles['Rinne Input.vst3'].Sha256.Substring(0, 12)}
+    & $addSafe '加载来源核对：证据里的位置是 <cfg>\plugins\…，没有盘符路径' $false {
+        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].loaded[0] -like '<cfg>\plugins\Rinne Input.vst3\*' -and (ConvertTo-Json $evGood.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\'}
+    $evForeign = & $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) })
+    & $addSafe '加载来源核对：Input 是别处的同名模块，场景的 PASS 改判 INCOMPLETE，原因点名，场景自己的说明保留' $true {
+        $evForeign.Status -ceq 'INCOMPLETE' -and $evForeign.Detail -match '插件加载来源没核实' -and $evForeign.Detail -match '被测副本以外' -and $evForeign.Detail -match '场景自己的说明' -and $evForeign.Facts.modules[0].verdict -ceq 'Foreign'}
+    & $addSafe '加载来源核对：别处的同名模块在结果里不带盘符路径' $false {(ConvertTo-Json $evForeign.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\'}
+    & $add '加载来源核对：场景的 FAIL 同样改判 INCOMPLETE（测的可能是另一份构建，红的原因不一定在被测副本上）' $true ((& $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }) 'FAIL').Status -ceq 'INCOMPLETE')
+    $evUnseen = & $evRun (& $evLaunch @{})
+    & $addSafe '加载来源核对：一个被测模块都没见到，场景的 PASS 改判 INCOMPLETE' $true {$evUnseen.Status -ceq 'INCOMPLETE' -and $evUnseen.Detail -match '没有在进程的模块列表里见到' -and $evUnseen.Facts.modules[0].verdict -ceq 'Unseen'}
+    $evWrongSha = @{ 'Rinne Input.vst3' = @{ Path = $evFiles['Rinne Input.vst3'].Path; Sha256 = ('f' * 64) }; 'Rinne Output.vst3' = $evFiles['Rinne Output.vst3'] }
+    $evChanged = & $evRun (& $evLaunch $evSeenGood) 'PASS' 0 $null $evWrongSha
+    & $addSafe '加载来源核对：路径对、但 sha256 与复制时算的不同，场景的 PASS 改判 INCOMPLETE' $true {$evChanged.Status -ceq 'INCOMPLETE' -and $evChanged.Facts.modules[0].verdict -ceq 'Changed'}
+    & $add '加载来源核对：读不到进程的模块列表（ModuleScans=0），场景的 PASS 改判 INCOMPLETE' $true ((& $evRun (& $evLaunch $evSeenGood 0)).Status -ceq 'INCOMPLETE')
+    $evNoLaunch = & $evRun @()
+    & $add '加载来源核对：这个场景里没有一次会加载插件的启动被核对，场景的 PASS 改判 INCOMPLETE（没有证明）' $true ($evNoLaunch.Status -ceq 'INCOMPLETE' -and $evNoLaunch.Detail -match '没有一次会加载插件')
+    & $add '加载来源核对：只有不加载插件的启动（参照渲染）不算证明过，改判 INCOMPLETE' $true ((& $evRun (& $evLaunch @{} 0 $false)).Status -ceq 'INCOMPLETE')
+    & $add '加载来源核对：不加载插件的参照渲染在前、加载插件的启动对得上在后，场景的 PASS 保留' $false ((& $evRun @((& $evLaunch @{} 0 $false), (& $evLaunch $evSeenGood))).Status -ceq 'PASS')
+    & $add '加载来源核对：两次加载插件的启动，第二次是别处的模块，整个场景改判 INCOMPLETE' $true ((& $evRun @((& $evLaunch $evSeenGood), (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }))).Status -ceq 'INCOMPLETE')
+    & $add '加载来源核对：锁等不到（LockBusy，REAPER 没有启动）的那次不计入，不拖累其余启动的核对' $false ((& $evRun @((& $evLaunch $evSeenGood), (& $evLaunch @{} 0 $true 'LockBusy'))).Status -ceq 'PASS')
+    & $add '加载来源核对：只看本场景开始之后的启动（From），之前场景里的坏启动不连累' $false ((& $evRun @((& $evLaunch @{} 0), (& $evLaunch $evSeenGood)) 'PASS' 1).Status -ceq 'PASS')
+    $evOwn = & $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }) 'INCOMPLETE'
+    & $addSafe '加载来源核对：场景自己已经是 INCOMPLETE 的不改它的说明（不盖掉超时、卡对话框这些自己的原因），但证据照写' $false {$evOwn.Status -ceq 'INCOMPLETE' -and $evOwn.Detail -ceq '场景自己的说明' -and $evOwn.Facts.modules[0].verdict -ceq 'Foreign'}
+    $evKeep = & $evRun (& $evLaunch $evSeenGood) 'PASS' 0 ([ordered]@{ other = 1 })
+    & $addSafe '加载来源核对：场景已有的 Facts 保留，modules 加在旁边' $false {$evKeep.Facts.other -eq 1 -and $evKeep.Facts.modules.Count -eq 1}
+    # 接线：不带插件链的参照渲染必须声明「不加载插件」（-LoadsPlugins $false），别的渲染调用不能带；否则参照渲染会被当成加载被测插件的启动，
+    # 每个渲染场景都因为「没见到被测模块」判 INCOMPLETE。看语法树里的命令调用，不比文本
+    $scenarioFile = Join-Path $script:Scripts 'Scenarios.psm1'
+    $scenarioAst = [System.Management.Automation.Language.Parser]::ParseFile($scenarioFile, [ref]$null, [ref]$null)
+    $renderCalls = @($scenarioAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Invoke-RenderProject' }, $true))
+    $referenceFn = $scenarioAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RenderReference' }, $true)
+    $loadsArgs = foreach ($call in $renderCalls) {
+        $elements = $call.CommandElements
+        for ($at = 0; $at -lt $elements.Count - 1; $at++) {
+            if ($elements[$at] -is [System.Management.Automation.Language.CommandParameterAst] -and $elements[$at].ParameterName -eq 'LoadsPlugins') {
+                [pscustomobject]@{ Value = $elements[$at + 1].Extent.Text; Inside = ($call.Extent.StartOffset -ge $referenceFn.Extent.StartOffset -and $call.Extent.EndOffset -le $referenceFn.Extent.EndOffset) }
+            }
+        }
+    }
+    & $add '接线：参照渲染（Get-RenderReference）的 Invoke-RenderProject 带 -LoadsPlugins $false，且只有这一处声明不加载插件' $false (
+        $renderCalls.Count -ge 3 -and @($loadsArgs).Count -eq 1 -and @($loadsArgs)[0].Value -ceq '$false' -and @($loadsArgs)[0].Inside)
     $cases
 }
 

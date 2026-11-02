@@ -176,7 +176,7 @@ function Get-ReaperListingShownName {
 function ConvertTo-ReaperSafeListing {
     param([Parameter(Mandatory)]$Listing, [Parameter(Mandatory)][string]$Salt)
     $out = [ordered]@{}
-    foreach ($k in $Listing.Keys) {
+    foreach ($k in $Listing.get_Keys()) {
         $shown = Get-ReaperListingShownName -EntryName $k -Salt $Salt
         for ($n = 2; $out.Contains($shown); $n++) { $shown = (Get-ReaperListingShownName -EntryName $k -Salt $Salt) + "-$n" }
         $out[$shown] = $Listing[$k]
@@ -209,20 +209,20 @@ function Compare-ReaperProbeLogListing {
     $changed = [Collections.Generic.List[string]]::new()
     $shown = { param($entry) Get-ReaperListingShownName -EntryName $entry -Salt $Salt }
     $linkUnknown = [Collections.Generic.List[string]]::new()
-    foreach ($k in $Before.Keys) {
+    foreach ($k in $Before.get_Keys()) {
         if (-not $After.Contains($k)) { $changed.Add("removed:$(& $shown $k)"); continue }
         $v = Compare-ReaperListingValue -Before $Before[$k] -After $After[$k]
         if (-not $v.Same) { $changed.Add("changed:$(& $shown $k)") }
         elseif ($v.LinkUnknown) { $linkUnknown.Add((& $shown $k)) }
     }
-    foreach ($k in $After.Keys) { if (-not $skip.Contains($k) -and -not $Before.Contains($k)) { $changed.Add("added:$(& $shown $k)") } }
+    foreach ($k in $After.get_Keys()) { if (-not $skip.Contains($k) -and -not $Before.Contains($k)) { $changed.Add("added:$(& $shown $k)") } }
     # 硬链接数没取到的条目不判变，只在提示里记一笔（名字照样只写散列）；提示最多列 8 项，数目写全
     $notes = [Collections.Generic.List[string]]::new()
     if ($linkUnknown.Count) {
         $listed = (@($linkUnknown | Select-Object -First 8) -join '、') + ($linkUnknown.Count -gt 8 ? '……' : '')
         $notes.Add("硬链接数没取到：$($linkUnknown.Count) 项的前后清单里至少一侧是 ?（一时打不开，例如 OneDrive 正在同步、杀毒软件短暂独占），这几项只比了大小、修改时间与重解析点，没比硬链接数（$listed）")
     }
-    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.Count; Changed = $changed.ToArray(); LinkUnknown = $linkUnknown.ToArray(); Notes = $notes.ToArray() }
+    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.get_Count(); Changed = $changed.ToArray(); LinkUnknown = $linkUnknown.ToArray(); Notes = $notes.ToArray() }
 }
 
 # 纯函数。Entries 的每一项要有 Name、IsFile、IsLink、LastWriteUtc（[datetime]，UTC）。返回本轮自己的那些（原样），
@@ -465,9 +465,9 @@ function Read-ReaperProbeLog {
     }
     # 列号：行类型之后的第几列（f[0] 是行类型）
     $at = @{}
-    foreach ($type in $script:Columns.Keys) { $i = 1; foreach ($name in $script:Columns[$type]) { $at["$type.$name"] = $i; $i++ } }
+    foreach ($type in $script:Columns.get_Keys()) { $i = 1; foreach ($name in $script:Columns[$type]) { $at["$type.$name"] = $i; $i++ } }
     $want = @{}
-    foreach ($type in $script:Columns.Keys) { $want[$type] = $script:Columns[$type].Count + 1 }
+    foreach ($type in $script:Columns.get_Keys()) { $want[$type] = $script:Columns[$type].Count + 1 }
     # 块记录最多（64 样本的一格上万行）：几列的下标先取出来
     $bSeq = $at['B.seq']; $bN = $at['B.n']; $bDecl = $at['B.n_decl']; $bPlaying = $at['B.playing']; $bNonRt = $at['B.nonrt']; $bD = $at['B.d']
     $lines = $Text -split "`n"
