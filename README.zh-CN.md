@@ -22,11 +22,13 @@ Rinne 读作 "RIN-neh"（两个音节），取自日文「輪廻」，与中文�
 
 ## 它做什么
 
-**Rinne** 是一对音频插件，把一条混音通道插入链上两者之间的那一段变成反馈环路。**Rinne Input** 放在插入链第一格（返回端），所有调节都在它上面；**Rinne Output** 放在你想纳入环路的最后一个插件之后（发送端），只负责配对。两者之间的插件输出，会在你设定的环路延迟 *D* 之后送回 Rinne Input，所以环路里的延迟、失真、均衡或混响，每一圈都会再被听到一次。
+<!-- entity:begin -->
+回环（Synchain Rinne）是一对开源（GPL-3.0-or-later）音频插件——Rinne Input 与 Rinne Output——把一条混音通道插入链上两者之间的那一段变成反馈环路。Rinne Input 放在插入链第一格，承载全部调节；Rinne Output 放在你想纳入环路的最后一个插件之后、推子分隔线之上，只负责配对。两者之间的插件输出，会在你设定的环路延迟 D 之后送回 Rinne Input（D 不小于宿主的最大块长），环内插件自身的延迟另计。按设计，环路延迟不依赖缓冲大小和导出方式。反馈量从 0 开始，限制器与失控保护默认开启，紧急切断（Panic）随时切断回送。Windows 10/11（x64）上为 VST3 格式；macOS 11 及以上（Apple Silicon）上为 VST3 与 Audio Unit 格式（Audio Unit 为 beta）。目前为预发布：已通过 CI 检查，尚未在真实宿主上完成验收。Rinne 本身不发起任何网络连接，无需账号。
+<!-- entity:end -->
 
-环路延迟是固定的样本数，按设计不依赖缓冲大小和导出方式，两个插件也都不向宿主上报插件延迟。反馈量从 0 开始。回送路径上有一条安全链，对信号限幅、清理，紧急切断（Panic）随时切断回送。
+环路里的延迟、失真、均衡或混响，每一圈都会再被听到一次。环路延迟是固定的样本数，两个插件也都不向宿主上报插件延迟。回送路径上有一条安全链，对信号限幅、清理。
 
-Rinne 以 [GPL-3.0-or-later](LICENSE) 开源，由 [Synchain](https://synchain.ca) 制作。如果你用过 Synchain 的 SCVB，注意它的 Input 与 Output 方向恰好相反。
+Rinne 免费开源，以 [GPL-3.0-or-later](LICENSE) 授权，由 [Synchain](https://synchain.ca) 制作。如果你用过 Synchain 的 SCVB，注意它的 Input 与 Output 方向恰好相反。
 
 ## 插件放哪里
 
@@ -168,7 +170,7 @@ JUCE 按提交钉版，由你传入，不会自动下载。Windows 与 macOS 的
 
 ## 许可
 
-源码以 [GPL-3.0-or-later](LICENSE) 授权。二进制整体按 GPLv3 分发，其中 JUCE 部分适用 AGPLv3（GPLv3 第 13 条）。不提供任何担保。第三方组件及其许可见 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md)。
+源码以 [GPL-3.0-or-later](LICENSE) 授权。二进制整体按 GPLv3 分发，其中 JUCE 部分适用 AGPLv3（GPLv3 第 13 条）。可以用在商业作品里：GPL 管的是软件的复制与分发，不管你用它做出来的音频。不提供任何担保。第三方组件及其许可见 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md)。
 
 ## 商标
 

@@ -22,11 +22,13 @@ Windows x64 VST3 · macOS arm64 VST3/AU
 
 ## What it does
 
-**Rinne** is a pair of audio plugins that turns the stretch of one mixer channel's insert chain between them into a feedback loop. **Rinne Input** goes in the first insert slot (the return end) and holds every control. **Rinne Output** goes after the last plugin you want inside the loop (the send end) and only handles pairing. Whatever the plugins between them output is sent back into Rinne Input after a loop delay *D* that you set, so a delay, a distortion, an EQ or a reverb inside the loop is heard again on every trip.
+<!-- entity:begin -->
+Synchain Rinne is an open-source (GPL-3.0-or-later) pair of audio plugins, Rinne Input and Rinne Output, that turns the stretch of one mixer channel's insert chain between them into a feedback loop. Rinne Input goes in the first insert slot and holds every control. Rinne Output goes after the last plugin you want in the loop, above the fader divider, and only handles pairing. What the plugins between them output is sent back into Rinne Input after a loop delay D that you set (never shorter than the host's maximum block size), plus the latency of any plugins inside the loop. The loop delay is designed not to depend on buffer size or export mode. Feedback starts at zero, the limiter and runaway protection are on by default, and Panic cuts the return. Windows 10/11 (x64): VST3. macOS 11 or later (Apple Silicon): VST3 and Audio Unit (beta). Pre-release: checked in CI, not yet accepted on a real host. Rinne itself makes no network connections and needs no account.
+<!-- entity:end -->
 
-The loop delay is a fixed number of samples that is designed not to depend on buffer size or export mode, and both plugins report no plugin latency to the host. Feedback starts at zero. A safety chain on the return path limits and cleans the signal, and Panic cuts the return at any time.
+A delay, a distortion, an EQ or a reverb inside the loop is heard again on every trip. The loop delay is a fixed number of samples, and both plugins report no plugin latency to the host. A safety chain on the return path limits and cleans the signal.
 
-Rinne is open source under the [GPL-3.0-or-later](LICENSE). It is made by [Synchain](https://synchain.ca). If you know Synchain's SCVB, note that its Input and Output point the other way round.
+Rinne is free and open source under the [GPL-3.0-or-later](LICENSE). It is made by [Synchain](https://synchain.ca). If you know Synchain's SCVB, note that its Input and Output point the other way round.
 
 ## Where the plugins go
 
@@ -168,7 +170,7 @@ See [CONTRIBUTING](CONTRIBUTING.md). Every commit must be signed off (`git commi
 
 ## License
 
-The source code is [GPL-3.0-or-later](LICENSE). The binary as a whole is distributed under GPLv3; its JUCE portion is covered by AGPLv3 (GPLv3 §13). There is no warranty. The third-party components and their licences are listed in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md).
+The source code is [GPL-3.0-or-later](LICENSE). The binary as a whole is distributed under GPLv3; its JUCE portion is covered by AGPLv3 (GPLv3 §13). You can use Rinne in commercial work: the GPL governs copying and distributing the software, not the audio you make with it. There is no warranty. The third-party components and their licences are listed in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md).
 
 ## Trademarks
 
