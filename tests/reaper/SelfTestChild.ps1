@@ -771,6 +771,7 @@ if ($realReaperRunning) {
     # 默认资源目录（这里是假的 AppData 下的那个）里有列不出来的子目录（拒绝访问）：前后都读不了，证明不了没被碰过，按可能被碰过处理：
     # 场景全绿也判 FAIL，停手，-Repeat 2 只跑一轮。以前列目录的错误被吞掉，这个子目录像不存在一样，这一轮会判 PASS
     $lockedDefault = Join-Path (Get-ReaperDefaultCfgDir) 'rn-locked'
+    if (-not $lockedDefault.StartsWith((Split-Path -Parent $Work) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw "默认资源目录不在自测的临时目录之下，不造读不了的目录：$lockedDefault" }
     $null = New-Item -ItemType Directory -Force -Path $lockedDefault
     Set-Content -LiteralPath (Join-Path $lockedDefault 'x.ini') -Value x
     $sidU = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -788,6 +789,7 @@ if ($realReaperRunning) {
                     $rowU.stoppedBecause -like '*读不了*' -and $rowU.stoppedBecause -like '*可能被碰过*' -and @($smU.R.runs).Count -eq 1 -and $smU.R.launches -eq 1 -and $smU.Console -like '*读不了的子目录*')
             }
         }
+    # rinne-delete-ok: 只删上面在自测临时目录之下新建的 rn-locked，路径在临时目录之下已在创建前断言
     } finally { & icacls.exe $lockedDefault /remove:d "*$sidU" 2>&1 | Out-Null; Remove-Item -LiteralPath $lockedDefault -Recurse -Force -ErrorAction SilentlyContinue }
 
     # ---- 结束不了的进程（整轮）：第一个场景撞上 → 它 INCOMPLETE、后面的场景不再启动 REAPER、整轮 FAIL 并停手，-Repeat 2 只跑一轮，gui 锁放开 ----
