@@ -11,6 +11,7 @@ import {
     FIT_PROBE,
     HIDE_TEXT_STYLE as BASE_HIDE_TEXT_STYLE,
     decodePng,
+    hasPixels,
     itemsDrift,
     rectsDrift,
     settleScene,
@@ -26,8 +27,6 @@ import {
     isFirstRunSceneId,
     overlayA11yProbe,
 } from "../first-run/measure.mjs";
-// 「文字矩形里有可量的像素」的判定：与 Input 的量尺是同一个函数（宽、高都至少 1 px），跳过要记账的口径也照 Input 的 measure
-import { hasPixels } from "../../tests/smoke-input-kit-page.mjs";
 
 /** 裸词条键、占位符、null 的扫描：共用的那一份，再加首启词条的前缀（rules.、tour.、hint.），见 fixtures/first-run/measure.mjs。 */
 export { findLeaks };

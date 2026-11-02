@@ -23,8 +23,11 @@ import { SCENES as ALL_SCENES } from "../mock/scenarios.js";
 import {
     HIDE_TEXT_STYLE as BASE_HIDE_TEXT_STYLE,
     decodePng,
+    hasPixels,
     itemsDrift,
     rectsDrift,
+    skipSummary,
+    unexpectedSkips,
     worstContrast,
 } from "./shared-measure.mjs";
 import {
@@ -37,6 +40,12 @@ import {
     isFirstRunSceneId,
     overlayA11yProbe,
 } from "../fixtures/first-run/measure.mjs";
+
+/**
+ * 跳过记账（hasPixels、SKIP_OK、unexpectedSkips、skipSummary）的实现在 shared-measure.mjs，Input 与 Output 两个套件共用。
+ * 这里只转发 Input 套件内另外三个对比度冒烟（first-run、presets、主套件）仍在用的两个。
+ */
+export { skipSummary, unexpectedSkips };
 
 /** 裸词条键、占位符、null 的扫描：共用的那一份，再加首启词条的前缀（rules.、tour.、hint.），见 fixtures/first-run/measure.mjs。 */
 export { findLeaks };
@@ -700,12 +709,6 @@ async function shotRect(page, origin, r) {
 }
 
 /**
- * 文字矩形里有可量的像素：宽、高都至少 1 px。worstContrast 对一个像素都没采到的矩形会抛错（不会悄悄返回通过），
- * 所以量之前先用它筛：整段被滚动区裁掉（裁完高度为零或负）、字号为零这类没有可量像素的文字，不论有没有滚动区都一样跳过。
- */
-export const hasPixels = (r) => Boolean(r) && r.w >= 1 && r.h >= 1;
-
-/**
  * 页面静止后量出每段文字的最差对比度。返回的数组上带 skipped：这一画面里因为没有可量像素而跳过的文字 [{ text（前 48 字）, el（所在元素的标签）}]。
  * 跳过不是通过：每个套件把按画面的跳过数打进输出（见 skipSummary），并断言跳过的只有 SKIP_OK 里那几种元素（见 unexpectedSkips）。
  */
@@ -762,35 +765,6 @@ export async function measure(page) {
     await dropHide(page);
     out.skipped = skipped;
     return out;
-}
-
-/**
- * 本来就没有可量像素的元素：原生下拉的 <option>（弹层由浏览器画，页面里没有矩形）与 SVG 的 <title>（只是悬停提示，不上屏）。
- * 跳过的文字只该出自这两种元素；别处的字被跳过（例如整段被滚动区裁掉、字号为零）是新情况，要有人看一眼。
- */
-export const SKIP_OK = Object.freeze(["option", "title"]);
-
-/** measure 返回的 skipped 里不在 SKIP_OK 内的项，写成「元素:文字」；空表示都是本来就不可见的。 */
-export const unexpectedSkips = (skipped) =>
-    skipped.filter((x) => !SKIP_OK.includes(x.el)).map((x) => `${x.el}:${x.text}`);
-
-/**
- * 把按画面的跳过数写成一行输出。skips 是 [画面名, measure 返回的 skipped] 的列表；没有跳过的画面不列。
- * 第一行是合计与每画面段数的分布，第二行是逐画面的段数（没有跳过的画面不列）。
- */
-export function skipSummary(skips) {
-    const hit = skips.filter(([, texts]) => texts.length > 0);
-    const total = hit.reduce((n, [, texts]) => n + texts.length, 0);
-    const byCount = new Map();
-    for (const [, texts] of hit) byCount.set(texts.length, (byCount.get(texts.length) || 0) + 1);
-    const dist = [...byCount]
-        .sort((a, b) => a[0] - b[0])
-        .map(([n, k]) => `每画面 ${n} 段 × ${k} 个`)
-        .join("、");
-    const head = `没有可量像素而跳过的文字共 ${total} 段（${hit.length} 个画面）`;
-    return hit.length
-        ? `${head}：${dist}\n  按画面：${hit.map(([tag, texts]) => `${tag}×${texts.length}`).join("、")}`
-        : head;
 }
 
 // ---------------------------------------------------------------- 自检
