@@ -1180,7 +1180,7 @@ function Invoke-SelfTest {
             'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
             'pulls/3/files'                    = { $files }
             'pulls/3/commits'                  = { Read-RinneFixture 'pr3-commits.json' }
-            'pulls/3/comments'               = { Read-RinneFixture 'pr3-review-comments.json' }
+            'pulls/3/comments'                 = { Read-RinneFixture 'pr3-review-comments.json' }
             'pulls/3/reviews'                  = { Read-RinneFixture 'pr3-reviews.json' }
             'pulls/3$'                         = {
                 if ($pullState.Nulls -gt 0) { $pullState.Nulls--; $p = Copy-RinneObject $prFixture; $p.mergeable = $null; $p.mergeable_state = 'unknown'; return $p }
