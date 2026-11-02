@@ -594,9 +594,9 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     $fileA = Join-Path $sameDir 'a.bin'; $fileCopy = Join-Path $sameDir 'copy.bin'; $fileLink = Join-Path $sameDir 'link.bin'
     [IO.File]::WriteAllText($fileA, 'same bytes')
     Copy-Item -LiteralPath $fileA -Destination $fileCopy
-    $null = New-Item -ItemType HardLink -Path $fileLink -Target $fileA
+    $linkOk = try { $null = New-Item -ItemType HardLink -Path $fileLink -Target $fileA; $true } catch { $false } # 本机建不了硬链接（文件系统不支持、权限）时只让硬链接这一条降级
     & $add '同一个文件：路径只差大小写是同一个' $false (Test-ReaperSameFile $fileA $fileA.ToUpperInvariant())
-    & $add '同一个文件：硬链接指向同一个文件' $false (Test-ReaperSameFile $fileA $fileLink)
+    & $add "同一个文件：硬链接指向同一个文件$($linkOk ? '' : '（本机建不了硬链接，这条没能真跑）')" $false ((-not $linkOk) -or (Test-ReaperSameFile $fileA $fileLink))
     & $add '同一个文件：内容相同的另一份拷贝不是同一个' $true (-not (Test-ReaperSameFile $fileA $fileCopy))
     & $add '同一个文件：有一边不存在、或为空，不算同一个' $true (-not (Test-ReaperSameFile $fileA (Join-Path $sameDir 'nope.bin')) -and -not (Test-ReaperSameFile $fileA '') -and -not (Test-ReaperSameFile $null $fileA))
     $goneFile = Join-Path $sameDir 'gone.bin'
