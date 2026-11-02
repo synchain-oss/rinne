@@ -56,7 +56,9 @@ function New-ReaperContext {
         Exe = $ReaperExe; NullTest = $NullTest; Work = $WorkDir; Driver = $Driver; Limits = $Config.limits; Signal = $Config.signal
         LockWaitSec = $LockWaitSec; Launches = 0; Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new()
         # GuiLock：起 REAPER 时持的锁，看门狗反例事后核对的也是它（同一个名字、同一套锁名前缀）
-        GuiLock = $GuiLock; Env = @{}; Launcher = $null; ModuleSampler = $null # Env：当前场景的 env 字段；Launcher、ModuleSampler 只给自测注入
+        GuiLock = $GuiLock; Env = @{}; Launcher = $null; ModuleSampler = $null; Terminator = $null # Env：当前场景的 env 字段；Launcher、ModuleSampler、Terminator 只给自测注入
+        # Halted：有 REAPER 进程到点没能结束时记下原因（字符串）；之后这一轮不再启动任何 REAPER，也不再跑场景，每个场景直接 INCOMPLETE 并写明原因
+        Halted = $null
         # Installed：被测的 .vst3 模块文件名 → @{ Path; Sha256 }（Install-ReaperPlugins 复制进私有目录的那一份）；PluginsDir：私有插件目录（结果里的路径据此打码）；
         # LaunchLog：每次启动记一条（标签、会不会加载插件、状态、进程里见到的被测模块与读到模块列表的次数），场景处理完后据此核对加载来源
         Installed = $Installed; PluginsDir = $PluginsDir; LaunchLog = [Collections.Generic.List[object]]::new()
@@ -73,8 +75,10 @@ function Set-ReaperAudioConfig([int]$Sr, [int]$Block) {
 
 # 持 gui 锁起一次 REAPER；锁等不到返回 Status = LockBusy（调用方判 INCOMPLETE，绝不无锁硬跑）。
 # LoadsPlugins：这次启动的工程会不会加载被测插件（不带插件链的参照渲染不会）。会加载的，启动期间每次轮询都读进程的模块列表，见到的被测模块记进 Ctx.LaunchLog。
+# 上一次启动的进程没能结束（Ctx.Halted 有值）时一律不再启动：返回 Status = Halted，没有拿锁，也不记启动次数。
 function Invoke-ReaperLaunch {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '', [bool]$LoadsPlugins = $true)
+    if ($Ctx.Halted) { return [pscustomobject]@{ Status = 'Halted'; ExitCode = $null; Seconds = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{}; StillRunning = $false } }
     $lock = Enter-RinneLock $Ctx.GuiLock -TimeoutSeconds $Ctx.LockWaitSec
     if (-not $lock) { return [pscustomobject]@{ Status = 'LockBusy'; ExitCode = $null; Seconds = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{} } }
     try {
@@ -85,17 +89,31 @@ function Invoke-ReaperLaunch {
         if ($Ctx.Launcher) { $extra.Launcher = $Ctx.Launcher }
         if ($LoadsPlugins -and $Ctx.Installed.get_Count()) { $extra.WatchModules = @($Ctx.Installed.get_Keys()) }
         if ($Ctx.ModuleSampler) { $extra.ModuleSampler = $Ctx.ModuleSampler }
+        if ($Ctx.Terminator) { $extra.Terminator = $Ctx.Terminator }
         $rest = @{} + $HostArgs; $null = $rest.Remove('Environment')
         $started = Invoke-ReaperHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work @rest @extra
+        if ($started.StillRunning) { $Ctx.Halted = Get-StuckDescription $started } # 锁在 finally 里照样放开
         $Ctx.LaunchLog.Add([pscustomobject]@{ Label = $Label; LoadsPlugins = $LoadsPlugins; Status = $started.Status; Modules = $started.Modules; ModuleScans = $started.ModuleScans })
         $started
     } finally { Exit-RinneLock $lock }
 }
 
+# 这一趟的进程到点没能结束（Invoke-ReaperHost 的 StillRunning）。手造的 Run 里可能没有这个属性，按没有处理。
+function Test-HostStuck($Run) { $p = $Run.PSObject.Properties['StillRunning']; [bool]($p -and $p.Value) }
+
+# 没能结束的进程的说明：进程号加原因（结束动作报的错，或结束之后 5 秒仍未退出）。
+function Get-StuckDescription($Run) {
+    $killError = $Run.PSObject.Properties['KillError']
+    $why = ($killError -and $killError.Value) ? "结束动作报错：$($killError.Value)" : '结束之后 5 秒仍未退出'
+    "REAPER 进程 $(Get-RunPid $Run) 没能结束（$why），它可能还在运行"
+}
+
 # REAPER 这一趟有没有正常结束；没有就说清楚怎么没的。
 function Get-HostFailure($Run) {
+    if (Test-HostStuck $Run) { return "$(Get-StuckDescription $Run)；本轮不再启动新的 REAPER" }
     switch ($Run.Status) {
         'LockBusy' { return 'gui 锁等不到' }
+        'Halted' { return '本轮已停止（有 REAPER 进程没能结束），这次没有启动 REAPER' }
         'Timeout' { return "超时（$($Run.Seconds) s）被结束" }
         'Killed' { return "到点被结束（$($Run.Seconds) s）" }
         'Modal' { return "卡在对话框 $($Run.Modal)（见到：$($Run.Windows -join ', ')），被结束" }
@@ -290,7 +308,8 @@ function Invoke-HangScenario($Ctx, $S) {
     $lua = Invoke-LuaStep -Ctx $Ctx -Name $S.id -Step hang -Job @{ project = $r.Project } -TimeoutSec ([double](Get-Field $S timeoutSec 0)) -KillAfterSec ([double](Get-Field $S killAfterSec 0))
     if (-not $lua.Why) { return New-Outcome PASS '本该卡住的驱动正常结束了（反例没有生效）' }
     # gui 锁没等到时 REAPER 根本没启动，Run 里没有进程号可查；原因照实写，别落成「场景抛错」
-    if ($lua.Run.Status -eq 'LockBusy') { return New-Outcome INCOMPLETE "$($lua.Why)；REAPER 没有启动，看门狗没能验证" }
+    if ($lua.Run.Status -in 'LockBusy', 'Halted') { return New-Outcome INCOMPLETE "$($lua.Why)；REAPER 没有启动，看门狗没能验证" }
+    if (Test-HostStuck $lua.Run) { return New-Outcome FAIL "看门狗没能结束进程：$($lua.Why)" }
     if (Get-Process -Id $lua.Run.Pid -ErrorAction SilentlyContinue) { return New-Outcome FAIL "进程 $($lua.Run.Pid) 还活着" }
     $lock = $null
     $deadline = (Get-Date).AddSeconds(20)
@@ -321,7 +340,8 @@ function Test-RinneLockFree([string]$Name) {
 
 # 每个 REAPER 进程退出后立即收它自己的日志（只按这次启动的 pid 与启动时刻认）。锁等不到（REAPER 根本没启动）时没什么可收。
 function Save-ProbeLogs($Ctx, $Run, [string]$CellDir) {
-    if ($Run.Status -eq 'LockBusy' -or -not ($Run.PSObject.Properties.Name -contains 'Pid') -or -not $Run.Pid) { return $null }
+    if (($Run.Status -in 'LockBusy', 'Halted') -or -not ($Run.PSObject.Properties.Name -contains 'Pid') -or -not $Run.Pid) { return $null }
+    if (Test-HostStuck $Run) { return $null } # 进程可能还活着、还在写：这时收日志会搬走它正在写的文件，不收
     # 退出时刻是这次启动的进程退出的那一刻（Invoke-ReaperHost 记下）；没有这个字段的 Run（自测里手造的）不给，收日志取现在
     $exited = ($Run.PSObject.Properties.Name -contains 'ExitedUtc') ? @{ ExitedUtc = $Run.ExitedUtc } : @{}
     $m = Move-ReaperProbeLogs -LogDir $Ctx.Probe.LogDir -Pids @([int]$Run.Pid) -SinceUtc $Run.StartedUtc -DestDir $CellDir @exited
@@ -631,6 +651,7 @@ function Invoke-ReaperScenario {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario)
     $handler = $script:Handlers[$Scenario.kind]
     if (-not $handler) { return New-Outcome INCOMPLETE "没有 $($Scenario.kind) 这种场景" }
+    if ($Ctx.Halted) { return New-Outcome INCOMPLETE "本轮已停止，这个场景没有跑，没有启动 REAPER：$($Ctx.Halted)" | Add-Member -NotePropertyName Seconds -NotePropertyValue 0 -PassThru }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $Ctx.Env = @{}
     $envField = Get-Field $Scenario env $null
@@ -641,6 +662,6 @@ function Invoke-ReaperScenario {
     $o | Add-Member -NotePropertyName Seconds -NotePropertyValue ([math]::Round($sw.Elapsed.TotalSeconds, 1)) -PassThru
 }
 
-Export-ModuleMember -Function New-Outcome, Invoke-Native, New-ReaperContext, Get-ReaperScenarioKinds, Invoke-ReaperScenario, Invoke-ReaperLaunch, Get-HostFailure, Get-CompareVerdict,
+Export-ModuleMember -Function New-Outcome, Invoke-Native, New-ReaperContext, Get-ReaperScenarioKinds, Invoke-ReaperScenario, Invoke-ReaperLaunch, Get-HostFailure, Test-HostStuck, Get-CompareVerdict,
     Get-ReaperLockMutexName, Test-RinneLockFree, Test-ReaperProbeCell, Get-ReaperAnalyzerSummary,
     ConvertTo-ReaperCompareRow, Get-ReaperCompareHead, Invoke-ReaperProbeAnalyzer, Add-ReaperModuleEvidence, ConvertTo-ReaperModuleShown

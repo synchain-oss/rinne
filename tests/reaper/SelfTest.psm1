@@ -128,6 +128,186 @@ function Get-GuardCases([string]$Tmp) {
     & $add '正常初始化的配置目录通过校验' $false ($made.Ini -like '*good\reaper.ini' -and (Assert-ReaperCfgDir $good).Dir -eq $made.Dir)
     Remove-Item -LiteralPath (Join-Path $good 'reaper.ini')
     & $add '哨兵在、ini 没了被拒绝' $true (Test-Refused { Assert-ReaperCfgDir $good } '*reaper.ini*')
+    foreach ($c in (Get-LinkedIniCases $Tmp $defaultDir)) { $cases.Add($c) }
+    foreach ($c in (Get-DriveTypeCases $Tmp $used)) { $cases.Add($c) }
+    $cases
+}
+
+# 配置目录顶层的链接与 reaper.ini 的文件身份：reaper.ini 若是指向默认资源目录（%APPDATA%\REAPER）的符号链接或硬链接，REAPER 与写 ini 的函数
+# 写进去的就是使用者自己的 ini，光核目录（路径、身份、哨兵）拦不住。全部在假 APPDATA 与临时目录里做，不碰真的。
+# 建不了符号链接 / 硬链接的环境里，对应的那一条降级（用例名里写明没能真跑），别的照常。
+function Get-LinkedIniCases([string]$Tmp, [string]$FakeRoamDefault) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok }
+    # 顶层有 junction（不需要特权，什么环境都建得出来）：哪怕它指向无害的地方
+    $linked = Join-Path $Tmp 'linked-cfg'
+    $null = New-ReaperCfgDir $linked
+    $linkTarget = Join-Path $Tmp 'linked-elsewhere'
+    $null = New-Item -ItemType Directory -Path $linkTarget
+    $topJunction = Join-Path $linked 'extra'
+    $null = New-Item -ItemType Junction -Path $topJunction -Target $linkTarget
+    try {
+        & $add '配置目录顶层有 junction（重解析点）被拒绝，哪怕它指向无害的地方，原因点名是哪一项' $true (Test-Refused { Assert-ReaperCfgDir $linked } '*extra*重解析点*')
+        $before = Get-TreeFingerprint $linked
+        & $add '-Init：顶层有 junction 的目录被拒绝，什么都没写' $true ((Test-Refused { New-ReaperCfgDir $linked } '*重解析点*') -and (Get-TreeFingerprint $linked) -ceq $before)
+    } finally { [IO.Directory]::Delete($topJunction) } # 只删链接本身
+    & $addSafe '顶层的 junction 去掉以后同一个目录照常通过（上面拒绝的就是那个链接）' $false { (Assert-ReaperCfgDir $linked).Dir -like '*linked-cfg' }
+    # 隐藏的链接也算（Get-ChildItem 不带 -Force 看不见隐藏条目）
+    $hiddenJunction = Join-Path $linked '.hidden-extra'
+    $null = New-Item -ItemType Junction -Path $hiddenJunction -Target $linkTarget
+    try {
+        & attrib.exe +h /l $hiddenJunction | Out-Null
+        & $add '配置目录顶层有隐藏的 junction 同样被拒绝' $true (Test-Refused { Assert-ReaperCfgDir $linked } '*.hidden-extra*重解析点*')
+    } finally { [IO.Directory]::Delete($hiddenJunction) }
+    # 顶层列不出来就拒绝（看不见不能当作没有）：不存在的目录直接问
+    & $add '顶层条目列不出来（目录不存在）拒绝，不当作没有链接' $true (Test-Refused { Assert-ReaperNoTopLevelLinks (Join-Path $Tmp 'no-such-cfg-dir') } '*列不出来*')
+    # reaper.ini 是符号链接（要特权）：指向存在的文件，以及指向还不存在的文件（-Init 若不先拦，WriteAllText 会顺着链接把文件建出来）
+    $symCfg = Join-Path $Tmp 'symlink-ini-cfg'
+    $null = New-ReaperCfgDir $symCfg
+    $symIni = Join-Path $symCfg 'reaper.ini'
+    $symTarget = Join-Path $Tmp 'symlink-ini-target.ini'
+    [IO.File]::WriteAllText($symTarget, "[REAPER]`nuser=1`n")
+    Remove-Item -LiteralPath $symIni
+    $symOk = try { $null = New-Item -ItemType SymbolicLink -Path $symIni -Target $symTarget; $true } catch { $false }
+    $noSym = $symOk ? '' : '（本机建不了符号链接，这条没能真跑）'
+    & $add "reaper.ini 是指向别处文件的符号链接被拒绝$noSym" $true ((-not $symOk) -or (Test-Refused { Assert-ReaperCfgDir $symCfg } '*reaper.ini*重解析点*'))
+    if ($symOk) { Remove-Item -LiteralPath $symIni }
+    $missingTarget = Join-Path $Tmp 'symlink-ini-dangling.ini'
+    $brokenLinkOk = try { $null = New-Item -ItemType SymbolicLink -Path $symIni -Target $missingTarget; $true } catch { $false }
+    & $add "-Init：reaper.ini 是指向还不存在的文件的符号链接，被拒绝，链接指到的文件没被建出来$noSym" $true (
+        (-not $brokenLinkOk) -or ((Test-Refused { New-ReaperCfgDir $symCfg } '*重解析点*') -and -not (Test-Path -LiteralPath $missingTarget)))
+    if ($brokenLinkOk) { Remove-Item -LiteralPath $symIni }
+    # reaper.ini 与默认资源目录（假 APPDATA 里的）里的 reaper.ini 是同一个文件（硬链接）
+    $defaultIni = Join-Path $FakeRoamDefault 'reaper.ini'
+    [IO.File]::WriteAllText($defaultIni, "[REAPER]`nuser=1`n")
+    try {
+        $hardCfg = Join-Path $Tmp 'hardlink-ini-cfg'
+        $null = New-ReaperCfgDir $hardCfg
+        $hardIni = Join-Path $hardCfg 'reaper.ini'
+        Remove-Item -LiteralPath $hardIni
+        $hardOk = try { $null = New-Item -ItemType HardLink -Path $hardIni -Target $defaultIni; $true } catch { $false }
+        $noHard = $hardOk ? '' : '（本机建不了硬链接，这条没能真跑）'
+        & $add "reaper.ini 与默认资源目录里的 reaper.ini 是硬链接（同一个文件）被拒绝（顶层硬链接数这一层先拦下）$noHard" $true ((-not $hardOk) -or (Test-Refused { Assert-ReaperCfgDir $hardCfg } '*reaper.ini*硬链接*'))
+        # 硬链接数这一层换成替身（都说 1）以后，文件身份那一层仍然认得出它们是同一个文件：两层各自单独有用例
+        & $add "reaper.ini 与默认资源目录里的 reaper.ini 是硬链接：硬链接数那层放行时，文件身份那层照样拒绝$noHard" $true ((-not $hardOk) -or (Test-Refused { Assert-ReaperCfgDir $hardCfg -LinkCountOf { param($p) 1 } } '*reaper.ini*同一个文件*'))
+        if ($hardOk) { Remove-Item -LiteralPath $hardIni }
+        Copy-Item -LiteralPath $defaultIni -Destination $hardIni
+        & $addSafe '内容相同、但不是同一个文件（拷贝）的 reaper.ini 通过：默认资源目录里有同名文件不等于冲突' $false { (Assert-ReaperCfgDir $hardCfg).Ini -like '*hardlink-ini-cfg\reaper.ini' }
+    } finally { Remove-Item -LiteralPath $defaultIni }
+    # 身份取不到就拒绝：存在的文件打不开身份很难真造出来，用注入的替身（只给自测）。替身按路径回答：配置目录里的 ini 一个值，默认资源目录里的另一个值
+    $idCfg = Join-Path $Tmp 'identity-cfg'
+    $null = New-ReaperCfgDir $idCfg
+    $ids = {
+        param($mine, $theirs)
+        $forMine = $mine; $forTheirs = $theirs
+        { param($p) if ($p -like '*\identity-cfg\reaper.ini') { $forMine } else { $forTheirs } }.GetNewClosure()
+    }
+    & $addSafe 'ini 文件身份：与默认资源目录里的不同，通过' $false { (Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' 'BB-02')).Dir -like '*identity-cfg' }
+    & $addSafe 'ini 文件身份：默认资源目录里没有 reaper.ini（没有可比的），通过' $false { (Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' $null)).Dir -like '*identity-cfg' }
+    & $addSafe 'ini 文件身份：与默认资源目录里的相同，拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' 'AA-01') } '*同一个文件*' }
+    & $addSafe 'ini 文件身份：配置目录里的 ini 取不到身份（打不开），拒绝，不静默放行' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'ERROR:5' 'BB-02') } '*reaper.ini 取不到文件身份*' }
+    & $addSafe 'ini 文件身份：配置目录里的 ini 身份是空（认不出），拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids $null 'BB-02') } '*reaper.ini 取不到文件身份*' }
+    & $addSafe 'ini 文件身份：默认资源目录里的 reaper.ini 取不到身份（存在却打不开），拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' 'ERROR:5') } '*默认资源目录里的 reaper.ini 取不到文件身份*' }
+    # 顶层每个文件的硬链接数必须是 1：大于 1 说明还有别的名字指到同一份内容（可能在使用者自己的配置里），写它就写了别人的东西；取不到同样拒绝。
+    # 哨兵与 reaper.ini 都在内，不只查 reaper.ini
+    $hlCfg = Join-Path $Tmp 'hardlink-top-cfg'
+    $null = New-ReaperCfgDir $hlCfg
+    $hlOutside = Join-Path $Tmp 'hardlink-top-outside.ini'
+    [IO.File]::WriteAllText($hlOutside, "[REAPER]`nuser=1`n")
+    $linkCountOf = { param($Path) try { Get-ReaperHardLinkCount $Path } catch { -99 } } # 取数函数不在 / 抛错时用例变红，不让整组在布置阶段崩掉
+    $countBefore = & $linkCountOf $hlOutside
+    $hlExtra = Join-Path $hlCfg 'extra.ini'
+    $hlOk = try { $null = New-Item -ItemType HardLink -Path $hlExtra -Target $hlOutside; $true } catch { $false }
+    $noHl = $hlOk ? '' : '（本机建不了硬链接，这条没能真跑）'
+    $countAfter = $hlOk ? (& $linkCountOf $hlOutside) : 2
+    & $add '取硬链接数：普通文件是 1，多一个硬链接后是 2，路径不存在是 -1（取不到）' $true ($countBefore -eq 1 -and $countAfter -eq 2 -and (& $linkCountOf (Join-Path $Tmp 'no-such-file.ini')) -eq -1)
+    & $add "配置目录顶层别的文件（extra.ini）有硬链接（另一个名字在目录外）被拒绝，原因点名是哪一项$noHl" $true ((-not $hlOk) -or (Test-Refused { Assert-ReaperCfgDir $hlCfg } '*extra.ini*硬链接*'))
+    if ($hlOk) {
+        $hlBefore = Get-TreeFingerprint $hlCfg
+        & $add '-Init：顶层有硬链接文件的目录被拒绝，什么都没写' $true ((Test-Refused { New-ReaperCfgDir $hlCfg } '*硬链接*') -and (Get-TreeFingerprint $hlCfg) -ceq $hlBefore)
+        Remove-Item -LiteralPath $hlExtra
+    }
+    & $addSafe '顶层的硬链接去掉以后同一个目录照常通过（上面拒绝的就是那个文件）' $false { (Assert-ReaperCfgDir $hlCfg).Dir -like '*hardlink-top-cfg' }
+    # reaper.ini 自己与外面任意文件（不是默认资源目录里的）做硬链接，也靠硬链接数拦下
+    $hlIni = Join-Path $hlCfg 'reaper.ini'
+    $hlIniSaved = [IO.File]::ReadAllBytes($hlIni)
+    Remove-Item -LiteralPath $hlIni
+    $hlIniOk = try { $null = New-Item -ItemType HardLink -Path $hlIni -Target $hlOutside; $true } catch { $false }
+    & $add "reaper.ini 与目录外任意文件是硬链接被拒绝（不止拿它跟默认资源目录比）$noHl" $true ((-not $hlIniOk) -or (Test-Refused { Assert-ReaperCfgDir $hlCfg } '*reaper.ini*硬链接*'))
+    if ($hlIniOk) { Remove-Item -LiteralPath $hlIni }
+    [IO.File]::WriteAllBytes($hlIni, $hlIniSaved)
+    # 哨兵文件是硬链接同样拒绝
+    $hlSentName = (Get-ReaperSentinel).Name
+    $hlSent = Join-Path $hlCfg $hlSentName
+    $hlSentSaved = [IO.File]::ReadAllBytes($hlSent)
+    $hlSentOutside = Join-Path $Tmp 'hardlink-sentinel-outside'
+    [IO.File]::WriteAllBytes($hlSentOutside, $hlSentSaved)
+    Remove-Item -LiteralPath $hlSent
+    $hlSentOk = try { $null = New-Item -ItemType HardLink -Path $hlSent -Target $hlSentOutside; $true } catch { $false }
+    & $add "配置目录里的哨兵文件是硬链接被拒绝$noHl" $true ((-not $hlSentOk) -or (Test-Refused { Assert-ReaperCfgDir $hlCfg } "*$hlSentName*硬链接*"))
+    if ($hlSentOk) { Remove-Item -LiteralPath $hlSent }
+    [IO.File]::WriteAllBytes($hlSent, $hlSentSaved)
+    & $addSafe '哨兵与 reaper.ini 换回单独的文件以后同一个目录照常通过' $false { (Assert-ReaperCfgDir $hlCfg).Dir -like '*hardlink-top-cfg' }
+    # 硬链接数的判据本身：换成替身（只给自测）
+    & $addSafe '硬链接数：取不到（-1）拒绝，不静默放行' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) -1 } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：2 拒绝，说明里写出数目' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 2 } } '*2 个硬链接*' }
+    & $addSafe '硬链接数：1 通过' $false { (Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 1 }).Dir -like '*identity-cfg' }
+    & $addSafe '硬链接数：顶层的目录（plugins）不查，哪怕替身对目录说取不到' $false { (Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) if ($p -like '*\plugins') { -1 } else { 1 } }).Dir -like '*identity-cfg' }
+    # 只有恰好 1 才放行：替身什么都不返回（$null）、返回 0、空串、不是数字，都是「取不到」，不能被当成没有别的名字
+    & $addSafe '硬链接数：取不到（替身返回 $null）拒绝，不当成 0 放行' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) $null } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：取不到（替身什么都不返回）拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：0 拒绝，按取不到说（文件在世不可能是 0 个名字）' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 0 } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：空串、不是数字的值同样按取不到拒绝' $true { (Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) '' } } '*取不到硬链接数*') -and (Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 'x' } } '*取不到硬链接数*') }
+    & $addSafe '硬链接数：大于 1 有自己的原因，不说成取不到' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 3 } } '*3 个硬链接*' }
+    & $addSafe '硬链接数：取不到的原因里没有「个硬链接」，大于 1 的原因里没有「取不到」（两种原因各写各的）' $true {
+        $unobtainable = try { $null = Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) $null }; '' } catch { $_.Exception.Message }
+        $many = try { $null = Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 2 }; '' } catch { $_.Exception.Message }
+        $unobtainable -like '*取不到*' -and $unobtainable -notlike '*个硬链接*' -and $many -like '*个硬链接*' -and $many -notlike '*取不到*' }
+    $cases
+}
+
+# 映射的网络盘：net use Z: \\localhost\C$\… 之后 Z:\… 字符串上是本机盘符，能过「盘符开头」这一层。驱动器类型是 Network、NoRootDirectory、Unknown 的一律拒绝。
+# 判驱动器类型的函数可注入（只给自测）：不真去映射网络盘。subst 盘符在系统里算本机盘，仍由文件身份逐级比较兜住（上面的 subst 用例）。
+function Get-DriveTypeCases([string]$Tmp, [string[]]$UsedLetters) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok }
+    $driveCfg = Join-Path $Tmp 'drive-type-cfg'
+    $null = New-ReaperCfgDir $driveCfg
+    $typed = { param($kind) $answer = $kind; { param($driveLetter) $answer }.GetNewClosure() }
+    foreach ($kind in 'Fixed', 'Removable') {
+        & $addSafe "驱动器类型是 $kind（本机盘）时通过" $false { (Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $typed $kind)).Dir -like '*drive-type-cfg' }
+    }
+    foreach ($kind in 'Network', 'NoRootDirectory', 'Unknown') {
+        & $addSafe "驱动器类型是 $kind 被拒绝（映射的网络盘 Z:\… 字符串上是本机盘符）" $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $typed $kind) } "*-CfgDir 只接受本机盘符开头*驱动器类型是 $kind*" }
+    }
+    & $addSafe '查驱动器类型抛错按 Unknown 处理，被拒绝' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf { param($driveLetter) throw 'boom' } } '*-CfgDir 只接受本机盘符开头*驱动器类型是 Unknown*' }
+    & $addSafe '-Init 对网络盘上的目录同样拒绝，什么都没建' $true {
+        $fresh = Join-Path $Tmp 'drive-type-fresh'
+        (Test-Refused { New-ReaperCfgDir $fresh -DriveTypeOf (& $typed 'Network') } '*-CfgDir 只接受本机盘符开头*驱动器类型是 Network*') -and -not (Test-Path -LiteralPath $fresh)
+    }
+    & $addSafe '判盘符：非盘符开头（UNC、\\?\ 前缀、相对路径）一律有问题；本机盘符开头没有问题' $true {
+        (Get-ReaperDriveProblem '\\srv\share\x' (& $typed 'Fixed')) -and (Get-ReaperDriveProblem '\\?\C:\x' (& $typed 'Fixed')) -and (Get-ReaperDriveProblem 'rel\x' (& $typed 'Fixed')) -and -not (Get-ReaperDriveProblem 'C:\x' (& $typed 'Fixed'))
+    }
+    # 真查驱动器类型（不映射任何东西）：临时目录所在的盘是本机盘；一个没被占用的盘符是 NoRootDirectory / Unknown，Assert-ReaperCfgDir 因此拒绝
+    $tmpLetter = $Tmp.Substring(0, 1)
+    & $addSafe '驱动器类型（真查）：临时目录所在的盘不是 Network / NoRootDirectory / Unknown' $false { (Get-ReaperDriveType $tmpLetter) -notin 'Network', 'NoRootDirectory', 'Unknown' }
+    $free = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S') | Where-Object { $_ -notin $UsedLetters } | Select-Object -First 1
+    $noFree = $free ? '' : '（这台机器上 S…Z 都被占用，这条没能真跑）'
+    & $addSafe "驱动器类型（真查）：没有被占用的盘符是 NoRootDirectory 或 Unknown，其下的配置目录因此被拒绝$noFree" $true {
+        (-not $free) -or (((Get-ReaperDriveType $free) -in 'NoRootDirectory', 'Unknown') -and (Test-Refused { Assert-ReaperCfgDir "${free}:\rn-cfg" } '*驱动器类型*'))
+    }
+    # 经链接解析之后的真实路径也要查：本机盘上的 junction 可以指到映射的网络盘上，字符串上的配置目录仍是本机盘符，解析之后才落在网络盘上。
+    # 自测里造不出两个驱动器类型不同的真盘（subst 盘符解析后回到它指向的真目录），用按调用顺序回答的替身：第一次问（字符串上的路径）说本机盘，
+    # 第二次问（解析之后的真实路径）说 Network。没有链接时两次问的是同一个盘符，所以这条同时证明了「字符串上的」与「真实路径」是各问一次
+    $order = { param($firstKind, $laterKind) $asked = [ref]0; { param($driveLetter) $asked.Value++; $asked.Value -eq 1 ? $firstKind : $laterKind }.GetNewClosure() }
+    & $addSafe '真实路径（解析之后）所在的盘是网络盘被拒绝，哪怕字符串上的盘符是本机盘，原因点名是真实路径' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Fixed' 'Network') } '*真实路径*Network*' }
+    & $addSafe '真实路径所在的盘是 NoRootDirectory 同样被拒绝' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Fixed' 'NoRootDirectory') } '*真实路径*NoRootDirectory*' }
+    & $addSafe '字符串上的盘符是网络盘时，在解析链接之前就拒绝（不先去碰网络上的路径），原因点名是 -CfgDir 本身' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Network' 'Fixed') } '*-CfgDir 只接受本机盘符开头*Network*' }
+    & $addSafe '两次问都是本机盘时通过（对照：上面拒绝的是驱动器类型）' $false { (Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Fixed' 'Removable')).Dir -like '*drive-type-cfg' }
+    # 查类型本身出错（盘符不是字母，DriveInfo 抛错）按 Unknown，不放行
+    & $addSafe '真查驱动器类型：盘符不是字母（DriveInfo 抛错）按 Unknown 处理' $true { (Get-ReaperDriveType '1') -ceq 'Unknown' -and (Get-ReaperDriveType '') -ceq 'Unknown' }
     $cases
 }
 
@@ -292,6 +472,94 @@ function Get-SnapshotCases([string]$Tmp) {
     $nMoved = Compare-ReaperDefaultCfgSnapshot -Before $n1 -After (Get-ReaperDefaultCfgSnapshot -Root $namesRoot)
     & $add '清单：叫 Keys 的文件被删、新增一个文件，照样各报一项' $true (-not $nMoved.Same -and (@($nMoved.Changed | Sort-Object) -join ',') -ceq 'added:Values2,removed:Keys')
     & $add '清单：目录不存在是空清单，不报错' $false ((Get-ReaperDefaultCfgSnapshot -Root (Join-Path $Tmp 'nope')).Count -eq 0)
+    # 读不了的子目录：以前 Get-ChildItem 的错误被吞掉，那个子目录像是不存在，前后永远相同，等于没查。现在记成 unreadable 项，比较判「证明不了没变」
+    # 比较结果取成固定形状：缺了 Unreadable、Differences 这两个属性时用例变红，而不是在这里抛错
+    $cmpOf = { param($before, $after) $r = Compare-ReaperDefaultCfgSnapshot -Before $before -After $after; [pscustomobject]@{ Same = [bool]$r.Same; Changed = @($r.Changed)
+        Unreadable = @($r.PSObject.Properties['Unreadable'] ? $r.Unreadable : @()); Differences = ($r.PSObject.Properties['Differences'] ? [int]$r.Differences : -1) } }
+    $lockRoot = Join-Path $Tmp 'snap-unreadable'
+    $lockedDir = Join-Path $lockRoot 'locked'
+    $null = New-Item -ItemType Directory -Path (Join-Path $lockRoot 'ok'), $lockedDir
+    Set-Content -LiteralPath (Join-Path $lockRoot 'ok\a.ini') -Value 'aaaa'
+    Set-Content -LiteralPath (Join-Path $lockedDir 'secret.ini') -Value 'ssss'
+    $uOpen = Get-ReaperDefaultCfgSnapshot -Root $lockRoot
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    & icacls.exe $lockedDir /deny "*${sid}:(RD)" 2>&1 | Out-Null
+    $madeDenied = $LASTEXITCODE -eq 0
+    try {
+        $stillListable = try { $null = Get-ChildItem -LiteralPath $lockedDir -Force -ErrorAction Stop; $true } catch { $false }
+        $noDeny = ($madeDenied -and -not $stillListable) ? '' : '（本机没能造出读不了的目录，这几条没能真跑）'
+        if ($noDeny) { & $add "清单：读不了的子目录的几条用例没能真跑$noDeny" $true $true }
+        else {
+            $uLocked = Get-ReaperDefaultCfgSnapshot -Root $lockRoot
+            & $add '清单：读不了的子目录记成 unreadable 项，不是悄悄漏掉；读得了的目录照常记' $true ($uLocked['locked'] -ceq 'unreadable' -and $uLocked['ok\a.ini'] -like '*|*')
+            $cLocked = & $cmpOf $uLocked (Get-ReaperDefaultCfgSnapshot -Root $lockRoot)
+            & $add '清单：前后两次都读不了同一个子目录，也判证明不了没变，Changed 与 Unreadable 里点名它' $true (
+                -not $cLocked.Same -and @($cLocked.Unreadable) -ceq 'locked' -and $cLocked.Changed -contains 'unreadable:locked' -and $cLocked.Differences -eq 0)
+            $cWas = & $cmpOf $uOpen $uLocked
+            & $add '清单：之前读得了、之后读不了，判证明不了没变（不是「removed」也不是相同），它下面的条目（secret.ini）不算被删，只记这一项' $true (
+                -not $cWas.Same -and @($cWas.Unreadable) -ceq 'locked' -and (@($cWas.Changed) -join ',') -ceq 'unreadable:locked' -and $cWas.Differences -eq 0)
+            Add-Content -LiteralPath (Join-Path $lockRoot 'ok\a.ini') -Value 'more'
+            $cBoth = & $cmpOf $uLocked (Get-ReaperDefaultCfgSnapshot -Root $lockRoot)
+            & $add '清单：读不了的同时，读得了的部分变了照样报 changed，两类各自点名' $true (
+                -not $cBoth.Same -and $cBoth.Changed -contains 'changed:ok\a.ini' -and $cBoth.Changed -contains 'unreadable:locked' -and $cBoth.Differences -eq 1)
+        }
+    } finally { & icacls.exe $lockedDir /remove:d "*$sid" 2>&1 | Out-Null }
+    $uBack = Get-ReaperDefaultCfgSnapshot -Root $lockRoot
+    & $add '清单：解除限制后同一个目录又能读，记回目录项（对照：上面判的是读不了，不是别的）' $false ($uBack['locked'] -ceq 'dir' -and $uBack['locked\secret.ini'] -like '*|*' -and @($uBack.get_Keys() | Where-Object { $uBack[$_] -ceq 'unreadable' }).Count -eq 0)
+    # 比较本身（纯逻辑，不依赖本机能不能造出读不了的目录）
+    $unr = { param($names) $d = [ordered]@{ 'ok.ini' = '4|1' }; foreach ($n in $names) { $d[$n] = 'unreadable' }; $d }
+    $pSame = & $cmpOf (& $unr @()) (& $unr @())
+    & $add '比较：没有 unreadable 项时前后相同仍判相同，Unreadable 为空、Differences 为 0' $false ($pSame.Same -and @($pSame.Unreadable).Count -eq 0 -and $pSame.Differences -eq 0)
+    $pBoth = & $cmpOf (& $unr @('Data')) (& $unr @('Data'))
+    & $add '比较：前后都是 unreadable 的同一项，判证明不了没变' $true (-not $pBoth.Same -and @($pBoth.Unreadable) -ceq 'Data' -and $pBoth.Changed -contains 'unreadable:Data')
+    $pBefore = & $cmpOf (& $unr @('Data')) (& $unr @())
+    & $add '比较：只有之前是 unreadable（之后读得了或没了），判证明不了没变' $true (-not $pBefore.Same -and @($pBefore.Unreadable) -ceq 'Data' -and (@($pBefore.Changed) -join ',') -ceq 'unreadable:Data' -and $pBefore.Differences -eq 0)
+    $pAfter = & $cmpOf (& $unr @()) (& $unr @('Data'))
+    & $add '比较：只有之后是 unreadable，判证明不了没变' $true (-not $pAfter.Same -and @($pAfter.Unreadable) -ceq 'Data' -and (@($pAfter.Changed) -join ',') -ceq 'unreadable:Data' -and $pAfter.Differences -eq 0)
+    # 同一项一边是普通项、一边是 unreadable：只记 unreadable，不再当普通项比出一条 changed
+    $pBA = & $cmpOf ([ordered]@{ 'ok.ini' = '4|1'; 'Data' = 'dir' }) (& $unr @('Data'))
+    & $add '比较：之前是普通项、之后是 unreadable，只记 unreadable，不另外报 changed（Differences 为 0）' $true (
+        (@($pBA.Changed) -join ',') -ceq 'unreadable:Data' -and $pBA.Differences -eq 0)
+    $pAB = & $cmpOf (& $unr @('Data')) ([ordered]@{ 'ok.ini' = '4|1'; 'Data' = 'dir' })
+    & $add '比较：之前是 unreadable、之后是普通项，只记 unreadable，不另外报 changed 或 added（Differences 为 0）' $true (
+        (@($pAB.Changed) -join ',') -ceq 'unreadable:Data' -and $pAB.Differences -eq 0)
+    $pTwo = & $cmpOf (& $unr @('Data', 'Effects')) (& $unr @('Effects', 'Presets'))
+    & $add '比较：不同的 unreadable 项各记一次，按名字排序，不重复' $true ((@($pTwo.Unreadable) -join ',') -ceq 'Data,Effects,Presets')
+    # 读不了的目录下面的条目：另一份里这些条目是「看不见」，不是「被删 / 新增 / 改了」，不计增删改，一并归到读不了
+    $tree = [ordered]@{ 'Data' = 'dir'; 'Data\a.ini' = '4|1'; 'Data\sub' = 'dir'; 'Data\sub\b.ini' = '5|2'; 'ok.ini' = '4|1' }
+    $treeBlind = [ordered]@{ 'Data' = 'unreadable'; 'ok.ini' = '4|1' }
+    $pTreeA = & $cmpOf $tree $treeBlind
+    & $add '比较：之前读得了、之后目录读不了：目录下面的条目（含更深一层）不算 removed，只记 unreadable，Differences 为 0' $true (
+        -not $pTreeA.Same -and (@($pTreeA.Changed) -join ',') -ceq 'unreadable:Data' -and $pTreeA.Differences -eq 0)
+    $pTreeB = & $cmpOf $treeBlind $tree
+    & $add '比较：之前读不了、之后目录读得了：目录下面的条目（含更深一层）不算 added，只记 unreadable，Differences 为 0' $true (
+        -not $pTreeB.Same -and (@($pTreeB.Changed) -join ',') -ceq 'unreadable:Data' -and $pTreeB.Differences -eq 0)
+    $pTreeC = & $cmpOf $tree ([ordered]@{ 'Data' = 'unreadable'; 'ok.ini' = '9|9'; 'new.ini' = '1|1' })
+    & $add '比较：目录读不了的同时，别处的改动和新增照样各自点名，目录下面的条目不另外报' $true (
+        $pTreeC.Changed -contains 'added:new.ini' -and $pTreeC.Changed -contains 'changed:ok.ini' -and $pTreeC.Changed -contains 'unreadable:Data' -and @($pTreeC.Changed).Count -eq 3 -and $pTreeC.Differences -eq 2)
+    # 只是名字以读不了的目录名开头的兄弟（Data2、Data.bak）不在它下面，被删照样报
+    $pSib = & $cmpOf ([ordered]@{ 'Data' = 'dir'; 'Data2' = 'dir'; 'Data2\c.ini' = '4|1'; 'Data.bak' = '1|1' }) ([ordered]@{ 'Data' = 'unreadable'; 'Data2' = 'dir' })
+    & $add '比较：名字只是以读不了的目录名开头的兄弟目录（Data2、Data.bak）不在它下面，里面的条目被删照样报 removed' $true (
+        $pSib.Changed -contains 'removed:Data.bak' -and $pSib.Changed -contains 'removed:Data2\c.ini' -and $pSib.Changed -contains 'unreadable:Data' -and @($pSib.Changed).Count -eq 3 -and $pSib.Differences -eq 2)
+    # 清单的键来自文件系统，两次大小写写法可能不一样
+    $pCase = & $cmpOf ([ordered]@{ 'Data' = 'dir'; 'data\a.ini' = '4|1' }) ([ordered]@{ 'Data' = 'unreadable' })
+    & $add '比较：读不了的目录下面的条目按不分大小写认（键的大小写写法可能前后不同）' $true ((@($pCase.Changed) -join ',') -ceq 'unreadable:Data' -and $pCase.Differences -eq 0)
+    # 根目录自己读不了（键是 .）：整份清单都在它下面
+    $pRoot = & $cmpOf ([ordered]@{ 'a.ini' = '4|1'; 'Data' = 'dir'; 'Data\b.ini' = '5|2' }) ([ordered]@{ '.' = 'unreadable' })
+    & $add '比较：根目录自己读不了（键是 .），之前的全部条目都不算被删，只记 unreadable:.' $true ((@($pRoot.Changed) -join ',') -ceq 'unreadable:.' -and $pRoot.Differences -eq 0)
+    # 列目录的错误对应哪个清单键：TargetObject 可能是路径字符串，也可能是 FileSystemInfo（取 FullName）；两种都不是才落到「未知」
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok }
+    $ekRoot = Join-Path $Tmp 'snap-errkey'
+    $ekPrefix = $ekRoot.TrimEnd('\') + '\'
+    $ekKey = { param($target) Get-ReaperSnapshotErrorKey $target $ekPrefix }
+    & $addSafe '清单键：错误的目标是路径字符串，键是它相对根的路径' $true { (& $ekKey (Join-Path $ekRoot 'Data\sub')) -ceq 'Data\sub' }
+    & $addSafe '清单键：错误的目标是 FileSystemInfo（目录对象），取 FullName，键同样是相对路径，不落到「未知」' $true { (& $ekKey ([IO.DirectoryInfo]::new((Join-Path $ekRoot 'Data\sub')))) -ceq 'Data\sub' }
+    & $addSafe '清单键：错误的目标是 FileSystemInfo（文件对象）同样取 FullName' $true { (& $ekKey ([IO.FileInfo]::new((Join-Path $ekRoot 'a.ini')))) -ceq 'a.ini' }
+    & $addSafe '清单键：根目录自己（字符串或 FileSystemInfo）是键 .' $true { (& $ekKey $ekRoot) -ceq '.' -and (& $ekKey ([IO.DirectoryInfo]::new($ekRoot))) -ceq '.' }
+    & $addSafe '清单键：路径大小写写法不同也认得出（不分大小写）' $true { (& $ekKey ([IO.DirectoryInfo]::new((Join-Path $ekRoot 'Data').ToUpperInvariant()))) -ceq 'DATA' }
+    & $addSafe '清单键：既不是字符串也不是 FileSystemInfo（$null、数字、别的对象）取不到，返回空，调用方记「未知」' $true { -not (& $ekKey $null) -and -not (& $ekKey 7) -and -not (& $ekKey ([pscustomobject]@{ FullName = (Join-Path $ekRoot 'x') })) }
+    & $addSafe '清单键：路径写法无效（含空字符）取不到键，不抛错' $true { -not (& $ekKey ($ekRoot + "\bad`0name")) }
+    & $addSafe '清单键：目标在根目录之外取不到键（不会写成一个根本不在清单里的相对路径）' $true { -not (& $ekKey ([IO.DirectoryInfo]::new((Join-Path $Tmp 'elsewhere')))) -and -not (& $ekKey (Join-Path $Tmp 'elsewhere')) }
     $cases
 }
 
@@ -367,6 +635,54 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '模态框：主窗口等非对话框不管' $false ((& $v 'REAPERwnd' $true 'REAPER v7').Action -eq 'Ignore')
     & $add '标题里的路径被打码' $false ((ConvertTo-ReaperSafeTitle 'Error in D:\scratch\proj.rpp now') -notmatch 'scratch')
     & $add '结果文本里的盘符路径与 UNC 被打码' $false ((Hide-LocalPaths 'a D:\scratch\y.wav b \\host\share\z c') -notmatch 'scratch|host')
+    # 标题打码：路径里常有空格（C:\Work\John Smith），从盘符 / UNC 起要一直打码到下一个引号或标题末尾，不能在第一个空格处停。
+    # 用例的坏样例都让泄漏出现在结果的前 40 个字符以内（超过的会被截断，看不出来）
+    $safe = { param($text) ConvertTo-ReaperSafeTitle $text }
+    & $add '标题打码：用户目录带空格（C:\Work\John Smith\a.rpp），空格后面的目录名与文件名不留进结果' $true ((& $safe 'Error in C:\Work\John Smith\a.rpp now') -ceq 'Error in <path>')
+    & $add '标题打码：UNC 路径带空格也整段打码' $true ((& $safe 'Cannot open \\srv\share\John Smith\a.rpp') -ceq 'Cannot open <path>')
+    & $add '标题打码：正斜杠写法、路径里有多个空格也整段打码' $true ((& $safe 'D:/My Music/John Smith/x y.wav') -ceq '<path>')
+    & $add '标题打码：路径后面跟着 REAPER 自己的标题后缀（- REAPER v…/win64）：路径整段打码，后缀留着' $true ((& $safe 'C:\Work\John Smith\a.rpp - REAPER v7.82/win64') -ceq '<path> - REAPER v7.82/win64')
+    & $add '标题打码：只有路径加 - REAPER 两个词（没有版本）时后缀同样留着' $true ((& $safe 'C:\Work\John Smith\a.rpp - REAPER') -ceq '<path> - REAPER')
+    & $add '标题打码：目录名里就带 - REAPER 的路径（后缀不在末尾）整段打码，不信中间的「后缀」' $true ((& $safe 'C:\Work\John - REAPER\secret box\a.rpp') -ceq '<path>')
+    & $add '标题打码：认不出的结尾（- REAPER 后面不是版本号）宁可一起打码' $true ((& $safe 'C:\p q\r - REAPER s0meth') -ceq '<path>')
+    & $add '标题打码：同一个标题里有两段路径，第一段起整段打码，第二段的目录名也不留' $true ((& $safe 'Copy C:\a b\one.rpp to D:\c d\two.rpp') -ceq 'Copy <path>')
+    & $add '标题打码：带引号的路径各自打到引号为止，引号后面的文字保留' $false ((& $safe 'Cannot open "C:\Work\John Smith\a.rpp" (gone)') -ceq 'Cannot open "<path>" (gone)')
+    & $add '标题打码：两段带引号的路径各自打码' $false ((& $safe '"C:\x y\a.rpp" and "\\h\s t\b.wav"') -ceq '"<path>" and "<path>"')
+    & $add '标题打码：没有路径的标题原样，超过 40 个字符仍截断' $false (((& $safe 'Brand New Box') -ceq 'Brand New Box') -and ((& $safe ('x' * 60)).Length -eq 40))
+    & $add '标题打码：正斜杠写法的 UNC（//srv/share/John Smith/a.rpp）带空格也整段打码' $true ((& $safe 'Cannot open //srv/share/John Smith/a.rpp') -ceq 'Cannot open <path>')
+    & $add '标题打码：单个斜杠不是路径（Mix A/B tape 原样）' $false ((& $safe 'Mix A/B tape') -ceq 'Mix A/B tape')
+    # 标题打码不带引号时本来只在 " 处停：撇号、全角标点不是边界，目录名里有 O'Brien、顿号、括号照样整段打码
+    & $add '标题打码：目录名里有撇号（C:\Work\O''Brien Smith\a.rpp）整段打码，Brien 与 Smith 不留' $true ((& $safe 'Error in C:\Work\O''Brien Smith\a.rpp now') -ceq 'Error in <path>')
+    & $add '标题打码：目录名里有全角顿号与括号，整段打码，REAPER 自己的标题后缀留着' $true ((& $safe 'Open C:\Work\项目、旧（1） Smith\a.rpp - REAPER v7.82/win64') -ceq 'Open <path> - REAPER v7.82/win64')
+    & $add '标题打码：单引号括起来的路径宁可多打码（不留 John、Smith）' $true ((& $safe 'Cannot open ''C:\Work\John Smith\a.rpp'' (gone)') -notmatch 'John|Smith')
+    # 结果文本打码（Hide-LocalPaths）：同样一直打到引号、全角分隔符或行尾，不在空白处停（以前在第一个空白处停：John Smith 的 Smith 与后面的目录名会漏进结果 json 与控制台）
+    $hide = { param($text) Hide-LocalPaths $text }
+    & $add '结果文本打码：用户目录带空格（C:\Work\John Smith\x.rpp），空格后面的目录名不留，整段是 <path>' $true ((& $hide '读 C:\Work\John Smith\x.rpp') -ceq '读 <path>')
+    & $add '结果文本打码：UNC 路径带空格（\\srv\share\John Smith\a.wav）整段打码' $true ((& $hide '开 \\srv\share\John Smith\a.wav') -ceq '开 <path>')
+    & $add '结果文本打码：正斜杠写法的 UNC（//srv/share/John Smith/a.wav）整段打码' $true ((& $hide '开 //srv/share/John Smith/a.wav') -ceq '开 <path>')
+    & $add '结果文本打码：正斜杠写法的盘符路径带空格（D:/My Music/John Smith/x y.wav）整段打码' $true ((& $hide 'D:/My Music/John Smith/x y.wav') -ceq '<path>')
+    & $add '结果文本打码：带引号的路径各自打到引号为止，引号后面的文字保留' $false ((& $hide '"C:\x y\a" 和 ''D:\p q\b'' 之后') -ceq '"<path>" 和 ''<path>'' 之后')
+    # 不带引号的路径只在 "、换行和 < > | ? * 处停：' 与全角标点不再是边界（目录名里就可能有 O'Brien、顿号、括号），宁可把后面的文字一起打码
+    & $add '结果文本打码：不带引号的路径后面的全角分隔符（；）不是边界，其后的文字一起打码' $true ((& $hide 'C:\a b\c；然后') -ceq '<path>')
+    & $add '结果文本打码：全角逗号、句号、顿号、右括号同样不是边界（宁可多打码）' $true (((& $hide 'C:\a b\c，d') -ceq '<path>') -and ((& $hide 'C:\a b\c。d') -ceq '<path>') -and ((& $hide 'C:\a b\c、d') -ceq '<path>') -and ((& $hide '（见 C:\a b\c）') -ceq '（见 <path>'))
+    & $add '结果文本打码：目录名里有撇号（C:\Work\O''Brien Smith\x）：Brien 与 Smith 都不留，整段是 <path>' $true (
+        ((& $hide 'C:\Work\O''Brien Smith\x') -ceq '<path>') -and ((& $hide '读 C:\Work\O''Brien Smith\x 之后') -notmatch 'Brien|Smith|x 之后'))
+    & $add '结果文本打码：目录名里有全角顿号、全角括号（C:\Work\张、三 Smith\x，C:\Work\项目（旧） Smith\x）：Smith 不留' $true (
+        ((& $hide 'C:\Work\张、三 Smith\x') -ceq '<path>') -and ((& $hide 'C:\Work\项目（旧） Smith\x，然后') -ceq '<path>') -and ((& $hide 'C:\Work\项目（旧） Smith\x') -notmatch 'Smith|项目'))
+    & $add '结果文本打码：开引号之后的路径打到对应的闭引号，目录名里的撇号不当闭引号（''C:\Work\O''Brien Smith\x'' 之后）' $true (
+        ((& $hide '''C:\Work\O''Brien Smith\x'' 之后') -ceq '''<path>'' 之后') -and ((& $hide '见（''C:\Work\O''Brien Smith\x''）') -ceq '见（''<path>''）'))
+    & $add '结果文本打码：双引号里的路径含撇号，同样打到双引号为止，后面的文字保留' $true ((& $hide '"C:\Work\O''Brien Smith\x" 之后') -ceq '"<path>" 之后')
+    & $add '结果文本打码：带引号的路径里有全角标点，也打到闭引号为止（引号后面的文字保留）' $true ((& $hide '"C:\Work\张、三（旧） Smith\x" 之后') -ceq '"<path>" 之后')
+    & $add '结果文本打码：同一种引号括起来的两段路径各自打码，中间的文字保留' $true ((& $hide '''C:\x y\a'' 和 ''D:\p q\b'' 之后') -ceq '''<path>'' 和 ''<path>'' 之后')
+    & $add '结果文本打码：路径里夹着另一种引号时，只认同一种引号收尾（"C:\Work\a ''q'' b\x"、''C:\Work\a "q" b\x''）' $true (
+        ((& $hide '"C:\Work\a ''q'' b\x" 之后') -ceq '"<path>" 之后') -and ((& $hide '''C:\Work\a "q" b\x'' 之后') -ceq '''<path>'' 之后'))
+    & $add '结果文本打码：撇号后面紧跟数字同样不算闭引号（''C:\Work\Q''1 Smith\x'' 之后）' $true ((& $hide '''C:\Work\Q''1 Smith\x'' 之后') -ceq '''<path>'' 之后')
+    & $add '结果文本打码：带引号的路径不跨行，开引号后面没有闭引号的那一行照样按不带引号处理' $true ((& $hide "`"C:\a b\c`nD:\d e\f`" 完") -ceq "`"<path>`n<path>`" 完")
+    & $add '结果文本打码：路径后面紧跟的 < 是边界（路径里不可能有）' $true ((& $hide 'C:\a b\c<br>') -ceq '<path><br>')
+    & $add '结果文本打码：只有开引号、没有闭引号的路径照样整段打码（宁可多打码）' $true ((& $hide '用户 ''C:\Work\John Smith\x') -notmatch 'John|Smith')
+    & $add '结果文本打码：闭引号后面紧跟字母（撇号）不算闭引号，但双引号照旧是边界' $false (((& $hide '"C:\x y\a"之后') -ceq '"<path>"之后') -and ((& $hide '''C:\Work\O''Brien Smith\x'' 之后') -notmatch 'Brien|Smith'))
+    & $add '结果文本打码：换行是边界，每一行的路径各自打码' $true ((& $hide "C:\a b\c`nD:\d e\f`n完") -ceq "<path>`n<path>`n完")
+    & $add '结果文本打码：没有路径的文字原样（单个斜杠、冒号不算）' $false ((& $hide '没有路径 a/b c: d') -ceq '没有路径 a/b c: d')
     $nt = { param($bit, $lag, $head) "逐位相同：$bit`n对齐偏移（lag）：$lag 样本（正数表示 B 比 A 晚）`n开头 2.00 秒残差（96000 帧）：峰值 $head dBFS，RMS $head dBFS`n" }
     $good = & $nt '是' '0' '-inf'
     & $add '对拍结论：四项都满足才 PASS' $false ((Get-CompareVerdict 0 $good).Status -eq 'PASS')
@@ -388,6 +704,13 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '一轮结局：场景全绿但默认资源目录变了判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $false -Residual 0) -eq 'FAIL')
     & $add '一轮结局：场景全绿但结束后还留着 reaper.exe 判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 1) -eq 'FAIL')
     & $add '一轮结局：全绿、目录没变、没有残留才是 PASS' $false ((Get-RunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $true -Residual 0) -eq 'PASS')
+    & $add '一轮结局：场景全绿但有 REAPER 进程没能结束（本轮已停）判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 0 -Halted $true) -eq 'FAIL')
+    & $add '一轮结局：没有进程卡住时 -Halted $false 不影响 PASS' $false ((Get-RunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 0 -Halted $false) -eq 'PASS')
+    & $add '停手：REAPER 进程没能结束，不再启动新的 REAPER，原因点名进程' $true ((Get-ReaperRoundStop -CfgUnchanged $true -Halted '进程 123 没能结束') -like '*没能结束*123*')
+    & $add '停手：进程没能结束优先于别的原因（有活着的 REAPER 时先说这个）' $true ((Get-ReaperRoundStop -CfgUnchanged $false -Rejected $true -Halted '进程 1 没能结束') -like '*没能结束*')
+    & $add '停手：默认资源目录有读不了的子目录（别的都没变），说的是证明不了、可能被碰过，不说「变了」' $true (
+        ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $true) -like '*读不了*') -and ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $true) -like '*可能*'))
+    & $add '停手：默认资源目录真的变了（哪怕同时有读不了的），说「变了」' $true ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $false) -like '*默认资源目录变了*')
     $chain = New-ReaperProjectText -SourceWav 'S' -RenderDir 'D' -RenderName 'N' -Bypass @('output') -TrackVolume 0.5 -Channels 1 -SampleRate 44100 -OneX
     & $add '工程：Input 在 Output 前' $false ($chain.IndexOf('Rinne Input') -lt $chain.IndexOf('Rinne Output'))
     & $add '工程：旁路行只在被旁路的那个插件前' $false (([regex]::Matches($chain, 'BYPASS 1 0 0').Count -eq 1) -and ($chain.IndexOf('BYPASS 1 0 0') -gt $chain.IndexOf('Rinne Input')))
