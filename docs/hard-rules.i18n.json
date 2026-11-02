@@ -1,5 +1,7 @@
 {
   "version": 1,
+  "rulesVersion": 1,
+  "rulesVersionZhSha256": "0e3afd4f544907fc1f8dfe0f5b97a95d6419dbc06e114f8eea1c37700ac5bd89",
   "lead": {
     "zhSha256": "1f549adbf00bb51fa1591b19552794f8c14503da500ab5c393ed63b0ee37325d",
     "en": "Feedback can get loud — fast. Rinne deliberately feeds a channel back into itself. Start with Feedback at 0, keep monitors and headphones low while you experiment, and leave Rinne’s safety protection on. Rinne limits and sanitises the signal it feeds back and has a Panic button, but plugins you place inside the loop can still raise the level that reaches your speakers, and no software can guarantee a loop will never howl. Rinne comes with no warranty (GPL-3.0, sections 15–16).",

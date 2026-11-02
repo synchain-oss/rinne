@@ -68,7 +68,8 @@ export function createGroupPills(o) {
     const bar = el("div", { class: "rn-group__bar", role: "radiogroup" }, ...pills);
     const root = el(
         "div",
-        { class: "rn-group", data: { gb: o.gb || `${o.role}.group`, state: "none" } },
+        // data-tour：Output 导览第 2 步亮这一排
+        { class: "rn-group", data: { gb: o.gb || `${o.role}.group`, state: "none", tour: "group" } },
         label,
         bar,
         autoBadge,

@@ -13,6 +13,8 @@
 // 只有完全没有桥（离线模式）才用默认快照显示。
 // 预览专用：浏览器预览里从 mock 读场景描述，用来直接摆出限制器确认、关于面板、缩放确认、预设面板这几种覆盖层；
 // 真宿主没有 previewScene，这些分支不会走到。
+// 首启链（语言卡 → 使用规则页 → 导览）由 first-run.js 判与画，这里只喂快照、接「?」与关于面板的「查看使用规则」。
+// 预览里给了场景就不自动弹首启链（场景描述的是一种既定画面），首启的三个场景改为静态摆出；无桥模式也不弹。
 
 import { createBridge } from "../shared/bridge.js";
 import { installDicts } from "../shared/i18n.js";
@@ -29,9 +31,11 @@ import { createPairPill } from "../shared/pair-status.js";
 import { createMsgline, orderMessages } from "../shared/msgline.js";
 import { createToast } from "../shared/toast.js";
 import { createAbout } from "../shared/about.js";
+import { createFirstRun } from "../shared/first-run.js";
 import { docLink, docRef } from "../shared/links.js";
 import common from "../i18n/common.js";
 import input from "../i18n/input.js";
+import guide from "../i18n/guide.js";
 import { el } from "../shared/dom.js";
 import {
     SMART_DEFAULT_MS,
@@ -59,6 +63,7 @@ import { createPanic, createLimiterConfirm } from "./components/safety-layer.js"
 import { setHidden, setVar } from "./components/util.js";
 import { createOfflineBridge, defaultFrames } from "./offline.js";
 import { gateBridge } from "./bridge-gate.js";
+import { TOUR_IN_STEPS } from "./tour-in.js";
 
 const ROLE = "input";
 /** 真宿主一直不给快照时，等这么久就揭幕（只画标签与「—」）。 */
@@ -90,7 +95,7 @@ function openBridge() {
 }
 
 function boot() {
-    installDicts(common, input);
+    installDicts(common, input, guide);
     const opened = openBridge();
     const { offline } = opened;
     // 写入闸：真快照（state 与 pair）到齐之前，对宿主的写入一律不发（见 bridge-gate.js）
@@ -237,7 +242,7 @@ function boot() {
         role: ROLE,
         onScale: (f) => scaleUi.preview(f),
         onAbout: openAbout,
-        onHelp: openGuide,
+        onHelp: () => firstRun.openRules(),
     });
     const scaleConfirm = createScaleConfirm({
         role: ROLE,
@@ -253,7 +258,10 @@ function boot() {
         inert: [shell.content],
         bridge,
         features: { resetOnPlay: true, tail: true },
-        onViewRules: () => {},
+        onViewRules: () => {
+            about.close();
+            firstRun.openRules();
+        },
         onCopied: () => ctx.toast("toast.diagCopied"),
         onCopyFail: (reason) => ctx.toast("toast.copyFail", { reason }),
         onClose: () => renderShellState(),
@@ -284,6 +292,27 @@ function boot() {
             bridge.panic();
         },
     });
+    // 导览与冒烟用的锚点：紧急切断在任何遮罩下都要点得到（elementFromPoint 命中它）
+    panic.el.setAttribute("data-tour", "panic");
+    const firstRun = createFirstRun({
+        role: ROLE,
+        bridge,
+        host: shell.top,
+        shell: shell.el,
+        inert: [shell.content],
+        steps: TOUR_IN_STEPS,
+        onChange: () => {
+            renderShellState();
+            renderPanicScrim();
+        },
+    });
+    if (offline || scene) firstRun.disableAuto();
+    // 恢复的实例而本机没确认过当前版本：页脚提示换成「点版本号查看」，切断的提示照旧优先
+    footer.setHintOverride((h, t) =>
+        firstRun.restoredHint() && !(h && h.state === "cut")
+            ? { state: "restored", text: t("hint.firstUseRestored") }
+            : h,
+    );
 
     // ---- 电平弹道
     const mixLv = cards.feedback.levels;
@@ -313,9 +342,12 @@ function boot() {
         return node;
     };
     const pairRow = el("div", { class: "in-pairrow" }, group.el, pairPill.el);
+    // 导览第 2 步的亮区：组选择、对端行与消息位外面的一个不可交互的占位框（它们分属三件，没有共同的父节点）
+    const pairTour = el("div", { "data-tour": "pair", "aria-hidden": "true", style: { pointerEvents: "none" } });
     const presetSlot = el("div", { class: "in-preset-slot", "data-slot": "preset-trigger" });
     const presetMenu = createPresetMenu(ctx, { slot: presetSlot, host: shell.layer });
     shell.content.append(
+        at(pairTour, 20, 64, 760, 62),
         at(header.el, 20, 17),
         at(presetSlot, 314, 21, 200, 30),
         at(langCap.el, "", 25),
@@ -405,18 +437,64 @@ function boot() {
         });
         for (const card of Object.values(cards)) card.render();
         presetMenu.render();
-        panic.update({ cut: Boolean(safety.cut), overScrim: about.isOpen() || S.scaleState.confirming, t });
+        panic.update({ cut: Boolean(safety.cut), overScrim: overlayOn(), t });
         limiterConfirm.retext(t);
         renderMessages();
+        // 首启链先吃这份快照再画页脚：恢复实例的页脚提示读的是首启链手里的快照，后画才是当帧的
+        feedFirstRun();
         renderFooter();
         renderShellState();
         scaleConfirm.update({ ...S.scaleState, t });
     }
 
+    /** 遮罩态：关于面板、缩放确认与首启链的叠层。 */
+    function overlayOn() {
+        return about.isOpen() || S.scaleState.confirming || firstRun.isOpen();
+    }
+
+    function renderPanicScrim() {
+        const t = ctx.view ? ctx.view.t : makeT(pendingLang());
+        const cut = Boolean(ctx.view && (ctx.view.state.safety || {}).cut);
+        panic.update({ cut, overScrim: overlayOn(), t });
+    }
+
+    /** 首启链的「必须立即关」「环路激活」两个判据：快照与电平灯都会改它们。 */
+    function firstRunLive() {
+        const { state, pair } = ctx.view;
+        const safety = state.safety || {};
+        const lamps = (S.meters && S.meters.lamps) || {};
+        return {
+            l2: isDanger({ cut: safety.cut, pairState: pair.state, l2: safety.l2 }),
+            guardLit: Boolean(lamps.guard) && lamps.guard !== "ok",
+            loopActive: isFlowing({
+                pairState: pair.state,
+                cut: safety.cut,
+                loopOn: ctx.values().loop_on,
+                silentCause: state.silentCause,
+            }),
+        };
+    }
+
+    /** 首启链吃的快照：全局位与上面两个判据。两路首批快照到齐之后才喂。 */
+    function feedFirstRun() {
+        if (!ctx.view) return;
+        const { state, lang } = ctx.view;
+        firstRun.update(
+            {
+                lang,
+                langChosen: state.langChosen,
+                rulesAck: state.rulesAck,
+                guideSeen: state.guideSeen,
+                restored: state.restored,
+            },
+            firstRunLive(),
+        );
+    }
+
     function renderShellState() {
         if (!ctx.view) {
             // 快照没到：不知道危险与否，只反映遮罩
-            shell.setState({ danger: false, hostBypass: false, overlay: about.isOpen() || S.scaleState.confirming });
+            shell.setState({ danger: false, hostBypass: false, overlay: overlayOn() });
             return;
         }
         const { state, pair } = ctx.view;
@@ -424,7 +502,7 @@ function boot() {
         shell.setState({
             danger: isDanger({ cut: safety.cut, pairState: pair.state, l2: safety.l2 }),
             hostBypass: state.silentCause === "hostBypass",
-            overlay: about.isOpen() || S.scaleState.confirming,
+            overlay: overlayOn(),
         });
     }
 
@@ -559,6 +637,7 @@ function boot() {
     }
 
     function closeOverlays() {
+        firstRun.abort();
         if (about.isOpen()) about.close();
         if (S.scaleState.confirming) scaleUi.revert();
         limiterConfirm.close();
@@ -645,6 +724,8 @@ function boot() {
                 ctx.view.meters = f;
                 cards.safety.render();
                 scheduleMessages();
+                // 电平帧只给首启链换判据（失控灯亮了要立即关），不重量导览
+                firstRun.live(firstRunLive());
             }
         }
     };
@@ -688,6 +769,7 @@ function boot() {
             if (scene.limiter === "confirm") limiterConfirm.open({ t: ctx.view.t, from: cards.safety.limiterToggle });
             if (scene.overlay === "about") openAbout();
             if (scene.overlay === "scaleConfirm") scaleUi.preview(S.state.uiScale || 1);
+            firstRun.showScene(scene);
         });
     }
 
@@ -725,7 +807,7 @@ function boot() {
         group.update({ group: null, auto: false, peers: [], unassigned: false, autoGroup: null, disabled: true, t });
         for (const card of Object.values(cards)) card.renderPending(t);
         presetMenu.renderPending(t);
-        panic.update({ cut: false, overScrim: about.isOpen() || S.scaleState.confirming, t });
+        panic.update({ cut: false, overScrim: overlayOn(), t });
         // 缩放：宿主的档位还不知道，下拉里只有一项「—」且置灰（选档要记下选档前的档位，快照没到时那是编出来的）。
         // 下拉是共享页脚的节点，页脚的 update 在 locked 为假时会把它重新打开，所以每次 update 之后再关一次；
         // 就绪后 renderFooter 的 update 用真实的选项表，下拉随之重建、重新可用

@@ -8,6 +8,8 @@
 // 缩放下拉的选项与置灰判据来自 scale-ui.js 的状态机（createScaleUi.options），本组件不重算。
 //
 // 版本按钮点开关于面板；「?」按钮重看使用规则与引导。两个按钮的 data-gb 沿用设计稿锚点。
+// 首启链要在页面的提示之上再盖一层（恢复的实例显示 hint.firstUseRestored）：setHintOverride(fn) 收页面给的提示与 t、
+// 返回要显示的提示，设上或撤掉时按最近一次的入参立即重画提示位；Output 的页面代码不经手这一层。
 
 import { el } from "./dom.js";
 import { icon } from "./icons.js";
@@ -72,6 +74,20 @@ export function createFooter(o) {
         el("div", { class: "rn-footer__right" }, scaleWrap, version, help),
     );
 
+    /** 首启链的提示覆盖层与最近一次的入参。 */
+    let hintOverride = null;
+    let lastP = null;
+
+    /** 只重画提示位（覆盖层变了时用）：不碰下拉，页面在 update 之后对下拉另加的置灰不会被冲掉。 */
+    function applyHint(p) {
+        const pageHint = hintOverride ? hintOverride(p.hint || null, p.t) : p.hint;
+        const h = p.locked === true ? { state: "locked", text: p.t("common.scale.lockedLegacy") } : pageHint;
+        hintText.textContent = h ? h.text : "";
+        hint.setAttribute("data-state", h ? h.state : "none");
+        root.setAttribute("data-state", h ? h.state : "none");
+        hintText.setAttribute("title", h ? h.text : "");
+    }
+
     /** 下拉选项的签名：页面每秒会重发好几次同样的状态，选项没变就不重建（用户正打开下拉或用键盘选档时重建会让弹出层关掉、高亮跳回）。 */
     let optionsSig = "";
 
@@ -83,13 +99,10 @@ export function createFooter(o) {
          *   hint：页面给的提示（state 是锚点 data-state，text 是已取好的文字）；locked 时忽略它，显示锁定提示
          */
         update(p) {
+            lastP = p;
             const { t } = p;
             const locked = p.locked === true;
-            const h = locked ? { state: "locked", text: t("common.scale.lockedLegacy") } : p.hint;
-            hintText.textContent = h ? h.text : "";
-            hint.setAttribute("data-state", h ? h.state : "none");
-            root.setAttribute("data-state", h ? h.state : "none");
-            hintText.setAttribute("title", h ? h.text : "");
+            applyHint(p);
             // 下拉：档位、标签、置灰与置灰说明（已按当前语言取好）、锁定都没变就不重建，只在签名变了时整表重写
             const titleOf = (opt) => (opt.disabled && opt.titleKey ? t(opt.titleKey) : "");
             const sig = JSON.stringify([
@@ -117,6 +130,11 @@ export function createFooter(o) {
             version.setAttribute("title", t("common.footer.aboutTip"));
             help.setAttribute("title", t("common.footer.helpTip"));
             help.setAttribute("aria-label", t("common.footer.helpTip"));
+        },
+        /** @param {((hint:{state:string,text:string}|null, t:(k:string)=>string)=>({state:string,text:string}|null))|null} fn 第二个参数是页面当前语言的 t */
+        setHintOverride(fn) {
+            hintOverride = typeof fn === "function" ? fn : null;
+            if (lastP) applyHint(lastP);
         },
         /** 缩放下拉当前显示的档位（测试与页面回读用）。 */
         scaleValue: () => Number(select.value),

@@ -1097,6 +1097,314 @@
     color: var(--sem-red-ink-dark);
 }
 
+/* ------------------------------------------------------------ 首启链：语言卡、使用规则页、导览（设计稿 v2.5） */
+/* 三件都在外壳 top 层：语言卡与规则页走共用模态（遮罩 100、面板 120），导览整层 150，都低于紧急切断那一层（400）。 */
+.rn-langStart {
+    padding: 22px 22px var(--sp-20);
+}
+
+.rn-langStart__mark {
+    display: flex;
+    justify-content: center;
+    margin-bottom: var(--sp-12);
+    color: var(--txt-dark-1);
+}
+
+.rn-langStart__title {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-130);
+    line-height: 1.55;
+    color: var(--txt-dark-1);
+    text-align: center;
+    text-wrap: balance;
+}
+
+.rn-langStart__btns {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-8);
+    margin-top: var(--sp-16);
+}
+
+.rn-langStart__btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 100%;
+    height: 34px;
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-125);
+    color: var(--txt-dark-1);
+}
+
+.rn-langStart__btn[data-lang-pick="zh"] {
+    font-family: var(--ff-sans);
+    font-weight: 500;
+}
+
+/* 规则页：标题、引导词、正文、脚注全是红字；只有正文区滚动 */
+.rn-rules {
+    display: flex;
+    flex-direction: column;
+    padding: var(--sp-20) var(--sp-18) var(--sp-14) 22px;
+    overflow: hidden;
+}
+
+.rn-shell[data-role="output"] .rn-rules {
+    padding: var(--sp-16) var(--sp-14) var(--sp-12) var(--sp-18);
+}
+
+.rn-rules__title {
+    flex: none;
+    padding-right: var(--sp-6);
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-140);
+    line-height: 1.5;
+    color: var(--sem-red-ink-dark);
+    text-wrap: pretty;
+}
+
+.rn-rules__body {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    margin-top: var(--sp-12);
+    padding-right: var(--sp-8);
+    overflow-x: hidden;
+    overflow-y: auto;
+    outline: none;
+}
+
+.rn-rules__list {
+    margin: 0;
+    padding-left: var(--sp-18);
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-120);
+    color: var(--sem-red-ink-dark);
+}
+
+.rn-rules__item {
+    padding-left: 2px;
+    margin-bottom: var(--sp-12);
+}
+
+.rn-rules__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-10);
+    margin-bottom: 4px;
+}
+
+.rn-rules__lead {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-130);
+    color: var(--sem-red-ink-dark);
+}
+
+.rn-rules__text {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-120);
+    line-height: 1.62;
+    color: var(--sem-red-ink-dark);
+    text-wrap: pretty;
+}
+
+.rn-rules__footnote {
+    margin-top: 2px;
+    padding-bottom: 4px;
+    font-family: var(--ff-sans);
+    font-weight: 500;
+    font-size: var(--fs-105);
+    color: var(--sem-red-ink-dark);
+}
+
+/* 放行之前「下面还有」的提示，不盖在红字上：正文区底部的暗影画在文字下面（文字在上层、照旧不透明，
+   底色只会更深，对比度只升不降）；正文区外沿、按钮栏的分隔线提亮一档 */
+.rn-rules[data-state="gated"] .rn-rules__body {
+    box-shadow: inset 0 -22px 18px -14px rgba(var(--void), 0.55);
+}
+
+.rn-rules__more {
+    position: relative;
+    height: 0;
+}
+
+.rn-rules__more::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 4px; /* 与按钮栏的上边线重合（按钮栏 margin-top 4px） */
+    height: 1px;
+    background: rgba(var(--acc), 0.6);
+    pointer-events: none;
+}
+
+.rn-rules__actions {
+    display: flex;
+    flex: none;
+    justify-content: flex-end;
+    gap: var(--sp-8);
+    margin-top: 4px;
+    padding-top: var(--sp-12);
+    border-top: 1px solid rgba(var(--wh), 0.1);
+}
+
+.rn-rules__actions .sc-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    scale: 1;
+}
+
+/* 导览：暗幕挖羽化矩形洞（遮罩图由 tour-paint.js 的 holeMask 写在行内），说明框宽 360 */
+.rn-tour {
+    position: absolute;
+    inset: 0;
+    z-index: 150;
+}
+
+.rn-tour__mask {
+    position: absolute;
+    inset: 0;
+    background: var(--dark-scrim);
+    -webkit-backdrop-filter: var(--dark-scrim-blur);
+    backdrop-filter: var(--dark-scrim-blur);
+}
+
+.rn-tour__callout {
+    position: absolute;
+    z-index: 1;
+    box-sizing: border-box;
+    width: 360px;
+    padding: var(--sp-14) var(--sp-16);
+    border-radius: var(--r-callout);
+    background-color: var(--dark-solid);
+    background-image: var(--dark-toast);
+    border: 1px solid rgba(var(--wh), 0.16);
+    box-shadow: var(--dark-toast-shadow);
+    color: var(--txt-dark-2);
+    outline: none;
+}
+
+.rn-shell[data-role="output"] .rn-tour__callout {
+    padding: var(--sp-11) var(--sp-16);
+}
+
+.rn-tour__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-10);
+    height: 20px;
+}
+
+.rn-tour__title {
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-160);
+    line-height: 1.2;
+    color: var(--txt-dark-1);
+    white-space: nowrap;
+}
+
+.rn-tour__ind {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-8);
+    flex: none;
+}
+
+.rn-tour__step {
+    font-family: var(--ff-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    color: var(--txt-dark-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+.rn-tour__dots {
+    display: inline-flex;
+    gap: 3px;
+}
+
+.rn-tour__dot {
+    flex: none;
+    width: 5px;
+    height: 5px;
+    border-radius: var(--r-pill);
+    background: rgba(var(--wh), 0.28);
+}
+
+.rn-tour__dot[data-current] {
+    width: 12px;
+    background: var(--acc-cta);
+}
+
+.rn-tour__body {
+    margin-top: var(--sp-8);
+    font-family: var(--ff-sans);
+    font-size: var(--fs-125);
+    font-weight: 400;
+    line-height: 1.55;
+    color: var(--txt-dark-2);
+    text-wrap: pretty;
+}
+
+.rn-shell[data-role="output"] .rn-tour__body {
+    margin-top: 5px;
+}
+
+.rn-tour__foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-6) var(--sp-8);
+    margin-top: var(--sp-10);
+}
+
+.rn-shell[data-role="output"] .rn-tour__foot {
+    margin-top: 7px;
+}
+
+.rn-tour__hint {
+    font-family: var(--ff-mono);
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    color: var(--txt-dark-3);
+    white-space: nowrap;
+}
+
+.rn-tour__btns {
+    display: inline-flex;
+    gap: var(--sp-6);
+    margin-left: auto;
+}
+
+.rn-tour__btn {
+    height: 22px;
+    padding: 0 9px;
+}
+
+.rn-tour__btn.sc-btn--cta {
+    padding: 0 var(--sp-11);
+}
+
+.rn-tour__btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    scale: 1;
+}
+
 /* ------------------------------------------------------------ 对 SCVB 件的局部覆盖 */
 /* 电平表与增益缩减表：数值由页面的 rAF 弹道自己平滑，CSS 过渡会叠一层滞后 */
 .rn-meters .sc-meter__fill,

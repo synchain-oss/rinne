@@ -11,7 +11,7 @@
 //   - 本文件不建 DOM，不挂事件，不读 i18n，不调桥，不写 state；只对调用方传进来的
 //     canvas、说明框、箭头元素做「量、画、摆」。
 //   - 模块顶层没有副作用，也不触碰 document（检查脚本与冒烟脚本 import 即跑，顶层碰 document 会当场报错）。
-//   - 颜色一律读设计 token（--void、--r-callout、--dark-*），不写裸色值。
+//   - 颜色一律读设计 token（--void、--r-callout、--dark-*），不写裸色值；holeMask 遮罩图里的 #000 只表示不透明度。
 
 /** 亮区洞的圆角，与说明框同款浮层卡圆角（--r-callout）。 */
 export const SPOT_RADIUS = 16;
@@ -236,4 +236,70 @@ export function placeCallout(callout, arrowEl, card, spotLocal) {
             arrowEl.style.top = Math.round(off - AW / 2) + "px";
         }
     }
+}
+
+// ---------------------------------------------------------------- 首启导览用的画法（设计稿 v2.5）
+// 导览的遮罩与模态同款：暗幕加背景模糊，亮区是用遮罩图挖出的羽化矩形洞（不是上面的 canvas 圆角洞）；
+// 说明框按步骤给的首选位置摆，压到亮区、要避开的矩形或越出设计盒时才换方位。
+
+/** 亮区洞边缘的羽化（设计 px）。 */
+export const HOLE_FEATHER = 7;
+
+/** 换方位时说明框离设计盒边缘、离亮区的距离（设计 px）。首选位置只要求整框在设计盒内（设计稿 Output 第 3 步的框就贴着底边）。 */
+export const CALLOUT_MARGIN = 8;
+export const CALLOUT_GAP = 8;
+
+/**
+ * 挖洞的遮罩图：两条线性渐变叠加，横向或纵向落在洞外的点总有一条不透明，所以洞外整片不透明、洞内透明，
+ * 四边各羽化 f。遮罩只看不透明度，#000 不是界面颜色。
+ * @param {{x:number,y:number,w:number,h:number}} r 亮区（设计盒坐标）
+ */
+export function holeMask(r, f = HOLE_FEATHER) {
+    const span = (a, len) =>
+        `#000 ${a - f}px, transparent ${a + f}px, transparent ${a + len - f}px, #000 ${a + len + f}px`;
+    return `linear-gradient(to right, ${span(r.x, r.w)}), linear-gradient(to bottom, ${span(r.y, r.h)})`;
+}
+
+/** 两个矩形是否相交（贴边不算）。 */
+export function rectsOverlap(a, b) {
+    return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/**
+ * 说明框的位置。先试首选位置，再依次试亮区的下、上、右、左；合格是指整框在设计盒内，
+ * 不压亮区，也不压 avoid 里的任何矩形（Input 的紧急切断）。全都不合格时返回首选位置，ok 为 false，由冒烟报出来。
+ * @param {{w:number,h:number}} box 设计盒
+ * @param {{w:number,h:number}} size 说明框的实际尺寸（随语言变）
+ * @param {{x:number,y:number,w:number,h:number}|null} spot 亮区；null 表示这一步没有锚点
+ * @param {{x?:number, y?:number, below?:number, above?:number, center?:boolean}} pref
+ *   x 缺省时水平居中；center 垂直居中；below / above 是相对亮区的下沿 / 上沿的间距；否则用 y
+ * @param {Array<{x:number,y:number,w:number,h:number}>} [avoid]
+ * @returns {{x:number, y:number, ok:boolean, how:string}}
+ */
+export function pickCalloutPos(box, size, spot, pref, avoid = []) {
+    const M = CALLOUT_MARGIN;
+    const fits = ([, x, y]) => {
+        const r = { x, y, w: size.w, h: size.h };
+        if (x < 0 || y < 0 || x + size.w > box.w || y + size.h > box.h) return false;
+        return !(spot && rectsOverlap(r, spot)) && !avoid.some((a) => rectsOverlap(r, a));
+    };
+    const x0 = Number.isFinite(pref.x) ? pref.x : Math.round((box.w - size.w) / 2);
+    let y0 = pref.y;
+    if (pref.center || !Number.isFinite(y0)) y0 = Math.round((box.h - size.h) / 2);
+    if (spot && Number.isFinite(pref.below)) y0 = spot.y + spot.h + pref.below;
+    if (spot && Number.isFinite(pref.above)) y0 = spot.y - pref.above - size.h;
+    const cands = [["pref", x0, y0]];
+    if (spot) {
+        const cx = clamp(x0, M, box.w - M - size.w);
+        const cy = clamp(spot.y, M, box.h - M - size.h);
+        cands.push(
+            ["below", cx, spot.y + spot.h + CALLOUT_GAP],
+            ["above", cx, spot.y - CALLOUT_GAP - size.h],
+            ["right", spot.x + spot.w + CALLOUT_GAP, cy],
+            ["left", spot.x - CALLOUT_GAP - size.w, cy],
+        );
+    }
+    const hit = cands.find(fits);
+    const [how, x, y] = hit || cands[0];
+    return { x: Math.round(x), y: Math.round(y), ok: Boolean(hit), how };
 }

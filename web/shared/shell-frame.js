@@ -38,9 +38,12 @@ export function shellState({ danger, hostBypass, overlay }) {
 }
 
 /**
+ * 页面以外还有叠层时（Output 的首启链挂在 app.js，页面不知道它开着），setOverlaySource(fn) 把它并进遮罩判据：
+ * fn() 为真时按 overlay 算；那一侧的叠层开关变了调 refresh()，按最近一次 setState 的入参重算。
  * @param {{role:"input"|"output"}} o
  * @returns {{el:HTMLElement, content:HTMLElement, layer:HTMLElement, top:HTMLElement,
- *            setState:(s:{danger?:boolean, hostBypass?:boolean, overlay?:boolean})=>string}}
+ *            setState:(s:{danger?:boolean, hostBypass?:boolean, overlay?:boolean})=>string,
+ *            setOverlaySource:(fn:(()=>boolean)|null)=>string, refresh:()=>string}}
  */
 export function createShell({ role }) {
     const box = DESIGN[role];
@@ -66,20 +69,32 @@ export function createShell({ role }) {
         layer,
         top,
     );
+    let last = {};
+    let extraOverlay = null;
+    function apply() {
+        const overlay = Boolean(last.overlay) || Boolean(extraOverlay && extraOverlay());
+        const state = shellState({ ...last, overlay });
+        root.setAttribute("data-state", state);
+        // 危险描边靠 data-danger 驱动 ::after 的不透明度；它与 data-state 分开写，
+        // 是因为宿主旁路与危险可以同时成立，而 data-state 只能取一个值
+        root.setAttribute("data-danger", last.danger ? "1" : "0");
+        root.toggleAttribute("data-bypass", Boolean(last.hostBypass));
+        return state;
+    }
     return {
         el: root,
         content,
         layer,
         top,
         setState(s) {
-            const state = shellState(s || {});
-            root.setAttribute("data-state", state);
-            // 危险描边靠 data-danger 驱动 ::after 的不透明度；它与 data-state 分开写，
-            // 是因为宿主旁路与危险可以同时成立，而 data-state 只能取一个值
-            root.setAttribute("data-danger", s && s.danger ? "1" : "0");
-            root.toggleAttribute("data-bypass", Boolean(s && s.hostBypass));
-            return state;
+            last = s || {};
+            return apply();
         },
+        setOverlaySource(fn) {
+            extraOverlay = typeof fn === "function" ? fn : null;
+            return apply();
+        },
+        refresh: () => apply(),
     };
 }
 
