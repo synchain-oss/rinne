@@ -16,6 +16,8 @@
 //   但紧急切断、消息位（红字、恢复按钮）、危险描边不在降级层里，照 A / B 档判，并用有效不透明度断言它们没被降级。
 //   场景表里的旁路场景之外，另有「旁路 + 紧急切断」「旁路 + 沙盒拒绝共享内存」两个红字用例，要求量到 A 档红字并过线。
 // 采样两遍、截图前后核对矩形，页面没静止就不量（不拿一张拼凑的画面去量）。
+// 没有可量像素的文字（矩形宽或高不足 1 px：整段被滚动区裁掉、字号为零，以及本来就不上屏的下拉选项与 SVG 提示）不量，但不静默：
+//   每个画面的跳过数打进输出，并断言跳过的只出自下拉选项与 SVG 提示；别处的字被跳过要报（理由见 kit 的 measure）。
 // 坏样例：把一段 A 档文字改成与底近似的颜色，量尺必须量出低于门槛；采样为空必须报错（防空转）；
 //   把消息位或紧急切断挪进降级层、或把内容层整体降回 0.55，旁路断言必须报出来；
 //   强加等待态把配对 pill 压暗到 0.6，量尺必须量出低于门槛，失败信息必须带出有效不透明度、旁路、等待态、inert 与进行中的动画。
@@ -42,6 +44,8 @@ import {
     openInput,
     openPresetState,
     settle,
+    skipSummary,
+    unexpectedSkips,
 } from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();
@@ -98,6 +102,8 @@ try {
     const tally = { A: 0, B: 0, C: 0 };
     const bypassScenes = [];
     let degraded = 0;
+    /** 按画面记的跳过：[画面名, 没有可量像素而跳过的文字]。跳过不是通过，打进输出。 */
+    const skips = [];
     for (const lang of LANGS) {
         for (const frame of MAIN_FRAMES) {
             const { scene } = frame;
@@ -110,6 +116,12 @@ try {
                 });
             const items = await measure(page);
             pages++;
+            skips.push([tag, items.skipped]);
+            run.eq(
+                unexpectedSkips(items.skipped),
+                [],
+                `${tag}：没有可量像素而被跳过的文字只该是下拉选项与 SVG 提示（别处的字被跳过要看一眼）`,
+            );
             // 模态与确认框打开时只量它们自己里面的字，段数天然少
             const overlay = scene.id === "in-scale-confirm" || scene.id === "in-about";
             run.check(
@@ -143,6 +155,7 @@ try {
     run.log(
         `  共量 ${pages} 页；A 档 ${tally.A} 段、B 档 ${tally.B} 段、C 档 ${tally.C} 段（只记录）；旁路降级层 ${degraded} 段按 C 档只记录`,
     );
+    run.log(`  ${skipSummary(skips)}`);
     run.check(tally.A > 0 && tally.B > 0, "A 档与 B 档都应采到文字（防空转）");
     run.eq(
         FRAMES.length - MAIN_FRAMES.length,

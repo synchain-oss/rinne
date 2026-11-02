@@ -500,6 +500,8 @@ export function contrastProbe(doc, win) {
         return { x: box.left + k, y: box.top + k, w: box.right - box.left - 2 * k, h: box.bottom - box.top - 2 * k };
     };
     win.__cp = [];
+    // 整段没有可量像素的文字（矩形宽或高不足 1 px，例如整段被滚动区裁掉、字号为零）：不进采样表，但记下来，由 measure 带出去
+    win.__cpSkipped = [];
     win.__cpPlace = (i) => {
         const it = win.__cp[i];
         if (it.sc) it.p.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -515,7 +517,10 @@ export function contrastProbe(doc, win) {
         const tier = tierOf(p);
         const r = rectOf(n);
         const sc = scrollerOf(p);
-        if (!sc && (r.w < 1 || r.h < 1)) continue;
+        if (!sc && (r.w < 1 || r.h < 1)) {
+            win.__cpSkipped.push({ text: text.slice(0, 48), el: p.tagName.toLowerCase() });
+            continue;
+        }
         let op = 1;
         for (let a = p; a && a !== doc.documentElement; a = a.parentElement) op *= Number(gcs(a).opacity);
         // SVG 的文字画的是 fill（color 只是继承来的值，与画出来的颜色无关）
@@ -535,6 +540,7 @@ export function contrastProbe(doc, win) {
             inOverlay: Boolean(p.closest(".rn-scrim, .rn-tour")),
             inPanic: Boolean(p.closest(".in-panic")),
             text: text.slice(0, 48),
+            el: p.tagName.toLowerCase(),
             tier,
             sel: cls.split(" ").filter(Boolean).slice(0, 3).join("."),
             r,
@@ -690,7 +696,16 @@ async function shotRect(page, origin, r) {
     return { png: decodePng(Buffer.from(shot.data, "base64")), x, y };
 }
 
-/** 页面静止后量出每段文字的最差对比度。 */
+/**
+ * 文字矩形里有可量的像素：宽、高都至少 1 px。worstContrast 对一个像素都没采到的矩形会抛错（不会悄悄返回通过），
+ * 所以量之前先用它筛：整段被滚动区裁掉（裁完高度为零或负）、字号为零这类没有可量像素的文字，不论有没有滚动区都一样跳过。
+ */
+export const hasPixels = (r) => Boolean(r) && r.w >= 1 && r.h >= 1;
+
+/**
+ * 页面静止后量出每段文字的最差对比度。返回的数组上带 skipped：这一画面里因为没有可量像素而跳过的文字 [{ text（前 48 字）, el（所在元素的标签）}]。
+ * 跳过不是通过：每个套件把按画面的跳过数打进输出（见 skipSummary），并断言跳过的只有 SKIP_OK 里那几种元素（见 unexpectedSkips）。
+ */
 export async function measure(page) {
     const origin = await frameRect(page);
     let items;
@@ -722,20 +737,57 @@ export async function measure(page) {
         await settle(page);
     }
     if (last) throw new Error(`页面量不到静止画面：${last}`);
+    const skipped = await inFrame(page, (doc, win) => [...win.__cpSkipped]);
     const out = [];
     for (const it of items) {
         if (!it.scrolled) {
-            if (it.r.w < 1 || it.r.h < 1) continue;
+            if (!hasPixels(it.r)) {
+                skipped.push({ text: it.text, el: it.el });
+                continue;
+            }
             out.push({ ...it, worst: worstContrast(whole, it) });
             continue;
         }
         const r = await inFrame(page, (doc, win, i) => win.__cpPlace(i), it.idx);
-        if (!r || r.w < 1 || r.h < 1) continue;
+        if (!hasPixels(r)) {
+            skipped.push({ text: it.text, el: it.el });
+            continue;
+        }
         const { png, x, y } = await shotRect(page, origin, r);
         out.push({ ...it, r, worst: worstContrast(png, { ...it, r: { x: r.x - x, y: r.y - y, w: r.w, h: r.h } }) });
     }
     await dropHide(page);
+    out.skipped = skipped;
     return out;
+}
+
+/**
+ * 本来就没有可量像素的元素：原生下拉的 <option>（弹层由浏览器画，页面里没有矩形）与 SVG 的 <title>（只是悬停提示，不上屏）。
+ * 跳过的文字只该出自这两种元素；别处的字被跳过（例如整段被滚动区裁掉、字号为零）是新情况，要有人看一眼。
+ */
+export const SKIP_OK = Object.freeze(["option", "title"]);
+
+/** measure 返回的 skipped 里不在 SKIP_OK 内的项，写成「元素:文字」；空表示都是本来就不可见的。 */
+export const unexpectedSkips = (skipped) =>
+    skipped.filter((x) => !SKIP_OK.includes(x.el)).map((x) => `${x.el}:${x.text}`);
+
+/**
+ * 把按画面的跳过数写成一行输出。skips 是 [画面名, measure 返回的 skipped] 的列表；没有跳过的画面不列。
+ * 第一行是合计与每画面段数的分布，第二行是逐画面的段数（没有跳过的画面不列）。
+ */
+export function skipSummary(skips) {
+    const hit = skips.filter(([, texts]) => texts.length > 0);
+    const total = hit.reduce((n, [, texts]) => n + texts.length, 0);
+    const byCount = new Map();
+    for (const [, texts] of hit) byCount.set(texts.length, (byCount.get(texts.length) || 0) + 1);
+    const dist = [...byCount]
+        .sort((a, b) => a[0] - b[0])
+        .map(([n, k]) => `每画面 ${n} 段 × ${k} 个`)
+        .join("、");
+    const head = `没有可量像素而跳过的文字共 ${total} 段（${hit.length} 个画面）`;
+    return hit.length
+        ? `${head}：${dist}\n  按画面：${hit.map(([tag, texts]) => `${tag}×${texts.length}`).join("、")}`
+        : head;
 }
 
 // ---------------------------------------------------------------- 自检
@@ -817,6 +869,39 @@ if (isMain) {
                 !inlineProbe(fitProbe).includes("function accessibleName"),
             "页内函数的序列化：挂了 deps 的探针带上共用函数，没挂的不带",
         );
+        // 没有可量像素的文字：宽或高不足 1 px（含裁完高度为零或负）一律跳过，跳过的要记账
+        run.check(
+            hasPixels({ x: 0, y: 0, w: 10, h: 1 }) &&
+                !hasPixels({ x: 0, y: 0, w: 10, h: 0 }) &&
+                !hasPixels({ x: 0, y: 0, w: 10, h: -3 }) &&
+                !hasPixels({ x: 0, y: 0, w: 0.5, h: 8 }) &&
+                !hasPixels(null),
+            "没有可量像素的判定：宽高都要至少 1 px，高度为零或负（整段被裁掉）、空矩形都不算",
+        );
+        run.eq(
+            unexpectedSkips([
+                { text: "1/8", el: "option" },
+                { text: "回送提示", el: "title" },
+                { text: "零号字", el: "span" },
+            ]),
+            ["span:零号字"],
+            "跳过的文字只许出自 option 与 title，别的元素里的字要报出来",
+        );
+        run.eq(
+            skipSummary([
+                [
+                    "in-a/zh",
+                    [
+                        { text: "x", el: "option" },
+                        { text: "y", el: "option" },
+                    ],
+                ],
+                ["in-b/zh", []],
+            ]),
+            "没有可量像素而跳过的文字共 2 段（1 个画面）：每画面 2 段 × 1 个\n  按画面：in-a/zh×2",
+            "跳过数按画面写进输出，没有跳过的画面不列",
+        );
+        run.eq(skipSummary([["in-b/zh", []]]), "没有可量像素而跳过的文字共 0 段（0 个画面）", "没有跳过时也写一行");
     }
     if (!findBrowser()) {
         // 纯函数部分有失败照报失败；全过才按「没有浏览器」整套跳过，跳过不是通过

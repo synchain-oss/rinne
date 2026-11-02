@@ -7,7 +7,8 @@
 //   __fx.expectedTexts  此刻页上必须看得见的文字（按快照里的视图模型现算）；
 //   __fx.mutate(fn)     改 mock 的模型并立即发一轮帧（场景之外的状态组合用它造）；
 //   __fx.emit(name, p)  直接往页面发一个桥事件（乱序、坏载荷用它造）；
-//   __fx.firstRun       首启控制器（只有场景是语言卡、规则页、导览时才有，其余场景为 null，「?」照旧不接线）。
+//   __fx.firstRun       首启控制器（只有场景是语言卡、规则页、导览时才有，其余场景为 null，「?」照旧不接线）；
+//   __fx.raw            桥上收到的最近一帧原始 rinne.state / rinne.pair（和 web/output/app.js 的 raw 同一份），首启断言用它求 outputFlowing。
 // defect 参数只给冒烟的坏样例用：故意造出一种问题，检查脚本必须把它抓出来。
 
 import common from "../../../web/i18n/common.js";
@@ -48,6 +49,19 @@ try {
             return real[name](...args);
         };
     }
+    // 桥上收到的最近一帧原始 rinne.state / rinne.pair：和 web/output/app.js 的 raw 同样只认序号递增的帧（乱序的旧帧不算），
+    // 页面快照里的 state / pair 是页面规范化之后的值，真页面求 outputFlowing 用的是这里的原帧
+    const raw = { state: null, pair: null, seq: { state: -Infinity, pair: -Infinity } };
+    const take = (kind) => (f) => {
+        if (!f || typeof f !== "object") return;
+        if (Number.isFinite(f.seq)) {
+            if (f.seq <= raw.seq[kind]) return;
+            raw.seq[kind] = f.seq;
+        }
+        raw[kind] = f;
+    };
+    bridge.on("rinne.state", take("state"));
+    bridge.on("rinne.pair", take("pair"));
     session.start();
 
     const sc = session.mock.previewScene && session.mock.previewScene.state;
@@ -81,7 +95,7 @@ try {
         // guardLit 真页面也恒为 false；loopActive 在真页面里由 outputFlowing 判断（app.js 是带副作用的入口模块，不能 import），
         // 这里写死 false。静态的首启场景不带危险态（配对不是冲突 / 版本不匹配），也没有环路活动（没有已连接的配对在回送），
         // 所以真页面在这些场景里喂的也是 false。这一点不靠这里的注释：fixtures/output/lib.mjs 的 overlayFailures 在每个首启画面上
-        // 用真页面同一个判断（view.danger 与 outputFlowing）断言，夹具与真页面分叉会被发现
+        // 用真页面同一个判断断言（view.danger 取页面视图模型，outputFlowing 用上面存的桥上原帧求），夹具与真页面分叉会被发现
         firstRun.update(
             {
                 lang: st.lang,
@@ -167,6 +181,7 @@ try {
         scenario,
         calls,
         page,
+        raw,
         get firstRun() {
             return firstRun;
         },

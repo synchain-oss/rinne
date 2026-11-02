@@ -12,7 +12,8 @@
 // 场景之外再造最坏组合：14 条消息逐条上屏（三语）、超长轨道名、多条消息同时在场（「+n」）、单声道与采样率最宽的写法。
 // 末尾是坏样例：夹具的 ?defect=overflow / place3 / rawkey 必须被上面各项抓出来（量尺本身可信）；首启另有：
 //   普通页面上没有叠层要报、第 N 步按第 M 步查要报、导览说明框里两段字互压要报、首启词条的裸键要扫出来、
-//   首启画面带上危险态（配对冲突）或环路在流动（已连接）要报（夹具喂首启控制器的运行态写死为假，与真页面的判断分叉时要发现）。
+//   首启画面带上危险态（配对冲突）或环路在流动（已连接）要报（夹具喂首启控制器的运行态写死为假，与真页面的判断分叉时要发现），
+//   环路是否在流动按桥上收到的原帧求（只改原帧、不改页面快照，断言要跟着原帧走）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-output-fit-page.mjs [仓库根]
@@ -24,6 +25,7 @@ import { EXPECTED_PROBE, missingExpected } from "./shared-measure.mjs";
 import {
     LANGS,
     MESSAGE_CASES,
+    FIRST_RUN_FEED_PROBE,
     OUT_FIT_PROBE,
     findLeaks,
     frameTag,
@@ -276,6 +278,36 @@ try {
                 got.some((m) => /环路/.test(m)) && !got.some((m) => /危险态/.test(m)),
                 `坏样例：已连接的首启画面，应只报环路在流动，实得 ${JSON.stringify(got)}`,
             );
+        }
+        // 求环路是否在流动用的是桥上收到的原帧（和真页面一样），不是页面规范化之后的快照：只改其中一边，断言要跟着原帧走。
+        // 每条都把「改原帧」和「求值」放进同一次页内求值：周期回声每 250 ms 会发一帧新帧顶掉原帧，分成两次求值会夹进回声
+        const feedAfter = (edit) =>
+            page.eval(
+                `(() => { ${edit}; const f = ${FIRST_RUN_FEED_PROBE}; f.snapBypassed = window.__fx.page.snapshot().state.send.bypassed; return f; })()`,
+            );
+        const rawBypassed = (v) =>
+            `const r = window.__fx.raw; r.state = { ...r.state, send: { ...r.state.send, bypassed: ${v} } };`;
+        // 原帧说旁路了、页面快照仍是没旁路（已连接）：跟着原帧走，环路不在流动
+        await setModel(page, { state: "connected", send: { bypassed: false } });
+        {
+            const f = await feedAfter(rawBypassed(true));
+            run.eq(f.snapBypassed, false, "前提：只改了原帧，页面规范化之后的快照仍是没旁路");
+            run.eq(f.flowing, false, "坏样例：原帧说旁路了，环路就不在流动（断言跟着原帧走，不是跟着页面快照走）");
+        }
+        // 反过来：页面快照是旁路、原帧说没旁路：跟着原帧走，环路在流动
+        await setModel(page, { state: "connected", send: { bypassed: true } });
+        {
+            const f = await feedAfter(rawBypassed(false));
+            run.eq(f.snapBypassed, true, "前提：只改了原帧，页面规范化之后的快照仍是旁路");
+            run.eq(f.flowing, true, "坏样例：原帧说没旁路，环路就在流动（断言跟着原帧走，不是跟着页面快照走）");
+        }
+        // 乱序的旧帧不算（和真页面一样只认序号递增的帧）：补发一个序号更小、说旁路了的旧 rinne.state，原帧不该被它顶掉
+        await setModel(page, { state: "connected", send: { bypassed: false } });
+        {
+            const f = await feedAfter(
+                `const r = window.__fx.raw.state; window.__fx.emit("rinne.state", { ...r, seq: r.seq - 5, send: { ...r.send, bypassed: true } });`,
+            );
+            run.eq(f.flowing, true, "坏样例：序号更小的旧帧（说旁路了）不该顶掉原帧，已连接的环路仍在流动");
         }
     }
     {

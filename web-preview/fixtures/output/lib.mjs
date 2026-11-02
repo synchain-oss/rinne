@@ -135,6 +135,7 @@ export const overlayState = (page) => page.eval(`(${inlineProbe(overlayA11yProbe
 /**
  * 真页面（web/output/app.js）喂给首启控制器的两个判断：危险描边 view.danger（页面自己的视图模型）与「环路这头正在回送」outputFlowing。
  * outputFlowing 在带副作用的入口模块里、不能 import，所以按源码原样取下来在页内求值（不另写一份）；
+ * 它的两个参数和真页面一样是桥上收到的原始帧（夹具存在 __fx.raw 里），不是页面规范化之后的快照。
  * 源码的形状变了就抛错，不悄悄放过（和上面 derive 的锚点同一个做法）。
  */
 const APP_SRC = readFileSync(new URL("../../../web/output/app.js", import.meta.url), "utf8");
@@ -145,8 +146,9 @@ if (!FLOWING_SRC)
     throw new Error("web/output/app.js 里的 outputFlowing 变了，请同步 web-preview/fixtures/output/lib.mjs");
 export const FIRST_RUN_FEED_PROBE = `(() => {
     ${FLOWING_SRC}
-    const { state, pair, view } = window.__fx.page.snapshot();
-    return { danger: view.danger === true, flowing: outputFlowing(state, pair) };
+    const { view } = window.__fx.page.snapshot();
+    const { state, pair } = window.__fx.raw;
+    return { danger: view.danger === true, flowing: state && pair ? outputFlowing(state, pair) : null };
 })()`;
 
 /**
@@ -162,6 +164,7 @@ export async function overlayFailures(page, frame) {
     const out = [];
     const feed = await page.eval(FIRST_RUN_FEED_PROBE);
     if (feed.danger) out.push("首启画面不该带危险态：真页面的 view.danger 为真");
+    if (feed.flowing === null) out.push("夹具没有收到桥上的原始 rinne.state / rinne.pair 帧，求不出环路是否在流动");
     if (feed.flowing) out.push("首启画面的环路不该在流动：真页面的 outputFlowing 为真");
     if (o.kind !== want.kind) out.push(`叠层应是 ${want.kind}，实得 ${JSON.stringify(o.open)}`);
     if (want.kind === "tour" && o.step !== want.step) out.push(`导览应在第 ${want.step} 步，实得 ${o.step}`);

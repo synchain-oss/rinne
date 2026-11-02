@@ -16,6 +16,9 @@
 //   叠层摘掉之后下面的页面文字被量到（「叠层打开时只量叠层」的断言在这样的页面上有话说）；
 //   普通页面上没有叠层要报；SVG 标签的 fill 改暗要量出明显偏低、好页面上的标签不能是 1:1（藏字样式与按 fill 读色生效）；
 //   规则页正文区压矮到比段落还矮：越出滚动区的部分下面是页脚的按钮，不是这段字的底，量尺只取露出来的一段，正文仍要过 A 档（没有这条裁剪会量出 1.20）。
+// 没有可量像素的文字（矩形宽或高不足 1 px：整段被滚动区裁掉、字号为零，以及本来就不上屏的下拉选项与 SVG 提示）不量，但不静默：
+//   每个画面的跳过数打进输出，并断言跳过的只出自下拉选项与 SVG 提示；别处的字被跳过要报（理由见 kit 的 measure）。
+//   坏样例：字号为零的两段字（滚动区外、滚动区里各一段）要被跳过、记账、并被上面的断言报出来，量尺不能崩。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
 // 用法：node web-preview/tests/smoke-input-contrast-first-run-page.mjs [仓库根]
@@ -38,6 +41,8 @@ import {
     openInput,
     overlayProbeFailures,
     releaseRules,
+    skipSummary,
+    unexpectedSkips,
 } from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();
@@ -52,6 +57,8 @@ try {
     const page = await browser.newPage();
     let pages = 0;
     const tally = { A: 0, B: 0, C: 0 };
+    /** 按画面记的跳过：[画面名, 没有可量像素而跳过的文字]。跳过不是通过，打进输出。 */
+    const skips = [];
     for (const lang of LANGS) {
         for (const frame of FIRST_RUN_FRAMES) {
             const tag = frameTag(frame, lang);
@@ -59,6 +66,12 @@ try {
             run.eq(await overlayProbeFailures(page, frame), [], `${tag}：首启叠层应摆出来`);
             const items = await measure(page);
             pages++;
+            skips.push([tag, items.skipped]);
+            run.eq(
+                unexpectedSkips(items.skipped),
+                [],
+                `${tag}：没有可量像素而被跳过的文字只该是下拉选项与 SVG 提示（别处的字被跳过要看一眼）`,
+            );
             // 叠层打开时只量叠层自己的字与叠层之上的紧急切断；叠层的字确实量到了、紧急切断也量到了（防空转）
             run.check(items.length > 2, `${tag}：应采到足够多的文字段（防空转），实得 ${items.length}`);
             const stray = items.filter((i) => !i.inOverlay && !i.inPanic);
@@ -89,6 +102,7 @@ try {
         }
     }
     run.log(`  共量 ${pages} 页；A 档 ${tally.A} 段、B 档 ${tally.B} 段、C 档 ${tally.C} 段（只记录）`);
+    run.log(`  ${skipSummary(skips)}`);
     run.eq(pages, 9 * LANGS.length, "首启画面：8 个场景加规则页放行后一个，每种语言各量一遍");
     run.eq(FRAMES.length, SCENES.length + 1, "每个场景一个画面，规则页多一个放行后的画面（防新增场景漏测）");
     run.check(tally.A > 0, "A 档应采到文字（防空转）");
@@ -223,6 +237,38 @@ try {
             scrolled.every((i) => i.worst.min >= TIER_MIN.A),
             `${tag}：滚动区里的正文只取露出来的一段，应仍过 ${TIER_MIN.A}，实得 ${JSON.stringify(scrolled.map((i) => [i.text.slice(0, 12), +i.worst.min.toFixed(2)]))}`,
         );
+    }
+
+    // 坏样例：整段没有可量像素的文字（字号为零）。量尺不能崩（worstContrast 对一个像素都没采到的矩形会抛错），也不能悄悄放过：
+    // 要被跳过、记进 measure 返回的 skipped，并被「跳过的只许出自下拉选项与 SVG 提示」的断言报出来。
+    // 在滚动区外（规则页标题）与滚动区里（规则页正文）各摆一段，两条路径都走；先量一遍没摆之前的页面，确认本来一段都没跳过
+    await openInput(page, server, "in-rules", { lang: "zh" });
+    await releaseRules(page);
+    run.eq((await measure(page)).skipped, [], "坏样例前提：规则页放行后本来没有被跳过的文字");
+    await inFrame(page, (doc) => {
+        const zero = (text) => {
+            const e = doc.createElement("span");
+            e.style.setProperty("font-size", "0", "important");
+            e.textContent = text;
+            return e;
+        };
+        doc.querySelector(".rn-rules__title").append(zero("零号外"));
+        doc.querySelector('[data-part="rules.body"] .rn-rules__text').append(zero("零号内"));
+    });
+    {
+        const items = await measure(page);
+        run.eq(
+            items.skipped.map((x) => `${x.el}:${x.text}`).sort(),
+            ["span:零号内", "span:零号外"],
+            "坏样例：字号为零的两段字（滚动区外、滚动区里各一段）应被跳过并记账",
+        );
+        run.eq(
+            unexpectedSkips(items.skipped).length,
+            2,
+            "坏样例：被跳过的字不在下拉选项与 SVG 提示之内，应被断言报出来",
+        );
+        run.check(!items.some((i) => /零号/.test(i.text)), "坏样例：被跳过的字不该出现在量出来的结果里");
+        run.check(items.length > 10, `坏样例：其余的字照常量到，实得 ${items.length} 段`);
     }
 
     run.check(page.errors.length === 0, `页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
