@@ -23,7 +23,7 @@
 //   scope-closed      仓内跟踪的文本文件必须登记在扫描范围或排除清单里，新增的用户面文档不会悄悄漏扫
 //   scope-parse       扫描范围里的 JSON / JS 词条文件读不出来，就没法按字符串值扫描，直接判红
 //   scope-data        范围表 docs/wording-scope.json 自己的形状：没有未知字段、路径不重复、同一路径不既在扫描范围又在排除清单、
-//                     排除清单每组写明理由、核心用户面文件（两份 README、中文用户指南、硬规则词条）不得挪出扫描范围、
+//                     排除清单每组写明理由、核心用户面文件（REQUIRED_SCOPE 那张清单）不得挪出扫描范围、
 //                     排除清单不得盖住词条目录 web/i18n/（它下面的 .js 一律扫，用引号与否定放行合法的反例）
 //
 // 扫描范围与排除清单是数据，放在 docs/wording-scope.json，不放在本文件里：本文件在基础设施路径之内，
@@ -83,10 +83,8 @@ export const SCOPE_FILE = "docs/wording-scope.json";
 
 /**
  * 核心用户面文件（底线）：仓里已经存在的所有公开用户面文档——两份 README、更新日志、安全策略、贡献指南、安装说明、
- * 中文用户指南与硬规则词条。任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，这是它的底线）。
- * 以实际存在为准：英文版用户指南 docs/USER_GUIDE.md、docs/DAW_COMPATIBILITY.md、docs/KNOWN_ISSUES.md 现在都不存在，
- * 它们落地的同一个 PR 要把路径加进这张清单（范围表里已经先登记了它们的路径，文件一出现就被扫；
- * 加进这里是为了此后不许挪出去）。
+ * 中英两份用户指南、宿主兼容性、已知问题与硬规则词条。任何改动都不许把它们挪出扫描范围（范围表不在基础设施清单里，
+ * 这是它的底线）。以实际存在为准：以后再新增面向用户的公开文档，落地的同一个 PR 要把路径加进这张清单。
  */
 export const REQUIRED_SCOPE = [
     "README.md",
@@ -95,7 +93,10 @@ export const REQUIRED_SCOPE = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "docs/INSTALL.md",
+    "docs/USER_GUIDE.md",
     "docs/USER_GUIDE.zh-CN.md",
+    "docs/DAW_COMPATIBILITY.md",
+    "docs/KNOWN_ISSUES.md",
     "docs/hard-rules.i18n.json",
 ];
 
@@ -995,8 +996,23 @@ export async function selfTest() {
         edited((t) => t.scope.push("docs/*.md")),
         "通配符",
     );
-    // 底线清单里的每一个文件：挪出 scope 判红（单纯删掉，或者挪进排除清单，两种写法都拦）
-    for (const required of REQUIRED_SCOPE) {
+    // 底线清单里的每一个文件：挪出 scope 判红（单纯删掉，或者挪进排除清单，两种写法都拦）。
+    // 遍历的是这里逐字写出的期望清单，不是 REQUIRED_SCOPE 本身：从 REQUIRED_SCOPE 里去掉任何一份，对应的坏样例就变红，
+    // 而不是随着遍历对象一起消失
+    const CORE_FILES = [
+        "README.md",
+        "README.zh-CN.md",
+        "CHANGELOG.md",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        "docs/INSTALL.md",
+        "docs/USER_GUIDE.md",
+        "docs/USER_GUIDE.zh-CN.md",
+        "docs/DAW_COMPATIBILITY.md",
+        "docs/KNOWN_ISSUES.md",
+        "docs/hard-rules.i18n.json",
+    ];
+    for (const required of CORE_FILES) {
         badTable(
             `核心用户面文件 ${required} 被挪出 scope`,
             edited((t) => (t.scope = t.scope.filter((p) => p !== required))),
@@ -1012,18 +1028,9 @@ export async function selfTest() {
         );
     }
     cases.push({
-        label: "核心用户面文件清单覆盖仓里已有的公开用户面文档（两份 README、更新日志、安全策略、贡献指南、安装说明、中文用户指南、硬规则词条）",
+        label: "核心用户面文件清单覆盖仓里已有的公开用户面文档（两份 README、更新日志、安全策略、贡献指南、安装说明、中英用户指南、宿主兼容性、已知问题、硬规则词条）",
         bad: false,
-        passed: [
-            "README.md",
-            "README.zh-CN.md",
-            "CHANGELOG.md",
-            "SECURITY.md",
-            "CONTRIBUTING.md",
-            "docs/INSTALL.md",
-            "docs/USER_GUIDE.zh-CN.md",
-            "docs/hard-rules.i18n.json",
-        ].every((p) => REQUIRED_SCOPE.includes(p)),
+        passed: CORE_FILES.every((p) => REQUIRED_SCOPE.includes(p)),
         expect: [],
     });
     badTable(
