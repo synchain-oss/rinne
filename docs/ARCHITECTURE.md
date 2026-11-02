@@ -2,12 +2,37 @@
 
 ## Summary (EN)
 
-How Rinne is layered, which thread does what, how the return path is protected, and the nine safety invariants
-with the tests that hold each one. The safety chain and state machine live in `src/core/engine/SafetyMachine.h`;
+A one-page overview, how Rinne is layered, which thread does what, how the return path is protected, and the nine
+safety invariants with the tests that hold each one. The safety chain and state machine live in `src/core/engine/SafetyMachine.h`;
 the rationale is in [ADR-0003](adr/0003-safety-model.md). Weakening any invariant is a release blocker.
 
 本文是分层、线程模型、回送安全与九条安全不变量的真源。每条不变量都对应测试，测试名写在第 6 节；
 削弱其中任何一条都按红旗处理。设计取舍见 [ADR-0003](adr/0003-safety-model.md)。
+
+## 0. 总览
+
+```text
+一条通道的插入链（宿主的音频线程逐块调用每个插件）
+
+ 干声 -> [Rinne Input] -> 环内插件 ... -> [Rinne Output] -> 其余插件 / 推子 / 发送
+           ^   |                              |
+           |   | 读回送                       | 写入环
+           |   v                              v
+           | 回送链 ①-⑨ + 安全状态机    +------------------------+
+           +----------------------------| 命名共享内存           |
+             读头落后写头 D 个样本      | 环（样本流）+ 标签     |
+                                        | 组 A-H、心跳、状态     |
+                                        +------------------------+
+
+ 分层  rinne_core（IPC、环路、DSP、安全状态机、state；不含 JUCE）
+         <- rinne_plugin_common（WebView 宿主、桥、Fallback 面板）
+         <- src/input、src/output（JUCE 外壳，只做映射）
+ 线程  音频线程读环、跑回送链、写环；消息线程管参数、state、配对心跳与界面桥
+ 配置  唯一真源是 Input 的 state；Output 只有组与配对
+```
+
+Rinne Input 在第一格，混合干声与回送；Rinne Output 在环内最后一格，把走到这里的信号写进环。两者只通过共享内存交换
+样本和少量状态，不经过宿主。后面几节按这张图从外到内展开。
 
 ## 1. 分层
 
@@ -148,12 +173,12 @@ the rationale is in [ADR-0003](adr/0003-safety-model.md). Weakening any invarian
 
 | # | 不变量 | 守住它的测试（Catch2 用例名） |
 | --- | --- | --- |
-| 1 | 任何失败只会让回送变成 0，干声照常 | `every failure leaves the return at exactly zero`；`a non-finite value produced inside the Input trips immediately`；`panic fades out in 10 ms, asks for one flush, and stays latched`；`losing the pairing fades out in 10 ms; re-pairing fades in as first_pair`；`an unprepared machine gives zero gain`。安全链不碰干声（由引擎相加）；干声逐位不变在引擎这一层由 `tests/core/engine/test_input_wiring.cpp` 的逐位直通用例覆盖（含 −0.0 与 NaN 载荷），外壳用例 `stereo audio passes through bit for bit at every block size` 在壳调用引擎之后才覆盖整条处理（现在它只测外壳） |
-| 2 | 永不读旧数据或别名数据 | `panic fades out in 10 ms, asks for one flush, and stays latched`（跳闸后清空延迟线）；读位下界与撕裂判定的用例随环路层与 IPC 层的代码一起入库，届时补进这一格 |
+| 1 | 任何失败只会让回送变成 0，干声照常 | `every failure leaves the return at exactly zero`；`a non-finite value produced inside the Input trips immediately`；`panic fades out in 10 ms, asks for one flush, and stays latched`；`losing the pairing fades out in 10 ms; re-pairing fades in as first_pair`；`an unprepared machine gives zero gain`。安全链不碰干声（由引擎相加）；干声逐位不变在引擎这一层由 `tests/core/engine/test_input_wiring.cpp` 的逐位直通用例覆盖（含 −0.0 与 NaN 载荷）；壳调用引擎之后的整条处理由 `invariant 7: with feedback at 0 a paired Input passes its input through bit for bit`（`tests/host/wiring/test_wiring_audio.cpp`）覆盖 |
+| 2 | 永不读旧数据或别名数据 | `panic fades out in 10 ms, asks for one flush, and stays latched`（跳闸后清空延迟线）；`a copy raced by an overwriting write reports the overwritten frames through validFrom`（被新一圈覆盖的帧不算有效）；`读头的有效区间：交叉淡化里新读头的 validFrom 之前读成 0，且切块不改变结果`（读头只读自己的有效区间）；`a writer that wakes after its chunk was reclaimed loses the head`（醒来的旧写方丢掉写头）；`a torn label read is always rejected or self-consistent` 与 `snapshot: a label counts only when two reads agree, and a torn read keeps the last one until the slot changes hands`（撕裂的标签不算数）；`plugin_host s24: after a project reload the new Input restores its state and never reads the old ring content`（重载工程后不读旧环内容） |
 | 3 | 回送有硬上界：\|ret\| < 1.0；限制器开时 ≤ 上限 | `return stays below 1.0 and within the ceiling for random and extreme input`；`a million parameter jumps never make the chain diverge`；`soft clip stays finite and strictly below 1.0f at the extremes`；`soft clip never expands, is odd and monotonic over a dense sweep`；`limiter output never exceeds the ceiling, bit for bit` |
 | 4 | 默认安全：反馈默认 0；新配对、换写方、载入预设、恢复之后，都从首个有效读样本起 500 ms 淡入 | `safety controls default to the safe settings`；`a new instance stays silent until paired, then fades in over 500 ms from the first valid sample`；`entering a fade-in from RUN ramps down over 10 ms before the 500 ms ramp, without a step`；`a fade-in after the ramp-down still waits for the first valid read sample`；`recover is refused during the 1.5 s cooldown and never queued` |
-| 5 | 音频线程不加锁、不分配、不做 I/O、不读墙钟 | `test_safety_chain.cpp` 开头的静态断言（安全链可平凡析构、不持有堆内存，处理函数 noexcept）与 `Meters.h` 的无锁断言。回调内零分配的运行时检查随接线补：外壳用例 `stereo audio passes through bit for bit at every block size` 在壳调用引擎之后才覆盖安全链 |
+| 5 | 音频线程不加锁、不分配、不做 I/O、不读墙钟 | `test_safety_chain.cpp` 开头的静态断言（安全链可平凡析构、不持有堆内存，处理函数 noexcept）与 `Meters.h` 的无锁断言；回调内零分配由运行时检查守住：`the wired audio callbacks neither allocate nor free while paired, bypassed or past the declared length`（接好线的两个回调，用 `tests/host/shell/` 的分配计数器）与 `rig L3-03 音频线程不分配：一个周期的两端 process 与中间链在各种块上都不碰堆`；计数器本身有自检用例 `allocation counter sees operator new in all its forms` 与 `rig 分配计数器自检：计数开着时 new 一次就数得到`。I/O 与读墙钟没有逐条运行时用例，靠第 2 节的规则与评审 |
 | 6 | 两端向宿主上报的延迟恒为 0 | `latency is always zero` |
-| 7 | 参数恒定时，输出与宿主怎么切块逐位无关 | `output and state transitions do not depend on how the host splits blocks`（安全链这一层）；引擎这一层由 `tests/core/engine/test_input_wiring.cpp` 的不变量 7 用例覆盖（含跨 8192 与 32768 的块）；壳调用引擎之后由外壳用例 `stereo audio passes through bit for bit at every block size` 覆盖整条处理 |
-| 8 | Output 永不改动宿主 buffer（逐位直通） | `stereo audio passes through bit for bit at every block size`；`mono audio passes through bit for bit at every block size` |
-| 9 | 环头与标签头只由该槽的属主写 | 由 IPC 层的测试守住，随该层代码入库时补进这一格 |
+| 7 | 参数恒定时，输出与宿主怎么切块逐位无关 | `output and state transitions do not depend on how the host splits blocks`（安全链这一层）；引擎这一层由 `tests/core/engine/test_input_wiring.cpp` 的不变量 7 用例覆盖（含跨 8192 与 32768 的块）；壳调用引擎之后由 `invariant 7: with constant parameters the Input output does not depend on how the host splits blocks`（`tests/host/wiring/test_wiring_audio.cpp`）覆盖整条处理 |
+| 8 | Output 永不改动宿主 buffer（逐位直通） | `stereo audio passes through bit for bit at every block size`；`mono audio passes through bit for bit at every block size`（外壳）；`invariant 8: the Output never changes the host buffer, negative zero and NaN payloads included`（接好线的 Output） |
+| 9 | 环头与标签头只由该槽的属主写 | `two output peers elect exactly one owner`；`two input peers elect exactly one owner`（同一槽只选出一个属主）；`a takeover is noticed by the per-tick self-check and the old owner stops writing`；`a takeover starts the new owner's bit at one and the old owner never writes it again`（接管后旧属主不再写）；`a preempted output's late writer publish is repaired on the new owner's next heartbeat`（被抢占的旧属主迟到的发布由新属主修复）；`the owner writes its label, repairs a dead writer's odd sequence, and restores a foreign payload`（标签由属主写）；`BoundBlock leases both segments and checks the owner word` 与 `a block whose slot owner word was changed by someone else hands the engine no segment`（属主字被改，音频线程拿不到段） |
