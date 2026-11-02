@@ -10,6 +10,7 @@
 #   Get-ReaperDefaultCfgSnapshot / Compare-ReaperDefaultCfgSnapshot
 #                              只读地取 %APPDATA%\REAPER 下全部条目的大小与修改时间，前后比较
 #   Get-ReaperFileIdentity     目录的文件身份（卷序列号 + 文件 ID）：路径写法再怎么绕，指到同一个目录身份就相同
+#   Get-ReaperSystemVst3Dirs   REAPER 自己总会补进 vstpath64 的两个系统 VST3 目录（reaper.ini 里的写法）
 #   Find-ReaperVariableCaseCollisions / Find-ReaperControlChars / Test-ReaperScriptLint
 #                              变量名不得只靠大小写区分（PowerShell 变量名不分大小写，$c 会盖掉 $C）；脚本里不得夹不可见的控制字符；
 #                              字典的 .Keys / .Values 不当属性读（会被同名条目遮住）
@@ -57,6 +58,10 @@ function Stop-Refuse([string]$Why) { throw [System.InvalidOperationException]::n
 
 # 路径指到的目录（或文件）的文件身份字符串；路径不存在返回 $null；存在却打不开返回 'ERROR:<错误码>'（调用方要当作「证明不了」处理）。
 function Get-ReaperFileIdentity([string]$Path) { [RinneReaperFileId]::Get($Path) }
+
+# REAPER 自己总会补进 vstpath64 的两个系统 VST3 目录，写成它在 reaper.ini 里的写法（环境变量不展开，写成别的写法它认不出，会再补一份排在最后）。
+# 放在这里是因为第二个目录的写法里有 APPDATA 字样，而全仓只有 Guard 与自测可以提到它（Test-ReaperScriptLint）；这里只是目录名，不读也不写那个目录。
+function Get-ReaperSystemVst3Dirs { , @('%COMMONPROGRAMFILES%\VST3', '%LOCALAPPDATA%\Programs\Common\VST3') }
 
 # 逐级解析 junction 与符号链接，返回真实路径；路径不存在的部分照字面接上。
 function Resolve-ReaperRealPath([string]$Path, [int]$Depth = 0) {
@@ -329,4 +334,4 @@ function Test-ReaperScriptLint {
 
 Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Resolve-ReaperRealPath, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
     Get-ReaperCfgArgument, Set-ReaperIniText, Set-ReaperIniValue, Get-ReaperDefaultCfgDir, Get-ReaperDefaultCfgSnapshot, Compare-ReaperDefaultCfgSnapshot,
-    Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint
+    Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint, Get-ReaperSystemVst3Dirs

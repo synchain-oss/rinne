@@ -486,6 +486,153 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     $clearAt = @($selfCalls | Where-Object { $_.Name -eq 'Clear-ReaperSelftestSubst' } | ForEach-Object { $_.At })
     $makeAt = @($selfCalls | Where-Object { $_.Name -eq 'New-RinneTempDir' } | ForEach-Object { $_.At })
     & $add '接线：自测入口在建 scratch 目录之前先清 subst 残留' $false ($clearAt.Count -eq 1 -and $makeAt.Count -eq 1 -and $clearAt[0] -lt $makeAt[0])
+    # 加载来源 1：vstpath64 的新值（纯函数，表驱动）。REAPER 对同名的 VST3 包只留扫描顺序里最后的那个，私有目录必须排在最后，系统 VST3 目录显式写在它前面
+    $sysDirs = '%COMMONPROGRAMFILES%\VST3;%LOCALAPPDATA%\Programs\Common\VST3'
+    $privateDir = 'C:\cfg\plugins'
+    $commonExpanded = [Environment]::ExpandEnvironmentVariables('%COMMONPROGRAMFILES%') + '\VST3'
+    $pathTable = @(
+        @{ Name = '没有 vstpath64 这一行（当前值为空）'; Current = ''; Want = "$sysDirs;$privateDir" }
+        @{ Name = '只有私有目录'; Current = $privateDir; Want = "$sysDirs;$privateDir" }
+        @{ Name = '已经是新顺序（重复安装）原样不动'; Current = "$sysDirs;$privateDir"; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录大小写写法不同，换成给定的写法并排到最后'; Current = "c:\CFG\Plugins;$sysDirs"; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录带结尾反斜杠'; Current = "$privateDir\;$sysDirs"; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录用正斜杠并带结尾斜杠'; Current = 'C:/cfg/plugins/'; Want = "$sysDirs;$privateDir" }
+        @{ Name = '私有目录夹在两个系统目录中间'; Current = '%COMMONPROGRAMFILES%\VST3;C:\cfg\plugins;%LOCALAPPDATA%\Programs\Common\VST3'; Want = "$sysDirs;$privateDir" }
+        @{ Name = '别的目录原样保留、相对顺序不变'; Current = "D:\mine;$privateDir;E:\other"; Want = "D:\mine;E:\other;$sysDirs;$privateDir" }
+        @{ Name = '系统目录已按展开后的写法写过，不再追加另一种写法'; Current = "$commonExpanded;$privateDir"; Want = "$commonExpanded;%LOCALAPPDATA%\Programs\Common\VST3;$privateDir" }
+        @{ Name = '重复项与空段只留一份'; Current = "D:\mine;;d:\MINE\;$privateDir;"; Want = "D:\mine;$sysDirs;$privateDir" }
+    )
+    foreach ($tableRow in $pathTable) {
+        $pathGot = Get-ReaperPluginPathValue -Current $tableRow.Current -Private $privateDir
+        & $add "vstpath64：$($tableRow.Name)" $false ($pathGot -ceq $tableRow.Want)
+        & $add "vstpath64：再算一遍结果不变，最后一段是私有目录、私有目录只出现一次（$($tableRow.Name)）" $false (
+            ((Get-ReaperPluginPathValue -Current $pathGot -Private $privateDir) -ceq $pathGot) -and ($pathGot.Split(';')[-1] -ceq $privateDir) -and (@($pathGot.Split(';') | Where-Object { $_ -ieq $privateDir }).Count -eq 1))
+    }
+    $oldLayout = Get-ReaperPluginPathValue -Current "$privateDir;$sysDirs" -Private $privateDir
+    & $add 'vstpath64：旧写法（私有目录排在最前）必须被改写，不能原样放行' $true ($oldLayout -cne "$privateDir;$sysDirs" -and $oldLayout.Split(';')[0] -cne $privateDir)
+
+    # 加载来源 2：被测的 .vst3 模块是不是都从私有目录里这次复制进去的那份加载的。纯函数，同路径比较与 sha256 用注入的替身
+    $inPath = 'C:\cfg\plugins\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    $outPath = 'C:\cfg\plugins\Rinne Output.vst3\Contents\x86_64-win\Rinne Output.vst3'
+    $sysInPath = 'C:\Program Files\Common Files\VST3\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    $verdictWant = @{ 'Rinne Input.vst3' = @{ Path = $inPath; Sha256 = ('a' * 64) }; 'Rinne Output.vst3' = @{ Path = $outPath; Sha256 = ('b' * 64) } }
+    $liveHashes = @{ $inPath = ('a' * 64); $outPath = ('b' * 64) }
+    $sameFake = { param($first, $second) [string]::Equals($first, $second, [StringComparison]::OrdinalIgnoreCase) }
+    $hashFake = { param($file) $liveHashes.ContainsKey($file) ? $liveHashes[$file] : $null }.GetNewClosure()
+    $hashDrifted = { param($file) 'c' * 64 }
+    $hashUnreadable = { param($file) $null }
+    $modVerdict = { param($seen, $scans = 3, $hashOf = $hashFake, $want = $verdictWant) Get-ReaperModuleVerdict -Expected $want -Seen $seen -Scans $scans -SameFile $sameFake -HashOf $hashOf }
+    $seenGood = @{ 'Rinne Input.vst3' = @($inPath); 'Rinne Output.vst3' = @($outPath) }
+    $good = & $modVerdict $seenGood
+    & $add '加载来源：两个插件都只从私有目录加载、sha256 对得上才是 Proven，没有原因' $false (
+        $good.Verdict -ceq 'Proven' -and $good.Reasons.Count -eq 0 -and $good.Binaries['Rinne Input.vst3'].State -ceq 'Private' -and $good.Binaries['Rinne Output.vst3'].State -ceq 'Private')
+    & $add '加载来源：路径写法只差大小写（同一个文件）仍是 Proven，用同文件判定而不是比字符串' $false ((& $modVerdict @{ 'Rinne Input.vst3' = @($inPath.ToUpperInvariant()); 'Rinne Output.vst3' = @($outPath) }).Verdict -ceq 'Proven')
+    $foreign = & $modVerdict @{ 'Rinne Input.vst3' = @($sysInPath); 'Rinne Output.vst3' = @($outPath) }
+    & $add '加载来源：Input 是从系统 VST3 目录加载的同名模块，判 Foreign 并点名' $true (
+        $foreign.Verdict -ceq 'Foreign' -and $foreign.Binaries['Rinne Input.vst3'].State -ceq 'Foreign' -and ($foreign.Reasons -match 'Rinne Input.vst3 从被测副本以外'))
+    & $add '加载来源：私有副本也见到了、但同名的别处模块同样加载过，仍判 Foreign' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @($inPath, $sysInPath); 'Rinne Output.vst3' = @($outPath) }).Verdict -ceq 'Foreign')
+    $unseen = & $modVerdict @{}
+    & $add '加载来源：一个被测模块都没见到，判 Unseen 并点名两个' $true ($unseen.Verdict -ceq 'Unseen' -and @($unseen.Reasons -match '没有在进程的模块列表里见到').Count -eq 2)
+    & $add '加载来源：只见到 Input 没见到 Output，判 Unseen' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @($inPath) }).Verdict -ceq 'Unseen')
+    & $add '加载来源：见到的是别的模块（同名以外的文件）不算见到被测模块，判 Unseen' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @(); 'Rinne Output.vst3' = @() }).Verdict -ceq 'Unseen')
+    $drifted = & $modVerdict $seenGood 3 $hashDrifted
+    & $add '加载来源：路径对、但文件现在的 sha256 与复制时不同，判 Changed' $true ($drifted.Verdict -ceq 'Changed' -and $drifted.Binaries['Rinne Input.vst3'].State -ceq 'Changed' -and ($drifted.Reasons -match 'sha256'))
+    & $add '加载来源：路径对、但文件读不出来（算不出 sha256），判 Changed，不当作对得上' $true ((& $modVerdict $seenGood 3 $hashUnreadable).Verdict -ceq 'Changed')
+    $unreadable = & $modVerdict $seenGood 0
+    & $add '加载来源：一次也没读到模块列表（Scans=0）判 Unreadable，即便 Seen 看着是对的' $true ($unreadable.Verdict -ceq 'Unreadable' -and ($unreadable.Reasons -match '一次也没读到'))
+    & $add '加载来源：没有被测副本的清单判 NoExpected，不判 Proven' $true ((& $modVerdict @{} 3 $hashFake @{}).Verdict -ceq 'NoExpected')
+    & $add '加载来源：Foreign 排在 Unseen 之前（一个别处加载、一个没见到，整体判 Foreign）' $true ((& $modVerdict @{ 'Rinne Input.vst3' = @($sysInPath) }).Verdict -ceq 'Foreign')
+
+    # 同一个文件的判定与 sha256 用真文件：路径只差大小写、硬链接是同一个文件，复制出来的另一份不是
+    $sameDir = Join-Path $Tmp 'same-file'
+    $null = New-Item -ItemType Directory -Path $sameDir
+    $fileA = Join-Path $sameDir 'a.bin'; $fileCopy = Join-Path $sameDir 'copy.bin'; $fileLink = Join-Path $sameDir 'link.bin'
+    [IO.File]::WriteAllText($fileA, 'same bytes')
+    Copy-Item -LiteralPath $fileA -Destination $fileCopy
+    $null = New-Item -ItemType HardLink -Path $fileLink -Target $fileA
+    & $add '同一个文件：路径只差大小写是同一个' $false (Test-ReaperSameFile $fileA $fileA.ToUpperInvariant())
+    & $add '同一个文件：硬链接指向同一个文件' $false (Test-ReaperSameFile $fileA $fileLink)
+    & $add '同一个文件：内容相同的另一份拷贝不是同一个' $true (-not (Test-ReaperSameFile $fileA $fileCopy))
+    & $add '同一个文件：有一边不存在、或为空，不算同一个' $true (-not (Test-ReaperSameFile $fileA (Join-Path $sameDir 'nope.bin')) -and -not (Test-ReaperSameFile $fileA '') -and -not (Test-ReaperSameFile $null $fileA))
+    $goneFile = Join-Path $sameDir 'gone.bin'
+    & $add '同一个文件：文件已经不存在时（读不出文件身份），完整路径只差大小写仍认作同一个，差一个字符不认' $false ((Test-ReaperSameFile $goneFile $goneFile.ToUpperInvariant()) -and -not (Test-ReaperSameFile $goneFile ($goneFile + 'x')))
+    & $add 'sha256：与 Get-FileHash 一致（小写），读不出的文件返回 $null' $false (
+        ((Get-ReaperFileSha256 $fileA) -ceq (Get-FileHash -LiteralPath $fileA -Algorithm SHA256).Hash.ToLowerInvariant()) -and $null -eq (Get-ReaperFileSha256 (Join-Path $sameDir 'nope.bin')))
+
+    # 结果里写的模块位置：私有目录、系统 VST3 目录用占位前缀，别处只留文件名，盘符路径与用户名目录不进结果
+    $shownPlugins = Join-Path $Tmp 'shown-plugins'
+    $shownLeaf = 'Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    & $add '模块位置：私有插件目录下的写成 <cfg>\plugins\…' $false ((ConvertTo-ReaperModuleShown (Join-Path $shownPlugins $shownLeaf) $shownPlugins) -ceq "<cfg>\plugins\$shownLeaf")
+    & $add '模块位置：系统 VST3 目录下的写成 <CommonProgramFiles>\…' $false ((ConvertTo-ReaperModuleShown (Join-Path $env:CommonProgramFiles "VST3\$shownLeaf") $shownPlugins) -ceq "<CommonProgramFiles>\VST3\$shownLeaf")
+    $localRoot = [Environment]::GetFolderPath('LocalApplicationData')
+    & $add '模块位置：本机用户的 VST3 目录下的写成 <LocalProfile>\…，不带用户名' $false ((ConvertTo-ReaperModuleShown (Join-Path $localRoot "Programs\Common\VST3\$shownLeaf") $shownPlugins) -ceq "<LocalProfile>\Programs\Common\VST3\$shownLeaf")
+    $elsewhere = ConvertTo-ReaperModuleShown 'D:\work\someone\build\Rinne Input.vst3' $shownPlugins
+    & $add '模块位置：别处的只留文件名，不留盘符路径与用户名' $true ($elsewhere -ceq '<其他目录>\Rinne Input.vst3' -and $elsewhere -notmatch 'someone|D:')
+
+    # 场景处理完后核对加载来源（Add-ReaperModuleEvidence）：用真文件，路径与 sha256 都按真的算
+    $evPlugins = Join-Path $Tmp 'ev-plugins'
+    $evFiles = @{}
+    foreach ($evLeaf in 'Rinne Input.vst3', 'Rinne Output.vst3') {
+        $evFile = Join-Path $evPlugins (Join-Path $evLeaf "Contents\x86_64-win\$evLeaf")
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $evFile)
+        [IO.File]::WriteAllText($evFile, "binary of $evLeaf")
+        $evFiles[$evLeaf] = @{ Path = $evFile; Sha256 = (Get-FileHash -LiteralPath $evFile -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $evElsewhere = Join-Path $Tmp 'ev-elsewhere\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
+    $evSeenGood = @{ 'Rinne Input.vst3' = @($evFiles['Rinne Input.vst3'].Path); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }
+    $evLaunch = { param($seen, $scans = 3, $loads = $true, $status = 'Exited') [pscustomobject]@{ Label = 'ev'; LoadsPlugins = $loads; Status = $status; Modules = $seen; ModuleScans = $scans } }
+    $evRun = {
+        param($launches, $status = 'PASS', $from = 0, $facts = $null, $installed = $evFiles)
+        $evLog = [Collections.Generic.List[object]]::new()
+        foreach ($oneLaunch in @($launches)) { $evLog.Add($oneLaunch) }
+        $evOutcome = [pscustomobject]@{ Status = $status; Detail = '场景自己的说明' }
+        if ($facts) { $evOutcome | Add-Member -NotePropertyName Facts -NotePropertyValue $facts }
+        Add-ReaperModuleEvidence -Ctx @{ Installed = $installed; PluginsDir = $evPlugins; LaunchLog = $evLog } -Outcome $evOutcome -From $from
+    }
+    $evGood = & $evRun (& $evLaunch $evSeenGood)
+    & $add '加载来源核对：来源对得上，场景的 PASS 原样保留，说明不改，证据写进 Facts.modules' $false (
+        $evGood.Status -ceq 'PASS' -and $evGood.Detail -ceq '场景自己的说明' -and $evGood.Facts.modules.Count -eq 1 -and $evGood.Facts.modules[0].verdict -ceq 'Proven' -and
+        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].state -ceq 'Private' -and $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].sha256 -ceq $evFiles['Rinne Input.vst3'].Sha256.Substring(0, 12))
+    & $add '加载来源核对：证据里的位置是 <cfg>\plugins\…，没有盘符路径' $false (
+        $evGood.Facts.modules[0].binaries['Rinne Input.vst3'].loaded[0] -like '<cfg>\plugins\Rinne Input.vst3\*' -and (ConvertTo-Json $evGood.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\')
+    $evForeign = & $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) })
+    & $add '加载来源核对：Input 是别处的同名模块，场景的 PASS 改判 INCOMPLETE，原因点名，场景自己的说明保留' $true (
+        $evForeign.Status -ceq 'INCOMPLETE' -and $evForeign.Detail -match '插件加载来源没核实' -and $evForeign.Detail -match '被测副本以外' -and $evForeign.Detail -match '场景自己的说明' -and $evForeign.Facts.modules[0].verdict -ceq 'Foreign')
+    & $add '加载来源核对：别处的同名模块在结果里不带盘符路径' $false ((ConvertTo-Json $evForeign.Facts -Depth 8) -notmatch '[A-Za-z]:\\\\')
+    & $add '加载来源核对：场景的 FAIL 同样改判 INCOMPLETE（测的可能是另一份构建，红的原因不一定在被测副本上）' $true ((& $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }) 'FAIL').Status -ceq 'INCOMPLETE')
+    $evUnseen = & $evRun (& $evLaunch @{})
+    & $add '加载来源核对：一个被测模块都没见到，场景的 PASS 改判 INCOMPLETE' $true ($evUnseen.Status -ceq 'INCOMPLETE' -and $evUnseen.Detail -match '没有在进程的模块列表里见到' -and $evUnseen.Facts.modules[0].verdict -ceq 'Unseen')
+    $evWrongSha = @{ 'Rinne Input.vst3' = @{ Path = $evFiles['Rinne Input.vst3'].Path; Sha256 = ('f' * 64) }; 'Rinne Output.vst3' = $evFiles['Rinne Output.vst3'] }
+    $evChanged = & $evRun (& $evLaunch $evSeenGood) 'PASS' 0 $null $evWrongSha
+    & $add '加载来源核对：路径对、但 sha256 与复制时算的不同，场景的 PASS 改判 INCOMPLETE' $true ($evChanged.Status -ceq 'INCOMPLETE' -and $evChanged.Facts.modules[0].verdict -ceq 'Changed')
+    & $add '加载来源核对：读不到进程的模块列表（ModuleScans=0），场景的 PASS 改判 INCOMPLETE' $true ((& $evRun (& $evLaunch $evSeenGood 0)).Status -ceq 'INCOMPLETE')
+    $evNoLaunch = & $evRun @()
+    & $add '加载来源核对：这个场景里没有一次会加载插件的启动被核对，场景的 PASS 改判 INCOMPLETE（没有证明）' $true ($evNoLaunch.Status -ceq 'INCOMPLETE' -and $evNoLaunch.Detail -match '没有一次会加载插件')
+    & $add '加载来源核对：只有不加载插件的启动（参照渲染）不算证明过，改判 INCOMPLETE' $true ((& $evRun (& $evLaunch @{} 0 $false)).Status -ceq 'INCOMPLETE')
+    & $add '加载来源核对：不加载插件的参照渲染在前、加载插件的启动对得上在后，场景的 PASS 保留' $false ((& $evRun @((& $evLaunch @{} 0 $false), (& $evLaunch $evSeenGood))).Status -ceq 'PASS')
+    & $add '加载来源核对：两次加载插件的启动，第二次是别处的模块，整个场景改判 INCOMPLETE' $true ((& $evRun @((& $evLaunch $evSeenGood), (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }))).Status -ceq 'INCOMPLETE')
+    & $add '加载来源核对：锁等不到（LockBusy，REAPER 没有启动）的那次不计入，不拖累其余启动的核对' $false ((& $evRun @((& $evLaunch $evSeenGood), (& $evLaunch @{} 0 $true 'LockBusy'))).Status -ceq 'PASS')
+    & $add '加载来源核对：只看本场景开始之后的启动（From），之前场景里的坏启动不连累' $false ((& $evRun @((& $evLaunch @{} 0), (& $evLaunch $evSeenGood)) 'PASS' 1).Status -ceq 'PASS')
+    $evOwn = & $evRun (& $evLaunch @{ 'Rinne Input.vst3' = @($evElsewhere); 'Rinne Output.vst3' = @($evFiles['Rinne Output.vst3'].Path) }) 'INCOMPLETE'
+    & $add '加载来源核对：场景自己已经是 INCOMPLETE 的不改它的说明（不盖掉超时、卡对话框这些自己的原因），但证据照写' $false ($evOwn.Status -ceq 'INCOMPLETE' -and $evOwn.Detail -ceq '场景自己的说明' -and $evOwn.Facts.modules[0].verdict -ceq 'Foreign')
+    $evKeep = & $evRun (& $evLaunch $evSeenGood) 'PASS' 0 ([ordered]@{ other = 1 })
+    & $add '加载来源核对：场景已有的 Facts 保留，modules 加在旁边' $false ($evKeep.Facts.other -eq 1 -and $evKeep.Facts.modules.Count -eq 1)
+    # 接线：不带插件链的参照渲染必须声明「不加载插件」（-LoadsPlugins $false），别的渲染调用不能带；否则参照渲染会被当成加载被测插件的启动，
+    # 每个渲染场景都因为「没见到被测模块」判 INCOMPLETE。看语法树里的命令调用，不比文本
+    $scenarioFile = Join-Path $script:Scripts 'Scenarios.psm1'
+    $scenarioAst = [System.Management.Automation.Language.Parser]::ParseFile($scenarioFile, [ref]$null, [ref]$null)
+    $renderCalls = @($scenarioAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Invoke-RenderProject' }, $true))
+    $referenceFn = $scenarioAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RenderReference' }, $true)
+    $loadsArgs = foreach ($call in $renderCalls) {
+        $elements = $call.CommandElements
+        for ($at = 0; $at -lt $elements.Count - 1; $at++) {
+            if ($elements[$at] -is [System.Management.Automation.Language.CommandParameterAst] -and $elements[$at].ParameterName -eq 'LoadsPlugins') {
+                [pscustomobject]@{ Value = $elements[$at + 1].Extent.Text; Inside = ($call.Extent.StartOffset -ge $referenceFn.Extent.StartOffset -and $call.Extent.EndOffset -le $referenceFn.Extent.EndOffset) }
+            }
+        }
+    }
+    & $add '接线：参照渲染（Get-RenderReference）的 Invoke-RenderProject 带 -LoadsPlugins $false，且只有这一处声明不加载插件' $false (
+        $renderCalls.Count -ge 3 -and @($loadsArgs).Count -eq 1 -and @($loadsArgs)[0].Value -ceq '$false' -and @($loadsArgs)[0].Inside)
     $cases
 }
 

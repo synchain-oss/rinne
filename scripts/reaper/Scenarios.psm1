@@ -4,6 +4,9 @@
 # 每个场景返回 @{ Status; Detail }：PASS / FAIL / INCOMPLETE。INCOMPLETE 是「没能得出结论」（超时、被杀、卡对话框、
 # 没产出文件、锁等不到），任何时候都不当 PASS。判据不通过才是 FAIL。
 # 场景种类登记在 $script:Handlers，scenarios.json 里每个条目的 kind 选一个；以后加种类只在这里加一项。
+# 加载来源：每次会加载插件的 REAPER 启动都读进程实际加载的模块（Invoke-ReaperLaunch 记进 Ctx.LaunchLog），场景处理完后 Add-ReaperModuleEvidence
+# 核对：被测的每个 .vst3 模块都得是私有目录里这次复制进去的那份、sha256 对得上；核不上（别处的同名模块、没见到、读不到模块列表）这个场景就判 INCOMPLETE，
+# 不论场景自己的判据绿不绿，因为测的可能是另一份构建。
 #   render     离线或 1x 渲染，与同参数无插件渲染逐位对拍
 #   probe      设备块长 / 采样率读回，两个插件上报延迟为 0
 #   instances  反复加减实例，句柄与内存增长有上界
@@ -47,12 +50,16 @@ function Invoke-Native {
 
 function New-ReaperContext {
     param([Parameter(Mandatory)][string]$ReaperExe, [Parameter(Mandatory)][string]$NullTest, [Parameter(Mandatory)][string]$WorkDir,
-          [Parameter(Mandatory)][string]$Driver, [Parameter(Mandatory)]$Config, [double]$LockWaitSec = 1800, [string]$GuiLock = 'gui')
+          [Parameter(Mandatory)][string]$Driver, [Parameter(Mandatory)]$Config, [double]$LockWaitSec = 1800, [string]$GuiLock = 'gui',
+          [hashtable]$Installed = @{}, [string]$PluginsDir = '')
     @{
         Exe = $ReaperExe; NullTest = $NullTest; Work = $WorkDir; Driver = $Driver; Limits = $Config.limits; Signal = $Config.signal
         LockWaitSec = $LockWaitSec; Launches = 0; Signals = @{}; Refs = @{}; Files = [Collections.Generic.List[string]]::new()
         # GuiLock：起 REAPER 时持的锁，看门狗反例事后核对的也是它（同一个名字、同一套锁名前缀）
-        GuiLock = $GuiLock; Env = @{}; Launcher = $null # Env：当前场景的 env 字段；Launcher 只给自测注入
+        GuiLock = $GuiLock; Env = @{}; Launcher = $null; ModuleSampler = $null # Env：当前场景的 env 字段；Launcher、ModuleSampler 只给自测注入
+        # Installed：被测的 .vst3 模块文件名 → @{ Path; Sha256 }（Install-ReaperPlugins 复制进私有目录的那一份）；PluginsDir：私有插件目录（结果里的路径据此打码）；
+        # LaunchLog：每次启动记一条（标签、会不会加载插件、状态、进程里见到的被测模块与读到模块列表的次数），场景处理完后据此核对加载来源
+        Installed = $Installed; PluginsDir = $PluginsDir; LaunchLog = [Collections.Generic.List[object]]::new()
     }
 }
 
@@ -65,8 +72,9 @@ function Set-ReaperAudioConfig([int]$Sr, [int]$Block) {
 }
 
 # 持 gui 锁起一次 REAPER；锁等不到返回 Status = LockBusy（调用方判 INCOMPLETE，绝不无锁硬跑）。
+# LoadsPlugins：这次启动的工程会不会加载被测插件（不带插件链的参照渲染不会）。会加载的，启动期间每次轮询都读进程的模块列表，见到的被测模块记进 Ctx.LaunchLog。
 function Invoke-ReaperLaunch {
-    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs)
+    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)][hashtable]$HostArgs, [string]$Label = '', [bool]$LoadsPlugins = $true)
     $lock = Enter-RinneLock $Ctx.GuiLock -TimeoutSeconds $Ctx.LockWaitSec
     if (-not $lock) { return [pscustomobject]@{ Status = 'LockBusy'; ExitCode = $null; Seconds = 0; Modal = $null; Dismissed = @(); Windows = @(); Marks = @{} } }
     try {
@@ -75,8 +83,12 @@ function Invoke-ReaperLaunch {
         foreach ($src in @($Ctx.Env, $HostArgs['Environment'])) { if ($src) { foreach ($k in $src.get_Keys()) { $envMap[$k] = $src[$k] } } }
         $extra = @{ Environment = $envMap }
         if ($Ctx.Launcher) { $extra.Launcher = $Ctx.Launcher }
+        if ($LoadsPlugins -and $Ctx.Installed.get_Count()) { $extra.WatchModules = @($Ctx.Installed.get_Keys()) }
+        if ($Ctx.ModuleSampler) { $extra.ModuleSampler = $Ctx.ModuleSampler }
         $rest = @{} + $HostArgs; $null = $rest.Remove('Environment')
-        Invoke-ReaperHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work @rest @extra
+        $started = Invoke-ReaperHost -ReaperExe $Ctx.Exe -WorkDir $Ctx.Work @rest @extra
+        $Ctx.LaunchLog.Add([pscustomobject]@{ Label = $Label; LoadsPlugins = $LoadsPlugins; Status = $started.Status; Modules = $started.Modules; ModuleScans = $started.ModuleScans })
+        $started
     } finally { Exit-RinneLock $lock }
 }
 
@@ -123,8 +135,9 @@ function New-ReaperRun {
     @{ Project = $projectPath; Wav = $wavPath }
 }
 
-function Invoke-RenderProject($Ctx, [string]$Project, [string]$Wav) {
-    $hostRun = Invoke-ReaperLaunch -Ctx $Ctx -HostArgs @{ ReaperArgs = @('-renderproject', "`"$Project`""); TimeoutSec = $Ctx.Limits.renderTimeoutSec }
+function Invoke-RenderProject($Ctx, [string]$Project, [string]$Wav, [bool]$LoadsPlugins = $true) {
+    $hostRun = Invoke-ReaperLaunch -Ctx $Ctx -HostArgs @{ ReaperArgs = @('-renderproject', "`"$Project`""); TimeoutSec = $Ctx.Limits.renderTimeoutSec } `
+        -Label ([IO.Path]::GetFileNameWithoutExtension($Project)) -LoadsPlugins $LoadsPlugins
     $why = Get-HostFailure $hostRun
     if (-not $why -and -not (Test-Path -LiteralPath $Wav)) { $why = '渲染没有产出 wav' }
     [pscustomobject]@{ Run = $hostRun; Why = $why }
@@ -135,7 +148,7 @@ function Get-RenderReference {
     $key = "$Sr-$Mode-$Channels"
     if (-not $Ctx.Refs.ContainsKey($key)) {
         $r = New-ReaperRun -Ctx $Ctx -Name "ref-$key" -Sr $Sr -Block 512 -Mode $Mode -Channels $Channels -Chain @()
-        $res = Invoke-RenderProject $Ctx $r.Project $r.Wav
+        $res = Invoke-RenderProject $Ctx $r.Project $r.Wav -LoadsPlugins $false # 参照渲染的工程没有插件链，不加载被测插件
         $Ctx.Refs[$key] = @{ Wav = $r.Wav; Why = $res.Why }
     }
     $Ctx.Refs[$key]
@@ -169,7 +182,7 @@ function Invoke-LuaStep {
     foreach ($f in @($resultFile) + @($Watch.get_Values())) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f } }
     $Ctx.Files.Add($jobFile); $Ctx.Files.Add($resultFile); foreach ($f in $Watch.get_Values()) { $Ctx.Files.Add($f) }
     Write-ReaperText -Path $jobFile -Text (ConvertTo-ReaperLuaTable (@{ step = $Step; result = $resultFile } + $Job))
-    $hostRun = Invoke-ReaperLaunch -Ctx $Ctx -HostArgs @{
+    $hostRun = Invoke-ReaperLaunch -Ctx $Ctx -Label $Name -HostArgs @{
         ReaperArgs = @("`"$($Ctx.Driver)`""); Environment = @{ RINNE_REAPER_JOB = $jobFile }; WatchFiles = $Watch
         TimeoutSec = ($TimeoutSec -gt 0 ? $TimeoutSec : $Ctx.Limits.luaTimeoutSec); KillAfterSec = $KillAfterSec
     }
@@ -572,6 +585,48 @@ $script:Handlers = @{
 
 function Get-ReaperScenarioKinds { , @($script:Handlers.get_Keys() | Sort-Object) }
 
+# 结果里写的模块位置：私有插件目录里的写成 <cfg>\plugins\…，系统 VST3 目录写成 <CommonProgramFiles>\…、<LocalProfile>\…，别处只留文件名，不留盘符路径
+# （含用户名的目录不进结果）。
+function ConvertTo-ReaperModuleShown([string]$ModulePath, [string]$PluginsDir) {
+    $under = { param($Root, $Mark) if ($Root -and (Test-ReaperUnder $ModulePath $Root)) { $Mark + '\' + [IO.Path]::GetFullPath($ModulePath).Substring([IO.Path]::GetFullPath($Root).TrimEnd('\').Length).TrimStart('\') } }
+    $shown = (& $under $PluginsDir '<cfg>\plugins') ?? (& $under $env:CommonProgramFiles '<CommonProgramFiles>') ?? (& $under ([Environment]::GetFolderPath('LocalApplicationData')) '<LocalProfile>')
+    $shown ?? ('<其他目录>\' + [IO.Path]::GetFileName($ModulePath))
+}
+
+# 场景处理完后核对加载来源。From：这个场景开始前 Ctx.LaunchLog 的条数。只看这个场景里会加载插件的启动（锁等不到、没启动的不算）：
+# 每次启动的模块列表都要 Proven；一次都没有（没有一次会加载插件的启动被核对）同样不算证明过。核不上时：场景自己的结局是 PASS 或 FAIL，
+# 一律改判 INCOMPLETE（FAIL 也改：测的可能是另一份构建，红的原因不一定在被测副本上）；已经是 INCOMPLETE 等别的结局的不动，免得盖掉它自己的原因。
+# 不论核不核得上，每次启动的模块证据（状态、实际加载的位置、sha256 前 12 位）都写进这一格的 Facts.modules。
+function Add-ReaperModuleEvidence {
+    param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Outcome, [Parameter(Mandatory)][int]$From)
+    $launches = @($Ctx.LaunchLog | Select-Object -Skip $From | Where-Object { $_.LoadsPlugins -and $_.Status -ne 'LockBusy' })
+    $evidence = [Collections.Generic.List[object]]::new()
+    $why = [Collections.Generic.List[string]]::new()
+    foreach ($l in $launches) {
+        $v = Get-ReaperModuleVerdict -Expected $Ctx.Installed -Seen $l.Modules -Scans $l.ModuleScans
+        $bins = [ordered]@{}
+        foreach ($leaf in $v.Binaries.get_Keys()) {
+            $b = $v.Binaries[$leaf]
+            $bins[$leaf] = [ordered]@{
+                state = $b.State; loaded = @($b.Seen | ForEach-Object { ConvertTo-ReaperModuleShown $_ $Ctx.PluginsDir })
+                sha256 = ($Ctx.Installed[$leaf].Sha256).Substring(0, 12)
+            }
+        }
+        $evidence.Add([ordered]@{ launch = $l.Label; verdict = $v.Verdict; scans = $l.ModuleScans; binaries = $bins })
+        foreach ($r in $v.Reasons) { $why.Add("$($l.Label)：$r") }
+    }
+    if (-not $launches.Count) { $why.Add('这个场景里没有一次会加载插件的 REAPER 启动被核对，加载来源没有证明') }
+    $final = $Outcome.Status; $note = $Outcome.Detail
+    if ($why.Count -and $final -in 'PASS', 'FAIL') {
+        $note = "插件加载来源没核实，测的可能不是这次复制进私有目录的构建，不当结论（场景自己的结局是 $final）：$($why -join '；')；场景说明：$($Outcome.Detail)"
+        $final = 'INCOMPLETE'
+    }
+    $factMap = ($Outcome.PSObject.Properties.Name -contains 'Facts') ? $Outcome.Facts : [ordered]@{}
+    $factMap['modules'] = $evidence.ToArray()
+    $o = New-Outcome $final $note
+    $o | Add-Member -NotePropertyName Facts -NotePropertyValue $factMap -PassThru
+}
+
 function Invoke-ReaperScenario {
     param([Parameter(Mandatory)]$Ctx, [Parameter(Mandatory)]$Scenario)
     $handler = $script:Handlers[$Scenario.kind]
@@ -580,10 +635,12 @@ function Invoke-ReaperScenario {
     $Ctx.Env = @{}
     $envField = Get-Field $Scenario env $null
     if ($envField) { foreach ($p in $envField.PSObject.Properties) { $Ctx.Env[$p.Name] = ([string]$p.Value).Replace('{work}', $Ctx.Work) } }
+    $logFrom = $Ctx.LaunchLog.Count
     try { $o = & $handler $Ctx $Scenario } catch { $o = New-Outcome INCOMPLETE "场景抛错：$($_.Exception.Message -replace '\s+', ' ')" }
+    $o = Add-ReaperModuleEvidence -Ctx $Ctx -Outcome $o -From $logFrom
     $o | Add-Member -NotePropertyName Seconds -NotePropertyValue ([math]::Round($sw.Elapsed.TotalSeconds, 1)) -PassThru
 }
 
 Export-ModuleMember -Function New-Outcome, Invoke-Native, New-ReaperContext, Get-ReaperScenarioKinds, Invoke-ReaperScenario, Invoke-ReaperLaunch, Get-HostFailure, Get-CompareVerdict,
     Get-ReaperLockMutexName, Test-RinneLockFree, Test-ReaperProbeCell, Get-ReaperAnalyzerSummary,
-    ConvertTo-ReaperCompareRow, Get-ReaperCompareHead, Invoke-ReaperProbeAnalyzer
+    ConvertTo-ReaperCompareRow, Get-ReaperCompareHead, Invoke-ReaperProbeAnalyzer, Add-ReaperModuleEvidence, ConvertTo-ReaperModuleShown
