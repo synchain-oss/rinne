@@ -62,9 +62,9 @@
     }
   ],
   "frReview": {
-    "status": "pending",
-    "reviewedBy": "",
-    "reviewedZhSha256": "",
-    "approvalUrl": ""
+    "status": "reviewed",
+    "reviewedBy": "DLsnows",
+    "reviewedZhSha256": "0e3afd4f544907fc1f8dfe0f5b97a95d6419dbc06e114f8eea1c37700ac5bd89",
+    "approvalUrl": "https://github.com/synchain-oss/rinne/pull/99#issuecomment-6586139718"
   }
 }
