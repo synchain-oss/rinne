@@ -9,7 +9,7 @@ file; `{{ZIP}}` in the commands below stands for the file name of the zip you do
 macOS 版没有 Apple Developer ID 签名、未经公证，所以打开宿主之前要先多做一步：先解锁，再打开 DAW。zip 里的
 `INSTALL.txt` 由本文件渲染而成；下面命令里的 `{{ZIP}}` 指你下载的 zip 文件名。
 
-Before you start: read "Read this first" in the [user guide](USER_GUIDE.zh-CN.md#使用前必读). / 开始之前，请先读[用户指南](USER_GUIDE.zh-CN.md#使用前必读)里的「使用前必读」。
+Before you start: read "Read this first" in the [user guide](USER_GUIDE.md#read-this-first). / 开始之前，请先读[用户指南](USER_GUIDE.zh-CN.md#使用前必读)里的「使用前必读」。
 
 ## Windows
 

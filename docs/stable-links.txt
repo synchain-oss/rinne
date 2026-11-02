@@ -6,3 +6,11 @@ docs/INSTALL.md#windows
 docs/INSTALL.md#macos
 docs/USER_GUIDE.zh-CN.md
 docs/USER_GUIDE.zh-CN.md#使用前必读
+docs/USER_GUIDE.md
+docs/USER_GUIDE.md#read-this-first
+docs/USER_GUIDE.md#troubleshooting
+docs/USER_GUIDE.md#no-return-heard-five-steps
+docs/USER_GUIDE.md#map-loop-to-a-quick-control
+docs/USER_GUIDE.zh-CN.md#故障排查
+docs/USER_GUIDE.zh-CN.md#听不到回送五步排查
+docs/USER_GUIDE.zh-CN.md#把环路映射到快速控制
