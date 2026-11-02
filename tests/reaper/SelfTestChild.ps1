@@ -342,6 +342,24 @@ Write-Case '插件复制：报告里带复制进去的那一份的路径与完�
 Write-Case '插件复制：第一次全复制，内容相同第二次不动，改了的再复制' $false (@($first | Where-Object { $_.copied }).Count -eq 2 -and @($second | Where-Object { $_.copied }).Count -eq 0 -and @($third | Where-Object { $_.copied }).Count -eq 1)
 Write-Case '插件复制：私有 VST3 目录排在 vstpath64 最后，目标里只有这次的构建' $false ($iniNow -match ('(?m)^vstpath64=' + [regex]::Escape($systemDirs) + ';' + [regex]::Escape($pluginsDir) + '\r?$') -and (Get-Content -LiteralPath (Join-Path $pinned.Dir 'plugins/Rinne Input.vst3/Contents/x86_64-win/Rinne Input.vst3') -Raw).Trim() -eq 'bits-new')
 
+# ---- 扫描缓存：装插件时去掉被测插件的条目（真文件，Latin-1 字节原样往返）----
+$cacheFile = Join-Path $pinned.Dir 'reaper-vstplugins64.ini'
+$cacheNames = 'Rinne Input.vst3', 'Rinne Output.vst3'
+if (Test-Path -LiteralPath $cacheFile) { Remove-Item -LiteralPath $cacheFile }
+$noCache = Clear-ReaperScanCache -CfgDir $pinned.Dir -FileNames $cacheNames
+Write-Case '扫描缓存：缓存文件不存在时什么都不做，也不建这个文件' $false ($noCache.Removed -eq 0 -and -not (Test-Path -LiteralPath $cacheFile))
+$cacheKept = "[vstcache]`r`nOther.vst3=0102030405060708,11{FF,Caf" + [char]0xE9 + " " + [char]0xFF + "`r`n"
+$cacheStaleText = "[vstcache]`r`nRinne_Output.vst3=525EE8DD736ADD01,1{AB,Rinne Output (Synchain)`r`nOther.vst3=0102030405060708,11{FF,Caf" + [char]0xE9 + " " + [char]0xFF + "`r`nRinne_Input.vst3=BCE5AEDD736ADD01,1{AB,Rinne Input (Synchain)`r`n"
+[IO.File]::WriteAllBytes($cacheFile, [Text.Encoding]::Latin1.GetBytes($cacheStaleText))
+$cleared = Clear-ReaperScanCache -CfgDir $pinned.Dir -FileNames $cacheNames
+Write-Case '扫描缓存：留着旧时间戳的两个被测条目从文件里去掉了，别的行（含非 ASCII 字节）与 CRLF 原样，返回去掉 2 行' $true (
+    $cleared.Removed -eq 2 -and [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($cacheFile)) -ceq $cacheKept)
+(Get-Item -LiteralPath $cacheFile).LastWriteTimeUtc = [DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+$clearedAgain = Clear-ReaperScanCache -CfgDir $pinned.Dir -FileNames $cacheNames
+Write-Case '扫描缓存：没有要去掉的条目时不写文件（内容与修改时间都不变）' $false (
+    $clearedAgain.Removed -eq 0 -and [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($cacheFile)) -ceq $cacheKept -and (Get-Item -LiteralPath $cacheFile).LastWriteTimeUtc -eq [DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc))
+Remove-Item -LiteralPath $cacheFile
+
 # ---- 第二段接线：替身 REAPER 走真正的场景处理器、收日志与入口 ----
 # 替身先起一个马上退出的进程，拿它（已退出）的 pid 写两份探针日志、结果文件和导出的 wav，像一次正常结束的 REAPER；
 # 任务文件的路径从启动信息的环境变量取。分析器与 rinne_nulltest 用 .cmd 替身（吐准备好的输出）。
@@ -599,8 +617,14 @@ if ($realReaperRunning) {
         $console = (@($all | Where-Object { $_ -is [Management.Automation.InformationRecord] } | ForEach-Object { "$($_.MessageData)" }) -join "`n")
         [pscustomobject]@{ R = $r; Results = (Join-Path $results $Id); Console = $console }
     }
+    # 整轮入口装插件时去掉被测插件在扫描缓存里的条目（探针的两个包名），别的条目原样
+    $wireCache = Join-Path $CfgA 'reaper-vstplugins64.ini'
+    $wireCacheKept = "[vstcache]`nOther.vst3=1112131415161718,2{CD,Other`n"
+    [IO.File]::WriteAllBytes($wireCache, [Text.Encoding]::Latin1.GetBytes("[vstcache]`nRinne_Probe_Input.vst3=0102030405060708,1{AB,Rinne Probe Input`n" + "Other.vst3=1112131415161718,2{CD,Other`n" + "Rinne_Probe_Output.vst3=2122232425262728,3{EF,Rinne Probe Output`n"))
     $smoke1 = Invoke-WireSmoke 'clean' (New-WireSpec 'clean') '^probe-steady-48000-512$' -NoNegative
     $run1 = $smoke1.R.runs[0]
+    Write-Case '整轮入口：被测插件在扫描缓存里的条目被去掉，别的条目原样，结果里记下去掉了 2 条' $true (
+        $smoke1.R.scanCache.removedEntries -eq 2 -and $smoke1.R.scanCache.unkeyed -eq 0 -and [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($wireCache)) -ceq $wireCacheKept)
     Write-Case "整轮入口（第二段）：干净的一轮 PASS，文档目录除本轮自己的文件外没变，搬走 2 份，没留 reaper 进程（$($smoke1.R.verdict)）" $false (
         $smoke1.R.verdict -eq 'PASS' -and $run1.probe.docsListing.unchanged -and $run1.probe.moved -eq 2 -and @($run1.probe.notes).Count -eq 0 -and $run1.reaperProcessesLeft -eq 0 -and -not ($run1.PSObject.Properties.Name -contains 'stoppedBecause'))
 

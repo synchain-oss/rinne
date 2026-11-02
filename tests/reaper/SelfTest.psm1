@@ -528,6 +528,34 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     $oldLayout = Get-ReaperPluginPathValue -Current "$privateDir;$sysDirs" -Private $privateDir
     & $add 'vstpath64：旧写法（私有目录排在最前）必须被改写，不能原样放行' $true ($oldLayout -cne "$privateDir;$sysDirs" -and $oldLayout.Split(';')[0] -cne $privateDir)
 
+    # 加载来源 1b：扫描缓存里被测插件的条目要去掉。缓存里留着系统目录发布版的时间戳时，REAPER 不管 vstpath64 怎么排都用发布版（真机上见过），
+    # 而且赢一次就一直赢；所以装插件时清掉被测插件的条目，让 REAPER 重扫，由私有目录排在最后来定
+    $cacheNames = 'Rinne Input.vst3', 'Rinne Output.vst3'
+    $cacheOther = "Other.vst3=0102030405060708,11{FF,Other plugin`n"
+    $cacheStale = "[vstcache]`nRinne_Output.vst3=525EE8DD736ADD01,1668839456{AB,Rinne Output (Synchain)`n" + $cacheOther + "Rinne_Input.vst3=BCE5AEDD736ADD01,1769505170{AB,Rinne Input (Synchain)`n"
+    $cacheCut = Remove-ReaperScanCacheEntries -Text $cacheStale -FileNames $cacheNames
+    & $add '扫描缓存：键是文件名里除字母、数字、点以外的字符换成 _' $false (
+        (Get-ReaperScanCacheKey 'Rinne Input.vst3') -ceq 'Rinne_Input.vst3' -and (Get-ReaperScanCacheKey 'a-b (c).vst3') -ceq 'a_b__c_.vst3' -and $null -eq (Get-ReaperScanCacheKey ('插件' + '.vst3')))
+    & $add '扫描缓存：留着发布版时间戳的两个被测条目都被去掉，别的条目一字不动，记下去掉 2 行' $true (
+        $cacheCut.Text -ceq ("[vstcache]`n" + $cacheOther) -and $cacheCut.Removed -eq 2 -and $cacheCut.Unkeyed -eq 0)
+    & $add '扫描缓存：再清一遍不再有变化（去掉 0 行，文本原样）' $false ((Remove-ReaperScanCacheEntries -Text $cacheCut.Text -FileNames $cacheNames) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq $cacheCut.Text })
+    & $add '扫描缓存：外壳插件的子条目（键<序号=）跟着去掉，键只是前缀相同的别的文件不动' $true (
+        (Remove-ReaperScanCacheEntries -Text "[vstcache]`nRinne_Input.vst3=1,1{A,x`nRinne_Input.vst3<1=2,2{B,y`nRinne_Input.vst3.bak=3,3{C,z`nRinne_Input2.vst3=4,4{D,w`n" -FileNames $cacheNames).Text -ceq "[vstcache]`nRinne_Input.vst3.bak=3,3{C,z`nRinne_Input2.vst3=4,4{D,w`n")
+    & $add '扫描缓存：键的大小写不同也认（Windows 文件名不分大小写）' $true (
+        (Remove-ReaperScanCacheEntries -Text "[vstcache]`nrinne_input.vst3=1,1{A,x`n" -FileNames $cacheNames).Removed -eq 1)
+    & $add '扫描缓存：只动 [vstcache] 一节，别的节里同名的键不动' $true (
+        (Remove-ReaperScanCacheEntries -Text "[other]`nRinne_Input.vst3=a`n[vstcache]`nRinne_Input.vst3=1,1{A,x`n[xvst3_compat]`nRinne_Input.vst3=b`n" -FileNames $cacheNames).Text -ceq "[other]`nRinne_Input.vst3=a`n[vstcache]`n[xvst3_compat]`nRinne_Input.vst3=b`n")
+    $cacheCrlf = Remove-ReaperScanCacheEntries -Text $cacheStale.Replace("`n", "`r`n") -FileNames $cacheNames
+    & $add '扫描缓存：CRLF 换行的缓存去掉条目后仍是 CRLF，别的行不变' $true ($cacheCrlf.Text -ceq ("[vstcache]`n" + $cacheOther).Replace("`n", "`r`n") -and $cacheCrlf.Removed -eq 2)
+    & $add '扫描缓存：条目在最后一行且没有结尾换行也能去掉，前一行的换行保留' $true (
+        (Remove-ReaperScanCacheEntries -Text "[vstcache]`nOther.vst3=1,1{A,x`nRinne_Input.vst3=1,1{A,x" -FileNames $cacheNames).Text -ceq "[vstcache]`nOther.vst3=1,1{A,x`n")
+    & $add '扫描缓存：没有 [vstcache] 一节、空文本、没有文件名，都原样返回、去掉 0 行' $false (
+        ((Remove-ReaperScanCacheEntries -Text "[x]`nRinne_Input.vst3=1`n" -FileNames $cacheNames) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq "[x]`nRinne_Input.vst3=1`n" }) -and
+        ((Remove-ReaperScanCacheEntries -Text '' -FileNames $cacheNames) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq '' }) -and
+        ((Remove-ReaperScanCacheEntries -Text $cacheStale -FileNames @()) | ForEach-Object { $_.Removed -eq 0 -and $_.Text -ceq $cacheStale }))
+    $cacheWide = Remove-ReaperScanCacheEntries -Text $cacheStale -FileNames @('插件.vst3')
+    & $add '扫描缓存：文件名含非 ASCII 字符时没有已知的键，记进 Unkeyed、不猜着删' $true ($cacheWide.Unkeyed -eq 1 -and $cacheWide.Removed -eq 0 -and $cacheWide.Text -ceq $cacheStale)
+
     # 加载来源 2：被测的 .vst3 模块是不是都从私有目录里这次复制进去的那份加载的。纯函数，同路径比较与 sha256 用注入的替身
     $inPath = 'C:\cfg\plugins\Rinne Input.vst3\Contents\x86_64-win\Rinne Input.vst3'
     $outPath = 'C:\cfg\plugins\Rinne Output.vst3\Contents\x86_64-win\Rinne Output.vst3'
