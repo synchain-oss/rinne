@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 提交与 PR 的卫生门禁。四个子命令共用一套判据，commit-msg / pre-push 两个 hook 也调这里：
-//   commits         --range <A..B> | --json <PR 提交列表> [--expect <n>]  [--tier same|fork|push]
-//                   DCO、只允许 Signed-off-by 一种尾注、AI 署名、subject 格式、作者与提交者邮箱
+//   commits         --range <A..B> | --json <PR 提交列表> [--expect <n>]  [--tier same|fork|push] [--pr-author <login>]
+//                   DCO、只允许 Signed-off-by 一种尾注、AI 署名、subject 格式、作者与提交者邮箱；dependabot 的提交
+//                   只在 dependabot 开的 PR（--pr-author）或 push 档里免 subject、签名与身份规则，隐私与 AI 署名照判
 //   pr-text         标题与正文取 --title / --body-file，缺省读环境变量 PR_TITLE / PR_BODY；
 //                   [--fork --author "名字 <邮箱>" | --commits-json <PR 提交列表>]；隐私规则、AI 署名、正文末行签名
 //   branch          --head <名> [--base <名>] [--fork]；按 base 分命名规则，名字里不得有私有编号与个人针
 //   contract-guard  --base <ref> [--head <ref>] [--body-file <f>]；改到冻结契约面时，要求正文写
 //                   contract-neutral: <理由>，或同 PR 新增 docs/contract-changes/<YYYYMMDD>-<slug>.md
-//   dependabot      --json <PR 提交列表>；每个提交都是 dependabot 的（作者与提交者都对得上）时退出 0，否则 1
+//   dependabot      --json <PR 提交列表> [--tier same|fork] --pr-author <login>；PR 作者是 dependabot 且每个提交都
+//                   满足 commits 的豁免条件时退出 0，否则 1
 //   --needles local|ci|ci-optional（个人针来源，见 privacy-needles.mjs）  --self-test
 // 提交分三档：same 同仓（维护者身份、签名逐字一致）；fork 外部贡献（DCO 本义：有与作者一致的签名，
 // AI 署名只告警）；push 推送后兜底（提交者可以是 GitHub 网页合并，作者不在白名单时按 fork 判）。
@@ -30,6 +32,7 @@ const SAME_AUTHORS = ["noreply@synchain.ca", "140901583+dlsnows@users.noreply.gi
 const WEB_FLOW = "noreply@github.com";
 const COMMITTERS = ["noreply@synchain.ca", WEB_FLOW];
 const DEPENDABOT = "49699333+dependabot[bot]@users.noreply.github.com";
+const DEPENDABOT_LOGIN = "dependabot[bot]";
 export const SUBJECT =
     /^(?:feat|fix|docs|test|refactor|perf|ci|build|chore|style|revert|harden|release|merge)\([a-z0-9][a-z0-9/-]*\): \S/;
 const GIT_SUBJECT = /^(?:Merge (?:remote-tracking )?branch '[^']+'(?: of \S+)?(?: into \S+)?|Revert ".+")$/;
@@ -72,7 +75,7 @@ export function checkMessage(message, opts = {}) {
     const lines = text.split("\n");
     const subjectOk = merge || SUBJECT.test(lines[0]) || GIT_SUBJECT.test(lines[0]);
     if (!subjectOk) errors.push("subject 必须是 type(scope): 描述");
-    if (lines.some((l) => AI_TRAILER.test(l))) (fork ? warns : errors).push("不允许 AI 署名尾注");
+    if (hasAiTrailer(lines)) (fork ? warns : errors).push("不允许 AI 署名尾注");
     if (trailers(text).some((l) => !SIGNOFF_LINE.test(l)))
         (fork ? warns : errors).push("尾注只允许 Signed-off-by 一种");
     if (merge) return { errors, warns };
@@ -94,12 +97,33 @@ export function checkMessage(message, opts = {}) {
 export const isDependabot = (c) =>
     c.author.email.toLowerCase() === DEPENDABOT && c.committer.email.toLowerCase() === WEB_FLOW;
 
-/** 一个提交：c = { sha, parents, author: {name, email}, committer: {name, email}, message }。 */
-export function checkCommit(c, { tier = "same", personal = [] } = {}) {
+/** 消息里有没有 AI 署名尾注行（任何一行，不限尾注块）。 */
+export const hasAiTrailer = (lines) => lines.some((l) => AI_TRAILER.test(l));
+
+/**
+ * dependabot 的提交免不免 subject、签名与身份规则。作者与提交者邮箱有推送权的人都能伪造，PR 作者的 login 伪造不了：
+ * PR 里（档位 same）只认 dependabot 开的 PR 里邮箱对得上的提交；push 档没有 PR 作者，仍按邮箱对；fork 档一律不免。
+ */
+export function dependabotExempt(c, { tier, prAuthor }) {
+    if (!isDependabot(c)) return false;
+    return tier === "push" || (tier === "same" && prAuthor === DEPENDABOT_LOGIN);
+}
+
+/** PR 提交列表（API 形态）是不是纯 dependabot 的：非空，且每个提交都满足 dependabotExempt。 */
+export const pureDependabotPr = (list, opts) =>
+    list.length > 0 &&
+    list.every((c) => dependabotExempt({ author: c.commit.author, committer: c.commit.committer }, opts));
+
+/** 一个提交：c = { sha, parents, author: {name, email}, committer: {name, email}, message }；prAuthor：PR 作者的 login。 */
+export function checkCommit(c, { tier = "same", prAuthor, personal = [] } = {}) {
     const ae = c.author.email.toLowerCase();
     const ce = c.committer.email.toLowerCase();
-    // dependabot 只免 subject 与签名，隐私规则照扫
-    if (isDependabot(c) && tier !== "fork") return textFindings(c.message, { fork: true, personal });
+    if (dependabotExempt(c, { tier, prAuthor })) {
+        // 只免 subject、签名与身份规则：隐私规则与 AI 署名（含尾注）照样判错，不降成告警
+        const { errors } = textFindings(c.message, { personal });
+        if (hasAiTrailer(c.message.split(/\r?\n/))) errors.push("不允许 AI 署名尾注");
+        return { errors, warns: [] };
+    }
     const errors = [];
     if (tier === "same" && !SAME_AUTHORS.includes(ae)) errors.push("作者邮箱不在同仓白名单");
     if (tier !== "fork" && !COMMITTERS.includes(ce)) errors.push("提交者邮箱不在白名单");
@@ -303,7 +327,7 @@ const apiCommit = (sha) => ({ sha, parents: [{}], commit: { author: ME, committe
 export function selfTest() {
     const cases = [];
     const t = (label, bad, errors) => cases.push({ label, bad, passed: bad ? errors.length > 0 : errors.length === 0 });
-    const c = (label, bad, x, tier) => t(label, bad, checkCommit(x, { tier }).errors);
+    const c = (label, bad, x, tier, prAuthor) => t(label, bad, checkCommit(x, { tier, prAuthor }).errors);
     const throws = (label, fn) => {
         let threw = false;
         try {
@@ -334,13 +358,44 @@ export function selfTest() {
     const merge = "Merge remote-tracking branch 'origin/feature/v1' into feat/x";
     c("同仓：git 默认合并 subject", false, commit(`${merge}\n\n${SIGNOFF}`));
     c("同仓：合并提交免签名", false, commit("Merge pull request #3 from synchain-oss/feat/x", { parents: 2 }));
-    c("dependabot", false, commit("ci(deps): bump x", { author: BOT, committer: WEB }));
-    c("伪造的 dependabot 作者", true, commit("ci(deps): bump x", { author: BOT }));
+    // dependabot：同仓档要 dependabot 自己开的 PR，push 档按邮箱；隐私与 AI 署名在豁免路径上照样判错
+    const bump = (...body) =>
+        commit(
+            ["Bump x from 1.0 to 1.1", "", ...body, "", "Signed-off-by: dependabot[bot] <support@github.com>"].join(
+                "\n",
+            ),
+            {
+                author: BOT,
+                committer: WEB,
+            },
+        );
+    const dep = "dependabot[bot]";
+    c("dependabot：自己开的 PR", false, bump("Bumps x."), "same", dep);
+    c("dependabot：push 档", false, bump("Bumps x."), "push");
+    c("dependabot：别人开的 PR 里混进 dependabot 邮箱的提交", true, bump("Bumps x."), "same", "DLsnows");
+    c("dependabot：没给 PR 作者", true, bump("Bumps x."), "same");
+    c("伪造的 dependabot 作者（提交者不是 GitHub）", true, { ...bump("Bumps x."), committer: ME }, "same", dep);
+    c("dependabot：消息照扫隐私", true, bump(OUTSIDER.email), "same", dep);
     c(
-        "dependabot 消息照扫隐私",
+        "dependabot：Signed-off-by 行里的个人邮箱也判错",
         true,
-        commit(`ci(deps): bump x\n\n${OUTSIDER.email}`, { author: BOT, committer: WEB }),
+        bump(`Signed-off-by: x <${OUTSIDER.email}>`),
+        "same",
+        dep,
     );
+    c("dependabot：AI 署名尾注判错", true, bump(j("Co-authored", "-by: Someone <s@example.com>")), "same", dep);
+    c("dependabot：AI 署名行判错", true, bump(j("Generated with Cla", "ude Code")), "same", dep);
+    c("dependabot：push 档的 AI 署名尾注判错", true, bump(j("Co-authored", "-by: Someone <s@example.com>")), "push");
+    c("fork：写 dependabot 作者的提交不免", true, bump("Bumps x."), "fork", dep);
+    const listOf = (...commits) => commits.map((x) => ({ commit: { author: x.author, committer: x.committer } }));
+    const pure = (label, bad, list, tier, prAuthor) =>
+        t(label, bad, pureDependabotPr(list, { tier, prAuthor }) ? [] : ["不是纯 dependabot 的 PR"]);
+    pure("纯 dependabot 的 PR", false, listOf(bump(), bump()), "same", dep);
+    pure("PR 里混进维护者的提交", true, listOf(bump(), commit(msg(SIGNOFF))), "same", dep);
+    pure("PR 作者不是 dependabot", true, listOf(bump()), "same", "DLsnows");
+    pure("没给 PR 作者", true, listOf(bump()), "same");
+    pure("fork 档不算", true, listOf(bump()), "fork", dep);
+    pure("空的提交列表", true, [], "same", dep);
     const own = `Signed-off-by: ${OUTSIDER.name} <${OUTSIDER.email}>`;
     c("fork：作者真实邮箱 + 自签名", false, commit(msg(own), { author: OUTSIDER, committer: OUTSIDER }), "fork");
     c("fork：签名与作者不一致", true, commit(msg(SIGNOFF), { author: OUTSIDER, committer: OUTSIDER }), "fork");
@@ -533,7 +588,7 @@ function main(argv) {
         const needleList = personal();
         const list = readCommits({ range: opt("--range"), json: opt("--json"), expect: opt("--expect") }, cwd);
         for (const c of list) {
-            const r = checkCommit(c, { tier, personal: needleList });
+            const r = checkCommit(c, { tier, prAuthor: opt("--pr-author"), personal: needleList });
             errors.push(...r.errors.map((e) => `${c.sha.slice(0, 7)} ${e}`));
             warns.push(...r.warns.map((w) => `${c.sha.slice(0, 7)} ${w}`));
         }
@@ -550,9 +605,12 @@ function main(argv) {
         ];
         ({ errors, warns } = checkPrText({ title, body: body(), fork: has("--fork"), authors, personal: personal() }));
     } else if (cmd === "dependabot") {
-        // 只回答「是不是纯 dependabot 的 PR」，不输出别的：给 workflow 决定要不要跳过正文签名检查
+        // 只回答「是不是纯 dependabot 的 PR」，不输出别的：给 workflow 决定要不要跳过正文签名检查。
+        // 判据与 commits 放行 dependabot 提交的是同一个函数：PR 作者必须是 dependabot，缺 --pr-author 一律不是
+        const tier = opt("--tier") || "same";
+        if (!["same", "fork"].includes(tier)) throw new Error(`dependabot 只认 same 或 fork 档，不是 ${tier}`);
         const list = parseCommitList(fs.readFileSync(opt("--json"), "utf8"));
-        const all = list.length > 0 && list.every((c) => isDependabot(c.commit));
+        const all = pureDependabotPr(list, { tier, prAuthor: opt("--pr-author") });
         console.log(`check-commits dependabot：${all ? "全部提交都是 dependabot 的" : "不是纯 dependabot 的 PR"}`);
         return all ? 0 : 1;
     } else if (cmd === "branch") {
@@ -578,7 +636,7 @@ function main(argv) {
         const args = { changes, statusOf: statusAt(base), headStatusOf: statusAt(head), body: body() };
         errors = contractGuard(args).map((e) => mask(e, list));
     } else {
-        console.error("用法见文件头注释：commits | pr-text | branch | contract-guard | --self-test");
+        console.error("用法见文件头注释：commits | pr-text | branch | contract-guard | dependabot | --self-test");
         return 1;
     }
     for (const w of warns) console.log(`::warning::${w}`);
