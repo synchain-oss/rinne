@@ -67,7 +67,7 @@
 - 子 PR（base `feature/**`）的 required check 是 `branch-gate`、`clang-format`、`docs-truth`、`compliance`；评审 bot 的 `claude-pr-review` 不是 required check，但合并判据要求它在当前 head 上 success，纯文档 PR 也跑。进 `dev`、`prod` 的 PR 另跑完整构建（`build.yml`）。子 PR 的触发规则有意如此，不要改。
 - 另有两个 pr-agent 交叉审查，调用 `Synchain-oss/ci-workflows` 的共享 workflow：`pr-agent`（进 `dev` 的 PR，DeepSeek 经 OpenCode Go）与 `pr-agent-claude`（各个 base，Claude Haiku）。check 名分别是 `pr-agent-claude / pr-agent`（`feature/**` 上）与 `pr-agent / pr-agent`（`dev` 上）。它们只发评论（照 §2），不改 PR 正文、不打标签。`deepseek-review.yml` 是 Claude 额度用完时的应急审查，只能手动触发、默认停用。这三者都不是 required check，结论都不进合并判据。
 - 改到 mac 代码、CMake、CI 或打包脚本的子支线，合入前对其 head 手动 dispatch 一次构建。
-- workflow 加固由 docs-truth 机检：最小 permissions、concurrency、每个 job 有 timeout；不可信文本只经 `env:` 传入；required job 不带 job 级 `if:`，所在 workflow 不设 paths 过滤。
+- workflow 加固由 docs-truth 机检：最小 permissions、concurrency、每个 job 有 timeout；不可信文本只经 `env:` 传入；required job 不带 job 级 `if:`，所在 workflow 不设 paths 过滤；runner 镜像钉系统大版本，`runs-on` 与 matrix 里不用 `*-latest`（评审 bot 的 deny 列表依赖镜像里的路径，换大版本要同时复核它）。
 
 ## §5 冻结契约
 

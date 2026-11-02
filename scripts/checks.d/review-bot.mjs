@@ -279,11 +279,11 @@ export function inspectReviewWorkflows(read) {
 const cond = (lines) => ["    if: >-", ...lines.map((l) => `      ${l}`)];
 const FOCUS = ["1. 实时线程零分配。", "   续行缩进更深。", "2. IPC 成对的 fence。"];
 const CLAUDE = FIXTURE.replace(
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     [
         "    name: claude-pr-review",
         ...cond(SAME_REPO.map((c, i) => (i < SAME_REPO.length - 1 ? `${c} &&` : c))),
-        "    runs-on: ubuntu-latest",
+        "    runs-on: ubuntu-24.04",
     ].join("\n"),
 ).replace(
     "            ## 输出",
