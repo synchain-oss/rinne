@@ -6,7 +6,8 @@
 //   ② hard-rules.gen.js：每一行的首、中、尾字节各改一次，外加按固定步长取的字节，以及文件头尾增删一个字节，全都判红；
 //   ③ guide.js：生成段（含两端标记）里同样取点改字节，全都判红；生成段之外的手写词条改了不归这个块管（对照组）；
 //   ④ 规则版本：rulesVersion 不是正整数、缺失，或中文改了而 rulesVersionZhSha256 没跟上，都判红；
-//      把哈希换成当前中文的合并哈希后转绿（只改措辞的路径）；
+//      把哈希换成当前中文的合并哈希后转绿（只改措辞的路径）；fr 已审（reviewed）时，回写先要被拒绝（审校记录已过期），
+//      夹具里的 reviewedZhSha256 也换成合并哈希（模拟重新审过）后才转绿；
 //   ⑤ 形状：hard-rules.gen.js 首行之前、END 之后多出内容判红；guide.js 丢了标记判红；
 //   ⑥ 上屏数据：RULES_VERSION 等于 hard-rules.i18n.json 的 rulesVersion；guide.js 摊开的 rules.rN.lead / body 与
 //      hard-rules.gen.js 的 RULES 三语逐条相同。
@@ -179,6 +180,23 @@ await withFixture(async ({ dir, put, get, check }) => {
         I18N_FILE,
         editJson(get(I18N_FILE), (j) => (j.rulesVersionZhSha256 = h.combined)),
     );
+    if (JSON.parse(get(I18N_FILE).toString("utf8")).frReview?.status === "reviewed") {
+        // fr 已审：中文一改，审校记录就过期，回写必须拦住；换成当前合并哈希（模拟重新审过）后才放行
+        let err = null;
+        try {
+            await writeAll(dir, MODS);
+        } catch (e) {
+            err = e;
+        }
+        run.check(
+            err !== null && String(err.message).includes("审校记录已过期"),
+            "fr 已审、中文改了：回写应拒绝并报审校记录已过期",
+        );
+        put(
+            I18N_FILE,
+            editJson(get(I18N_FILE), (j) => (j.frReview.reviewedZhSha256 = h.combined)),
+        );
+    }
     await writeAll(dir, MODS);
     run.eq(await check(), [], "确认只是措辞、把哈希换成当前合并哈希并回写后转绿");
 });
