@@ -95,7 +95,10 @@ jobs:
         if: github.base_ref == 'prod'
         run: |
           set -euo pipefail
-          extra=$(git rev-list --no-merges origin/prod --not origin/dev | head -n 5)
+          # 经文件中转：pipefail 下 head 提前关管道，git 收到 SIGPIPE，命令替换失败，下面的错误行还没打印步骤就停了；
+          # git rev-list 自己失败时，重定向这一条会让步骤照样停下
+          git rev-list --no-merges origin/prod --not origin/dev > "$RUNNER_TEMP/extra.txt"
+          extra=$(head -n 5 "$RUNNER_TEMP/extra.txt" | tr '\n' ' ')
           if [ -n "$extra" ]; then
             echo "::error::prod 上有 dev 之外的非合并提交：$extra"
             exit 1
