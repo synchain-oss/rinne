@@ -28,7 +28,7 @@ Rinne 读作 "RIN-neh"（两个音节），取自日文「輪廻」，与中文�
 
 环路里的延迟、失真、均衡或混响，每一圈都会再被听到一次。环路延迟是固定的样本数，两个插件也都不向宿主上报插件延迟。回送路径上有一条安全链，对信号限幅、清理。
 
-Rinne 免费开源，以 [GPL-3.0-or-later](LICENSE) 授权，由 [Synchain](https://synchain.ca) 制作。如果你用过 Synchain 的 SCVB，注意它的 Input 与 Output 方向恰好相反。
+Rinne 免费开源，以 [GPL-3.0-or-later](LICENSE) 授权，由 [Synchain](https://synchain.ca) 制作。Rinne Input 是环路的返回端，Rinne Output 是发送端；如果你用过 Synchain 的 SCVB，注意它的 Input 与 Output 方向恰好相反。
 
 ## 插件放哪里
 

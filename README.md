@@ -28,7 +28,7 @@ Synchain Rinne is an open-source (GPL-3.0-or-later) pair of audio plugins, Rinne
 
 A delay, a distortion, an EQ or a reverb inside the loop is heard again on every trip. The loop delay is a fixed number of samples, and both plugins report no plugin latency to the host. A safety chain on the return path limits and cleans the signal.
 
-Rinne is free and open source under the [GPL-3.0-or-later](LICENSE). It is made by [Synchain](https://synchain.ca). If you know Synchain's SCVB, note that its Input and Output point the other way round.
+Rinne is free and open source under the [GPL-3.0-or-later](LICENSE). It is made by [Synchain](https://synchain.ca). Rinne Input is the return end of the loop and Rinne Output the send end; if you know Synchain's SCVB, note that its Input and Output point the other way round.
 
 ## Where the plugins go
 
