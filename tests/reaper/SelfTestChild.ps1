@@ -687,12 +687,18 @@ try {
 } finally { if (-not $holder2.HasExited) { $holder2.Kill(); $holder2.WaitForExit() } }
 
 # ---- 整轮入口（Invoke-ReaperSmoke -Probe）：文档目录前后清单、停手、反例格不并进整轮分析 ----
+# 同机另有会话在真跑 REAPER 时，那些进程只活几秒、隔一会儿一个：先等一个空档，等不到才降级
+$reaperGapWait = [Diagnostics.Stopwatch]::StartNew()
+while (@(Get-ReaperProcessIds).Count -gt 0 -and $reaperGapWait.Elapsed.TotalSeconds -lt 120) { Start-Sleep -Seconds 1 }
 $realReaperRunning = @(Get-ReaperProcessIds).Count -gt 0
 if ($realReaperRunning) {
     Write-Case '整轮入口（第二段）：本机有 reaper.exe 在跑，预检会 SKIPPED，这一组接线用例没能真跑' $true $true
 } else {
     $build = New-FakeProbeBuild -Root (Join-Path $wire 'probe-build')
     $results = Join-Path $wire 'results'
+    # 整轮跑到一半，本机冒出别人的 reaper.exe（同机另有会话在真跑 REAPER）：预检在启动任何东西之前就整套 SKIPPED、没有 runs。
+    # 只认「SKIPPED 且原因是本机已有 reaper.exe」，别的原因照旧让用例红
+    function Test-WireSkippedByRealReaper($SmokeResult) { $SmokeResult.verdict -eq 'SKIPPED' -and "$($SmokeResult.skipReasons)" -like '*本机已有 reaper.exe*' }
     function Invoke-WireSmoke([string]$Id, [hashtable]$Spec, [string]$Only, [int]$Repeat = 1, [switch]$NoNegative, [hashtable]$ExtraHooks = @{}, [string]$ScenarioOverride = '') {
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $Spec.LogDir 'sub')
         [IO.File]::WriteAllText((Join-Path $Spec.LogDir 'foreign-a.csv'), "foreign-a`n") # 别人的文件（用户在宿主里写的）
@@ -703,14 +709,15 @@ if ($realReaperRunning) {
                 Only = $Only; Repeat = $Repeat; Probe = $true; Python = $fakePy.Python; SelfTestHooks = $hooks }
         if ($NoNegative) { $p.NoNegative = $true }
         $env:FAKE_COMPARE_FILE = ''
-        $all = @(Invoke-ReaperSmoke @p 6>&1) # 控制台上的 Write-Host 是信息流：留下来，核对里面没有别人的文件名
-        $r = @($all | Where-Object { $_ -isnot [Management.Automation.InformationRecord] })[-1]
+        for ($attempt = 1; $attempt -le 8; $attempt++) {
+            $all = @(Invoke-ReaperSmoke @p 6>&1) # 控制台上的 Write-Host 是信息流：留下来，核对里面没有别人的文件名
+            $r = @($all | Where-Object { $_ -isnot [Management.Automation.InformationRecord] })[-1]
+            if (-not (Test-WireSkippedByRealReaper $r)) { break }
+            Start-Sleep -Seconds 15 # 等别人的 reaper.exe 退出再重来；还挡着就把 SKIPPED 的结果交给用例，用例降级成占位
+        }
         $console = (@($all | Where-Object { $_ -is [Management.Automation.InformationRecord] } | ForEach-Object { "$($_.MessageData)" }) -join "`n")
         [pscustomobject]@{ R = $r; Results = (Join-Path $results $Id); Console = $console }
     }
-    # 整轮用例跑到一半，本机冒出别人的 reaper.exe（预检整套 SKIPPED、没有 runs）：降级成一条占位用例，不在 runs[0] 上抛错。
-    # 只认「SKIPPED 且原因是本机已有 reaper.exe」，别的原因照旧让用例红
-    function Test-WireSkippedByRealReaper($WireResult) { $WireResult.R.verdict -eq 'SKIPPED' -and "$($WireResult.R.skipReasons)" -like '*本机已有 reaper.exe*' }
     # 整轮入口装插件时去掉被测插件在扫描缓存里的条目（探针的两个包名），别的条目原样
     $wireCache = Join-Path $CfgA 'reaper-vstplugins64.ini'
     $wireCacheKept = "[vstcache]`nOther.vst3=1112131415161718,2{CD,Other`n"
@@ -781,7 +788,7 @@ if ($realReaperRunning) {
         if ($canList) { Write-Case '（本机没能造出读不了的目录：默认资源目录有读不了的子目录的整轮用例没能真跑）' $true $true }
         else {
             $smU = Invoke-WireSmoke 'unreadable-default' (New-WireSpec 'unreadable-default') '^probe-steady-48000-512$' -Repeat 2 -NoNegative
-            if (Test-WireSkippedByRealReaper $smU) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：默认资源目录有读不了的子目录的整轮用例没能真跑）' $true $true }
+            if (Test-WireSkippedByRealReaper $smU.R) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：默认资源目录有读不了的子目录的整轮用例没能真跑）' $true $true }
             else {
                 $rowU = $smU.R.runs[0]
                 Write-Case "整轮入口：默认资源目录里有读不了的子目录，场景全绿也判 FAIL，记为证明不了没变，停手，-Repeat 2 只跑了 $(@($smU.R.runs).Count) 轮" $true (
@@ -801,7 +808,7 @@ if ($realReaperRunning) {
     try {
         $smW = Invoke-WireSmoke 'stuck-round' (New-WireSpec 'stuck-round') '^probe-steady-48000-(512|1024)$' -Repeat 2 -NoNegative -ScenarioOverride $shortScenarioFile `
             -ExtraHooks @{ Launcher = (New-StuckStandIn 'Start-Sleep -Seconds 120' $stuckSeenW); Terminator = $denyKill }
-        if (Test-WireSkippedByRealReaper $smW) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：REAPER 结束不了的整轮用例没能真跑）' $true $true }
+        if (Test-WireSkippedByRealReaper $smW.R) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：REAPER 结束不了的整轮用例没能真跑）' $true $true }
         else {
             $rowW = $smW.R.runs[0]
             Write-Case "整轮入口：REAPER 结束不了，第一个场景 INCOMPLETE 点名，后面的场景 INCOMPLETE 写本轮已停止，只启动过 $($stuckSeenW.Pids.Count) 个进程" $true (
