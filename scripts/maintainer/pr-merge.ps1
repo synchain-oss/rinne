@@ -1563,6 +1563,29 @@ function Invoke-SelfTest {
         & $bad '回应 pr-agent 评论但早于 updated_at：仍算未回应' { param($f) & $reitem $f { param($a) & $prAgentComment $a 1201 '2026-10-12T05:20:00Z'; $a.Issue += & $reply 1202 '1201' '2026-10-12T05:10:00Z' } }
         & $bad 'pr-agent 的两种通知免回应' { param($f) & $reitem $f { param($a) $a.Issue += & $user 1203 'github-actions[bot]' "<!-- pr-agent:review:full -->`n**[Persistent review]（旧）** updated to latest commit abc1234" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z'; $a.Issue += & $user 1204 'github-actions[bot]' "Failed to generate PR review: timeout`n<!-- pr-agent:improve:summary -->" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'ready'
         & $bad 'pr-agent 标记在前 5 行之外（正文引用）不算，按 bot 免回应' { param($f) & $reitem $f { param($a) $a.Issue += & $user 1205 'github-actions[bot]' "第一行`n第二行`n第三行`n第四行`n第五行`n<!-- pr-agent:review:full -->`n## PR Reviewer Guide" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'ready'
+        # Kind=bot 不再一律免回应：带【红旗】【重要】【建议】分级字样的（手动 DeepSeek 应急审查之类，作者同样是 github-actions[bot]，
+        # 正文是模型写的文字）和 bot 提交的 review 正文是审查意见，要有后来的 agent 评论在 in-reply-to 里点名；回执、失败通知等纯通知免回应
+        $botNote = { param($a, $id, $body, $updated = '2026-10-12T05:00:00Z', $login = 'github-actions[bot]') $a.Issue += & $user $id $login $body '2026-10-12T05:00:00Z' $updated }
+        $botReview = { param($a, $id, $body) $a.Reviews += [pscustomobject]@{ id = $id; state = 'COMMENTED'; body = $body; user = [pscustomobject]@{ login = 'some-bot[bot]'; type = 'Bot' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' } }
+        $unanswered = { param($r, $id) @($r.Failures | Where-Object { $_ -match "没有回应的评论：.* $id（bot）" }).Count -eq 1 -and @($r.Needs).Count -eq 0 }
+        & $bad '未回应的 bot 评论带【红旗】（应急审查）：判 not-ready' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "## 审查结果`n`n1. 【红旗】processBlock 里分配内存（src/a.cpp:10）" } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '未回应的 bot 评论带【重要】' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【重要】缺测试" } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '未回应的 bot 评论带【建议】' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【建议】命名可以再短些" } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '点名回应 bot 的审查评论（晚于 updated_at）放行' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【红旗】x"; $a.Issue += & $reply 1302 '1301' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad '回应 bot 的审查评论但早于 updated_at：仍算未回应' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【红旗】x" '2026-10-12T05:20:00Z'; $a.Issue += & $reply 1302 '1301' '2026-10-12T05:10:00Z' } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '回复没有点名 bot 的审查评论：仍算未回应' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【红旗】x"; $a.Issue += & $reply 1302 $null '2026-10-12T05:10:00Z' '已处理 1301。' } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad 'bot 提交的 review 正文（没有分级字样）要回应' { param($f) & $reitem $f { param($a) & $botReview $a 1310 '整体建议拆成两个 PR' } } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '没有回应的评论：review 1310（bot）' }).Count -eq 1 }
+        & $bad '点名回应 bot 的 review 正文放行' { param($f) & $reitem $f { param($a) & $botReview $a 1310 '整体建议拆成两个 PR'; $a.Issue += & $reply 1311 '1310' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad 'bot 的空正文 review 免回应' { param($f) & $reitem $f { param($a) & $botReview $a 1312 '' } } 'ready'
+        & $bad '回执、拒审、head 变了、未完成的通知与 dependabot 的评论免回应' {
+            param($f) & $reitem $f { param($a)
+                & $botNote $a 1320 '已收到 /review，开始审查。'
+                & $botNote $a 1321 '该 PR 修改了 .github/workflows/ 或 .github/actions/，按安全策略不能通过 /review 审查，请维护者本地拉分支人工审。'
+                & $botNote $a 1322 '审查期间 PR 有新的推送（审的是 abc1234，现在是 def5678），本次结论作废，请重新评论 /review。'
+                & $botNote $a 1323 '/review 未完成：本次审查失败、超时或被取消（例如又发了一次 /review），PR 上没有审查结论不代表没有问题。日志：https://x/runs/1'
+                & $botNote $a 1324 'Superseded by #12.' '2026-10-12T05:00:00Z' 'dependabot[bot]'
+            }
+        } 'ready'
         # 外部评论：交用户；external-handled 绑定 head、by = user，以及处理时那条评论的 updated_at
         $external = { param($a, $updated = '2026-10-12T05:00:00Z') $a.Issue += & $user 998 'someone' 'lgtm' '2026-10-12T05:00:00Z' $updated }
         $handledRec = { param($h = $head, $by = 'user', $comments = @([pscustomobject]@{ id = '998'; updated_at = '2026-10-12T05:00:00Z' })) @([pscustomobject]@{ head = $h; by = $by; comments = $comments; note = '已回复' }) }

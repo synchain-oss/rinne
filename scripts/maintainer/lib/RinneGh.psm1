@@ -663,8 +663,23 @@ function Get-RinneCommentItems {
 }
 
 <#
+  Kind=bot 的评论里哪些是审查意见（要回应），哪些是纯通知（免回应）。bot 评论里没有可认的 workflow 标记，
+  手动跑的 DeepSeek 应急审查与 /review 的回执都由 github-actions[bot] 发，所以只能认内容：
+  - 正文带【红旗】【重要】【建议】任一分级字样（审查 prompt 规定的分级写法，模型写出的审查意见都带）；
+  - bot 提交的 review 且正文非空（review 本身就是审查；空正文的只是 inline 评论的壳，那些评论各自判）。
+  其余（回执、拒审与 head 变了、未完成的通知，pr-agent 的两种通知，dependabot 之类）是纯通知。
+#>
+function Test-RinneBotReview {
+    param([Parameter(Mandatory)]$Item)
+    if ($Item.Body -match '【(?:红旗|重要|建议)】') { return $true }
+    return $Item.Source -eq 'review' -and [bool]$Item.Body.Trim()
+}
+
+<#
   一条评论有没有得到我方回应。「之后」一律对比原评论的 updated_at：原评论在我方回复之后又改过，就算没回应。
-  - agent 自己的、非总结的 bot 通知（/review 的回执之类）：不需要；
+  - agent 自己的评论：不需要；
+  - bot 的纯通知（/review 的回执、拒审与失败通知、pr-agent 的两种通知、dependabot 的评论）：不需要；
+    bot 的审查意见（判据见 Test-RinneBotReview）：与 pr-agent 的审查输出同一条规则，要有后来的 agent 评论在 in-reply-to 里点名；
   - bot 审查总结：之后有处置汇总引用它的运行编号；
   - pr-agent 的审查输出：与维护者的意见相同，要有后来的 agent 评论在 in-reply-to 里点名它；
   - review comment：线程里有我方回复的，要有一条晚于它的最后一次修改；维护者本人的 inline 评论必须有这样一条回复，
@@ -694,7 +709,7 @@ function Test-RinneResponded {
         if ($replies.Count -or $Item.Kind -ne 'bot') { return $explicit -or $later }
         return $explicit -or [bool]$Item.Resolved
     }
-    if ($Item.Kind -eq 'bot') { return $true }
+    if ($Item.Kind -eq 'bot') { return $explicit -or -not (Test-RinneBotReview $Item) }
     if ($Item.Source -eq 'review') {
         if ($Item.State -eq 'CHANGES_REQUESTED') { return $explicit -or [bool]$Item.ApprovedLater }
         if (-not $Item.Body.Trim() -and @($Item.Comments).Count) {
