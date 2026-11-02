@@ -84,7 +84,23 @@ All controls live in Rinne Input. From top to bottom:
 - **LEVELS**: IN, RETURN and OUT meters. RETURN is measured before the feedback gain, so it moves even at 0 % feedback; use it to check that the loop is closed.
 - **PRESET**: factory presets and your own; see "Presets".
 
-The host lists these controls as parameters; their IDs, display names, ranges and defaults are in the [parameter contract](contracts/PARAMETERS.md). Panic, Restore return, the group and Re-pair are actions in the interface, not host parameters.
+The host lists these controls as parameters; the table below gives their IDs, display names, ranges and defaults. Panic, Restore return, the group and Re-pair are actions in the interface, not host parameters.
+
+<!-- BEGIN gen:params-table:en -->
+| ID | Display name | Range | Default | Unit | Automatable |
+| --- | --- | --- | --- | --- | --- |
+| feedback | Feedback | 0…150 | 0 | % | Yes |
+| loop_on | Loop | 0…1 | 1 |  | Yes |
+| mix | Mix | 0…100 | 25 | % | Yes |
+| delay_mode | Delay Mode | 0…1 | 0 |  | No |
+| delay_ms | Loop Delay | 1…4000 | 100 | ms | No |
+| delay_note | Sync Note | 0…15 | 10 |  | No |
+| low_cut | Low Cut | 20…2000 | 20 | Hz | Yes |
+| high_cut | High Cut | 1000…20000 | 20000 | Hz | Yes |
+| polarity | Invert Polarity | 0…1 | 0 |  | Yes |
+| limiter | Return Limiter | 0…1 | 1 |  | No |
+| ceiling | Ceiling | -24…0 | -6 | dB | No |
+<!-- END gen:params-table:en -->
 
 ## Rinne Output
 
