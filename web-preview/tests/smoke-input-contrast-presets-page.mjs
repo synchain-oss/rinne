@@ -14,7 +14,7 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { TIER_MIN } from "./shared-measure.mjs";
+import { TIER_MIN, skipSummary, unexpectedSkips } from "./shared-measure.mjs";
 import {
     LANGS,
     PRESET_STATES,
@@ -24,8 +24,6 @@ import {
     measure,
     openInput,
     openPresetState,
-    skipSummary,
-    unexpectedSkips,
 } from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();

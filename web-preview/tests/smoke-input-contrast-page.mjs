@@ -29,7 +29,7 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { TIER_MIN, worstContrast } from "./shared-measure.mjs";
+import { TIER_MIN, skipSummary, unexpectedSkips, worstContrast } from "./shared-measure.mjs";
 import {
     FRAMES,
     LANGS,
@@ -44,8 +44,6 @@ import {
     openInput,
     openPresetState,
     settle,
-    skipSummary,
-    unexpectedSkips,
 } from "./smoke-input-kit-page.mjs";
 
 const ROOT = repoRoot();

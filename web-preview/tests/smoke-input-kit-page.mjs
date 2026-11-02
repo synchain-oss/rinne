@@ -41,12 +41,6 @@ import {
     overlayA11yProbe,
 } from "../fixtures/first-run/measure.mjs";
 
-/**
- * 跳过记账（hasPixels、SKIP_OK、unexpectedSkips、skipSummary）的实现在 shared-measure.mjs，Input 与 Output 两个套件共用。
- * 这里只转发 Input 套件内另外三个对比度冒烟（first-run、presets、主套件）仍在用的两个。
- */
-export { skipSummary, unexpectedSkips };
-
 /** 裸词条键、占位符、null 的扫描：共用的那一份，再加首启词条的前缀（rules.、tour.、hint.），见 fixtures/first-run/measure.mjs。 */
 export { findLeaks };
 
