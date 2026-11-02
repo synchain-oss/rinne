@@ -58,35 +58,13 @@ function outputFlowing(state, pair) {
 
 const { bridge, offline } = openBridge();
 const scene = previewScene(bridge);
-let firstRun = null;
-const page = mountOutputPage({
-    host: document.getElementById("app"),
-    bridge,
-    offline,
-    preview: scene ? { overlay: scene.overlay, countdown: scene.countdown } : null,
-    hooks: {
-        onHelp: () => firstRun.openRules(),
-        onViewRules: () => {
-            page.parts.about.close();
-            firstRun.openRules();
-        },
-    },
-});
-const { shell, footer } = page.parts;
-firstRun = createFirstRun({
-    role: "output",
-    bridge,
-    host: shell.top,
-    shell: shell.el,
-    inert: [shell.content],
-    steps: TOUR_OUT_STEPS,
-});
-if (offline || scene) firstRun.disableAuto();
-
-// 原帧：只认序号递增的帧；两路都到过一帧才喂首启链
+// 原帧：只认序号递增的帧；两路都到过一帧才喂首启链。
+// 要在挂页面之前订：页面一挂上就请求首帧，后端可能同步回帧（预览就是），晚订会漏掉首批，
+// 恢复实例的页脚提示要等下一次回声才换。喂放进微任务：同一批帧页面先处理完（危险态读页面的视图模型），首启链再吃。
 const raw = { state: null, pair: null, seq: { state: -Infinity, pair: -Infinity } };
 let restoredShown = false;
 let sceneShown = false;
+let feedQueued = false;
 function feed() {
     if (!raw.state || !raw.pair) return;
     const st = raw.state;
@@ -122,12 +100,45 @@ const take = (kind) => (f) => {
         raw.seq[kind] = f.seq;
     }
     raw[kind] = f;
-    feed();
+    if (feedQueued) return;
+    feedQueued = true;
+    queueMicrotask(() => {
+        feedQueued = false;
+        feed();
+    });
 };
 if (!offline) {
     bridge.on("rinne.state", take("state"));
     bridge.on("rinne.pair", take("pair"));
 }
+
+let firstRun = null;
+const page = mountOutputPage({
+    host: document.getElementById("app"),
+    bridge,
+    offline,
+    preview: scene ? { overlay: scene.overlay, countdown: scene.countdown } : null,
+    hooks: {
+        onHelp: () => firstRun.openRules(),
+        onViewRules: () => {
+            page.parts.about.close();
+            firstRun.openRules();
+        },
+    },
+});
+const { shell, footer } = page.parts;
+firstRun = createFirstRun({
+    role: "output",
+    bridge,
+    host: shell.top,
+    shell: shell.el,
+    inert: [shell.content],
+    steps: TOUR_OUT_STEPS,
+    onChange: () => shell.refresh(),
+});
+// 首启链开着时外壳同样进遮罩态（与关于面板、缩放确认一样），页面的遮罩判据之外再并上它
+shell.setOverlaySource(() => firstRun.isOpen());
+if (offline || scene) firstRun.disableAuto();
 
 // 主模块初始化完成：boot 守卫与首帧信号都到位，才算页面起来了（见 index.html 头部）
 if (typeof window.__rinneMarkReady === "function") window.__rinneMarkReady();

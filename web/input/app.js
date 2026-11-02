@@ -440,10 +440,11 @@ function boot() {
         panic.update({ cut: Boolean(safety.cut), overScrim: overlayOn(), t });
         limiterConfirm.retext(t);
         renderMessages();
+        // 首启链先吃这份快照再画页脚：恢复实例的页脚提示读的是首启链手里的快照，后画才是当帧的
+        feedFirstRun();
         renderFooter();
         renderShellState();
         scaleConfirm.update({ ...S.scaleState, t });
-        feedFirstRun();
     }
 
     /** 遮罩态：关于面板、缩放确认与首启链的叠层。 */
@@ -457,12 +458,27 @@ function boot() {
         panic.update({ cut, overScrim: overlayOn(), t });
     }
 
-    /** 首启链吃的快照：全局位与「必须立即关」「环路激活」两个判据。两路首批快照到齐之后才喂。 */
-    function feedFirstRun() {
-        if (!ctx.view) return;
-        const { state, pair, lang } = ctx.view;
+    /** 首启链的「必须立即关」「环路激活」两个判据：快照与电平灯都会改它们。 */
+    function firstRunLive() {
+        const { state, pair } = ctx.view;
         const safety = state.safety || {};
         const lamps = (S.meters && S.meters.lamps) || {};
+        return {
+            l2: isDanger({ cut: safety.cut, pairState: pair.state, l2: safety.l2 }),
+            guardLit: Boolean(lamps.guard) && lamps.guard !== "ok",
+            loopActive: isFlowing({
+                pairState: pair.state,
+                cut: safety.cut,
+                loopOn: ctx.values().loop_on,
+                silentCause: state.silentCause,
+            }),
+        };
+    }
+
+    /** 首启链吃的快照：全局位与上面两个判据。两路首批快照到齐之后才喂。 */
+    function feedFirstRun() {
+        if (!ctx.view) return;
+        const { state, lang } = ctx.view;
         firstRun.update(
             {
                 lang,
@@ -471,16 +487,7 @@ function boot() {
                 guideSeen: state.guideSeen,
                 restored: state.restored,
             },
-            {
-                l2: isDanger({ cut: safety.cut, pairState: pair.state, l2: safety.l2 }),
-                guardLit: Boolean(lamps.guard) && lamps.guard !== "ok",
-                loopActive: isFlowing({
-                    pairState: pair.state,
-                    cut: safety.cut,
-                    loopOn: ctx.values().loop_on,
-                    silentCause: state.silentCause,
-                }),
-            },
+            firstRunLive(),
         );
     }
 
@@ -717,7 +724,8 @@ function boot() {
                 ctx.view.meters = f;
                 cards.safety.render();
                 scheduleMessages();
-                feedFirstRun();
+                // 电平帧只给首启链换判据（失控灯亮了要立即关），不重量导览
+                firstRun.live(firstRunLive());
             }
         }
     };

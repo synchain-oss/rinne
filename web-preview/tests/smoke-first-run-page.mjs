@@ -5,17 +5,21 @@
 //      没激活的环路上按 Esc 不关；滚到底放行，[开始导览] 进导览，→ / ← 翻页，Esc 结束；三个写位依次写对；
 //      结束后内容层不再 inert；再打开（不清全局位）整条链不出；
 //   ② 规则页的四条红字：标题、四条的引导词与正文、脚注都是红色墨水、不透明、字重不低于 500，没有省略号与行数截断，
-//      横向不溢出，文字与词条逐字相同；标题完整落在面板里；
+//      横向不溢出，可见的每一行没有被别的东西盖住（放行前的提示也不许盖），文字与词条逐字相同；标题完整落在面板里；
 //   ③ 放行：不滚动时 8 秒后按钮放行，之前一直禁用；
 //   ④ 紧急切断：语言卡、规则页、导览开着时，按钮内五个点的 elementFromPoint 都落在按钮自己身上；导览中真点一下，
 //      叠层立即关、桥收到一次 panic、不写「引导已看」；
 //   ⑤ 危险态立即关：语言卡开着时注入切断（L2）、规则页开着时失控灯亮，叠层立即关、不写位；危险解除后不再弹；
 //   ⑥ 恢复的实例：不弹链，页脚换成 hint.firstUseRestored；「?」打开的规则页要确认（只有 [我已了解]），确认后页脚恢复；
+//      每一帧快照处理完，页脚都与这一帧一致（打开时当帧就是恢复提示，确认后当帧换回）；
 //   ⑦ Esc：要确认的规则页在环路激活（正在回送）时可以 Esc，不算确认；重看的规则页随时可以 Esc；
 //      危险态下用户自己点「?」打开的规则页是普通模态，不自动关，紧急切断照常可点；
-//   ⑧ Output：全新走 语言卡 → 规则页 → 4 步导览；Input 的导览看过时只弹规则页（[我已了解]），确认后不接导览；
-//      规则页开着时配对冲突（L2）叠层立即关；恢复的实例同样换页脚提示；
-//   坏样例：在紧急切断上盖一层透明元素，命中判据必须判红；把红字改成灰色、加省略号，红字判据必须判红。
+//   ⑧ Output：全新走 语言卡 → 规则页 → 4 步导览，链开着时外壳是遮罩态、结束后回常态；Input 的导览看过时只弹规则页
+//      （[我已了解]），确认后不接导览；规则页开着时配对冲突（L2）叠层立即关；恢复的实例同样换页脚提示，同样当帧跟上；
+//   ⑨ 导览开着时电平帧（增益衰减变了）不重量导览，快照变了才重量（对照）；
+//   ⑩ setLang 回包不 ok：规则页照常打开，但退回宿主的语言，全局位没写；
+//   坏样例：在紧急切断上盖一层透明元素，命中判据必须判红；把红字改成灰色、加省略号、正文底部盖一条不接受命中的渐变，
+//   红字判据必须判红。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 // 本文件同时导出首启的两个页面冒烟（smoke-tour-page、smoke-first-run-e2e-page）共用的打开、点击与量尺。
 //
@@ -197,7 +201,7 @@ export function hitProbe(doc, win, sel) {
 /**
  * 规则页红字的量尺：expected 是 { title, items:[{lead, body}], footnote }。返回问题列表（空表示合格）。
  * 红字：颜色等于 --sem-red-ink-dark 的计算值、到面板为止的各层不透明度都是 1、字重不低于 500、
- * 没有省略号与行数截断、横向不溢出；文字与词条逐字相同；标题完整落在面板里。
+ * 没有省略号与行数截断、横向不溢出、可见的每一行没有被别的东西盖住；文字与词条逐字相同；标题完整落在面板里。
  */
 export function redProbe(doc, win, role, expected) {
     const panel = doc.querySelector(`[data-gb="${role}.rules"]`);
@@ -221,6 +225,33 @@ export function redProbe(doc, win, role, expected) {
             const o = Number(win.getComputedStyle(n).opacity);
             if (o < 1) out.push(`${name} 的祖先 ${n.className} 不透明度 ${o}`);
         }
+    }
+    // 遮挡：每条红字在可见区里的每一行，行中点的 elementFromPoint 都要落在这段文字自己（或其子节点）上。
+    // 量的时候让面板里的一切（含 ::before / ::after）都接受命中，pointer-events: none 的覆盖层也藏不住
+    const sheet = doc.createElement("style");
+    const scope = `[data-gb="${role}.rules"]`;
+    sheet.textContent = `${scope}, ${scope} *, ${scope} *::before, ${scope} *::after { pointer-events: auto !important; }`;
+    doc.head.append(sheet);
+    try {
+        for (const e of reds) {
+            const clip = (e.closest(".rn-rules__body") || panel).getBoundingClientRect();
+            const range = doc.createRange();
+            range.selectNodeContents(e);
+            for (const r of range.getClientRects()) {
+                if (r.width < 2 || r.height < 2) continue;
+                const x = r.left + r.width / 2;
+                const y = r.top + r.height / 2;
+                // 滚出可见区的行不量
+                if (x < clip.left + 1 || x > clip.right - 1 || y < clip.top + 1 || y > clip.bottom - 1) continue;
+                const hit = doc.elementFromPoint(x, y);
+                if (!hit || !(hit === e || e.contains(hit))) {
+                    const who = hit ? hit.getAttribute("data-part") || hit.className || hit.tagName : "无";
+                    out.push(`${e.className} 在 y=${Math.round(y - clip.top)} 的一行被 ${who} 盖住`);
+                }
+            }
+        }
+    } finally {
+        sheet.remove();
     }
     const title = panel.querySelector(".rn-rules__title");
     const pr = panel.getBoundingClientRect();
@@ -254,13 +285,62 @@ export const rulesExpected = (dict) => ({
     footnote: dict["rules.footnote"],
 });
 
-/** 让下一个打开的壳页把后端标成「恢复的实例」（新机器上打开旧工程）。返回撤销函数。 */
-export async function markRestored(page) {
+/**
+ * 让下一个打开的壳页把后端标成「恢复的实例」（新机器上打开旧工程）。返回撤销函数。
+ * hintRole 给了时另记一份「每帧之后的页脚」：每一帧 rinne.state 发出、页面处理完（同一任务里的微任务都跑完）之后，
+ * 记下该帧的 restored、rulesAck 与页脚提示的 data-state，存在壳页的 window.__hintLog（过期帧与被后一帧赶上的不记）。
+ */
+export async function markRestored(page, { hintRole = null } = {}) {
     const { identifier } = await page.send("Page.addScriptToEvaluateOnNewDocument", {
-        source: `(() => { let pv; Object.defineProperty(window, "__RINNE_PREVIEW__", { configurable: true, get: () => pv, set: (v) => { if (v && v.model) v.model.restored = true; pv = v; } }); })();`,
+        source: `(() => {
+            if (window.top !== window) return;
+            const role = ${JSON.stringify(hintRole)};
+            window.__hintLog = [];
+            let pv;
+            let maxSeq = -Infinity;
+            let latest = null;
+            const watch = (f) => {
+                if (!f || f.seq <= maxSeq) return;
+                maxSeq = f.seq;
+                latest = f;
+                setTimeout(() => {
+                    if (latest !== f) return;
+                    const fr = document.querySelector("iframe");
+                    const h = fr && fr.contentDocument && fr.contentDocument.querySelector('[data-gb="' + role + '.footer.hint"]');
+                    window.__hintLog.push({ seq: f.seq, restored: f.restored === true, ack: f.rulesAck, hint: h ? h.getAttribute("data-state") : null });
+                }, 0);
+            };
+            Object.defineProperty(window, "__RINNE_PREVIEW__", { configurable: true, get: () => pv, set: (v) => {
+                if (v && v.model) v.model.restored = true;
+                if (role && v && v.core) v.core.addEventListener("rinne.state", watch);
+                pv = v;
+            } });
+        })();`,
     });
     return () => page.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
 }
+
+/**
+ * 读 markRestored 记下的每帧页脚，返回问题列表：页面画过页脚之后，每一帧的页脚都要与这一帧一致——
+ * 恢复的实例且没确认当前版本（RULES_VERSION 为 1）时是 restored，否则不是。另要求两种帧都出现过（量尺不空转）。
+ */
+export async function hintLogProblems(page) {
+    const log = await page.eval("window.__hintLog.slice()");
+    // 页面画出页脚之前的帧不算（提示位还是初始的 none）
+    const first = log.findIndex((e) => e.hint && e.hint !== "none");
+    const drawn = first < 0 ? [] : log.slice(first);
+    const want = (e) => e.restored && e.ack !== 1;
+    const out = drawn
+        .filter((e) => want(e) !== (e.hint === "restored"))
+        .map((e) => `第 ${e.seq} 帧（restored=${e.restored}，rulesAck=${e.ack}）之后页脚是 ${e.hint}`);
+    if (!drawn.some((e) => want(e))) out.push("没有记到「要换恢复提示」的帧");
+    if (!drawn.some((e) => e.restored && !want(e))) out.push("没有记到「确认之后」的帧");
+    return out;
+}
+
+/** 外壳的 data-state（normal、modal、danger、bypassed）。 */
+export const shellStateOf = (page, role) =>
+    inFrame(page, (doc, win, r) => doc.querySelector(`[data-gb="${r}.shell"]`).getAttribute("data-state"), role);
 
 /** 改预览后端的模型并让它发一帧快照。fn 是 (model) => void 的源码字符串。 */
 export const poke = (page, fn) =>
@@ -383,16 +463,24 @@ if (isMain) {
         await waitOverlay(page, "input", '(s) => s.rules === "ready"', "不滚动 8 秒后应放行", 4000);
         const waited = Date.now() - t0;
         run.check(waited >= 7500, `放行等了 ${waited} ms，应不少于 8 秒（含量测误差）`);
-        // 坏样例：红字改成灰色、加省略号，红字判据必须判红
+        // 坏样例：红字改成灰色、加省略号、正文底部盖一条不接受命中的渐变，红字判据必须判红
         await inFrame(page, (doc) => {
             const t = doc.querySelector('[data-gb="input.rules"] .rn-rules__text');
             t.style.color = "rgb(128, 128, 128)";
             const l = doc.querySelector('[data-gb="input.rules"] .rn-rules__lead');
             l.style.textOverflow = "ellipsis";
+            const body = doc.querySelector('[data-gb="input.rules"] [data-part="rules.body"]');
+            const cover = doc.createElement("div");
+            cover.style.cssText = `position:absolute;left:0;right:0;top:${body.offsetTop + body.clientHeight - 34}px;height:34px;pointer-events:none;background:linear-gradient(rgba(28,24,38,0),rgba(28,24,38,0.96))`;
+            body.parentElement.append(cover);
         });
         {
             const red = await inFrame(page, redProbe, "input", rulesExpected(DICT.zh));
-            run.check(red.length >= 2, `坏样例：红字改灰、加省略号应判红（实得 ${red.length} 项）`);
+            run.check(red.length >= 3, `坏样例：红字改灰、加省略号、盖渐变应判红（实得 ${red.length} 项）`);
+            run.check(
+                red.some((m) => m.includes("盖住")),
+                `坏样例：正文底部盖一条渐变，遮挡判据应判红（${red.join("；")}）`,
+            );
         }
 
         // ============================================================ ④ 导览中点紧急切断
@@ -442,7 +530,7 @@ if (isMain) {
 
         // ============================================================ ⑥ 恢复的实例
         {
-            const undo = await markRestored(page);
+            const undo = await markRestored(page, { hintRole: "input" });
             await openRole(page, server, "input");
             await undo();
             rec = await recordBridge(page, WRITES);
@@ -475,6 +563,9 @@ if (isMain) {
                 `document.querySelector("iframe").contentDocument.querySelector('[data-gb="input.footer.hint"]').getAttribute("data-state") !== "restored"`,
                 { label: "确认后页脚不再是恢复提示" },
             );
+            await sleep(page, 300);
+            const late = await hintLogProblems(page);
+            run.check(late.length === 0, `恢复的实例：页脚当帧跟上快照（打开时与确认后）：${late.join("；")}`);
         }
 
         // ============================================================ ⑦ Esc：环路激活 / 重看
@@ -518,12 +609,68 @@ if (isMain) {
             "重看中点紧急切断：桥只收到 panic，不写位",
         );
 
+        // ============================================================ ⑨ 电平帧不重量导览
+        await openRole(page, server, "input");
+        await waitOverlay(page, "input", "(s) => s.lang", "电平帧：应出语言卡");
+        await clickPart(page, '[data-lang-pick="zh"]');
+        await waitOverlay(page, "input", '(s) => s.rules === "gated"', "电平帧：应进规则页");
+        await scrollRulesToEnd(page, "input");
+        await waitOverlay(page, "input", '(s) => s.rules === "ready"', "电平帧：应放行");
+        await clickPart(page, '[data-gb="input.rules"] [data-part="rules.start"]');
+        await waitOverlay(page, "input", "(s) => s.tour === 1", "电平帧：应进导览");
+        await press(page, "ArrowRight");
+        await waitOverlay(page, "input", "(s) => s.tour === 2", "电平帧：翻到有亮区的第 2 步");
+        // 每次重量都会重写遮罩的 data-spot（值不变也算一次改动），数它
+        await inFrame(page, (doc, win) => {
+            const mask = doc.querySelector('[data-gb="input.tour"] .rn-tour__mask');
+            win.__layouts = 0;
+            win.__layoutObs = new win.MutationObserver((recs) => {
+                win.__layouts += recs.length;
+            });
+            win.__layoutObs.observe(mask, { attributes: true, attributeFilter: ["data-spot"] });
+        });
+        for (const gr of [-3, 0, -6, 0]) {
+            await poke(page, `(m) => { m.meters.gr = ${gr}; }`);
+            await sleep(page, 150);
+        }
+        run.eq(await inFrame(page, (doc, win) => win.__layouts), 0, "导览开着时电平帧（增益衰减变了）不重量导览");
+        // 对照：快照变了要重量（量尺不空转）
+        await poke(page, "(m) => { m.sampleRate = m.sampleRate === 44100 ? 48000 : 44100; }");
+        await page.waitFor(`document.querySelector("iframe").contentWindow.__layouts > 0`, {
+            label: "对照：快照变了，导览应重量一次",
+        });
+        run.eq((await stateOf(page, "input")).tour, 2, "电平帧与快照都没让导览走步或关掉");
+
+        // ============================================================ ⑩ 选的语言没写成：叠层退回宿主的语言
+        await openRole(page, server, "input");
+        await page.eval(
+            `(() => { const m = window.__RINNE_PREVIEW__.mock; m.setLang = async () => ({ ok: false, reason: "not-ready" }); })()`,
+        );
+        await waitOverlay(page, "input", "(s) => s.lang", "setLang 没写成：应出语言卡");
+        {
+            const hostLang = await inFrame(page, (doc) => doc.documentElement.lang);
+            run.check(hostLang !== "fr", `宿主的语言不是 fr（防空转）：${hostLang}`);
+            await clickPart(page, '[data-lang-pick="fr"]');
+            await waitOverlay(page, "input", '(s) => s.rules === "gated"', "setLang 没写成：照常进规则页");
+            const want = DICT[hostLang]["rules.title"];
+            await page.waitFor(
+                `document.querySelector("iframe").contentDocument.querySelector('[data-gb="input.rules"] .rn-rules__title').textContent === ${JSON.stringify(want)}`,
+                { label: `setLang 没写成：规则页应退回宿主的语言（${hostLang}）` },
+            );
+            const red = await inFrame(page, redProbe, "input", rulesExpected(DICT[hostLang]));
+            run.check(red.length === 0, `setLang 没写成：规则页整页是宿主的语言（${red.join("；")}）`);
+            const d = await uiDefaults(page);
+            run.check(d.langChosen !== true, `setLang 没写成：全局位没写（${JSON.stringify(d)}）`);
+        }
+
         // ============================================================ ⑧ Output
         await openRole(page, server, "output");
         rec = await recordBridge(page, WRITES);
         await waitOverlay(page, "output", "(s) => s.lang", "Output 全新：应出语言卡");
+        run.eq(await shellStateOf(page, "output"), "modal", "Output 语言卡开着：外壳是遮罩态");
         await clickPart(page, '[data-lang-pick="fr"]');
         await waitOverlay(page, "output", '(s) => s.rules === "gated"', "Output：应进规则页");
+        run.eq(await shellStateOf(page, "output"), "modal", "Output 规则页开着：外壳是遮罩态");
         {
             const red = await inFrame(page, redProbe, "output", rulesExpected(DICT.fr));
             run.check(red.length === 0, `Output 规则页红字（fr）：${red.join("；")}`);
@@ -533,9 +680,11 @@ if (isMain) {
         await clickPart(page, '[data-gb="output.rules"] [data-part="rules.start"]');
         for (let i = 1; i <= 4; i++) {
             await waitOverlay(page, "output", `(s) => s.tour === ${i}`, `Output 导览第 ${i} 步`);
+            if (i === 1) run.eq(await shellStateOf(page, "output"), "modal", "Output 导览开着：外壳是遮罩态");
             await clickPart(page, '[data-gb="output.tour"] [data-part="tour.callout"]');
         }
         await waitOverlay(page, "output", "(s) => s.tour === null && !s.inert", "Output 导览 4 步后结束");
+        run.eq(await shellStateOf(page, "output"), "normal", "Output 首启链结束：外壳回到常态");
         run.eq(
             await rec.calls(),
             [
@@ -586,7 +735,7 @@ if (isMain) {
 
         // 恢复的实例
         {
-            const undo = await markRestored(page);
+            const undo = await markRestored(page, { hintRole: "output" });
             await openRole(page, server, "output");
             await undo();
             await sleep(page, 900);
@@ -600,6 +749,23 @@ if (isMain) {
                 return { state: e.getAttribute("data-state"), text: e.textContent };
             });
             run.eq(h, { state: "restored", text: DICT.zh["hint.firstUseRestored"] }, "Output 恢复的实例：页脚换提示");
+            await clickPart(page, '[data-gb="output.footer.help"]');
+            await waitOverlay(
+                page,
+                "output",
+                '(s) => s.rules === "gated"',
+                "Output 恢复的实例：「?」应打开要确认的规则页",
+            );
+            await scrollRulesToEnd(page, "output");
+            await waitOverlay(page, "output", '(s) => s.rules === "ready"', "Output 恢复的实例：滚到底放行");
+            await clickPart(page, '[data-gb="output.rules"] [data-part="rules.ack"]');
+            await page.waitFor(
+                `document.querySelector("iframe").contentDocument.querySelector('[data-gb="output.footer.hint"]').getAttribute("data-state") !== "restored"`,
+                { label: "Output 确认后页脚不再是恢复提示" },
+            );
+            await sleep(page, 300);
+            const late = await hintLogProblems(page);
+            run.check(late.length === 0, `Output 恢复的实例：页脚当帧跟上快照（打开时与确认后）：${late.join("；")}`);
         }
 
         run.check(page.errors.length === 0, `页面不应有错误：${page.errors.slice(0, 3).join("；")}`);

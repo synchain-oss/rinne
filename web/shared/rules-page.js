@@ -76,7 +76,7 @@ export function createRulesPage(o) {
         el("ol", { class: "rn-rules__list" }, ...items.map((x) => x.li)),
         footnote,
     );
-    const fade = el("div", { class: "rn-rules__fade", aria: { hidden: "true" } });
+    const more = el("div", { class: "rn-rules__more", aria: { hidden: "true" } });
     const actions = el("div", { class: "rn-rules__actions" });
     const modal = createModal({
         host: o.host,
@@ -86,7 +86,7 @@ export function createRulesPage(o) {
         cls: "rn-rules",
     });
     modal.panel.setAttribute("aria-labelledby", title.id);
-    modal.panel.append(title, scroller, fade, actions);
+    modal.panel.append(title, scroller, more, actions);
 
     let variant = "review";
     let gated = false;
@@ -97,7 +97,7 @@ export function createRulesPage(o) {
 
     function applyGate() {
         modal.panel.setAttribute("data-state", variant === "review" ? "review" : gated ? "gated" : "ready");
-        fade.hidden = !gated;
+        more.hidden = !gated;
         for (const b of buttons) {
             b.disabled = gated;
             b.toggleAttribute("data-disabled", gated);

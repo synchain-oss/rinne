@@ -193,11 +193,18 @@ export function createFirstRun(o) {
     const doc = o.doc || globalThis.document;
     const onChange = typeof o.onChange === "function" ? o.onChange : () => {};
     const write = (name, arg) => {
+        let reply;
         try {
-            Promise.resolve(o.bridge[name](arg)).catch(() => {});
+            reply = Promise.resolve(o.bridge[name](arg));
         } catch {
             // 桥没接上：本机的全局位没写成，下次打开照常再弹
+            reply = Promise.resolve(null);
         }
+        // 选的语言没写成（not-ready 之类）：宿主不会把它带回来，叠层退回宿主的语言，免得界面与宿主各说各话
+        const failed = () => {
+            if (name === "setLang") dropPicked(arg);
+        };
+        reply.then((r) => (r && r.ok === true ? undefined : failed()), failed);
     };
     const machine = createFirstRunMachine({ role: o.role, write });
     let snap = null;
@@ -248,6 +255,14 @@ export function createFirstRun(o) {
                 sync();
             },
         }));
+
+    /** setLang 没写成：刚选的语言作废，开着的叠层（选完语言后面接的规则页或导览）换回宿主的语言。 */
+    function dropPicked(code) {
+        if (picked !== code) return;
+        picked = null;
+        if (shown === "rules") lazy.rules.retext(t());
+        else if (shown === "tour") lazy.tour.retext(t());
+    }
 
     /** 按状态机的当前环摆界面：先收起别的，再开当前的。 */
     function sync(scene) {
@@ -302,11 +317,19 @@ export function createFirstRun(o) {
             if (machine.frame(live)) sync();
             else if (auto && !still && machine.begin(snap, live)) sync();
             if (relang && shown === "rules") lazy.rules.retext(t());
-            // 导览开着时每帧重量一次：快照会改亮区里那几件的高（配对卡的副行之类）
+            // 导览开着时每份快照重量一次：快照会改亮区里那几件的高（配对卡的副行之类）
             if (shown === "tour") {
                 if (relang) lazy.tour.retext(t());
                 else lazy.tour.relayout();
             }
+        },
+        /**
+         * 电平帧（失控灯之类变了）：只换判据、做「必须立即关」的判定。电平帧不改版面，不重量导览。
+         * @param {{l2?:boolean, guardLit?:boolean, loopActive?:boolean}} nextLive
+         */
+        live(nextLive) {
+            live = nextLive || {};
+            if (machine.frame(live)) sync();
         },
         /** 「?」与关于面板「查看使用规则」。 */
         openRules() {
