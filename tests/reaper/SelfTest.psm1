@@ -128,6 +128,129 @@ function Get-GuardCases([string]$Tmp) {
     & $add '正常初始化的配置目录通过校验' $false ($made.Ini -like '*good\reaper.ini' -and (Assert-ReaperCfgDir $good).Dir -eq $made.Dir)
     Remove-Item -LiteralPath (Join-Path $good 'reaper.ini')
     & $add '哨兵在、ini 没了被拒绝' $true (Test-Refused { Assert-ReaperCfgDir $good } '*reaper.ini*')
+    foreach ($c in (Get-LinkedIniCases $Tmp $defaultDir)) { $cases.Add($c) }
+    foreach ($c in (Get-DriveTypeCases $Tmp $used)) { $cases.Add($c) }
+    $cases
+}
+
+# 配置目录顶层的链接与 reaper.ini 的文件身份：reaper.ini 若是指向默认资源目录（%APPDATA%\REAPER）的符号链接或硬链接，REAPER 与写 ini 的函数
+# 写进去的就是使用者自己的 ini，光核目录（路径、身份、哨兵）拦不住。全部在假 APPDATA 与临时目录里做，不碰真的。
+# 建不了符号链接 / 硬链接的环境里，对应的那一条降级（用例名里写明没能真跑），别的照常。
+function Get-LinkedIniCases([string]$Tmp, [string]$FakeRoamDefault) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok }
+    # 顶层有 junction（不需要特权，什么环境都建得出来）：哪怕它指向无害的地方
+    $linked = Join-Path $Tmp 'linked-cfg'
+    $null = New-ReaperCfgDir $linked
+    $linkTarget = Join-Path $Tmp 'linked-elsewhere'
+    $null = New-Item -ItemType Directory -Path $linkTarget
+    $topJunction = Join-Path $linked 'extra'
+    $null = New-Item -ItemType Junction -Path $topJunction -Target $linkTarget
+    try {
+        & $add '配置目录顶层有 junction（重解析点）被拒绝，哪怕它指向无害的地方，原因点名是哪一项' $true (Test-Refused { Assert-ReaperCfgDir $linked } '*extra*重解析点*')
+        $before = Get-TreeFingerprint $linked
+        & $add '-Init：顶层有 junction 的目录被拒绝，什么都没写' $true ((Test-Refused { New-ReaperCfgDir $linked } '*重解析点*') -and (Get-TreeFingerprint $linked) -ceq $before)
+    } finally { [IO.Directory]::Delete($topJunction) } # 只删链接本身
+    & $addSafe '顶层的 junction 去掉以后同一个目录照常通过（上面拒绝的就是那个链接）' $false { (Assert-ReaperCfgDir $linked).Dir -like '*linked-cfg' }
+    # 隐藏的链接也算（Get-ChildItem 不带 -Force 看不见隐藏条目）
+    $hiddenJunction = Join-Path $linked '.hidden-extra'
+    $null = New-Item -ItemType Junction -Path $hiddenJunction -Target $linkTarget
+    try {
+        & attrib.exe +h /l $hiddenJunction | Out-Null
+        & $add '配置目录顶层有隐藏的 junction 同样被拒绝' $true (Test-Refused { Assert-ReaperCfgDir $linked } '*.hidden-extra*重解析点*')
+    } finally { [IO.Directory]::Delete($hiddenJunction) }
+    # 顶层列不出来就拒绝（看不见不能当作没有）：不存在的目录直接问
+    & $add '顶层条目列不出来（目录不存在）拒绝，不当作没有链接' $true (Test-Refused { Assert-ReaperNoTopLevelLinks (Join-Path $Tmp 'no-such-cfg-dir') } '*列不出来*')
+    # reaper.ini 是符号链接（要特权）：指向存在的文件，以及指向还不存在的文件（-Init 若不先拦，WriteAllText 会顺着链接把文件建出来）
+    $symCfg = Join-Path $Tmp 'symlink-ini-cfg'
+    $null = New-ReaperCfgDir $symCfg
+    $symIni = Join-Path $symCfg 'reaper.ini'
+    $symTarget = Join-Path $Tmp 'symlink-ini-target.ini'
+    [IO.File]::WriteAllText($symTarget, "[REAPER]`nuser=1`n")
+    Remove-Item -LiteralPath $symIni
+    $symOk = try { $null = New-Item -ItemType SymbolicLink -Path $symIni -Target $symTarget; $true } catch { $false }
+    $noSym = $symOk ? '' : '（本机建不了符号链接，这条没能真跑）'
+    & $add "reaper.ini 是指向别处文件的符号链接被拒绝$noSym" $true ((-not $symOk) -or (Test-Refused { Assert-ReaperCfgDir $symCfg } '*reaper.ini*重解析点*'))
+    if ($symOk) { Remove-Item -LiteralPath $symIni }
+    $missingTarget = Join-Path $Tmp 'symlink-ini-dangling.ini'
+    $brokenLinkOk = try { $null = New-Item -ItemType SymbolicLink -Path $symIni -Target $missingTarget; $true } catch { $false }
+    & $add "-Init：reaper.ini 是指向还不存在的文件的符号链接，被拒绝，链接指到的文件没被建出来$noSym" $true (
+        (-not $brokenLinkOk) -or ((Test-Refused { New-ReaperCfgDir $symCfg } '*重解析点*') -and -not (Test-Path -LiteralPath $missingTarget)))
+    if ($brokenLinkOk) { Remove-Item -LiteralPath $symIni }
+    # reaper.ini 与默认资源目录（假 APPDATA 里的）里的 reaper.ini 是同一个文件（硬链接）
+    $defaultIni = Join-Path $FakeRoamDefault 'reaper.ini'
+    [IO.File]::WriteAllText($defaultIni, "[REAPER]`nuser=1`n")
+    try {
+        $hardCfg = Join-Path $Tmp 'hardlink-ini-cfg'
+        $null = New-ReaperCfgDir $hardCfg
+        $hardIni = Join-Path $hardCfg 'reaper.ini'
+        Remove-Item -LiteralPath $hardIni
+        $hardOk = try { $null = New-Item -ItemType HardLink -Path $hardIni -Target $defaultIni; $true } catch { $false }
+        $noHard = $hardOk ? '' : '（本机建不了硬链接，这条没能真跑）'
+        & $add "reaper.ini 与默认资源目录里的 reaper.ini 是硬链接（同一个文件）被拒绝$noHard" $true ((-not $hardOk) -or (Test-Refused { Assert-ReaperCfgDir $hardCfg } '*reaper.ini*同一个文件*'))
+        if ($hardOk) { Remove-Item -LiteralPath $hardIni }
+        Copy-Item -LiteralPath $defaultIni -Destination $hardIni
+        & $addSafe '内容相同、但不是同一个文件（拷贝）的 reaper.ini 通过：默认资源目录里有同名文件不等于冲突' $false { (Assert-ReaperCfgDir $hardCfg).Ini -like '*hardlink-ini-cfg\reaper.ini' }
+    } finally { Remove-Item -LiteralPath $defaultIni }
+    # 身份取不到就拒绝：存在的文件打不开身份很难真造出来，用注入的替身（只给自测）。替身按路径回答：配置目录里的 ini 一个值，默认资源目录里的另一个值
+    $idCfg = Join-Path $Tmp 'identity-cfg'
+    $null = New-ReaperCfgDir $idCfg
+    $ids = {
+        param($mine, $theirs)
+        $forMine = $mine; $forTheirs = $theirs
+        { param($p) if ($p -like '*\identity-cfg\reaper.ini') { $forMine } else { $forTheirs } }.GetNewClosure()
+    }
+    & $addSafe 'ini 文件身份：与默认资源目录里的不同，通过' $false { (Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' 'BB-02')).Dir -like '*identity-cfg' }
+    & $addSafe 'ini 文件身份：默认资源目录里没有 reaper.ini（没有可比的），通过' $false { (Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' $null)).Dir -like '*identity-cfg' }
+    & $addSafe 'ini 文件身份：与默认资源目录里的相同，拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' 'AA-01') } '*同一个文件*' }
+    & $addSafe 'ini 文件身份：配置目录里的 ini 取不到身份（打不开），拒绝，不静默放行' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'ERROR:5' 'BB-02') } '*reaper.ini 取不到文件身份*' }
+    & $addSafe 'ini 文件身份：配置目录里的 ini 身份是空（认不出），拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids $null 'BB-02') } '*reaper.ini 取不到文件身份*' }
+    & $addSafe 'ini 文件身份：默认资源目录里的 reaper.ini 取不到身份（存在却打不开），拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' 'ERROR:5') } '*默认资源目录里的 reaper.ini 取不到文件身份*' }
+    $cases
+}
+
+# 映射的网络盘：net use Z: \\localhost\C$\… 之后 Z:\… 字符串上是本机盘符，能过「盘符开头」这一层。驱动器类型是 Network、NoRootDirectory、Unknown 的一律拒绝。
+# 判驱动器类型的函数可注入（只给自测）：不真去映射网络盘。subst 盘符在系统里算本机盘，仍由文件身份逐级比较兜住（上面的 subst 用例）。
+function Get-DriveTypeCases([string]$Tmp, [string[]]$UsedLetters) {
+    $cases = [Collections.Generic.List[object]]::new()
+    $add = { param($Label, $Bad, $Passed) $cases.Add([pscustomobject]@{ Label = $Label; Bad = $Bad; Passed = [bool]$Passed }) }
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok }
+    $driveCfg = Join-Path $Tmp 'drive-type-cfg'
+    $null = New-ReaperCfgDir $driveCfg
+    $typed = { param($kind) $answer = $kind; { param($driveLetter) $answer }.GetNewClosure() }
+    foreach ($kind in 'Fixed', 'Removable') {
+        & $addSafe "驱动器类型是 $kind（本机盘）时通过" $false { (Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $typed $kind)).Dir -like '*drive-type-cfg' }
+    }
+    foreach ($kind in 'Network', 'NoRootDirectory', 'Unknown') {
+        & $addSafe "驱动器类型是 $kind 被拒绝（映射的网络盘 Z:\… 字符串上是本机盘符）" $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $typed $kind) } "*-CfgDir 只接受本机盘符开头*驱动器类型是 $kind*" }
+    }
+    & $addSafe '查驱动器类型抛错按 Unknown 处理，被拒绝' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf { param($driveLetter) throw 'boom' } } '*-CfgDir 只接受本机盘符开头*驱动器类型是 Unknown*' }
+    & $addSafe '-Init 对网络盘上的目录同样拒绝，什么都没建' $true {
+        $fresh = Join-Path $Tmp 'drive-type-fresh'
+        (Test-Refused { New-ReaperCfgDir $fresh -DriveTypeOf (& $typed 'Network') } '*-CfgDir 只接受本机盘符开头*驱动器类型是 Network*') -and -not (Test-Path -LiteralPath $fresh)
+    }
+    & $addSafe '判盘符：非盘符开头（UNC、\\?\ 前缀、相对路径）一律有问题；本机盘符开头没有问题' $true {
+        (Get-ReaperDriveProblem '\\srv\share\x' (& $typed 'Fixed')) -and (Get-ReaperDriveProblem '\\?\C:\x' (& $typed 'Fixed')) -and (Get-ReaperDriveProblem 'rel\x' (& $typed 'Fixed')) -and -not (Get-ReaperDriveProblem 'C:\x' (& $typed 'Fixed'))
+    }
+    # 真查驱动器类型（不映射任何东西）：临时目录所在的盘是本机盘；一个没被占用的盘符是 NoRootDirectory / Unknown，Assert-ReaperCfgDir 因此拒绝
+    $tmpLetter = $Tmp.Substring(0, 1)
+    & $addSafe '驱动器类型（真查）：临时目录所在的盘不是 Network / NoRootDirectory / Unknown' $false { (Get-ReaperDriveType $tmpLetter) -notin 'Network', 'NoRootDirectory', 'Unknown' }
+    $free = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S') | Where-Object { $_ -notin $UsedLetters } | Select-Object -First 1
+    $noFree = $free ? '' : '（这台机器上 S…Z 都被占用，这条没能真跑）'
+    & $addSafe "驱动器类型（真查）：没有被占用的盘符是 NoRootDirectory 或 Unknown，其下的配置目录因此被拒绝$noFree" $true {
+        (-not $free) -or (((Get-ReaperDriveType $free) -in 'NoRootDirectory', 'Unknown') -and (Test-Refused { Assert-ReaperCfgDir "${free}:\rn-cfg" } '*驱动器类型*'))
+    }
+    # 经链接解析之后的真实路径也要查：本机盘上的 junction 可以指到映射的网络盘上，字符串上的配置目录仍是本机盘符，解析之后才落在网络盘上。
+    # 自测里造不出两个驱动器类型不同的真盘（subst 盘符解析后回到它指向的真目录），用按调用顺序回答的替身：第一次问（字符串上的路径）说本机盘，
+    # 第二次问（解析之后的真实路径）说 Network。没有链接时两次问的是同一个盘符，所以这条同时证明了「字符串上的」与「真实路径」是各问一次
+    $order = { param($firstKind, $laterKind) $asked = [ref]0; { param($driveLetter) $asked.Value++; $asked.Value -eq 1 ? $firstKind : $laterKind }.GetNewClosure() }
+    & $addSafe '真实路径（解析之后）所在的盘是网络盘被拒绝，哪怕字符串上的盘符是本机盘，原因点名是真实路径' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Fixed' 'Network') } '*真实路径*Network*' }
+    & $addSafe '真实路径所在的盘是 NoRootDirectory 同样被拒绝' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Fixed' 'NoRootDirectory') } '*真实路径*NoRootDirectory*' }
+    & $addSafe '字符串上的盘符是网络盘时，在解析链接之前就拒绝（不先去碰网络上的路径），原因点名是 -CfgDir 本身' $true { Test-Refused { Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Network' 'Fixed') } '*-CfgDir 只接受本机盘符开头*Network*' }
+    & $addSafe '两次问都是本机盘时通过（对照：上面拒绝的是驱动器类型）' $false { (Assert-ReaperCfgDir $driveCfg -DriveTypeOf (& $order 'Fixed' 'Removable')).Dir -like '*drive-type-cfg' }
+    # 查类型本身出错（盘符不是字母，DriveInfo 抛错）按 Unknown，不放行
+    & $addSafe '真查驱动器类型：盘符不是字母（DriveInfo 抛错）按 Unknown 处理' $true { (Get-ReaperDriveType '1') -ceq 'Unknown' -and (Get-ReaperDriveType '') -ceq 'Unknown' }
     $cases
 }
 

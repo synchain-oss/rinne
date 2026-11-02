@@ -3,13 +3,17 @@
 # REAPER 本机烟测的安全护栏。这里的函数只吃路径与文本，自己不启动 REAPER。
 # 存在的理由：REAPER 对不存在的 -cfgfile 路径不报错，而是悄悄改用 %APPDATA%\REAPER，把维护者自己的配置写掉。
 # 所以启动前必须同时满足：配置目录是显式给出的绝对路径、不在（也不指向）%APPDATA% 之下、目录里有 doctor.ps1 -Init 写的
-# 哨兵文件、reaper.ini 在。任何一条不满足就抛出以 REFUSED: 开头的错误，调用方不得启动 REAPER。
+# 哨兵文件、reaper.ini 在。另外：盘符必须是本机盘（映射的网络盘、不存在或认不出的盘符不收，链接解析之后的真实路径同样要查）；
+# 配置目录顶层不得有重解析点（符号链接、junction）；reaper.ini 与默认资源目录里的 reaper.ini 不得是同一个文件（硬链接等）。
+# 任何一条不满足就抛出以 REFUSED: 开头的错误，调用方不得启动 REAPER。
 #   Assert-ReaperCfgDir        校验配置目录，返回 @{ Dir; Ini }；New-ReaperCfgDir 给 doctor -Init 建目录与哨兵
 #   Initialize-ReaperCfg       校验并把 ini 路径钉成只读常量；之后 -cfgfile 的实参只能由 Get-ReaperCfgArgument 产生
 #   Set-ReaperIniValue         只改私有 ini 里的一个键（字节原样往返，不改别的行）
 #   Get-ReaperDefaultCfgSnapshot / Compare-ReaperDefaultCfgSnapshot
 #                              只读地取 %APPDATA%\REAPER 下全部条目的大小与修改时间，前后比较
 #   Get-ReaperFileIdentity     目录的文件身份（卷序列号 + 文件 ID）：路径写法再怎么绕，指到同一个目录身份就相同
+#   Get-ReaperDriveType / Get-ReaperDriveProblem
+#                              盘符的驱动器类型；路径所在的盘是不是本机盘（Network、NoRootDirectory、Unknown 都不是）
 #   Get-ReaperSystemVst3Dirs   REAPER 自己总会补进 vstpath64 的两个系统 VST3 目录（reaper.ini 里的写法）
 #   Find-ReaperVariableCaseCollisions / Find-ReaperControlChars / Test-ReaperScriptLint
 #                              变量名不得只靠大小写区分（PowerShell 变量名不分大小写，$c 会盖掉 $C）；脚本里不得夹不可见的控制字符；
@@ -59,6 +63,23 @@ function Stop-Refuse([string]$Why) { throw [System.InvalidOperationException]::n
 # 路径指到的目录（或文件）的文件身份字符串；路径不存在返回 $null；存在却打不开返回 'ERROR:<错误码>'（调用方要当作「证明不了」处理）。
 function Get-ReaperFileIdentity([string]$Path) { [RinneReaperFileId]::Get($Path) }
 
+# 盘符对应的驱动器类型（只查类型，不读盘）；查不出来按 Unknown 处理。
+function Get-ReaperDriveType([string]$DriveLetter) {
+    try { [string][IO.DriveInfo]::new($DriveLetter).DriveType } catch { 'Unknown' }
+}
+
+# 路径必须以本机盘符开头：不是盘符开头（UNC、\\?\ 前缀、\\.\ 设备路径、相对路径），或盘符的驱动器类型是 Network（net use 映射出来的网络盘，包括映射到
+# \\localhost\C$\… 的：字符串上它是 Z:\…，躲得过按字符串的比较）、NoRootDirectory（没有这个盘）、Unknown（认不出），都有问题。返回问题的说明，没有问题返回 $null。
+# subst 盘符在系统里算本机盘，这里放行，由 Assert-ReaperOutsideDefaultDir 的文件身份逐级比较兜住。DriveTypeOf 只给自测注入：收盘符字母（大写），返回驱动器类型；抛错按 Unknown 算。
+function Get-ReaperDriveProblem {
+    param([string]$Path, [scriptblock]$DriveTypeOf = $null)
+    if ($Path -notmatch '^([A-Za-z]):(?:[\\/]|$)') { return '不是盘符开头的绝对路径：\\?\ 前缀、\\.\ 设备路径、UNC 与 \\localhost\C$\ 这类管理共享写法一律不收' }
+    $letter = $Matches[1].ToUpperInvariant()
+    $kind = try { $DriveTypeOf ? (& $DriveTypeOf $letter) : (Get-ReaperDriveType $letter) } catch { 'Unknown' }
+    if ([string]$kind -in 'Network', 'NoRootDirectory', 'Unknown') { return "盘符 ${letter}: 的驱动器类型是 ${kind}：映射的网络盘、不存在的盘符、认不出的盘符一律不收" }
+    $null
+}
+
 # REAPER 自己总会补进 vstpath64 的两个系统 VST3 目录，写成它在 reaper.ini 里的写法（环境变量不展开，写成别的写法它认不出，会再补一份排在最后）。
 # 放在这里是因为第二个目录的写法里有 APPDATA 字样，而全仓只有 Guard 与自测可以提到它（Test-ReaperScriptLint）；这里只是目录名，不读也不写那个目录。
 function Get-ReaperSystemVst3Dirs { , @('%COMMONPROGRAMFILES%\VST3', '%LOCALAPPDATA%\Programs\Common\VST3') }
@@ -95,14 +116,19 @@ function Test-ReaperUnder([string]$Path, [string]$Root) {
 #   2. 字符串比较：展开 .. 与 junction / 符号链接之后，不在 AppData 的字符串前缀之下；
 #   3. 文件身份比较：配置目录自己和它的每一级上级（直到盘符根），只要有一个与 AppData 是同一个目录（8.3 短名、subst 盘符等字符串认不出的写法），
 #      就拒绝；存在却取不到身份（拒绝访问等）也拒绝，证明不了就不放行。路径还不存在的部分（取到 $null）正常跳过。
-function Assert-ReaperOutsideDefaultDir([string]$CfgDir) {
+function Assert-ReaperOutsideDefaultDir {
+    param([string]$CfgDir, [scriptblock]$DriveTypeOf = $null)
     if ([string]::IsNullOrWhiteSpace($CfgDir)) { Stop-Refuse '没有给 -CfgDir（只接受显式的绝对路径）' }
     if (-not [IO.Path]::IsPathFullyQualified($CfgDir)) { Stop-Refuse '-CfgDir 必须是绝对路径' }
-    if ($CfgDir -notmatch '^[A-Za-z]:[\\/]') { Stop-Refuse '-CfgDir 只接受本机盘符开头的绝对路径（C:\…）：\\?\ 前缀、\\.\ 设备路径、UNC 与 \\localhost\C$\ 这类管理共享写法一律不收' }
+    $driveProblem = Get-ReaperDriveProblem $CfgDir $DriveTypeOf
+    if ($driveProblem) { Stop-Refuse "-CfgDir 只接受本机盘符开头的绝对路径（C:\…）：$driveProblem" }
     $appData = $env:APPDATA
     if ([string]::IsNullOrWhiteSpace($appData)) { Stop-Refuse 'APPDATA 没有设置，无法证明配置目录在它之外' }
     $full = [IO.Path]::GetFullPath($CfgDir).TrimEnd('\', '/')
     $real = (Resolve-ReaperRealPath $full).TrimEnd('\', '/')
+    # 链接可以把本机盘上的路径指到网络盘（或 UNC）上：解析之后的真实路径也得在本机盘上
+    $realProblem = Get-ReaperDriveProblem $real $DriveTypeOf
+    if ($realProblem) { Stop-Refuse "配置目录经链接解析后的真实路径不在本机盘上：$realProblem" }
     $bases = @($appData, (Resolve-ReaperRealPath $appData))
     foreach ($candidate in @($full, $real)) {
         foreach ($base in $bases) {
@@ -122,13 +148,40 @@ function Assert-ReaperOutsideDefaultDir([string]$CfgDir) {
     $real
 }
 
+# 配置目录顶层的条目（含隐藏的）不得带重解析点标记：reaper.ini、哨兵、plugins 等任何一项是符号链接或 junction，REAPER 与 Set-ReaperIniValue
+# 写进去的就是链接指到的地方，可能是使用者自己的配置，光核配置目录自己拦不住。目录列不出来同样拒绝：看不见不能当作没有。
+function Assert-ReaperNoTopLevelLinks([string]$CfgRoot) {
+    $entries = try { @(Get-ChildItem -LiteralPath $CfgRoot -Force -ErrorAction Stop) } catch { Stop-Refuse '配置目录里的条目列不出来，没法证明顶层没有链接' }
+    foreach ($entry in $entries) {
+        if ($entry.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+            Stop-Refuse "配置目录顶层的 '$($entry.Name)' 是重解析点（符号链接、junction 等）：它指到哪里，REAPER 就写到哪里，一律不收"
+        }
+    }
+}
+
+# 配置目录里的 reaper.ini 不得与默认资源目录里的 reaper.ini 是同一个文件（硬链接，或经链接绕过的写法）：同一个文件的话，REAPER 与 Set-ReaperIniValue
+# 写的就是使用者自己的 ini。按文件身份比；默认资源目录里没有同名文件就没有可比的；两边任何一个存在却取不到身份都拒绝，证明不了就不放行。
+# IdentityFn 只给自测注入：收路径，返回文件身份字符串（同 Get-ReaperFileIdentity：不存在 $null，打不开 'ERROR:…'）。
+function Assert-ReaperIniNotDefault {
+    param([string]$CfgIniFile, [scriptblock]$IdentityFn = $null)
+    $fileId = $IdentityFn ?? ${function:Get-ReaperFileIdentity}
+    $mine = & $fileId $CfgIniFile
+    if (-not $mine -or $mine.StartsWith('ERROR:')) { Stop-Refuse "配置目录里的 reaper.ini 取不到文件身份（$($mine ?? '空')），无法证明它不是默认资源目录里的那一份" }
+    $theirs = & $fileId (Join-Path (Get-ReaperDefaultCfgDir) 'reaper.ini')
+    if ($theirs -and $theirs.StartsWith('ERROR:')) { Stop-Refuse "默认资源目录里的 reaper.ini 取不到文件身份（$theirs），无法证明配置目录里的 reaper.ini 与它不是同一个文件" }
+    if ($theirs -and $mine -ceq $theirs) { Stop-Refuse '配置目录里的 reaper.ini 与默认资源目录里的 reaper.ini 是同一个文件（硬链接或链接）：永不碰 %APPDATA%\REAPER' }
+}
+
+# DriveTypeOf、IdentityOf 只给自测注入（不真去映射网络盘、不真造取不到身份的文件）；正式的调用不传。
 function Assert-ReaperCfgDir {
-    param([string]$CfgDir)
-    $real = Assert-ReaperOutsideDefaultDir $CfgDir
+    param([string]$CfgDir, [scriptblock]$DriveTypeOf = $null, [scriptblock]$IdentityOf = $null)
+    $real = Assert-ReaperOutsideDefaultDir $CfgDir $DriveTypeOf
     if (-not (Test-Path -LiteralPath $real -PathType Container)) { Stop-Refuse '配置目录不存在' }
+    Assert-ReaperNoTopLevelLinks $real
     if (-not (Test-ReaperSentinel $real)) { Stop-Refuse '配置目录里没有哨兵文件（先用 doctor.ps1 -Init 初始化）' }
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini -PathType Leaf)) { Stop-Refuse '配置目录里没有 reaper.ini' }
+    Assert-ReaperIniNotDefault $ini $IdentityOf
     [pscustomobject]@{ Dir = $real; Ini = $ini }
 }
 
@@ -142,13 +195,15 @@ function Test-ReaperSentinel([string]$Folder) {
 # 只接管三种目录：还不存在的、空的、已有哨兵的（以前 -Init 过的，已有的 ini 不动）。已有内容又没有哨兵的一律拒绝，什么都不写，
 # 也没有绕过的开关：那多半是一份真实的 REAPER 配置（例如便携版的目录），冒烟会改它的 reaper.ini、往它的 plugins 里复制插件。
 function New-ReaperCfgDir {
-    param([string]$CfgDir)
-    $real = Assert-ReaperOutsideDefaultDir $CfgDir
+    param([string]$CfgDir, [scriptblock]$DriveTypeOf = $null)
+    $real = Assert-ReaperOutsideDefaultDir $CfgDir $DriveTypeOf
     if (Test-Path -LiteralPath $real) {
         if (-not (Test-Path -LiteralPath $real -PathType Container)) { Stop-Refuse '-CfgDir 指向的是一个文件，不是目录' }
         if (-not (Test-ReaperSentinel $real) -and @(Get-ChildItem -LiteralPath $real -Force).Count -gt 0) {
             Stop-Refuse '-CfgDir 已有内容却没有哨兵文件：只接管不存在的目录、空目录或以前 -Init 过的目录，什么都没写'
         }
+        # 以前 -Init 过的目录里若有条目被换成了链接（例如 reaper.ini 成了指向别处、还不存在的文件的符号链接），下面的 WriteAllText 会顺着链接把文件建出来
+        Assert-ReaperNoTopLevelLinks $real
     }
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $real 'plugins')
     $ini = Join-Path $real 'reaper.ini'
@@ -332,6 +387,6 @@ function Test-ReaperScriptLint {
     , $problems.ToArray()
 }
 
-Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Resolve-ReaperRealPath, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
+Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Get-ReaperDriveType, Get-ReaperDriveProblem, Resolve-ReaperRealPath, Assert-ReaperNoTopLevelLinks, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
     Get-ReaperCfgArgument, Set-ReaperIniText, Set-ReaperIniValue, Get-ReaperDefaultCfgDir, Get-ReaperDefaultCfgSnapshot, Compare-ReaperDefaultCfgSnapshot,
     Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint, Get-ReaperSystemVst3Dirs
