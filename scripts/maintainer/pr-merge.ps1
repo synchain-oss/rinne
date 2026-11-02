@@ -266,11 +266,14 @@ function Get-RowCell {
     return $null
 }
 
-<# 这一行是不是【红旗】【重要】：级别列写红旗或重要（带不带【】都认）；认不出级别列时，任何一格里有【红旗】或【重要】。 #>
+<#
+  这一行是不是【红旗】【重要】：级别列存在时，只认以「【红旗】」「【重要】」「红旗」「重要」开头的级别格（「重要 / 建议」算）；
+  「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」这类只是子串命中的不算。认不出级别列（或这一格是空的）时，任何一格里有【红旗】或【重要】。
+#>
 function Test-SevereRow {
     param($Row)
     $level = Get-RowCell $Row '级别'
-    if ($level) { return [bool]($level -match '红旗|重要') }
+    if ($level) { return [bool]($level -match '^(?:【红旗】|【重要】|红旗|重要)') }
     @($Row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0
 }
 
@@ -1746,6 +1749,27 @@ function Invoke-SelfTest {
             $second.Body = (($second.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $id -eq '2' }) -join "`n"
             $f.Items = @($f.Items) + @($second)
         } 'ready'
+        # 级别格收紧：级别列存在时，只有以「【红旗】」「【重要】」「红旗」「重要」开头的单元格才是严重行。
+        # 「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」只是子串命中，不是严重行（以前会被当成严重行：既冒出一条挂账，又能给第 2 项凑条数）
+        foreach ($lv in '汇总（红旗 0、重要 0、建议 0）', '总结', '信息：重要度低', '建议（重要的事另列）') {
+            & $bad "级别格写「$lv」、处置「不改」：不是严重行，不要用户豁免" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'ready'
+        }
+        foreach ($lv in '【红旗】', '【重要】', '红旗', '重要', '重要 / 建议', '**重要**', '重要（既有）') {
+            & $bad "级别格写「$lv」、处置「不改」：是严重行，挂账" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'needs-user'
+        }
+        & $bad '尾注 important=2 的一轮，处置汇总只有 1 条真严重行，再加一行级别写「汇总（红旗 0、重要 0、建议 0）」凑数：仍判红' { param($f) & $onlyRows $f $run1 '1', '3', '5'; & $addRow $f 1 (& $deferCell '汇总（红旗 0、重要 0、建议 0）' '无需另外动作' '—') } 'not-ready' (& $notEnough $run1 2 1)
+        # 处置汇总只认我方在 issue comment 里发的：外部人伪造的、挂着同一个 bot-run 标记的「处置汇总」，或我方 inline 评论里带标记的严重行，都不能给条数凑数
+        $padRow = {
+            param($f, [scriptblock]$mark)
+            $pad = Copy-RinneObject (& $dispOf $f $run1)
+            $pad.Id = '9950'
+            $pad.Body = (($pad.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $id -eq '2' }) -join "`n"
+            & $mark $pad
+            & $onlyRows $f $run1 '1', '3', '5'
+            $f.Items = @($f.Items) + @($pad)
+        }
+        & $bad '尾注 important=2 的一轮，外部人伪造一条带 bot-run 标记的处置汇总来凑严重行数：不算，仍判红' { param($f) & $padRow $f { param($p) $p.Kind = 'external'; $p.Author = 'someone' } } 'not-ready' (& $notEnough $run1 2 1)
+        & $bad '尾注 important=2 的一轮，我方 inline 评论里带 bot-run 标记的严重行：不是处置汇总，不算，仍判红' { param($f) & $padRow $f { param($p) $p.Source = 'review-comment' } } 'not-ready' (& $notEnough $run1 2 1)
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
         & $bad '缺 gates json' { param($f) $f.Gates = $null }
         & $bad 'gates 的 sha 不是 head' { param($f) $f.Gates.sha40 = 'e' * 40 }
