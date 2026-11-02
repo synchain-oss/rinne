@@ -275,6 +275,22 @@ function Test-SevereRow {
 }
 
 <#
+  引用某次 bot 运行（标记里 bot-run=<运行编号>）的处置汇总里，级别为【红旗】【重要】的行数。
+  只看 issue comment 里我方（有写权限且带标记）的处置汇总，和 review-state 认处置汇总的口径一致；
+  同一行文字重复出现只算一条（复制几遍凑数不行）。
+#>
+function Get-DispositionSevereCount {
+    param([object[]]$Items, [Parameter(Mandatory)][string]$RunId)
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' })) {
+        $m = Get-AgentMarker $i.Body
+        if (-not $m -or $m.Kind -ne 'disposition' -or [string]$m.Extra['bot-run'] -ne $RunId) { continue }
+        foreach ($row in @(Get-DispositionRows $i.Body)) { if (Test-SevereRow $row) { [void]$seen.Add($row.Line) } }
+    }
+    $seen.Count
+}
+
+<#
   处置汇总表里没有清掉的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。
   严重行默认挂账：只有处置列（去掉 * _ 与反引号之后）以「已修」「修复」「已改」「采纳」「已采纳」开头、不含拒绝词
   （「不改」「不采纳」「挂账」「暂不」「维持」「未修」「搁置」「驳回」「不处理」「延后」「暂缓」「忽略」等），而且处置列或它右边的
@@ -424,7 +440,17 @@ function Get-MergeVerdict {
     if (-not $d) { $fail.Add('最后一条 bot 总结之后没有处置汇总') }
     elseif ($s -and $d.botRun -ne $s.runId) { $fail.Add("处置汇总引用的运行 $($d.botRun) 不是最后一条 bot 总结的 $($s.runId)") }
     foreach ($x in @($F.State.summaries)) {
-        if ($x.runId -and @($F.State.dispositionRuns) -notcontains [string]$x.runId) { $fail.Add("运行 $($x.runId) 的 bot 总结没有处置汇总") }
+        if (-not $x.runId) { continue }
+        if (@($F.State.dispositionRuns) -notcontains [string]$x.runId) { $fail.Add("运行 $($x.runId) 的 bot 总结没有处置汇总"); continue }
+        # 只有引用没有内容不算回应：尾注 red + important = N 时，引用这次运行的处置汇总里要有至少 N 条【红旗】【重要】的行
+        # （「已处理。」一句话、少列几条都不行）。尾注不可用的总结没有可信的 N，按它正文里逐条列出的红旗 / 重要意见数
+        $wanted = if ($x.ok) { [int]$x.red + [int]$x.important } else { @($x.items | Where-Object { $_.level -in @('红旗', '重要') }).Count }
+        if ($wanted -le 0) { continue }
+        $have = Get-DispositionSevereCount -Items $F.Items -RunId ([string]$x.runId)
+        if ($have -lt $wanted) {
+            $footer = if ($x.ok) { "尾注 red=$($x.red) important=$($x.important)" } else { '尾注不可用，正文列出的红旗 / 重要意见' }
+            $fail.Add("运行 $($x.runId) 的 bot 总结$footer，共 $wanted 条要处置，引用它的处置汇总里只有 $have 条【红旗】【重要】的行")
+        }
     }
 
     # 5. 线程与回应：open thread = 0；每条 bot 与人的评论都有回应（对比原评论的 updated_at，按 in-reply-to 认）；
@@ -1600,6 +1626,35 @@ function Invoke-SelfTest {
         }
         & $bad '【红旗】处置写「已修」并附提交号：清掉' { param($f) & $addRow $f 1 (& $deferCell '【红旗】' '已修' 'd62c5dc') } 'ready'
         & $bad '提交号写在处置格里（处置列自己带 sha）：清掉' { param($f) & $addRow $f 1 '| 9 | bot | 【重要】 | a.mjs:1 | x | 已修 d62c5dc | 理由 |' } 'ready'
+        # 处置汇总的内容：bot 总结尾注 red + important = N 时，引用那次运行的处置汇总里，级别为【红旗】【重要】的行至少 N 条，
+        # 不够判红（写清哪次运行、要几条、有几条）。夹具里第 1 轮总结 important=2，它的处置汇总有 3 条严重行
+        $run1 = [string]$base.State.summaries[0].runId
+        $run2 = [string]$base.State.summaries[1].runId
+        $dispOf = { param($f, $run) @($f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' }) | Where-Object { (Get-AgentMarker $_.Body).Extra['bot-run'] -eq $run } | Select-Object -First 1 }
+        # 处置汇总表的数据行只留编号在 ids 里的（表头、分隔行与表外的文字原样保留）
+        $rowId = { param($line) $m = [regex]::Match($line, '^\| (\d+) \|'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
+        $onlyRows = {
+            param($f, $run, [string[]]$ids)
+            $d = & $dispOf $f $run
+            $d.Body = (($d.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $ids -contains $id }) -join "`n"
+        }
+        $notEnough = { param($run, $n, $have) { param($r) @($r.Failures | Where-Object { $_ -match "运行 $run" -and $_ -match "共 $n 条" -and $_ -match "只有 $have 条" }).Count -eq 1 }.GetNewClosure() }
+        & $bad '尾注 important=2 的一轮，处置汇总只写「已处理。」没有表：判红' { param($f) $d = & $dispOf $f $run1; $d.Body = ($d.Body -split "`n")[0] + "`n已处理。" } 'not-ready' (& $notEnough $run1 2 0)
+        & $bad '尾注 important=2 的一轮，处置汇总的表里只有 1 条严重行：判红' { param($f) & $onlyRows $f $run1 '1', '3', '5' } 'not-ready' (& $notEnough $run1 2 1)
+        & $bad '尾注 important=2 的一轮，处置汇总的表里恰有 2 条严重行：放行' { param($f) & $onlyRows $f $run1 '1', '2', '3', '5' } 'ready'
+        & $bad '尾注 important=2 的一轮，把同一条严重行复制两遍凑数：只算 1 条，判红' { param($f) & $onlyRows $f $run1 '1', '3'; $d = & $dispOf $f $run1; $row = @($d.Body -split "`n" | Where-Object { (& $rowId $_) -eq '1' }); $d.Body += "`n$($row[0])" } 'not-ready' (& $notEnough $run1 2 1)
+        & $bad '尾注 important=1 的一轮，处置汇总里没有严重行：判红' { param($f) $f.State.summaries[1].important = 1 } 'not-ready' (& $notEnough $run2 1 0)
+        & $bad '尾注 red=1 的一轮，处置汇总里没有严重行：判红' { param($f) $f.State.summaries[1].red = 1 } 'not-ready' (& $notEnough $run2 1 0)
+        & $bad '尾注 red=0 important=0 的一轮，处置汇总的表里没有严重行：放行' { param($f) & $onlyRows $f $run2 @() } 'ready'
+        & $bad '早先一条总结的尾注不可用（ok=false）：按正文的逐条意见数核对，处置汇总只写「已处理。」判红' { param($f) $f.State.summaries[0].ok = $false; $d = & $dispOf $f $run1; $d.Body = ($d.Body -split "`n")[0] + "`n已处理。" } 'not-ready' (& $notEnough $run1 2 0)
+        & $bad '严重行分写在两条引用同一次运行的处置评论里：合计够 N 条，放行' {
+            param($f)
+            $second = Copy-RinneObject (& $dispOf $f $run1)
+            $second.Id = '9901'
+            & $onlyRows $f $run1 '1', '3', '5'
+            $second.Body = (($second.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $id -eq '2' }) -join "`n"
+            $f.Items = @($f.Items) + @($second)
+        } 'ready'
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
         & $bad '缺 gates json' { param($f) $f.Gates = $null }
         & $bad 'gates 的 sha 不是 head' { param($f) $f.Gates.sha40 = 'e' * 40 }
