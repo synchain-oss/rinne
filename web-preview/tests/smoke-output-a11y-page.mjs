@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Output 页面的可访问性冒烟（无头浏览器）：真页面（夹具 web-preview/fixtures/output）× 中 / 英 / 法。
-//   ① 名称：页上每个可交互件都有非空的可访问名称（aria-labelledby > aria-label > 文字 > title），全部场景都查；
+// 首启的 6 个场景（语言卡、规则页、导览 4 步）加规则页放行后的画面另在 smoke-output-a11y-first-run-page.mjs 查：
+//   拆出去是为了让两个文件各自跑在 run-all 单项 300 秒的上限之内（合在一起实测 317 秒，超了），判据一条没动；
+//   本页排除的集合在下面按数量精确断言（恰好 7 个画面），不多排也不少排。
+//   ① 名称：页上每个可交互件都有非空的可访问名称（aria-labelledby > aria-label > 文字 > title），全部非首启场景都查；
 //   ② 角色与状态：配对卡 group + 名称、语言胶囊 tablist / tab、组选择 radiogroup / radio（roving tabindex，恰好一个 tabindex=0）、
-//      消息位红为 alert 其余 status（全部场景）、关于面板 dialog + aria-modal + aria-labelledby、缩放确认 dialog、轻提示 status；
+//      消息位红为 alert 其余 status（全部非首启场景）、关于面板 dialog + aria-modal + aria-labelledby、缩放确认 dialog、轻提示 status；
 //   ③ 键盘：组选择方向键只移焦点、空格与回车才选中；关于面板打开时焦点在里面、外壳内容 inert，Esc 关闭且焦点还给版本按钮；
 //      Tab 走一圈，每一站都有看得见的焦点环；接管确认条展开时其余组 aria-disabled 且不接受点选；
 //   ④ 坏样例：夹具的 ?defect=noname 必须被名称审计抓出来，?defect=noring 必须被焦点环检查抓出来。
@@ -22,9 +25,13 @@ import {
     click,
     enableFocus,
     focusOf,
+    frameTag,
+    isFirstRunScene,
     loadDesign,
     loadOutputScenes,
     openOutput,
+    openOutputFrame,
+    outputFrames,
     press,
     tabWalk,
 } from "../fixtures/output/lib.mjs";
@@ -35,6 +42,9 @@ if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 
 const box = await loadDesign(ROOT);
 const scenes = await loadOutputScenes(ROOT);
+const frames = outputFrames(scenes);
+/** 本页查的画面：首启的画面另在 smoke-output-a11y-first-run-page 查。 */
+const mainFrames = frames.filter((f) => !isFirstRunScene(f.scene));
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser();
 
@@ -56,10 +66,10 @@ try {
     for (const lang of LANGS) {
         await freshPage();
 
-        // ---- ① 名称 + 消息位角色：全部场景 ----
-        for (const sc of scenes) {
-            const tag = `${lang}/${sc.id}`;
-            await openOutput(page, server, box, lang, sc.id);
+        // ---- ① 名称 + 消息位角色：全部非首启场景 ----
+        for (const frame of mainFrames) {
+            const tag = frameTag(lang, frame);
+            await openOutputFrame(page, server, box, lang, frame);
             const audit = await page.eval(NAME_AUDIT);
             run.check(audit.interactive >= 12, `${tag}：应有足够多的可交互件（防空转），实得 ${audit.interactive}`);
             run.eq(audit.missing, [], `${tag}：这些可交互件没有可访问名称`);
@@ -253,6 +263,13 @@ try {
             `${tag}：轻提示应是 status 且有文字`,
         );
     }
+    run.eq(
+        frames.length - mainFrames.length,
+        7,
+        "本页排除的恰好是首启的 7 个画面（6 个场景加规则页放行后一个），它们由 smoke-output-a11y-first-run-page 查",
+    );
+    run.eq(mainFrames.length, 15, "本页查 15 个非首启场景，每个一个画面（防新增场景漏测）");
+    run.eq(frames.length, scenes.length + 1, "每个场景一个画面，规则页多一个放行后的画面（防新增场景漏测）");
 
     // ---- ④ 坏样例 ----
     await freshPage();

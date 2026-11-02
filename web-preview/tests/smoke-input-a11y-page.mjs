@@ -2,7 +2,8 @@
 //
 // Input 页面可访问性冒烟（无头浏览器），真源页面经预览壳页装载。
 //   ① 名称：页上每个可交互件都有非空的可访问名称（aria-labelledby > aria-label > 文字 > title）；
-//      32 个 in-* 场景的中文页全量审计，英文与法文页审计最有代表性的几个场景；预设面板的八个子态（场景表只有两个）逐语言审计；
+//      40 个 in-* 场景（含首启的 8 个）的中文页全量审计，英文与法文页审计最有代表性的几个场景，首启的画面三语都审计；
+//      预设面板的八个子态（场景表只有两个）逐语言审计；
 //      对话框、列表框、原生下拉、输入框的名称只能由作者给；
 //   ② 角色与状态：滑块（反馈量、Mix、低切、高切、延迟、上限）有 valuemin / valuemax / valuenow / valuetext 且取值合理，
 //      开关有 aria-checked，单位分段是 tablist，电平管是 meter（-60 到 0），紧急切断是有名称的按钮，
@@ -10,6 +11,13 @@
 //   ③ 键盘：反馈滑块的方向键 1 步、PgUp / PgDn 10 步、Home 到 0、End 在限制器开着时停在 100%（闸），Enter 进入数值输入、Esc 退出且不改值；
 //      紧急切断用键盘（空格与回车）能触发；Tab 走一圈每一站都有看得见的焦点环；
 //   ④ 坏样例：去掉滑块的名称、关掉焦点环、把 valuemax 改小，上面各项必须各自判红（量尺本身可信）。
+//   ⑤ 首启叠层（语言卡、规则页、导览各步，三语）：叠层是带名称的模态对话框（role=dialog、aria-modal、aria-labelledby 指到有字的节点）、
+//      叠层打开时内容层 inert、键盘焦点在叠层之内；叠层里每颗按钮有名称，规则页未放行时两颗按钮真禁用并带 title、放行后可用，
+//      导览第 1 步的「上一步」禁用；规则页正文区能用键盘到达；紧急切断在三种叠层下都不在 inert 里、有名称、能聚焦，
+//      Tab 走一圈每一站只落在叠层或紧急切断上、且有看得见的焦点环；用键盘（空格）在三种叠层下触发紧急切断，桥收到一次 panic、叠层关掉。
+//      已在 smoke-first-run-page 断言过的不重复：Esc 的去留、按钮放行的时机、红字、紧急切断的命中点与导览中真点切断。
+//      坏样例：去掉叠层名称、去掉内容层 inert、把焦点移出叠层、把规则页按钮改成可用、让紧急切断落进 inert、关掉叠层里的焦点环，各项必须判红；
+//      反例：只有 aria-labelledby 的按钮（没有文字、没有 aria-label）不算没有名称，叠层按钮的名称与名称审计取法同一个函数。
 // 浏览器缺失时整套跳过（退出码 2），不是通过。本机同时只能有一个浏览器冒烟。
 //
 // 用法：node web-preview/tests/smoke-input-a11y-page.mjs [仓库根]
@@ -18,18 +26,26 @@ import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 import {
+    FRAMES,
     LANGS,
     PRESET_STATES,
     SCENES,
     VIEW,
+    frameTag,
     inFrame,
+    isFirstRunScene,
+    openFrame,
     openInput,
     openPresetState,
+    overlayProbeFailures,
     recordBridge,
 } from "./smoke-input-kit-page.mjs";
+import { overlayA11yProbe, overlayProblems, stripToLabelledBy } from "../fixtures/first-run/measure.mjs";
 
 const ROOT = repoRoot();
 const run = createRun("Input 页面可访问性");
+/** 导览共几步（场景表里 in-tour-N 的个数）：最后一步的按钮是「完成」而不是「下一步」。 */
+const TOUR_STEPS = SCENES.filter((s) => /^in-tour-[0-9]+$/.test(s.id)).length;
 if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 
 /** 页内名称审计：返回 { interactive:N, missing:[描述] }。 */
@@ -160,6 +176,11 @@ const focusFrame = (page) =>
     inFrame(page, (doc, win) => {
         win.focus();
         if (doc.activeElement && doc.activeElement !== doc.body) doc.activeElement.blur();
+        // 顺序焦点导航的起点是上一次聚焦的节点，blur 不会重置它：首启叠层打开时焦点在叠层里，Tab 会从那里往后走、
+        // 漏掉文档里排在叠层前面的件（紧急切断就在前面）。把起点放回文档开头，Tab 一圈才是完整的一圈
+        doc.body.tabIndex = -1;
+        doc.body.focus();
+        doc.body.removeAttribute("tabindex");
     });
 
 /** 焦点落在页面里指定选择器的元素上。 */
@@ -175,6 +196,32 @@ const focusOn = (page, selector) =>
         },
         selector,
     );
+
+/** 页内：把焦点放到紧急切断上，返回它的角色、名称、是否在 inert 里、能否聚焦。 */
+function panicProbe(doc) {
+    const p = doc.querySelector('[data-gb="input.panic"]');
+    if (!p) return null;
+    p.focus();
+    return {
+        tag: p.tagName,
+        name: (p.getAttribute("aria-label") || p.textContent || "").trim(),
+        inert: Boolean(p.closest("[inert]")),
+        disabled: p.disabled,
+        focused: doc.activeElement === p,
+    };
+}
+
+/** 紧急切断在叠层之下的问题清单，空表示都对：是有名称的按钮、不在 inert 里、没禁用、聚焦得上。 */
+const panicProblems = (p) =>
+    !p
+        ? ["页面里没有紧急切断"]
+        : [
+              p.tag !== "BUTTON" && `应是 button，实得 ${p.tag}`,
+              !p.name && "没有可访问名称",
+              p.inert && "落在 inert 里",
+              p.disabled && "被禁用",
+              !p.focused && "聚焦不上",
+          ].filter(Boolean);
 
 const FB = '[data-gb="input.fb.knob"] [role="slider"]';
 const readNow = (page) =>
@@ -224,6 +271,11 @@ async function tabWalk(page) {
             return {
                 id: `${a.getAttribute("data-gb") || a.getAttribute("data-part") || a.className || a.tagName}`,
                 ring,
+                // 首启叠层打开时，每一站只该落在叠层里或紧急切断上
+                inOverlay: Boolean(
+                    a.closest('[data-gb="input.langStart"], [data-gb="input.rules"], [data-gb="input.tour"]'),
+                ),
+                panic: a.matches('[data-gb="input.panic"]'),
             };
         });
         if (!f) break;
@@ -250,10 +302,11 @@ try {
     ];
     let audited = 0;
     for (const lang of LANGS) {
-        for (const scene of SCENES) {
-            if (lang !== "zh" && !REPRESENTATIVE.includes(scene.id)) continue;
-            const tag = `${scene.id}/${lang}`;
-            await openInput(page, server, scene.id, { lang });
+        for (const frame of FRAMES) {
+            const { scene } = frame;
+            if (lang !== "zh" && !REPRESENTATIVE.includes(scene.id) && !isFirstRunScene(scene)) continue;
+            const tag = frameTag(frame, lang);
+            await openFrame(page, server, frame, { lang });
             const audit = await inFrame(page, nameAudit);
             audited++;
             run.eq(
@@ -268,6 +321,12 @@ try {
         }
     }
     run.log(`  名称审计共 ${audited} 页`);
+    // 中文全量；英、法文审计代表场景，加上首启的 9 个画面（8 个场景加规则页放行后一个）三语都审计
+    run.eq(
+        audited,
+        FRAMES.length + (LANGS.length - 1) * (REPRESENTATIVE.length + 9),
+        "名称审计的页数：中文全量，英、法文为代表场景加首启画面",
+    );
 
     // 预设面板的子态：逐语言逐子态摆出来审计；面板、列表框、条目、输入框、各按钮都要有名称，下拉也要
     let presetAudited = 0;
@@ -471,6 +530,190 @@ try {
         run.check(
             stops.length >= 20 && stops.filter((s) => !s.ring).length >= 20,
             `坏样例：关掉焦点环后应报出没有环的停靠点，实得 ${stops.filter((s) => !s.ring).length}`,
+        );
+    }
+
+    // ---- ⑤ 首启叠层：角色与名称、内容层 inert、焦点、紧急切断、Tab 一圈（三语，每个首启画面）
+    {
+        const OVERLAY_ANY =
+            '(() => { const d = document.querySelector("iframe").contentDocument; return ["langStart", "rules", "tour"].every((k) => { const e = d.querySelector(\'[data-gb="input.\' + k + \'"]\'); return !e || !!e.closest("[hidden]"); }); })()';
+        let checked = 0;
+        for (const lang of LANGS) {
+            for (const frame of FRAMES) {
+                if (!isFirstRunScene(frame.scene)) continue;
+                const tag = frameTag(frame, lang);
+                await openFrame(page, server, frame, { lang });
+                const o = await inFrame(page, overlayA11yProbe, "input");
+                run.eq(overlayProblems(o, frame, TOUR_STEPS), [], `${tag}：叠层的无障碍问题`);
+                run.eq(panicProblems(await inFrame(page, panicProbe)), [], `${tag}：叠层之上的紧急切断`);
+                const { stops } = await tabWalk(page);
+                run.check(
+                    stops.some((s) => s.inOverlay),
+                    `${tag}：Tab 一圈应进到叠层里，实得 ${JSON.stringify(stops.map((s) => s.id))}`,
+                );
+                run.check(
+                    stops.some((s) => s.panic),
+                    `${tag}：Tab 一圈应到紧急切断，实得 ${JSON.stringify(stops.map((s) => s.id))}`,
+                );
+                run.eq(
+                    stops.filter((s) => !s.inOverlay && !s.panic).map((s) => s.id),
+                    [],
+                    `${tag}：Tab 一圈只该落在叠层或紧急切断上（内容层 inert）`,
+                );
+                run.eq(
+                    stops.filter((s) => !s.ring).map((s) => s.id),
+                    [],
+                    `${tag}：这些 Tab 停靠点没有看得见的焦点环`,
+                );
+                checked++;
+            }
+        }
+        run.eq(checked, 9 * LANGS.length, "首启画面：8 个场景加规则页放行后一个，每种语言各查一遍");
+
+        // 用键盘（空格）在三种叠层下触发紧急切断：桥收到一次 panic，叠层关掉
+        for (const id of ["in-lang", "in-rules", "in-tour-1"]) {
+            await openInput(page, server, id, { lang: "zh" });
+            const rec = await recordBridge(page, ["panic"]);
+            run.check(await focusOn(page, '[data-gb="input.panic"]'), `${id}：应能把焦点放到紧急切断上`);
+            await press(page, "Space");
+            await page.waitFor(`window.__calls.some((c) => c[0] === "panic")`, {
+                label: `${id}：空格应触发紧急切断`,
+            });
+            run.eq((await rec.calls()).filter((c) => c[0] === "panic").length, 1, `${id}：紧急切断恰好调一次`);
+            await page.waitFor(OVERLAY_ANY, { label: `${id}：紧急切断后叠层应立即关` });
+        }
+
+        // 坏样例：量尺本身可信。每一条改坏之后，对应的判据必须报出来
+        const bad = async (label, id, sub, mutate, check) => {
+            const frame = { scene: SCENES.find((s) => s.id === id), sub };
+            await openFrame(page, server, frame, { lang: "zh" });
+            run.eq(
+                overlayProblems(await inFrame(page, overlayA11yProbe, "input"), frame, TOUR_STEPS),
+                [],
+                `坏样例前提（${label}）：改坏之前应没有问题`,
+            );
+            await inFrame(page, mutate);
+            await check(frame);
+        };
+        const overlayHas = (re, label) => async (frame) => {
+            const got = overlayProblems(await inFrame(page, overlayA11yProbe, "input"), frame, TOUR_STEPS);
+            run.check(
+                got.some((m) => re.test(m)),
+                `坏样例：${label}，应报出 ${re}，实得 ${JSON.stringify(got)}`,
+            );
+        };
+        await bad(
+            "导览去掉名称",
+            "in-tour-2",
+            "",
+            (doc) => doc.querySelector('[data-gb="input.tour"]').removeAttribute("aria-labelledby"),
+            overlayHas(/没有可访问名称/, "导览对话框没有名称"),
+        );
+        await bad(
+            "语言卡去掉名称",
+            "in-lang",
+            "",
+            (doc) => doc.querySelector('[data-gb="input.langStart"]').removeAttribute("aria-labelledby"),
+            overlayHas(/没有可访问名称/, "语言卡没有名称"),
+        );
+        await bad(
+            "去掉内容层 inert",
+            "in-rules",
+            "",
+            (doc) => doc.querySelector('[data-gb="input.shell"] > [data-part="content"]').removeAttribute("inert"),
+            overlayHas(/内容层应是 inert/, "内容层没有 inert"),
+        );
+        await bad(
+            "焦点移出叠层",
+            "in-tour-3",
+            "",
+            (doc) => doc.activeElement && doc.activeElement.blur(),
+            overlayHas(/焦点应在叠层之内/, "焦点不在叠层里"),
+        );
+        await bad(
+            "规则页按钮在未放行时可用",
+            "in-rules",
+            "",
+            (doc) => doc.querySelector('[data-part="rules.start"]').removeAttribute("disabled"),
+            overlayHas(/rules\.start 在未放行应禁用/, "未放行的按钮没禁用"),
+        );
+        await bad(
+            "规则页按钮放行后仍禁用",
+            "in-rules",
+            "ready",
+            (doc) => doc.querySelector('[data-part="rules.skip"]').setAttribute("disabled", ""),
+            overlayHas(/rules\.skip 在放行后应可用/, "放行后的按钮仍禁用"),
+        );
+        await bad(
+            "按钮没有名称",
+            "in-lang",
+            "",
+            (doc) => {
+                const b = doc.querySelector('[data-part="langStart.en"]');
+                b.textContent = "";
+            },
+            overlayHas(/langStart\.en 没有名称/, "语言按钮没有名称"),
+        );
+        // 反例：按钮没有文字、没有 aria-label，只有 aria-labelledby（指到两个有字的节点）：名称就是那两段字，
+        // 叠层探针不能把它判成「没有名称」（取名称的顺序与写法同名称审计，是同一个函数，见 accessibleName）
+        {
+            const frame = { scene: SCENES.find((s) => s.id === "in-lang"), sub: "" };
+            await openFrame(page, server, frame, { lang: "zh" });
+            const want = await inFrame(page, stripToLabelledBy, '[data-part="langStart.en"]');
+            const o = await inFrame(page, overlayA11yProbe, "input");
+            run.eq(
+                o.buttons.find((b) => b.part === "langStart.en").name,
+                want,
+                "反例：只有 aria-labelledby 的按钮，叠层探针取到的名称",
+            );
+            run.eq(overlayProblems(o, frame, TOUR_STEPS), [], "反例：只有 aria-labelledby 的按钮不算没有名称");
+            run.eq(
+                (await inFrame(page, nameAudit)).missing,
+                [],
+                "反例：整页名称审计也不能把只有 aria-labelledby 的按钮判成缺名称",
+            );
+        }
+        // 紧急切断落进 inert：panicProblems 要报
+        await openInput(page, server, "in-rules", { lang: "zh" });
+        await inFrame(page, (doc) => doc.querySelector('[data-gb="input.panic"]').setAttribute("inert", ""));
+        {
+            const got = panicProblems(await inFrame(page, panicProbe));
+            run.check(
+                got.some((m) => /inert/.test(m)) && got.some((m) => /聚焦不上/.test(m)),
+                `坏样例：紧急切断落进 inert，应报「落在 inert 里」与「聚焦不上」，实得 ${JSON.stringify(got)}`,
+            );
+        }
+        // 内容层不 inert：Tab 一圈会走进内容层，「只该落在叠层或紧急切断上」要报红
+        await openInput(page, server, "in-tour-2", { lang: "zh" });
+        await inFrame(page, (doc) =>
+            doc.querySelector('[data-gb="input.shell"] > [data-part="content"]').removeAttribute("inert"),
+        );
+        {
+            const { stops } = await tabWalk(page);
+            run.check(
+                stops.filter((s) => !s.inOverlay && !s.panic).length >= 5,
+                `坏样例：去掉内容层 inert 后 Tab 一圈应走进内容层，实得 ${JSON.stringify(stops.map((s) => s.id))}`,
+            );
+        }
+        // 关掉焦点环：叠层里的停靠点要报出没有环
+        await openInput(page, server, "in-tour-2", { lang: "zh" });
+        await inFrame(page, (doc) => {
+            const s = doc.createElement("style");
+            s.textContent = ".rn-shell *, .rn-shell *:focus-visible { outline: none !important; }";
+            doc.head.append(s);
+        });
+        {
+            const { stops } = await tabWalk(page);
+            run.check(
+                stops.filter((s) => s.inOverlay && !s.ring).length >= 2,
+                `坏样例：关掉焦点环后叠层里应报出没有环的停靠点，实得 ${JSON.stringify(stops)}`,
+            );
+        }
+        // 叠层没摆出来：overlayProbeFailures 要报（量尺不能在普通页面上空转）
+        await openInput(page, server, "in-playing", { lang: "zh" });
+        run.check(
+            (await overlayProbeFailures(page, { scene: SCENES.find((s) => s.id === "in-tour-2"), sub: "" })).length > 0,
+            "坏样例：普通页面上没有叠层，应判「叠层没摆出来」",
         );
     }
 

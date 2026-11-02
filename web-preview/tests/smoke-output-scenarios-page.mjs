@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Output 页面的行为冒烟（无头浏览器）：真页面（夹具 web-preview/fixtures/output）接 mock 桥，逐个场景与交互点一遍。
-//   ① 场景表：15 个场景各自的配对状态灯、色语义、副行、轨道行（名字 / 无名 / 插入链）、核验与声道徽标、消息位、发送行、
+//   ① 场景表：15 个场景（首启的 6 个场景不在这里，见下）各自的配对状态灯、色语义、副行、轨道行（名字 / 无名 / 插入链）、核验与声道徽标、消息位、发送行、
 //      页脚提示、外壳状态与危险描边、组选择、覆盖层；
 //   ② 三语：状态灯与核验徽标的文字取自词典，不是写死；<html lang> 跟界面语言；
 //   ③ 交互：选组（同组不重复调用、成功后弹提示）、接管确认条的两个按钮与组号（读 takeoverGroup，缺省或不认识时读 group）、
@@ -13,6 +13,10 @@
 //      首帧到齐前组胶囊、重新配对、接管确认与缩放都不写（缩放下拉置灰只显示「—」，语言照常），到齐后照常选组与选档；旧 WebKit
 //      的缩放锁请回 1 也等两路首帧齐了才发（先 state 后 pair、先 pair 后 state 各一遍）；销毁后不留定时器、不再去问桥、pagehide 监听摘掉；
 //   ⑦ 坏样例：把红字挪进内容层、把危险描边关掉，上面对应的断言必须变红（见各自的替身断言）。
+// 首启的 6 个场景（语言卡、规则页、导览 4 步）显式排除在本页之外：本页逐场景核对的是配对状态灯、副行、轨道行、消息位、发送行、
+//   页脚提示与外壳状态，首启场景是压在整页上的叠层，下面的内容层只是底，没有这些场景自己的期望；而且首启场景接了首启控制器，
+//   与本页③「?」在首启链接入前不动作的前提相反。首启场景的几何、对比度、无障碍由适配、对比度、无障碍三套按画面覆盖，
+//   首启链本身的行为由 smoke-first-run-page 覆盖。排除的集合在下面按 ID 精确断言，不多排也不少排。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-output-scenarios-page.mjs [仓库根]
@@ -28,6 +32,7 @@ import {
     attr,
     callsOf,
     click,
+    isFirstRunScene,
     loadDesign,
     loadOutputScenes,
     openOutput,
@@ -40,7 +45,8 @@ const run = createRun("Output 页面行为");
 if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 
 const box = await loadDesign(ROOT);
-const scenes = await loadOutputScenes(ROOT);
+const allScenes = await loadOutputScenes(ROOT);
+const scenes = allScenes.filter((s) => !isFirstRunScene(s));
 const load = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
 const common = (await load("web/i18n/common.js")).default;
 const outDict = (await load("web/i18n/output.js")).default;
@@ -236,6 +242,14 @@ const WANT = {
     },
 };
 
+run.eq(
+    allScenes
+        .filter(isFirstRunScene)
+        .map((s) => s.id)
+        .sort(),
+    ["out-lang", "out-rules", "out-tour-1", "out-tour-2", "out-tour-3", "out-tour-4"],
+    "本页排除的只有首启的 6 个场景（语言卡、规则页、导览 4 步），不多排也不少排",
+);
 run.eq(
     scenes.map((s) => s.id).sort(),
     Object.keys(WANT).sort(),

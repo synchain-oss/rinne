@@ -55,7 +55,7 @@ export function createTour(o) {
                 },
             },
         });
-    const title = el("span", { class: "rn-tour__title" });
+    const title = el("span", { class: "rn-tour__title", id: `rn-tour-title-${o.role}` });
     const stepNo = el("span", { class: "rn-tour__step" });
     const dots = o.steps.map(() => el("span", { class: "rn-tour__dot" }));
     const body = el("div", { class: "rn-tour__body" });
@@ -81,7 +81,8 @@ export function createTour(o) {
         {
             class: "rn-tour",
             role: "dialog",
-            aria: { modal: "true" },
+            // 对话框的名称是当前步的标题（与语言卡、规则页一致：名称由 aria-labelledby 指到标题节点）
+            aria: { modal: "true", labelledby: title.id },
             data: { gb: `${o.role}.tour`, state: "closed" },
             hidden: true,
         },

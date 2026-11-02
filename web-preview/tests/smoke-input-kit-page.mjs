@@ -17,14 +17,51 @@ import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
 import { SCENES as ALL_SCENES } from "../mock/scenarios.js";
-import { HIDE_TEXT_STYLE, decodePng, findLeaks, itemsDrift, rectsDrift, worstContrast } from "./shared-measure.mjs";
+import {
+    HIDE_TEXT_STYLE as BASE_HIDE_TEXT_STYLE,
+    decodePng,
+    itemsDrift,
+    rectsDrift,
+    worstContrast,
+} from "./shared-measure.mjs";
+import {
+    SVG_HIDE_STYLE,
+    accessibleName,
+    clipToAncestorScroller,
+    expectedOverlay,
+    findLeaks,
+    inlineProbe,
+    isFirstRunSceneId,
+    overlayA11yProbe,
+} from "../fixtures/first-run/measure.mjs";
 
+/** 裸词条键、占位符、null 的扫描：共用的那一份，再加首启词条的前缀（rules.、tour.、hint.），见 fixtures/first-run/measure.mjs。 */
 export { findLeaks };
+
+/** 量尺截图前把页内文字藏起来的样式：共用件的那一份，加上 SVG 文字与插入链示意的描边（理由见 SVG_HIDE_STYLE）。 */
+const HIDE_TEXT_STYLE = BASE_HIDE_TEXT_STYLE + SVG_HIDE_STYLE;
 export const LANGS = Object.freeze(["zh", "en", "fr"]);
 
-/** 本页范围外的场景：首启（I-30 到 I-32）由后续的页面接手；预设面板的两个场景（in-preset-*）已在范围内。 */
-const OUT_OF_SCOPE = /^(in-lang|in-rules|in-tour-)/;
-export const SCENES = Object.freeze(ALL_SCENES.filter((s) => s.role === "input" && !OUT_OF_SCOPE.test(s.id)));
+/** 首启链的场景：语言卡（in-lang）、规则页（in-rules）、导览各步（in-tour-N）。静态画面，叠层压在页面上。 */
+export const isFirstRunScene = (s) => isFirstRunSceneId(s.id);
+/** Input 的全部场景（含首启 8 个）。不关心首启的使用方要自己用 isFirstRunScene 排除，并写明理由。 */
+export const SCENES = Object.freeze(ALL_SCENES.filter((s) => s.role === "input"));
+export const FIRST_RUN_SCENES = Object.freeze(SCENES.filter(isFirstRunScene));
+/**
+ * 一个「画面」是场景加子态：每个场景一个画面；规则页静态摆成「未放行」，再多一个「放行后」（sub 为 ready，滚到底放行）的画面，
+ * 两种按钮状态都要量到。适配、对比度、无障碍三套都按画面走。
+ */
+export const FRAMES = Object.freeze(
+    SCENES.flatMap((scene) =>
+        scene.id === "in-rules"
+            ? [
+                  { scene, sub: "" },
+                  { scene, sub: "ready" },
+              ]
+            : [{ scene, sub: "" }],
+    ),
+);
+export const frameTag = (frame, lang) => `${frame.scene.id}${frame.sub ? ":" + frame.sub : ""}/${lang}`;
 
 /** 预览壳页的视口：够放下 2 档（1600×1160）。 */
 export const VIEW = Object.freeze({ w: 1700, h: 1300 });
@@ -76,10 +113,54 @@ export async function settle(page) {
     });
 }
 
-/** 在页面所在的 iframe 里求值：fn 是 (doc, win, ...args) => 可序列化的值（可以是 async），不能引用外面的变量。 */
+/**
+ * 把已摆出的规则页（in-rules，静态摆成「未放行」）放行：和用户一样把正文区滚到底，页面自己放行按钮。
+ * 静态场景不起 8 秒计时，所以只能走「读到底」这一条路；等到 data-state 变成 ready 才返回。
+ */
+export async function releaseRules(page) {
+    await inFrame(page, (doc, win) => {
+        const b = doc.querySelector('[data-gb="input.rules"] [data-part="rules.body"]');
+        b.scrollTop = b.scrollHeight;
+        b.dispatchEvent(new win.Event("scroll"));
+    });
+    await page.waitFor(
+        `document.querySelector("iframe").contentDocument.querySelector('[data-gb="input.rules"]').getAttribute("data-state") === "ready"`,
+        { timeout: 6000, label: "规则页滚到底后应放行（data-state=ready）" },
+    );
+    await settle(page);
+}
+
+/** 摆出一个画面：开场景，规则页的放行后画面再滚到底。 */
+export async function openFrame(page, server, frame, opts) {
+    await openInput(page, server, frame.scene.id, opts);
+    if (frame.sub === "ready") await releaseRules(page);
+}
+
+/**
+ * 首启画面的叠层必须真的摆出来（量尺不能在一张没有叠层的普通页面上空转）：叠层恰好一个、种类与导览步号对得上，
+ * 规则页的放行状态与子态一致。返回问题列表，空表示都对；不是首启场景的画面直接返回空表。
+ */
+export async function overlayProbeFailures(page, frame) {
+    const want = expectedOverlay(frame.scene.id);
+    if (!want) return [];
+    const o = await inFrame(page, overlayA11yProbe, "input");
+    const out = [];
+    if (o.kind !== want.kind) out.push(`叠层应是 ${want.kind}，实得 ${JSON.stringify(o.open)}`);
+    if (want.kind === "tour" && o.step !== want.step) out.push(`导览应在第 ${want.step} 步，实得 ${o.step}`);
+    if (want.kind === "rules") {
+        const state = frame.sub === "ready" ? "ready" : "gated";
+        if (!o.rules || o.rules.state !== state) out.push(`规则页应是 ${state}，实得 ${o.rules && o.rules.state}`);
+    }
+    return out;
+}
+
+/**
+ * 在页面所在的 iframe 里求值：fn 是 (doc, win, ...args) => 可序列化的值（可以是 async），不能引用外面的变量；
+ * 唯一的例外是挂在 fn.deps 上的共用函数（见 inlineProbe），它们的源码会一并送进页面。
+ */
 export function inFrame(page, fn, ...args) {
     return page.eval(
-        `(() => { const f = document.querySelector("iframe"); return (${fn.toString()})(f.contentDocument, f.contentWindow, ...${JSON.stringify(args)}); })()`,
+        `(() => { const f = document.querySelector("iframe"); return (${inlineProbe(fn)})(f.contentDocument, f.contentWindow, ...${JSON.stringify(args)}); })()`,
     );
 }
 
@@ -154,11 +235,11 @@ export function fitProbe(doc, win) {
         for (let a = e.parentElement; a && a !== shellEl; a = a.parentElement) if (isScroller(a)) return a;
         return null;
     };
-    // 浮在内容上面的层：轻提示、模态、限制器关闭确认、预设面板（不透明，盖住下面那几行）；压住下面的文字是设计，只比同一层
+    // 浮在内容上面的层：轻提示、模态（含首启的语言卡、规则页与导览说明框）、限制器关闭确认、预设面板（不透明，盖住下面那几行）；压住下面的文字是设计，只比同一层
     const layerOf = (e) =>
         e.closest(".rn-toast")
             ? "toast"
-            : e.closest(".rn-scrim")
+            : e.closest(".rn-scrim, .rn-tour")
               ? "modal"
               : e.closest(".in-limconfirm")
                 ? "confirm"
@@ -354,7 +435,13 @@ export function contrastProbe(doc, win) {
     const tierOf = (p) => {
         if (p.closest('[class*="eyebrow"]')) return "C";
         if (p.closest(".rn-about__preview")) return "B";
+        // 置灰的控件（首启规则页未放行时的两颗按钮、导览第 1 步的「上一步」）整体按 0.4 降级、本来就是「不可用」的画面：按 C 只记录，不判。
+        // 只认真正的 :disabled / aria-disabled，不认视觉上的淡：可用的按钮被压淡照判
+        // 范围只限首启的规则页与导览（置灰的控件只出现在这两处）：别处置灰的控件原来怎么判还怎么判，不因为这条口径悄悄少测
+        if (p.closest('[data-gb$=".rules"], [data-gb$=".tour"]') && p.closest(":disabled, [aria-disabled='true']"))
+            return "C";
         if (p.closest(".rn-modal")) return "A";
+        if (p.closest(".rn-tour__callout")) return "A"; // 导览说明框：整块是模态里的字，与模态同档
         if (p.closest(".in-limconfirm")) return "A"; // 限制器关闭确认框：Input 自己的确认层，和模态同档
         if (p.closest(".in-panic")) return "A";
         // 预设按钮与面板：标签（mono 小标）与两处说明文字（设计稿给的 --txt-3）按 C 只记录；置灰的不判；
@@ -386,7 +473,9 @@ export function contrastProbe(doc, win) {
         return null;
     };
     for (const e of shellEl.querySelectorAll("*")) if (isScroller(e)) e.scrollTop = 0;
-    const scrimOn = [...shellEl.querySelectorAll(".rn-scrim")].some(shown);
+    // 叠层（模态遮罩、首启导览的暗幕）打开时，下面的页面被压暗，不是要判的对象；只判叠层自己的文字，
+    // 以及叠层之上、没被压暗的紧急切断
+    const scrimOn = [...shellEl.querySelectorAll(".rn-scrim, .rn-tour")].some(shown);
     const rectOf = (n) => {
         // 采样之后页面把这段文字换掉了（节点已脱离文档）：给一个远在视野外的矩形，让两遍对照判成「没静止」
         if (!n.isConnected) return { x: -1e6, y: -1e6, w: 0, h: 0 };
@@ -403,9 +492,16 @@ export function contrastProbe(doc, win) {
         const right = sx ? Math.min(r.right, pr.right) : r.right;
         const top = sy ? Math.max(r.top, pr.top) : r.top;
         const bottom = sy ? Math.min(r.bottom, pr.bottom) : r.bottom;
-        return { x: left, y: top, w: right - left, h: bottom - top };
+        // SVG 文字（规则页旁的插入链示意，字号 7.5 到 8.5）的字框是整行的行盒，四周各有一圈没有墨迹的留白，
+        // 留白的四角会落到圆角槽的外面；只取中间的墨迹区（四周各收 1.5 px），免得把槽外的底量成字的底
+        const k = p.namespaceURI === "http://www.w3.org/2000/svg" ? 1.5 : 0;
+        // 文字在祖先的滚动区里（规则页正文）：只取滚动区露出来的那一段；函数与 Output 的量尺是同一份源码（理由见该函数）
+        const box = clipToAncestorScroller({ left, top, right, bottom }, scrollerOf(p));
+        return { x: box.left + k, y: box.top + k, w: box.right - box.left - 2 * k, h: box.bottom - box.top - 2 * k };
     };
     win.__cp = [];
+    // 整段没有可量像素的文字（矩形宽或高不足 1 px，例如整段被滚动区裁掉、字号为零）：不进采样表，但记下来，由 measure 带出去
+    win.__cpSkipped = [];
     win.__cpPlace = (i) => {
         const it = win.__cp[i];
         if (it.sc) it.p.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -417,14 +513,18 @@ export function contrastProbe(doc, win) {
         const text = n.nodeValue.replace(/\s+/g, " ").trim();
         const p = n.parentElement;
         if (!text || !p || !shown(p)) continue;
-        if (scrimOn && !p.closest(".rn-scrim")) continue;
+        if (scrimOn && !p.closest(".rn-scrim, .rn-tour, .in-panic")) continue;
         const tier = tierOf(p);
         const r = rectOf(n);
         const sc = scrollerOf(p);
-        if (!sc && (r.w < 1 || r.h < 1)) continue;
+        if (!sc && (r.w < 1 || r.h < 1)) {
+            win.__cpSkipped.push({ text: text.slice(0, 48), el: p.tagName.toLowerCase() });
+            continue;
+        }
         let op = 1;
         for (let a = p; a && a !== doc.documentElement; a = a.parentElement) op *= Number(gcs(a).opacity);
-        const c = parse(gcs(p).color);
+        // SVG 的文字画的是 fill（color 只是继承来的值，与画出来的颜色无关）
+        const c = parse(p.namespaceURI === "http://www.w3.org/2000/svg" ? gcs(p).fill : gcs(p).color);
         if (!c) continue;
         const cls = (p.className && p.className.baseVal === undefined ? p.className : "") || p.tagName;
         const toneEl = p.closest("[data-tone]");
@@ -436,7 +536,11 @@ export function contrastProbe(doc, win) {
             // 在消息位里（非空闲）：宿主旁路时消息位不降级，要和别的内容层文字分开对待
             inLine: Boolean(p.closest('.rn-msgline:not([data-state="idle"])')),
             inBtn: Boolean(p.closest("button")),
+            // 在叠层（模态遮罩、导览）里、在紧急切断里：叠层打开时只量这两类（下面被压暗的页面不量）
+            inOverlay: Boolean(p.closest(".rn-scrim, .rn-tour")),
+            inPanic: Boolean(p.closest(".in-panic")),
             text: text.slice(0, 48),
+            el: p.tagName.toLowerCase(),
             tier,
             sel: cls.split(" ").filter(Boolean).slice(0, 3).join("."),
             r,
@@ -446,6 +550,8 @@ export function contrastProbe(doc, win) {
     }
     return out;
 }
+
+contrastProbe.deps = [clipToAncestorScroller];
 
 // ---------------------------------------------------------------- 预设面板子态
 
@@ -590,7 +696,16 @@ async function shotRect(page, origin, r) {
     return { png: decodePng(Buffer.from(shot.data, "base64")), x, y };
 }
 
-/** 页面静止后量出每段文字的最差对比度。 */
+/**
+ * 文字矩形里有可量的像素：宽、高都至少 1 px。worstContrast 对一个像素都没采到的矩形会抛错（不会悄悄返回通过），
+ * 所以量之前先用它筛：整段被滚动区裁掉（裁完高度为零或负）、字号为零这类没有可量像素的文字，不论有没有滚动区都一样跳过。
+ */
+export const hasPixels = (r) => Boolean(r) && r.w >= 1 && r.h >= 1;
+
+/**
+ * 页面静止后量出每段文字的最差对比度。返回的数组上带 skipped：这一画面里因为没有可量像素而跳过的文字 [{ text（前 48 字）, el（所在元素的标签）}]。
+ * 跳过不是通过：每个套件把按画面的跳过数打进输出（见 skipSummary），并断言跳过的只有 SKIP_OK 里那几种元素（见 unexpectedSkips）。
+ */
 export async function measure(page) {
     const origin = await frameRect(page);
     let items;
@@ -622,20 +737,57 @@ export async function measure(page) {
         await settle(page);
     }
     if (last) throw new Error(`页面量不到静止画面：${last}`);
+    const skipped = await inFrame(page, (doc, win) => [...win.__cpSkipped]);
     const out = [];
     for (const it of items) {
         if (!it.scrolled) {
-            if (it.r.w < 1 || it.r.h < 1) continue;
+            if (!hasPixels(it.r)) {
+                skipped.push({ text: it.text, el: it.el });
+                continue;
+            }
             out.push({ ...it, worst: worstContrast(whole, it) });
             continue;
         }
         const r = await inFrame(page, (doc, win, i) => win.__cpPlace(i), it.idx);
-        if (!r || r.w < 1 || r.h < 1) continue;
+        if (!hasPixels(r)) {
+            skipped.push({ text: it.text, el: it.el });
+            continue;
+        }
         const { png, x, y } = await shotRect(page, origin, r);
         out.push({ ...it, r, worst: worstContrast(png, { ...it, r: { x: r.x - x, y: r.y - y, w: r.w, h: r.h } }) });
     }
     await dropHide(page);
+    out.skipped = skipped;
     return out;
+}
+
+/**
+ * 本来就没有可量像素的元素：原生下拉的 <option>（弹层由浏览器画，页面里没有矩形）与 SVG 的 <title>（只是悬停提示，不上屏）。
+ * 跳过的文字只该出自这两种元素；别处的字被跳过（例如整段被滚动区裁掉、字号为零）是新情况，要有人看一眼。
+ */
+export const SKIP_OK = Object.freeze(["option", "title"]);
+
+/** measure 返回的 skipped 里不在 SKIP_OK 内的项，写成「元素:文字」；空表示都是本来就不可见的。 */
+export const unexpectedSkips = (skipped) =>
+    skipped.filter((x) => !SKIP_OK.includes(x.el)).map((x) => `${x.el}:${x.text}`);
+
+/**
+ * 把按画面的跳过数写成一行输出。skips 是 [画面名, measure 返回的 skipped] 的列表；没有跳过的画面不列。
+ * 第一行是合计与每画面段数的分布，第二行是逐画面的段数（没有跳过的画面不列）。
+ */
+export function skipSummary(skips) {
+    const hit = skips.filter(([, texts]) => texts.length > 0);
+    const total = hit.reduce((n, [, texts]) => n + texts.length, 0);
+    const byCount = new Map();
+    for (const [, texts] of hit) byCount.set(texts.length, (byCount.get(texts.length) || 0) + 1);
+    const dist = [...byCount]
+        .sort((a, b) => a[0] - b[0])
+        .map(([n, k]) => `每画面 ${n} 段 × ${k} 个`)
+        .join("、");
+    const head = `没有可量像素而跳过的文字共 ${total} 段（${hit.length} 个画面）`;
+    return hit.length
+        ? `${head}：${dist}\n  按画面：${hit.map(([tag, texts]) => `${tag}×${texts.length}`).join("、")}`
+        : head;
 }
 
 // ---------------------------------------------------------------- 自检
@@ -644,10 +796,40 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv
 if (isMain) {
     const ROOT = repoRoot();
     const run = createRun("Input 页面冒烟公共件");
-    run.check(SCENES.length === 32, `范围内的场景应有 32 个，实得 ${SCENES.length}`);
+    run.check(SCENES.length === 40, `Input 的场景应有 40 个（含首启 8 个），实得 ${SCENES.length}`);
+    run.eq(
+        FIRST_RUN_SCENES.map((s) => s.id),
+        ["in-lang", "in-rules", "in-tour-1", "in-tour-2", "in-tour-3", "in-tour-4", "in-tour-5", "in-tour-6"],
+        "首启场景：语言卡、规则页、导览六步",
+    );
+    run.eq(FRAMES.length, SCENES.length + 1, "画面数：每个场景一个，规则页多一个「放行后」");
+    run.eq(
+        FRAMES.filter((f) => f.sub === "ready").map((f) => f.scene.id),
+        ["in-rules"],
+        "只有规则页有「放行后」画面",
+    );
     run.check(
-        SCENES.every((s) => !OUT_OF_SCOPE.test(s.id)),
-        "首启场景不得混进来",
+        ["in-playing", "in-about", "in-tour", "in-tourist", "in-rules-x", "in-lang2"].every(
+            (id) => !isFirstRunScene({ id }),
+        ) && ["in-lang", "in-rules", "in-tour-1", "in-tour-6", "out-tour-4"].every((id) => isFirstRunScene({ id })),
+        "首启场景的认法：只认 lang、rules、tour-N 整个 ID，不按前缀模糊匹配（in-tourist、in-rules-x 不算）",
+    );
+    run.eq(
+        [
+            expectedOverlay("in-lang"),
+            expectedOverlay("in-rules"),
+            expectedOverlay("in-tour-3"),
+            expectedOverlay("in-x"),
+        ],
+        [{ kind: "lang" }, { kind: "rules" }, { kind: "tour", step: 3 }, null],
+        "场景对应的叠层",
+    );
+    run.check(
+        findLeaks("规则 rules.r1.lead").length === 1 &&
+            findLeaks("导览 tour.step1.title").length === 1 &&
+            findLeaks("提示 hint.firstRun").length === 1 &&
+            findLeaks("我已了解，开始导览").length === 0,
+        "首启词条的裸键（rules.、tour.、hint. 前缀）要扫得出，正常文案不误报",
     );
     run.check(
         ["in-preset-menu", "in-preset-save"].every((id) => SCENES.some((s) => s.id === id)),
@@ -660,6 +842,67 @@ if (isMain) {
             findLeaks("环路已关闭：回送不会加入输出。").length === 0,
         "裸键、占位符、undefined 要扫得出，正常文案不误报",
     );
+    // 可访问名称的取法（叠层按钮与名称审计共用的 accessibleName）：aria-labelledby > aria-label > 文字 > title，用假节点逐条验顺序
+    {
+        const nameOf = (attrs, text, ids = {}, tag = "BUTTON") =>
+            accessibleName(
+                { tagName: tag, textContent: text, getAttribute: (k) => (k in attrs ? attrs[k] : null) },
+                { getElementById: (id) => (id in ids ? { textContent: ids[id] } : null) },
+            );
+        const all = { "aria-labelledby": "s1 s2", "aria-label": "标签", title: "提示" };
+        const ids = { s1: "甲", s2: "乙" };
+        run.eq(nameOf(all, "文字", ids), "甲 乙", "名称：aria-labelledby 排第一，多个 id 用空白隔开、各取一段拼起来");
+        run.eq(
+            nameOf({ ...all, "aria-labelledby": "没有" }, "文字", ids),
+            "标签",
+            "名称：aria-labelledby 指不到字时退到 aria-label",
+        );
+        run.eq(nameOf({ "aria-label": "标签", title: "提示" }, "文字"), "标签", "名称：aria-label 排在文字前面");
+        run.eq(nameOf({ title: "提示" }, " 文字 "), "文字", "名称：文字排在 title 前面，两端空白去掉");
+        run.eq(nameOf({ title: "提示" }, ""), "提示", "名称：没有别的才取 title");
+        run.eq(nameOf({}, ""), "", "名称：什么都没有就是空串");
+        run.eq(nameOf({ title: "提示" }, "当前值", {}, "SELECT"), "提示", "名称：原生下拉不取文字（那是当前值）");
+        // 页内函数的序列化：挂了 deps 的函数，源码里带上依赖的声明；没挂的原样
+        run.check(
+            inlineProbe(contrastProbe).includes("function clipToAncestorScroller") &&
+                inlineProbe(overlayA11yProbe).includes("function accessibleName") &&
+                !inlineProbe(fitProbe).includes("function accessibleName"),
+            "页内函数的序列化：挂了 deps 的探针带上共用函数，没挂的不带",
+        );
+        // 没有可量像素的文字：宽或高不足 1 px（含裁完高度为零或负）一律跳过，跳过的要记账
+        run.check(
+            hasPixels({ x: 0, y: 0, w: 10, h: 1 }) &&
+                !hasPixels({ x: 0, y: 0, w: 10, h: 0 }) &&
+                !hasPixels({ x: 0, y: 0, w: 10, h: -3 }) &&
+                !hasPixels({ x: 0, y: 0, w: 0.5, h: 8 }) &&
+                !hasPixels(null),
+            "没有可量像素的判定：宽高都要至少 1 px，高度为零或负（整段被裁掉）、空矩形都不算",
+        );
+        run.eq(
+            unexpectedSkips([
+                { text: "1/8", el: "option" },
+                { text: "回送提示", el: "title" },
+                { text: "零号字", el: "span" },
+            ]),
+            ["span:零号字"],
+            "跳过的文字只许出自 option 与 title，别的元素里的字要报出来",
+        );
+        run.eq(
+            skipSummary([
+                [
+                    "in-a/zh",
+                    [
+                        { text: "x", el: "option" },
+                        { text: "y", el: "option" },
+                    ],
+                ],
+                ["in-b/zh", []],
+            ]),
+            "没有可量像素而跳过的文字共 2 段（1 个画面）：每画面 2 段 × 1 个\n  按画面：in-a/zh×2",
+            "跳过数按画面写进输出，没有跳过的画面不列",
+        );
+        run.eq(skipSummary([["in-b/zh", []]]), "没有可量像素而跳过的文字共 0 段（0 个画面）", "没有跳过时也写一行");
+    }
     if (!findBrowser()) {
         // 纯函数部分有失败照报失败；全过才按「没有浏览器」整套跳过，跳过不是通过
         if (!run.finish()) process.exit(1);
@@ -818,6 +1061,64 @@ if (isMain) {
         run.check(
             cp.some((i) => i.tier === "A") && cp.some((i) => i.tier === "C"),
             `对比度采样应有 A 档与 C 档文字，实得 ${JSON.stringify([...new Set(cp.map((i) => i.tier))])}`,
+        );
+
+        // ---- 首启画面：叠层摆出来、规则页放行、置灰分档、叠层下只量叠层与紧急切断、SVG 文字取 fill
+        const sceneOf = (id) => SCENES.find((s) => s.id === id);
+        const gatedFrame = { scene: sceneOf("in-rules"), sub: "" };
+        const readyFrame = { scene: sceneOf("in-rules"), sub: "ready" };
+        await openFrame(page, server, gatedFrame, { lang: "zh" });
+        run.eq(await overlayProbeFailures(page, gatedFrame), [], "规则页未放行：叠层与放行状态应对得上");
+        run.check(
+            (await overlayProbeFailures(page, readyFrame)).length > 0,
+            "坏样例：未放行的页面按「放行后」画面查，应报出放行状态不对",
+        );
+        const btnTiers = async () =>
+            (await inFrame(page, contrastProbe))
+                .filter((i) => i.inBtn && /开始导览|跳过导览/.test(i.text))
+                .map((i) => i.tier);
+        run.eq(await btnTiers(), ["C", "C"], "未放行：两颗真禁用的按钮按 C 档（置灰的不判）");
+        await releaseRules(page);
+        run.eq(await btnTiers(), ["A", "A"], "放行后：两颗按钮回到 A 档");
+        // 坏样例：放行后按钮若被重新禁用，分档要跟着回到 C（分档认的是 :disabled，不是画面）
+        await inFrame(page, (doc) => doc.querySelector('[data-part="rules.skip"]').setAttribute("disabled", ""));
+        run.eq(await btnTiers(), ["C", "A"], "坏样例：放行后把「跳过导览」重新禁用，它的分档应回到 C，另一颗仍是 A");
+        await openFrame(page, server, readyFrame, { lang: "fr" });
+        run.eq(await overlayProbeFailures(page, readyFrame), [], "规则页放行后（法文）：叠层与放行状态应对得上");
+
+        // 叠层下的量法：导览打开时只量叠层里的字与紧急切断，页面文字不量；语言卡、规则页同
+        for (const id of ["in-lang", "in-rules", "in-tour-3"]) {
+            await openInput(page, server, id, { lang: "zh" });
+            const items = await inFrame(page, contrastProbe);
+            run.eq(
+                items.filter((i) => !i.inOverlay && !i.inPanic).map((i) => i.text),
+                [],
+                `${id}：叠层打开时页面文字不该被量`,
+            );
+            run.check(
+                items.some((i) => i.inOverlay && i.tier === "A") && items.some((i) => i.inPanic && i.tier === "A"),
+                `${id}：叠层里的字与紧急切断都应按 A 档量到`,
+            );
+        }
+        // 导览说明框、紧急切断的分档；SVG 文字取 fill、藏字样式覆盖 SVG
+        await openInput(page, server, "in-rules", { lang: "zh" });
+        const svgItems = (await inFrame(page, contrastProbe)).filter((i) => i.sel === "text" || i.sel === "tspan");
+        run.check(svgItems.length > 0, "规则页旁的插入链示意应采到 SVG 文字");
+        run.check(
+            HIDE_TEXT_STYLE.includes("svg text") && HIDE_TEXT_STYLE.includes(".rn-chain svg rect"),
+            "截图前的藏字样式要覆盖 SVG 文字与示意图的描边",
+        );
+        // 叠层没有摆出来时，overlayProbeFailures 要报；非首启画面直接空表
+        await openInput(page, server, "in-playing", { lang: "zh" });
+        run.check(
+            (await overlayProbeFailures(page, { scene: sceneOf("in-tour-4"), sub: "" })).length > 0,
+            "坏样例：普通页面上没有叠层，应判「叠层没摆出来」",
+        );
+        run.eq(await overlayProbeFailures(page, { scene: sceneOf("in-playing"), sub: "" }), [], "非首启画面不查叠层");
+        await openFrame(page, server, { scene: sceneOf("in-tour-4"), sub: "" }, { lang: "zh" });
+        run.check(
+            (await overlayProbeFailures(page, { scene: sceneOf("in-tour-5"), sub: "" })).some((m) => /第 5 步/.test(m)),
+            "坏样例：第 4 步的页面按第 5 步查，应报出导览步号不对",
         );
         run.check(page.errors.length === 0, `页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
     } finally {

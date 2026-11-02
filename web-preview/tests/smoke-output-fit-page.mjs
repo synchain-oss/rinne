@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Output 页面的适配冒烟（无头浏览器）：真页面（夹具 web-preview/fixtures/output）× 中 / 英 / 法 × 全部场景与全部消息。
+// Output 页面的适配冒烟（无头浏览器）：真页面（夹具 web-preview/fixtures/output）× 中 / 英 / 法 × 全部场景（含首启的 6 个）与全部消息。
 // 量四件事：
 //   ① 所有可见文字不越出所在件、不越出外壳、不被 overflow 裁掉（含 line-clamp 截断）、互相不压住；data-gb 件不越出外壳；
 //   ② 登记的「必须上屏」文字（红字、状态灯、副行、消息、页脚提示、发送行、轨道名）确实上屏，防止量了个空；
 //   ③ 界面上没有裸词条键、没替换的占位符、null / undefined（文字与 title、aria-label 都查）；
 //   ④ 行数：常驻红字 ≤ 2 行（设计盒里只留了两行的位置）、副行 ≤ 2 行、发送行与页脚提示 1 行、消息位文字 ≤ 3 行。
+// 首启的 6 个场景（语言卡、规则页、导览 4 步）：夹具接首启控制器摆成静态画面，叠层压在整页上；叠层与下面的页面不是同一层（设计如此，只比同一层），
+//   规则页另摆一个「放行后」（滚到底）的画面；每个首启画面先断言叠层真的摆出来了（种类、导览步号、规则页放行状态），再量上面四件事；
+//   裸键扫描认 rules.、tour.、hint. 前缀（共用的那一份认不出）。
 // 场景之外再造最坏组合：14 条消息逐条上屏（三语）、超长轨道名、多条消息同时在场（「+n」）、单声道与采样率最宽的写法。
-// 末尾是坏样例：夹具的 ?defect=overflow / place3 / rawkey 必须被上面各项抓出来（量尺本身可信）。
+// 末尾是坏样例：夹具的 ?defect=overflow / place3 / rawkey 必须被上面各项抓出来（量尺本身可信）；首启另有：
+//   普通页面上没有叠层要报、第 N 步按第 M 步查要报、导览说明框里两段字互压要报、首启词条的裸键要扫出来、
+//   首启画面带上危险态（配对冲突）或环路在流动（已连接）要报（夹具喂首启控制器的运行态写死为假，与真页面的判断分叉时要发现），
+//   环路是否在流动按桥上收到的原帧求（只改原帧、不改页面快照，断言要跟着原帧走）。
 // 浏览器缺失时整套跳过（退出码 2）。
 //
 // 用法：node web-preview/tests/smoke-output-fit-page.mjs [仓库根]
@@ -15,13 +21,21 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { FIT_PROBE, EXPECTED_PROBE, missingExpected, findLeaks } from "./shared-measure.mjs";
+import { EXPECTED_PROBE, missingExpected } from "./shared-measure.mjs";
 import {
     LANGS,
     MESSAGE_CASES,
+    FIRST_RUN_FEED_PROBE,
+    OUT_FIT_PROBE,
+    findLeaks,
+    frameTag,
+    isFirstRunScene,
     loadDesign,
     loadOutputScenes,
     openOutput,
+    openOutputFrame,
+    outputFrames,
+    overlayFailures,
     setModel,
     lineCount,
     textOf,
@@ -33,12 +47,13 @@ if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 
 const box = await loadDesign(ROOT);
 const scenes = await loadOutputScenes(ROOT);
+const frames = outputFrames(scenes);
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser();
 
 /** 量一遍当前页：带标签地登记失败。返回探针结果。 */
 async function measure(page, tag, allow = null) {
-    const probe = await page.eval(FIT_PROBE);
+    const probe = await page.eval(OUT_FIT_PROBE);
     // allow：设计上就该被省略号截断的那几处（超长轨道名），量尺会把它们报成 clipped / outside，这里按名字放行，其余照报
     if (allow) probe.problems = probe.problems.filter((p) => !allow.test(p.detail));
     const expected = await page.eval(EXPECTED_PROBE);
@@ -77,10 +92,13 @@ try {
     let texts = 0;
 
     // ---- 全部场景 × 三语 ----
+    let firstRunPages = 0;
     for (const lang of LANGS) {
-        for (const sc of scenes) {
-            const tag = `${lang}/${sc.id}`;
-            await openOutput(page, server, box, lang, sc.id);
+        for (const frame of frames) {
+            const tag = frameTag(lang, frame);
+            await openOutputFrame(page, server, box, lang, frame);
+            run.eq(await overlayFailures(page, frame), [], `${tag}：首启叠层应摆出来`);
+            if (isFirstRunScene(frame.scene)) firstRunPages++;
             const probe = await measure(page, tag);
             pages++;
             texts += probe.texts;
@@ -179,11 +197,13 @@ try {
         }
     }
     run.log(`  共量 ${pages} 页、${texts} 段可见文字`);
+    run.eq(firstRunPages, 7 * LANGS.length, "首启画面：6 个场景加规则页放行后一个，每种语言各量一遍");
+    run.eq(frames.length, scenes.length + 1, "每个场景一个画面，规则页多一个放行后的画面（防新增场景漏测）");
 
     // ---- 坏样例：量尺必须抓得出 ----
     {
         await openOutput(page, server, box, "zh", "out-connected", "&defect=overflow");
-        const probe = await page.eval(FIT_PROBE);
+        const probe = await page.eval(OUT_FIT_PROBE);
         const got = new Set(probe.problems.map((p) => p.kind));
         run.check(
             got.has("outside") || got.has("clipped"),
@@ -194,7 +214,7 @@ try {
         await openOutput(page, server, box, "zh", "out-connected", "&defect=place3");
         const n = await lineCount(page, ".rn-place__text");
         run.check(n > 2, `坏样例 place3：红字撑到 3 行以上时行数应 > 2（行数量尺可信），实得 ${n}`);
-        const probe = await page.eval(FIT_PROBE);
+        const probe = await page.eval(OUT_FIT_PROBE);
         run.check(
             probe.problems.length > 0,
             "坏样例 place3：红字撑出两行位置时，越界/裁切量尺也应报出来（红字不能被悄悄裁掉）",
@@ -202,7 +222,7 @@ try {
     }
     {
         await openOutput(page, server, box, "zh", "out-connected", "&defect=rawkey");
-        const probe = await page.eval(FIT_PROBE);
+        const probe = await page.eval(OUT_FIT_PROBE);
         const leaks = findLeaks(`${probe.joined} ${probe.attrs.join(" ")}`);
         run.check(
             leaks.includes("out.neverDefined"),
@@ -213,9 +233,117 @@ try {
         // 登记的文字不上屏：把页脚提示改掉，必须被报缺
         await openOutput(page, server, box, "zh", "out-connected");
         await page.eval(`document.querySelector('[data-gb="output.footer.hint"]').textContent = "占位"`);
-        const probe = await page.eval(FIT_PROBE);
+        const probe = await page.eval(OUT_FIT_PROBE);
         const expected = await page.eval(EXPECTED_PROBE);
         run.check(missingExpected(expected, probe).length > 0, "坏样例：改掉页脚提示后，登记的上屏文字应被报缺");
+    }
+
+    // ---- 首启的坏样例 ----
+    const frameOf = (id, sub = "") => ({ scene: scenes.find((s) => s.id === id), sub });
+    {
+        // 普通页面上没有叠层：叠层没摆出来必须报（量尺不能在没有叠层的页面上空转）
+        await openOutput(page, server, box, "zh", "out-connected");
+        run.check(
+            (await overlayFailures(page, frameOf("out-tour-2"))).length > 0,
+            "坏样例：普通页面上没有叠层，应判「叠层没摆出来」",
+        );
+        run.eq(await overlayFailures(page, frameOf("out-connected")), [], "非首启画面不查叠层");
+        // 第 N 步的页面按第 M 步查：导览步号对不上必须报
+        await openOutput(page, server, box, "zh", "out-tour-3");
+        run.check(
+            (await overlayFailures(page, frameOf("out-tour-4"))).some((m) => /第 4 步/.test(m)),
+            "坏样例：第 3 步的页面按第 4 步查，应报出导览步号不对",
+        );
+        // 未放行的规则页按「放行后」查：放行状态对不上必须报
+        await openOutput(page, server, box, "zh", "out-rules");
+        run.check(
+            (await overlayFailures(page, frameOf("out-rules", "ready"))).length > 0,
+            "坏样例：未放行的规则页按「放行后」画面查，应报出放行状态不对",
+        );
+        // 夹具喂首启控制器的运行态写死「无危险态、无环路活动」：真页面的判断（view.danger、outputFlowing）为真时必须报出来，
+        // 夹具与真页面才不会悄悄分叉。配对冲突是危险态、已连接且没旁路是环路在流动，两项各摆一次，且互不牵连
+        await openOutput(page, server, box, "zh", "out-tour-3");
+        await setModel(page, { state: "conflict" });
+        {
+            const got = await overlayFailures(page, frameOf("out-tour-3"));
+            run.check(
+                got.some((m) => /危险态/.test(m)) && !got.some((m) => /环路/.test(m)),
+                `坏样例：配对冲突的首启画面，应只报带危险态，实得 ${JSON.stringify(got)}`,
+            );
+        }
+        await setModel(page, { state: "connected" });
+        {
+            const got = await overlayFailures(page, frameOf("out-tour-3"));
+            run.check(
+                got.some((m) => /环路/.test(m)) && !got.some((m) => /危险态/.test(m)),
+                `坏样例：已连接的首启画面，应只报环路在流动，实得 ${JSON.stringify(got)}`,
+            );
+        }
+        // 求环路是否在流动用的是桥上收到的原帧（和真页面一样），不是页面规范化之后的快照：只改其中一边，断言要跟着原帧走。
+        // 每条都把「改原帧」和「求值」放进同一次页内求值：周期回声每 250 ms 会发一帧新帧顶掉原帧，分成两次求值会夹进回声
+        const feedAfter = (edit) =>
+            page.eval(
+                `(() => { ${edit}; const f = ${FIRST_RUN_FEED_PROBE}; f.snapBypassed = window.__fx.page.snapshot().state.send.bypassed; return f; })()`,
+            );
+        const rawBypassed = (v) =>
+            `const r = window.__fx.raw; r.state = { ...r.state, send: { ...r.state.send, bypassed: ${v} } };`;
+        // 原帧说旁路了、页面快照仍是没旁路（已连接）：跟着原帧走，环路不在流动
+        await setModel(page, { state: "connected", send: { bypassed: false } });
+        {
+            const f = await feedAfter(rawBypassed(true));
+            run.eq(f.snapBypassed, false, "前提：只改了原帧，页面规范化之后的快照仍是没旁路");
+            run.eq(f.flowing, false, "坏样例：原帧说旁路了，环路就不在流动（断言跟着原帧走，不是跟着页面快照走）");
+        }
+        // 反过来：页面快照是旁路、原帧说没旁路：跟着原帧走，环路在流动
+        await setModel(page, { state: "connected", send: { bypassed: true } });
+        {
+            const f = await feedAfter(rawBypassed(false));
+            run.eq(f.snapBypassed, true, "前提：只改了原帧，页面规范化之后的快照仍是旁路");
+            run.eq(f.flowing, true, "坏样例：原帧说没旁路，环路就在流动（断言跟着原帧走，不是跟着页面快照走）");
+        }
+        // 乱序的旧帧不算（和真页面一样只认序号递增的帧）：补发一个序号更小、说旁路了的旧 rinne.state，原帧不该被它顶掉
+        await setModel(page, { state: "connected", send: { bypassed: false } });
+        {
+            const f = await feedAfter(
+                `const r = window.__fx.raw.state; window.__fx.emit("rinne.state", { ...r, seq: r.seq - 5, send: { ...r.send, bypassed: true } });`,
+            );
+            run.eq(f.flowing, true, "坏样例：序号更小的旧帧（说旁路了）不该顶掉原帧，已连接的环路仍在流动");
+        }
+    }
+    {
+        // 导览说明框与模态一样是浮在内容上面的一层：说明框里两段字互压必须量出 overlap
+        await openOutput(page, server, box, "zh", "out-tour-2");
+        const clean = await page.eval(OUT_FIT_PROBE);
+        run.eq(
+            clean.problems.map((p) => p.kind),
+            [],
+            "前提：导览第 2 步压在页面上不算互压（独立一层）",
+        );
+        await page.eval(
+            `(() => { const t = document.querySelector(".rn-tour__title").getBoundingClientRect(); const b = document.querySelector(".rn-tour__body"); const r = b.getBoundingClientRect(); b.style.position = "relative"; b.style.top = (t.top - r.top + 2) + "px"; })()`,
+        );
+        const bad = await page.eval(OUT_FIT_PROBE);
+        run.check(
+            bad.problems.some((p) => p.kind === "overlap"),
+            `坏样例：导览说明框里正文压到标题上，应量出 overlap，实得 ${JSON.stringify(bad.problems.map((p) => p.kind))}`,
+        );
+    }
+    {
+        // 首启词条缺了会直接显示键本身：rules.、tour.、hint. 前缀的裸键要扫得出
+        await openOutput(page, server, box, "zh", "out-tour-2");
+        await page.eval(`document.querySelector(".rn-tour__title").textContent = "tour.out.step9.title"`);
+        const probe = await page.eval(OUT_FIT_PROBE);
+        run.check(
+            findLeaks(`${probe.joined} ${probe.attrs.join(" ")}`).includes("tour.out.step9.title"),
+            "坏样例：导览标题显示成裸键 tour.out.step9.title，应被扫出",
+        );
+        run.eq(
+            [findLeaks("规则 rules.r1.lead"), findLeaks("提示 hint.firstRun"), findLeaks("我已了解，开始导览")].map(
+                (a) => a.length,
+            ),
+            [1, 1, 0],
+            "rules.、hint. 前缀的裸键要扫出来，正常文案不误报",
+        );
     }
 
     run.check(page.errors.length === 0, `页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
