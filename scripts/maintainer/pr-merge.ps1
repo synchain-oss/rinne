@@ -190,6 +190,8 @@ function Get-MergeFacts {
         }
     }
     $files = Get-RinneApi "repos/$repo/pulls/$Pr/files?per_page=100" -Paginate
+    # 这个 PR 自己的提交（处置汇总里附的提交号要在这里面找）；接口最多列 250 个，再多的 PR 认不出的号只会挂账
+    $commits = @(Get-RinneApi "repos/$repo/pulls/$Pr/commits?per_page=100" -Paginate | ForEach-Object { [string]$_.sha })
     $gates = Read-GatesResult (Join-Path (Get-RinneRoot) "_logs/$CardId") $head
     $needsDispatch = Test-NeedsDispatch $card @($files)
     $dispatchRuns = if ($needsDispatch) {
@@ -206,6 +208,7 @@ function Get-MergeFacts {
     $mergeBase = Invoke-RinneGit @('merge-base', 'origin/feature/v1', "refs/remotes/origin/pr/$Pr") -AllowFail
     [pscustomobject]@{
         Pr = $Pr; Card = $card; Pull = $pull; Head = $head; Files = @($files); Activity = $activity
+        Commits = $commits
         State = $state; Items = @(Get-RinneCommentItems -Activity $activity -State $state); Threads = @($activity.Threads)
         Run = $run; Jobs = $jobs; Posted = $posted; Checks = Get-RinneCheckRuns $head -PullRequestEventOnly; Required = Get-RinneRequiredChecks
         Gates = $gates; Records = Read-Records $Pr
@@ -268,16 +271,18 @@ function Get-RowCell {
 }
 
 <#
-  这一行是不是【红旗】【重要】：级别列存在时，只认以「【红旗】」「【重要】」「红旗」「重要」开头的级别格（「重要 / 建议」算）。
-  不带【】的两种写法再加边界：「红旗」后面不能紧跟（可有空白）数字 0，「重要」后面不能紧跟「度」「性」或（可有空白）数字 0
-  （「红旗 0」「重要 0」「重要度低」「重要性一般」是计数、描述，不是级别）；0 后面再跟数字的（「重要 05」「重要 10」）仍算，
-  「重要 1」「重要 2」这类当编号写的也算严重行（往严里错）；带【】的写法不变（「【重要】度」照旧算）。
-  「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」这类只是子串命中的更不算。认不出级别列（或这一格是空的）时，任何一格里有【红旗】或【重要】。
+  这一行是不是【红旗】【重要】：级别列存在时，级别格里带【】的「【红旗】」「【重要】」出现在任意位置都算
+  （「🔴 【红旗】」「（既有）【重要】」前面带别的字符也认；「【重要】度」照旧算）。
+  不带【】的「红旗」「重要」仍只认开头（「重要 / 建议」算），并保留边界：「红旗」后面不能紧跟（可有空白）数字 0，
+  「重要」后面不能紧跟「度」「性」或（可有空白）数字 0（「红旗 0」「重要 0」「重要度低」「重要性一般」是计数、描述，不是级别）；
+  0 后面再跟数字的（「重要 05」「重要 10」）仍算，「重要 1」「重要 2」这类当编号写的也算严重行（往严里错）。
+  「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」这类不带【】、只是子串命中的更不算。
+  认不出级别列（或这一格是空的）时，任何一格里有【红旗】或【重要】。
 #>
 function Test-SevereRow {
     param($Row)
     $level = Get-RowCell $Row '级别'
-    if ($level) { return [bool]($level -match '^(?:【红旗】|【重要】|红旗(?!\s*0(?!\d))|重要(?![度性]|\s*0(?!\d)))') }
+    if ($level) { return [bool]($level -match '【(?:红旗|重要)】|^(?:红旗(?!\s*0(?!\d))|重要(?![度性]|\s*0(?!\d)))') }
     @($Row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0
 }
 
@@ -298,16 +303,35 @@ function Get-DispositionSevereCount {
 }
 
 <#
+  这些单元格里有没有这个 PR 自己的提交号：一串 7–40 位十六进制（大小写不论），按前缀去比 Commits（这个 PR 的提交列表，
+  pulls/<n>/commits 的 sha），恰好匹配一个提交才算；匹配不到（别的 PR 的提交、编造的串、评论编号、运行编号）或匹配到两个以上
+  （前缀歧义）都算没附提交号。Commits 为空（取不到列表）时一个也认不出，严重行全部挂账。
+  纯数字的串不再单独排除：它能不能算，只看它是不是这个 PR 某个提交的前缀。
+#>
+function Test-OwnCommitRef {
+    param([AllowEmptyCollection()][AllowEmptyString()][string[]]$Cells, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Commits)
+    $own = @($Commits | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() })
+    foreach ($cell in @($Cells)) {
+        foreach ($m in [regex]::Matches([string]$cell, '(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])', [Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+            $ref = $m.Value.ToLowerInvariant()
+            if (@($own | Where-Object { $_.StartsWith($ref, [StringComparison]::Ordinal) }).Count -eq 1) { return $true }
+        }
+    }
+    return $false
+}
+
+<#
   处置汇总表里没有清掉的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。
   严重行默认挂账：只有处置列（去掉 * _ 与反引号之后）以「已修」「修复」「已改」「采纳」「已采纳」开头、不含拒绝词
-  （「不改」「不采纳」「挂账」「暂不」「维持」「未修」「搁置」「驳回」「不处理」「延后」「暂缓」「忽略」等），而且处置列或它右边的
-  列里附了提交号，这一行才算清掉。别的写法一律挂账：词表外的词（「无需修改」「误报」「设计如此」「待修复」「已处理」）、
-  空处置、只写「采纳」没有提交号，以及认不出处置列的表（逐格扫描没法确定哪一格是处置）。
+  （「不改」「不采纳」「挂账」「暂不」「维持」「未修」「搁置」「驳回」「不处理」「延后」「暂缓」「忽略」「不了」「无法」等），
+  而且处置列或它右边的列里附了这个 PR 自己的提交号（见 Test-OwnCommitRef；Commits 是这个 PR 的提交列表），这一行才算清掉。
+  别的写法一律挂账：词表外的词（「无需修改」「误报」「设计如此」「待修复」「已处理」）、空处置、只写「采纳」没有提交号、
+  提交号不是这个 PR 的或前缀歧义，以及认不出处置列的表（逐格扫描没法确定哪一格是处置）。
   同一条意见按「位置 + 摘要」认（去掉 markdown 标记），以最后一次处置为准：后来写了已修并附提交的，不再要用户豁免；
   后来才改成别的写法的，照样列出。
 #>
 function Get-DeferredSevere {
-    param([object[]]$Items)
+    param([object[]]$Items, [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Commits)
     $rounds = [System.Collections.Generic.List[object]]::new()
     $order = 0
     foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' })) {
@@ -316,7 +340,7 @@ function Get-DeferredSevere {
         $rounds.Add([pscustomobject]@{ Round = [int]$m.Round; Order = $order; Rows = @(Get-DispositionRows $i.Body) })
         $order++
     }
-    $reject = '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略'
+    $reject = '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略|不了|无法'
     # 同一个位置以轮次靠后的那一行为准；同一轮里以行序靠后的为准
     $latest = @{}
     foreach ($r in @($rounds | Sort-Object Round, Order)) {
@@ -329,8 +353,8 @@ function Get-DeferredSevere {
             if (-not $key) { $key = $row.Line }
             $at = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) { $row.Cols['处置'] } else { -1 }
             $decision = if ($at -ge 0) { $row.Cells[$at] } else { '' }
-            # 「附提交」只在处置列和它右边的列里找，而且串里至少有一个 a-f 字母（评论编号、运行编号这类纯数字不算）
-            $proof = $at -ge 0 -and @($row.Cells | Select-Object -Skip $at | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count -gt 0
+            # 「附提交」只在处置列和它右边的列里找，而且要是这个 PR 自己的提交（前缀恰好匹配一个）
+            $proof = $at -ge 0 -and (Test-OwnCommitRef @($row.Cells | Select-Object -Skip $at) $Commits)
             $cleared = $decision -and $decision -notmatch $reject -and $decision -match '^(?:已修|修复|已改|已?采纳)' -and $proof
             $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = -not $cleared }
         }
@@ -477,7 +501,7 @@ function Get-MergeVerdict {
         }
         if (-not (Test-RinneResponded -Item $i -Items $F.Items -State $F.State)) { $fail.Add("没有回应的评论：$($i.Source) $($i.Id)（$($i.Kind)）") }
     }
-    $deferred = @(Get-DeferredSevere $F.Items)
+    $deferred = @(Get-DeferredSevere $F.Items -Commits $F.Commits)
     if ($deferred.Count -gt 0) {
         if ($waiver -and [bool](Get-RinneProp $waiver 'deferred')) { & $rely 'waiver' $waiver }
         else { & $need 'user' 'deferred' "有 $($deferred.Count) 条【红旗】【重要】在最新一轮处置里仍判为不改或挂账，只能由用户豁免" }
@@ -1155,7 +1179,8 @@ function Invoke-SelfTest {
             'collaborators/DLsnows/permission' = { 'admin' }
             'collaborators/[^/]+/permission'   = { @{ Code = 0; Out = 'read'; Err = '' } }
             'pulls/3/files'                    = { $files }
-            'pulls/3/comments'                 = { Read-RinneFixture 'pr3-review-comments.json' }
+            'pulls/3/commits'                  = { Read-RinneFixture 'pr3-commits.json' }
+            'pulls/3/comments'               = { Read-RinneFixture 'pr3-review-comments.json' }
             'pulls/3/reviews'                  = { Read-RinneFixture 'pr3-reviews.json' }
             'pulls/3$'                         = {
                 if ($pullState.Nulls -gt 0) { $pullState.Nulls--; $p = Copy-RinneObject $prFixture; $p.mergeable = $null; $p.mergeable_state = 'unknown'; return $p }
@@ -1699,9 +1724,9 @@ function Invoke-SelfTest {
         & $bad '先挂账、后已修（附提交）：不再要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修' 'd62c5dc') } 'ready'
         & $bad '先已修、后挂账：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'd62c5dc'); & $addRow $f 3 (& $deferCell '【重要】' '挂账') } 'needs-user'
         & $bad '同一位置的两条意见：一条挂账、另一条（摘要不同）已修，挂账的仍要豁免' { param($f) & $addRow $f 1 '| 9 | bot | 【重要】 | a.mjs:1 | 甲 | 挂账 | 理由 |'; & $addRow $f 3 '| 10 | bot | 【重要】 | a.mjs:1 | 乙 | 已修 | d62c5dc |' } 'needs-user'
-        & $bad '已修的提交串在处置列左边的列里（右边只有理由）：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 '| abc1234 | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
+        & $bad '已修的提交串在处置列左边的列里（右边只有理由）：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 '| d62c5dc | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
         & $bad '已修的行里只有纯数字的编号：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 '| 7000000101 | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
-        & $bad '已修的提交串是纯数字：不算附了提交，仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修' '12345678') } 'needs-user'
+        & $bad '已修的提交串是纯数字、又不是这个 PR 任何一个提交的前缀：不算附了提交，仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修' '12345678') } 'needs-user'
         & $bad '处置写未采纳（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '未采纳' 'd62c5dc') } 'needs-user'
         & $bad '处置写搁置：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '搁置') } 'needs-user'
         & $bad '处置写驳回（带提交串）：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '驳回' 'd62c5dc') } 'needs-user'
@@ -1709,8 +1734,14 @@ function Invoke-SelfTest {
         & $bad '处置列是空的：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '') } 'needs-user'
         & $bad '处置写不修复（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '不修复' 'd62c5dc') } 'needs-user'
         & $bad '先挂账、后写已修但没附提交：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修') } 'needs-user'
-        # 严重行默认挂账：只有「处置列以已修 / 修复 / 已改 / 采纳开头、不含拒绝词、处置列及右侧有提交号」才算清掉，
-        # 别的写法（词表外的词、空处置、没提交号、没有处置列）一律要用户豁免。下面四种措辞各一例，加空处置与只写「采纳」没提交号
+        # 拒绝词里的「不了」「无法」：处置以「修复」「已修」开头、又带这两个词的写法（修复不了、已修复其余无法修复），
+        # 以前被「以修复开头」当成已修；「无法修复」「修不了」不以已修 / 修复开头，本来就挂账，留在这里防回退。
+        # 每种写法各配提交号：不配的话没提交号本身就挂账，看不出拒绝词有没有起作用
+        foreach ($w in '修复不了', '无法修复', '修不了', '已修复，其余无法修复', '已修一半，剩下的做不了') {
+            & $bad "【重要】处置写「$w」并附提交号：含「不了」「无法」，默认挂账" { param($f) & $addRow $f 1 (& $deferCell '【重要】' $w 'd62c5dc') } 'needs-user'
+        }
+        # 严重行默认挂账：只有「处置列以已修 / 修复 / 已改 / 采纳开头、不含拒绝词、处置列及右侧有这个 PR 自己的提交号」才算清掉，
+        # 别的写法（词表外的词、空处置、没提交号、提交号不是这个 PR 的、没有处置列）一律要用户豁免。下面四种措辞各一例，加空处置与只写「采纳」没提交号
         foreach ($w in '无需修改', '误报', '设计如此', '待修复', '计划修复', '已处理') {
             & $bad "【重要】处置写「$w」（词表外，没提交号）：默认挂账" { param($f) & $addRow $f 1 (& $deferCell '【重要】' $w) } 'needs-user'
         }
@@ -1719,7 +1750,7 @@ function Invoke-SelfTest {
         & $bad '【重要】处置写「无需修改」且附了提交串：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '无需修改' 'd62c5dc') } 'needs-user'
         & $bad '【重要】处置只写「采纳」没有提交号：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '采纳') } 'needs-user'
         & $bad '【重要】处置写「已修，其余不改」且附了提交串：含拒绝词，默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修，其余不改' 'd62c5dc') } 'needs-user'
-        & $bad '【重要】处置写「已修」但提交串在处置列左边：默认挂账' { param($f) & $addRow $f 1 '| abc1234 | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
+        & $bad '【重要】处置写「已修」但提交串在处置列左边：默认挂账' { param($f) & $addRow $f 1 '| d62c5dc | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
         & $bad '【重要】写在没有表头（认不出处置列）的表里，即使写「已修」并附提交串：默认挂账' { param($f) $a = (@($f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' }) | Where-Object { (Get-AgentMarker $_.Body).Round -eq 1 })[0]; $a.Body += "`n`n| 9 | bot | 【重要】 | a.mjs:1 | x | 已修 | d62c5dc |" } 'needs-user'
         # 清得掉的写法：已修 / 修复 / 已改 / 采纳 / 已采纳（带不带 markdown 标记都行），处置列或右侧附提交号
         foreach ($w in '已修', '已修复', '修复', '已改', '采纳', '已采纳', '**已修**', '采纳：补了用例') {
@@ -1727,6 +1758,22 @@ function Invoke-SelfTest {
         }
         & $bad '【红旗】处置写「已修」并附提交号：清掉' { param($f) & $addRow $f 1 (& $deferCell '【红旗】' '已修' 'd62c5dc') } 'ready'
         & $bad '提交号写在处置格里（处置列自己带 sha）：清掉' { param($f) & $addRow $f 1 '| 9 | bot | 【重要】 | a.mjs:1 | x | 已修 d62c5dc | 理由 |' } 'ready'
+        # 提交号要是这个 PR 自己的：在 PR 的提交列表（夹具 pr3-commits.json，经假 gh 的 pulls/3/commits 取来）里按前缀找，
+        # 至少 7 位、恰好匹配一个提交。找不到（别的 PR 的号、编造的串）或匹配到两个（前缀歧义）都算没附提交号
+        Add-RinneCase $cases '取数：Facts 带着这个 PR 的提交列表（含 head），来自 pulls/3/commits' $false (-not (@($base.Commits).Count -eq 7 -and @($base.Commits) -contains $head))
+        foreach ($p in '1a2b3c4', '1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d') {
+            & $bad "【重要】已修，附的提交号「$p」不是这个 PR 的提交：默认挂账" { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' $p) } 'needs-user'
+        }
+        & $bad '【重要】已修，附的提交号只有 6 位（前缀太短）：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'd62c5d') } 'needs-user'
+        & $bad '【重要】已修，附本 PR 某个提交的 8 位前缀：清掉' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'd62c5dcf') } 'ready'
+        & $bad '【重要】已修，附本 PR 某个提交的完整 40 位 sha：清掉' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'd62c5dcfda5f865cc133c63ea54294db95a6227d') } 'ready'
+        & $bad '【重要】已修，附本 PR 某个提交的大写前缀：清掉' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'D62C5DCF') } 'ready'
+        & $bad '【重要】已修，附的前缀同时匹配两个提交（8 位 ab12cd34）：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'ab12cd34') } 'needs-user'
+        & $bad '【重要】已修，附的前缀同时匹配两个提交（9 位 ab12cd34e）：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'ab12cd34e') } 'needs-user'
+        & $bad '【重要】已修，附的前缀长到只匹配一个提交（10 位 ab12cd34e5）：清掉' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' 'ab12cd34e5') } 'ready'
+        & $bad '【重要】已修，附的纯数字串恰好是本 PR 某个提交的前缀：清掉' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' '98765432') } 'ready'
+        & $bad '【重要】已修，一行里既有别的 PR 的号又有本 PR 的号：有一个是本 PR 的就算附了' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修' '1a2b3c4，另见 d62c5dc') } 'ready'
+        & $bad '取不到这个 PR 的提交列表（空）：所有严重行都认不出提交号，全部挂账' { param($f) $f.Commits = @() } 'needs-user'
         # 处置汇总的内容：bot 总结尾注 red + important = N 时，引用那次运行的处置汇总里，级别为【红旗】【重要】的行至少 N 条，
         # 不够判红（写清哪次运行、要几条、有几条）。夹具里第 1 轮总结 important=2，它的处置汇总有 3 条严重行
         $run1 = [string]$base.State.summaries[0].runId
@@ -1756,9 +1803,18 @@ function Invoke-SelfTest {
             $second.Body = (($second.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $id -eq '2' }) -join "`n"
             $f.Items = @($f.Items) + @($second)
         } 'ready'
-        # 级别格收紧：级别列存在时，只有以「【红旗】」「【重要】」「红旗」「重要」开头的单元格才是严重行。
+        # 提交号核对只影响「清没清掉」，不影响第 2 项的条数：2 条严重行附的都是别的 PR 的号，条数照样够（不判红），只是挂账交用户
+        & $bad '尾注 important=2 的一轮，2 条严重行附的提交号都不是本 PR 的：条数够不判红，但挂账交用户' {
+            param($f)
+            & $onlyRows $f $run1 '1', '2', '3', '5'
+            $d = & $dispOf $f $run1
+            $d.Body = $d.Body.Replace('d62c5dc', '1a2b3c4')
+        } 'needs-user' { param($r) @($r.Failures | Where-Object { $_ -match '条要处置' }).Count -eq 0 -and $r.Level -eq 'user' }
+        # 级别格：级别列存在时，带【】的「【红旗】」「【重要】」在格里任意位置出现都是严重行（前面带别的字符也认）；
+        # 不带【】的「红旗」「重要」仍只认开头。
         # 「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」只是子串命中，不是严重行（以前会被当成严重行：既冒出一条挂账，又能给第 2 项凑条数）
-        foreach ($lv in '汇总（红旗 0、重要 0、建议 0）', '总结', '信息：重要度低', '建议（重要的事另列）', '红旗 0', '红旗0', '重要度低', '重要性一般', '重要 0') {
+        foreach ($lv in '汇总（红旗 0、重要 0、建议 0）', '总结', '信息：重要度低', '建议（重要的事另列）', '红旗 0', '红旗0', '重要度低', '重要性一般', '重要 0',
+                '🔴 红旗', '（既有）重要', '汇总：重要 3 条', '[旧] 红旗') {
             & $bad "级别格写「$lv」、处置「不改」：不是严重行，不要用户豁免" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'ready'
         }
         # 数字前瞻只排除零计数：「重要 1」「红旗 3」当编号写的照旧算严重行；「重要 05」「重要 10」0 后面还有数字，也算
@@ -1766,6 +1822,11 @@ function Invoke-SelfTest {
                 '重要 1', '重要 2', '红旗 3', '重要 10', '重要 05', '红旗 05') {
             & $bad "级别格写「$lv」、处置「不改」：是严重行，挂账" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'needs-user'
         }
+        # 带【】的写法在格里任意位置都认；前面带的是汇总字样也一样（往严里错：多问用户一次，也不让严重行从格式缝里漏过去）
+        foreach ($lv in '🔴 【红旗】', '（既有）【重要】', '⚠️【重要】', '[旧] 【红旗】', '汇总：【红旗】0 条', '重要/【红旗】', '【建议】【重要】') {
+            & $bad "级别格写「$lv」、处置「不改」：带【】的写法任意位置都认，是严重行，挂账" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'needs-user'
+        }
+        & $bad '尾注 important=2 的一轮，处置汇总只有 1 条靠前的严重行，再加一行级别写「🔴 【红旗】」：2 条，条数够，放行' { param($f) & $onlyRows $f $run1 '1', '3', '5'; & $addRow $f 1 (& $deferCell '🔴 【红旗】' '已修' 'd62c5dc') } 'ready'
         & $bad '尾注 important=2 的一轮，处置汇总只有 1 条真严重行，再加一行级别写「汇总（红旗 0、重要 0、建议 0）」凑数：仍判红' { param($f) & $onlyRows $f $run1 '1', '3', '5'; & $addRow $f 1 (& $deferCell '汇总（红旗 0、重要 0、建议 0）' '无需另外动作' '—') } 'not-ready' (& $notEnough $run1 2 1)
         # 处置汇总只认我方在 issue comment 里发的：外部人伪造的、挂着同一个 bot-run 标记的「处置汇总」，或我方 inline 评论里带标记的严重行，都不能给条数凑数
         $padRow = {
