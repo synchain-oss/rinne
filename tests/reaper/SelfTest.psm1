@@ -188,7 +188,9 @@ function Get-LinkedIniCases([string]$Tmp, [string]$FakeRoamDefault) {
         Remove-Item -LiteralPath $hardIni
         $hardOk = try { $null = New-Item -ItemType HardLink -Path $hardIni -Target $defaultIni; $true } catch { $false }
         $noHard = $hardOk ? '' : '（本机建不了硬链接，这条没能真跑）'
-        & $add "reaper.ini 与默认资源目录里的 reaper.ini 是硬链接（同一个文件）被拒绝$noHard" $true ((-not $hardOk) -or (Test-Refused { Assert-ReaperCfgDir $hardCfg } '*reaper.ini*同一个文件*'))
+        & $add "reaper.ini 与默认资源目录里的 reaper.ini 是硬链接（同一个文件）被拒绝（顶层硬链接数这一层先拦下）$noHard" $true ((-not $hardOk) -or (Test-Refused { Assert-ReaperCfgDir $hardCfg } '*reaper.ini*硬链接*'))
+        # 硬链接数这一层换成替身（都说 1）以后，文件身份那一层仍然认得出它们是同一个文件：两层各自单独有用例
+        & $add "reaper.ini 与默认资源目录里的 reaper.ini 是硬链接：硬链接数那层放行时，文件身份那层照样拒绝$noHard" $true ((-not $hardOk) -or (Test-Refused { Assert-ReaperCfgDir $hardCfg -LinkCountOf { param($p) 1 } } '*reaper.ini*同一个文件*'))
         if ($hardOk) { Remove-Item -LiteralPath $hardIni }
         Copy-Item -LiteralPath $defaultIni -Destination $hardIni
         & $addSafe '内容相同、但不是同一个文件（拷贝）的 reaper.ini 通过：默认资源目录里有同名文件不等于冲突' $false { (Assert-ReaperCfgDir $hardCfg).Ini -like '*hardlink-ini-cfg\reaper.ini' }
@@ -207,6 +209,51 @@ function Get-LinkedIniCases([string]$Tmp, [string]$FakeRoamDefault) {
     & $addSafe 'ini 文件身份：配置目录里的 ini 取不到身份（打不开），拒绝，不静默放行' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'ERROR:5' 'BB-02') } '*reaper.ini 取不到文件身份*' }
     & $addSafe 'ini 文件身份：配置目录里的 ini 身份是空（认不出），拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids $null 'BB-02') } '*reaper.ini 取不到文件身份*' }
     & $addSafe 'ini 文件身份：默认资源目录里的 reaper.ini 取不到身份（存在却打不开），拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -IdentityOf (& $ids 'AA-01' 'ERROR:5') } '*默认资源目录里的 reaper.ini 取不到文件身份*' }
+    # 顶层每个文件的硬链接数必须是 1：大于 1 说明还有别的名字指到同一份内容（可能在使用者自己的配置里），写它就写了别人的东西；取不到同样拒绝。
+    # 哨兵与 reaper.ini 都在内，不只查 reaper.ini
+    $hlCfg = Join-Path $Tmp 'hardlink-top-cfg'
+    $null = New-ReaperCfgDir $hlCfg
+    $hlOutside = Join-Path $Tmp 'hardlink-top-outside.ini'
+    [IO.File]::WriteAllText($hlOutside, "[REAPER]`nuser=1`n")
+    $linkCountOf = { param($Path) try { Get-ReaperHardLinkCount $Path } catch { -99 } } # 取数函数不在 / 抛错时用例变红，不让整组在布置阶段崩掉
+    $countBefore = & $linkCountOf $hlOutside
+    $hlExtra = Join-Path $hlCfg 'extra.ini'
+    $hlOk = try { $null = New-Item -ItemType HardLink -Path $hlExtra -Target $hlOutside; $true } catch { $false }
+    $noHl = $hlOk ? '' : '（本机建不了硬链接，这条没能真跑）'
+    $countAfter = $hlOk ? (& $linkCountOf $hlOutside) : 2
+    & $add '取硬链接数：普通文件是 1，多一个硬链接后是 2，路径不存在是 -1（取不到）' $true ($countBefore -eq 1 -and $countAfter -eq 2 -and (& $linkCountOf (Join-Path $Tmp 'no-such-file.ini')) -eq -1)
+    & $add "配置目录顶层别的文件（extra.ini）有硬链接（另一个名字在目录外）被拒绝，原因点名是哪一项$noHl" $true ((-not $hlOk) -or (Test-Refused { Assert-ReaperCfgDir $hlCfg } '*extra.ini*硬链接*'))
+    if ($hlOk) {
+        $hlBefore = Get-TreeFingerprint $hlCfg
+        & $add '-Init：顶层有硬链接文件的目录被拒绝，什么都没写' $true ((Test-Refused { New-ReaperCfgDir $hlCfg } '*硬链接*') -and (Get-TreeFingerprint $hlCfg) -ceq $hlBefore)
+        Remove-Item -LiteralPath $hlExtra
+    }
+    & $addSafe '顶层的硬链接去掉以后同一个目录照常通过（上面拒绝的就是那个文件）' $false { (Assert-ReaperCfgDir $hlCfg).Dir -like '*hardlink-top-cfg' }
+    # reaper.ini 自己与外面任意文件（不是默认资源目录里的）做硬链接，也靠硬链接数拦下
+    $hlIni = Join-Path $hlCfg 'reaper.ini'
+    $hlIniSaved = [IO.File]::ReadAllBytes($hlIni)
+    Remove-Item -LiteralPath $hlIni
+    $hlIniOk = try { $null = New-Item -ItemType HardLink -Path $hlIni -Target $hlOutside; $true } catch { $false }
+    & $add "reaper.ini 与目录外任意文件是硬链接被拒绝（不止拿它跟默认资源目录比）$noHl" $true ((-not $hlIniOk) -or (Test-Refused { Assert-ReaperCfgDir $hlCfg } '*reaper.ini*硬链接*'))
+    if ($hlIniOk) { Remove-Item -LiteralPath $hlIni }
+    [IO.File]::WriteAllBytes($hlIni, $hlIniSaved)
+    # 哨兵文件是硬链接同样拒绝
+    $hlSentName = (Get-ReaperSentinel).Name
+    $hlSent = Join-Path $hlCfg $hlSentName
+    $hlSentSaved = [IO.File]::ReadAllBytes($hlSent)
+    $hlSentOutside = Join-Path $Tmp 'hardlink-sentinel-outside'
+    [IO.File]::WriteAllBytes($hlSentOutside, $hlSentSaved)
+    Remove-Item -LiteralPath $hlSent
+    $hlSentOk = try { $null = New-Item -ItemType HardLink -Path $hlSent -Target $hlSentOutside; $true } catch { $false }
+    & $add "配置目录里的哨兵文件是硬链接被拒绝$noHl" $true ((-not $hlSentOk) -or (Test-Refused { Assert-ReaperCfgDir $hlCfg } "*$hlSentName*硬链接*"))
+    if ($hlSentOk) { Remove-Item -LiteralPath $hlSent }
+    [IO.File]::WriteAllBytes($hlSent, $hlSentSaved)
+    & $addSafe '哨兵与 reaper.ini 换回单独的文件以后同一个目录照常通过' $false { (Assert-ReaperCfgDir $hlCfg).Dir -like '*hardlink-top-cfg' }
+    # 硬链接数的判据本身：换成替身（只给自测）
+    & $addSafe '硬链接数：取不到（-1）拒绝，不静默放行' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) -1 } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：2 拒绝，说明里写出数目' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 2 } } '*2 个硬链接*' }
+    & $addSafe '硬链接数：1 通过' $false { (Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 1 }).Dir -like '*identity-cfg' }
+    & $addSafe '硬链接数：顶层的目录（plugins）不查，哪怕替身对目录说取不到' $false { (Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) if ($p -like '*\plugins') { -1 } else { 1 } }).Dir -like '*identity-cfg' }
     $cases
 }
 
@@ -439,7 +486,8 @@ function Get-SnapshotCases([string]$Tmp) {
             & $add '清单：前后两次都读不了同一个子目录，也判证明不了没变，Changed 与 Unreadable 里点名它' $true (
                 -not $cLocked.Same -and @($cLocked.Unreadable) -ceq 'locked' -and $cLocked.Changed -contains 'unreadable:locked' -and $cLocked.Differences -eq 0)
             $cWas = & $cmpOf $uOpen $uLocked
-            & $add '清单：之前读得了、之后读不了，判证明不了没变（不是「removed」也不是相同）' $true (-not $cWas.Same -and @($cWas.Unreadable) -ceq 'locked' -and $cWas.Changed -contains 'unreadable:locked')
+            & $add '清单：之前读得了、之后读不了，判证明不了没变（不是「removed」也不是相同），它下面的条目（secret.ini）不算被删，只记这一项' $true (
+                -not $cWas.Same -and @($cWas.Unreadable) -ceq 'locked' -and (@($cWas.Changed) -join ',') -ceq 'unreadable:locked' -and $cWas.Differences -eq 0)
             Add-Content -LiteralPath (Join-Path $lockRoot 'ok\a.ini') -Value 'more'
             $cBoth = & $cmpOf $uLocked (Get-ReaperDefaultCfgSnapshot -Root $lockRoot)
             & $add '清单：读不了的同时，读得了的部分变了照样报 changed，两类各自点名' $true (
@@ -467,6 +515,28 @@ function Get-SnapshotCases([string]$Tmp) {
         (@($pAB.Changed) -join ',') -ceq 'unreadable:Data' -and $pAB.Differences -eq 0)
     $pTwo = & $cmpOf (& $unr @('Data', 'Effects')) (& $unr @('Effects', 'Presets'))
     & $add '比较：不同的 unreadable 项各记一次，按名字排序，不重复' $true ((@($pTwo.Unreadable) -join ',') -ceq 'Data,Effects,Presets')
+    # 读不了的目录下面的条目：另一份里这些条目是「看不见」，不是「被删 / 新增 / 改了」，不计增删改，一并归到读不了
+    $tree = [ordered]@{ 'Data' = 'dir'; 'Data\a.ini' = '4|1'; 'Data\sub' = 'dir'; 'Data\sub\b.ini' = '5|2'; 'ok.ini' = '4|1' }
+    $treeBlind = [ordered]@{ 'Data' = 'unreadable'; 'ok.ini' = '4|1' }
+    $pTreeA = & $cmpOf $tree $treeBlind
+    & $add '比较：之前读得了、之后目录读不了：目录下面的条目（含更深一层）不算 removed，只记 unreadable，Differences 为 0' $true (
+        -not $pTreeA.Same -and (@($pTreeA.Changed) -join ',') -ceq 'unreadable:Data' -and $pTreeA.Differences -eq 0)
+    $pTreeB = & $cmpOf $treeBlind $tree
+    & $add '比较：之前读不了、之后目录读得了：目录下面的条目（含更深一层）不算 added，只记 unreadable，Differences 为 0' $true (
+        -not $pTreeB.Same -and (@($pTreeB.Changed) -join ',') -ceq 'unreadable:Data' -and $pTreeB.Differences -eq 0)
+    $pTreeC = & $cmpOf $tree ([ordered]@{ 'Data' = 'unreadable'; 'ok.ini' = '9|9'; 'new.ini' = '1|1' })
+    & $add '比较：目录读不了的同时，别处的改动和新增照样各自点名，目录下面的条目不另外报' $true (
+        $pTreeC.Changed -contains 'added:new.ini' -and $pTreeC.Changed -contains 'changed:ok.ini' -and $pTreeC.Changed -contains 'unreadable:Data' -and @($pTreeC.Changed).Count -eq 3 -and $pTreeC.Differences -eq 2)
+    # 只是名字以读不了的目录名开头的兄弟（Data2、Data.bak）不在它下面，被删照样报
+    $pSib = & $cmpOf ([ordered]@{ 'Data' = 'dir'; 'Data2' = 'dir'; 'Data2\c.ini' = '4|1'; 'Data.bak' = '1|1' }) ([ordered]@{ 'Data' = 'unreadable'; 'Data2' = 'dir' })
+    & $add '比较：名字只是以读不了的目录名开头的兄弟目录（Data2、Data.bak）不在它下面，里面的条目被删照样报 removed' $true (
+        $pSib.Changed -contains 'removed:Data.bak' -and $pSib.Changed -contains 'removed:Data2\c.ini' -and $pSib.Changed -contains 'unreadable:Data' -and @($pSib.Changed).Count -eq 3 -and $pSib.Differences -eq 2)
+    # 清单的键来自文件系统，两次大小写写法可能不一样
+    $pCase = & $cmpOf ([ordered]@{ 'Data' = 'dir'; 'data\a.ini' = '4|1' }) ([ordered]@{ 'Data' = 'unreadable' })
+    & $add '比较：读不了的目录下面的条目按不分大小写认（键的大小写写法可能前后不同）' $true ((@($pCase.Changed) -join ',') -ceq 'unreadable:Data' -and $pCase.Differences -eq 0)
+    # 根目录自己读不了（键是 .）：整份清单都在它下面
+    $pRoot = & $cmpOf ([ordered]@{ 'a.ini' = '4|1'; 'Data' = 'dir'; 'Data\b.ini' = '5|2' }) ([ordered]@{ '.' = 'unreadable' })
+    & $add '比较：根目录自己读不了（键是 .），之前的全部条目都不算被删，只记 unreadable:.' $true ((@($pRoot.Changed) -join ',') -ceq 'unreadable:.' -and $pRoot.Differences -eq 0)
     $cases
 }
 
@@ -556,6 +626,19 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '标题打码：带引号的路径各自打到引号为止，引号后面的文字保留' $false ((& $safe 'Cannot open "C:\Work\John Smith\a.rpp" (gone)') -ceq 'Cannot open "<path>" (gone)')
     & $add '标题打码：两段带引号的路径各自打码' $false ((& $safe '"C:\x y\a.rpp" and "\\h\s t\b.wav"') -ceq '"<path>" and "<path>"')
     & $add '标题打码：没有路径的标题原样，超过 40 个字符仍截断' $false (((& $safe 'Brand New Box') -ceq 'Brand New Box') -and ((& $safe ('x' * 60)).Length -eq 40))
+    & $add '标题打码：正斜杠写法的 UNC（//srv/share/John Smith/a.rpp）带空格也整段打码' $true ((& $safe 'Cannot open //srv/share/John Smith/a.rpp') -ceq 'Cannot open <path>')
+    & $add '标题打码：单个斜杠不是路径（Mix A/B tape 原样）' $false ((& $safe 'Mix A/B tape') -ceq 'Mix A/B tape')
+    # 结果文本打码（Hide-LocalPaths）：同样一直打到引号、全角分隔符或行尾，不在空白处停（以前在第一个空白处停：John Smith 的 Smith 与后面的目录名会漏进结果 json 与控制台）
+    $hide = { param($text) Hide-LocalPaths $text }
+    & $add '结果文本打码：用户目录带空格（C:\Work\John Smith\x.rpp），空格后面的目录名不留，整段是 <path>' $true ((& $hide '读 C:\Work\John Smith\x.rpp') -ceq '读 <path>')
+    & $add '结果文本打码：UNC 路径带空格（\\srv\share\John Smith\a.wav）整段打码' $true ((& $hide '开 \\srv\share\John Smith\a.wav') -ceq '开 <path>')
+    & $add '结果文本打码：正斜杠写法的 UNC（//srv/share/John Smith/a.wav）整段打码' $true ((& $hide '开 //srv/share/John Smith/a.wav') -ceq '开 <path>')
+    & $add '结果文本打码：正斜杠写法的盘符路径带空格（D:/My Music/John Smith/x y.wav）整段打码' $true ((& $hide 'D:/My Music/John Smith/x y.wav') -ceq '<path>')
+    & $add '结果文本打码：带引号的路径各自打到引号为止，引号后面的文字保留' $false ((& $hide '"C:\x y\a" 和 ''D:\p q\b'' 之后') -ceq '"<path>" 和 ''<path>'' 之后')
+    & $add '结果文本打码：路径后面的全角分隔符（；）及其后的文字保留' $false ((& $hide 'C:\a b\c；然后') -ceq '<path>；然后')
+    & $add '结果文本打码：路径后面的全角逗号、句号、顿号、右括号同样是边界' $false (((& $hide 'C:\a b\c，d') -ceq '<path>，d') -and ((& $hide 'C:\a b\c。d') -ceq '<path>。d') -and ((& $hide 'C:\a b\c、d') -ceq '<path>、d') -and ((& $hide '（见 C:\a b\c）') -ceq '（见 <path>）'))
+    & $add '结果文本打码：换行是边界，每一行的路径各自打码' $true ((& $hide "C:\a b\c`nD:\d e\f`n完") -ceq "<path>`n<path>`n完")
+    & $add '结果文本打码：没有路径的文字原样（单个斜杠、冒号不算）' $false ((& $hide '没有路径 a/b c: d') -ceq '没有路径 a/b c: d')
     $nt = { param($bit, $lag, $head) "逐位相同：$bit`n对齐偏移（lag）：$lag 样本（正数表示 B 比 A 晚）`n开头 2.00 秒残差（96000 帧）：峰值 $head dBFS，RMS $head dBFS`n" }
     $good = & $nt '是' '0' '-inf'
     & $add '对拍结论：四项都满足才 PASS' $false ((Get-CompareVerdict 0 $good).Status -eq 'PASS')

@@ -89,14 +89,14 @@ function Get-ReaperModalVerdict {
     [pscustomobject]@{ Action = 'Fatal'; Name = $name }
 }
 
-# 标题里可能带工程路径：从盘符 / UNC 起一直换成 <path>，到下一个引号或标题末尾为止，再截 40 个字符。
+# 标题里可能带工程路径：从盘符 / UNC（反斜杠或正斜杠写法）起一直换成 <path>，到下一个引号或标题末尾为止，再截 40 个字符。
 # 路径里常有空格（C:\Work\John Smith\a.rpp），不能在第一个空格处停：留下的半截目录名与文件名会进结果文件。
 # 路径后面若正好是 REAPER 自己的标题后缀（" - REAPER"，可带版本号），并且在标题最末，后缀留着；认不出的结尾（后缀不在末尾、后面不是版本号）
 # 一起打码，宁可多打。
 function ConvertTo-ReaperSafeTitle([string]$Title) {
     $tail = [regex]::Match($Title, ' - REAPER(?: v[0-9][0-9A-Za-z.+_-]*(?:/[A-Za-z0-9_]+)?)?$')
     $body = $tail.Success ? $Title.Substring(0, $tail.Index) : $Title
-    $t = ($body -replace '(?:[A-Za-z]:[\\/]|\\\\)[^"]*', '<path>') + ($tail.Success ? $tail.Value : '')
+    $t = ($body -replace '(?:[A-Za-z]:[\\/]|\\\\|(?<!/)//)[^"]*', '<path>') + ($tail.Success ? $tail.Value : '')
     $t.Length -gt 40 ? $t.Substring(0, 40) : $t
 }
 

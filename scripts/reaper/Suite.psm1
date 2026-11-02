@@ -323,8 +323,9 @@ function Install-ReaperPlugins {
     , $report.ToArray()
 }
 
-# 路径一律打码：结果 json 要能过隐私检查。
-function Hide-LocalPaths([string]$Text) { $Text -replace '[A-Za-z]:[\\/][^\s"''；，。]*', '<path>' -replace '\\\\[^\s"'']*', '<path>' }
+# 路径一律打码：结果 json 与控制台都要能过隐私检查。从盘符 / UNC（反斜杠或正斜杠写法）起一直打到引号、全角的分隔符（；，。、）、
+# 路径里不可能有的字符（< > | ? *）或行尾为止；路径里常有空格（C:\Work\John Smith\x），不能在空白处停，路径后面紧跟的说明文字也宁可一起打码。
+function Hide-LocalPaths([string]$Text) { $Text -replace '(?:[A-Za-z]:[\\/]|\\\\|(?<!/)//)[^"''；，。、）\r\n<>|?*]*', '<path>' }
 
 # 一组结局里最差的。空列表是「什么都没跑」，没有结论，不能当 PASS。
 function Get-WorstStatus([string[]]$StatusList) {
@@ -593,7 +594,7 @@ function Invoke-ReaperSmoke {
             Write-Host ("  探针日志：搬走 {0} 份，文档目录除本轮自己的文件外{1}{2}；整轮分析 {3}" -f $ctx.Probe.Moved, ($docs.Same ? '未变' : "变了：$($docs.Changed -join ', ')"), (@($docs.LinkUnknown).Count ? "（有 $(@($docs.LinkUnknown).Count) 项硬链接数没取到，只比了大小、修改时间与重解析点）" : ''), $whole.summary)
         }
         $stop = Get-ReaperRoundStop -CfgUnchanged $cmp.Same -DocsUnchanged $docsSame -Rejected ($Probe -and $ctx.Probe.Rejected) -CfgUnreadable ($cmp.Differences -eq 0 -and @($cmp.Unreadable).Count -gt 0) -Halted ([string]$ctx.Halted)
-        if ($stop) { $runRow.stoppedBecause = $stop; Write-Host "  停止后续轮次：$stop"; break }
+        if ($stop) { $stopShown = Hide-LocalPaths $stop; $runRow.stoppedBecause = $stopShown; Write-Host "  停止后续轮次：$stopShown"; break }
     }
     $result.launches = $launches
     $result.verdict = Get-WorstStatus @($result.runs | ForEach-Object { $_.verdict })

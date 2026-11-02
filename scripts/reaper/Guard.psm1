@@ -4,7 +4,8 @@
 # 存在的理由：REAPER 对不存在的 -cfgfile 路径不报错，而是悄悄改用 %APPDATA%\REAPER，把维护者自己的配置写掉。
 # 所以启动前必须同时满足：配置目录是显式给出的绝对路径、不在（也不指向）%APPDATA% 之下、目录里有 doctor.ps1 -Init 写的
 # 哨兵文件、reaper.ini 在。另外：盘符必须是本机盘（映射的网络盘、不存在或认不出的盘符不收，链接解析之后的真实路径同样要查）；
-# 配置目录顶层不得有重解析点（符号链接、junction）；reaper.ini 与默认资源目录里的 reaper.ini 不得是同一个文件（硬链接等）。
+# 配置目录顶层不得有重解析点（符号链接、junction），顶层每个文件的硬链接数必须是 1（大于 1、或取不到都不收：另一个名字可能在使用者自己的配置里）；
+# reaper.ini 与默认资源目录里的 reaper.ini 不得是同一个文件（硬链接等）。
 # 任何一条不满足就抛出以 REFUSED: 开头的错误，调用方不得启动 REAPER。
 #   Assert-ReaperCfgDir        校验配置目录，返回 @{ Dir; Ini }；New-ReaperCfgDir 给 doctor -Init 建目录与哨兵
 #   Initialize-ReaperCfg       校验并把 ini 路径钉成只读常量；之后 -cfgfile 的实参只能由 Get-ReaperCfgArgument 产生
@@ -12,6 +13,7 @@
 #   Get-ReaperDefaultCfgSnapshot / Compare-ReaperDefaultCfgSnapshot
 #                              只读地取 %APPDATA%\REAPER 下全部条目的大小与修改时间，前后比较
 #   Get-ReaperFileIdentity     目录的文件身份（卷序列号 + 文件 ID）：路径写法再怎么绕，指到同一个目录身份就相同
+#   Get-ReaperHardLinkCount    文件的硬链接数（只读属性打开，不读内容）；打不开返回 -1
 #   Get-ReaperDriveType / Get-ReaperDriveProblem
 #                              盘符的驱动器类型；路径所在的盘是不是本机盘（Network、NoRootDirectory、Unknown 都不是）
 #   Get-ReaperSystemVst3Dirs   REAPER 自己总会补进 vstpath64 的两个系统 VST3 目录（reaper.ini 里的写法）
@@ -53,6 +55,32 @@ public static class RinneReaperFileId {
 '@
 }
 
+# 硬链接数取自打开的句柄（FILE_STANDARD_INFO 的 NumberOfLinks）：FILE_READ_ATTRIBUTES、共享全开，不占着别人的文件，也不挡别人写。
+# 带 OPEN_REPARSE_POINT（链接按链接本身看）与 BACKUP_SEMANTICS。打不开返回 -1。
+if (-not ('RinneReaperLinkCount' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RinneReaperLinkCount {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(IntPtr handle, int infoClass, byte[] buffer, uint size);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    public static long Get(string path) {
+        IntPtr h = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return -1;
+        try {
+            byte[] b = new byte[24]; // FILE_STANDARD_INFO：AllocationSize 8 + EndOfFile 8 + NumberOfLinks 4 + DeletePending 1 + Directory 1 + 填充
+            if (!GetFileInformationByHandleEx(h, 1, b, (uint)b.Length)) return -1;
+            return BitConverter.ToUInt32(b, 16);
+        } finally { CloseHandle(h); }
+    }
+}
+'@
+}
+
 $script:SentinelName = '.rinne-reaper-cfg'
 $script:SentinelMagic = 'rinne-reaper-private-cfg v1'
 
@@ -62,6 +90,9 @@ function Stop-Refuse([string]$Why) { throw [System.InvalidOperationException]::n
 
 # 路径指到的目录（或文件）的文件身份字符串；路径不存在返回 $null；存在却打不开返回 'ERROR:<错误码>'（调用方要当作「证明不了」处理）。
 function Get-ReaperFileIdentity([string]$Path) { [RinneReaperFileId]::Get($Path) }
+
+# 文件的硬链接数；打不开（或取不到）返回 -1，调用方要当作「证明不了只有一个名字」处理。
+function Get-ReaperHardLinkCount([string]$Path) { [RinneReaperLinkCount]::Get($Path) }
 
 # 盘符对应的驱动器类型（只查类型，不读盘）；查不出来按 Unknown 处理。
 function Get-ReaperDriveType([string]$DriveLetter) {
@@ -150,12 +181,20 @@ function Assert-ReaperOutsideDefaultDir {
 
 # 配置目录顶层的条目（含隐藏的）不得带重解析点标记：reaper.ini、哨兵、plugins 等任何一项是符号链接或 junction，REAPER 与 Set-ReaperIniValue
 # 写进去的就是链接指到的地方，可能是使用者自己的配置，光核配置目录自己拦不住。目录列不出来同样拒绝：看不见不能当作没有。
-function Assert-ReaperNoTopLevelLinks([string]$CfgRoot) {
+# 顶层每个文件（哨兵与 reaper.ini 都在内）的硬链接数必须是 1：大于 1 说明还有别的名字指到同一份内容，可能就在默认资源目录里，写它就写了使用者自己的文件；
+# 取不到硬链接数同样拒绝。LinkCountOf 只给自测注入：收路径，返回硬链接数（取不到是 -1）。
+function Assert-ReaperNoTopLevelLinks {
+    param([string]$CfgRoot, [scriptblock]$LinkCountOf = $null)
+    $countLinks = $LinkCountOf ?? ${function:Get-ReaperHardLinkCount}
     $entries = try { @(Get-ChildItem -LiteralPath $CfgRoot -Force -ErrorAction Stop) } catch { Stop-Refuse '配置目录里的条目列不出来，没法证明顶层没有链接' }
     foreach ($entry in $entries) {
         if ($entry.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
             Stop-Refuse "配置目录顶层的 '$($entry.Name)' 是重解析点（符号链接、junction 等）：它指到哪里，REAPER 就写到哪里，一律不收"
         }
+        if ($entry.PSIsContainer) { continue }
+        $linkTotal = [long](& $countLinks $entry.FullName)
+        if ($linkTotal -lt 0) { Stop-Refuse "配置目录顶层的 '$($entry.Name)' 取不到硬链接数，没法证明它没有别的名字指到使用者自己的文件" }
+        if ($linkTotal -gt 1) { Stop-Refuse "配置目录顶层的 '$($entry.Name)' 有 $linkTotal 个硬链接：另一个名字可能在默认资源目录里，REAPER 写它就写了使用者自己的文件，一律不收" }
     }
 }
 
@@ -172,12 +211,12 @@ function Assert-ReaperIniNotDefault {
     if ($theirs -and $mine -ceq $theirs) { Stop-Refuse '配置目录里的 reaper.ini 与默认资源目录里的 reaper.ini 是同一个文件（硬链接或链接）：永不碰 %APPDATA%\REAPER' }
 }
 
-# DriveTypeOf、IdentityOf 只给自测注入（不真去映射网络盘、不真造取不到身份的文件）；正式的调用不传。
+# DriveTypeOf、IdentityOf、LinkCountOf 只给自测注入（不真去映射网络盘、不真造取不到身份或硬链接数的文件）；正式的调用不传。
 function Assert-ReaperCfgDir {
-    param([string]$CfgDir, [scriptblock]$DriveTypeOf = $null, [scriptblock]$IdentityOf = $null)
+    param([string]$CfgDir, [scriptblock]$DriveTypeOf = $null, [scriptblock]$IdentityOf = $null, [scriptblock]$LinkCountOf = $null)
     $real = Assert-ReaperOutsideDefaultDir $CfgDir $DriveTypeOf
     if (-not (Test-Path -LiteralPath $real -PathType Container)) { Stop-Refuse '配置目录不存在' }
-    Assert-ReaperNoTopLevelLinks $real
+    Assert-ReaperNoTopLevelLinks $real $LinkCountOf
     if (-not (Test-ReaperSentinel $real)) { Stop-Refuse '配置目录里没有哨兵文件（先用 doctor.ps1 -Init 初始化）' }
     $ini = Join-Path $real 'reaper.ini'
     if (-not (Test-Path -LiteralPath $ini -PathType Leaf)) { Stop-Refuse '配置目录里没有 reaper.ini' }
@@ -306,20 +345,29 @@ function Get-ReaperDefaultCfgSnapshot {
 # 前后两份清单是不是一样。有 unreadable 项（前后任何一份里有）就证明不了没变：Same 为假，Changed 里记 'unreadable:<路径>'，
 # 调用方按「默认资源目录可能被碰过」处理。Unreadable：前后两份里 unreadable 的路径（排序、不重复）；Differences：能比的部分里
 # 增、删、改的条数（不含 unreadable）。
+# 读不了的目录（前后任一份里）自己和它下面的子条目都不计增删改：一边读得了、一边读不了时，读得了的那份里它下面的条目在另一份里就是「没有」，
+# 那不是被删了，是看不见了；这些条目一并归到「读不了，证明不了没变」。根目录自己读不了（键是 '.'）时整份都在它下面。
 function Compare-ReaperDefaultCfgSnapshot {
     param([Parameter(Mandatory)]$Before, [Parameter(Mandatory)]$After)
     $unreadable = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     foreach ($side in @($Before, $After)) {
         foreach ($k in $side.get_Keys()) { if ($side[$k] -ceq 'unreadable') { $null = $unreadable.Add([string]$k) } }
     }
+    $isHidden = {
+        param($SnapKey)
+        foreach ($blind in $unreadable) {
+            if ($blind -ceq '.' -or $SnapKey.Equals($blind, [StringComparison]::OrdinalIgnoreCase) -or $SnapKey.StartsWith($blind + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
+        $false
+    }.GetNewClosure()
     $changed = [Collections.Generic.List[string]]::new()
     foreach ($k in $Before.get_Keys()) {
-        if ($unreadable.Contains([string]$k)) { continue }
+        if (& $isHidden ([string]$k)) { continue }
         if (-not $After.Contains($k)) { $changed.Add("removed:$k") }
         elseif ($After[$k] -cne $Before[$k]) { $changed.Add("changed:$k") }
     }
     foreach ($k in $After.get_Keys()) {
-        if ($unreadable.Contains([string]$k)) { continue }
+        if (& $isHidden ([string]$k)) { continue }
         if (-not $Before.Contains($k)) { $changed.Add("added:$k") }
     }
     $differences = $changed.Count
@@ -412,6 +460,6 @@ function Test-ReaperScriptLint {
     , $problems.ToArray()
 }
 
-Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Get-ReaperDriveType, Get-ReaperDriveProblem, Resolve-ReaperRealPath, Assert-ReaperNoTopLevelLinks, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
+Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Get-ReaperHardLinkCount, Get-ReaperDriveType, Get-ReaperDriveProblem, Resolve-ReaperRealPath, Assert-ReaperNoTopLevelLinks, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
     Get-ReaperCfgArgument, Set-ReaperIniText, Set-ReaperIniValue, Get-ReaperDefaultCfgDir, Get-ReaperDefaultCfgSnapshot, Compare-ReaperDefaultCfgSnapshot,
     Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint, Get-ReaperSystemVst3Dirs

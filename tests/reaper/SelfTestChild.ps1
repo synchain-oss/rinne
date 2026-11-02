@@ -124,6 +124,7 @@ Write-Case '启动记录：进程自报的退出时刻是 1601 年（被结束�
     $run.Status -eq 'Killed' -and $run.ExitedUtc -gt $run.StartedUtc.AddSeconds(1) -and $run.ExitedUtc -le [DateTime]::UtcNow.AddSeconds(1))
 # ---- 结束不了的进程（StillRunning）：杀不掉，或杀了之后 5 秒还没退出，不能静默吞掉 ----
 $denyKill = { param($ProcessId) throw 'Access is denied' }
+$denyKillPath = { param($ProcessId) throw 'Access is denied: C:\Work\John Smith\REAPER\reaper.exe (blocked)' } # 报错里夹着带空格的路径：整轮的结果与控制台上不能留下半截
 $noopKill = { param($ProcessId) }
 $killThenThrow = { param($ProcessId) Stop-Process -Id $ProcessId -Force; throw 'late error' }
 $stuckSeen = @{ Pids = [Collections.Generic.List[int]]::new() }
@@ -799,6 +800,37 @@ if ($realReaperRunning) {
     # rinne-delete-ok: 只删上面在自测临时目录之下新建的 rn-locked，路径在临时目录之下已在创建前断言
     } finally { & icacls.exe $lockedDefault /remove:d "*$sidU" 2>&1 | Out-Null; Remove-Item -LiteralPath $lockedDefault -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # 默认资源目录里的一个目录在这一轮的中途变得读不了（前一份读得了、后一份读不了）：它下面的条目在后一份里是「看不见」，不是「被删了」。
+    # 原因要说读不了、证明不了没变，不能说「默认资源目录变了」；整轮仍判 FAIL 并停手
+    $turnsDefault = Join-Path (Get-ReaperDefaultCfgDir) 'rn-turns'
+    if (-not $turnsDefault.StartsWith((Split-Path -Parent $Work) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw "默认资源目录不在自测的临时目录之下，不造读不了的目录：$turnsDefault" }
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $turnsDefault 'deep')
+    Set-Content -LiteralPath (Join-Path $turnsDefault 'y.ini') -Value y
+    Set-Content -LiteralPath (Join-Path $turnsDefault 'deep\z.ini') -Value z
+    $turnsSpec = New-WireSpec 'turns-unreadable'
+    $turnsBase = New-FakeReaperLauncher $turnsSpec
+    $turnsState = @{ Denied = $false }
+    $turnsLauncher = {
+        param($psi)
+        if (-not $turnsState.Denied) { $turnsState.Denied = $true; & icacls.exe $turnsDefault /deny "*${sidU}:(RD)" 2>&1 | Out-Null }
+        & $turnsBase $psi
+    }.GetNewClosure()
+    try {
+        $smT = Invoke-WireSmoke 'turns-unreadable' $turnsSpec '^probe-steady-48000-512$' -Repeat 2 -NoNegative -ExtraHooks @{ Launcher = $turnsLauncher }
+        $turnsListable = try { $null = Get-ChildItem -LiteralPath $turnsDefault -Force -ErrorAction Stop; $true } catch { $false }
+        if (Test-WireSkippedByRealReaper $smT.R) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：中途变得读不了的整轮用例没能真跑）' $true $true }
+        elseif ($turnsListable) { Write-Case '（本机没能造出读不了的目录：中途变得读不了的整轮用例没能真跑）' $true $true }
+        else {
+            $rowT = $smT.R.runs[0]
+            Write-Case "整轮入口：默认资源目录里的目录在这一轮中途变得读不了，原因说读不了、证明不了没变，不说「默认资源目录变了」，Changed 里只有这一项（它下面的条目不算被删），整轮 FAIL，停手，只跑了 $(@($smT.R.runs).Count) 轮" $true (
+                $rowT.scenarios[0].status -eq 'PASS' -and $rowT.verdict -eq 'FAIL' -and $smT.R.verdict -eq 'FAIL' -and -not $rowT.defaultCfgDir.unchanged -and
+                (@($rowT.defaultCfgDir['changed']) -join ',') -ceq 'unreadable:rn-turns' -and @($rowT.defaultCfgDir['unreadable']) -ceq 'rn-turns' -and
+                $rowT.stoppedBecause -like '*读不了*' -and $rowT.stoppedBecause -notlike '*默认资源目录变了*' -and @($smT.R.runs).Count -eq 1 -and $smT.R.launches -eq 1 -and
+                $smT.Console -like '*读不了的子目录*' -and $smT.Console -notlike '*变了：*')
+        }
+    # rinne-delete-ok: 只删上面在自测临时目录之下新建的 rn-turns，路径在临时目录之下已在创建前断言
+    } finally { & icacls.exe $turnsDefault /remove:d "*$sidU" 2>&1 | Out-Null; Remove-Item -LiteralPath $turnsDefault -Recurse -Force -ErrorAction SilentlyContinue }
+
     # ---- 结束不了的进程（整轮）：第一个场景撞上 → 它 INCOMPLETE、后面的场景不再启动 REAPER、整轮 FAIL 并停手，-Repeat 2 只跑一轮，gui 锁放开 ----
     $shortCfg = Get-Content -LiteralPath $scenarioFile -Raw | ConvertFrom-Json
     $shortCfg.probe.limits.luaTimeoutSec = 2
@@ -807,7 +839,7 @@ if ($realReaperRunning) {
     $stuckSeenW = @{ Pids = [Collections.Generic.List[int]]::new() }
     try {
         $smW = Invoke-WireSmoke 'stuck-round' (New-WireSpec 'stuck-round') '^probe-steady-48000-(512|1024)$' -Repeat 2 -NoNegative -ScenarioOverride $shortScenarioFile `
-            -ExtraHooks @{ Launcher = (New-StuckStandIn 'Start-Sleep -Seconds 120' $stuckSeenW); Terminator = $denyKill }
+            -ExtraHooks @{ Launcher = (New-StuckStandIn 'Start-Sleep -Seconds 120' $stuckSeenW); Terminator = $denyKillPath }
         if (Test-WireSkippedByRealReaper $smW.R) { Write-Case '（整轮预检时本机冒出了别人的 reaper.exe，整套 SKIPPED：REAPER 结束不了的整轮用例没能真跑）' $true $true }
         else {
             $rowW = $smW.R.runs[0]
@@ -818,6 +850,12 @@ if ($realReaperRunning) {
                 $rowW.verdict -eq 'FAIL' -and $smW.R.verdict -eq 'FAIL' -and $rowW.Contains('haltedBecause') -and "$($rowW['haltedBecause'])" -like '*没能结束*' -and $rowW.stoppedBecause -like '*没能结束*' -and
                 @($smW.R.runs).Count -eq 1 -and $rowW.reaperProcessesLeft -eq 0 -and -not (& $gone $stuckSeenW.Pids[0]) -and $smW.Console -like '*停止后续轮次*没能结束*')
             Write-Case '整轮入口：REAPER 结束不了，gui 锁照样放开；结果 json 里没有盘符路径' $true ((Test-RinneLockFree gui) -and (($smW.R | ConvertTo-Json -Depth 12) -cnotmatch '[A-Za-z]:\\\\'))
+            # 结束动作的报错里夹着带空格的路径（C:\Work\John Smith\…）：场景说明、本轮停下的原因、haltedBecause 都进结果 json，停手原因与场景说明还打到控制台。
+            # 任何一个出口漏了打码，或者在空格处停，就会留下 Smith / John
+            $leakText = (($smW.R | ConvertTo-Json -Depth 12) + "`n" + $smW.Console)
+            Write-Case '整轮入口：结束动作的报错里带空格的路径（C:\Work\John Smith\…），结果 json、停手原因、控制台上都不留 Smith / John，说明处是 <path>' $true (
+                $leakText -cnotmatch 'Smith|John' -and "$($rowW['haltedBecause'])" -like '*<path>*' -and "$($rowW['stoppedBecause'])" -like '*<path>*' -and
+                $rowW.scenarios[0].detail -like '*<path>*' -and $smW.Console -like '*停止后续轮次*<path>*' -and $smW.Console -like '*[[]INCOMPLETE]*<path>*')
         }
     } finally { Stop-StuckStandIns $stuckSeenW }
 
