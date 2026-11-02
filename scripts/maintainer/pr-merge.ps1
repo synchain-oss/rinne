@@ -7,8 +7,8 @@
 #   -Merge -Pr <n> -Card <卡> -SummaryFile <f>
 #                                 重新核对，ready 才合并：squash，钉住审过的 head（sha=…），显式写 subject「<标题> (#n)」
 #                                 与 body（摘要段 + 空行 + 唯一一行签名）
-#   -After -Pr <n> -Card <卡>     回读 squash 提交（DCO、作者与提交者、恰好一行签名）、删远端子支线、持 git 锁移除 worktree
-#                                 与 wt/tip-<n>
+#   -After -Pr <n> -Card <卡>     回读 squash 提交（DCO、作者与提交者、恰好一行签名）、核对远端与本地子支线的尖都等于 PR 合并时的
+#                                 head（对不上就抛错、什么都不删）、删远端子支线、持 git 锁移除 worktree 与 wt/tip-<n>、本地分支
 #   -SelfTest                     用 fixtures/ 里录制的 PR 响应离线跑，对每条判据给反例
 # 只从主 clone 运行，而且主 clone 必须正好在刚取回的 origin/feature/v1 上、工作树干净：判据取自 feature 线，
 # 而不是待合并 PR 自己的版本。gates 的结果 json 是自报的：最低档按 PR 的文件清单与卡片在这里重算（定档规则取自
@@ -946,8 +946,29 @@ function Invoke-AfterUnlocked {
         $cur = (Invoke-RinneGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $wt -AllowFail).Out.Trim()
         if ($cur -ne $branch) { throw "$wt 在分支「$cur」上，不是 #$Pr 的 $branch：卡号对不上，不清理" }
     }
+    # 删之前先核对子支线的尖：远端与本地分支的尖都要等于 PR 合并时的 head，否则分支上有没合入的提交（合并之后才推的、
+    # 本地还没推的），删掉就丢了。任何一项对不上都抛错，什么都不删（远端分支、worktree、本地分支都留着）。
+    # ls-remote 只有退出码 0（取到尖）和 2（远端没有这个分支）两种合法结果，别的（网络、认证）核对不了，同样不删
+    $headSha = [string]$pull.head.sha
+    if ($headSha -notmatch '^[0-9a-f]{40}$') { throw "取不到 #$Pr 合并时的 head（接口给的是「$headSha」），核对不了分支尖，什么都没删" }
+    $remote = Invoke-RinneGit @('ls-remote', '--exit-code', '--heads', 'origin', "refs/heads/$branch") -AllowFail
+    if ($remote.Code -ne 0 -and $remote.Code -ne 2) { throw "ls-remote 查远端 $branch 失败（退出码 $($remote.Code)），核对不了分支尖，什么都没删：$($remote.Err.Trim())" }
+    $remoteTip = $null
+    if ($remote.Code -eq 0) {
+        $remoteTip = @(($remote.Out -split "`r?`n") | ForEach-Object { $f = $_.Trim() -split '\s+'; if ($f.Count -eq 2 -and $f[1] -eq "refs/heads/$branch") { $f[0] } }) | Select-Object -First 1
+        if (-not $remoteTip) { throw "ls-remote 的输出里没有 refs/heads/$branch，核对不了分支尖，什么都没删" }
+        if ($remoteTip -ne $headSha) {
+            throw "远端子支线 $branch 的尖 $remoteTip 不是 #$Pr 合并时的 head $headSha：分支上有没合入的提交，什么都没删"
+        }
+    }
+    $local = Invoke-RinneGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail
+    if ($local.Code -ne 0 -and $local.Code -ne 1) { throw "rev-parse 查本地分支 $branch 失败（退出码 $($local.Code)），核对不了分支尖，什么都没删：$($local.Err.Trim())" }
+    $localTip = if ($local.Code -eq 0) { $local.Out.Trim() } else { $null }
+    if ($localTip -and $localTip -ne $headSha) {
+        throw "本地子支线 $branch 的尖 $localTip 不是 #$Pr 合并时的 head $headSha：分支上有没合入的提交，什么都没删（worktree 也不移除）"
+    }
     # 删远端子支线（pre-push hook 放行 feat/* 的删除），再持锁移除 worktree 与本地分支
-    if ((Invoke-RinneGit @('ls-remote', '--exit-code', '--heads', 'origin', $branch) -AllowFail).Code -eq 0) {
+    if ($remoteTip) {
         Invoke-RinneGit @('push', 'origin', '--delete', "refs/heads/$branch") | Out-Null
     }
     $tip = Join-Path (Get-RinneRoot) "wt/tip-$Pr"
@@ -963,7 +984,7 @@ function Invoke-AfterUnlocked {
             # rinne-delete-ok: 路径已由上一行 Assert-RinneWtDir 核对为 wt 下的 tip-<n>，且是 worktree
             Invoke-RinneGit @('worktree', 'remove', '--force', $tip) | Out-Null
         }
-        if ((Invoke-RinneGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail).Code -eq 0) {
+        if ($localTip) {
             Invoke-RinneGit @('branch', '-D', $branch) | Out-Null
         }
     } | Out-Null
@@ -2152,13 +2173,15 @@ function Invoke-SelfTest {
         Set-RinneLockImpl { param($name, $sb) $locks.Add($name); & $sb }
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
         Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
+        $tips = @{ Remote = $head; RemoteCode = 0; Local = $head; LocalGone = $false }
         $after = [ordered]@{
             'pulls/3$'                       = { $merged }
             'merge-base --is-ancestor'       = { '' }
             'check-commits\.mjs commits --range' = { @{ Code = 0; Out = 'check-commits commits：通过'; Err = '' } }
             ' log -1 --format=%B'            = { $sq }
             ' symbolic-ref --quiet --short HEAD' = { $wtBranch }
-            'ls-remote --exit-code'          = { "$('a' * 40)`trefs/heads/feat/review-bot" }
+            # 远端 / 本地子支线的尖：默认就是 PR 合并时的 head；用例改它们造「分支上有没合入的提交」。RemoteCode 2 是 ls-remote 找不到
+            'ls-remote --exit-code'          = { if ($tips.RemoteCode -eq 0) { "$($tips.Remote)`trefs/heads/feat/review-bot" } else { @{ Code = $tips.RemoteCode; Out = ''; Err = 'x' } } }
             ' push origin --delete refs/heads/feat/review-bot' = { '' }
             # 假的 worktree remove：挪进自测的临时目录（不递归删参数给的路径），最后随临时目录一起删。挪之前核对给的路径按真实路径
             # 在这个临时目录里面，不在就抛错、不动它（Get-RinneRoot 的取值以后变了，也挪不到真的 wt/ 下的目录）
@@ -2167,7 +2190,7 @@ function Invoke-SelfTest {
                 if (-not (Test-RinneInTempDir -Path $argv[-1] -Dir $tmp)) { throw "假的 worktree remove 只挪自测临时目录里面的路径：$($argv[-1])" }
                 Move-Item -LiteralPath $argv[-1] -Destination (Join-Path $tmp "removed-$([guid]::NewGuid().ToString('N'))"); ''
             }
-            'rev-parse --verify --quiet refs/heads/feat/review-bot' = { '' }
+            'rev-parse --verify --quiet refs/heads/feat/review-bot' = { if ($tips.LocalGone) { @{ Code = 1; Out = ''; Err = '' } } else { $tips.Local } }
             ' branch -D feat/review-bot'     = { '' }
             '^git .* fetch '                 = { '' }
         }
@@ -2182,6 +2205,45 @@ function Invoke-SelfTest {
                 $locks[0] -eq 'merge' -and @($locks | Where-Object { $_ -eq 'git' }).Count -ge 2))
         Add-RinneCase $cases '-After：一并强制移除这个 PR 的 wt/tip-3' $false (-not (
                 @($log | Where-Object { $_ -match "worktree remove --force $([regex]::Escape($tip))$" }).Count -eq 1 -and -not (Test-Path -LiteralPath $tip)))
+        # 删之前先核对子支线的尖：远端或本地分支上有没合入的提交（尖不等于 PR 合并时的 head）就抛错，什么都不删（远端分支、worktree、
+        # wt/tip-3、本地分支都留着），错误信息写清两个 sha。worktree 与 wt/tip-3 每个用例前重建
+        $remake = {
+            New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid"), $tip | Out-Null
+            Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
+            Set-Content -LiteralPath (Join-Path $tip '.git') -Value 'gitdir: x'
+        }
+        $tryAfter = { $log.Clear(); try { Invoke-After -Pr 3 -CardId $cid | Out-Null; $null } catch { $_.Exception.Message } }
+        $nothingDeleted = {
+            (Test-Path -LiteralPath (Join-Path $tmp "wt/$cid")) -and (Test-Path -LiteralPath $tip) -and
+            -not @($log | Where-Object { $_ -match ' push origin --delete | worktree remove | branch -D ' }).Count
+        }
+        $extra = 'b' * 40
+        & $remake
+        $tips.Remote = $extra
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：远端子支线比 PR head 多一个提交：抛错、什么都不删、错误信息写清两个 sha' $true ([bool]($err -and $err.Contains($extra) -and $err.Contains($head) -and (& $nothingDeleted)))
+        $tips.Remote = $head; $tips.Local = $extra
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：本地子支线比 PR head 多一个提交（远端对得上）：抛错、什么都不删（远端分支与 worktree 都留着）、错误信息写清两个 sha' $true ([bool]($err -and $err.Contains($extra) -and $err.Contains($head) -and (& $nothingDeleted)))
+        $tips.Local = $head; $tips.RemoteCode = 128
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：ls-remote 出错（退出码不是 0 也不是 2）：核对不了远端分支尖，抛错、什么都不删' $true ([bool]($err -and (& $nothingDeleted)))
+        $tips.RemoteCode = 2
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：远端子支线已经删了（ls-remote 找不到）：只清本地（worktree、wt/tip-3、本地分支）' $false (-not (
+                -not $err -and -not @($log | Where-Object { $_ -match ' push origin --delete ' }).Count -and
+                @($log | Where-Object { $_ -match ' branch -D feat/review-bot$' }).Count -eq 1 -and -not (Test-Path -LiteralPath $tip)))
+        $tips.RemoteCode = 0
+        $tips.LocalGone = $true
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：本地分支已经不在（远端对得上）：删远端、移除 worktree，不再 branch -D' $false (-not (
+                -not $err -and @($log | Where-Object { $_ -match ' push origin --delete refs/heads/feat/review-bot$' }).Count -eq 1 -and
+                -not @($log | Where-Object { $_ -match ' branch -D ' }).Count -and -not (Test-Path -LiteralPath $tip)))
+        $tips.LocalGone = $false
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
         Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
         $wtBranch = 'feat/other-card'
