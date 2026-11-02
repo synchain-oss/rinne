@@ -4,7 +4,7 @@
 // 两个插件共用的词条在 common.js（语言选择卡也在那里），键不得重名；由 web/shared/i18n.js 的 mergeDicts 合并。
 // 四条规则的引导词与正文（rules.r<N>.lead / body）不在这里手写：真源是 docs/USER_GUIDE.zh-CN.md 的「使用前必读」
 // 与 docs/hard-rules.i18n.json，由 gen-docs 的 hard-rules 块写进下面的生成段，改真源后运行 node scripts/gen-docs.mjs --write。
-// 其余 fr 为初译，登记在 fr-review/guide.json，发布前抽检；规则的 fr 由 hard-rules.i18n.json 的 frReview 记录。
+// 其余 fr 已逐条复核，并经维护者抽检通过（见 docs/validation/i18n-review-log.md）；规则的 fr 由 hard-rules.i18n.json 的 frReview 记录。
 //
 // 排版规则（scripts/check-i18n.mjs 检查）：
 //   - zh 用全角标点，en 用弯引号和弯撇号；
@@ -212,13 +212,13 @@ export default {
             "Insérez Rinne Output après le dernier plug-in voulu dans la boucle (le plus simple : dernier slot pré-fader) ; il rejoint un groupe de lui-même. Vert = connecté ; un nom de piste identique ci-dessous indique très probablement la même piste.",
         "tour.in.step3.title": "Réinjection",
         "tour.in.step3.body":
-            "Le gain du retour ; il démarre à 0. Baissez l’écoute et montez-le lentement : plus de retour, plus vite l’auto-oscillation. Avec le mix à 50 % ou plus et sans perte dans la boucle, elle est certaine au-delà de 100 % (l’arc ambre) ; un gain dans la boucle l’avance.",
+            "Le gain du retour ; il démarre à 0. Baissez l’écoute et montez-le lentement : plus de retour, plus vite l’auto-oscillation. Avec le mix à 50 % ou plus et sans perte dans la boucle, elle est certaine au-delà de 100 % (l’arc ambre) ; un gain dans la boucle peut l’avancer.",
         "tour.in.step4.title": "Délai de boucle D",
         "tour.in.step4.body":
             "Le temps fixe d’un tour de boucle — identique quelle que soit la taille de tampon, et à l’export. Il ne peut pas descendre sous le minimum (le plus grand bloc de cette session) ; réglé plus bas, Rinne fonctionne au minimum et affiche le D réel.",
         "tour.in.step5.title": "Sécurité et coupure d’urgence",
         "tour.in.step5.body":
-            "Le retour passe toujours par un blocage DC et un écrêtage doux ; limiteur et protection anti-emballement sont actifs par défaut. En cas de souci, appuyez sur Coupure d’urgence, même visite ouverte. Rétablir le retour est dans la barre d’avis.",
+            "Le retour passe toujours par un blocage DC et un écrêtage doux ; limiteur et protection anti-emballement sont actifs par défaut. En cas de problème, appuyez sur Coupure d’urgence, même en pleine visite ou fenêtre ouverte. Rétablir le retour est dans la barre d’avis.",
         "tour.in.step6.title": "À revoir à tout moment",
         "tour.in.step6.body":
             "Cliquez sur le bouton « ? » en bas à droite pour revoir les règles et cette visite. Cliquez sur le numéro de version pour les licences, les réglages avancés et les diagnostics.",
