@@ -181,8 +181,8 @@ function Assert-ReaperOutsideDefaultDir {
 
 # 配置目录顶层的条目（含隐藏的）不得带重解析点标记：reaper.ini、哨兵、plugins 等任何一项是符号链接或 junction，REAPER 与 Set-ReaperIniValue
 # 写进去的就是链接指到的地方，可能是使用者自己的配置，光核配置目录自己拦不住。目录列不出来同样拒绝：看不见不能当作没有。
-# 顶层每个文件（哨兵与 reaper.ini 都在内）的硬链接数必须是 1：大于 1 说明还有别的名字指到同一份内容，可能就在默认资源目录里，写它就写了使用者自己的文件；
-# 取不到硬链接数同样拒绝。LinkCountOf 只给自测注入：收路径，返回硬链接数（取不到是 -1）。
+# 顶层每个文件（哨兵与 reaper.ini 都在内）的硬链接数只有恰好 1 才放行：大于 1 说明还有别的名字指到同一份内容，可能就在默认资源目录里，写它就写了使用者自己的文件；
+# 取不到（-1、空、不是数字、0）同样拒绝。LinkCountOf 只给自测注入：收路径，返回硬链接数（取不到是 -1）。
 function Assert-ReaperNoTopLevelLinks {
     param([string]$CfgRoot, [scriptblock]$LinkCountOf = $null)
     $countLinks = $LinkCountOf ?? ${function:Get-ReaperHardLinkCount}
@@ -192,9 +192,11 @@ function Assert-ReaperNoTopLevelLinks {
             Stop-Refuse "配置目录顶层的 '$($entry.Name)' 是重解析点（符号链接、junction 等）：它指到哪里，REAPER 就写到哪里，一律不收"
         }
         if ($entry.PSIsContainer) { continue }
-        $linkTotal = [long](& $countLinks $entry.FullName)
-        if ($linkTotal -lt 0) { Stop-Refuse "配置目录顶层的 '$($entry.Name)' 取不到硬链接数，没法证明它没有别的名字指到使用者自己的文件" }
-        if ($linkTotal -gt 1) { Stop-Refuse "配置目录顶层的 '$($entry.Name)' 有 $linkTotal 个硬链接：另一个名字可能在默认资源目录里，REAPER 写它就写了使用者自己的文件，一律不收" }
+        # 只有恰好 1 才放行。取不到（-1）、空、不是数字、0（文件在世不可能是 0）都算取不到；大于 1 是另有名字指到同一份内容
+        $linkRaw = & $countLinks $entry.FullName
+        $linkTotal = ($null -ne $linkRaw -and "$linkRaw" -cmatch '^-?[0-9]+$') ? [long]"$linkRaw" : -1
+        if ($linkTotal -lt 1) { Stop-Refuse "配置目录顶层的 '$($entry.Name)' 取不到硬链接数，没法证明它没有别的名字指到使用者自己的文件" }
+        if ($linkTotal -ne 1) { Stop-Refuse "配置目录顶层的 '$($entry.Name)' 有 $linkTotal 个硬链接：另一个名字可能在默认资源目录里，REAPER 写它就写了使用者自己的文件，一律不收" }
     }
 }
 
@@ -332,14 +334,24 @@ function Get-ReaperDefaultCfgSnapshot {
     }
     $unknown = 0
     foreach ($err in $listErrors) {
-        $target = $err.TargetObject -is [string] ? $err.TargetObject : $null
-        $full = $target ? [IO.Path]::GetFullPath($target).TrimEnd('\') : $null
-        $entryKey = if ($full -and ($full + '\').Equals($prefix, [StringComparison]::OrdinalIgnoreCase)) { '.' }
-               elseif ($full -and ($full + '\').StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $full.Substring($prefix.Length) }
-               else { '(未知)#' + (++$unknown) }
+        $entryKey = Get-ReaperSnapshotErrorKey $err.TargetObject $prefix
+        if (-not $entryKey) { $entryKey = '(未知)#' + (++$unknown) }
         $snap[$entryKey] = 'unreadable'
     }
     $snap
+}
+
+# 一条列目录的错误对应的清单键。TargetObject 可能是路径字符串，也可能是 FileSystemInfo（目录、文件对象，取 FullName）；两种都取不到、
+# 路径不在 KeyPrefix（Root 加反斜杠）之下，或路径写法无效，都返回 $null，调用方记成 '(未知)#序号'。Root 自己是 '.'。
+function Get-ReaperSnapshotErrorKey {
+    param($TargetObject, [string]$KeyPrefix)
+    $target = if ($TargetObject -is [string]) { $TargetObject } elseif ($TargetObject -is [IO.FileSystemInfo]) { $TargetObject.FullName } else { $null }
+    if (-not $target) { return $null }
+    $full = try { [IO.Path]::GetFullPath($target).TrimEnd('\') } catch { $null }
+    if (-not $full) { return $null }
+    if (($full + '\').Equals($KeyPrefix, [StringComparison]::OrdinalIgnoreCase)) { return '.' }
+    if (($full + '\').StartsWith($KeyPrefix, [StringComparison]::OrdinalIgnoreCase)) { return $full.Substring($KeyPrefix.Length) }
+    $null
 }
 
 # 前后两份清单是不是一样。有 unreadable 项（前后任何一份里有）就证明不了没变：Same 为假，Changed 里记 'unreadable:<路径>'，
@@ -460,6 +472,6 @@ function Test-ReaperScriptLint {
     , $problems.ToArray()
 }
 
-Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Get-ReaperHardLinkCount, Get-ReaperDriveType, Get-ReaperDriveProblem, Resolve-ReaperRealPath, Assert-ReaperNoTopLevelLinks, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
+Export-ModuleMember -Function Get-ReaperSentinel, Get-ReaperFileIdentity, Get-ReaperHardLinkCount, Get-ReaperSnapshotErrorKey, Get-ReaperDriveType, Get-ReaperDriveProblem, Resolve-ReaperRealPath, Assert-ReaperNoTopLevelLinks, Test-ReaperUnder, Assert-ReaperCfgDir, New-ReaperCfgDir, Initialize-ReaperCfg,
     Get-ReaperCfgArgument, Set-ReaperIniText, Set-ReaperIniValue, Get-ReaperDefaultCfgDir, Get-ReaperDefaultCfgSnapshot, Compare-ReaperDefaultCfgSnapshot,
     Find-ReaperVariableCaseCollisions, Find-ReaperControlChars, Test-ReaperScriptLint, Get-ReaperSystemVst3Dirs

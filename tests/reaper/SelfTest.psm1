@@ -254,6 +254,16 @@ function Get-LinkedIniCases([string]$Tmp, [string]$FakeRoamDefault) {
     & $addSafe '硬链接数：2 拒绝，说明里写出数目' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 2 } } '*2 个硬链接*' }
     & $addSafe '硬链接数：1 通过' $false { (Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 1 }).Dir -like '*identity-cfg' }
     & $addSafe '硬链接数：顶层的目录（plugins）不查，哪怕替身对目录说取不到' $false { (Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) if ($p -like '*\plugins') { -1 } else { 1 } }).Dir -like '*identity-cfg' }
+    # 只有恰好 1 才放行：替身什么都不返回（$null）、返回 0、空串、不是数字，都是「取不到」，不能被当成没有别的名字
+    & $addSafe '硬链接数：取不到（替身返回 $null）拒绝，不当成 0 放行' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) $null } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：取不到（替身什么都不返回）拒绝' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：0 拒绝，按取不到说（文件在世不可能是 0 个名字）' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 0 } } '*取不到硬链接数*' }
+    & $addSafe '硬链接数：空串、不是数字的值同样按取不到拒绝' $true { (Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) '' } } '*取不到硬链接数*') -and (Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 'x' } } '*取不到硬链接数*') }
+    & $addSafe '硬链接数：大于 1 有自己的原因，不说成取不到' $true { Test-Refused { Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 3 } } '*3 个硬链接*' }
+    & $addSafe '硬链接数：取不到的原因里没有「个硬链接」，大于 1 的原因里没有「取不到」（两种原因各写各的）' $true {
+        $unobtainable = try { $null = Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) $null }; '' } catch { $_.Exception.Message }
+        $many = try { $null = Assert-ReaperCfgDir $idCfg -LinkCountOf { param($p) 2 }; '' } catch { $_.Exception.Message }
+        $unobtainable -like '*取不到*' -and $unobtainable -notlike '*个硬链接*' -and $many -like '*个硬链接*' -and $many -notlike '*取不到*' }
     $cases
 }
 
@@ -537,6 +547,19 @@ function Get-SnapshotCases([string]$Tmp) {
     # 根目录自己读不了（键是 .）：整份清单都在它下面
     $pRoot = & $cmpOf ([ordered]@{ 'a.ini' = '4|1'; 'Data' = 'dir'; 'Data\b.ini' = '5|2' }) ([ordered]@{ '.' = 'unreadable' })
     & $add '比较：根目录自己读不了（键是 .），之前的全部条目都不算被删，只记 unreadable:.' $true ((@($pRoot.Changed) -join ',') -ceq 'unreadable:.' -and $pRoot.Differences -eq 0)
+    # 列目录的错误对应哪个清单键：TargetObject 可能是路径字符串，也可能是 FileSystemInfo（取 FullName）；两种都不是才落到「未知」
+    $addSafe = { param($Label, $Bad, [scriptblock]$Check) $ok = $false; try { $ok = [bool](& $Check) } catch { $ok = $false }; & $add $Label $Bad $ok }
+    $ekRoot = Join-Path $Tmp 'snap-errkey'
+    $ekPrefix = $ekRoot.TrimEnd('\') + '\'
+    $ekKey = { param($target) Get-ReaperSnapshotErrorKey $target $ekPrefix }
+    & $addSafe '清单键：错误的目标是路径字符串，键是它相对根的路径' $true { (& $ekKey (Join-Path $ekRoot 'Data\sub')) -ceq 'Data\sub' }
+    & $addSafe '清单键：错误的目标是 FileSystemInfo（目录对象），取 FullName，键同样是相对路径，不落到「未知」' $true { (& $ekKey ([IO.DirectoryInfo]::new((Join-Path $ekRoot 'Data\sub')))) -ceq 'Data\sub' }
+    & $addSafe '清单键：错误的目标是 FileSystemInfo（文件对象）同样取 FullName' $true { (& $ekKey ([IO.FileInfo]::new((Join-Path $ekRoot 'a.ini')))) -ceq 'a.ini' }
+    & $addSafe '清单键：根目录自己（字符串或 FileSystemInfo）是键 .' $true { (& $ekKey $ekRoot) -ceq '.' -and (& $ekKey ([IO.DirectoryInfo]::new($ekRoot))) -ceq '.' }
+    & $addSafe '清单键：路径大小写写法不同也认得出（不分大小写）' $true { (& $ekKey ([IO.DirectoryInfo]::new((Join-Path $ekRoot 'Data').ToUpperInvariant()))) -ceq 'DATA' }
+    & $addSafe '清单键：既不是字符串也不是 FileSystemInfo（$null、数字、别的对象）取不到，返回空，调用方记「未知」' $true { -not (& $ekKey $null) -and -not (& $ekKey 7) -and -not (& $ekKey ([pscustomobject]@{ FullName = (Join-Path $ekRoot 'x') })) }
+    & $addSafe '清单键：路径写法无效（含空字符）取不到键，不抛错' $true { -not (& $ekKey ($ekRoot + "\bad`0name")) }
+    & $addSafe '清单键：目标在根目录之外取不到键（不会写成一个根本不在清单里的相对路径）' $true { -not (& $ekKey ([IO.DirectoryInfo]::new((Join-Path $Tmp 'elsewhere')))) -and -not (& $ekKey (Join-Path $Tmp 'elsewhere')) }
     $cases
 }
 
@@ -628,6 +651,10 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '标题打码：没有路径的标题原样，超过 40 个字符仍截断' $false (((& $safe 'Brand New Box') -ceq 'Brand New Box') -and ((& $safe ('x' * 60)).Length -eq 40))
     & $add '标题打码：正斜杠写法的 UNC（//srv/share/John Smith/a.rpp）带空格也整段打码' $true ((& $safe 'Cannot open //srv/share/John Smith/a.rpp') -ceq 'Cannot open <path>')
     & $add '标题打码：单个斜杠不是路径（Mix A/B tape 原样）' $false ((& $safe 'Mix A/B tape') -ceq 'Mix A/B tape')
+    # 标题打码不带引号时本来只在 " 处停：撇号、全角标点不是边界，目录名里有 O'Brien、顿号、括号照样整段打码
+    & $add '标题打码：目录名里有撇号（C:\Work\O''Brien Smith\a.rpp）整段打码，Brien 与 Smith 不留' $true ((& $safe 'Error in C:\Work\O''Brien Smith\a.rpp now') -ceq 'Error in <path>')
+    & $add '标题打码：目录名里有全角顿号与括号，整段打码，REAPER 自己的标题后缀留着' $true ((& $safe 'Open C:\Work\项目、旧（1） Smith\a.rpp - REAPER v7.82/win64') -ceq 'Open <path> - REAPER v7.82/win64')
+    & $add '标题打码：单引号括起来的路径宁可多打码（不留 John、Smith）' $true ((& $safe 'Cannot open ''C:\Work\John Smith\a.rpp'' (gone)') -notmatch 'John|Smith')
     # 结果文本打码（Hide-LocalPaths）：同样一直打到引号、全角分隔符或行尾，不在空白处停（以前在第一个空白处停：John Smith 的 Smith 与后面的目录名会漏进结果 json 与控制台）
     $hide = { param($text) Hide-LocalPaths $text }
     & $add '结果文本打码：用户目录带空格（C:\Work\John Smith\x.rpp），空格后面的目录名不留，整段是 <path>' $true ((& $hide '读 C:\Work\John Smith\x.rpp') -ceq '读 <path>')
@@ -635,8 +662,25 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '结果文本打码：正斜杠写法的 UNC（//srv/share/John Smith/a.wav）整段打码' $true ((& $hide '开 //srv/share/John Smith/a.wav') -ceq '开 <path>')
     & $add '结果文本打码：正斜杠写法的盘符路径带空格（D:/My Music/John Smith/x y.wav）整段打码' $true ((& $hide 'D:/My Music/John Smith/x y.wav') -ceq '<path>')
     & $add '结果文本打码：带引号的路径各自打到引号为止，引号后面的文字保留' $false ((& $hide '"C:\x y\a" 和 ''D:\p q\b'' 之后') -ceq '"<path>" 和 ''<path>'' 之后')
-    & $add '结果文本打码：路径后面的全角分隔符（；）及其后的文字保留' $false ((& $hide 'C:\a b\c；然后') -ceq '<path>；然后')
-    & $add '结果文本打码：路径后面的全角逗号、句号、顿号、右括号同样是边界' $false (((& $hide 'C:\a b\c，d') -ceq '<path>，d') -and ((& $hide 'C:\a b\c。d') -ceq '<path>。d') -and ((& $hide 'C:\a b\c、d') -ceq '<path>、d') -and ((& $hide '（见 C:\a b\c）') -ceq '（见 <path>）'))
+    # 不带引号的路径只在 "、换行和 < > | ? * 处停：' 与全角标点不再是边界（目录名里就可能有 O'Brien、顿号、括号），宁可把后面的文字一起打码
+    & $add '结果文本打码：不带引号的路径后面的全角分隔符（；）不是边界，其后的文字一起打码' $true ((& $hide 'C:\a b\c；然后') -ceq '<path>')
+    & $add '结果文本打码：全角逗号、句号、顿号、右括号同样不是边界（宁可多打码）' $true (((& $hide 'C:\a b\c，d') -ceq '<path>') -and ((& $hide 'C:\a b\c。d') -ceq '<path>') -and ((& $hide 'C:\a b\c、d') -ceq '<path>') -and ((& $hide '（见 C:\a b\c）') -ceq '（见 <path>'))
+    & $add '结果文本打码：目录名里有撇号（C:\Work\O''Brien Smith\x）：Brien 与 Smith 都不留，整段是 <path>' $true (
+        ((& $hide 'C:\Work\O''Brien Smith\x') -ceq '<path>') -and ((& $hide '读 C:\Work\O''Brien Smith\x 之后') -notmatch 'Brien|Smith|x 之后'))
+    & $add '结果文本打码：目录名里有全角顿号、全角括号（C:\Work\张、三 Smith\x，C:\Work\项目（旧） Smith\x）：Smith 不留' $true (
+        ((& $hide 'C:\Work\张、三 Smith\x') -ceq '<path>') -and ((& $hide 'C:\Work\项目（旧） Smith\x，然后') -ceq '<path>') -and ((& $hide 'C:\Work\项目（旧） Smith\x') -notmatch 'Smith|项目'))
+    & $add '结果文本打码：开引号之后的路径打到对应的闭引号，目录名里的撇号不当闭引号（''C:\Work\O''Brien Smith\x'' 之后）' $true (
+        ((& $hide '''C:\Work\O''Brien Smith\x'' 之后') -ceq '''<path>'' 之后') -and ((& $hide '见（''C:\Work\O''Brien Smith\x''）') -ceq '见（''<path>''）'))
+    & $add '结果文本打码：双引号里的路径含撇号，同样打到双引号为止，后面的文字保留' $true ((& $hide '"C:\Work\O''Brien Smith\x" 之后') -ceq '"<path>" 之后')
+    & $add '结果文本打码：带引号的路径里有全角标点，也打到闭引号为止（引号后面的文字保留）' $true ((& $hide '"C:\Work\张、三（旧） Smith\x" 之后') -ceq '"<path>" 之后')
+    & $add '结果文本打码：同一种引号括起来的两段路径各自打码，中间的文字保留' $true ((& $hide '''C:\x y\a'' 和 ''D:\p q\b'' 之后') -ceq '''<path>'' 和 ''<path>'' 之后')
+    & $add '结果文本打码：路径里夹着另一种引号时，只认同一种引号收尾（"C:\Work\a ''q'' b\x"、''C:\Work\a "q" b\x''）' $true (
+        ((& $hide '"C:\Work\a ''q'' b\x" 之后') -ceq '"<path>" 之后') -and ((& $hide '''C:\Work\a "q" b\x'' 之后') -ceq '''<path>'' 之后'))
+    & $add '结果文本打码：撇号后面紧跟数字同样不算闭引号（''C:\Work\Q''1 Smith\x'' 之后）' $true ((& $hide '''C:\Work\Q''1 Smith\x'' 之后') -ceq '''<path>'' 之后')
+    & $add '结果文本打码：带引号的路径不跨行，开引号后面没有闭引号的那一行照样按不带引号处理' $true ((& $hide "`"C:\a b\c`nD:\d e\f`" 完") -ceq "`"<path>`n<path>`" 完")
+    & $add '结果文本打码：路径后面紧跟的 < 是边界（路径里不可能有）' $true ((& $hide 'C:\a b\c<br>') -ceq '<path><br>')
+    & $add '结果文本打码：只有开引号、没有闭引号的路径照样整段打码（宁可多打码）' $true ((& $hide '用户 ''C:\Work\John Smith\x') -notmatch 'John|Smith')
+    & $add '结果文本打码：闭引号后面紧跟字母（撇号）不算闭引号，但双引号照旧是边界' $false (((& $hide '"C:\x y\a"之后') -ceq '"<path>"之后') -and ((& $hide '''C:\Work\O''Brien Smith\x'' 之后') -notmatch 'Brien|Smith'))
     & $add '结果文本打码：换行是边界，每一行的路径各自打码' $true ((& $hide "C:\a b\c`nD:\d e\f`n完") -ceq "<path>`n<path>`n完")
     & $add '结果文本打码：没有路径的文字原样（单个斜杠、冒号不算）' $false ((& $hide '没有路径 a/b c: d') -ceq '没有路径 a/b c: d')
     $nt = { param($bit, $lag, $head) "逐位相同：$bit`n对齐偏移（lag）：$lag 样本（正数表示 B 比 A 晚）`n开头 2.00 秒残差（96000 帧）：峰值 $head dBFS，RMS $head dBFS`n" }

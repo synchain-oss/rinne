@@ -323,9 +323,15 @@ function Install-ReaperPlugins {
     , $report.ToArray()
 }
 
-# 路径一律打码：结果 json 与控制台都要能过隐私检查。从盘符 / UNC（反斜杠或正斜杠写法）起一直打到引号、全角的分隔符（；，。、）、
-# 路径里不可能有的字符（< > | ? *）或行尾为止；路径里常有空格（C:\Work\John Smith\x），不能在空白处停，路径后面紧跟的说明文字也宁可一起打码。
-function Hide-LocalPaths([string]$Text) { $Text -replace '(?:[A-Za-z]:[\\/]|\\\\|(?<!/)//)[^"''；，。、）\r\n<>|?*]*', '<path>' }
+# 路径一律打码：结果 json 与控制台都要能过隐私检查。路径从盘符 / UNC（反斜杠或正斜杠写法）起。紧跟在开引号（" 或 '）后面的路径打到对应的闭引号为止
+# （闭引号后面不能紧跟字母或数字，否则是 O'Brien 这样的撇号）；不带引号的路径只在 "、换行和路径里不可能有的字符（< > | ? *）处停。
+# 路径里常有空格、撇号、全角标点（C:\Work\John Smith\x、C:\Work\O'Brien Smith\x、含顿号或括号的目录名），所以空白、' 和全角标点都不是边界，
+# 路径后面紧跟的说明文字也宁可一起打码。
+function Hide-LocalPaths([string]$Text) {
+    $pathStart = '(?:[A-Za-z]:[\\/]|\\\\|(?<!/)//)'
+    $quotedHidden = $Text -replace ('(?<q>["'']){0}[^\r\n]*?\k<q>(?![\p{{L}}\p{{N}}])' -f $pathStart), '${q}<path>${q}'
+    $quotedHidden -replace ($pathStart + '[^"\r\n<>|?*]*'), '<path>'
+}
 
 # 一组结局里最差的。空列表是「什么都没跑」，没有结论，不能当 PASS。
 function Get-WorstStatus([string[]]$StatusList) {
