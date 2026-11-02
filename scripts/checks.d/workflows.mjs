@@ -12,6 +12,8 @@
 //   - required job（.github/required-checks.json 里的 context）不带 job 级 if（`!cancelled()` 除外），
 //     所在 workflow 的触发器不带 paths 过滤：被跳过的 required job 会被当成通过
 //   - run 脚本里不插值 ${{ }}：标题、正文、分支名这类不可信文本只经 env 传入
+//   - runner 镜像钉版本：job 的 runs-on 与 strategy 里不许出现 ubuntu / windows / macos-latest（单行、列表、块标量、
+//     matrix 与 include 项都算；steps 下的行不看）：评审 bot 的 deny 列表依赖镜像里的路径，-latest 换系统大版本不打招呼
 //   - 最后跑钉版 actionlint（-shellcheck= -pyflakes=，本机与 CI 都不依赖外部 linter）
 // 解析器只认本仓手写 workflow 的写法（两格缩进的块式 YAML），不是完整的 YAML 解析器；认不出的写法宁可判红。
 
@@ -199,6 +201,16 @@ const SCOPES = new Set([
 ]);
 /** 调用可复用 workflow 的 job 只许这两个写权限：都是发评论要用的。 */
 const WRITE_SCOPES = new Set(["issues", "pull-requests"]);
+/** 会移动的 runner 标签：换系统大版本不打招呼。要钉版本（ubuntu-24.04、windows-2022、macos-15）。 */
+const LATEST = /\b(?:ubuntu|windows|macos)-latest\b/i;
+
+/** job 级某个键所在的行，加上它下面的全部行（含与键同列的 `- ` 列表项）；块标量的正文经 valueText 取。 */
+function jobSubtree(job, key) {
+    const at = job.own.findIndex((l) => l.indent === 4 && l.key === key);
+    if (at < 0) return [];
+    const end = job.own.findIndex((l, i) => i > at && (l.indent < 4 || (l.indent === 4 && !/^\s*-\s/.test(l.code))));
+    return job.own.slice(at, end < 0 ? job.own.length : end);
+}
 
 /** 一个 workflow 的加固问题。required：必须满足 required 规则的 job 名集合。 */
 export function inspectWorkflow(file, text, { required = new Set(), allowlist }) {
@@ -230,6 +242,12 @@ export function inspectWorkflow(file, text, { required = new Set(), allowlist })
         const jobPerm = job.get("permissions");
         if (jobPerm && /^(?:read|write)-all$/.test(unquote(jobPerm.value))) {
             err(jobPerm.no, `job ${job.id} 的 permissions 要逐项写最小权限`);
+        }
+        // runner 只出自 runs-on 与 strategy 里的 matrix（列表、块标量、include 项也一样），steps 从不点名 runner：
+        // 步骤名或 run 脚本里提到 latest 不是发现
+        for (const l of [...jobSubtree(job, "runs-on"), ...jobSubtree(job, "strategy")]) {
+            const text = valueText(lines, l);
+            if (LATEST.test(text)) err(l.no, `job ${job.id} 的 runner 要钉版本，不用 ${text.match(LATEST)[0]}`);
         }
         if (job.get("uses")) {
             // 调用可复用 workflow：权限、secret 与 with 的取值都经被调用方之手，逐项收紧
@@ -334,7 +352,7 @@ const GOOD = [
     "jobs:",
     "  gate:",
     "    name: gate",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    steps:",
     `      - uses: actions/checkout@${PIN} # v7.0.1`,
@@ -405,6 +423,8 @@ export default {
         };
         const shared = (p) => check(swap(`actions/checkout@${PIN}`, `Synchain-oss/${p}@${PIN}`));
         const checkout = `      - uses: actions/checkout@${PIN} # v7.0.1`;
+        const runsOn = "    runs-on: ubuntu-24.04";
+        const matrix = (os) => swap(runsOn, `    strategy:\n      matrix:\n${os}\n    runs-on: \${{ matrix.os }}`);
         const call = (a, b) => {
             if (!SHARED.includes(a)) throw new Error(`自测夹具里找不到要替换的片段：${a}`);
             return check(WORKFLOW.replace(a, b));
@@ -478,6 +498,52 @@ export default {
                 check(swap('          echo "$TITLE"', "          echo ${{ github.event.pull_request.title }}")),
             ],
             ["本地 uses 越出 .github", true, check(swap(`actions/checkout@${PIN} # v7.0.1`, "./scripts/x"))],
+            // runner 钉版本：runs-on 与 strategy 里不许有 *-latest，写法不限；steps 下的字样不算
+            ["runs-on 写 ubuntu-latest", true, check(swap(runsOn, "    runs-on: ubuntu-latest"))],
+            ["runs-on 写 Windows-Latest（大小写不同）", true, check(swap(runsOn, "    runs-on: Windows-Latest"))],
+            [
+                "runs-on 的流式列表里有 macos-latest",
+                true,
+                check(swap(runsOn, "    runs-on: [self-hosted, macos-latest]")),
+            ],
+            ["runs-on 的块列表项是 *-latest", true, check(swap(runsOn, "    runs-on:\n      - ubuntu-latest"))],
+            ["runs-on 的块列表与键同列", true, check(swap(runsOn, "    runs-on:\n    - ubuntu-latest"))],
+            ["runs-on 是块标量", true, check(swap(runsOn, "    runs-on: >-\n      ubuntu-latest"))],
+            ["matrix 里有 *-latest", true, check(matrix("        os: [ubuntu-latest]"))],
+            ["matrix 里的块标量是 *-latest", true, check(matrix("        os: >-\n          ubuntu-latest"))],
+            [
+                "matrix 的 include 项是 *-latest",
+                true,
+                check(matrix("        include:\n          - os: windows-latest")),
+            ],
+            ["钉版本的 Windows 镜像", false, check(swap(runsOn, "    runs-on: windows-2022"))],
+            ["钉版本的 matrix", false, check(matrix("        os: [ubuntu-24.04, windows-2022]"))],
+            ["钉版本的 matrix include 项", false, check(matrix("        include:\n          - os: macos-15"))],
+            [
+                "单行 run 里提到 *-latest 不是 runner",
+                false,
+                check(swap("      - name: Run\n", "      - run: echo ubuntu-latest\n      - name: Run\n")),
+            ],
+            [
+                "步骤名里提到 *-latest 不是 runner",
+                false,
+                check(
+                    swap(
+                        "      - name: Run\n",
+                        "      - name: Test on ubuntu-latest\n        run: echo test\n      - name: Run\n",
+                    ),
+                ),
+            ],
+            [
+                "注释与 run 脚本里的 *-latest 不是 runner",
+                false,
+                check(
+                    swap(runsOn, `${runsOn} # 不用 ubuntu-latest`).replace(
+                        'echo "$TITLE"',
+                        'echo "$TITLE ubuntu-latest"',
+                    ),
+                ),
+            ],
             // 解析器认不了的写法：评审时用来绕过检查的四种，加上锚点
             ["流式映射写的步骤", true, check(swap(checkout, "      - { uses: softprops/action-gh-release@v2 }"))],
             ["带引号的 uses 键", true, check(swap(checkout, '      - "uses": qodo-ai/pr-agent@main'))],
@@ -491,7 +557,7 @@ export default {
                 true,
                 check(swap("    timeout-minutes: 5", `    timeout-minutes: 5\n    "if": x`)),
             ],
-            ["锚点", true, check(swap("    runs-on: ubuntu-latest", "    runs-on: &os ubuntu-latest"))],
+            ["锚点", true, check(swap(runsOn, "    runs-on: &os ubuntu-24.04"))],
             [
                 "job 级 permissions 写成 write-all",
                 true,

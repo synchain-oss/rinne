@@ -5,8 +5,9 @@
 //   prepare  模型开跑前把材料写进 .rinne-review/（模型没有 shell，只能 Read / Glob / Grep）。diff 一律钉在
 //            --base...--head 上取（compare 接口），与模型读的工作区、评论里的 head 标记是同一个提交：
 //            pr.diff（取不到整份时退回逐文件 patch，并留 DIFF_PARTIAL）、pr.json、round.json；
-//            第 2 轮起另有上一轮的审查总结 previous-review.md、在它之后的「评审处置汇总」disposition.md，
-//            以及上一轮审过的 head 到当前 head 的 incremental.diff（只在能放心当增量用时才写，见 incrementalPlan）。
+//            第 2 轮起另有上一条可用的审查总结（末行是机读尾注的那条）previous-review.md、在它之后的「评审处置汇总」
+//            disposition.md，以及那条总结审过的 head 到当前 head 的 incremental.diff（只在能放心当增量用时才写，
+//            见 incrementalPlan）。不可用的总结照样计入轮次，但不当起点；只有不可用的总结时本轮全量审。
 //   config   从 claude-review.yml 取出 prompt 与 claude_args（唯一真源），核对结构、代入本次的值，写进 GITHUB_OUTPUT。
 //   post     取模型的最终回复，发成一条 PR 评论：首行是隐藏的 head 标记，机读尾注恒在最后一行、恰好一行，
 //            且三个数与正文【红旗】【重要】【建议】三节的条数一致。不一致、缺尾注或尾注互相矛盾时，
@@ -190,8 +191,13 @@ export function sliceChars(s, n) {
 /** 评论作者的 author_association 是仓库成员。只作离线默认值：见 findPrevious 的说明。 */
 export const memberAssociation = (c) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(c.author_association);
 
+/** 总结可不可用：末行是机读尾注（post 对不可用的总结不贴尾注）。CRLF 与行尾空白不算。 */
+export const hasFooter = (body) => FOOTER.test((body || "").replace(/\r\n/g, "\n").trimEnd().split("\n").at(-1).trim());
+
 /**
- * 上一轮：本 workflow 用 github-actions[bot] 发的、bot 相同的最近一条审查总结。
+ * 上一轮：本 workflow 用 github-actions[bot] 发的、bot 相同的最近一条可用的审查总结（末行是机读尾注）。
+ * 不可用的总结（贴出时不带尾注）里的意见没被计数，在它上面做增量审查，后面的改动可能绕过那些意见通过合并判据，
+ * 所以它不当起点；轮次 rounds 照样数它。
  * 处置汇总必须在那条总结之后（更早的是给更早那一轮的），不能是 bot 发的，而且作者要过 trusted（别人的评论可以
  * 伪造标记）。prepare 传进来的 trusted 按作者对本仓的实际权限判断（write 及以上），不看 author_association：
  * 组织成员身份不公开时，用 GITHUB_TOKEN 读到的 author_association 是 NONE，维护者的处置汇总会被当成外人的。
@@ -199,7 +205,7 @@ export const memberAssociation = (c) => ["OWNER", "MEMBER", "COLLABORATOR"].incl
  */
 export function findPrevious(comments, bot, trusted = memberAssociation) {
     const isReview = (c) => c.user?.login === "github-actions[bot]" && headMark(c.body)?.bot === bot;
-    const at = comments.findLastIndex(isReview);
+    const at = comments.findLastIndex((c) => isReview(c) && hasFooter(c.body));
     const last = at >= 0 ? comments[at] : null;
     const disposition = last
         ? comments
@@ -474,7 +480,8 @@ function prepare({ pr, repo, base, head, bot, out }) {
     const prev = findPrevious(comments, bot, canWrite(repo));
     if (prev.previousReview) write("previous-review.md", prev.previousReview);
     if (prev.disposition) write("disposition.md", prev.disposition);
-    let plan = { incremental: false, reason: prev.previousHead ? "上一轮审的就是当前 head" : "第 1 轮" };
+    const fresh = prev.rounds ? "之前的总结都不可用（没有机读尾注），本轮全量审" : "第 1 轮";
+    let plan = { incremental: false, reason: prev.previousHead ? "上一轮审的就是当前 head" : fresh };
     if (prev.previousHead && prev.previousHead !== head)
         plan = incrementalPlan(compareJson(repo, prev.previousHead, head));
     if (plan.incremental) write("incremental.diff", plan.patch);
@@ -561,7 +568,7 @@ const DENY = "Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Read(./.
 export const FIXTURE = [
     "jobs:",
     `  ${JOB}:`,
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    steps:",
     "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
     `      - uses: anthropics/claude-code-action@${PIN} # v1.0.248`,
@@ -743,7 +750,8 @@ export function selfTest() {
     t("defang：行首空白的链接引用同样打断", false, /^\s*\[pr-agent:[^\]]+\]:/.test(defang(`  ${ref}`)));
 
     // 上一轮与处置汇总
-    const mark = (sha, bot) => `<!-- rinne-review-head sha=${sha} bot=${bot} -->\n总结`;
+    const mark = (sha, bot, footer = F(0, 0, 0)) =>
+        `<!-- rinne-review-head sha=${sha} bot=${bot} -->\n总结\n\n${footer}`;
     const actions = { login: "github-actions[bot]" };
     const member = { user: { login: "maintainer" }, author_association: "MEMBER" };
     const comments = [
@@ -772,6 +780,42 @@ export function selfTest() {
     const midMark = { user: actions, body: `## PR Reviewer Guide\n${mark("e".repeat(40), "claude")}` };
     const notRound = findPrevious([comments[1], midMark], "claude");
     t("正文中间的 head 标记不算上一轮", true, notRound.previousHead === "b".repeat(40) && notRound.rounds === 1);
+    // 不可用的总结（贴出时不带尾注）不当起点，轮次照样数它
+    const unusable = {
+        user: actions,
+        author_association: "NONE",
+        body: mark("f".repeat(40), "claude", "**注意：本次审查总结缺少机读尾注，bot 结论不可用。**"),
+    };
+    const onlyUnusable = findPrevious([unusable], "claude");
+    t(
+        "只有不可用的总结：没有上一轮，本轮全量审",
+        true,
+        onlyUnusable.previousHead === null && onlyUnusable.previousReview === null && onlyUnusable.rounds === 1,
+    );
+    const afterUnusable = findPrevious(
+        [comments[1], { ...member, body: `${disposition("orchestrator")}\n上一轮处置` }, unusable],
+        "claude",
+    );
+    t(
+        "可用的总结在不可用的总结之前：仍是起点，它之后的处置汇总照认",
+        false,
+        !(
+            afterUnusable.previousHead === "b".repeat(40) &&
+            afterUnusable.previousReview === comments[1].body &&
+            afterUnusable.disposition?.includes("上一轮处置") &&
+            afterUnusable.rounds === 2
+        ),
+    );
+    const footerNotLast = { ...unusable, body: `${mark("f".repeat(40), "claude")}\n尾注之后还有字` };
+    t("尾注不在最后一行的总结不当起点", true, findPrevious([footerNotLast], "claude").previousHead === null);
+    const crlf = { ...comments[1], body: `${comments[1].body.replace(/\n/g, "\r\n")}\r\n` };
+    t("尾注后面是 CRLF 行尾：仍是最后一行", false, findPrevious([crlf], "claude").previousHead !== "b".repeat(40));
+    const padded = { ...comments[1], body: comments[1].body.replace(F(0, 0, 0), `  ${F(0, 0, 0)}  `) };
+    t(
+        "尾注行首尾有空白：与 validateSummary 同口径，仍算",
+        false,
+        findPrevious([padded], "claude").previousHead !== "b".repeat(40),
+    );
     // 第 2 轮实际漏掉的那条：维护者的组织成员身份不公开，GITHUB_TOKEN 读到的 author_association 是 NONE；
     // 标记里的 head 是推送后的新 head，与上一轮审过的 head 不同
     const real = {
