@@ -48,7 +48,8 @@ function Invoke-Push {
     }
     $leaks = Get-RinneSetting -Env 'RINNE_GITLEAKS' -GitKey 'rinne.gitleaks'
     if (-not $leaks) { throw '未配置 gitleaks：设置 RINNE_GITLEAKS 或 git config rinne.gitleaks' }
-    $scan = Invoke-RinneExternal $leaks @('git', $Repo, '--no-banner', '--redact', "--log-opts=$from..$head --no-ext-diff --no-textconv") -AllowFail
+    # git log -p 默认不给合并提交出补丁：--diff-merges=first-parent 让合并提交对第一父提交出补丁，只由合并提交带入的内容也扫得到
+    $scan = Invoke-RinneExternal $leaks @('git', $Repo, '--no-banner', '--redact', "--log-opts=$from..$head --diff-merges=first-parent --no-ext-diff --no-textconv") -AllowFail
     if ($scan.Code -ne 0) { throw "gitleaks 在 $from..$($head.Substring(0, 7)) 里有发现，不推送" }
     Invoke-RinneGit @('push', 'origin', "HEAD:refs/heads/$branch") -Repo $Repo | Out-Null
     "已推送 $branch → $($head.Substring(0, 7))"
@@ -85,6 +86,10 @@ function Invoke-SelfTest {
         Add-RinneCase $cases '新分支：先 gitleaks 扫 origin/feature/v1..HEAD，再推 HEAD:refs/heads/feat/<slug>' $false (-not (
                 $r -match '已推送' -and $push.Count -eq 1 -and $push[0] -match 'push origin HEAD:refs/heads/feat/example-card$' -and
                 @($log | Where-Object { $_ -match "gitleaks-fake git wt .*--log-opts=origin/feature/v1\.\.$head" }).Count -eq 1))
+        # git log -p 默认不给合并提交出补丁：--log-opts 里没有 --diff-merges=first-parent 时，只由合并提交（解冲突时）带入的内容 gitleaks 看不到
+        $mergeDiff = '^gitleaks-fake git .*--log-opts=\S+\.\.\S+ (?:\S+ )*--diff-merges=first-parent(?: |$)'
+        Add-RinneCase $cases 'gitleaks 的 --log-opts 带 --diff-merges=first-parent（合并提交带入的内容也扫）' $false (-not (@($log | Where-Object { $_ -match $mergeDiff }).Count -eq 1))
+        Add-RinneCase $cases 'gitleaks 的 --log-opts 缺 --diff-merges=first-parent 时对不上判据' $true (@($log | Where-Object { ($_ -replace ' --diff-merges=first-parent', '') -match $mergeDiff }).Count -eq 0)
         $first = { param($pattern) for ($k = 0; $k -lt $log.Count; $k++) { if ($log[$k] -match $pattern) { return $k } }; -1 }
         Add-RinneCase $cases '推送前先断言身份（GH_TOKEN 取维护者的 token、核对 login）并核对推送 URL' $false (-not (
                 $env:GH_TOKEN -eq 'tok-selftest' -and (& $first '^gh api user') -ge 0 -and (& $first 'remote get-url --push') -gt (& $first '^gh api user') -and
