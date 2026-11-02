@@ -223,6 +223,7 @@ Know what it is and is not. Loop off fades the return out; it is not latched and
 - **Does Rinne add latency in the host?** No: both plugins report no latency, so the host does not shift anything. The loop itself takes D plus the latency of the plugins inside it.
 - **Where do I report a problem?** On the project’s issue tracker, or by mail to contact@synchain.ca if you have no GitHub account.
 - **Is the macOS build signed?** No. It is not signed with an Apple Developer ID and not notarized; see [INSTALL](INSTALL.md).
+- **Can I use Rinne in commercial work?** Yes. The GPL governs copying and distributing the software, not the audio you make with it.
 - **Why can’t I map Panic?** It is an interface action by design; map Loop for a hardware stop.
 
 ## Glossary
