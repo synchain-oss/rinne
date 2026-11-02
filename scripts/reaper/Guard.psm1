@@ -280,26 +280,51 @@ function Get-ReaperDefaultCfgDir { Join-Path $env:APPDATA 'REAPER' }
 
 # 默认资源目录下全部条目的清单，只读。文件记「大小|修改时间刻度」；目录只记「在」：NTFS 在父目录列表里给的子目录时间戳更新滞后，
 # 同一个目录连取两次可能不同，记下来会误报。目录里的增删改都会从文件项上看出来。目录不存在返回空表。Root 只给自测用。
+# 列不出来的目录（拒绝访问等）不能悄悄漏掉：漏掉等于「没有这个目录」，里面被动了也看不出来。每个列不出来的目录记一项 'unreadable'，
+# 键是它相对 Root 的路径（取不到路径的错误记成 '(未知)#序号'）；Root 自己列不出来记在键 '.' 下。
 function Get-ReaperDefaultCfgSnapshot {
     param([string]$Root = (Get-ReaperDefaultCfgDir))
     $snap = [ordered]@{}
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $snap }
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
-    foreach ($e in Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue) {
+    $listErrors = @()
+    foreach ($e in Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listErrors) {
         $snap[$e.FullName.Substring($prefix.Length)] = $e.PSIsContainer ? 'dir' : ('{0}|{1}' -f $e.Length, $e.LastWriteTimeUtc.Ticks)
+    }
+    $unknown = 0
+    foreach ($err in $listErrors) {
+        $target = $err.TargetObject -is [string] ? $err.TargetObject : $null
+        $full = $target ? [IO.Path]::GetFullPath($target).TrimEnd('\') : $null
+        $entryKey = if ($full -and ($full + '\').Equals($prefix, [StringComparison]::OrdinalIgnoreCase)) { '.' }
+               elseif ($full -and ($full + '\').StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $full.Substring($prefix.Length) }
+               else { '(未知)#' + (++$unknown) }
+        $snap[$entryKey] = 'unreadable'
     }
     $snap
 }
 
+# 前后两份清单是不是一样。有 unreadable 项（前后任何一份里有）就证明不了没变：Same 为假，Changed 里记 'unreadable:<路径>'，
+# 调用方按「默认资源目录可能被碰过」处理。Unreadable：前后两份里 unreadable 的路径（排序、不重复）；Differences：能比的部分里
+# 增、删、改的条数（不含 unreadable）。
 function Compare-ReaperDefaultCfgSnapshot {
     param([Parameter(Mandatory)]$Before, [Parameter(Mandatory)]$After)
+    $unreadable = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($side in @($Before, $After)) {
+        foreach ($k in $side.get_Keys()) { if ($side[$k] -ceq 'unreadable') { $null = $unreadable.Add([string]$k) } }
+    }
     $changed = [Collections.Generic.List[string]]::new()
     foreach ($k in $Before.get_Keys()) {
+        if ($unreadable.Contains([string]$k)) { continue }
         if (-not $After.Contains($k)) { $changed.Add("removed:$k") }
         elseif ($After[$k] -cne $Before[$k]) { $changed.Add("changed:$k") }
     }
-    foreach ($k in $After.get_Keys()) { if (-not $Before.Contains($k)) { $changed.Add("added:$k") } }
-    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.get_Count(); Changed = $changed.ToArray() }
+    foreach ($k in $After.get_Keys()) {
+        if ($unreadable.Contains([string]$k)) { continue }
+        if (-not $Before.Contains($k)) { $changed.Add("added:$k") }
+    }
+    $differences = $changed.Count
+    foreach ($k in $unreadable) { $changed.Add("unreadable:$k") }
+    [pscustomobject]@{ Same = ($changed.Count -eq 0); Count = $Before.get_Count(); Changed = $changed.ToArray(); Unreadable = @($unreadable); Differences = $differences }
 }
 
 # 一段脚本文本里只差大小写的变量名（整个文件范围，比 PowerShell 的作用域规则更严）。解析失败也算问题，不放过。

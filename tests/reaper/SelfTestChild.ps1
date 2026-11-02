@@ -674,6 +674,25 @@ if ($realReaperRunning) {
     Write-Case '整轮入口（第二段）：盐每轮不同：两轮里同一个别人的文件（foreign-a.csv）的散列对不上' $true (
         @($keysTouch1 | Where-Object { $_ -cmatch '^other-' -and $_ -in (ConvertFrom-Json $listBefore1).PSObject.Properties.Name }).Count -eq 0)
 
+    # 默认资源目录（这里是假的 AppData 下的那个）里有列不出来的子目录（拒绝访问）：前后都读不了，证明不了没被碰过，按可能被碰过处理：
+    # 场景全绿也判 FAIL，停手，-Repeat 2 只跑一轮。以前列目录的错误被吞掉，这个子目录像不存在一样，这一轮会判 PASS
+    $lockedDefault = Join-Path (Get-ReaperDefaultCfgDir) 'rn-locked'
+    $null = New-Item -ItemType Directory -Force -Path $lockedDefault
+    Set-Content -LiteralPath (Join-Path $lockedDefault 'x.ini') -Value x
+    $sidU = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    & icacls.exe $lockedDefault /deny "*${sidU}:(RD)" 2>&1 | Out-Null
+    try {
+        $canList = try { $null = Get-ChildItem -LiteralPath $lockedDefault -Force -ErrorAction Stop; $true } catch { $false }
+        if ($canList) { Write-Case '（本机没能造出读不了的目录：默认资源目录有读不了的子目录的整轮用例没能真跑）' $true $true }
+        else {
+            $smU = Invoke-WireSmoke 'unreadable-default' (New-WireSpec 'unreadable-default') '^probe-steady-48000-512$' -Repeat 2 -NoNegative
+            $rowU = $smU.R.runs[0]
+            Write-Case "整轮入口：默认资源目录里有读不了的子目录，场景全绿也判 FAIL，记为证明不了没变，停手，-Repeat 2 只跑了 $(@($smU.R.runs).Count) 轮" $true (
+                $rowU.scenarios[0].status -eq 'PASS' -and $rowU.verdict -eq 'FAIL' -and $smU.R.verdict -eq 'FAIL' -and -not $rowU.defaultCfgDir.unchanged -and @($rowU.defaultCfgDir.unreadable) -ceq 'rn-locked' -and
+                $rowU.stoppedBecause -like '*读不了*' -and $rowU.stoppedBecause -like '*可能被碰过*' -and @($smU.R.runs).Count -eq 1 -and $smU.R.launches -eq 1 -and $smU.Console -like '*读不了的子目录*')
+        }
+    } finally { & icacls.exe $lockedDefault /remove:d "*$sidU" 2>&1 | Out-Null; Remove-Item -LiteralPath $lockedDefault -Recurse -Force -ErrorAction SilentlyContinue }
+
     # 硬链接数一时取不到（OneDrive 正在同步、杀毒软件短暂独占……）：前一份清单是 1、后一份记 ?。列清单在 Suite 模块里换成替身，
     # 这一轮里「放行文件」出现之后，别人的 foreign-a.csv 的硬链接数就记成 ?
     $linkFlag = Join-Path $wire 'link-unknown.flag'

@@ -344,9 +344,10 @@ function Get-RunVerdict {
 
 # 纯函数：这一轮之后还接不接着跑。默认资源目录变了、探针日志目录里别人的文件变了，立刻停手，不再启动 REAPER；
 # 分析器拒收真日志（日志与分析器的契约对不上）再跑也是一样，同样停下。返回停下的原因，接着跑返回空串。
+# CfgUnreadable：默认资源目录没变的证据缺了（有列不出来的子目录），能比的部分没有差别；这时不是「变了」，是「证明不了没被碰过」，按可能被碰过处理。
 function Get-ReaperRoundStop {
-    param([bool]$CfgUnchanged, [bool]$DocsUnchanged = $true, [bool]$Rejected = $false)
-    if (-not $CfgUnchanged) { return '默认资源目录变了' }
+    param([bool]$CfgUnchanged, [bool]$DocsUnchanged = $true, [bool]$Rejected = $false, [bool]$CfgUnreadable = $false)
+    if (-not $CfgUnchanged) { return $CfgUnreadable ? '默认资源目录里有读不了的子目录，没法证明它没被碰过（按可能被碰过处理）' : '默认资源目录变了' }
     if (-not $DocsUnchanged) { return '探针日志目录里别人的文件变了' }
     if ($Rejected) { return '分析器拒收真日志' }
     ''
@@ -567,7 +568,7 @@ function Invoke-ReaperSmoke {
         $runRow = [ordered]@{
             index = $k; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); verdict = $verdict; launches = $ctx.Launches
             counts = [ordered]@{ PASS = @($statuses | Where-Object { $_ -eq 'PASS' }).Count; FAIL = @($statuses | Where-Object { $_ -eq 'FAIL' }).Count; INCOMPLETE = @($statuses | Where-Object { $_ -eq 'INCOMPLETE' }).Count; SKIPPED = @($statuses | Where-Object { $_ -eq 'SKIPPED' }).Count }
-            defaultCfgDir = [ordered]@{ unchanged = $cmp.Same; entries = $cmp.Count; changed = @($cmp.Changed | Select-Object -First 8) }
+            defaultCfgDir = [ordered]@{ unchanged = $cmp.Same; entries = $cmp.Count; changed = @($cmp.Changed | Select-Object -First 8); unreadable = @($cmp.Unreadable | Select-Object -First 8) }
             reaperProcessesLeft = $strayCount
             scenarios = $rows.ToArray()
         }
@@ -582,11 +583,11 @@ function Invoke-ReaperSmoke {
             foreach ($id in $ctx.Probe.Analyses.get_Keys()) { $runRow.probe.analyzer.cells[$id] = $ctx.Probe.Analyses[$id].exit }
         }
         $result.runs += $runRow
-        Write-Host ("第 {0}/{1} 轮：{2}，{3} s，REAPER 启动 {4} 次，默认资源目录{5}" -f $k, $Repeat, $verdict, $result.runs[-1].seconds, $ctx.Launches, ($cmp.Same ? '未变' : "变了：$($cmp.Changed -join ', ')"))
+        Write-Host ("第 {0}/{1} 轮：{2}，{3} s，REAPER 启动 {4} 次，默认资源目录{5}" -f $k, $Repeat, $verdict, $result.runs[-1].seconds, $ctx.Launches, ($cmp.Same ? '未变' : ($cmp.Differences -eq 0 ? "有读不了的子目录，证明不了没变：$($cmp.Changed -join ', ')" : "变了：$($cmp.Changed -join ', ')")))
         if ($Probe) {
             Write-Host ("  探针日志：搬走 {0} 份，文档目录除本轮自己的文件外{1}{2}；整轮分析 {3}" -f $ctx.Probe.Moved, ($docs.Same ? '未变' : "变了：$($docs.Changed -join ', ')"), (@($docs.LinkUnknown).Count ? "（有 $(@($docs.LinkUnknown).Count) 项硬链接数没取到，只比了大小、修改时间与重解析点）" : ''), $whole.summary)
         }
-        $stop = Get-ReaperRoundStop -CfgUnchanged $cmp.Same -DocsUnchanged $docsSame -Rejected ($Probe -and $ctx.Probe.Rejected)
+        $stop = Get-ReaperRoundStop -CfgUnchanged $cmp.Same -DocsUnchanged $docsSame -Rejected ($Probe -and $ctx.Probe.Rejected) -CfgUnreadable ($cmp.Differences -eq 0 -and @($cmp.Unreadable).Count -gt 0)
         if ($stop) { $runRow.stoppedBecause = $stop; Write-Host "  停止后续轮次：$stop"; break }
     }
     $result.launches = $launches

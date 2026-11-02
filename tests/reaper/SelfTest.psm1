@@ -415,6 +415,58 @@ function Get-SnapshotCases([string]$Tmp) {
     $nMoved = Compare-ReaperDefaultCfgSnapshot -Before $n1 -After (Get-ReaperDefaultCfgSnapshot -Root $namesRoot)
     & $add '清单：叫 Keys 的文件被删、新增一个文件，照样各报一项' $true (-not $nMoved.Same -and (@($nMoved.Changed | Sort-Object) -join ',') -ceq 'added:Values2,removed:Keys')
     & $add '清单：目录不存在是空清单，不报错' $false ((Get-ReaperDefaultCfgSnapshot -Root (Join-Path $Tmp 'nope')).Count -eq 0)
+    # 读不了的子目录：以前 Get-ChildItem 的错误被吞掉，那个子目录像是不存在，前后永远相同，等于没查。现在记成 unreadable 项，比较判「证明不了没变」
+    # 比较结果取成固定形状：缺了 Unreadable、Differences 这两个属性时用例变红，而不是在这里抛错
+    $cmpOf = { param($before, $after) $r = Compare-ReaperDefaultCfgSnapshot -Before $before -After $after; [pscustomobject]@{ Same = [bool]$r.Same; Changed = @($r.Changed)
+        Unreadable = @($r.PSObject.Properties['Unreadable'] ? $r.Unreadable : @()); Differences = ($r.PSObject.Properties['Differences'] ? [int]$r.Differences : -1) } }
+    $lockRoot = Join-Path $Tmp 'snap-unreadable'
+    $lockedDir = Join-Path $lockRoot 'locked'
+    $null = New-Item -ItemType Directory -Path (Join-Path $lockRoot 'ok'), $lockedDir
+    Set-Content -LiteralPath (Join-Path $lockRoot 'ok\a.ini') -Value 'aaaa'
+    Set-Content -LiteralPath (Join-Path $lockedDir 'secret.ini') -Value 'ssss'
+    $uOpen = Get-ReaperDefaultCfgSnapshot -Root $lockRoot
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    & icacls.exe $lockedDir /deny "*${sid}:(RD)" 2>&1 | Out-Null
+    $madeDenied = $LASTEXITCODE -eq 0
+    try {
+        $stillListable = try { $null = Get-ChildItem -LiteralPath $lockedDir -Force -ErrorAction Stop; $true } catch { $false }
+        $noDeny = ($madeDenied -and -not $stillListable) ? '' : '（本机没能造出读不了的目录，这几条没能真跑）'
+        if ($noDeny) { & $add "清单：读不了的子目录的几条用例没能真跑$noDeny" $true $true }
+        else {
+            $uLocked = Get-ReaperDefaultCfgSnapshot -Root $lockRoot
+            & $add '清单：读不了的子目录记成 unreadable 项，不是悄悄漏掉；读得了的目录照常记' $true ($uLocked['locked'] -ceq 'unreadable' -and $uLocked['ok\a.ini'] -like '*|*')
+            $cLocked = & $cmpOf $uLocked (Get-ReaperDefaultCfgSnapshot -Root $lockRoot)
+            & $add '清单：前后两次都读不了同一个子目录，也判证明不了没变，Changed 与 Unreadable 里点名它' $true (
+                -not $cLocked.Same -and @($cLocked.Unreadable) -ceq 'locked' -and $cLocked.Changed -contains 'unreadable:locked' -and $cLocked.Differences -eq 0)
+            $cWas = & $cmpOf $uOpen $uLocked
+            & $add '清单：之前读得了、之后读不了，判证明不了没变（不是「removed」也不是相同）' $true (-not $cWas.Same -and @($cWas.Unreadable) -ceq 'locked' -and $cWas.Changed -contains 'unreadable:locked')
+            Add-Content -LiteralPath (Join-Path $lockRoot 'ok\a.ini') -Value 'more'
+            $cBoth = & $cmpOf $uLocked (Get-ReaperDefaultCfgSnapshot -Root $lockRoot)
+            & $add '清单：读不了的同时，读得了的部分变了照样报 changed，两类各自点名' $true (
+                -not $cBoth.Same -and $cBoth.Changed -contains 'changed:ok\a.ini' -and $cBoth.Changed -contains 'unreadable:locked' -and $cBoth.Differences -eq 1)
+        }
+    } finally { & icacls.exe $lockedDir /remove:d "*$sid" 2>&1 | Out-Null }
+    $uBack = Get-ReaperDefaultCfgSnapshot -Root $lockRoot
+    & $add '清单：解除限制后同一个目录又能读，记回目录项（对照：上面判的是读不了，不是别的）' $false ($uBack['locked'] -ceq 'dir' -and $uBack['locked\secret.ini'] -like '*|*' -and @($uBack.get_Keys() | Where-Object { $uBack[$_] -ceq 'unreadable' }).Count -eq 0)
+    # 比较本身（纯逻辑，不依赖本机能不能造出读不了的目录）
+    $unr = { param($names) $d = [ordered]@{ 'ok.ini' = '4|1' }; foreach ($n in $names) { $d[$n] = 'unreadable' }; $d }
+    $pSame = & $cmpOf (& $unr @()) (& $unr @())
+    & $add '比较：没有 unreadable 项时前后相同仍判相同，Unreadable 为空、Differences 为 0' $false ($pSame.Same -and @($pSame.Unreadable).Count -eq 0 -and $pSame.Differences -eq 0)
+    $pBoth = & $cmpOf (& $unr @('Data')) (& $unr @('Data'))
+    & $add '比较：前后都是 unreadable 的同一项，判证明不了没变' $true (-not $pBoth.Same -and @($pBoth.Unreadable) -ceq 'Data' -and $pBoth.Changed -contains 'unreadable:Data')
+    $pBefore = & $cmpOf (& $unr @('Data')) (& $unr @())
+    & $add '比较：只有之前是 unreadable（之后读得了或没了），判证明不了没变' $true (-not $pBefore.Same -and @($pBefore.Unreadable) -ceq 'Data' -and (@($pBefore.Changed) -join ',') -ceq 'unreadable:Data' -and $pBefore.Differences -eq 0)
+    $pAfter = & $cmpOf (& $unr @()) (& $unr @('Data'))
+    & $add '比较：只有之后是 unreadable，判证明不了没变' $true (-not $pAfter.Same -and @($pAfter.Unreadable) -ceq 'Data' -and (@($pAfter.Changed) -join ',') -ceq 'unreadable:Data' -and $pAfter.Differences -eq 0)
+    # 同一项一边是普通项、一边是 unreadable：只记 unreadable，不再当普通项比出一条 changed
+    $pBA = & $cmpOf ([ordered]@{ 'ok.ini' = '4|1'; 'Data' = 'dir' }) (& $unr @('Data'))
+    & $add '比较：之前是普通项、之后是 unreadable，只记 unreadable，不另外报 changed（Differences 为 0）' $true (
+        (@($pBA.Changed) -join ',') -ceq 'unreadable:Data' -and $pBA.Differences -eq 0)
+    $pAB = & $cmpOf (& $unr @('Data')) ([ordered]@{ 'ok.ini' = '4|1'; 'Data' = 'dir' })
+    & $add '比较：之前是 unreadable、之后是普通项，只记 unreadable，不另外报 changed 或 added（Differences 为 0）' $true (
+        (@($pAB.Changed) -join ',') -ceq 'unreadable:Data' -and $pAB.Differences -eq 0)
+    $pTwo = & $cmpOf (& $unr @('Data', 'Effects')) (& $unr @('Effects', 'Presets'))
+    & $add '比较：不同的 unreadable 项各记一次，按名字排序，不重复' $true ((@($pTwo.Unreadable) -join ',') -ceq 'Data,Effects,Presets')
     $cases
 }
 
@@ -525,6 +577,9 @@ function Get-PureCases([string]$Tmp, [string]$RepoRoot) {
     & $add '一轮结局：场景全绿但默认资源目录变了判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $false -Residual 0) -eq 'FAIL')
     & $add '一轮结局：场景全绿但结束后还留着 reaper.exe 判 FAIL' $true ((Get-RunVerdict -RowStatuses @('PASS') -CfgUnchanged $true -Residual 1) -eq 'FAIL')
     & $add '一轮结局：全绿、目录没变、没有残留才是 PASS' $false ((Get-RunVerdict -RowStatuses @('PASS', 'PASS') -CfgUnchanged $true -Residual 0) -eq 'PASS')
+    & $add '停手：默认资源目录有读不了的子目录（别的都没变），说的是证明不了、可能被碰过，不说「变了」' $true (
+        ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $true) -like '*读不了*') -and ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $true) -like '*可能*'))
+    & $add '停手：默认资源目录真的变了（哪怕同时有读不了的），说「变了」' $true ((Get-ReaperRoundStop -CfgUnchanged $false -CfgUnreadable $false) -like '*默认资源目录变了*')
     $chain = New-ReaperProjectText -SourceWav 'S' -RenderDir 'D' -RenderName 'N' -Bypass @('output') -TrackVolume 0.5 -Channels 1 -SampleRate 44100 -OneX
     & $add '工程：Input 在 Output 前' $false ($chain.IndexOf('Rinne Input') -lt $chain.IndexOf('Rinne Output'))
     & $add '工程：旁路行只在被旁路的那个插件前' $false (([regex]::Matches($chain, 'BYPASS 1 0 0').Count -eq 1) -and ($chain.IndexOf('BYPASS 1 0 0') -gt $chain.IndexOf('Rinne Input')))
