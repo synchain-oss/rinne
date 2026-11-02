@@ -7,24 +7,56 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 import {
     CONTRAST_PROBE,
-    HIDE_TEXT_STYLE,
+    FIT_PROBE,
+    HIDE_TEXT_STYLE as BASE_HIDE_TEXT_STYLE,
     decodePng,
     itemsDrift,
     rectsDrift,
     settleScene,
     worstContrast,
 } from "../../tests/shared-measure.mjs";
+import {
+    SVG_HIDE_STYLE,
+    expectedOverlay,
+    findLeaks,
+    isFirstRunSceneId,
+    overlayA11yProbe,
+} from "../first-run/measure.mjs";
+
+/** 裸词条键、占位符、null 的扫描：共用的那一份，再加首启词条的前缀（rules.、tour.、hint.），见 fixtures/first-run/measure.mjs。 */
+export { findLeaks };
 
 export const LANGS = Object.freeze(["zh", "en", "fr"]);
 
-/** 首启链（语言选择、使用规则、引导）不在本页：它们的场景由首启那一块接手，这里不摆。 */
-const FIRST_LAUNCH = new Set(["out-lang", "out-rules", "out-tour-1", "out-tour-2", "out-tour-3", "out-tour-4"]);
+/** 量尺截图前把页内文字藏起来的样式：共用件的那一份，加上 SVG 文字与插入链示意的描边（理由见 SVG_HIDE_STYLE）。 */
+const HIDE_TEXT_STYLE = BASE_HIDE_TEXT_STYLE + SVG_HIDE_STYLE;
 
-/** 本页负责的全部场景（来自预览场景表，不另抄一份 ID）。 */
+/** 首启链（语言卡、规则页、导览各步）的场景：静态画面，叠层压在整页上，由夹具接首启控制器摆出来。 */
+export const isFirstRunScene = (s) => isFirstRunSceneId(s.id);
+
+/**
+ * Output 的全部场景（来自预览场景表，不另抄一份 ID），含首启的 6 个。
+ * 不关心首启的使用方要自己用 isFirstRunScene 排除，并在那里写明理由。
+ */
 export async function loadOutputScenes(root) {
     const m = await import(pathToFileURL(path.join(root, "web-preview/mock/scenarios.js")).href);
-    return m.SCENES.filter((s) => s.role === "output" && !FIRST_LAUNCH.has(s.id));
+    return m.SCENES.filter((s) => s.role === "output");
 }
+
+/**
+ * 一个「画面」是场景加子态：每个场景一个画面；规则页静态摆成「未放行」，再多一个「放行后」（sub 为 ready，滚到底放行）的画面，
+ * 两种按钮状态都要量到。适配、对比度、无障碍三套都按画面走。
+ */
+export const outputFrames = (scenes) =>
+    scenes.flatMap((scene) =>
+        scene.id === "out-rules"
+            ? [
+                  { scene, sub: "" },
+                  { scene, sub: "ready" },
+              ]
+            : [{ scene, sub: "" }],
+    );
+export const frameTag = (lang, frame) => `${lang}/${frame.scene.id}${frame.sub ? ":" + frame.sub : ""}`;
 
 export async function loadDesign(root) {
     const m = await import(pathToFileURL(path.join(root, "web/shared/design-box.js")).href);
@@ -45,6 +77,12 @@ export async function openOutput(page, server, box, lang, scenario, extra = "") 
     const err = await page.eval("window.__fxError || ''");
     if (err) throw new Error(`夹具出错（${lang}/${scenario || "默认"}）：${err}`);
     await settleScene(page);
+}
+
+/** 摆出一个画面：开场景，规则页的放行后画面再滚到底。 */
+export async function openOutputFrame(page, server, box, lang, frame, extra = "") {
+    await openOutput(page, server, box, lang, frame.scene.id, extra);
+    if (frame.sub === "ready") await releaseRules(page);
 }
 
 /** 点一个元素（页内 click）；找不到返回 false。 */
@@ -71,6 +109,42 @@ export const lineCount = (page, sel) =>
     page.eval(
         `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return -1; const tops = new Set(); const w = document.createTreeWalker(e, NodeFilter.SHOW_TEXT); for (let n = w.nextNode(); n; n = w.nextNode()) { if (!n.nodeValue.trim()) continue; const r = document.createRange(); r.selectNodeContents(n); for (const x of r.getClientRects()) if (x.width > 0) tops.add(Math.round(x.top / 3)); } return tops.size; })()`,
     );
+
+/**
+ * 把已摆出的规则页（out-rules，静态摆成「未放行」）放行：和用户一样把正文区滚到底，页面自己放行按钮。
+ * 静态场景不起 8 秒计时，所以只能走「读到底」这一条路；等到 data-state 变成 ready 才返回。
+ */
+export async function releaseRules(page) {
+    await page.eval(
+        `(() => { const b = document.querySelector('[data-gb="output.rules"] [data-part="rules.body"]'); b.scrollTop = b.scrollHeight; b.dispatchEvent(new Event("scroll")); })()`,
+    );
+    await page.waitFor(`document.querySelector('[data-gb="output.rules"]').getAttribute("data-state") === "ready"`, {
+        timeout: 6000,
+        label: "规则页滚到底后应放行（data-state=ready）",
+    });
+    await settleScene(page);
+}
+
+/** 叠层的无障碍现状（页内求值 overlayA11yProbe，角色取 output）。 */
+export const overlayState = (page) => page.eval(`(${overlayA11yProbe.toString()})(document, window, "output")`);
+
+/**
+ * 首启画面的叠层必须真的摆出来（量尺不能在一张没有叠层的普通页面上空转）：叠层恰好一个、种类与导览步号对得上，
+ * 规则页的放行状态与子态一致。返回问题列表，空表示都对；不是首启场景的画面直接返回空表。
+ */
+export async function overlayFailures(page, frame) {
+    const want = expectedOverlay(frame.scene.id);
+    if (!want) return [];
+    const o = await overlayState(page);
+    const out = [];
+    if (o.kind !== want.kind) out.push(`叠层应是 ${want.kind}，实得 ${JSON.stringify(o.open)}`);
+    if (want.kind === "tour" && o.step !== want.step) out.push(`导览应在第 ${want.step} 步，实得 ${o.step}`);
+    if (want.kind === "rules") {
+        const state = frame.sub === "ready" ? "ready" : "gated";
+        if (!o.rules || o.rules.state !== state) out.push(`规则页应是 ${state}，实得 ${o.rules && o.rules.state}`);
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------- 造状态
 
@@ -118,25 +192,83 @@ export const setModel = (
  */
 const SHARED_ANCHOR = 'if (p.closest(".rn-pair")) return "B";';
 const FX_CAP_ANCHOR = 'if (p.closest(".fx-cap")) return null;';
-export const OUT_CONTRAST_PROBE = (() => {
-    for (const a of [SHARED_ANCHOR, FX_CAP_ANCHOR])
-        if (!CONTRAST_PROBE.includes(a))
-            throw new Error("共享对比度探针的分档锚点变了，请同步 web-preview/fixtures/output/lib.mjs");
-    return CONTRAST_PROBE.replace(
+const MODAL_ANCHOR = 'if (p.closest(".rn-modal")) return "A";';
+const SCRIM_ON_ANCHOR = 'const scrimOn = [...stage.querySelectorAll(".rn-scrim")].some(shown);';
+const SCRIM_SKIP_ANCHOR = 'if (scrimOn && !p.closest(".rn-scrim")) continue;';
+const COLOR_ANCHOR = "const c = parse(getComputedStyle(p).color);";
+const RECT_ANCHOR = "return { x: left, y: top, w: right - left, h: bottom - top };";
+const LAYER_ANCHOR = 'e.closest(".rn-scrim") ? "modal"';
+const ITEM_ANCHOR = 'tone: toneEl ? toneEl.getAttribute("data-tone") : "", text: text.slice(0, 48),';
+
+/** 在共享探针上按锚点改写；锚点变了就抛错，不悄悄放过（共享探针另有人改时，这里必须跟着看一眼）。 */
+function derive(base, edits) {
+    let out = base;
+    for (const [anchor, text] of edits) {
+        if (!out.includes(anchor))
+            throw new Error("共享探针的锚点变了，请同步 web-preview/fixtures/output/lib.mjs：" + anchor);
+        out = out.replace(anchor, () => text);
+    }
+    return out;
+}
+
+export const OUT_CONTRAST_PROBE = derive(CONTRAST_PROBE, [
+    [
         FX_CAP_ANCHOR,
         `${FX_CAP_ANCHOR}
         // 宿主旁路时内容按设计降到 .55 不透明度，等同被停用的界面：只记录不判。
         // 不在此列、照常分档的：常驻红字（在 layer 层）、消息位里成立的消息（旁路时不降级；空闲的灰字提示照设计一起降，仍是 C）
         if (p.closest("[data-bypass] .rn-shell__content") && !p.closest('.rn-out--band:not([data-state="idle"])')) return "C";`,
-    ).replace(
+    ],
+    [
         SHARED_ANCHOR,
         `if (p.closest(".rn-place")) return "A";
         // 「（未提供轨道名）」是灰色占位，按灰色状态文字的 B 档判；有名字的轨道名与副行是正文，判 A
         if (p.closest('.rn-track__name[data-noname="1"]')) return "B";
         if (p.closest(".rn-paircard__sub, .rn-track__name")) return "A";
         ${SHARED_ANCHOR}`,
-    );
-})();
+    ],
+    [
+        MODAL_ANCHOR,
+        `// 置灰的控件（首启规则页未放行时的两颗按钮、导览第 1 步的「上一步」）整体按 0.4 降级、本来就是「不可用」的画面：按 C 只记录，不判。
+        // 只认真正的 :disabled / aria-disabled，不认视觉上的淡：可用的按钮被压淡照判（与 Input 的对比度冒烟同口径）
+        // 范围只限首启的规则页与导览（置灰的控件只出现在这两处）：别处置灰的控件原来怎么判还怎么判，不因为这条口径悄悄少测
+        if (p.closest('[data-gb$=".rules"], [data-gb$=".tour"]') && p.closest(":disabled, [aria-disabled='true']")) return "C";
+        ${MODAL_ANCHOR}
+        if (p.closest(".rn-tour__callout")) return "A"; // 导览说明框：整块是模态里的字，与模态同档`,
+    ],
+    [
+        SCRIM_ON_ANCHOR,
+        // 叠层（模态遮罩、首启导览的暗幕）打开时，下面的页面被压暗，不是要判的对象；只判叠层自己的文字
+        'const scrimOn = [...stage.querySelectorAll(".rn-scrim, .rn-tour")].some(shown);',
+    ],
+    [SCRIM_SKIP_ANCHOR, 'if (scrimOn && !p.closest(".rn-scrim, .rn-tour")) continue;'],
+    [
+        ITEM_ANCHOR,
+        // 在叠层里、在按钮里：首启冒烟据此断言「叠层打开时只量叠层自己的字」与「按钮的分档」
+        `${ITEM_ANCHOR} inOverlay: Boolean(p.closest(".rn-scrim, .rn-tour")), inBtn: Boolean(p.closest("button")),`,
+    ],
+    [
+        COLOR_ANCHOR,
+        // SVG 的文字（规则页旁的插入链示意）画的是 fill（color 只是继承来的值，与画出来的颜色无关）
+        'const c = parse(p.namespaceURI === "http://www.w3.org/2000/svg" ? getComputedStyle(p).fill : getComputedStyle(p).color);',
+    ],
+    [
+        RECT_ANCHOR,
+        `// SVG 文字（插入链示意，字号 7.5 到 8.5）的字框是整行的行盒，四周各有一圈没有墨迹的留白，
+        // 留白的四角会落到圆角槽的外面；只取中间的墨迹区（四周各收 1.5 px），免得把槽外的底量成字的底
+        const k = p.namespaceURI === "http://www.w3.org/2000/svg" ? 1.5 : 0;
+        // 文字在祖先的滚动区里（规则页正文）：只取滚动区露出来的那一段。段落比滚动区还高时（法文的规则页），
+        // 越出去的部分被裁掉，那里露出来的是滚动区外面的东西（页脚的按钮），不是这段字的底，量进去就是假红
+        const sc0 = scrollerOf(p);
+        const sr0 = sc0 ? sc0.getBoundingClientRect() : null;
+        const top2 = sr0 ? Math.max(top, sr0.top) : top;
+        const bottom2 = sr0 ? Math.min(bottom, sr0.bottom) : bottom;
+        return { x: left + k, y: top2 + k, w: right - left - 2 * k, h: bottom2 - top2 - 2 * k };`,
+    ],
+]);
+
+/** Output 的适配量尺：共享量尺之上，把首启导览的说明框与模态一样当作浮在内容上面的一层（压住下面的文字是设计，只比同一层）。 */
+export const OUT_FIT_PROBE = derive(FIT_PROBE, [[LAYER_ANCHOR, 'e.closest(".rn-scrim, .rn-tour") ? "modal"']]);
 
 const dropHideText = (page) =>
     page.eval('(() => { const s = document.getElementById("fx-hide-text"); if (s) s.remove(); })()');
@@ -262,11 +394,16 @@ export const NAME_AUDIT = `(() => {
 })()`;
 
 /**
- * Tab 走一圈（只按可 Tab 到的件数），返回每一站的 { id, ring, part, action }。ring 只认 outline：焦点环的实现就是 outline；
+ * Tab 走一圈（只按可 Tab 到的件数），返回每一站的 { id, ring, part, action, overlay }（overlay：这一站是否在首启叠层里）。ring 只认 outline：焦点环的实现就是 outline；
  * part、action 是节点的 data-part 与 data-action（没有就是空串），用来认出具体是哪个件，不靠 id（类名）猜。
  */
 export async function tabWalk(page) {
-    await page.eval("document.body.focus(); document.activeElement && document.activeElement.blur()");
+    // 顺序焦点导航的起点是上一次聚焦的节点，blur 不会重置它：首启叠层打开时焦点在叠层里，Tab 从那里往后走，
+    // 叠层在文档末尾，走出文档就停了，排在叠层之前的内容层停靠点走不到；
+    // 给 body 临时一个 tabindex 把焦点放上去，起点就回到文档开头，Tab 一圈才是完整的一圈
+    await page.eval(
+        'document.activeElement && document.activeElement !== document.body && document.activeElement.blur(); document.body.tabIndex = -1; document.body.focus(); document.body.removeAttribute("tabindex")',
+    );
     const tabbable = await page.eval(
         `[...document.getElementById("stage").querySelectorAll('button, select, input, a[href], [tabindex="0"]')].filter((e) => !e.disabled && !e.hidden && !e.closest("[inert]") && e.getClientRects().length > 0).length`,
     );
@@ -274,7 +411,7 @@ export async function tabWalk(page) {
     for (let i = 0; i < tabbable; i++) {
         await press(page, "Tab");
         const f = await page.eval(
-            `(() => { const a = document.activeElement; if (!a || a === document.body) return null; const cs = getComputedStyle(a); const ring = cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0; return { id: (a.getAttribute("data-gb") || a.getAttribute("data-group") || a.className || a.tagName) + "", ring, part: a.getAttribute("data-part") || "", action: a.getAttribute("data-action") || "" }; })()`,
+            `(() => { const a = document.activeElement; if (!a || a === document.body) return null; const cs = getComputedStyle(a); const ring = cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0; return { id: (a.getAttribute("data-gb") || a.getAttribute("data-group") || a.className || a.tagName) + "", ring, part: a.getAttribute("data-part") || "", action: a.getAttribute("data-action") || "", overlay: Boolean(a.closest('[data-gb="output.langStart"], [data-gb="output.rules"], [data-gb="output.tour"]')) }; })()`,
         );
         if (!f) break;
         stops.push(f);
