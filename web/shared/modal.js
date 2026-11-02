@@ -16,12 +16,14 @@ import { el } from "./dom.js";
 /** 每个节点被几个打开着的模态要求 inert。 */
 const inertCount = new WeakMap();
 
-function lockInert(node) {
+/** 把节点设为 inert（计数加一）。首启的导览不是面板式模态，也走这一对，和关于面板、缩放确认共用计数。 */
+export function lockInert(node) {
     inertCount.set(node, (inertCount.get(node) || 0) + 1);
     node.setAttribute("inert", "");
 }
 
-function unlockInert(node) {
+/** 计数减一，数到 0 才移除 inert。 */
+export function unlockInert(node) {
     const left = (inertCount.get(node) || 0) - 1;
     if (left > 0) {
         inertCount.set(node, left);

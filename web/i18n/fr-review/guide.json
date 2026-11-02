@@ -123,7 +123,7 @@
       "status": "待抽检"
     },
     "tour.out.step3.body": {
-      "fr": "Voyant vert = connecté. Des noms de piste identiques indiquent très probablement la même piste ; sans noms de l’hôte, « Vérification impossible » s’affiche, sans conséquence.",
+      "fr": "Voyant vert = connecté. Mêmes noms de piste : très probablement la même piste ; si l’hôte n’en donne pas, « Non vérifiable » s’affiche, sans gravité.",
       "status": "待抽检"
     },
     "tour.out.step4.title": {

@@ -1199,6 +1199,16 @@
     },
     "maxWidthPx": 140
   },
+  "hint.firstUseRestored": {
+    "fit": {
+      "font": "sans",
+      "lines": 1,
+      "ls": 0,
+      "size": 9.5,
+      "weight": 400
+    },
+    "maxWidthPx": 240
+  },
   "in.brand.eyebrow": {
     "fit": {
       "font": "mono",
@@ -2559,6 +2569,16 @@
     },
     "maxWidthPx": 406
   },
+  "rules.btn.ack": {
+    "fit": {
+      "font": "grotesk",
+      "lines": 1,
+      "ls": 0,
+      "size": 12,
+      "weight": 600
+    },
+    "maxWidthPx": 170
+  },
   "rules.btn.continue": {
     "fit": {
       "font": "grotesk",
@@ -2588,6 +2608,16 @@
       "weight": 600
     },
     "maxWidthPx": 170
+  },
+  "rules.footnote": {
+    "fit": {
+      "font": "sans",
+      "lines": 1,
+      "ls": 0,
+      "size": 10.5,
+      "weight": 500
+    },
+    "maxWidthPx": 392
   },
   "rules.r1.lead": {
     "fit": {
@@ -2942,7 +2972,7 @@
   "tour.out.step3.body": {
     "fit": {
       "font": "sans",
-      "lines": 4,
+      "lines": 3,
       "ls": 0,
       "size": 12.5,
       "weight": 400

@@ -231,7 +231,7 @@ export default {
             "Un nouveau Rinne Output rejoint le groupe du dernier Rinne Input non appairé (marqué AUTO), de préférence sur une piste de même nom. Si ce n’est pas le bon, cliquez sur un groupe pour le choisir à la main.",
         "tour.out.step3.title": "Appairage",
         "tour.out.step3.body":
-            "Voyant vert = connecté. Des noms de piste identiques indiquent très probablement la même piste ; sans noms de l’hôte, « Vérification impossible » s’affiche, sans conséquence.",
+            "Voyant vert = connecté. Mêmes noms de piste : très probablement la même piste ; si l’hôte n’en donne pas, « Non vérifiable » s’affiche, sans gravité.",
         "tour.out.step4.title": "À revoir à tout moment",
         "tour.out.step4.body": "Cliquez sur le bouton « ? » en bas à droite pour revoir les règles et cette visite.",
         // 恢复的实例（新机器上打开旧工程）：本机没确认过规则时的页脚提示
