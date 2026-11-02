@@ -2,18 +2,21 @@
 //
 // 生成块与真源一致（docs-truth 的一部分）。判据在 scripts/gen-docs.mjs：已接入的落地面逐字节比对生成结果；
 // 中文真源改了而译文的 zhSha256 没跟上，报「译文过期」；INSTALL.txt 用假变量试渲染两个平台，缺警告或缺必选规则即红。
-// 自测在临时目录里放一份真源的副本和两个带标记的落地面，逐项改坏。
+// 自测在临时目录里放一份真源的副本和两个带标记的落地面，逐项改坏。夹具里的中文用户指南是真文件的副本，
+// 指南里有参数表的生成标记（gen:params-table），所以参数表的两份真源（golden 与界面词条）也要一并带进夹具，
+// 否则回写时 params-table 找不到真源，整个 docs 组自测因此变红。
 
 import fs from "node:fs";
 import path from "node:path";
 import { checkAll, writeAll } from "../gen-docs.mjs";
+import { GOLDEN_FILE, I18N_FILE as PARAMS_I18N_FILE } from "../gen-docs.d/params-table.mjs";
 import { ROOT, caseResult } from "../lib/check-kit.mjs";
 import { cleanupTempDir, makeTempDir } from "../lib/safe-rm.mjs";
 import { I18N_FILE, INSTALL_FILE, SOURCE_FILE, loadSource, zhHashes } from "../lib/docs-kit.mjs";
 
 const SURFACES = {
     "README.md": ["safety-warning:en", "hard-rules:en"],
-    "docs/USER_GUIDE.md": ["safety-warning:en", "hard-rules:en"],
+    "docs/USER_GUIDE.md": ["safety-warning:en", "hard-rules:en", "params-table:en"],
 };
 const marked = (blocks) => blocks.map((b) => `<!-- BEGIN gen:${b} -->\n<!-- END gen:${b} -->\n`).join("\n");
 
@@ -25,7 +28,7 @@ async function scenario(root, mutate) {
             fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
             fs.writeFileSync(path.join(dir, rel), text);
         };
-        for (const rel of [SOURCE_FILE, I18N_FILE, INSTALL_FILE])
+        for (const rel of [SOURCE_FILE, I18N_FILE, INSTALL_FILE, GOLDEN_FILE, PARAMS_I18N_FILE])
             put(rel, fs.readFileSync(path.join(root, rel), "utf8"));
         for (const [rel, blocks] of Object.entries(SURFACES)) put(rel, `# t\n\n${marked(blocks)}`);
         put("README.zh-CN.md", "# 没有标记的文件\n");
@@ -114,6 +117,35 @@ export async function selfTest(root = ROOT) {
                     ),
                 ),
             (p) => p.some((x) => x.includes("approvalUrl")),
+        ],
+        [
+            "中文指南里的参数表生成块被手改",
+            true,
+            (c) => c.edit(SOURCE_FILE, swap("| feedback |", "| feedbak |")),
+            (p) => p.some((x) => x.includes("gen:params-table:zh")),
+        ],
+        [
+            "英文指南里的参数表生成块被手改",
+            true,
+            (c) => c.edit("docs/USER_GUIDE.md", swap("| feedback |", "| feedbak |")),
+            (p) => p.some((x) => x.includes("gen:params-table:en")),
+        ],
+        [
+            "golden 里的默认值改了、参数表没回写",
+            true,
+            (c) =>
+                c.edit(GOLDEN_FILE, (t) => {
+                    const j = JSON.parse(t);
+                    j.feedback.default = 7;
+                    return JSON.stringify(j, null, 2);
+                }),
+            (p) => p.some((x) => x.includes("gen:params-table")),
+        ],
+        [
+            "夹具里没有 golden：参数表渲染不了，检查点名缺的文件",
+            true,
+            (c) => fs.rmSync(path.join(c.dir, GOLDEN_FILE)),
+            (p) => p.some((x) => x.includes(GOLDEN_FILE)),
         ],
         [
             "标记拼错",

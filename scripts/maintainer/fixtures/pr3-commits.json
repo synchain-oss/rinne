@@ -1,0 +1,44 @@
+[
+  {
+    "sha": "ca052fd2e59aed41be41fabf3d2785b4ef479c52",
+    "commit": {
+      "message": "夹具：处置汇总第 1 轮引用的提交"
+    }
+  },
+  {
+    "sha": "d62c5dcfda5f865cc133c63ea54294db95a6227d",
+    "commit": {
+      "message": "夹具：处置汇总第 1 轮引用的提交"
+    }
+  },
+  {
+    "sha": "496b4833eab25d3d89e45fea6d7c6278ce868ff8",
+    "commit": {
+      "message": "夹具：处置汇总第 2 轮引用的提交"
+    }
+  },
+  {
+    "sha": "f35523c4b3c4feabf1c62a0d8a35846350b7121c",
+    "commit": {
+      "message": "夹具：PR 的 head"
+    }
+  },
+  {
+    "sha": "ab12cd34e5d13cca080dd659d6d8aa8dec0e8acf",
+    "commit": {
+      "message": "夹具：前缀歧义的提交甲"
+    }
+  },
+  {
+    "sha": "ab12cd34e9ab9485fad31f8b9561a7cfb13887a4",
+    "commit": {
+      "message": "夹具：前缀歧义的提交乙"
+    }
+  },
+  {
+    "sha": "98765432caa70946d8da3b59d1e0e79871293490",
+    "commit": {
+      "message": "夹具：纯数字开头的提交"
+    }
+  }
+]
