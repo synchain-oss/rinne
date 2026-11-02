@@ -7,8 +7,9 @@
 #   -Merge -Pr <n> -Card <卡> -SummaryFile <f>
 #                                 重新核对，ready 才合并：squash，钉住审过的 head（sha=…），显式写 subject「<标题> (#n)」
 #                                 与 body（摘要段 + 空行 + 唯一一行签名）
-#   -After -Pr <n> -Card <卡>     回读 squash 提交（DCO、作者与提交者、恰好一行签名）、删远端子支线、持 git 锁移除 worktree
-#                                 与 wt/tip-<n>
+#   -After -Pr <n> -Card <卡>     回读 squash 提交（DCO、作者与提交者、恰好一行签名）、核对远端与本地子支线的尖都等于 PR 合并时的
+#                                 head（对不上就抛错、什么都不删）、删远端子支线（带 lease：核对之后远端尖又变了，git 拒绝）、
+#                                 持 git 锁移除 worktree 与 wt/tip-<n>、本地分支（update-ref 带旧值）
 #   -SelfTest                     用 fixtures/ 里录制的 PR 响应离线跑，对每条判据给反例
 # 只从主 clone 运行，而且主 clone 必须正好在刚取回的 origin/feature/v1 上、工作树干净：判据取自 feature 线，
 # 而不是待合并 PR 自己的版本。gates 的结果 json 是自报的：最低档按 PR 的文件清单与卡片在这里重算（定档规则取自
@@ -206,7 +207,7 @@ function Get-MergeFacts {
     [pscustomobject]@{
         Pr = $Pr; Card = $card; Pull = $pull; Head = $head; Files = @($files); Activity = $activity
         State = $state; Items = @(Get-RinneCommentItems -Activity $activity -State $state); Threads = @($activity.Threads)
-        Run = $run; Jobs = $jobs; Posted = $posted; Checks = Get-RinneCheckRuns $head; Required = Get-RinneRequiredChecks
+        Run = $run; Jobs = $jobs; Posted = $posted; Checks = Get-RinneCheckRuns $head -PullRequestEventOnly; Required = Get-RinneRequiredChecks
         Gates = $gates; Records = Read-Records $Pr
         MainClone = [pscustomobject]@{
             Head = [string]$clone.Sha
@@ -259,11 +260,51 @@ function Get-DispositionRows {
     $rows.ToArray()
 }
 
+<# 处置汇总表的一行里取某一列的单元格（认不出表头、或这一列不存在时为 $null）。 #>
+function Get-RowCell {
+    param($Row, [Parameter(Mandatory)][string]$Name)
+    if ($Row.Cols -and $Row.Cols.ContainsKey($Name) -and $Row.Cols[$Name] -lt $Row.Cells.Count) { return $Row.Cells[$Row.Cols[$Name]] }
+    return $null
+}
+
 <#
-  处置汇总表里判为「不改」「不采纳」「挂账」「暂不」「维持」的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。
-  同一条意见按「位置」认（去掉 markdown 标记；没有位置列时按摘要），以最后一次处置为准：后来写了「已修」并附提交的，
-  不再要用户豁免；后来才判为不改 / 挂账的，照样列出。单元格先去掉 * _ 与反引号再认决定词（「**不改**」也认得出来），
-  决定词出现在处置列任意位置都算；「采纳」「已采纳」不是拒绝。
+  这一行是不是【红旗】【重要】：级别列存在时，只认以「【红旗】」「【重要】」「红旗」「重要」开头的级别格（「重要 / 建议」算）。
+  不带【】的两种写法再加边界：「红旗」后面不能紧跟（可有空白）数字 0，「重要」后面不能紧跟「度」「性」或（可有空白）数字 0
+  （「红旗 0」「重要 0」「重要度低」「重要性一般」是计数、描述，不是级别）；0 后面再跟数字的（「重要 05」「重要 10」）仍算，
+  「重要 1」「重要 2」这类当编号写的也算严重行（往严里错）；带【】的写法不变（「【重要】度」照旧算）。
+  「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」这类只是子串命中的更不算。认不出级别列（或这一格是空的）时，任何一格里有【红旗】或【重要】。
+#>
+function Test-SevereRow {
+    param($Row)
+    $level = Get-RowCell $Row '级别'
+    if ($level) { return [bool]($level -match '^(?:【红旗】|【重要】|红旗(?!\s*0(?!\d))|重要(?![度性]|\s*0(?!\d)))') }
+    @($Row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0
+}
+
+<#
+  引用某次 bot 运行（标记里 bot-run=<运行编号>）的处置汇总里，级别为【红旗】【重要】的行数。
+  只看 issue comment 里我方（有写权限且带标记）的处置汇总，和 review-state 认处置汇总的口径一致；
+  同一行文字重复出现只算一条（复制几遍凑数不行）。
+#>
+function Get-DispositionSevereCount {
+    param([object[]]$Items, [Parameter(Mandatory)][string]$RunId)
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($i in @($Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' })) {
+        $m = Get-AgentMarker $i.Body
+        if (-not $m -or $m.Kind -ne 'disposition' -or [string]$m.Extra['bot-run'] -ne $RunId) { continue }
+        foreach ($row in @(Get-DispositionRows $i.Body)) { if (Test-SevereRow $row) { [void]$seen.Add($row.Line) } }
+    }
+    $seen.Count
+}
+
+<#
+  处置汇总表里没有清掉的【红旗】【重要】：原文整行列出，供统筹记录、交用户裁决。
+  严重行默认挂账：只有处置列（去掉 * _ 与反引号之后）以「已修」「修复」「已改」「采纳」「已采纳」开头、不含拒绝词
+  （「不改」「不采纳」「挂账」「暂不」「维持」「未修」「搁置」「驳回」「不处理」「延后」「暂缓」「忽略」等），而且处置列或它右边的
+  列里附了提交号，这一行才算清掉。别的写法一律挂账：词表外的词（「无需修改」「误报」「设计如此」「待修复」「已处理」）、
+  空处置、只写「采纳」没有提交号，以及认不出处置列的表（逐格扫描没法确定哪一格是处置）。
+  同一条意见按「位置 + 摘要」认（去掉 markdown 标记），以最后一次处置为准：后来写了已修并附提交的，不再要用户豁免；
+  后来才改成别的写法的，照样列出。
 #>
 function Get-DeferredSevere {
     param([object[]]$Items)
@@ -275,29 +316,23 @@ function Get-DeferredSevere {
         $rounds.Add([pscustomobject]@{ Round = [int]$m.Round; Order = $order; Rows = @(Get-DispositionRows $i.Body) })
         $order++
     }
+    $reject = '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略'
     # 同一个位置以轮次靠后的那一行为准；同一轮里以行序靠后的为准
     $latest = @{}
     foreach ($r in @($rounds | Sort-Object Round, Order)) {
         foreach ($row in @($r.Rows)) {
-            $cell = { param($name) if ($row.Cols -and $row.Cols.ContainsKey($name) -and $row.Cols[$name] -lt $row.Cells.Count) { $row.Cells[$row.Cols[$name]] } else { $null } }
-            $level = & $cell '级别'
-            $severe = if ($level) { $level -match '红旗|重要' } else { @($row.Cells | Where-Object { $_ -match '【(红旗|重要)】' }).Count -gt 0 }
-            if (-not $severe) { continue }
-            $loc, $sum = (& $cell '位置'), (& $cell '摘要')
+            if (-not (Test-SevereRow $row)) { continue }
+            $loc, $sum = (Get-RowCell $row '位置'), (Get-RowCell $row '摘要')
             # 「位置 + 摘要」才算同一条：同一个位置上的两条不同意见（或位置写成 —、全局）不会互相冲掉；
             # 改写了摘要的行认不成同一条，已修清不掉原来的挂账——宁可多问用户一次
             $key = (@($loc, $sum) | Where-Object { $_ }) -join ' | '
             if (-not $key) { $key = $row.Line }
             $at = if ($row.Cols -and $row.Cols.ContainsKey('处置') -and $row.Cols['处置'] -lt $row.Cells.Count) { $row.Cols['处置'] } else { -1 }
-            $decision = if ($at -ge 0) { $row.Cells[$at] } else { $row.Cells -join ' ' }
+            $decision = if ($at -ge 0) { $row.Cells[$at] } else { '' }
             # 「附提交」只在处置列和它右边的列里找，而且串里至少有一个 a-f 字母（评论编号、运行编号这类纯数字不算）
-            $proof = @($row.Cells | Select-Object -Skip ([Math]::Max($at, 0)) | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count
-            if (-not $decision -or $decision -match '(?:^|[^采])(?:不改|不采纳|挂账|暂不|维持)|未采纳|不修复|未修复|未改|未修|搁置|驳回|不处理|延后|暂缓|忽略') {
-                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $true }
-            } elseif (($decision -match '已修|修复|已改|采纳') -and $proof) {
-                # 后来写明已修 / 采纳并附提交：这条不再要用户豁免
-                $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = $false }
-            }
+            $proof = $at -ge 0 -and @($row.Cells | Select-Object -Skip $at | Where-Object { $_ -match '(?<![0-9a-f])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9a-f])' }).Count -gt 0
+            $cleared = $decision -and $decision -notmatch $reject -and $decision -match '^(?:已修|修复|已改|已?采纳)' -and $proof
+            $latest[$key] = [pscustomobject]@{ Line = $row.Line; Deferred = -not $cleared }
         }
     }
     @($latest.Values | Where-Object Deferred | ForEach-Object Line)
@@ -412,7 +447,17 @@ function Get-MergeVerdict {
     if (-not $d) { $fail.Add('最后一条 bot 总结之后没有处置汇总') }
     elseif ($s -and $d.botRun -ne $s.runId) { $fail.Add("处置汇总引用的运行 $($d.botRun) 不是最后一条 bot 总结的 $($s.runId)") }
     foreach ($x in @($F.State.summaries)) {
-        if ($x.runId -and @($F.State.dispositionRuns) -notcontains [string]$x.runId) { $fail.Add("运行 $($x.runId) 的 bot 总结没有处置汇总") }
+        if (-not $x.runId) { continue }
+        if (@($F.State.dispositionRuns) -notcontains [string]$x.runId) { $fail.Add("运行 $($x.runId) 的 bot 总结没有处置汇总"); continue }
+        # 只有引用没有内容不算回应：尾注 red + important = N 时，引用这次运行的处置汇总里要有至少 N 条【红旗】【重要】的行
+        # （「已处理。」一句话、少列几条都不行）。尾注不可用的总结没有可信的 N，按它正文里逐条列出的红旗 / 重要意见数
+        $wanted = if ($x.ok) { [int]$x.red + [int]$x.important } else { @($x.items | Where-Object { $_.level -in @('红旗', '重要') }).Count }
+        if ($wanted -le 0) { continue }
+        $have = Get-DispositionSevereCount -Items $F.Items -RunId ([string]$x.runId)
+        if ($have -lt $wanted) {
+            $footer = if ($x.ok) { "尾注 red=$($x.red) important=$($x.important)" } else { '尾注不可用，正文列出的红旗 / 重要意见' }
+            $fail.Add("运行 $($x.runId) 的 bot 总结$footer，共 $wanted 条要处置，引用它的处置汇总里只有 $have 条【红旗】【重要】的行")
+        }
     }
 
     # 5. 线程与回应：open thread = 0；每条 bot 与人的评论都有回应（对比原评论的 updated_at，按 in-reply-to 认）；
@@ -946,9 +991,32 @@ function Invoke-AfterUnlocked {
         $cur = (Invoke-RinneGit @('symbolic-ref', '--quiet', '--short', 'HEAD') -Repo $wt -AllowFail).Out.Trim()
         if ($cur -ne $branch) { throw "$wt 在分支「$cur」上，不是 #$Pr 的 $branch：卡号对不上，不清理" }
     }
-    # 删远端子支线（pre-push hook 放行 feat/* 的删除），再持锁移除 worktree 与本地分支
-    if ((Invoke-RinneGit @('ls-remote', '--exit-code', '--heads', 'origin', $branch) -AllowFail).Code -eq 0) {
-        Invoke-RinneGit @('push', 'origin', '--delete', "refs/heads/$branch") | Out-Null
+    # 删之前先核对子支线的尖：远端与本地分支的尖都要等于 PR 合并时的 head，否则分支上有没合入的提交（合并之后才推的、
+    # 本地还没推的），删掉就丢了。任何一项对不上都抛错，什么都不删（远端分支、worktree、本地分支都留着）。
+    # ls-remote 只有退出码 0（取到尖）和 2（远端没有这个分支）两种合法结果，别的（网络、认证）核对不了，同样不删
+    $headSha = [string]$pull.head.sha
+    if ($headSha -notmatch '^[0-9a-f]{40}$') { throw "取不到 #$Pr 合并时的 head（接口给的是「$headSha」），核对不了分支尖，什么都没删" }
+    $remote = Invoke-RinneGit @('ls-remote', '--exit-code', '--heads', 'origin', "refs/heads/$branch") -AllowFail
+    if ($remote.Code -ne 0 -and $remote.Code -ne 2) { throw "ls-remote 查远端 $branch 失败（退出码 $($remote.Code)），核对不了分支尖，什么都没删：$($remote.Err.Trim())" }
+    $remoteTip = $null
+    if ($remote.Code -eq 0) {
+        $remoteTip = @(($remote.Out -split "`r?`n") | ForEach-Object { $f = $_.Trim() -split '\s+'; if ($f.Count -eq 2 -and $f[1] -eq "refs/heads/$branch") { $f[0] } }) | Select-Object -First 1
+        if (-not $remoteTip) { throw "ls-remote 的输出里没有 refs/heads/$branch，核对不了分支尖，什么都没删" }
+        if ($remoteTip -ne $headSha) {
+            throw "远端子支线 $branch 的尖 $remoteTip 不是 #$Pr 合并时的 head $headSha：分支上有没合入的提交，什么都没删"
+        }
+    }
+    $local = Invoke-RinneGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail
+    if ($local.Code -ne 0 -and $local.Code -ne 1) { throw "rev-parse 查本地分支 $branch 失败（退出码 $($local.Code)），核对不了分支尖，什么都没删：$($local.Err.Trim())" }
+    $localTip = if ($local.Code -eq 0) { $local.Out.Trim() } else { $null }
+    if ($localTip -and $localTip -ne $headSha) {
+        throw "本地子支线 $branch 的尖 $localTip 不是 #$Pr 合并时的 head $headSha：分支上有没合入的提交，什么都没删（worktree 也不移除）"
+    }
+    # 删远端子支线（pre-push hook 放行 feat/* 的删除），再持锁移除 worktree 与本地分支。上面的核对到这一步之间还有一小段时间：
+    # 删除也交给 git 比对，--force-with-lease=<ref>:<合并时的 head> 在远端尖已经不是那个值时拒绝（stale info），
+    # 这里抛错，发生在移除 worktree 之前，什么都没删（lease 只比对旧值，对删除同样生效；不会覆盖任何东西，不是强推）
+    if ($remoteTip) {
+        Invoke-RinneGit @('push', "--force-with-lease=refs/heads/${branch}:${headSha}", 'origin', '--delete', "refs/heads/$branch") | Out-Null
     }
     $tip = Join-Path (Get-RinneRoot) "wt/tip-$Pr"
     Invoke-RinneGitLocked {
@@ -963,8 +1031,9 @@ function Invoke-AfterUnlocked {
             # rinne-delete-ok: 路径已由上一行 Assert-RinneWtDir 核对为 wt 下的 tip-<n>，且是 worktree
             Invoke-RinneGit @('worktree', 'remove', '--force', $tip) | Out-Null
         }
-        if ((Invoke-RinneGit @('rev-parse', '--verify', '--quiet', "refs/heads/$branch") -AllowFail).Code -eq 0) {
-            Invoke-RinneGit @('branch', '-D', $branch) | Out-Null
+        # 本地分支由 git 带旧值删（update-ref -d <ref> <旧值>）：核对之后它又移动了，git 拒绝。worktree 已经移走，不存在「分支还被检出」的问题
+        if ($localTip) {
+            Invoke-RinneGit @('update-ref', '-d', "refs/heads/$branch", $headSha) | Out-Null
         }
     } | Out-Null
     Write-Output "#$Pr 已合入 $($sha.Substring(0, 7))「$($pull.title)」；回读通过，远端子支线、worktree 与合并后构建目录已清理"
@@ -1077,6 +1146,8 @@ function Invoke-SelfTest {
         $prFixture = $pull
         # GraphQL 的 review 修改时间可以按 id 改写（造「回复之后又改过」）
         $reviewEdits = @{}
+        # check run 与「某 head 上 pull_request 事件的运行列表」可以按用例改写（造手动 dispatch 的同名结果）
+        $checkOverride = @{ Runs = $null; Wf = $null }
         # 锁的假实现记下持有顺序与当前持有的锁，构建与 wt/tip-<n> 的 git 操作据此断言自己在哪些锁里
         $lockLog = [System.Collections.Generic.List[string]]::new()
         $held = [System.Collections.Generic.List[string]]::new()
@@ -1102,7 +1173,8 @@ function Invoke-SelfTest {
             'actions/runs/\d+$'                = { Read-RinneFixture 'pr3-run.json' }
             '^gh run view \d+ --repo \S+ --log( --job \d+)?$' = { $runLog.Text }
             'actions/workflows/build\.yml/runs' = { @{ workflow_runs = @() } }
-            'check-runs'                       = { if ($plant.Facts) { $plant.Facts = $false; & $putMarker }; Read-RinneFixture 'pr3-check-runs.json' }
+            'check-runs'                       = { if ($plant.Facts) { $plant.Facts = $false; & $putMarker }; if ($checkOverride.Runs) { return $checkOverride.Runs }; Read-RinneFixture 'pr3-check-runs.json' }
+            'actions/runs\?'                   = { if ($checkOverride.Wf) { return $checkOverride.Wf }; Read-RinneFixture 'pr3-runs.json' }
             '^git .* fetch '                   = { '' }
             '^git .* rev-parse refs/remotes/origin/pr/3' = { $head }
             '^git .* rev-parse (HEAD|origin/feature/v1)$' = { $tipSha }
@@ -1354,6 +1426,61 @@ function Invoke-SelfTest {
         $vm = Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid)
         $pullState.Nulls = 0
         Add-RinneCase $cases 'mergeable 一直是 null 判不可合并' $true ($vm.Code -eq 'not-ready' -and @($vm.Failures | Where-Object { $_ -match '不可合并' }).Count -eq 1)
+        # check run 按触发事件取：同名 check 只认 pull_request 事件触发、head sha 等于当前 head 的运行，同名多次取其中最新的。
+        # 经 Get-MergeFacts 走一遍真的取数路径；check-runs 与运行列表由 $checkOverride 改写
+        $crBase = { Copy-RinneObject (Read-RinneFixture 'pr3-check-runs.json') }
+        $runBase = { Copy-RinneObject (Read-RinneFixture 'pr3-runs.json') }
+        $newCheck = { param($id, $name, $conclusion, $run) [pscustomobject]@{ id = [long]$id; name = $name; status = 'completed'; conclusion = $conclusion; head_sha = $head; details_url = "https://github.com/synchain-oss/rinne/actions/runs/$run/job/$id"; app = [pscustomobject]@{ id = $null; slug = 'github-actions' } } }
+        $newRun = { param($id, $event = 'pull_request', $sha = $head) [pscustomobject]@{ id = [long]$id; name = 'x'; event = $event; head_sha = $sha; status = 'completed'; conclusion = 'success' } }
+        $setCheck = { param($cr, $name, $conclusion) foreach ($c in $cr.check_runs) { if ($c.name -eq $name) { $c.conclusion = $conclusion } } }
+        $viaFacts = {
+            param([string]$label, [scriptblock]$edit, [string]$expect, [scriptblock]$also = { param($r) $true })
+            $checkOverride.Runs = & $crBase; $checkOverride.Wf = & $runBase
+            & $edit $checkOverride.Runs $checkOverride.Wf
+            $r = Get-MergeVerdict (Get-MergeFacts -Pr 3 -CardId $cid)
+            $checkOverride.Runs = $null; $checkOverride.Wf = $null
+            if ($env:RINNE_SELFTEST_VERBOSE) { [Console]::Error.WriteLine("$label => $($r.Code) | $(@($r.Failures) + @($r.Needs | ForEach-Object Reason) -join ' ; ')") }
+            Add-RinneCase $cases $label ($expect -ne 'ready') ($(if ($expect -eq 'ready') { $r.Code -ne 'ready' } else { $r.Code -eq $expect -and (& $also $r) }))
+        }
+        $docsRed = { param($r) @($r.Failures | Where-Object { $_ -match 'check docs-truth 在当前 head 上不是 success' }).Count -eq 1 }
+        & $viaFacts 'PR 事件上 docs-truth 红、后来手动 dispatch 的同名绿：判红' {
+            param($cr, $wf) & $setCheck $cr 'docs-truth' 'failure'
+            $cr.check_runs += & $newCheck 114662999001 'docs-truth' 'success' 38209999001
+        } 'not-ready' $docsRed
+        & $viaFacts 'PR 事件上 docs-truth 红、后来的绿在运行列表里标 workflow_dispatch（接口没按事件过滤）：判红' {
+            param($cr, $wf) & $setCheck $cr 'docs-truth' 'failure'
+            $cr.check_runs += & $newCheck 114662999001 'docs-truth' 'success' 38209999001
+            $wf.workflow_runs += & $newRun 38209999001 'workflow_dispatch'
+        } 'not-ready' $docsRed
+        & $viaFacts 'docs-truth 只有手动 dispatch 的绿、没有 PR 事件的运行：判红' {
+            param($cr, $wf)
+            $cr.check_runs = @($cr.check_runs | Where-Object { $_.name -ne 'docs-truth' }) + (& $newCheck 114662999001 'docs-truth' 'success' 38209999001)
+        } 'not-ready' $docsRed
+        & $viaFacts 'docs-truth 只有没带运行编号的 check（不是 Actions 发的）：不算' {
+            param($cr, $wf)
+            $other = & $newCheck 114662999005 'docs-truth' 'success' 0
+            $other.details_url = 'https://ci.example.com/builds/1'
+            $cr.check_runs = @($cr.check_runs | Where-Object { $_.name -ne 'docs-truth' }) + $other
+        } 'not-ready' $docsRed
+        & $viaFacts '运行列表里的运行 head 不是当前 head：它的 check 不算' {
+            param($cr, $wf) foreach ($w in $wf.workflow_runs) { if ($w.id -eq 38203700245) { $w.head_sha = 'e' * 40 } }
+        } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'check (docs-truth|clang-format) 在当前 head 上不是 success' }).Count -eq 2 }
+        & $viaFacts 'claude-pr-review 在 PR 事件上红、后来 dispatch 的同名绿：判红' {
+            param($cr, $wf) & $setCheck $cr 'claude-pr-review' 'failure'
+            $cr.check_runs += & $newCheck 114662999002 'claude-pr-review' 'success' 38209999002
+        } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match 'claude-pr-review check' }).Count -eq 1 }
+        & $viaFacts 'PR 事件红、之后 PR 事件重跑变绿放行（新的一次运行，同名取最新）' {
+            param($cr, $wf) & $setCheck $cr 'docs-truth' 'failure'
+            $cr.check_runs += & $newCheck 114662999003 'docs-truth' 'success' 38209999003
+            $wf.workflow_runs += & $newRun 38209999003
+        } 'ready'
+        & $viaFacts 'PR 事件绿、之后手动 dispatch 的同名红：不受它影响放行' {
+            param($cr, $wf) $cr.check_runs += & $newCheck 114662999004 'docs-truth' 'failure' 38209999004
+        } 'ready'
+        $checkOverride.Wf = @{ Code = 1; Out = ''; Err = 'HTTP 502' }
+        $threw = Test-Throws { Get-MergeFacts -Pr 3 -CardId $cid }
+        $checkOverride.Wf = $null
+        Add-RinneCase $cases '取不到 pull_request 事件的运行列表：抛错，不退回不分事件的取法' $true $threw
         $v = Get-MergeVerdict $base
         Add-RinneCase $cases '干净的 PR 判 ready' $false ($v.Code -ne 'ready')
         if ($v.Code -ne 'ready') { [Console]::Error.WriteLine((ConvertTo-RinneJsonText $v)) }
@@ -1464,6 +1591,16 @@ function Invoke-SelfTest {
         & $bad 'Request changes 之后同一人 APPROVED 放行' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 777; state = 'CHANGES_REQUESTED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' }; $a.Reviews += [pscustomobject]@{ id = 778; state = 'APPROVED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:30:00Z'; html_url = 'u' } } } 'ready'
         & $bad 'Request changes 有点名回复放行' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 777; state = 'CHANGES_REQUESTED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' }; $a.Issue += & $reply 1000 '777' '2026-10-12T05:10:00Z' } } 'ready'
         & $bad '空正文、没有 inline 评论的 COMMENTED review 没有回应' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 779; state = 'COMMENTED'; body = ''; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' } } }
+        # APPROVED 的 review：以前一律不收，外部人的 Approve（不论有没有正文）不会交给用户，维护者带正文的 Approve 也没人回。
+        # 外部人的交用户；维护者带正文、没有 agent 标记的要点名回复；维护者与 bot 空正文的 Approve 没有可回应的内容，免回应
+        $approve = { param($a, $id, $login, $body = '', $type = 'User') $a.Reviews += [pscustomobject]@{ id = $id; state = 'APPROVED'; body = $body; user = [pscustomobject]@{ login = $login; type = $type }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' } }
+        & $bad '外部人带正文的 APPROVED 交用户' { param($f) & $reitem $f { param($a) & $approve $a 781 'someone' '看着没问题，可以合' } } 'needs-user' { param($r) @($r.Needs | Where-Object { $_.Reason -match 'review 781' }).Count -eq 1 }
+        & $bad '外部人空正文的 APPROVED 交用户' { param($f) & $reitem $f { param($a) & $approve $a 782 'someone' } } 'needs-user' { param($r) @($r.Needs | Where-Object { $_.Reason -match 'review 782' }).Count -eq 1 }
+        & $bad '维护者带正文的 APPROVED 没有回应' { param($f) & $reitem $f { param($a) & $approve $a 783 'DLsnows' '命名我再想想，先放行' } } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '没有回应的评论：review 783' }).Count -eq 1 }
+        & $bad '维护者带正文的 APPROVED 有点名回复放行' { param($f) & $reitem $f { param($a) & $approve $a 783 'DLsnows' '命名我再想想，先放行'; $a.Issue += & $reply 1000 '783' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad '维护者空正文的 APPROVED 免回应' { param($f) & $reitem $f { param($a) & $approve $a 784 'DLsnows' } } 'ready'
+        & $bad 'bot 空正文的 APPROVED 免回应' { param($f) & $reitem $f { param($a) & $approve $a 785 'some-bot[bot]' '' 'Bot' } } 'ready'
+        & $bad '外部人先 Request changes 后又 APPROVED：两条都是外部评论' { param($f) & $reitem $f { param($a) $a.Reviews += [pscustomobject]@{ id = 786; state = 'CHANGES_REQUESTED'; body = ''; user = [pscustomobject]@{ login = 'someone'; type = 'User' }; submitted_at = '2026-10-12T04:00:00Z'; html_url = 'u' }; & $approve $a 787 'someone' } } 'needs-user' { param($r) @($r.Needs).Count -eq 2 }
         # review 正文：REST 没有 updated_at，改过的时间来自 GraphQL（Get-RinnePrActivity 补进 updated_at）
         $bodyReview = { param($a, $updated) $a.Reviews += [pscustomobject]@{ id = 780; state = 'COMMENTED'; body = '整体再看看命名'; user = [pscustomobject]@{ login = 'DLsnows'; type = 'User' }; submitted_at = '2026-10-12T05:00:00Z'; updated_at = $updated; html_url = 'u' }; $a.Issue += & $reply 1000 '780' '2026-10-12T05:10:00Z' }
         & $bad '点名回复过的 review 正文放行' { param($f) & $reitem $f { param($a) & $bodyReview $a '2026-10-12T05:00:00Z' } } 'ready'
@@ -1494,6 +1631,29 @@ function Invoke-SelfTest {
         & $bad '回应 pr-agent 评论但早于 updated_at：仍算未回应' { param($f) & $reitem $f { param($a) & $prAgentComment $a 1201 '2026-10-12T05:20:00Z'; $a.Issue += & $reply 1202 '1201' '2026-10-12T05:10:00Z' } }
         & $bad 'pr-agent 的两种通知免回应' { param($f) & $reitem $f { param($a) $a.Issue += & $user 1203 'github-actions[bot]' "<!-- pr-agent:review:full -->`n**[Persistent review]（旧）** updated to latest commit abc1234" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z'; $a.Issue += & $user 1204 'github-actions[bot]' "Failed to generate PR review: timeout`n<!-- pr-agent:improve:summary -->" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'ready'
         & $bad 'pr-agent 标记在前 5 行之外（正文引用）不算，按 bot 免回应' { param($f) & $reitem $f { param($a) $a.Issue += & $user 1205 'github-actions[bot]' "第一行`n第二行`n第三行`n第四行`n第五行`n<!-- pr-agent:review:full -->`n## PR Reviewer Guide" '2026-10-12T05:00:00Z' '2026-10-12T05:00:00Z' } } 'ready'
+        # Kind=bot 不再一律免回应：带【红旗】【重要】【建议】分级字样的（手动 DeepSeek 应急审查之类，作者同样是 github-actions[bot]，
+        # 正文是模型写的文字）和 bot 提交的 review 正文是审查意见，要有后来的 agent 评论在 in-reply-to 里点名；回执、失败通知等纯通知免回应
+        $botNote = { param($a, $id, $body, $updated = '2026-10-12T05:00:00Z', $login = 'github-actions[bot]') $a.Issue += & $user $id $login $body '2026-10-12T05:00:00Z' $updated }
+        $botReview = { param($a, $id, $body) $a.Reviews += [pscustomobject]@{ id = $id; state = 'COMMENTED'; body = $body; user = [pscustomobject]@{ login = 'some-bot[bot]'; type = 'Bot' }; submitted_at = '2026-10-12T05:00:00Z'; html_url = 'u' } }
+        $unanswered = { param($r, $id) @($r.Failures | Where-Object { $_ -match "没有回应的评论：.* $id（bot）" }).Count -eq 1 -and @($r.Needs).Count -eq 0 }
+        & $bad '未回应的 bot 评论带【红旗】（应急审查）：判 not-ready' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "## 审查结果`n`n1. 【红旗】processBlock 里分配内存（src/a.cpp:10）" } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '未回应的 bot 评论带【重要】' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【重要】缺测试" } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '未回应的 bot 评论带【建议】' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【建议】命名可以再短些" } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '点名回应 bot 的审查评论（晚于 updated_at）放行' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【红旗】x"; $a.Issue += & $reply 1302 '1301' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad '回应 bot 的审查评论但早于 updated_at：仍算未回应' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【红旗】x" '2026-10-12T05:20:00Z'; $a.Issue += & $reply 1302 '1301' '2026-10-12T05:10:00Z' } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad '回复没有点名 bot 的审查评论：仍算未回应' { param($f) & $reitem $f { param($a) & $botNote $a 1301 "- 【红旗】x"; $a.Issue += & $reply 1302 $null '2026-10-12T05:10:00Z' '已处理 1301。' } } 'not-ready' { param($r) & $unanswered $r 1301 }
+        & $bad 'bot 提交的 review 正文（没有分级字样）要回应' { param($f) & $reitem $f { param($a) & $botReview $a 1310 '整体建议拆成两个 PR' } } 'not-ready' { param($r) @($r.Failures | Where-Object { $_ -match '没有回应的评论：review 1310（bot）' }).Count -eq 1 }
+        & $bad '点名回应 bot 的 review 正文放行' { param($f) & $reitem $f { param($a) & $botReview $a 1310 '整体建议拆成两个 PR'; $a.Issue += & $reply 1311 '1310' '2026-10-12T05:10:00Z' } } 'ready'
+        & $bad 'bot 的空正文 review 免回应' { param($f) & $reitem $f { param($a) & $botReview $a 1312 '' } } 'ready'
+        & $bad '回执、拒审、head 变了、未完成的通知与 dependabot 的评论免回应' {
+            param($f) & $reitem $f { param($a)
+                & $botNote $a 1320 '已收到 /review，开始审查。'
+                & $botNote $a 1321 '该 PR 修改了 .github/workflows/ 或 .github/actions/，按安全策略不能通过 /review 审查，请维护者本地拉分支人工审。'
+                & $botNote $a 1322 '审查期间 PR 有新的推送（审的是 abc1234，现在是 def5678），本次结论作废，请重新评论 /review。'
+                & $botNote $a 1323 '/review 未完成：本次审查失败、超时或被取消（例如又发了一次 /review），PR 上没有审查结论不代表没有问题。日志：https://x/runs/1'
+                & $botNote $a 1324 'Superseded by #12.' '2026-10-12T05:00:00Z' 'dependabot[bot]'
+            }
+        } 'ready'
         # 外部评论：交用户；external-handled 绑定 head、by = user，以及处理时那条评论的 updated_at
         $external = { param($a, $updated = '2026-10-12T05:00:00Z') $a.Issue += & $user 998 'someone' 'lgtm' '2026-10-12T05:00:00Z' $updated }
         $handledRec = { param($h = $head, $by = 'user', $comments = @([pscustomobject]@{ id = '998'; updated_at = '2026-10-12T05:00:00Z' })) @([pscustomobject]@{ head = $h; by = $by; comments = $comments; note = '已回复' }) }
@@ -1549,6 +1709,76 @@ function Invoke-SelfTest {
         & $bad '处置列是空的：判为拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '') } 'needs-user'
         & $bad '处置写不修复（带提交串）：仍是拒绝' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '不修复' 'd62c5dc') } 'needs-user'
         & $bad '先挂账、后写已修但没附提交：仍要豁免' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '挂账'); & $addRow $f 3 (& $deferCell '【重要】' '已修') } 'needs-user'
+        # 严重行默认挂账：只有「处置列以已修 / 修复 / 已改 / 采纳开头、不含拒绝词、处置列及右侧有提交号」才算清掉，
+        # 别的写法（词表外的词、空处置、没提交号、没有处置列）一律要用户豁免。下面四种措辞各一例，加空处置与只写「采纳」没提交号
+        foreach ($w in '无需修改', '误报', '设计如此', '待修复', '计划修复', '已处理') {
+            & $bad "【重要】处置写「$w」（词表外，没提交号）：默认挂账" { param($f) & $addRow $f 1 (& $deferCell '【重要】' $w) } 'needs-user'
+        }
+        & $bad '【红旗】处置写「误报」：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【红旗】' '误报') } 'needs-user'
+        & $bad '【重要】处置写「待修复」且附了提交串（含「修复」二字）：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '待修复' 'd62c5dc') } 'needs-user'
+        & $bad '【重要】处置写「无需修改」且附了提交串：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '无需修改' 'd62c5dc') } 'needs-user'
+        & $bad '【重要】处置只写「采纳」没有提交号：默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '采纳') } 'needs-user'
+        & $bad '【重要】处置写「已修，其余不改」且附了提交串：含拒绝词，默认挂账' { param($f) & $addRow $f 1 (& $deferCell '【重要】' '已修，其余不改' 'd62c5dc') } 'needs-user'
+        & $bad '【重要】处置写「已修」但提交串在处置列左边：默认挂账' { param($f) & $addRow $f 1 '| abc1234 | bot | 【重要】 | a.mjs:1 | x | 已修 | 理由 |' } 'needs-user'
+        & $bad '【重要】写在没有表头（认不出处置列）的表里，即使写「已修」并附提交串：默认挂账' { param($f) $a = (@($f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' }) | Where-Object { (Get-AgentMarker $_.Body).Round -eq 1 })[0]; $a.Body += "`n`n| 9 | bot | 【重要】 | a.mjs:1 | x | 已修 | d62c5dc |" } 'needs-user'
+        # 清得掉的写法：已修 / 修复 / 已改 / 采纳 / 已采纳（带不带 markdown 标记都行），处置列或右侧附提交号
+        foreach ($w in '已修', '已修复', '修复', '已改', '采纳', '已采纳', '**已修**', '采纳：补了用例') {
+            & $bad "【重要】处置写「$w」并附提交号：清掉，不要豁免" { param($f) & $addRow $f 1 (& $deferCell '【重要】' $w 'd62c5dc') } 'ready'
+        }
+        & $bad '【红旗】处置写「已修」并附提交号：清掉' { param($f) & $addRow $f 1 (& $deferCell '【红旗】' '已修' 'd62c5dc') } 'ready'
+        & $bad '提交号写在处置格里（处置列自己带 sha）：清掉' { param($f) & $addRow $f 1 '| 9 | bot | 【重要】 | a.mjs:1 | x | 已修 d62c5dc | 理由 |' } 'ready'
+        # 处置汇总的内容：bot 总结尾注 red + important = N 时，引用那次运行的处置汇总里，级别为【红旗】【重要】的行至少 N 条，
+        # 不够判红（写清哪次运行、要几条、有几条）。夹具里第 1 轮总结 important=2，它的处置汇总有 3 条严重行
+        $run1 = [string]$base.State.summaries[0].runId
+        $run2 = [string]$base.State.summaries[1].runId
+        $dispOf = { param($f, $run) @($f.Items | Where-Object { $_.Kind -eq 'agent' -and $_.Source -eq 'issue' }) | Where-Object { (Get-AgentMarker $_.Body).Extra['bot-run'] -eq $run } | Select-Object -First 1 }
+        # 处置汇总表的数据行只留编号在 ids 里的（表头、分隔行与表外的文字原样保留）
+        $rowId = { param($line) $m = [regex]::Match($line, '^\| (\d+) \|'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
+        $onlyRows = {
+            param($f, $run, [string[]]$ids)
+            $d = & $dispOf $f $run
+            $d.Body = (($d.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $ids -contains $id }) -join "`n"
+        }
+        $notEnough = { param($run, $n, $have) { param($r) @($r.Failures | Where-Object { $_ -match "运行 $run" -and $_ -match "共 $n 条" -and $_ -match "只有 $have 条" }).Count -eq 1 }.GetNewClosure() }
+        & $bad '尾注 important=2 的一轮，处置汇总只写「已处理。」没有表：判红' { param($f) $d = & $dispOf $f $run1; $d.Body = ($d.Body -split "`n")[0] + "`n已处理。" } 'not-ready' (& $notEnough $run1 2 0)
+        & $bad '尾注 important=2 的一轮，处置汇总的表里只有 1 条严重行：判红' { param($f) & $onlyRows $f $run1 '1', '3', '5' } 'not-ready' (& $notEnough $run1 2 1)
+        & $bad '尾注 important=2 的一轮，处置汇总的表里恰有 2 条严重行：放行' { param($f) & $onlyRows $f $run1 '1', '2', '3', '5' } 'ready'
+        & $bad '尾注 important=2 的一轮，把同一条严重行复制两遍凑数：只算 1 条，判红' { param($f) & $onlyRows $f $run1 '1', '3'; $d = & $dispOf $f $run1; $row = @($d.Body -split "`n" | Where-Object { (& $rowId $_) -eq '1' }); $d.Body += "`n$($row[0])" } 'not-ready' (& $notEnough $run1 2 1)
+        & $bad '尾注 important=1 的一轮，处置汇总里没有严重行：判红' { param($f) $f.State.summaries[1].important = 1 } 'not-ready' (& $notEnough $run2 1 0)
+        & $bad '尾注 red=1 的一轮，处置汇总里没有严重行：判红' { param($f) $f.State.summaries[1].red = 1 } 'not-ready' (& $notEnough $run2 1 0)
+        & $bad '尾注 red=0 important=0 的一轮，处置汇总的表里没有严重行：放行' { param($f) & $onlyRows $f $run2 @() } 'ready'
+        & $bad '早先一条总结的尾注不可用（ok=false）：按正文的逐条意见数核对，处置汇总只写「已处理。」判红' { param($f) $f.State.summaries[0].ok = $false; $d = & $dispOf $f $run1; $d.Body = ($d.Body -split "`n")[0] + "`n已处理。" } 'not-ready' (& $notEnough $run1 2 0)
+        & $bad '严重行分写在两条引用同一次运行的处置评论里：合计够 N 条，放行' {
+            param($f)
+            $second = Copy-RinneObject (& $dispOf $f $run1)
+            $second.Id = '9901'
+            & $onlyRows $f $run1 '1', '3', '5'
+            $second.Body = (($second.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $id -eq '2' }) -join "`n"
+            $f.Items = @($f.Items) + @($second)
+        } 'ready'
+        # 级别格收紧：级别列存在时，只有以「【红旗】」「【重要】」「红旗」「重要」开头的单元格才是严重行。
+        # 「汇总（红旗 0、重要 0、建议 0）」「信息：重要度低」只是子串命中，不是严重行（以前会被当成严重行：既冒出一条挂账，又能给第 2 项凑条数）
+        foreach ($lv in '汇总（红旗 0、重要 0、建议 0）', '总结', '信息：重要度低', '建议（重要的事另列）', '红旗 0', '红旗0', '重要度低', '重要性一般', '重要 0') {
+            & $bad "级别格写「$lv」、处置「不改」：不是严重行，不要用户豁免" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'ready'
+        }
+        # 数字前瞻只排除零计数：「重要 1」「红旗 3」当编号写的照旧算严重行；「重要 05」「重要 10」0 后面还有数字，也算
+        foreach ($lv in '【红旗】', '【重要】', '红旗', '重要', '重要 / 建议', '**重要**', '重要（既有）', '【重要】度', '【红旗】 0',
+                '重要 1', '重要 2', '红旗 3', '重要 10', '重要 05', '红旗 05') {
+            & $bad "级别格写「$lv」、处置「不改」：是严重行，挂账" { param($f) & $addRow $f 1 (& $deferCell $lv '不改') } 'needs-user'
+        }
+        & $bad '尾注 important=2 的一轮，处置汇总只有 1 条真严重行，再加一行级别写「汇总（红旗 0、重要 0、建议 0）」凑数：仍判红' { param($f) & $onlyRows $f $run1 '1', '3', '5'; & $addRow $f 1 (& $deferCell '汇总（红旗 0、重要 0、建议 0）' '无需另外动作' '—') } 'not-ready' (& $notEnough $run1 2 1)
+        # 处置汇总只认我方在 issue comment 里发的：外部人伪造的、挂着同一个 bot-run 标记的「处置汇总」，或我方 inline 评论里带标记的严重行，都不能给条数凑数
+        $padRow = {
+            param($f, [scriptblock]$mark)
+            $pad = Copy-RinneObject (& $dispOf $f $run1)
+            $pad.Id = '9950'
+            $pad.Body = (($pad.Body -split "`n") | Where-Object { $id = & $rowId $_; -not $id -or $id -eq '2' }) -join "`n"
+            & $mark $pad
+            & $onlyRows $f $run1 '1', '3', '5'
+            $f.Items = @($f.Items) + @($pad)
+        }
+        & $bad '尾注 important=2 的一轮，外部人伪造一条带 bot-run 标记的处置汇总来凑严重行数：不算，仍判红' { param($f) & $padRow $f { param($p) $p.Kind = 'external'; $p.Author = 'someone' } } 'not-ready' (& $notEnough $run1 2 1)
+        & $bad '尾注 important=2 的一轮，我方 inline 评论里带 bot-run 标记的严重行：不是处置汇总，不算，仍判红' { param($f) & $padRow $f { param($p) $p.Source = 'review-comment' } } 'not-ready' (& $notEnough $run1 2 1)
         & $bad 'required check 不是 success' { param($f) $f.Checks['docs-truth'].conclusion = 'failure' }
         & $bad '缺 gates json' { param($f) $f.Gates = $null }
         & $bad 'gates 的 sha 不是 head' { param($f) $f.Gates.sha40 = 'e' * 40 }
@@ -2152,14 +2382,19 @@ function Invoke-SelfTest {
         Set-RinneLockImpl { param($name, $sb) $locks.Add($name); & $sb }
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
         Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
+        $tips = @{ Remote = $head; RemoteCode = 0; Local = $head; LocalGone = $false; LeaseFails = $false; RefMoved = $false }
         $after = [ordered]@{
             'pulls/3$'                       = { $merged }
             'merge-base --is-ancestor'       = { '' }
             'check-commits\.mjs commits --range' = { @{ Code = 0; Out = 'check-commits commits：通过'; Err = '' } }
             ' log -1 --format=%B'            = { $sq }
             ' symbolic-ref --quiet --short HEAD' = { $wtBranch }
-            'ls-remote --exit-code'          = { "$('a' * 40)`trefs/heads/feat/review-bot" }
-            ' push origin --delete refs/heads/feat/review-bot' = { '' }
+            # 远端 / 本地子支线的尖：默认就是 PR 合并时的 head；用例改它们造「分支上有没合入的提交」。RemoteCode 2 是 ls-remote 找不到
+            'ls-remote --exit-code'          = { if ($tips.RemoteCode -eq 0) { "$($tips.Remote)`trefs/heads/feat/review-bot" } else { @{ Code = $tips.RemoteCode; Out = ''; Err = 'x' } } }
+            # 远端删除带 lease（旧值 = PR 合并时的 head）：核对之后远端尖又变了，git 拒绝（stale info）。LeaseFails 造这种情形
+            ' push --force-with-lease=refs/heads/feat/review-bot:[0-9a-f]{40} origin --delete refs/heads/feat/review-bot$' = {
+                if ($tips.LeaseFails) { @{ Code = 1; Out = ''; Err = ' ! [rejected]        (delete) -> feat/review-bot (stale info)' } } else { '' }
+            }
             # 假的 worktree remove：挪进自测的临时目录（不递归删参数给的路径），最后随临时目录一起删。挪之前核对给的路径按真实路径
             # 在这个临时目录里面，不在就抛错、不动它（Get-RinneRoot 的取值以后变了，也挪不到真的 wt/ 下的目录）
             ' worktree remove '              = {
@@ -2167,8 +2402,16 @@ function Invoke-SelfTest {
                 if (-not (Test-RinneInTempDir -Path $argv[-1] -Dir $tmp)) { throw "假的 worktree remove 只挪自测临时目录里面的路径：$($argv[-1])" }
                 Move-Item -LiteralPath $argv[-1] -Destination (Join-Path $tmp "removed-$([guid]::NewGuid().ToString('N'))"); ''
             }
-            'rev-parse --verify --quiet refs/heads/feat/review-bot' = { '' }
-            ' branch -D feat/review-bot'     = { '' }
+            'rev-parse --verify --quiet refs/heads/feat/review-bot' = { if ($tips.LocalGone) { @{ Code = 1; Out = ''; Err = '' } } else { $tips.Local } }
+            # 本地分支由 git 比对旧值再删：核对之后它又移动了，update-ref 拒绝。RefMoved 造这种情形
+            ' update-ref -d refs/heads/feat/review-bot [0-9a-f]{40}$' = {
+                if ($tips.RefMoved) { @{ Code = 1; Out = ''; Err = 'error: cannot lock ref ''refs/heads/feat/review-bot'': is at x but expected y' } } else { '' }
+            }
+            # 旧写法（不带 lease 的 push --delete、branch -D、不带旧值的 update-ref）：放行并留在日志里，由下面的用例断言它们没出现。
+            # 没有这三条，代码改回旧写法时假 git 只会报「fixture 里没有」、整组自测崩掉，看不出是哪条断言红
+            ' push .*--delete '              = { '' }
+            ' branch -D '                    = { '' }
+            ' update-ref -d '                = { '' }
             '^git .* fetch '                 = { '' }
         }
         $log.Clear()
@@ -2176,12 +2419,70 @@ function Invoke-SelfTest {
         New-Item -ItemType Directory -Force -Path $tip | Out-Null
         Set-Content -LiteralPath (Join-Path $tip '.git') -Value 'gitdir: x'
         $line = Invoke-After -Pr 3 -CardId $cid
+        # 删除命令的参数：远端 push 带 --force-with-lease=<ref>:<合并时的 head> 与 --delete，本地 update-ref -d <ref> <合并时的 head>
+        $leaseLine = "push --force-with-lease=refs/heads/feat/review-bot:${head} origin --delete refs/heads/feat/review-bot"
+        $updateLine = "update-ref -d refs/heads/feat/review-bot ${head}"
         Add-RinneCase $cases '-After：持 merge 锁；回读通过后删远端子支线、持 git 锁移除 worktree 与本地分支' $false (-not (
-                $line -match '已合入 fffffff' -and @($log | Where-Object { $_ -match 'push origin --delete refs/heads/feat/review-bot' }).Count -eq 1 -and
+                $line -match '已合入 fffffff' -and @($log | Where-Object { $_ -match ([regex]::Escape($leaseLine) + '$') }).Count -eq 1 -and
+                @($log | Where-Object { $_ -match ([regex]::Escape($updateLine) + '$') }).Count -eq 1 -and
+                -not @($log | Where-Object { $_ -match ' branch -D | push origin --delete ' }).Count -and
                 @($log | Where-Object { $_ -match "worktree remove $([regex]::Escape((Join-Path (Get-RinneRoot) "wt/$cid")))$" }).Count -eq 1 -and
                 $locks[0] -eq 'merge' -and @($locks | Where-Object { $_ -eq 'git' }).Count -ge 2))
         Add-RinneCase $cases '-After：一并强制移除这个 PR 的 wt/tip-3' $false (-not (
                 @($log | Where-Object { $_ -match "worktree remove --force $([regex]::Escape($tip))$" }).Count -eq 1 -and -not (Test-Path -LiteralPath $tip)))
+        # 删之前先核对子支线的尖：远端或本地分支上有没合入的提交（尖不等于 PR 合并时的 head）就抛错，什么都不删（远端分支、worktree、
+        # wt/tip-3、本地分支都留着），错误信息写清两个 sha。worktree 与 wt/tip-3 每个用例前重建
+        $remake = {
+            New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid"), $tip | Out-Null
+            Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
+            Set-Content -LiteralPath (Join-Path $tip '.git') -Value 'gitdir: x'
+        }
+        $tryAfter = { $log.Clear(); try { Invoke-After -Pr 3 -CardId $cid | Out-Null; $null } catch { $_.Exception.Message } }
+        $nothingDeleted = {
+            (Test-Path -LiteralPath (Join-Path $tmp "wt/$cid")) -and (Test-Path -LiteralPath $tip) -and
+            -not @($log | Where-Object { $_ -match ' push .*--delete | worktree remove | update-ref -d | branch -D ' }).Count
+        }
+        $extra = 'b' * 40
+        & $remake
+        $tips.Remote = $extra
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：远端子支线比 PR head 多一个提交：抛错、什么都不删、错误信息写清两个 sha' $true ([bool]($err -and $err.Contains($extra) -and $err.Contains($head) -and (& $nothingDeleted)))
+        $tips.Remote = $head; $tips.Local = $extra
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：本地子支线比 PR head 多一个提交（远端对得上）：抛错、什么都不删（远端分支与 worktree 都留着）、错误信息写清两个 sha' $true ([bool]($err -and $err.Contains($extra) -and $err.Contains($head) -and (& $nothingDeleted)))
+        $tips.Local = $head; $tips.RemoteCode = 128
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：ls-remote 出错（退出码不是 0 也不是 2）：核对不了远端分支尖，抛错、什么都不删' $true ([bool]($err -and (& $nothingDeleted)))
+        $tips.RemoteCode = 2
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：远端子支线已经删了（ls-remote 找不到）：只清本地（worktree、wt/tip-3、本地分支）' $false (-not (
+                -not $err -and -not @($log | Where-Object { $_ -match ' push .*--delete ' }).Count -and
+                @($log | Where-Object { $_ -match ([regex]::Escape($updateLine) + '$') }).Count -eq 1 -and -not (Test-Path -LiteralPath $tip)))
+        $tips.RemoteCode = 0
+        $tips.LocalGone = $true
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：本地分支已经不在（远端对得上）：删远端、移除 worktree，不再 update-ref -d' $false (-not (
+                -not $err -and @($log | Where-Object { $_ -match ([regex]::Escape($leaseLine) + '$') }).Count -eq 1 -and
+                -not @($log | Where-Object { $_ -match ' update-ref -d | branch -D ' }).Count -and -not (Test-Path -LiteralPath $tip)))
+        $tips.LocalGone = $false
+        # 核对之后远端尖又变了（别人推了新提交）：lease 失败，git 拒绝删除；抛错，而且发生在移除 worktree 之前，什么都没删
+        $tips.LeaseFails = $true
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：核对之后远端尖又变了（lease 失败）：抛错，worktree、wt/tip-3、本地分支都留着' $true ([bool]($err -and @($log | Where-Object { $_ -match ' push --force-with-lease=' }).Count -eq 1 -and
+                (Test-Path -LiteralPath (Join-Path $tmp "wt/$cid")) -and (Test-Path -LiteralPath $tip) -and
+                -not @($log | Where-Object { $_ -match ' worktree remove | update-ref -d | branch -D ' }).Count))
+        $tips.LeaseFails = $false
+        # 核对之后本地分支又移动了：update-ref 带旧值，git 拒绝，抛错（此时远端与 worktree 已经按核对过的尖处理完，本地分支留着）
+        $tips.RefMoved = $true
+        & $remake
+        $err = & $tryAfter
+        Add-RinneCase $cases '-After：核对之后本地分支又移动了（update-ref 的旧值不符）：抛错，本地分支留着' $true ([bool]($err -and @($log | Where-Object { $_ -match ' update-ref -d ' }).Count -eq 1))
+        $tips.RefMoved = $false
         New-Item -ItemType Directory -Force -Path (Join-Path $tmp "wt/$cid") | Out-Null
         Set-Content -LiteralPath (Join-Path $tmp "wt/$cid/.git") -Value 'gitdir: x'
         $wtBranch = 'feat/other-card'

@@ -73,14 +73,20 @@ function ghLogin(env) {
     return (run("gh", ["api", "user", "--jq", ".login"], { ...env, GH_TOKEN: token }).stdout || "").trim();
 }
 
+/**
+ * gitleaks 自己跑 git log -p。git log -p 默认不给合并提交出补丁，只由合并提交（解冲突时）带入的内容就扫不到，
+ * 所以加 --diff-merges=first-parent（合并提交对第一父提交出补丁）；本机的外部 diff 与 textconv 驱动会改写补丁，一并关掉。
+ */
+export function gitleaksLogOpts(revArgs) {
+    return [...revArgs, "--diff-merges=first-parent", "--no-ext-diff", "--no-textconv"].join(" ");
+}
+
 function gitleaksCheck(revArgs, cwd, env) {
     const bin = localSetting("RINNE_GITLEAKS", "rinne.gitleaks", { env, cwd }) || "gitleaks";
     const want = fs.readFileSync(path.join(ROOT, ".gitleaks-version"), "utf8").trim();
     const have = (run(bin, ["version"], env).stdout || "").trim().replace(/^v/, "");
     if (have !== want) return [`gitleaks 版本应为 ${want}（.gitleaks-version），实际 ${have || "找不到"}`];
-    // gitleaks 自己跑 git log -p；本机的外部 diff 与 textconv 驱动会改写补丁，一并关掉
-    const logOpts = [...revArgs, "--no-ext-diff", "--no-textconv"].join(" ");
-    const args = ["git", "--no-banner", "--no-color", "--redact", "-v", `--log-opts=${logOpts}`, "."];
+    const args = ["git", "--no-banner", "--no-color", "--redact", "-v", `--log-opts=${gitleaksLogOpts(revArgs)}`, "."];
     const r = spawnSync(bin, args, { cwd, env, encoding: "utf8" });
     if (r.status === 0) return [];
     return [
@@ -172,6 +178,18 @@ export function selfTest() {
         threw = true;
     }
     cases.push({ label: "输入：格式不对的行判红", bad: true, passed: threw });
+    // git log -p 默认不给合并提交出补丁：log-opts 里缺 --diff-merges=first-parent 时，只由合并提交带入的内容 gitleaks 看不到
+    const opts = gitleaksLogOpts([z, "--not", "--remotes=origin"]);
+    t(
+        "gitleaks：log-opts 带 --diff-merges=first-parent",
+        false,
+        / --diff-merges=first-parent(?: |$)/.test(opts) ? [] : ["x"],
+    );
+    t(
+        "gitleaks：log-opts 保留区间、--no-ext-diff 与 --no-textconv",
+        false,
+        opts.startsWith(`${z} --not --remotes=origin `) && opts.endsWith(" --no-ext-diff --no-textconv") ? [] : ["x"],
+    );
 
     // 端到端：经真实的 sh 外壳推到本地裸仓。坏提交在不挂 hook 的临时仓里做出来，推送时才挂 hook。
     const gitleaks = localSetting("RINNE_GITLEAKS", "rinne.gitleaks", { cwd: ROOT }) || "gitleaks";
@@ -231,6 +249,25 @@ export function selfTest() {
         repo.git([...other, "tag", "-a", "v0.0.2", "-m", `发布 ${FAKE_NEEDLE}`]);
         push("附注 tag 的 tagger 与消息不合规", true, "refs/tags/v0.0.2", [], allow);
         push("删除 feat/ 分支", false, ":refs/heads/feat/ok");
+        // 只由合并提交带入的凭据：两条分支改同一行，合并时手工解冲突写进去；两个父提交与它们各自的补丁都是干净的。
+        // git log -p 默认不给合并提交出补丁，gitleaks 的 log-opts 里没有 --diff-merges=first-parent 就扫不到
+        commit("docs/m.txt", "a\nb\nc\n", `docs(test): 合并用的底稿${signed}`);
+        repo.git(["checkout", "-q", "-b", "side"]);
+        commit("docs/m.txt", "a\nside\nc\n", `docs(test): 侧支改一行${signed}`);
+        repo.git(["checkout", "-q", "main"]);
+        commit("docs/m.txt", "a\nmain\nc\n", `docs(test): 主支改同一行${signed}`);
+        const before = repo.git(["rev-parse", "HEAD"]).trim();
+        const mergeWith = (line) => {
+            repo.git(["reset", "-q", "--hard", before]);
+            repo.git(["merge", "-q", "side"], { allowFail: true }); // 同一行都改了：冲突，停在待解决
+            repo.write("docs/m.txt", `a\n${line}\nc\n`);
+            repo.git(["add", "."]);
+            repo.git(["commit", "-q", "-m", "Merge branch 'side'"]);
+        };
+        mergeWith(`auth = "${leak}"`);
+        push("凭据只在合并提交里", true, "HEAD:refs/heads/feat/merge");
+        mergeWith("both");
+        push("合并提交里没有凭据（对照：合并提交本身不被别的规则拦）", false, "HEAD:refs/heads/feat/merge-ok");
     } finally {
         repo.cleanup();
         remote.cleanup();

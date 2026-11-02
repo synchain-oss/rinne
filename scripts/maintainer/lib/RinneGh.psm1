@@ -601,9 +601,9 @@ function Get-RinneRunLog {
   把四个来源摊成一张表。Kind：agent（有写权限且首行带 agent 标记）、bot-summary、bot、pr-agent（github-actions[bot]
   发的 pr-agent 审查输出，判据见 Test-RinnePrAgentComment）、user（有写权限、没有标记：维护者本人的意见）、
   external（既不是 bot 也没有写权限；账号已删除、login 为空的也算）。
-  review comment 带上所在线程、是否已 resolve 与所属 review。review 只收 COMMENTED 与 CHANGES_REQUESTED（正文为空的也收：
-  inline 评论都挂在一个空正文的 COMMENTED review 下，「Request changes」也可以不写正文）；空正文、只装着我方回复的 review
-  算 agent 的。CHANGES_REQUESTED 记下同一作者之后有没有 APPROVED。
+  review comment 带上所在线程、是否已 resolve 与所属 review。review 收 COMMENTED、CHANGES_REQUESTED 与 APPROVED（正文为空的也收：
+  inline 评论都挂在一个空正文的 COMMENTED review 下，「Request changes」「Approve」也可以不写正文；外部人的 Approve 同样
+  是外部评论，要交用户）；空正文、只装着我方回复的 review 算 agent 的。CHANGES_REQUESTED 记下同一作者之后有没有 APPROVED。
   IsNew：updated_at 晚于 Since（追踪评论是原地编辑的，按更新时间判新）。InReplyTo：agent 标记里 in-reply-to 列出的编号。
 #>
 function Get-RinneCommentItems {
@@ -648,7 +648,7 @@ function Get-RinneCommentItems {
     $reviews = @($Activity.Reviews)
     foreach ($c in $reviews) {
         $state = [string](Get-RinneProp $c 'state')
-        if (@('COMMENTED', 'CHANGES_REQUESTED') -notcontains $state) { continue }
+        if (@('COMMENTED', 'CHANGES_REQUESTED', 'APPROVED') -notcontains $state) { continue }
         $rid = [string]$c.id
         $inline = @($items | Where-Object { $_.Source -eq 'review-comment' -and $_.ReviewId -eq $rid })
         $author = [string](Get-RinneProp (Get-RinneProp $c 'user') 'login')
@@ -663,15 +663,31 @@ function Get-RinneCommentItems {
 }
 
 <#
+  Kind=bot 的评论里哪些是审查意见（要回应），哪些是纯通知（免回应）。bot 评论里没有可认的 workflow 标记，
+  手动跑的 DeepSeek 应急审查与 /review 的回执都由 github-actions[bot] 发，所以只能认内容：
+  - 正文带【红旗】【重要】【建议】任一分级字样（审查 prompt 规定的分级写法，模型写出的审查意见都带）；
+  - bot 提交的 review 且正文非空（review 本身就是审查；空正文的只是 inline 评论的壳，那些评论各自判）。
+  其余（回执、拒审与 head 变了、未完成的通知，pr-agent 的两种通知，dependabot 之类）是纯通知。
+#>
+function Test-RinneBotReview {
+    param([Parameter(Mandatory)]$Item)
+    if ($Item.Body -match '【(?:红旗|重要|建议)】') { return $true }
+    return $Item.Source -eq 'review' -and [bool]$Item.Body.Trim()
+}
+
+<#
   一条评论有没有得到我方回应。「之后」一律对比原评论的 updated_at：原评论在我方回复之后又改过，就算没回应。
-  - agent 自己的、非总结的 bot 通知（/review 的回执之类）：不需要；
+  - agent 自己的评论：不需要；
+  - bot 的纯通知（/review 的回执、拒审与失败通知、pr-agent 的两种通知、dependabot 的评论）：不需要；
+    bot 的审查意见（判据见 Test-RinneBotReview）：与 pr-agent 的审查输出同一条规则，要有后来的 agent 评论在 in-reply-to 里点名；
   - bot 审查总结：之后有处置汇总引用它的运行编号；
   - pr-agent 的审查输出：与维护者的意见相同，要有后来的 agent 评论在 in-reply-to 里点名它；
   - review comment：线程里有我方回复的，要有一条晚于它的最后一次修改；维护者本人的 inline 评论必须有这样一条回复，
     只 resolve 不算；bot 的 inline 评论在处置汇总里逐条处置过，线程里没有我方回复的，线程已 resolve 也算；
   - 其余（issue comment、review 正文、CHANGES_REQUESTED）：我方评论的 agent 标记里用 in-reply-to 点名了它
     （-Reply 自动带上），不认正文里碰巧出现的数字。空正文、只装着 inline 评论的 review 看它那些评论；
-    CHANGES_REQUESTED 也可以由同一作者之后的 APPROVED 解除（驳回的 review 不再出现在表里）。
+    CHANGES_REQUESTED 也可以由同一作者之后的 APPROVED 解除（驳回的 review 不再出现在表里）；
+    APPROVED 的 review 带正文（且没有 agent 标记）的要点名回复，空正文的没有可回应的内容，免回应。
 #>
 function Test-RinneResponded {
     param([Parameter(Mandatory)]$Item, [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, $State)
@@ -693,7 +709,7 @@ function Test-RinneResponded {
         if ($replies.Count -or $Item.Kind -ne 'bot') { return $explicit -or $later }
         return $explicit -or [bool]$Item.Resolved
     }
-    if ($Item.Kind -eq 'bot') { return $true }
+    if ($Item.Kind -eq 'bot') { return $explicit -or -not (Test-RinneBotReview $Item) }
     if ($Item.Source -eq 'review') {
         if ($Item.State -eq 'CHANGES_REQUESTED') { return $explicit -or [bool]$Item.ApprovedLater }
         if (-not $Item.Body.Trim() -and @($Item.Comments).Count) {
@@ -703,16 +719,35 @@ function Test-RinneResponded {
             }
             return $true
         }
+        if ($Item.State -eq 'APPROVED' -and -not $Item.Body.Trim()) { return $true }
     }
     return $explicit
 }
 
-<# 当前 head 上各个 check 的最新一次结果：name → { status; conclusion; details_url }。 #>
+<#
+  当前 head 上各个 check 的最新一次结果：name → { status; conclusion; details_url }。同名多次取 id 最大的那次。
+  默认不分触发事件；合并判据用 -PullRequestEventOnly：只认 pull_request 事件触发、head sha 等于 $Sha 的运行产生的 check，
+  同名多次取其中最新的。手动 dispatch、push 等事件触发的同名 check 不算，否则晚到的一次绿能盖掉 PR 事件上的红。
+  check run 自己不带触发事件，check suite 也没有事件字段，所以经 details_url 里的运行编号对到
+  actions/runs?event=pull_request&head_sha=$Sha 列出的运行（事件与 head sha 在本地再核一遍，不全信接口的过滤）；
+  对不到的（没有运行编号的 check，比如不是 Actions 发的）不算。取不到运行列表就抛错，不退回不分事件的取法。
+#>
 function Get-RinneCheckRuns {
-    param([Parameter(Mandatory)][string]$Sha)
+    param([Parameter(Mandatory)][string]$Sha, [switch]$PullRequestEventOnly)
     $pages = Get-RinneApi "repos/$($script:Repo)/commits/$Sha/check-runs?per_page=100" -Paginate
+    $prRuns = @{}
+    if ($PullRequestEventOnly) {
+        $runPages = Get-RinneApi "repos/$($script:Repo)/actions/runs?event=pull_request&head_sha=$Sha&per_page=100" -Paginate
+        foreach ($w in @($runPages | ForEach-Object { $_.workflow_runs } | ForEach-Object { $_ })) {
+            if ([string](Get-RinneProp $w 'event') -eq 'pull_request' -and [string](Get-RinneProp $w 'head_sha') -eq $Sha) { $prRuns[[string]$w.id] = $true }
+        }
+    }
     $latest = @{}
     foreach ($c in @($pages | ForEach-Object { $_.check_runs } | ForEach-Object { $_ })) {
+        if ($PullRequestEventOnly) {
+            $runId = if ([string](Get-RinneProp $c 'details_url') -match '/actions/runs/(\d+)(?:/|$)') { $Matches[1] } else { '' }
+            if (-not $runId -or -not $prRuns.ContainsKey($runId)) { continue }
+        }
         if (-not $latest.ContainsKey($c.name) -or [long]$c.id -gt [long]$latest[$c.name].id) { $latest[$c.name] = $c }
     }
     return $latest
