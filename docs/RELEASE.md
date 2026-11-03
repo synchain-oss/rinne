@@ -24,8 +24,9 @@ rc 不改 CMakeLists。其余一律拒（`-beta.1`、`-RC.1`、无前导 `v`、�
 4. **CHANGELOG**：有与本次版本对应的小节（`## [0.9.0]` 或 `## [0.9.0-rc.1]`，整行只有版本号）。
 5. **源码**：正式版的源码与最后一个 rc 相同。最后一个 rc 是 `origin/prod` 上编号最大、形态严格的
    `vX.Y.Z-rc.N`，且是正式版提交的祖先；野标签与不在 prod 上的 rc 不算。比对范围是 `src`、`web`、`cmake`、
-   `CMakeLists.txt`、`third_party`、`tests`，外加 `.juce-commit`、`.juce-version`；只差文档、`packaging/`、
-   `scripts/` 不算。rc 不受这一条约束。
+   `CMakeLists.txt`、`third_party`、`tests`，外加会编进二进制的 `presets`（工厂预设）与仓根 `LICENSE`，以及
+   `.juce-commit`、`.juce-version`；只差文档、`packaging/`、`scripts/`，或只差只进发行 zip 的 `LICENSES/`、
+   `THIRD-PARTY-NOTICES.md`，都不算。rc 不受这一条约束。
 
 `-SelfTest` 在临时 git 仓里造 prod 与非 prod 的提交、各种 tag 和改动，把整个门禁（含取数层）走一遍。
 

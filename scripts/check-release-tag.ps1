@@ -11,8 +11,9 @@
     ③ 来源：tag 指向的提交必须是 origin/prod 的祖先。tag 只打在 prod 上。
     ④ CHANGELOG：要有与本次版本对应的小节（`## [1.2.3]` 或 `## [1.2.3-rc.1]`）。
     ⑤ 源码：正式版的源码必须与最后一个 rc 相同（src、web、cmake、CMakeLists.txt、third_party、
-       tests，以及决定二进制内容的 JUCE 钉版文件 .juce-commit / .juce-version，任一有差异就红），
-       只差文档不算差异。rc 不受这一条约束。「最后一个 rc」只认 v<X.Y.Z>-rc.<数字> 这种严格形态、
+       tests，会编进二进制的 presets 与仓根 LICENSE，以及决定二进制内容的 JUCE 钉版文件
+       .juce-commit / .juce-version，任一有差异就红），只差文档不算差异。rc 不受这一条约束。
+       「最后一个 rc」只认 v<X.Y.Z>-rc.<数字> 这种严格形态、
        提交在 origin/prod 上、数字最大的那个，且必须是正式版提交的祖先（或同一个提交）；
        形态不对的野标签（v1.2.3-rc.x、v1.2.3-rc.1-fix）与不在 prod 上的 rc 一律不当 rc 用。
   判据分两层：
@@ -41,8 +42,11 @@ try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catc
 
 # 正式版与最后一个 rc 之间要逐字相同的路径。文档不在里面：发正式版允许改文档。
 # .juce-commit / .juce-version 是决定二进制内容的钉版文件（升级 JUCE 是许可事件），所以也算源码。
+# presets 与 LICENSE 不在 src 下却会编进二进制：presets/factory/*.json 经 RinnePresetAssets 链进 Input，
+# 仓根 LICENSE 经两个插件的 LICENSE_FILE 嵌进界面资源（「查看许可证」读它）。
+# 只进发行 zip 的 LICENSES/、THIRD-PARTY-NOTICES.md 与 INSTALL.txt 按文档口径不算；
 # packaging/ 与 scripts/ 不在里面：发正式版允许改打包脚本。
-$SourceParityPaths = @('src', 'web', 'cmake', 'CMakeLists.txt', 'third_party', 'tests', '.juce-commit', '.juce-version')
+$SourceParityPaths = @('src', 'web', 'cmake', 'CMakeLists.txt', 'third_party', 'tests', 'presets', 'LICENSE', '.juce-commit', '.juce-version')
 
 <# CHANGELOG 里有没有与版本对应的小节（`## [1.2.3]` 或 `## [1.2.3-rc.1]`）。 #>
 function Test-RinneChangelogSection([string]$ChangelogText, [string]$Version) {
@@ -352,6 +356,11 @@ if ($SelfTest) {
       'CHANGELOG.md'   = $Changelog
       'src/core/a.cpp' = "int a() { return 1; }`n"
       'docs/guide.md'  = "guide v1`n"
+      # 与仓里的真实布局对齐：预设在 presets/factory 下，LICENSE 在仓根，LICENSES/ 与 NOTICES 是只进 zip 的合规文件
+      'presets/factory/01-init.json' = "{ `"name`": `"init`" }`n"
+      'LICENSE'        = "GNU GENERAL PUBLIC LICENSE v3`n"
+      'LICENSES/GPL-3.0-or-later.txt' = "gpl text`n"
+      'THIRD-PARTY-NOTICES.md' = "notices v1`n"
       '.juce-commit'   = ('a' * 40) + "`n"
       '.juce-version'  = "8.0.8`n"
     }
@@ -366,14 +375,25 @@ if ($SelfTest) {
     'CMakeLists.txt' = @{ 'CMakeLists.txt' = "cmake_minimum_required(VERSION 3.22)`nproject(Rinne VERSION 1.2.3 LANGUAGES CXX)`n# changed`n" }
     'third_party'    = @{ 'third_party/x/y.txt' = "changed`n" }
     'tests'          = @{ 'tests/t.cpp' = "// changed`n" }
+    'presets'        = @{ 'presets/factory/01-init.json' = "{ `"name`": `"changed`" }`n" }
+    'LICENSE'        = @{ 'LICENSE' = "GNU GENERAL PUBLIC LICENSE v3, changed`n" }
     '.juce-commit'   = @{ '.juce-commit' = ('b' * 40) + "`n" }
     '.juce-version'  = @{ '.juce-version' = "8.0.9`n" }
   }
   foreach ($k in $parityTouch.Keys) {
     & $check "比对范围 `$SourceParityPaths 含 '$k'" $true ($SourceParityPaths -contains $k)
   }
-  $docsLike = @('docs', 'packaging', 'scripts', 'CHANGELOG.md') | Where-Object { $SourceParityPaths -contains $_ }
-  & $check '比对范围不含文档、打包脚本与 scripts（发正式版允许改它们）' $true (@($docsLike).Count -eq 0)
+  # 表本身的下限：独立写出的清单，不从 $SourceParityPaths 或 $parityTouch 生成。
+  # 只删表里的一项，上面按 $parityTouch 的守卫和改动夹具会红；连夹具一起删，这里还会红。
+  # presets 与 LICENSE 是编进二进制的非 src 输入，漏了它们，rc 之后改预设或许可证再发正式版闸门仍判绿。
+  $parityFloor = @('src', 'web', 'cmake', 'CMakeLists.txt', 'third_party', 'tests', 'presets', 'LICENSE', '.juce-commit', '.juce-version')
+  foreach ($m in $parityFloor) {
+    & $check "比对范围的下限含 '$m'" $true ($SourceParityPaths -contains $m)
+    & $check "下限里的 '$m' 有对应的改动夹具" $true ($parityTouch.Contains($m))
+  }
+  # 这些路径只进发行 zip 或只是文档，发正式版允许改：LICENSES/ 与 NOTICES 进了表就等于把合规文件冻死。
+  $docsLike = @('docs', 'packaging', 'scripts', 'CHANGELOG.md', 'LICENSES', 'THIRD-PARTY-NOTICES.md', 'upstream') | Where-Object { $SourceParityPaths -contains $_ }
+  & $check '比对范围不含文档、打包脚本、scripts 与只进 zip 的合规文件（发正式版允许改它们）' $true (@($docsLike).Count -eq 0)
 
   $tc = [System.Collections.Generic.List[hashtable]]::new()
   # 每格：Name（仓目录名）/ Tag（被检查的 tag）/ Setup（建仓、打 tag、摆 origin/prod）/ WantOk / WantKind / WantMsg（红格的原因关键词）/
@@ -403,6 +423,37 @@ if ($SelfTest) {
       Setup = { param($r)
         $c0 = Add-FxCommit $r (Get-FxBase); New-FxTag $r 'v1.2.3-rc.1' $c0
         $c1 = Add-FxCommit $r @{ 'packaging/m.txt' = "m`n"; 'scripts/p.ps1' = "p`n" }
+        Set-FxProd $r $c1; New-FxTag $r 'v1.2.3' $c1 } })
+  # 只差文档树：docs/ 下改一份、新增一份、嵌套目录里再放一份，都放行。
+  $tc.Add(@{ Name = 'final-docs-tree-only'; Tag = 'v1.2.3'; WantOk = $true; WantKind = 'final'
+      Setup = { param($r)
+        $c0 = Add-FxCommit $r (Get-FxBase); New-FxTag $r 'v1.2.3-rc.1' $c0
+        $c1 = Add-FxCommit $r @{ 'docs/guide.md' = "guide v3`n"; 'docs/RELEASE.md' = "release`n"; 'docs/design/notes.md' = "notes`n" }
+        Set-FxProd $r $c1; New-FxTag $r 'v1.2.3' $c1 } })
+  # 只进 zip 的合规文件：LICENSES/、NOTICES、upstream 登记随时可改。这一格同时钉住表里的 'LICENSE' 是精确路径，
+  # 没有被写成 'LICENSE*' 之类把 LICENSES/ 一起吞进去。
+  $tc.Add(@{ Name = 'final-zip-only-compliance-only'; Tag = 'v1.2.3'; WantOk = $true; WantKind = 'final'
+      Setup = { param($r)
+        $c0 = Add-FxCommit $r (Get-FxBase); New-FxTag $r 'v1.2.3-rc.1' $c0
+        $c1 = Add-FxCommit $r @{ 'LICENSES/GPL-3.0-or-later.txt' = "gpl text, reflowed`n"; 'THIRD-PARTY-NOTICES.md' = "notices v2`n"; 'upstream/ci.json' = "{}`n" }
+        Set-FxProd $r $c1; New-FxTag $r 'v1.2.3' $c1 } })
+  # 下面三格是单独写出的期望，不经 $parityTouch：把某条路径连同它的夹具一起从比对表和循环里删掉，它们仍然会红。
+  # rc 之后只改一个工厂预设、只改仓根 LICENSE、只新增一个预设，都得红（都会编进二进制）。
+  $tc.Add(@{ Name = 'final-preset-modified-only'; Tag = 'v1.2.3'; WantOk = $false; WantMsg = '源码与最后一个 rc 不一致'
+      Setup = { param($r)
+        $c0 = Add-FxCommit $r (Get-FxBase); New-FxTag $r 'v1.2.3-rc.1' $c0
+        $c1 = Add-FxCommit $r @{ 'presets/factory/01-init.json' = "{ `"name`": `"init`", `"feedback`": 0.5 }`n" }
+        Set-FxProd $r $c1; New-FxTag $r 'v1.2.3' $c1 } })
+  $tc.Add(@{ Name = 'final-license-only'; Tag = 'v1.2.3'; WantOk = $false; WantMsg = '源码与最后一个 rc 不一致'
+      Setup = { param($r)
+        $c0 = Add-FxCommit $r (Get-FxBase); New-FxTag $r 'v1.2.3-rc.1' $c0
+        $c1 = Add-FxCommit $r @{ 'LICENSE' = "GNU GENERAL PUBLIC LICENSE v3, edited after the rc`n" }
+        Set-FxProd $r $c1; New-FxTag $r 'v1.2.3' $c1 } })
+  # glob 收预设：rc 之后新增一个预设文件也会被编进二进制，不只是改已有的。
+  $tc.Add(@{ Name = 'final-preset-added-only'; Tag = 'v1.2.3'; WantOk = $false; WantMsg = '源码与最后一个 rc 不一致'
+      Setup = { param($r)
+        $c0 = Add-FxCommit $r (Get-FxBase); New-FxTag $r 'v1.2.3-rc.1' $c0
+        $c1 = Add-FxCommit $r @{ 'presets/factory/09-new.json' = "{ `"name`": `"new`" }`n" }
         Set-FxProd $r $c1; New-FxTag $r 'v1.2.3' $c1 } })
   $tc.Add(@{ Name = 'final-same-commit-as-rc'; Tag = 'v1.2.3'; WantOk = $true; WantKind = 'final'
       Setup = { param($r) $c0 = Add-FxCommit $r (Get-FxBase); New-FxTag $r 'v1.2.3-rc.1' $c0; New-FxTag $r 'v1.2.3' $c0 -Annotated; Set-FxProd $r $c0 } })

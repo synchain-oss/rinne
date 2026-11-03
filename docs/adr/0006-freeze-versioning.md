@@ -21,7 +21,7 @@
 - **改冻结面**：同一个 PR 新增 `docs/contract-changes/<YYYYMMDD>-<slug>.md`，或在正文写一行 `contract-neutral: <理由>`。永久冻结后另加 `status/frozen-contract` 标签，变更文档的「批准」栏填维护者确认评论的链接。
 - **永不改**：插件身份（插件码、bundle id、AU 三元组）、11 个参数 ID、会合段名不带 abi，以及会合段头与 state 头前 16 字节的位置和含义。
 - **版本号**：唯一真源是 `project(Rinne VERSION …)`，别处不写死。当前是 0.9.0，首个公开版本按 rc 先出。tag 只在维护者明确授权后打。
-- **正式版与 rc 同源**：`vX.Y.Z` 在 `src`、`web`、`cmake`、`CMakeLists.txt`、`third_party`、`tests` 上必须与最后一个 rc 相同，由 verify-tag 比对。
+- **正式版与 rc 同源**：`vX.Y.Z` 编进二进制的输入（范围以 `scripts/check-release-tag.ps1` 的 `$SourceParityPaths` 为准，说明见 `docs/RELEASE.md`）必须与最后一个 rc 相同，由 verify-tag 比对。
 
 SemVer 对音频产品的具体化：
 
