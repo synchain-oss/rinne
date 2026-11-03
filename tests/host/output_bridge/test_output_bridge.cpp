@@ -17,6 +17,7 @@
 #include "OutputBridge.h"
 #include "UiDefaultsStore.h"
 #include "state/StateCodec.h"
+#include "util/RinneVersion.h"
 
 namespace
 {
@@ -439,8 +440,15 @@ TEST_CASE("output bridge: rinne.state carries the Output fields and leaves out w
         CHECK_FALSE(static_cast<bool>(fields.getProperty("send", {}).getProperty("hostPaused", {})));
         CHECK(fields.getProperty("cfg", {}).getProperty("tailMode", {}).toString() == "auto");
         CHECK_FALSE(static_cast<bool>(fields.getProperty("inputGuideSeen", {})));
-        // 宿主测试里没有包装层，也没有构建标签：build 只剩编译时就定了的平台
-        CHECK(keysOf(fields.getProperty("build", {})) == std::set<std::string>{"arch"});
+        // 宿主测试里没有包装层，build 不带 fmt。sha 跟着构建标签走：本机 gates 不给标签，build 只剩编译时就定了的平台；
+        // kit 构建给 <kit>+<sha7>，多一个 sha，等于最后一个 + 后面那段。期望在这里独立算，不经过产品的 buildInfo
+        const juce::String label = rinne::build::buildLabel();
+        const juce::String tail = label.containsChar('+') ? label.fromLastOccurrenceOf("+", false, false) : "";
+        const bool labelHasSha = tail.length() >= 7 && tail.length() <= 40 && tail.containsOnly("0123456789abcdef");
+        const auto build = fields.getProperty("build", {});
+        CHECK(keysOf(build) == (labelHasSha ? std::set<std::string>{"arch", "sha"} : std::set<std::string>{"arch"}));
+        if (labelHasSha)
+            CHECK(build.getProperty("sha", {}).toString() == tail);
         // 从没处理过音频的实例不算「宿主停了」，等多久都一样
         bench.idle(300);
         CHECK_FALSE(static_cast<bool>(stateFields(bridge).getProperty("send", {}).getProperty("hostPaused", {})));
