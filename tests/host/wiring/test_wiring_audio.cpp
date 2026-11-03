@@ -183,33 +183,47 @@ TEST_CASE("a bypassed Output passes the host audio and fades the ring data to ze
     CHECK(rig.outputTouched == 0);
 }
 
-TEST_CASE("a bypassed Input passes the dry signal bit for bit after the 10 ms fade and keeps its delay line",
+TEST_CASE("a bypassed Input passes the dry signal bit for bit once the return has faded and the dry gain is back at 1, "
+          "whatever the mix, and keeps its delay line",
           "[host][wiring][audio]")
 {
     formalOnly();
     needsSharedMemory();
-    Rig rig;
-    rig.source = &sine;
-    rig.open(1);
-    hostSetParam(*rig.input, "feedback", 50.0f);
-    REQUIRE(rig.pairUp());
-    rig.cycles(150);
-    REQUIRE_FALSE(tripped(*rig.input));
+    // 回送 10 ms 淡出；干声增益 30 ms 线性回到 1（mix 越过 50 % 时它在旁路前小于 1，不回到 1 的话整轨变小声甚至无声）
+    constexpr std::size_t kDryBackAt = 1440;
+    for (const float mix : {25.0f, 80.0f, 100.0f})
+    {
+        CAPTURE(mix);
+        Rig rig;
+        rig.source = &sine;
+        rig.open(1);
+        hostSetParam(*rig.input, "feedback", 50.0f);
+        hostSetParam(*rig.input, "mix", mix);
+        REQUIRE(rig.pairUp());
+        rig.cycles(150);
+        REQUIRE_FALSE(tripped(*rig.input));
 
-    // ⛔ Input 的旁路回调不把旁路交给引擎（processBlockBypassed 传 false）→ 旁路块里还有回送
-    startRecording(rig);
-    for (int i = 0; i < 30; ++i)
-        rig.cycle(kBlock, true, false);
-    CHECK(firstDiff(rig.outLeft, rig.dryLeft) != -1); // 开头 10 ms 回送在淡出
-    CHECK(firstDiff(rig.outLeft, rig.dryLeft, 480) == -1);
-    CHECK_FALSE(tripped(*rig.input));
+        // ⛔ Input 的旁路回调不把旁路交给引擎（processBlockBypassed 传 false）→ 旁路块里还有回送
+        // ⛔ 旁路时干声增益不回到 1（仍按 mix）→ mix 100 % 时旁路后整轨无声、80 % 时只剩 0.4 倍，逐位对不上
+        startRecording(rig);
+        for (int i = 0; i < 30; ++i)
+            rig.cycle(kBlock, true, false);
+        CHECK(firstDiff(rig.outLeft, rig.dryLeft) != -1); // 开头回送在淡出、干声增益在回 1
+        CHECK(firstDiff(rig.outLeft, rig.dryLeft, kDryBackAt) == -1);
+        CHECK_FALSE(tripped(*rig.input));
 
-    // 解除旁路：本地延迟线没清，回送在 10 ms 的斜坡里就回来（清过的话要等一整个 D = 100 ms）
-    startRecording(rig);
-    for (int i = 0; i < 3; ++i)
-        rig.cycle();
-    CHECK(firstDiff(rig.outLeft, rig.dryLeft) != -1);
-    CHECK(rig.input->instanceHost().counts().suspendClears == 0);
+        // 解除旁路：本地延迟线没清，回送在 10 ms 的斜坡里就回来（清过的话要等一整个 D = 100 ms）；
+        // 干声增益 30 ms 线性滑回按 mix 的值
+        startRecording(rig);
+        for (int i = 0; i < 3; ++i)
+            rig.cycle();
+        CHECK(firstDiff(rig.outLeft, rig.dryLeft) != -1);
+        CHECK(rig.input->instanceHost().counts().suspendClears == 0);
+        for (int i = 0; i < 20; ++i)
+            rig.cycle();
+        CHECK(firstDiff(rig.outLeft, rig.dryLeft, kDryBackAt) != -1); // 回到 mix 的状态：输出不再是干声
+        CHECK_FALSE(tripped(*rig.input));
+    }
 }
 
 TEST_CASE("zero-sample callbacks advance nothing, and one that reaches the instance host does not hide a suspend",

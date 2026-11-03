@@ -6,6 +6,8 @@
 //                   它记下读头（安全链的输入）与应有的输出，测试拿引擎的输出与它逐位比较。
 //                   控制量、淡入请求、混合律都在这里按文档另写一遍，不调引擎的任何内部函数：接线错了（次序、
 //                   有效位、干声增益、mono 取平均、旁路门）两边就对不上。
+//                   干声增益 g_dry 逐样本平滑：目标每块定一次（旁路时为 1，否则按 mix），LinearSmoother 按 30 ms
+//                   线性走，第一块直接落定；平滑器类本身是共用的（它自己的用例在 test_smoother_hop.cpp）。
 //                   音色级（③④⑤）默认不进参照：这时它就是「不接音色级」的接线，默认参数下引擎必须与它逐位相同。
 //                   enableTone() 之后用另外构造的两个 CutFilter 与一个 SwitchRamp 按 InputEngine.h 写明的次序与复位时机
 //                   重算（前段 → 低切 → 高切 → 极性 mix(x, −x) →（mono 时取平均）→ 后段）。
@@ -20,6 +22,8 @@
 #include <memory>
 #include <vector>
 
+#include "dsp/LinearSmoother.h"
+#include "dsp/MixLaw.h"
 #include "dsp/SvfTpt.h"
 #include "dsp/SwitchRamp.h"
 #include "engine/EngineContext.h"
@@ -35,18 +39,25 @@
 namespace rinne::test
 {
 
-// 混合律（文档原文）：m = mixPercent / 100，g_dry = min(1, 2(1−m))，g_ret = min(1, 2m)。
+// 混合律（文档原文）：m = mixPercent / 100（越界钳回，NaN 按 0），g_dry = min(1, 2(1−m))，g_ret = min(1, 2m)。
+inline float referenceMix(float mixPercent) noexcept
+{
+    if (std::isnan(mixPercent))
+    {
+        return 0.0f;
+    }
+    return std::clamp(mixPercent, engine::kMinMixPercent, engine::kMaxMixPercent) / 100.0f;
+}
+
 inline float referenceDryGain(float mixPercent) noexcept
 {
-    const float m = std::clamp(mixPercent, engine::kMinMixPercent, engine::kMaxMixPercent) / 100.0f;
-    const float g = 2.0f * (1.0f - m);
+    const float g = 2.0f * (1.0f - referenceMix(mixPercent));
     return g < 1.0f ? g : 1.0f;
 }
 
 inline float referenceReturnGain(float mixPercent) noexcept
 {
-    const float m = std::clamp(mixPercent, engine::kMinMixPercent, engine::kMaxMixPercent) / 100.0f;
-    const float g = 2.0f * m;
+    const float g = 2.0f * referenceMix(mixPercent);
     return g < 1.0f ? g : 1.0f;
 }
 
@@ -60,6 +71,7 @@ public:
         lowCut_.prepare(sampleRate);
         highCut_.prepare(sampleRate);
         polarity_.prepare(sampleRate, dsp::kSwitchRampSeconds);
+        dryGain_.reset(sampleRate, dsp::kMixSmoothSeconds);
     }
 
     // 音色级进参照（第一块之前调）：参数每块给一次，第一块落定到参数，起播沿的复位点上清状态、落定
@@ -120,10 +132,15 @@ public:
                 settleTone();
             }
         }
+        // 干声增益的目标：旁路时 1，否则按 mix；第一块直接落定，之后 30 ms 线性走（逐样本，在下面的循环里）
+        const float dryTarget = bypassed ? 1.0f : referenceDryGain(p.mixPercent);
+        dryGain_.setTargetValue(dryTarget);
+        if (firstBlock_)
+        {
+            dryGain_.setCurrentAndTargetValue(dryTarget);
+        }
         firstBlock_ = false;
 
-        const float gDry = referenceDryGain(p.mixPercent);
-        const bool unity = gDry == 1.0f;
         const int retLength = r.returnLeft != nullptr && r.returnRight != nullptr ? r.returnLength : 0;
         int resetAt = -1;
         if (r.resetDsp && r.resetAtSample >= 0)
@@ -164,6 +181,9 @@ public:
                 l = polarity_.mix(l, -l);
                 rr = polarity_.mix(rr, -rr);
             }
+            const float gDry = dryGain_.getNextValue();
+            const bool unity = gDry == 1.0f;
+            gDryTrace.push_back(gDry);
             const float xl = inLeft[i];
             const float xr = inRight != nullptr ? inRight[i] : xl;
             const float dl = unity ? xl : xl * gDry;
@@ -219,6 +239,7 @@ public:
     std::vector<float> retRight;
     std::vector<float> wantLeft; // 应有的 Input 输出
     std::vector<float> wantRight;
+    std::vector<float> gDryTrace; // 每个样本用的 g_dry
 
 private:
     void settleTone() noexcept
@@ -237,6 +258,7 @@ private:
     dsp::CutFilter lowCut_{dsp::CutKind::LowCut};
     dsp::CutFilter highCut_{dsp::CutKind::HighCut};
     dsp::SwitchRamp polarity_;
+    dsp::LinearSmoother dryGain_{1.0f};
 };
 
 // 一条闭环：一条轨道上 Input 在前、Output 在后，中间可插一个「环内插件的替身」（middle）。

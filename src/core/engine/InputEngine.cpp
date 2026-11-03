@@ -4,11 +4,11 @@
 //
 // 一块的流程：
 //   1. 块首：块长观察；两端停用之后的清空请求（在环路层处理本块之前执行）。
-//   2. 干声的增益（线性律：m = mixPercent / 100）与回送增益的目标（feedback × g_ret）。
+//   2. 干声增益的目标（线性律：m = mixPercent / 100；旁路时为 1）与回送增益的目标（feedback × g_ret）。
 //   3. 交给环路层：参数与走带整体下传，环路层算好 D、拉环、混好回送（含逐样本有效位）。
 //   4. 安全链的块首控制量（参数 + 环路层报的配对、断档与 D）；命令序号与环路层的换写方 / 换绑定变成淡入请求；
 //      音色级的参数（低切、高切、极性）。
-//   5. 逐样本：读头 → 安全链前段（①②）→ 音色级（③④⑤）→ 安全链后段（⑥–⑨）→ 加到干声上，顺带收电平。
+//   5. 逐样本：读头 → 安全链前段（①②）→ 音色级（③④⑤）→ 干声增益走一步 → 安全链后段（⑥–⑨）→ 加到干声上，顺带收电平。
 //      起播沿的复位点上复位安全链与音色级。
 //   6. 块末：安全链发布测量量，引擎发布电平；跳闸淡出走完时清空本地延迟线；事件进诊断队列；琥珀灯与诊断的账；
 //      发布本端的会合槽。
@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "dsp/MixLaw.h"
 #include "dsp/Sanitize.h"
 
 namespace rinne::engine
@@ -39,21 +40,13 @@ static_assert(ipc::kTripRunaway == static_cast<std::uint32_t>(TripReason::Runawa
 
 namespace
 {
-// 干声与回送增益的线性律：m = mixPercent / 100（0..1）。
+// 干声与回送增益的线性律只有 dsp/MixLaw.h 一份：m = mixPercent / 100（0..1，越界钳回，NaN 按 0）。
 //   g_dry = min(1, 2(1−m))、g_ret = min(1, 2m)
-// m ≤ 50 % 时 g_dry 恰为 1；mix 为 0 时干声逐位直通（g_dry = 1、g_ret = 0）。
-inline float mixLawDry(float mixPercent) noexcept
+// m ≤ 50 % 时 g_dry 恰为 1；mix 为 0 或 NaN 时干声逐位直通（g_dry = 1、g_ret = 0）。
+// 先除以 100 再钳：对 [0, 100] 之内与越界的输入，结果都与先钳到 [0, 100] 再除相同（100 / 100 恰为 1）。
+inline float mixFraction(float mixPercent) noexcept
 {
-    const float m = std::clamp(mixPercent, kMinMixPercent, kMaxMixPercent) / 100.0f;
-    const float g = 2.0f * (1.0f - m);
-    return g < 1.0f ? g : 1.0f;
-}
-
-inline float mixLawReturn(float mixPercent) noexcept
-{
-    const float m = std::clamp(mixPercent, kMinMixPercent, kMaxMixPercent) / 100.0f;
-    const float g = 2.0f * m;
-    return g < 1.0f ? g : 1.0f;
+    return mixPercent / 100.0f;
 }
 
 // 线性幅度 → dBFS（峰值诊断用；0 或非有限时给安静的下限）。
@@ -76,7 +69,8 @@ inline void notePeak(float& peak, float x) noexcept
     }
 }
 
-// 回送加到干声上。回送为 ±0 时不加：g_dry 恰为 1 就一位不碰（−0.0 与 NaN 载荷原样留着），否则只写乘过的干声。
+// 回送加到干声上。回送为 ±0 时不加：这个样本的 g_dry 恰为 1 就一位不碰（−0.0 与 NaN 载荷原样留着），
+// 否则只写乘过的干声。
 inline void addReturn(float* out, int i, float dry, float ret, bool dryIsUnity) noexcept
 {
     if (out == nullptr)
@@ -138,6 +132,9 @@ void InputEngine::prepare(double sampleRate, int maxBlock) noexcept
     chain_.prepare(sr);
     if (rateChanged)
     {
+        // 干声增益：斜坡长度按新采样率重算，下一块直接落定到目标（prepare 起的是新的一段流，没有上一块可以平滑）
+        dryGain_.reset(sr, dsp::kMixSmoothSeconds);
+        dryGainSnapPending_ = true;
         lowCut_.prepare(sr);
         highCut_.prepare(sr);
         polarity_.prepare(sr, dsp::kSwitchRampSeconds);
@@ -222,7 +219,7 @@ SafetyControls InputEngine::makeControls(const EngineParams& params, const loop:
 {
     SafetyControls c;
     c.feedback = std::clamp(params.feedbackPercent, kMinFeedbackPercent, kMaxFeedbackPercent) / 100.0f;
-    c.returnGain = mixLawReturn(params.mixPercent);
+    c.returnGain = dsp::mixReturnGain(mixFraction(params.mixPercent));
     c.loopOn = params.loopOn;
     c.bypassed = bypassed || result.unsupportedBlock;
     c.limiterOn = params.limiterOn;
@@ -287,7 +284,6 @@ void InputEngine::renderBlock(const AudioView& buffer, const loop::BlockResult& 
     const float* const retLeft = result.returnLeft;
     const float* const retRight = result.returnRight;
     const std::uint8_t* const retValid = result.returnValid;
-    const bool dryIsUnity = dryGain_ == 1.0f;
 
     // 起播沿的复位点：本地延迟线已由环路层在沿上复位过，这里在同一个样本上复位安全链的 DSP 与判据、音色级的状态。
     int resetAt = -1;
@@ -316,10 +312,13 @@ void InputEngine::renderBlock(const AudioView& buffer, const loop::BlockResult& 
         chain_.processFront(l, r, valid);
         processTone(l, r);
 
+        // 干声增益逐样本走一步（进度按样本计，与切块无关）；这个样本恰为 1（平滑到位且目标是 1）就走逐位快速路径
+        const float gDry = dryGain_.getNextValue();
+        const bool dryIsUnity = gDry == 1.0f;
         const float inLeft = outLeft != nullptr ? outLeft[i] : 0.0f;
         const float inRight = outRight != nullptr ? outRight[i] : inLeft;
-        const float dryLeft = dryIsUnity ? inLeft : inLeft * dryGain_;
-        const float dryRight = dryIsUnity ? inRight : inRight * dryGain_;
+        const float dryLeft = dryIsUnity ? inLeft : inLeft * gDry;
+        const float dryRight = dryIsUnity ? inRight : inRight * gDry;
         notePeak(levels.input, inLeft);
         notePeak(levels.input, inRight);
         notePeak(levels.dryPart, dryLeft);
@@ -499,10 +498,18 @@ bool InputEngine::process(const AudioView& buffer, const EngineParams& params, c
         loop_.flushAfterSuspend();
     }
 
-    // 干声与回送的增益（线性律）。returnGain_ 是诊断看的目标值，真正的平滑在安全链里。
-    dryGain_ = mixLawDry(params.mixPercent);
+    // 干声与回送的增益（线性律）。干声增益的目标：宿主旁路时为 1（干声逐位直通），否则按 mix；平滑器 30 ms 线性滑过去，
+    // 逐样本的推进在 renderBlock 里。第一次 prepare 或换采样率之后的第一块直接落定。
+    // returnGain_ 是诊断看的目标值，回送增益真正的平滑在安全链里。
+    const float dryTarget = bypassed ? 1.0f : dsp::mixDryGain(mixFraction(params.mixPercent));
+    dryGain_.setTargetValue(dryTarget);
+    if (dryGainSnapPending_)
+    {
+        dryGain_.setCurrentAndTargetValue(dryTarget);
+        dryGainSnapPending_ = false;
+    }
     const float feedback = std::clamp(params.feedbackPercent, kMinFeedbackPercent, kMaxFeedbackPercent) / 100.0f;
-    returnGain_ = params.loopOn && !bypassed ? feedback * mixLawReturn(params.mixPercent) : 0.0f;
+    returnGain_ = params.loopOn && !bypassed ? feedback * dsp::mixReturnGain(mixFraction(params.mixPercent)) : 0.0f;
 
     // 环路层：参数与走带整体下传。
     loop::BlockContext ctx(params, transport);
