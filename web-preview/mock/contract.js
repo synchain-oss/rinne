@@ -198,42 +198,45 @@ export const RESUME_COOLDOWN_MS = 1500;
 /** 预设名长度上限（字符数）。 */
 export const PRESET_NAME_MAX = 24;
 
-/** 8 个工厂预设：id、三语名、改动的参数。不含 loop_on、组号、limiter 和 ceiling。 */
+/**
+ * 8 个工厂预设：id、三语名、改动的参数。不含 loop_on、组号、limiter 和 ceiling。
+ * 三语名逐字照 presets/factory/*.json（按文件序号一一对应），smoke-input-kit-page 的自检逐字比对，别在这里改成别的写法。
+ */
 export const FACTORY_PRESETS = [
-    { id: "init", name: { zh: "初始化", en: "Init", fr: "Initialiser" }, values: {} },
+    { id: "init", name: { zh: "Init", en: "Init", fr: "Init" }, values: {} },
     {
         id: "slapback",
-        name: { zh: "拍击回声 90 ms", en: "Slapback 90 ms", fr: "Slapback 90 ms" },
+        name: { zh: "Slapback 90 ms", en: "Slapback 90 ms", fr: "Slapback 90 ms" },
         values: { delay_ms: 90, feedback: 20, mix: 25 },
     },
     {
         id: "roundDub",
-        name: { zh: "回旋配音 1/4D", en: "Round dub 1/4D", fr: "Dub rotatif 1/4D" },
+        name: { zh: "Dub 1/4D", en: "Dub 1/4D", fr: "Dub 1/4D" },
         values: { delay_mode: "sync", delay_note: "n4d", feedback: 60, mix: 50 },
     },
     {
         id: "pingPong",
-        name: { zh: "乒乓 1/8", en: "Ping-pong 1/8", fr: "Ping-pong 1/8" },
+        name: { zh: "Ping-Pong 1/8", en: "Ping-Pong 1/8", fr: "Ping-Pong 1/8" },
         values: { delay_mode: "sync", delay_note: "n8", feedback: 45, mix: 25 },
     },
     {
         id: "shortestComb",
-        name: { zh: "最短梳状", en: "Shortest comb", fr: "Peigne minimal" },
+        name: { zh: "Shortest Comb", en: "Shortest Comb", fr: "Shortest Comb" },
         values: { delay_ms: 1, feedback: 70, mix: 50 },
     },
     {
         id: "longHold",
-        name: { zh: "长保持 92%", en: "Long hold 92%", fr: "Maintien long 92 %" },
+        name: { zh: "Long Hold 92 %", en: "Long Hold 92 %", fr: "Long Hold 92 %" },
         values: { feedback: 92, mix: 50 },
     },
     {
         id: "edgeOsc",
-        name: { zh: "振荡边缘 95%", en: "Edge of oscillation 95%", fr: "Bord d’oscillation 95 %" },
+        name: { zh: "Edge 95 %", en: "Edge 95 %", fr: "Edge 95 %" },
         values: { feedback: 95, mix: 50 },
     },
     {
         id: "lightMix",
-        name: { zh: "轻混合 30%", en: "Light mix 30%", fr: "Mixage léger 30 %" },
+        name: { zh: "Light Mix 30 %", en: "Light Mix 30 %", fr: "Light Mix 30 %" },
         values: { feedback: 75, mix: 30 },
     },
 ];

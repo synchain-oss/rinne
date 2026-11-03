@@ -131,8 +131,8 @@
 ## 已知差异（未改）
 
 - 规则页四条规则正文里，`: ;` 和 « » 旁用的是窄不换行空格 U+202F，其余条目用 U+00A0；两种都通过 `check-i18n`，字体里都有字形。维护者答复：不统一，维持现状（统一要重新生成规则页的生成物，不在本次范围内）。
-- 四条导出不一致的消息（`band.in.export*`）没有登记文本宽度预算，`check-text-fit` 看不到它们；改动后的四条按同一消息位的预算（`band.in.exportMismatch`，302 px，一行）用同一套量宽方法手算过，都在范围内（最长一条约 283 px，上限约 290 px）；写法是按这个宽度选的（例如「blocs trop grands」放不下，用了「gros blocs」）。这四个键应补上预算条目，这样以后改动才有检查兜底；预算表不在本次范围内，另行补。
-- 工厂预设的 fr 名在 `presets/factory/*.json` 里，不在词条表中，也不在 `check-i18n` 的检查范围内。按维护者的答复，8 个预设的 fr 名与 en 逐字一致（含 `Ping-Pong 1/8` 的大小写，排版也跟 en）：改了 7 个文件的 fr（`Dub 1/4D` 本来就一致）；钉住预设名的测试设计表（`tests/params/test_presets_factory.cpp`）同步对齐。web-preview 的 mock 里的预设名是旧快照（三语都与预设文件不符），不在本次范围内，另行对齐。名字列在抽检清单末尾。
+- 四条导出不一致的消息（`band.in.export*`）没有登记文本宽度预算，`check-text-fit` 看不到它们；改动后的四条按同一消息位的预算（`band.in.exportMismatch`，302 px，一行）用同一套量宽方法手算过，都在范围内（最长一条约 283 px，上限约 290 px）；写法是按这个宽度选的（例如「blocs trop grands」放不下，用了「gros blocs」）。这四个键应补上预算条目，这样以后改动才有检查兜底；预算表不在本次范围内，另行补。（后续：四条的预算已补进 `web/shared/text-budget.json`，键名就是这四个 `band.in.export*`，同一消息位，一行 302 px；上面引用的 `band.in.exportMismatch` 是设计稿时期的旧条目，不是任何词典里的键，补预算时一并删了。）
+- 工厂预设的 fr 名在 `presets/factory/*.json` 里，不在词条表中，也不在 `check-i18n` 的检查范围内。按维护者的答复，8 个预设的 fr 名与 en 逐字一致（含 `Ping-Pong 1/8` 的大小写，排版也跟 en）：改了 6 个文件的 fr（01、04、05、06、07、08；`Slapback 90 ms` 与 `Dub 1/4D` 的 fr 在审校前就与 en 一致，没有改）；钉住预设名的测试设计表（`tests/params/test_presets_factory.cpp`）同步对齐。web-preview 的 mock 里的预设名是旧快照（三语都与预设文件不符），不在本次范围内，另行对齐。名字列在抽检清单末尾。（后续：mock 的 8 个预设名已与 `presets/factory/*.json` 三语逐字对齐，由 `web-preview/tests/smoke-input-kit-page.mjs` 的自检逐字比对。）
 
 ## 抽检清单
 

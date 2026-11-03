@@ -12,16 +12,22 @@
 //
 // 用法：node web-preview/tests/smoke-input-kit-page.mjs [仓库根]
 
+import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
+import { FACTORY_PRESETS } from "../mock/contract.js";
 import { SCENES as ALL_SCENES } from "../mock/scenarios.js";
 import {
     HIDE_TEXT_STYLE as BASE_HIDE_TEXT_STYLE,
     decodePng,
+    hasPixels,
     itemsDrift,
     rectsDrift,
+    skipSummary,
+    unexpectedSkips,
     worstContrast,
 } from "./shared-measure.mjs";
 import {
@@ -697,12 +703,6 @@ async function shotRect(page, origin, r) {
 }
 
 /**
- * 文字矩形里有可量的像素：宽、高都至少 1 px。worstContrast 对一个像素都没采到的矩形会抛错（不会悄悄返回通过），
- * 所以量之前先用它筛：整段被滚动区裁掉（裁完高度为零或负）、字号为零这类没有可量像素的文字，不论有没有滚动区都一样跳过。
- */
-export const hasPixels = (r) => Boolean(r) && r.w >= 1 && r.h >= 1;
-
-/**
  * 页面静止后量出每段文字的最差对比度。返回的数组上带 skipped：这一画面里因为没有可量像素而跳过的文字 [{ text（前 48 字）, el（所在元素的标签）}]。
  * 跳过不是通过：每个套件把按画面的跳过数打进输出（见 skipSummary），并断言跳过的只有 SKIP_OK 里那几种元素（见 unexpectedSkips）。
  */
@@ -761,35 +761,6 @@ export async function measure(page) {
     return out;
 }
 
-/**
- * 本来就没有可量像素的元素：原生下拉的 <option>（弹层由浏览器画，页面里没有矩形）与 SVG 的 <title>（只是悬停提示，不上屏）。
- * 跳过的文字只该出自这两种元素；别处的字被跳过（例如整段被滚动区裁掉、字号为零）是新情况，要有人看一眼。
- */
-export const SKIP_OK = Object.freeze(["option", "title"]);
-
-/** measure 返回的 skipped 里不在 SKIP_OK 内的项，写成「元素:文字」；空表示都是本来就不可见的。 */
-export const unexpectedSkips = (skipped) =>
-    skipped.filter((x) => !SKIP_OK.includes(x.el)).map((x) => `${x.el}:${x.text}`);
-
-/**
- * 把按画面的跳过数写成一行输出。skips 是 [画面名, measure 返回的 skipped] 的列表；没有跳过的画面不列。
- * 第一行是合计与每画面段数的分布，第二行是逐画面的段数（没有跳过的画面不列）。
- */
-export function skipSummary(skips) {
-    const hit = skips.filter(([, texts]) => texts.length > 0);
-    const total = hit.reduce((n, [, texts]) => n + texts.length, 0);
-    const byCount = new Map();
-    for (const [, texts] of hit) byCount.set(texts.length, (byCount.get(texts.length) || 0) + 1);
-    const dist = [...byCount]
-        .sort((a, b) => a[0] - b[0])
-        .map(([n, k]) => `每画面 ${n} 段 × ${k} 个`)
-        .join("、");
-    const head = `没有可量像素而跳过的文字共 ${total} 段（${hit.length} 个画面）`;
-    return hit.length
-        ? `${head}：${dist}\n  按画面：${hit.map(([tag, texts]) => `${tag}×${texts.length}`).join("、")}`
-        : head;
-}
-
 // ---------------------------------------------------------------- 自检
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
@@ -835,6 +806,37 @@ if (isMain) {
         ["in-preset-menu", "in-preset-save"].every((id) => SCENES.some((s) => s.id === id)),
         "预设面板的两个场景应在范围内",
     );
+    // mock 的 8 个工厂预设名与 presets/factory/*.json 三语逐字相同（按文件序号一一对应）：预设文件改了名而 mock 没跟着改要红
+    {
+        const dir = path.join(ROOT, "presets", "factory");
+        const real = fs
+            .readdirSync(dir)
+            .filter((f) => /^\d\d-.+\.json$/.test(f))
+            .sort()
+            .map((file) => ({ file, name: JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")).name }));
+        const nameDrift = (mock) => {
+            const out = [];
+            if (mock.length !== real.length) out.push(`个数不同：mock ${mock.length} 个，预设文件 ${real.length} 个`);
+            for (let i = 0; i < Math.min(mock.length, real.length); i++)
+                for (const lang of LANGS)
+                    if (mock[i].name[lang] !== real[i].name[lang])
+                        out.push(
+                            `${real[i].file}/${lang}：mock「${mock[i].name[lang]}」，预设文件「${real[i].name[lang]}」`,
+                        );
+            return out;
+        };
+        run.eq(real.length, 8, "presets/factory 下有 8 个工厂预设文件");
+        run.eq(nameDrift(FACTORY_PRESETS), [], "mock 的工厂预设名与 presets/factory/*.json 三语逐字相同");
+        // 比对本身的坏样例：拿预设文件自己的名字当「mock」，不受真 mock 当前有没有漂移的影响
+        const same = real.map(({ name }) => ({ name: { ...name } }));
+        run.eq(nameDrift(same), [], "正例：名字原样照抄的 mock 比不出差异");
+        run.eq(
+            nameDrift(same.map((p, k) => (k === 3 ? { name: { ...p.name, fr: `${p.name.fr}x` } } : p))).length,
+            1,
+            "坏样例：某个预设的某一语言多一个字符，要被比出恰好一处",
+        );
+        run.check(nameDrift(same.slice(0, 7)).length > 0, "坏样例：mock 少一个预设要被比出来");
+    }
     run.check(
         findLeaks("反馈 band.in.neverDefined").length === 1 &&
             findLeaks("{g} 组").length === 1 &&
@@ -983,9 +985,10 @@ if (isMain) {
             "预设面板压住下面的页面文字不算互压（独立一层）",
         );
         await inFrame(page, (doc) => {
+            // 第三项上移一行（行距 24 px），压在第二项的字上：工厂预设名固定，这两段字横向有交叠
             const names = doc.querySelectorAll(".in-pm__opt .in-pm__name");
-            names[1].style.position = "relative";
-            names[1].style.top = "-24px";
+            names[2].style.position = "relative";
+            names[2].style.top = "-24px";
         });
         menuProbe = await inFrame(page, fitProbe);
         run.check(
@@ -1020,9 +1023,11 @@ if (isMain) {
             await openPresetState(page, state);
             return inFrame(page, contrastProbe);
         };
+        // 预设面板条目的名字从 mock 的合同里取，不在这里写死第二份（工厂预设名与 presets/factory 的对照见上面的自检）
+        const slapbackZh = FACTORY_PRESETS.find((p) => p.id === "slapback").name.zh;
         let tp = await tiersIn("list");
         run.check(
-            tp.some((i) => i.tier === "A" && /拍击回声/.test(i.text) && /in-pm__name/.test(i.sel)) &&
+            tp.some((i) => i.tier === "A" && i.text.includes(slapbackZh) && /in-pm__name/.test(i.sel)) &&
                 tp.some((i) => i.tier === "C" && /工厂预设/.test(i.text)),
             `预设面板的条目应按 A、标签按 C，实得 ${JSON.stringify(tp.filter((i) => /in-pm/.test(i.sel)).map((i) => [i.tier, i.text]))}`,
         );

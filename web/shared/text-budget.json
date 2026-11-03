@@ -379,7 +379,37 @@
     },
     "maxWidthPx": 294
   },
-  "band.in.exportMismatch": {
+  "band.in.exportOverrun": {
+    "fit": {
+      "font": "sans",
+      "lines": 1,
+      "ls": 0,
+      "size": 11.5,
+      "weight": 500
+    },
+    "maxWidthPx": 302
+  },
+  "band.in.exportPeer": {
+    "fit": {
+      "font": "sans",
+      "lines": 1,
+      "ls": 0,
+      "size": 11.5,
+      "weight": 500
+    },
+    "maxWidthPx": 302
+  },
+  "band.in.exportResync": {
+    "fit": {
+      "font": "sans",
+      "lines": 1,
+      "ls": 0,
+      "size": 11.5,
+      "weight": 500
+    },
+    "maxWidthPx": 302
+  },
+  "band.in.exportViolation": {
     "fit": {
       "font": "sans",
       "lines": 1,

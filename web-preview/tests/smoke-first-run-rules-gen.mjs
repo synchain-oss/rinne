@@ -29,8 +29,13 @@ const { cleanupTempDir, makeTempDir } = await load("scripts/lib/safe-rm.mjs");
 const block = await load("scripts/gen-docs.d/hard-rules.mjs");
 const { WEB_FILE, GUIDE_FILE } = block;
 
+// 用户指南（SOURCE_FILE）里还带着参数表的生成块，回写时 params-table 模块要读它的真源：golden 与 Input 词条表，一并放进夹具
+const { GOLDEN_FILE: PARAMS_GOLDEN_FILE, I18N_FILE: PARAMS_I18N_FILE } = await load(
+    "scripts/gen-docs.d/params-table.mjs",
+);
+
 const MODS = await loadModules();
-const FILES = [SOURCE_FILE, I18N_FILE, INSTALL_FILE, WEB_FILE, GUIDE_FILE];
+const FILES = [SOURCE_FILE, I18N_FILE, INSTALL_FILE, WEB_FILE, GUIDE_FILE, PARAMS_GOLDEN_FILE, PARAMS_I18N_FILE];
 const repoBytes = (rel) => fs.readFileSync(path.join(ROOT, rel));
 
 /** 临时目录里放一份仓内的真源与落地面，回写一遍；fn 拿到 { dir, put, get, check }。 */

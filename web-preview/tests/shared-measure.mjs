@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 共享件页面级冒烟的公共件：夹具场景表、开页、页内量尺脚本、PNG 解码与对比度计算。
+// 共享件页面级冒烟的公共件：夹具场景表、开页、页内量尺脚本、PNG 解码与对比度计算，以及 Input 与 Output 对比度量尺共用的跳过记账。
 // 这里只放可复用的函数，不自己跑断言；smoke-scenarios / smoke-fit / smoke-contrast / smoke-a11y 的共享件那几个脚本各自引用。
 // 夹具页是 web-preview/fixtures/shared/index.html，观测接口挂在 window.__fx 上（见 fixture.js 头部）。
 
@@ -595,3 +595,40 @@ export async function measureContrastOnPage(page) {
 }
 
 export const TIER_MIN = Object.freeze({ A: 4.5, B: 3.0 });
+
+// ---------------------------------------------------------------- 跳过记账（Input 与 Output 的对比度量尺共用）
+
+/**
+ * 文字矩形里有可量的像素：宽、高都至少 1 px。worstContrast 对一个像素都没采到的矩形会抛错（不会悄悄返回通过），
+ * 所以量之前先用它筛：整段被滚动区裁掉（裁完高度为零或负）、字号为零这类没有可量像素的文字，不论有没有滚动区都一样跳过。
+ */
+export const hasPixels = (r) => Boolean(r) && r.w >= 1 && r.h >= 1;
+
+/**
+ * 本来就没有可量像素的元素：原生下拉的 <option>（弹层由浏览器画，页面里没有矩形）与 SVG 的 <title>（只是悬停提示，不上屏）。
+ * 跳过的文字只该出自这两种元素；别处的字被跳过（例如整段被滚动区裁掉、字号为零）是新情况，要有人看一眼。
+ */
+export const SKIP_OK = Object.freeze(["option", "title"]);
+
+/** measure 返回的 skipped 里不在 SKIP_OK 内的项，写成「元素:文字」；空表示都是本来就不可见的。 */
+export const unexpectedSkips = (skipped) =>
+    skipped.filter((x) => !SKIP_OK.includes(x.el)).map((x) => `${x.el}:${x.text}`);
+
+/**
+ * 把按画面的跳过数写成一行输出。skips 是 [画面名, measure 返回的 skipped] 的列表；没有跳过的画面不列。
+ * 第一行是合计与每画面段数的分布，第二行是逐画面的段数（没有跳过的画面不列）。
+ */
+export function skipSummary(skips) {
+    const hit = skips.filter(([, texts]) => texts.length > 0);
+    const total = hit.reduce((n, [, texts]) => n + texts.length, 0);
+    const byCount = new Map();
+    for (const [, texts] of hit) byCount.set(texts.length, (byCount.get(texts.length) || 0) + 1);
+    const dist = [...byCount]
+        .sort((a, b) => a[0] - b[0])
+        .map(([n, k]) => `每画面 ${n} 段 × ${k} 个`)
+        .join("、");
+    const head = `没有可量像素而跳过的文字共 ${total} 段（${hit.length} 个画面）`;
+    return hit.length
+        ? `${head}：${dist}\n  按画面：${hit.map(([tag, texts]) => `${tag}×${texts.length}`).join("、")}`
+        : head;
+}

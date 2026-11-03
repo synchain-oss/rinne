@@ -22,9 +22,8 @@
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
-import { TIER_MIN } from "./shared-measure.mjs";
-// 跳过记账的口径与 Input 的对比度冒烟共用一份（SKIP_OK、unexpectedSkips、skipSummary 在 Input 的公共件里），不另写
-import { SKIP_OK, skipSummary, unexpectedSkips } from "./smoke-input-kit-page.mjs";
+// 跳过记账的口径与 Input 的对比度冒烟共用一份（SKIP_OK、unexpectedSkips、skipSummary 在共享量尺里），不另写
+import { SKIP_OK, TIER_MIN, skipSummary, unexpectedSkips } from "./shared-measure.mjs";
 import {
     LANGS,
     MESSAGE_CASES,
