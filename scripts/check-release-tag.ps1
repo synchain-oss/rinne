@@ -12,7 +12,8 @@
     ④ CHANGELOG：要有与本次版本对应的小节（`## [1.2.3]` 或 `## [1.2.3-rc.1]`）。
     ⑤ 源码：正式版的源码必须与最后一个 rc 相同（src、web、cmake、CMakeLists.txt、third_party、
        tests，会编进二进制的 presets 与仓根 LICENSE，以及决定二进制内容的 JUCE 钉版文件
-       .juce-commit / .juce-version，任一有差异就红），只差文档不算差异。rc 不受这一条约束。「最后一个 rc」只认 v<X.Y.Z>-rc.<数字> 这种严格形态、
+       .juce-commit / .juce-version，任一有差异就红），只差文档不算差异。rc 不受这一条约束。
+       「最后一个 rc」只认 v<X.Y.Z>-rc.<数字> 这种严格形态、
        提交在 origin/prod 上、数字最大的那个，且必须是正式版提交的祖先（或同一个提交）；
        形态不对的野标签（v1.2.3-rc.x、v1.2.3-rc.1-fix）与不在 prod 上的 rc 一律不当 rc 用。
   判据分两层：
