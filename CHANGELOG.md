@@ -50,3 +50,10 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   (about 16 ms) in the middle of playback, which used to cut the echo tail. The first playing block after both ends
   were suspended for more than 250 ms, or after a re-prepare while a stop report is in progress, is still a play
   start, even if the host never reported a stop.
+- The dry gain of Rinne Input now moves smoothly instead of in steps. When Mix changes, and when the host bypasses or
+  un-bypasses Rinne Input, the dry gain ramps linearly over 30 ms to its new value and lands on it exactly; it used to
+  jump at the next block boundary, which clicked, at a sample that depended on how the host split its blocks. When the
+  host bypasses Rinne Input, the return fades out over 10 ms and the dry gain returns to 1 over 30 ms, after which the
+  dry signal passes through bit for bit; previously, with Mix above 50 %, the dry signal stayed attenuated after the
+  bypass (silent at 100 %). Un-bypassing ramps the dry gain back to the Mix value over 30 ms. A Mix value that is NaN is
+  now treated as 0: the dry signal is unchanged and the return is 0 (it used to give the return its maximum gain).
