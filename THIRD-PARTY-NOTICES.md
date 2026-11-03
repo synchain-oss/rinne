@@ -233,7 +233,8 @@ Some files are adapted from [synchain-oss/scvb](https://github.com/synchain-oss/
 under GPL-3.0-or-later with the same copyright holder. Each such file carries the header line
 `Derived from synchain-oss/scvb; see upstream/<area>.json`. The registry in `upstream/*.json` records the upstream
 commit and file blob of every derived file; release zips render it into the per-file table of their copy of this
-file. Registered so far: `upstream/ci.json` (CI configuration and check scripts).
+file. The registry has one `upstream/<area>.json` per area (build, CI, core, state, web and so on); the format is
+described in `upstream/README.md`.
 
 <!-- /section:scvb-derived -->
 
