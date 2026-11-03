@@ -27,8 +27,11 @@
 //   out  Input 的最终输出（宿主缓冲里留下的值，一位不碰的样本就是干声本身）；
 //   Mix 推子的两路分量：干声分量 g_dry·干声，回送分量是真正加到干声上的那一项（⑨ 之后，含 g_safety、g_guard、
 //        限制器与软削波），两路相加就是 out。
-// 回送为 ±0 且 g_dry 恰为 1 的样本，宿主缓冲一位不碰（−0.0 与 NaN 载荷都原样留着）：加 +0.0 会把 −0.0 变成 +0.0，
-// 任何算术都会改 NaN 的载荷，所以只能不写。g_dry 不为 1 时只乘干声，回送为 ±0 照样不加。
+// 干声增益 g_dry（线性律见 dsp/MixLaw.h，mix 为 NaN 按 0）逐样本走 LinearSmoother：目标每块定一次（旁路时为 1，
+// 否则按 mix），30 ms（kMixSmoothSeconds）线性滑过去、终点精确，进度按样本计、与切块无关。第一次 prepare 与换采样率
+// 之后的第一块直接落定到目标，不从别的值滑过来；同采样率重新 prepare 不动它（流保持连续）。
+// 回送为 ±0 且当前样本的 g_dry 恰为 1 的样本，宿主缓冲一位不碰（−0.0 与 NaN 载荷都原样留着）：加 +0.0 会把 −0.0
+// 变成 +0.0，任何算术都会改 NaN 的载荷，所以只能不写。g_dry 不为 1 时只乘干声，回送为 ±0 照样不加。
 // 淡入（新配对、换写方、预设、宿主设状态、恢复）、上界、跳闸与锁存全由安全链负责；本引擎只把事实与命令交给它。
 //
 // 命令序号（panicSeq / recoverSeq / presetSeq / stateSeq）：
@@ -59,6 +62,7 @@
 #include <vector>
 
 #include "diag/EventQueue.h"
+#include "dsp/LinearSmoother.h"
 #include "dsp/SvfTpt.h"
 #include "dsp/SwitchRamp.h"
 #include "engine/AudioView.h"
@@ -128,7 +132,8 @@ public:
     void prepare(double sampleRate, int maxBlock) noexcept;
 
     // 音频线程：处理一块（就地：干声进、干声 + 回送出）。bypassed 为真表示宿主旁路了这一端：
-    // 照常拉环、推进读位，回送 10 ms 淡到 0（不跳闸、不清空），之后干声逐位直通。
+    // 照常拉环、推进读位，回送 10 ms 淡到 0（不跳闸、不清空），干声增益 30 ms 线性回到 1（不论 mix 是多少），
+    // 到 1 之后干声逐位直通。取消旁路后干声增益 30 ms 滑回按 mix 算的值，回送 10 ms 淡回。
     // 返回 true 表示这一块被处理了；false 表示 0 样本调用。
     bool process(const AudioView& buffer, const EngineParams& params, const TransportInfo& transport, bool bypassed,
                  const EngineContext& context) noexcept;
@@ -176,8 +181,9 @@ public:
     // 本会话观察到的最大块长（N_obs）。每次 prepare 清零；超长块（n > 32768，环路不走的块）不计入。
     int maxBlockSeen() const noexcept { return maxBlockSeen_; }
 
-    // 干声的增益（线性律：m = mixPercent / 100，g_dry = min(1, 2(1−m))）。
-    float dryGain() const noexcept { return dryGain_; }
+    // 干声增益 g_dry 在上一块末的当前值（线性律：m = mixPercent / 100，g_dry = min(1, 2(1−m))；旁路时的目标是 1）。
+    // 目标变了之后它在 30 ms 里逐样本滑过去，所以这是平滑器走到的位置，不是目标值。
+    float dryGain() const noexcept { return dryGain_.getCurrentValue(); }
     // 回送增益的目标值（feedback × g_ret；旁路或环路关时为 0）。安全链按 30 ms（反馈与 g_ret）与 10 ms（环路开关
     // 与旁路）线性平滑滑过去，再乘它自己的 g_safety 与 g_guard。
     float returnGain() const noexcept { return returnGain_; }
@@ -257,7 +263,9 @@ private:
     std::atomic<bool> flushRequest_{false};
 
     float returnGain_ = 0.0f;
-    float dryGain_ = 1.0f;
+    // 干声增益：逐样本平滑（30 ms，见文件头）。dryGainSnapPending_：第一次 prepare 或换采样率之后，下一块直接落定到目标
+    dsp::LinearSmoother dryGain_{1.0f};
+    bool dryGainSnapPending_ = true;
 
     // 离线渲染的进入沿（只发一次事件）
     bool lastNonrealtime_ = false;
