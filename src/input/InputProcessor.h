@@ -32,7 +32,7 @@ public:
     ~InputProcessor() override;
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
-    // 旁路：干声逐位直通；引擎照常拉环、回送 10 ms 淡出，延迟线不清
+    // 旁路：引擎照常拉环，回送 10 ms 淡到 0、干声增益 30 ms 回到 1（不论 mix），之后干声逐位直通；延迟线不清
     void processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
 
     void getStateInformation(juce::MemoryBlock& destData) override;
