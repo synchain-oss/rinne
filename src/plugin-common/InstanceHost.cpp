@@ -313,7 +313,7 @@ void InstanceHost::process(juce::AudioBuffer<float>& buffer, engine::EngineParam
         context.rendezvous = &lease.rv();
         context.group = lease.binding().group;
         context.token = lease.binding().writerToken;
-        context.ringGeneration = lease.binding().seq;
+        context.ringGeneration = lease.binding().ringGeneration;
         ring = lease.binding().ring;
     }
 

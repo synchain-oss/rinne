@@ -141,7 +141,7 @@ public:
     void prepare(const StreamFormat& format, u64 nowMs);
     // 关上认领的门。持有 active 槽时 active -> dormant，写 dormant_ms，重新发布绑定；CAS 失败就是被接管了
     void releaseResources(u64 nowMs);
-    // 属主把自己 active+provisional 的槽确认成正式 active（清掉 provisional 位）
+    // 属主把自己 active+provisional 的槽确认成正式 active（清掉 provisional 位），重新发布绑定；环与映射代号不变
     void confirmClaim(u64 nowMs);
     void setNonrealtime(bool on) noexcept;
     // 记住标签并标脏；tick 拿到写权时写进槽里。返回「现在是否已经写下」
@@ -197,6 +197,7 @@ private:
     HandleKeeper keeper_;
     SegmentHandle* rv_ = nullptr;
     SegmentHandle* ring_ = nullptr;
+    u64 ringGeneration_ = 0; // 环映射的代号（LoopBinding::ringGeneration）：openRing 接管一个新句柄就加 1
     BindingPublisher bindings_;
     SlotObserver observer_;
     RetryBackoff backoff_;

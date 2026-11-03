@@ -59,7 +59,8 @@ RingSegment& BoundBlock::ring() const noexcept
 
 bool BoundBlock::stillMine() const noexcept
 {
-    return mine().ctl.load(std::memory_order_acquire) == b_->myCtl;
+    const u64 word = mine().ctl.load(std::memory_order_acquire);
+    return word == b_->myCtl || (b_->confirmedCtl != 0 && word == b_->confirmedCtl);
 }
 
 const LoopBinding* BindingPublisher::publish(const LoopBinding& b)
