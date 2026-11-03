@@ -57,3 +57,11 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   dry signal passes through bit for bit; previously, with Mix above 50 %, the dry signal stayed attenuated after the
   bypass (silent at 100 %). Un-bypassing ramps the dry gain back to the Mix value over 30 ms. A Mix value that is NaN is
   now treated as 0: the dry signal is unchanged and the return is 0 (it used to give the return its maximum gain).
+
+### Fixed
+
+- The return no longer drops out and fades back in when nothing about the loop's segment changed: when a smart default
+  claim is confirmed (for example by the first project save), when one end is re-prepared at the same sample rate, or
+  when both ends resume after being stopped. The stream carries on sample for sample; after a long stop only the
+  existing suspend flush applies. A real change of segment (another group, or claiming again after losing the slot)
+  still rebuilds the read heads and fades in. The Output's writer no longer restarts its stall count on these events.

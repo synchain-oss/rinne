@@ -232,6 +232,7 @@ void Rendezvous::confirmClaim(u64 nowMs)
         return;
     }
     RoleSlot& slot = roleSlot(*static_cast<RvSegment*>(rv_->base()), group_, role());
+    // 写下的正是已发布绑定里的 confirmedCtl：CAS 之后、重新发布之前拿着旧快照的那一块照样认得出槽是自己的
     const CtlCas cas = casCtl(slot.ctl, myCtl_, kCtlPhaseActive);
     if (!cas.ok)
     {
@@ -239,7 +240,7 @@ void Rendezvous::confirmClaim(u64 nowMs)
         return;
     }
     myCtl_ = cas.word;
-    publishBinding(); // myCtl 变了
+    publishBinding(); // myCtl 变了；环还是那个句柄，映射代号不变
 }
 
 void Rendezvous::setNonrealtime(bool on) noexcept
@@ -485,6 +486,7 @@ bool Rendezvous::openRing(u64 nowMs)
             return false;
         }
         ring_ = keeper_.adopt(SegmentHandle(std::move(view), config_.backend));
+        ++ringGeneration_; // 新的映射：哪怕落在旧映射的地址上，代号也不同
         if (role() == Role::kOutput)
         {
             token_ = makeWriterToken(nowMs);
@@ -822,9 +824,16 @@ void Rendezvous::publishBinding()
     LoopBinding binding;
     binding.rv = rv_;
     binding.ring = ring_;
+    binding.ringGeneration = ringGeneration_;
     binding.group = group_;
     binding.role = role();
     binding.myCtl = myCtl_;
+    // 从活跃 + provisional 出发的转移只有四种：别人接管（到认领中）、属主休眠、属主释放、属主转正，落在
+    // 「gen + 1、活跃、不带 provisional」上的只有转正，别人写不出这个整字
+    if (ctlPhase(myCtl_) == kCtlPhaseActive && (ctlState(myCtl_) & kCtlProvisional) != 0)
+    {
+        binding.confirmedCtl = nextCtl(myCtl_, kCtlPhaseActive);
+    }
     binding.writerToken = token_;
     (void)bindings_.publish(binding);
     refreshState();

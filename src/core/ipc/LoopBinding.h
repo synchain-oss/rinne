@@ -44,12 +44,19 @@ const RoleSlot& roleSlot(const RvSegment& rv, u32 group, Role role) noexcept;
 // 只借句柄（句柄由同一个实例的 HandleKeeper 拥有），自己不持有任何映射。
 struct LoopBinding
 {
-    u64 seq = 0; // 发布序号，从 1 起，只供诊断与测试
+    // 发布序号，从 1 起，只供诊断与测试。同一个环上 ctl 一变（转正、休眠与唤醒）就重新发布、序号跟着变，不能拿来认映射
+    u64 seq = 0;
     SegmentHandle* rv = nullptr;
     SegmentHandle* ring = nullptr;
+    // 环映射的代号，从 1 起：会合每接管一个新的数据段句柄（打开数据段：认领之后、换组之后、失去槽之后重开）加 1，
+    // 同一个句柄上重新发布绑定时不变。EngineContext::ringGeneration 取的就是它
+    u64 ringGeneration = 0;
     u32 group = 0;
     Role role = Role::kInput;
     u64 myCtl = 0; // 属主最后写下的 ctl 整字：整字变了就说明被人接管过
+    // myCtl 是活跃 + provisional 时，属主转正（Rendezvous::confirmClaim）会写下的那个整字，否则 0。转正先 CAS 槽、
+    // 再重新发布绑定：两步之间拿着这份快照的那一块，槽里已经是它了，仍是自己的（见 BoundBlock::stillMine）
+    u64 confirmedCtl = 0;
     u64 writerToken = 0;
 };
 
@@ -68,7 +75,8 @@ public:
     RoleSlot& mine() const noexcept;
     RoleSlot& peer() const noexcept;
     RingSegment& ring() const noexcept;
-    // 这一块里属主身份有没有被别人动过：每块比对一次整字，杜绝双属主与 ABA（见 SegmentLayout 的 ctl 注释）
+    // 这一块里属主身份有没有被别人动过：每块比对一次整字，杜绝双属主与 ABA（见 SegmentLayout 的 ctl 注释）。
+    // 认的是 myCtl，以及绑定给了的 confirmedCtl（属主自己转正写下的整字，别人的转移写不出它）
     bool stillMine() const noexcept;
 
     BoundBlock(const BoundBlock&) = delete;

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // 音频线程怎么拿到段：会合槽的地址、绑定快照的发布与读取、块首租约（两段段的租约、身份比对、段太小就拒绝），
-// 以及句柄的退休节奏（延迟到期才 release，release 之后映射表还要等自己的宽限期；时钟读出 0 或倒退都不提前）。
+// 身份比对里转正写下的那个整字，以及句柄的退休节奏（延迟到期才 release，release 之后映射表还要等自己的宽限期；
+// 时钟读出 0 或倒退都不提前）。
 // 段用进程内后端建，句柄经 HandleKeeper 接管；时间一律注入，不睡眠。
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <string>
 
@@ -165,6 +167,53 @@ TEST_CASE("BoundBlock leases both segments and checks the owner word", "[ipc][bi
     }
     // 数据段还活着：仍然拒绝（会合段拿不到租约就整块不成立）
     CHECK(ring->valid());
+}
+
+TEST_CASE("BoundBlock also counts the confirmed word its binding names, and no other word", "[ipc][binding]")
+{
+    SegmentBackendInProcess::resetAllForTesting();
+    const Naming naming(NameScope::randomForTesting());
+    SegmentBackendInProcess backend;
+    HandleKeeper keeper;
+    SegmentHandle* const rv = keeper.adopt(openSegment(backend, naming, SegmentId::rendezvous(), kRvSpec));
+    SegmentHandle* const ring = keeper.adopt(openSegment(backend, naming, SegmentId::groupData(1), kRingSpec));
+
+    // 智能默认的认领（活跃 + provisional），gen 7；转正会写下 gen 8 的活跃整字
+    LoopBinding b;
+    b.rv = rv;
+    b.ring = ring;
+    b.group = 1;
+    b.role = Role::kInput;
+    b.myCtl = makeCtl(7, kCtlPhaseActive | kCtlProvisional);
+    b.confirmedCtl = makeCtl(8, kCtlPhaseActive);
+
+    BoundBlock block(&b);
+    REQUIRE(block.ok());
+    block.mine().ctl.store(b.myCtl);
+    CHECK(block.stillMine());
+    // 转正的 CAS 落了地、新快照还没发布：这一块仍是自己的
+    // ⛔ stillMine 只比 myCtl → 这里变红（那一块交给引擎的是空段，回送断一下再重新配对）
+    block.mine().ctl.store(b.confirmedCtl);
+    CHECK(block.stillMine());
+
+    // 别的整字一概不认：从 gen 7 出发的接管（认领中）、休眠、释放、带 provisional 的同阶段，以及再往后一代
+    for (const u64 other :
+         {makeCtl(8, kCtlPhaseClaiming | kCtlProvisional), makeCtl(8, kCtlPhaseClaiming),
+          makeCtl(8, kCtlPhaseDormant | kCtlProvisional), makeCtl(8, kCtlPhaseFree),
+          makeCtl(8, kCtlPhaseActive | kCtlProvisional), makeCtl(9, kCtlPhaseActive), makeCtl(7, kCtlPhaseActive)})
+    {
+        block.mine().ctl.store(other);
+        CHECK_FALSE(block.stillMine());
+    }
+
+    // 绑定没给 confirmedCtl（0）：只认 myCtl；槽里是 0（空闲的初值）也不因 confirmedCtl 为 0 而算自己的
+    b.confirmedCtl = 0;
+    block.mine().ctl.store(makeCtl(8, kCtlPhaseActive));
+    CHECK_FALSE(block.stillMine());
+    block.mine().ctl.store(0);
+    CHECK_FALSE(block.stillMine());
+    block.mine().ctl.store(b.myCtl);
+    CHECK(block.stillMine());
 }
 
 TEST_CASE("HandleKeeper retires a handle only after the delay and its own grace period", "[ipc][binding]")
