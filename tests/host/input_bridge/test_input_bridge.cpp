@@ -22,6 +22,7 @@
 #include "UiDefaultsStore.h"
 #include "engine/SafetyMachine.h"
 #include "state/StateCodec.h"
+#include "util/RinneVersion.h"
 
 namespace
 {
@@ -1320,8 +1321,15 @@ TEST_CASE("input bridge: rinne.state carries the Input fields and leaves out wha
         const auto causes = fields.getProperty("exportCauses", {});
         CHECK(keysOf(causes) == std::set<std::string>{"bits", "count"});
         CHECK(static_cast<int>(causes.getProperty("count", {})) == 0);
-        // 宿主测试里没有包装层，也没有构建标签：build 只剩编译时就定了的平台
-        CHECK(keysOf(fields.getProperty("build", {})) == std::set<std::string>{"arch"});
+        // 宿主测试里没有包装层，build 不带 fmt。sha 跟着构建标签走：本机 gates 不给标签，build 只剩编译时就定了的平台；
+        // kit 构建给 <kit>+<sha7>，多一个 sha。标签怎么取 sha 由「the build line takes the commit …」那条用例钉住
+        const juce::String label = rinne::build::buildLabel();
+        const auto build = fields.getProperty("build", {});
+        const auto expected = buildInfo(label, juce::AudioProcessor::wrapperType_Undefined);
+        CHECK(keysOf(build) == keysOf(expected));
+        CHECK(build.getProperty("sha", {}) == expected.getProperty("sha", {}));
+        if (label.isEmpty())
+            CHECK(keysOf(build) == std::set<std::string>{"arch"});
     }
     SECTION("after prepare and a manual pick")
     {
