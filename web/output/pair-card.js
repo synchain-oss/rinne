@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// 配对卡（O-06）：玻璃卡片 424×118，从上到下三块：
-//   状态灯一行（配对 pill 靠左，「配对」小标靠右）；
-//   副行（七种说法之一，最多两行）；
-//   两条轨道行：「本轨」与「Input 所在轨」，每行是色点、名字（超长省略，title 里是全名）；
-//     第二行末尾带轨道名核验徽标与声道徽标；未找到 Input 时第二行换成插入链示意，高亮 IN 槽。
-// 状态灯与副行包在 data-tour="pair" 的容器里，首启引导只亮这一块。
+// 配对卡（O-06）：玻璃卡片 424×140，画成一条信号链：
+//   正上方是状态灯一行（配对 pill 居中，「配对」小标在卡的左上角）；
+//   中间是两个节点与一根连线：左边「Input 所在轨」、右边「本轨」，每个节点是色点、小标、名字（最多折两行，再长省略，title 里是全名）；
+//     连线的颜色与虚实跟配对状态走（绿实线、琥珀实线、红虚线、灰虚线）；声道徽标骑在线上，轨道名核验徽标在线下；
+//     未找到 Input 时左节点换成插入链示意，高亮 IN 槽；
+//   链下是副行（七种说法之一，最多两行，居中）。
+// DOM 顺序仍是「本轨、Input 所在轨」（读屏顺序不变），左右换位由 CSS 的 row-reverse 做。
+// 状态灯这一排包在 data-tour="pair" 的容器里，首启引导第 3 步只亮这一排（副行不亮：说明框要放进设计盒）。
 // 本模块只管结构与文字；颜色语义、徽标、插入链都用共享件。update 的入参是 view-model.js 的 deriveView 结果。
 // 页面每秒会重发好几次同样的状态：只在文字或属性真的变了才写 DOM，插入链的 SVG 只在语言变时重建（重建会打断呼吸动画）。
 
@@ -84,8 +86,8 @@ export function createPairCard() {
     const sub = el("div", { class: "rn-paircard__sub", data: { part: "pair.sub", state: "searching" } });
     const head = el(
         "div",
-        { class: "rn-paircard__head", data: { tour: "pair" } },
-        el("div", { class: "rn-paircard__top" }, pill.el, eyebrow),
+        { class: "rn-paircard__head" },
+        el("div", { class: "rn-paircard__top", data: { tour: "pair" } }, pill.el, eyebrow),
         sub,
     );
     const thisRow = createTrackRow("track.this", "out.pair.thisTrack");

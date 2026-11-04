@@ -251,8 +251,8 @@
 
 | key | 位置 | 中文 | English | Français | 说明 |
 |---|---|---|---|---|---|
-| `out.place`（改） | 常驻位置提示（右边让出 60 px 给按钮，文字区 364 px，两行内） | 放在你想放进环路的最后一个插件之后、推子分隔线之上（最简单：推子前区最后一格）。 | Put this after the last plug-in you want in the loop and above the fader divider (simplest: the last pre-fader slot). | Placez-le après le dernier plug-in de la boucle, au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader). | 只删「voulu dans」一处：364 px 宽时旧稿在 4 % 余量下要三行。保留「après le dernier plug-in」和「au-dessus de la séparation du fader」两处关键位置词；「de la boucle」仍指明是环路里的最后一个 |
-| `out.place.ok` | 按钮文字（56 x 22，一行） | 知道了 | Got it | Compris | 与规则页按钮「Compris, lancer la visite」同一个词 |
+| `out.place`（改） | 常驻位置提示（右边是「知道了」按钮，文字区随按钮宽：法语最窄 332 px，英语 345 px，中文固定 290 px；字号 11 px、法语 10.5 px，两行内） | 放在你想放进环路的最后一个插件之后、推子分隔线之上（最简单：推子前区最后一格）。 | Put this after the last plug-in you want in the loop and above the fader divider (simplest: the last pre-fader slot). | Placez-le après le dernier plug-in de la boucle, au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader). | 只删「voulu dans」一处：364 px 宽时旧稿在 4 % 余量下要三行。法语文字区最窄，按 10.5 px 排两行刚好放下，不再缩短。保留「après le dernier plug-in」和「au-dessus de la séparation du fader」两处关键位置词；「de la boucle」仍指明是环路里的最后一个 |
+| `out.place.ok` | 按钮文字（20 高、宽随文字，一行） | 知道了 | Got it | Compris | 与规则页按钮「Compris, lancer la visite」同一个词 |
 | `out.place.dismissLabel` | 按钮的读屏名称 | 知道了，隐藏位置提示 | Got it, hide the placement hint | Compris, masquer le rappel de placement | 「rappel」对应提示的作用，与下面开关同词 |
 | `out.place.dismissTip` | 按钮的悬停提示 | 隐藏这条提示。需要时可在「关于」的高级设置里打开「显示位置提示」。 | Hides this hint. You can turn “Show placement hint” back on in About, under Advanced. | Masque ce rappel. Vous pouvez réactiver « Afficher le rappel de placement » dans À propos, sous Avancé. | 引用的开关名与 `about.adv.placeHint` 逐字相同；「À propos」「Avancé」与「关于」「高级设置」在界面里的译法一致 |
 | `about.adv.placeHint` | 「关于」高级设置里的开关（只有 Output），开 = 显示 | 显示位置提示 | Show placement hint | Afficher le rappel de placement | 一行内（预算 260 px） |
@@ -265,3 +265,11 @@
 | key | 位置 | 中文 | English | Français | 说明 |
 |---|---|---|---|---|---|
 | `about.fonts`（改） | 「关于」面板的字体说明 | 界面字体：Space Grotesk；Rinne Sans 与 Rinne Mono（由 Figtree / DM Mono 子集化并改名）；Noto Sans SC。均以 SIL Open Font License 1.1 授权。 | UI fonts: Space Grotesk; Rinne Sans and Rinne Mono (subset from Figtree / DM Mono and renamed); Noto Sans SC — all under the SIL Open Font License 1.1. | Polices de l’interface : Space Grotesk ; Rinne Sans et Rinne Mono (sous-ensembles de Figtree / DM Mono, renommés) ; Noto Sans SC — toutes sous licence SIL Open Font License 1.1. | 句式沿用原译，只换字体名并删去「selon la SIL OFL 1.1」；法语标点前仍是不换行空格 |
+
+## 追加：Output 信号链路版式（新增的 fr，待抽检）
+
+配对卡改成「Input 节点 — 连线 — 本轨节点」之后，发送状态行在没有接入环路时不再只画一个破折号，而是写一句话。`out.send.none` 原来的三语值都是「—」，现在改成下表。新增的 fr 登记在 `web/i18n/fr-review/output.json`（状态「待抽检」），抽检通过后从那里删掉。
+
+| key | 位置 | 中文 | English | Français | 说明 |
+|---|---|---|---|---|---|
+| `out.send.none`（改） | 发送状态行，没有接入环路时（找不到 Input、冲突、未分组、IPC 不可用、ABI 不符、采样率不符、验证器宿主） | 未接入环路 | NOT IN THE LOOP | HORS BOUCLE | 与同一行的其他三条同为大写等宽小字（9 px）。「hors boucle」是「不在环路里」，不说「déconnecté」：这一行只讲本轨有没有进环路，不判断断没断 |

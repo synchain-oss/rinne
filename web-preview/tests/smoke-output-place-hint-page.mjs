@@ -3,10 +3,12 @@
 // Output 常驻位置提示可手动关掉的页面冒烟（无头浏览器）：真页面（夹具 web-preview/fixtures/output）× 中 / 英 / 法。
 // 提示右侧有一颗「知道了」按钮；点了以后经桥写本机全局位，提示不再画、版式上移；「关于 → 高级设置」里的开关可以让它回来。
 // 量这些事：
-//   ① 按钮本身：是 button、在 layer 层、文字与 aria-label 三语对得上、不压住红字、不越出红字块、中心点上命中的就是它、一行；
-//      红字仍 ≤ 2 行；未关闭时外壳 data-place=on，六件之间的缝都是 4 px；
+//   ① 按钮本身：是 button、在 layer 层、文字与 aria-label 三语对得上、不压住红字、不越出红字块、中心点上命中的就是它、一行、
+//      20 高（命中区上下各补 2，共 24）、Rinne Sans 600；红字仍 ≤ 2 行；
+//      未关闭时外壳 data-place=on，页眉、提示、组、配对卡、消息位、页脚的坐标与缝就是信号链路版式的设计数（5、5、5、5、8）；
 //   ② 点它（鼠标 / 回车 / 空格，三语各用一种）：桥收到恰好一次 setPlaceHintHidden(true)；红字不再画；
-//      版式整体上移（组、配对卡、发送行、消息位各自的宽高与左缘不变，五道缝从 4 变 12，页脚不动，全在 460 x 364 内，互不重叠）；
+//      版式重排（组上移、配对卡长高到 172、消息位长到 44，让出的 45 归配对卡与上下的缝；左缘与宽不变，页眉与页脚不动，
+//      全在 460 x 364 内；发送行仍压在卡的底部，卡与消息位、组与页眉的缝是 10、10、8、6）；
 //      键盘用户焦点不丢（落到内容层第一个停靠点）；回声之后仍是关着的；全局位真的写进去了；
 //   ③ 键盘：Tab 走得到它且有焦点环；关于面板打开时它是 inert（Tab 走不到），关上后恢复；
 //   ④ 关于面板：Output 有「显示位置提示」开关，位置在诊断日志之后；关着时开关为关；点它写 false、红字回来、版式复原；
@@ -70,9 +72,27 @@ const SHELL = ".rn-shell";
 const ADV = '[data-adv="placeHint"]';
 const ROW = '[data-row="placeHint"]';
 const VERSION = '[data-gb="output.footer.version"]';
-/** 版式里从上到下的件（红字块在关着时不占位）。 */
-const STACK_SHOWN = ["header", "place", "group", "pair", "send", "band", "foot"];
-const STACK_HIDDEN = ["header", "group", "pair", "send", "band", "foot"];
+/** 版式里从上到下的件（红字块在关着时不占位；发送行压在配对卡里，不单列）。 */
+const STACK_SHOWN = ["header", "place", "group", "pair", "band", "foot"];
+const STACK_HIDDEN = ["header", "group", "pair", "band", "foot"];
+/** 各件顶边 [y, 高] 的设计数（设计盒坐标，原点是外壳内边框）：提示开着 / 关着。发送行 12 高，压在卡内。 */
+const WANT_SHOWN = {
+    header: [14, 38],
+    place: [57, 40],
+    group: [102, 26],
+    pair: [133, 140],
+    send: [255, 12],
+    band: [278, 42],
+    foot: [328, 26],
+};
+const WANT_HIDDEN = {
+    header: [14, 38],
+    group: [62, 26],
+    pair: [98, 172],
+    send: [251, 12],
+    band: [278, 44],
+    foot: [328, 26],
+};
 
 const sleep = (page, ms) => page.eval(`new Promise((r) => setTimeout(r, ${ms}))`);
 
@@ -147,18 +167,32 @@ async function fitProblems(page, tag) {
     run.check(leaks.length === 0, `${tag}：界面上出现了裸键、占位符或 null：${JSON.stringify(leaks.slice(0, 5))}`);
 }
 
-/** 版式上移的几何断言：before 是同一页关之前量的，after 是关之后量的。 */
+/** 各件相对页眉的纵向位置（页眉顶在设计盒的 14，用它抵掉外壳边框的偏移），逐件与设计数比。 */
+function checkDesign(g, want, tag) {
+    const o = g.header.y - 14;
+    for (const [k, [y, h]] of Object.entries(want)) {
+        run.check(
+            Math.abs(g[k].y - o - y) <= 0.5 && Math.abs(g[k].h - h) <= 0.5,
+            `${tag}：${k} 应在 y=${y}、高 ${h}，实得 y=${Math.round((g[k].y - o) * 10) / 10}、高 ${g[k].h}`,
+        );
+    }
+}
+
+/** 重排的几何断言：before 是同一页关之前量的，after 是关之后量的。 */
 function checkMovedUp(before, after, tag) {
     run.eq(after.dataPlace, "off", `${tag}：外壳应带 data-place=off`);
-    run.eq(gaps(after, STACK_HIDDEN), [12, 12, 12, 12, 12], `${tag}：关着时五道缝应从 4 摊到 12 且均匀`);
+    run.eq(
+        gaps(after, STACK_HIDDEN),
+        [10, 10, 8, 6],
+        `${tag}：关着时页眉 / 组 / 配对卡 / 消息位 / 页脚之间的缝是 10、10、8、6`,
+    );
+    checkDesign(after, WANT_HIDDEN, tag);
     for (const k of ["group", "pair", "send", "band"]) {
-        run.eq(
-            [after[k].x, after[k].w, after[k].h],
-            [before[k].x, before[k].w, before[k].h],
-            `${tag}：${k} 的左缘与宽高不应变（只挪 top）`,
-        );
-        run.check(after[k].y < before[k].y, `${tag}：${k} 应上移（${before[k].y} → ${after[k].y}）`);
+        run.eq([after[k].x, after[k].w], [before[k].x, before[k].w], `${tag}：${k} 的左缘与宽不应变（只挪 top、改高）`);
     }
+    run.check(after.group.y < before.group.y && after.pair.y < before.pair.y, `${tag}：组与配对卡应上移`);
+    run.check(after.pair.h > before.pair.h, `${tag}：配对卡应长高（${before.pair.h} → ${after.pair.h}）`);
+    run.check(after.band.h > before.band.h, `${tag}：消息位应长高（${before.band.h} → ${after.band.h}）`);
     run.eq([after.header.y, after.header.h], [before.header.y, before.header.h], `${tag}：页眉不动`);
     run.eq([after.foot.y, after.foot.h], [before.foot.y, before.foot.h], `${tag}：页脚不动`);
     for (const k of STACK_HIDDEN) {
@@ -173,6 +207,8 @@ function checkMovedUp(before, after, tag) {
         const b = after[STACK_HIDDEN[i]];
         run.check(b.y >= a.b, `${tag}：${STACK_HIDDEN[i]} 不应压住 ${STACK_HIDDEN[i - 1]}`);
     }
+    // 发送行压在配对卡的底部（有意叠在卡上），但不能压到卡外
+    run.check(after.send.y >= after.pair.y && after.send.b <= after.pair.b, `${tag}：发送行应在配对卡里`);
 }
 
 try {
@@ -190,7 +226,12 @@ try {
         await openOutput(page, server, box, lang, "");
         const shown = await geom(page);
         run.eq(shown.dataPlace, "on", `${tag}：没关过时外壳应带 data-place=on`);
-        run.eq(gaps(shown, STACK_SHOWN), [4, 4, 4, 4, 4, 4], `${tag}：没关过时六件之间的缝都是 4`);
+        run.eq(
+            gaps(shown, STACK_SHOWN),
+            [5, 5, 5, 5, 8],
+            `${tag}：没关过时页眉 / 提示 / 组 / 配对卡 / 消息位 / 页脚之间的缝是 5、5、5、5、8`,
+        );
+        checkDesign(shown, WANT_SHOWN, `${tag}：没关过`);
         run.eq(await placeShown(page), true, `${tag}：没关过时红字应在`);
         const info = await page.eval(`(() => {
             const b = document.querySelector(${JSON.stringify(OK)});
@@ -213,6 +254,9 @@ try {
                 insidePlace: r.left >= p.left && r.right <= p.right && r.top >= p.top && r.bottom <= p.bottom,
                 textRight, hitIsButton: hit === b || b.contains(hit), overflow: b.scrollWidth > b.clientWidth,
                 glow: b.getAttribute("data-glow"), tabindex: b.getAttribute("tabindex"),
+                family: getComputedStyle(b).fontFamily.split(",")[0].replace(/["']/g, "").trim(), weight: getComputedStyle(b).fontWeight,
+                hitTop: (() => { for (let y = r.top; y > r.top - 6; y -= 0.5) { const e = document.elementFromPoint(r.left + r.width / 2, y); if (!(e === b || b.contains(e))) return y + 0.5; } return r.top - 6; })(),
+                hitBottom: (() => { for (let y = r.bottom; y < r.bottom + 6; y += 0.5) { const e = document.elementFromPoint(r.left + r.width / 2, y); if (!(e === b || b.contains(e))) return y - 0.5; } return r.bottom + 6; })(),
             };
         })()`);
         run.check(info !== null, `${tag}：红字块里应有「知道了」按钮`);
@@ -225,7 +269,13 @@ try {
             run.eq(info.inLayer, true, `${tag}：按钮应在 layer 层（旁路时不随内容层降级）`);
             run.eq(info.inContent, false, `${tag}：按钮不在 content 层`);
             run.check(info.tabindex === null || Number(info.tabindex) >= 0, `${tag}：按钮不应被移出 Tab 顺序`);
-            run.eq([info.w, info.h], [56, 22], `${tag}：按钮 56 x 22`);
+            run.eq(info.h, 20, `${tag}：按钮 20 高`);
+            run.check(info.w >= 44 && info.w <= 70, `${tag}：按钮宽随文字（两侧各 10 的内边距），实得 ${info.w}`);
+            run.eq([info.family, info.weight], ["Rinne Sans", "600"], `${tag}：按钮文字是 Rinne Sans 600`);
+            run.check(
+                info.hitTop <= info.top - 1.5 && info.hitBottom >= info.bottom + 1.5,
+                `${tag}：按钮的命中区上下各补约 2（钮 ${info.top}–${info.bottom}，命中 ${info.hitTop}–${info.hitBottom}）`,
+            );
             run.eq(info.insidePlace, true, `${tag}：按钮应在红字块内`);
             run.check(
                 info.textRight <= info.left - 2,
@@ -359,7 +409,8 @@ try {
         run.eq(await placeShown(page), false, "首帧（关着）：快照到之前红字就不在");
         const pre = await geom(page);
         run.eq(pre.dataPlace, "off", "首帧（关着）：快照到之前外壳就是 data-place=off");
-        run.eq(gaps(pre, STACK_HIDDEN), [12, 12, 12, 12, 12], "首帧（关着）：快照到之前版式就是上移后的");
+        run.eq(gaps(pre, STACK_HIDDEN), [10, 10, 8, 6], "首帧（关着）：快照到之前版式就是重排后的");
+        checkDesign(pre, WANT_HIDDEN, "首帧（关着）");
         await page.waitFor("window.__fx.page.snapshot().state.seq >= 0", { timeout: 8000, label: "首个快照应到" });
         await sleep(page, 300);
         run.eq(await placeShown(page), false, "首帧（关着）：快照到了以后红字也不冒出来");

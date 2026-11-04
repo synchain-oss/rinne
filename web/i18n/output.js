@@ -22,7 +22,7 @@ export default {
         "out.group.autoTip": "已自动跟随最近一个未配对的 Rinne Input（组 {g}）；点任意组改为手动。",
         "out.group.autoFallback": "没有未配对的 Rinne Input，暂用组 {g}，每秒重新查找。",
         "out.group.peerDotTip": "组 {g}：有一个未配对的 Rinne Input 在线",
-        // 配对卡：状态灯、副行、两条轨道行
+        // 配对卡：状态灯、副行、两个轨道节点
         "out.pair.searching": "未找到 Input",
         "out.pair.bypassed": "已旁路",
         "out.pair.eyebrow": "配对",
@@ -40,7 +40,7 @@ export default {
         "out.send.ok": "发送中 · {ch} · {sr} kHz",
         "out.send.bypassed": "旁路：写入静音",
         "out.send.idle": "宿主未调用处理：暂停写入",
-        "out.send.none": "—",
+        "out.send.none": "未接入环路",
         // 页脚提示与消息位空闲灰字
         "out.hint.idle": "反馈量、延迟、音色和安全设置都在本轨的 Rinne Input 里。",
         "out.hint.unpaired": "先在本轨插入链第一格插入 Rinne Input",
@@ -78,7 +78,7 @@ export default {
         "out.group.autoFallback":
             "No unpaired Rinne Input yet; using group {g} for now and checking again every second.",
         "out.group.peerDotTip": "Group {g}: an unpaired Rinne Input is online",
-        // 配对卡：状态灯、副行、两条轨道行
+        // 配对卡：状态灯、副行、两个轨道节点
         "out.pair.searching": "NO INPUT",
         "out.pair.bypassed": "BYPASSED",
         "out.pair.eyebrow": "PAIRING",
@@ -98,7 +98,7 @@ export default {
         "out.send.ok": "SENDING · {ch} · {sr} kHz",
         "out.send.bypassed": "BYPASSED: WRITING SILENCE",
         "out.send.idle": "HOST NOT PROCESSING: PAUSED",
-        "out.send.none": "—",
+        "out.send.none": "NOT IN THE LOOP",
         // 页脚提示与消息位空闲灰字
         "out.hint.idle": "Feedback, delay, tone and safety settings all live in the Rinne Input on this track.",
         "out.hint.unpaired": "First insert Rinne Input on this track’s first insert slot",
@@ -137,7 +137,7 @@ export default {
         "out.group.autoFallback":
             "Aucun Rinne Input non appairé pour l’instant ; groupe {g} utilisé provisoirement, nouvelle recherche chaque seconde.",
         "out.group.peerDotTip": "Groupe {g} : un Rinne Input non appairé est en ligne",
-        // 配对卡：状态灯、副行、两条轨道行
+        // 配对卡：状态灯、副行、两个轨道节点
         "out.pair.searching": "AUCUN INPUT",
         "out.pair.bypassed": "CONTOURNÉ",
         "out.pair.eyebrow": "APPAIRAGE",
@@ -159,7 +159,7 @@ export default {
         "out.send.ok": "ENVOI · {ch} · {sr} kHz",
         "out.send.bypassed": "CONTOURNÉ : ÉCRIT DU SILENCE",
         "out.send.idle": "HÔTE INACTIF : EN PAUSE",
-        "out.send.none": "—",
+        "out.send.none": "HORS BOUCLE",
         // 页脚提示与消息位空闲灰字
         "out.hint.idle":
             "La réinjection, le délai, le timbre et la sécurité se règlent tous dans le Rinne Input de cette piste.",
