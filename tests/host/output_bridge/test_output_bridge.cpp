@@ -134,6 +134,45 @@ OutputProcessor& addOutputWith(Bench& bench, ipc::ISegmentBackend& backend)
     return bench.add(std::make_unique<OutputProcessor>(config), true);
 }
 
+// 本用例独占的设置目录：落盘位置指到这里，用完恢复（下一个用例开始时测试沙盒会再指回自己的目录）。
+// 只删这一层的文件和这个空目录，不递归
+class ScratchSettings
+{
+public:
+    ScratchSettings()
+    {
+        dir_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                   .getNonexistentChildFile("rinne-place-hint-test", "", false);
+        REQUIRE(dir_.createDirectory().wasOk());
+        uidefaults::setStorageDirForTests(dir_);
+    }
+
+    ~ScratchSettings()
+    {
+        uidefaults::setStorageDirForTests(juce::File());
+        juce::Array<juce::File> children;
+        dir_.findChildFiles(children, juce::File::findFilesAndDirectories, false);
+        for (const auto& c : children)
+            c.deleteFile(); // 只会有设置文件，或「设置文件」位置上占着的一个空目录
+        dir_.deleteFile();
+    }
+
+    ScratchSettings(const ScratchSettings&) = delete;
+    ScratchSettings& operator=(const ScratchSettings&) = delete;
+
+    juce::File file() const { return dir_.getChildFile("ui-defaults.settings"); }
+
+    // 直接写盘上的 XML，模拟老版本留下的、或被别的工具改过的文件
+    void writeRaw(const juce::String& values) const
+    {
+        REQUIRE(file().replaceWithText("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<PROPERTIES>\n" + values +
+                                       "\n</PROPERTIES>\n"));
+    }
+
+private:
+    juce::File dir_;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------- 回执
@@ -180,6 +219,21 @@ TEST_CASE("output bridge: the global-flag functions answer with the documented r
         CHECK(isOk(bridge.setDiagLog(args({juce::var(false)}))));
         CHECK_FALSE(uidefaults::diagLogEnabled());
     }
+    SECTION("setPlaceHintHidden takes a boolean, writes the global key and echoes it")
+    {
+        CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
+        const auto on = bridge.setPlaceHintHidden(args({juce::var(true)}));
+        CHECK(isOk(on));
+        CHECK(on.getProperty("value", juce::var()).isBool());
+        CHECK(static_cast<bool>(on.getProperty("value", juce::var())));
+        CHECK(uidefaults::placeHintHiddenGlobal());
+        for (const auto& bad :
+             {args({}), args({juce::var(0)}), args({juce::var(1)}), args({juce::var("false")}), args({juce::var()})})
+            CHECK(reasonOf(bridge.setPlaceHintHidden(bad)) == "bad-value");
+        CHECK(uidefaults::placeHintHiddenGlobal()); // 坏参数不写
+        CHECK(isOk(bridge.setPlaceHintHidden(args({juce::var(false)}))));
+        CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
+    }
     SECTION("none of them settles the instance or marks the project dirty")
     {
         DirtyListener dirty;
@@ -187,6 +241,8 @@ TEST_CASE("output bridge: the global-flag functions answer with the documented r
         bridge.setRulesAck(args({juce::var(2)}));
         bridge.setGuideSeen(args({juce::var(true)}));
         bridge.setDiagLog(args({juce::var(true)}));
+        bridge.setPlaceHintHidden(args({juce::var(true)}));
+        bridge.setPlaceHintHidden(args({juce::var(false)}));
         CHECK(dirty.dirtyMarks == 0);
         CHECK_FALSE(settled(output));
         output.removeListener(&dirty);
@@ -987,4 +1043,156 @@ TEST_CASE("output bridge: outOfOrder follows the order evidence of the Output en
         cycle(10);
     CHECK(bridge.noticeFacts().outputFirst);
     CHECK_FALSE(noticeOf(stateFields(bridge), "outOfOrder").isVoid());
+}
+
+// ---------------------------------------------------------------- 常驻位置提示的显隐（本机全局设置）
+
+/** 首帧预置里 placeHintHidden 的值。预置表不是恰好这一项（有人把预置删了）时测试直接失败，不去读不存在的元素。 */
+static bool seededPlaceHintHidden()
+{
+    const auto seed = OutputBridge::firstFrameSeedPairs();
+    REQUIRE(seed.size() == 1);
+    REQUIRE(seed[0].first == rinne::bridge::Init::PlaceHintHidden);
+    REQUIRE(seed[0].second.isBool());
+    return static_cast<bool>(seed[0].second);
+}
+
+TEST_CASE("output bridge: the placement hint is shown by default and the first-frame seed says so",
+          "[host][output_bridge][place_hint]")
+{
+    formalOnly();
+    ScratchSettings scratch;
+    CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
+    CHECK_FALSE(uidefaults::readUiFlags("output").placeHintHidden);
+    const auto seed = OutputBridge::firstFrameSeedPairs();
+    REQUIRE(seed.size() == 1);
+    CHECK(seed[0].first == rinne::bridge::Init::PlaceHintHidden);
+    CHECK(seed[0].second.isBool());
+    CHECK_FALSE(static_cast<bool>(seed[0].second));
+}
+
+TEST_CASE("output bridge: a settings file from before this key existed reads as shown",
+          "[host][output_bridge][place_hint]")
+{
+    formalOnly();
+    ScratchSettings scratch;
+    scratch.writeRaw("  <VALUE name=\"lang_global\" val=\"fr\"/>\n  <VALUE name=\"diag_log_enabled\" val=\"1\"/>");
+    CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
+    const auto flags = uidefaults::readUiFlags("output");
+    CHECK_FALSE(flags.placeHintHidden);
+    CHECK(flags.diagLog); // 老文件里别的键照常读
+    CHECK_FALSE(seededPlaceHintHidden());
+
+    // 键在但值读不出来（被改坏）同样按显示
+    scratch.writeRaw("  <VALUE name=\"place_hint_hidden_global\" val=\"maybe\"/>");
+    CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
+}
+
+TEST_CASE("output bridge: setPlaceHintHidden persists across a new instance and reaches the snapshot and the seed",
+          "[host][output_bridge][place_hint]")
+{
+    formalOnly();
+    ScratchSettings scratch;
+    {
+        Bench bench;
+        OutputProcessor& output = bench.addOutput();
+        Recorded rec;
+        OutputBridge bridge(output, hooksFor(bench, rec));
+        REQUIRE(isOk(bridge.setPlaceHintHidden(args({juce::var(true)}))));
+        CHECK(uidefaults::placeHintHiddenGlobal());
+    }
+    // 重开：全新的处理器和桥，什么都不从上一个实例带，值只能来自磁盘
+    {
+        Bench bench;
+        OutputProcessor& output = bench.addOutput();
+        Recorded rec;
+        OutputBridge bridge(output, hooksFor(bench, rec));
+        CHECK(uidefaults::placeHintHiddenGlobal());
+        CHECK(seededPlaceHintHidden());
+        // 快照通道：共用快照里带同名字段，键与首帧预置是同一个常量
+        const auto flags = uidefaults::readUiFlags("output");
+        CHECK(flags.placeHintHidden);
+        rinne::bridge::UiSeed seed;
+        seed.role = "output";
+        const auto snapshot = rinne::bridge::buildUiSnapshot(seed, flags);
+        CHECK(snapshot.getProperty(rinne::bridge::Init::PlaceHintHidden, juce::var()).isBool());
+        CHECK(static_cast<bool>(snapshot.getProperty(rinne::bridge::Init::PlaceHintHidden, juce::var())));
+        // 写入当拍补发一帧 rinne.state，让本窗口的页面马上对上（别的仍开着的 Output 窗口靠 1 Hz 兜底带上新值）
+        (void)bridge.firstFrames(OutputBridge::UiContext{}); // 先把基线对齐
+        (void)bridge.poll(OutputBridge::UiContext{});
+        CHECK(isOk(bridge.setPlaceHintHidden(args({juce::var(true)}))));
+        CHECK(bridge.poll(OutputBridge::UiContext{}).state);
+        // 恢复显示也一样落盘
+        CHECK(isOk(bridge.setPlaceHintHidden(args({juce::var(false)}))));
+        CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
+        CHECK_FALSE(uidefaults::readUiFlags("output").placeHintHidden);
+    }
+}
+
+TEST_CASE("output bridge: setPlaceHintHidden leaves the other flags, the project and the instance alone",
+          "[host][output_bridge][place_hint]")
+{
+    formalOnly();
+    ScratchSettings scratch;
+    Bench bench;
+    OutputProcessor& output = bench.addOutput();
+    Recorded rec;
+    OutputBridge bridge(output, hooksFor(bench, rec));
+    DirtyListener dirty;
+    output.addListener(&dirty);
+    REQUIRE(isOk(bridge.setPlaceHintHidden(args({juce::var(true)}))));
+    CHECK(dirty.dirtyMarks == 0);
+    CHECK_FALSE(settled(output));
+    // 不碰别的全局位
+    CHECK_FALSE(uidefaults::guideSeenGlobalOutput());
+    CHECK_FALSE(uidefaults::diagLogEnabled());
+    // 它走共用快照，Output 自己的状态字段集合不变
+    CHECK(keysOf(stateFields(bridge)).count("placeHintHidden") == 0);
+    output.removeListener(&dirty);
+}
+
+TEST_CASE("output bridge: a settings file that cannot be written answers unavailable and does not pretend",
+          "[host][output_bridge][place_hint]")
+{
+    formalOnly();
+    ScratchSettings scratch;
+    // 设置文件的位置被一个目录占着：打不开、写不进去
+    REQUIRE(scratch.file().createDirectory().wasOk());
+    Bench bench;
+    OutputProcessor& output = bench.addOutput();
+    Recorded rec;
+    OutputBridge bridge(output, hooksFor(bench, rec));
+    const auto r = bridge.setPlaceHintHidden(args({juce::var(true)}));
+    CHECK_FALSE(isOk(r));
+    CHECK(reasonOf(r) == "unavailable");
+    CHECK_FALSE(uidefaults::placeHintHiddenGlobal()); // 没存上就读不回来，页面据此让提示留着
+    CHECK_FALSE(uidefaults::setPlaceHintHiddenGlobal(true));
+    // 坏参数先于写盘判断：同样的环境下参数不是布尔仍是 bad-value
+    CHECK(reasonOf(bridge.setPlaceHintHidden(args({juce::var("true")}))) == "bad-value");
+}
+
+TEST_CASE("ui defaults: the placement hint key round-trips and keeps keys it does not know",
+          "[host][output_bridge][place_hint]")
+{
+    formalOnly();
+    ScratchSettings scratch;
+    scratch.writeRaw("  <VALUE name=\"lang_global\" val=\"en\"/>\n  <VALUE name=\"future_key_from_a_newer_build\" "
+                     "val=\"keep-me\"/>");
+    REQUIRE(uidefaults::setPlaceHintHiddenGlobal(true));
+    CHECK(uidefaults::placeHintHiddenGlobal());
+    // 磁盘上：新键在，别的键（含这个版本不认识的）原样留着
+    const auto text = scratch.file().loadFileAsString();
+    CHECK(text.contains("place_hint_hidden_global"));
+    CHECK(text.contains("future_key_from_a_newer_build"));
+    CHECK(text.contains("keep-me"));
+    CHECK(uidefaults::langGlobal() == "en");
+    // 再写假，其它键仍在
+    REQUIRE(uidefaults::setPlaceHintHiddenGlobal(false));
+    CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
+    const auto after = scratch.file().loadFileAsString();
+    CHECK(after.contains("future_key_from_a_newer_build"));
+    CHECK(uidefaults::langGlobal() == "en");
+    // 单独读与一次读回口径一致
+    CHECK(uidefaults::readUiFlags("input").placeHintHidden == uidefaults::placeHintHiddenGlobal());
+    CHECK(uidefaults::readUiFlags("output").placeHintHidden == uidefaults::placeHintHiddenGlobal());
 }

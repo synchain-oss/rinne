@@ -244,3 +244,16 @@
 三条的增幅分别是 +47 %、+6 %、+24 %（相对初译）；按维护者的裁定，15 % 的约束对这三条让位。
 
 抽检通过后的收尾：四份 `web/i18n/fr-review/*.json` 的 `entries` 已清空（`note` 改为说明已抽检通过）；`docs/hard-rules.i18n.json` 的 `frReview` 改为 `reviewed`，审校人、审校时中文的合并哈希和确认评论的链接都登记在里面。
+
+## 追加：Output 位置提示可关掉（新增与改动的 fr，待抽检）
+
+上面的复核与抽检结束之后，Output 的常驻位置提示加了一颗「知道了」按钮，「关于」里加了一个「显示位置提示」开关（只有 Output）。新增的 fr 与改动的一条登记在 `web/i18n/fr-review/output.json`、`web/i18n/fr-review/common.json`（状态「待抽检」），抽检通过后从那里删掉。
+
+| key | 位置 | 中文 | English | Français | 说明 |
+|---|---|---|---|---|---|
+| `out.place`（改） | 常驻位置提示（右边让出 60 px 给按钮，文字区 364 px，两行内） | 放在你想放进环路的最后一个插件之后、推子分隔线之上（最简单：推子前区最后一格）。 | Put this after the last plug-in you want in the loop and above the fader divider (simplest: the last pre-fader slot). | Placez-le après le dernier plug-in de la boucle, au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader). | 只删「voulu dans」一处：364 px 宽时旧稿在 4 % 余量下要三行。保留「après le dernier plug-in」和「au-dessus de la séparation du fader」两处关键位置词；「de la boucle」仍指明是环路里的最后一个 |
+| `out.place.ok` | 按钮文字（56 x 22，一行） | 知道了 | Got it | Compris | 与规则页按钮「Compris, lancer la visite」同一个词 |
+| `out.place.dismissLabel` | 按钮的读屏名称 | 知道了，隐藏位置提示 | Got it, hide the placement hint | Compris, masquer le rappel de placement | 「rappel」对应提示的作用，与下面开关同词 |
+| `out.place.dismissTip` | 按钮的悬停提示 | 隐藏这条提示。需要时可在「关于」的高级设置里打开「显示位置提示」。 | Hides this hint. You can turn “Show placement hint” back on in About, under Advanced. | Masque ce rappel. Vous pouvez réactiver « Afficher le rappel de placement » dans À propos, sous Avancé. | 引用的开关名与 `about.adv.placeHint` 逐字相同；「À propos」「Avancé」与「关于」「高级设置」在界面里的译法一致 |
+| `about.adv.placeHint` | 「关于」高级设置里的开关（只有 Output），开 = 显示 | 显示位置提示 | Show placement hint | Afficher le rappel de placement | 一行内（预算 260 px） |
+| `about.adv.placeHintTip` | 上一行的悬停提示 | 在窗口顶部常驻显示这个插件该放在哪的提示；点提示上的「知道了」会把它关掉，这里可以再打开。这是本机设置，所有 Output 共用。 | Keeps the reminder about where this plug-in goes at the top of the window. “Got it” on the reminder hides it; turn it back on here. This is a setting for this computer, shared by every Output. | Garde en haut de la fenêtre le rappel de l’emplacement de ce plug-in. « Compris » sur le rappel le masque ; réactivez-le ici. Réglage propre à cet ordinateur, commun à tous les Output. | 与 `about.adv.noteOut` 里「réglage propre à cet ordinateur」同一个说法 |

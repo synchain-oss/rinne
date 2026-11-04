@@ -4,7 +4,9 @@
    共享件的外观（外壳、页眉、组胶囊、消息位、页脚、模态、轻提示）全在 web/shared/rinne.css 里，这里不重复。
    颜色一律用 tokens.css 里已有的 token，不写裸色值；坐标是设计稿 v2.5 的数：
    14 页眉 38 + 4 + 红字块 36 + 4 + 组 26 + 4 + 配对卡 118 + 4 + 发送行 14 + 4 + 消息位 58 + 4 + 页脚 26 + 10 = 364。
-   红字块两行高（2 × 15 + 6）：三语都必须在两行内，冒烟量行数；窗口高度是宿主侧定死的，红字不能再长一行。 */
+   红字块两行高（2 × 15 + 6）：三语都必须在两行内，冒烟量行数；窗口高度是宿主侧定死的，红字不能再长一行。
+   红字块右侧有一颗「知道了」按钮，文字区因此是 364 宽（text-budget.json 的 out.place 同值）。
+   用户点了「知道了」之后外壳带 data-place="off"，红字块不画，下面五道缝从 4 摊到 12，见文末「位置提示关掉后」。 */
 
 html,
 body {
@@ -80,7 +82,8 @@ body {
     box-sizing: border-box;
     width: 440px;
     height: 36px;
-    padding: var(--sp-2) var(--sp-8);
+    /* 右内边距收到 4：按钮贴近右缘，文字区才有 364（438 - 8 - 4 - 6 - 56） */
+    padding: var(--sp-2) var(--sp-4) var(--sp-2) var(--sp-8);
     border-radius: var(--r-banner);
     display: flex;
     align-items: center;
@@ -89,13 +92,35 @@ body {
 }
 
 .rn-place__text {
-    flex: none;
-    width: 424px;
+    flex: 1 1 0;
+    min-width: 0;
     font-family: var(--ff-grotesk);
     font-weight: 600;
     font-size: var(--fs-110);
     line-height: 15px;
     color: var(--sem-red-ink);
+}
+
+/* 「知道了」：56 × 22 的小药丸，三语同宽（fr 的 Compris 最长，约 41 宽，两侧各留 5 的内边距）。
+   聚焦环用外壳统一的 :focus-visible；柔光照由 data-glow 交给共享的 glow.js。
+   字色取一级文字色而不是红字的墨色：它是普通操作，不是安全信息，对比度仍按这个块的 A 档量。 */
+.rn-place__ok {
+    box-sizing: border-box;
+    flex: none;
+    width: 56px;
+    height: 22px;
+    margin-left: var(--sp-6);
+    padding: 0 var(--sp-5);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--ff-grotesk);
+    font-weight: 600;
+    font-size: var(--fs-100);
+    line-height: 1;
+    color: var(--txt-1);
+    background: rgba(var(--wh), 0.5);
+    border: 1px solid rgba(var(--txt-1-rgb), 0.3);
 }
 
 /* ------------------------------------------------------------ 配对卡（O-06） */
@@ -266,4 +291,25 @@ body {
 
 .rn-shell[data-bypass] > .rn-shell__content > .rn-out--band:not([data-state="idle"]) {
     opacity: 1;
+}
+
+/* ------------------------------------------------------------ 位置提示关掉后（外壳 data-place="off"） */
+/* 红字块不画，它的 36 px 加一道 4 px 的缝共 40 px 摊给剩下的五道缝（页眉与组、组与配对卡、配对卡与发送行、发送行与消息位、
+   消息位与页脚），每道从 4 变 12，各件之间仍然均匀；页脚和页眉不动，设计盒仍是 460 x 364：
+   14 页眉 38 + 12 + 组 26 + 12 + 配对卡 118 + 12 + 发送行 14 + 12 + 消息位 58 + 12 + 页脚 26 + 10 = 364。
+   只有这四件的 top 变，宽高和左缘都不动。 */
+.rn-shell[data-place="off"] .rn-out--group {
+    top: 64px;
+}
+
+.rn-shell[data-place="off"] .rn-out--pair {
+    top: 102px;
+}
+
+.rn-shell[data-place="off"] .rn-out--send {
+    top: 232px;
+}
+
+.rn-shell[data-place="off"] .rn-out--band {
+    top: 258px;
 }

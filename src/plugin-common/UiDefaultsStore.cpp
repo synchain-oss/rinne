@@ -25,6 +25,7 @@ constexpr const char* kKeyGuideSeenOutput = "guide_seen_global_output";
 constexpr const char* kKeyUiScaleInput = "ui_scale_percent_input";
 constexpr const char* kKeyUiScaleOutput = "ui_scale_percent_output";
 constexpr const char* kKeyDiagLog = "diag_log_enabled";
+constexpr const char* kKeyPlaceHintHidden = "place_hint_hidden_global";
 
 // 缩放百分比的范围校验：夹取后不变就是在范围内。边界的真源是桥层那一对常量
 bool inRange(int percent)
@@ -219,14 +220,19 @@ bool readBool(const char* key)
     return f != nullptr && boolOf(*f, key);
 }
 
-void writeBool(const char* key, bool value)
+bool writeBoolChecked(const char* key, bool value)
 {
     const StoreSession session(Access::write);
     auto* f = session.file();
     if (f == nullptr)
-        return;
+        return false;
     f->setValue(key, value);
-    f->saveIfNeeded(); // 即刻落盘模式下已经写过；显式再来一次，免得以后改了选项就静默丢写
+    return f->saveIfNeeded(); // 即刻落盘模式下已经写过；显式再来一次，免得以后改了选项就静默丢写。落盘失败回假
+}
+
+void writeBool(const char* key, bool value)
+{
+    (void)writeBoolChecked(key, value);
 }
 
 int readPercent(const char* key)
@@ -370,6 +376,16 @@ void setDiagLogEnabled(bool enabled)
     writeBool(kKeyDiagLog, enabled);
 }
 
+bool placeHintHiddenGlobal()
+{
+    return readBool(kKeyPlaceHintHidden);
+}
+
+bool setPlaceHintHiddenGlobal(bool hidden)
+{
+    return writeBoolChecked(kKeyPlaceHintHidden, hidden);
+}
+
 bridge::UiFlags readUiFlags(const juce::String& role)
 {
     bridge::UiFlags flags;
@@ -381,6 +397,7 @@ bridge::UiFlags readUiFlags(const juce::String& role)
     flags.rulesAck = rulesAckOf(*f);
     flags.guideSeen = boolOf(*f, guideKey(role));
     flags.diagLog = boolOf(*f, kKeyDiagLog);
+    flags.placeHintHidden = boolOf(*f, kKeyPlaceHintHidden);
     return flags;
 }
 

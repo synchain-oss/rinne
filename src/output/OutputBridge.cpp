@@ -248,6 +248,24 @@ juce::var OutputBridge::setDiagLog(const juce::Array<juce::var>& args)
     return common::okResponseWith("value", on);
 }
 
+juce::var OutputBridge::setPlaceHintHidden(const juce::Array<juce::var>& args)
+{
+    bool hidden = false;
+    if (!common::jsBoolArg(args, hidden))
+        return common::failResponse(common::Reason::BadValue);
+    // 写本机的全局设置（所有 Output 共用），不进工程：不标脏、不定型。
+    // 写不进去（设置文件打不开或落盘失败）如实回 unavailable，页面据此让提示留着，不能先消失
+    if (!uidefaults::setPlaceHintHiddenGlobal(hidden))
+        return common::failResponse(common::Reason::Unavailable);
+    forceState_ = true;
+    return common::okResponseWith("value", hidden);
+}
+
+std::vector<std::pair<juce::String, juce::var>> OutputBridge::firstFrameSeedPairs()
+{
+    return {{juce::String(common::Init::PlaceHintHidden), juce::var(uidefaults::placeHintHiddenGlobal())}};
+}
+
 juce::var OutputBridge::resolveTakeover(const juce::Array<juce::var>& args)
 {
     bool accept = false;

@@ -132,7 +132,8 @@ firstRun = createFirstRun({
     bridge,
     host: shell.top,
     shell: shell.el,
-    inert: [shell.content],
+    // 常驻提示在 layer 层，不在 content 层里：它的「知道了」按钮也要一起 inert，否则 Tab 能走到叠层之下
+    inert: [shell.content, page.parts.place.el],
     steps: TOUR_OUT_STEPS,
     onChange: () => shell.refresh(),
 });

@@ -529,6 +529,7 @@ const REASON_FUNCTIONS = {
         "setDiagLog",
         "resolveTakeover",
         "output:setTailMode",
+        "output:setPlaceHintHidden",
         "input:setParam",
         "input:setLimiter",
         "input:setGuardOn",
@@ -542,8 +543,9 @@ const REASON_FUNCTIONS = {
     "not-allowed": ["openExternal"],
     // copyDiagnostics：写了剪贴板但回读对不上
     clipboard: ["copyDiagnostics"],
-    // 地址或文件已通过校验，系统没能打开
-    unavailable: ["openExternal", "showLicense"],
+    // openExternal、showLicense：地址或文件已通过校验，系统没能打开
+    // output:setPlaceHintHidden：参数合法，本机设置文件写不进去（页面据此让提示留着）
+    unavailable: ["openExternal", "showLicense", "output:setPlaceHintHidden"],
 };
 
 // 上表的键与 BridgeBase.h 的 Reason 逐个相等，角色自己的原因（只有那一端的桥回）不进去。登记过的函数行里还写了这种原因时

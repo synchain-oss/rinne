@@ -59,6 +59,7 @@ export const BRIDGE_FUNCTIONS = {
         "showLicense",
         "repairPair",
         "setTailMode",
+        "setPlaceHintHidden",
     ],
     input: [
         "requestInitialState",
@@ -111,10 +112,10 @@ for (const table of [BRIDGE_FUNCTIONS, BRIDGE_EVENTS]) {
 const ROLES = ["output", "input"];
 
 /**
- * 返回对象上的保留键。万一将来新增的函数名撞上这三个键，必须先改本文件，
+ * 返回对象上的保留键。万一将来新增的函数名撞上这几个键，必须先改本文件，
  * 而不是让桥函数悄悄覆盖 on、role 或 isPreview。
  */
-const RESERVED_KEYS = new Set(["role", "isPreview", "on"]);
+const RESERVED_KEYS = new Set(["role", "isPreview", "on", "seed"]);
 
 /**
  * 极简事件分发器。同一事件的回调按注册顺序同步调用；派发前取快照，允许回调内退订。
@@ -170,12 +171,30 @@ function makeOn(role, em) {
 }
 
 /**
- * 组装返回对象 { role, isPreview, on, ...每个函数一个方法 }。
- * call(name) 由各后端提供；方法一律 async，参数原样透传（校验归 C++）。
- * isRegistered(name) 判断后端是否真的实现了这个名字。
+ * 首帧同步预置：宿主装配 WebView 时放进 initialisationData 的键值（JUCE 把每个键存成数组，值在第 0 项），
+ * 页面脚本一跑就能同步读到，不必等第一个 rinne.state。本函数只做搬运：跳过 JUCE 自己的 __juce__ 开头的内部键，
+ * 取每个键的第 0 项，返回只读的纯对象；形状不对（不是对象、值不是数组）一律当没有。键名与取值的含义见
+ * docs/UI_BRIDGE.md，页面自己校验类型。mock 后端提供同形的 initialisationData，预览与真宿主走同一条读法。
  */
-function assemble(role, isPreview, em, call, isRegistered) {
-    const api = { role, isPreview, on: makeOn(role, em) };
+function readSeed(data) {
+    const seed = {};
+    if (data && typeof data === "object") {
+        for (const key of Object.keys(data)) {
+            if (key.startsWith("__")) continue;
+            const list = data[key];
+            if (Array.isArray(list) && list.length > 0) seed[key] = list[0];
+        }
+    }
+    return Object.freeze(seed);
+}
+
+/**
+ * 组装返回对象 { role, isPreview, on, seed, ...每个函数一个方法 }。
+ * call(name) 由各后端提供；方法一律 async，参数原样透传（校验归 C++）。
+ * isRegistered(name) 判断后端是否真的实现了这个名字；seed 是 readSeed 的结果。
+ */
+function assemble(role, isPreview, em, call, isRegistered, seed) {
+    const api = { role, isPreview, on: makeOn(role, em), seed };
     const absent = [];
     for (const name of BRIDGE_FUNCTIONS[role]) {
         if (RESERVED_KEYS.has(name)) {
@@ -234,7 +253,14 @@ function makeJuceBackend(role) {
 
     // 真宿主把每个已注册的 native function 登记在 initialisationData.__juce__functions
     const registered = new Set((window.__JUCE__.initialisationData || {}).__juce__functions || []);
-    return assemble(role, false, em, call, (name) => registered.has(name));
+    return assemble(
+        role,
+        false,
+        em,
+        call,
+        (name) => registered.has(name),
+        readSeed(window.__JUCE__.initialisationData),
+    );
 }
 
 /**
@@ -262,7 +288,14 @@ function makeMockBridge(role, mock) {
         async (...args) =>
             mock[name](...args);
 
-    return assemble(role, true, em, call, (name) => typeof mock[name] === "function");
+    return assemble(
+        role,
+        true,
+        em,
+        call,
+        (name) => typeof mock[name] === "function",
+        readSeed(mock.initialisationData),
+    );
 }
 
 /**
@@ -272,7 +305,8 @@ function makeMockBridge(role, mock) {
  *   role        必填；非法就抛错（每个页面各自传死值，不做自动嗅探）。
  *   mockBackend 仅在非真 JUCE 宿主时使用（含 __JUCE__ 只是辅助脚本占位对象的情形）；
  *               缺省取全局 window.__RINNE_MOCK__，由 web-preview 的入口注入。
- * @returns {{role: string, isPreview: boolean, on: Function}} 另含本侧全部桥函数（均为 async）。
+ * @returns {{role: string, isPreview: boolean, on: Function, seed: object}} 另含本侧全部桥函数（均为 async）。
+ *   seed 是宿主首帧同步预置的键值（见 readSeed），没有预置时是空对象。
  */
 export function createBridge(opts = {}) {
     const { role } = opts;

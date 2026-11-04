@@ -27,6 +27,7 @@ inline constexpr const char* kFnShowLicense = "showLicense";
 // ---- 函数：只在 Output ----
 inline constexpr const char* kFnRepairPair = "repairPair";
 inline constexpr const char* kFnSetTailMode = "setTailMode";
+inline constexpr const char* kFnSetPlaceHintHidden = "setPlaceHintHidden";
 
 // ---- 事件：原生推给界面 ----
 inline constexpr const char* kEvState = "rinne.state";

@@ -1,5 +1,14 @@
 {
   "page": "common",
-  "note": "fr 已逐条复核，并经维护者抽检通过；改动与理由见 docs/validation/i18n-review-log.md。entries 已清空。",
-  "entries": {}
+  "note": "fr 已逐条复核，并经维护者抽检通过；改动与理由见 docs/validation/i18n-review-log.md。entries 里只留「位置提示可关掉」之后新增或改动、待抽检的条目，抽检通过后删掉。",
+  "entries": {
+    "about.adv.placeHint": {
+      "fr": "Afficher le rappel de placement",
+      "status": "待抽检"
+    },
+    "about.adv.placeHintTip": {
+      "fr": "Garde en haut de la fenêtre le rappel de l’emplacement de ce plug-in. « Compris » sur le rappel le masque ; réactivez-le ici. Réglage propre à cet ordinateur, commun à tous les Output.",
+      "status": "待抽检"
+    }
+  }
 }

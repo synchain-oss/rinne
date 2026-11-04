@@ -123,6 +123,9 @@ export default {
             "打开后把最近的环路事件记进诊断信息，便于反馈问题；默认关。这是本机设置，对这台电脑上的所有工程生效。",
         "about.adv.note": "起播清空与 tail 模式随工程保存，只影响本实例；诊断日志开关是本机设置。",
         "about.adv.noteOut": "tail 模式随工程保存，只影响本实例；诊断日志开关是本机设置。",
+        "about.adv.placeHint": "显示位置提示",
+        "about.adv.placeHintTip":
+            "在窗口顶部常驻显示这个插件该放在哪的提示；点提示上的「知道了」会把它关掉，这里可以再打开。这是本机设置，所有 Output 共用。",
     },
     en: {
         // 通用按钮、状态字与品牌
@@ -239,6 +242,9 @@ export default {
             "Clear-on-play and tail mode are saved with the project for this instance; the diagnostics log switch is a setting for this computer.",
         "about.adv.noteOut":
             "Tail mode is saved with the project for this instance; the diagnostics log switch is a setting for this computer.",
+        "about.adv.placeHint": "Show placement hint",
+        "about.adv.placeHintTip":
+            "Keeps the reminder about where this plug-in goes at the top of the window. “Got it” on the reminder hides it; turn it back on here. This is a setting for this computer, shared by every Output.",
     },
     fr: {
         // 通用按钮、状态字与品牌
@@ -355,5 +361,8 @@ export default {
             "Le vidage au démarrage et le mode Tail sont enregistrés avec le projet pour cette instance\u00a0; l’interrupteur du journal de diagnostic est un réglage propre à cet ordinateur.",
         "about.adv.noteOut":
             "Le mode Tail est enregistré avec le projet pour cette instance\u00a0; l’interrupteur du journal de diagnostic est un réglage propre à cet ordinateur.",
+        "about.adv.placeHint": "Afficher le rappel de placement",
+        "about.adv.placeHintTip":
+            "Garde en haut de la fenêtre le rappel de l’emplacement de ce plug-in. «\u00a0Compris\u00a0» sur le rappel le masque\u00a0; réactivez-le ici. Réglage propre à cet ordinateur, commun à tous les Output.",
     },
 };

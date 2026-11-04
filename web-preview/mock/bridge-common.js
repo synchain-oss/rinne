@@ -47,8 +47,9 @@ export function memoryStorage() {
 }
 
 /**
- * 全局位的默认值。除 scaleLocked 与 fallbackShown 外，键名与原生 UiDefaultsStore 对应；
- * 这两项只给预览走到缩放锁定态与兜底面板在场态用，真桥没有。
+ * 全局位的默认值。除 scaleLocked、fallbackShown 与 placeHintWriteFails 外，键名与原生 UiDefaultsStore 对应；
+ * 这三项只给预览走到缩放锁定态、兜底面板在场态与「位置提示的设置写不进去」态用，真桥没有。
+ * placeHintHidden（Output 的常驻位置提示是否已被用户关掉）对应原生的 place_hint_hidden_global，缺省显示。
  */
 export function defaultUiDefaults() {
     return {
@@ -60,8 +61,10 @@ export function defaultUiDefaults() {
         uiScaleInput: 1,
         uiScaleOutput: 1,
         diagLog: false,
+        placeHintHidden: false,
         scaleLocked: false,
         fallbackShown: false,
+        placeHintWriteFails: false,
     };
 }
 

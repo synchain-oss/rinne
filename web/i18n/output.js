@@ -15,6 +15,9 @@ export default {
         "out.brand.title": "Rinne Output",
         "out.brand.eyebrow": "SYNCHAIN · 回环 · 链尾",
         "out.place": "放在你想放进环路的最后一个插件之后、推子分隔线之上（最简单：推子前区最后一格）。",
+        "out.place.ok": "知道了",
+        "out.place.dismissLabel": "知道了，隐藏位置提示",
+        "out.place.dismissTip": "隐藏这条提示。需要时可在「关于」的高级设置里打开「显示位置提示」。",
         // 组选择的徽标说明
         "out.group.autoTip": "已自动跟随最近一个未配对的 Rinne Input（组 {g}）；点任意组改为手动。",
         "out.group.autoFallback": "没有未配对的 Rinne Input，暂用组 {g}，每秒重新查找。",
@@ -66,6 +69,9 @@ export default {
         "out.brand.eyebrow": "SYNCHAIN · RINNE · CHAIN END",
         "out.place":
             "Put this after the last plug-in you want in the loop and above the fader divider (simplest: the last pre-fader slot).",
+        "out.place.ok": "Got it",
+        "out.place.dismissLabel": "Got it, hide the placement hint",
+        "out.place.dismissTip": "Hides this hint. You can turn “Show placement hint” back on in About, under Advanced.",
         // 组选择的徽标说明
         "out.group.autoTip":
             "Following the most recent unpaired Rinne Input (group {g}); click any group to choose by hand.",
@@ -120,7 +126,11 @@ export default {
         "out.brand.title": "Rinne Output",
         "out.brand.eyebrow": "SYNCHAIN · RINNE · FIN CHAÎNE",
         "out.place":
-            "Placez-le après le dernier plug-in voulu dans la boucle, au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader).",
+            "Placez-le après le dernier plug-in de la boucle, au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader).",
+        "out.place.ok": "Compris",
+        "out.place.dismissLabel": "Compris, masquer le rappel de placement",
+        "out.place.dismissTip":
+            "Masque ce rappel. Vous pouvez réactiver «\u00a0Afficher le rappel de placement\u00a0» dans À propos, sous Avancé.",
         // 组选择的徽标说明
         "out.group.autoTip":
             "Suit le dernier Rinne Input non appairé (groupe {g}) ; cliquez sur un groupe pour choisir à la main.",
