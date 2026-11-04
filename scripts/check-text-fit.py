@@ -8,7 +8,7 @@
 
 字宽表：拉丁字符的逐字前进宽度（单位 em）取自界面实际使用的子集字体（Rinne Sans 与 Space Grotesk）。
 Rinne Sans 取正文文件 RinneSans.woff2（Figtree 500，CSS 字重 300 到 500 都落到它）；600 以上落到 SemiBold，
-比它宽约 1%，由下面的 WEIGHT_FACTOR 兜住。Rinne Mono 是 0.6 em 的等宽，汉字与全角标点按 1.0 em（Noto Sans SC）。
+比它宽约 1%，由下面的 WEIGHT_FACTOR 兜住。比内嵌字重轻的请求（300）渲染出来仍是内嵌的字形，所以系数不低于 1.0。Rinne Mono 是 0.6 em 的等宽，汉字与全角标点按 1.0 em（Noto Sans SC）。
 只用 Python 标准库。
 
     python scripts/check-text-fit.py [--strings 文件] [--lang zh,en] [--lang fr]
@@ -63,7 +63,7 @@ def _expand(groups):
 TABLES = {"sans": _expand(SANS_GROUPS), "grotesk": _expand(GROTESK_GROUPS)}
 # 子集字体里没有的字形（∞ Ø ‘ 等）会回退到系统字体，按偏宽估算。
 FALLBACK_EM = {"sans": 0.62, "grotesk": 0.66, "mono": 0.6}
-WEIGHT_FACTOR = {300: 0.99, 400: 1.0, 500: 1.02, 600: 1.04, 700: 1.06}
+WEIGHT_FACTOR = {300: 1.0, 400: 1.0, 500: 1.02, 600: 1.04, 700: 1.06}
 NBSP = "\u00a0"
 # 窄不换行空格 U+202F：取自 Rinne Sans 与 Space Grotesk 里该字形的真实前进宽度（em）。Figtree 没有细空格，
 # Rinne Sans 与等宽字体里它都指向不换行空格的字形，所以 sans 这一档和普通空格一样宽
@@ -266,6 +266,8 @@ def self_test():
     expect(w_m > 3 * w_i, "proportional sans: m much wider than i")
     bold = dict(cjk12, weight=600)
     expect(text_width("abc", bold) > text_width("abc", cjk12), "600 wider than 400 for Latin")
+    light = dict(cjk12, weight=300)
+    expect(text_width("abc", light) >= text_width("abc", cjk12), "300 renders the embedded glyphs, never narrower than 400")
     expect(text_width("中", bold) == text_width("中", cjk12), "weight does not change CJK advance")
     expect(substitute("组 {g} · {n}") == "组 H · 16384", "placeholder substitution")
     expect(abs(char_advance_px(NNBSP, cjk12) - 0.244 * 12) < 1e-6, "U+202F uses its real advance in sans")

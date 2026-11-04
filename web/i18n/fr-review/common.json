@@ -9,6 +9,10 @@
     "about.adv.placeHintTip": {
       "fr": "Garde en haut de la fenêtre le rappel de l’emplacement de ce plug-in. « Compris » sur le rappel le masque ; réactivez-le ici. Réglage propre à cet ordinateur, commun à tous les Output.",
       "status": "待抽检"
+    },
+    "about.fonts": {
+      "fr": "Polices de l’interface : Space Grotesk ; Rinne Sans et Rinne Mono (sous-ensembles de Figtree / DM Mono, renommés) ; Noto Sans SC — toutes sous licence SIL Open Font License 1.1.",
+      "status": "待抽检"
     }
   }
 }
