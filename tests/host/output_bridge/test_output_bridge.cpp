@@ -1047,14 +1047,18 @@ TEST_CASE("output bridge: outOfOrder follows the order evidence of the Output en
 
 // ---------------------------------------------------------------- 常驻位置提示的显隐（本机全局设置）
 
-/** 首帧预置里 placeHintHidden 的值。预置表不是恰好这一项（有人把预置删了）时测试直接失败，不去读不存在的元素。 */
+/** 首帧预置里 placeHintHidden 的值。按键查找：这个键必须恰好出现一次、值是布尔，否则测试直接失败（有人把预置删了
+    也不会去读不存在的元素）；以后 Output 再加别的预置键不影响这里。 */
 static bool seededPlaceHintHidden()
 {
     const auto seed = OutputBridge::firstFrameSeedPairs();
-    REQUIRE(seed.size() == 1);
-    REQUIRE(seed[0].first == rinne::bridge::Init::PlaceHintHidden);
-    REQUIRE(seed[0].second.isBool());
-    return static_cast<bool>(seed[0].second);
+    const auto isPlaceHint = [](const std::pair<juce::String, juce::var>& entry) {
+        return entry.first == rinne::bridge::Init::PlaceHintHidden;
+    };
+    REQUIRE(std::count_if(seed.begin(), seed.end(), isPlaceHint) == 1);
+    const auto entry = std::find_if(seed.begin(), seed.end(), isPlaceHint);
+    REQUIRE(entry->second.isBool());
+    return static_cast<bool>(entry->second);
 }
 
 TEST_CASE("output bridge: the placement hint is shown by default and the first-frame seed says so",
@@ -1064,11 +1068,7 @@ TEST_CASE("output bridge: the placement hint is shown by default and the first-f
     ScratchSettings scratch;
     CHECK_FALSE(uidefaults::placeHintHiddenGlobal());
     CHECK_FALSE(uidefaults::readUiFlags("output").placeHintHidden);
-    const auto seed = OutputBridge::firstFrameSeedPairs();
-    REQUIRE(seed.size() == 1);
-    CHECK(seed[0].first == rinne::bridge::Init::PlaceHintHidden);
-    CHECK(seed[0].second.isBool());
-    CHECK_FALSE(static_cast<bool>(seed[0].second));
+    CHECK_FALSE(seededPlaceHintHidden());
 }
 
 TEST_CASE("output bridge: a settings file from before this key existed reads as shown",
