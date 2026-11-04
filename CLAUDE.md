@@ -122,7 +122,7 @@
 
 - web 资源经 `juce_add_binary_data` 嵌入。插件完全离线：`web/` 不加载外部资源，外链经桥交给 C++ 用系统浏览器打开（offline 检查）。
 - 缩放走「固定设计盒 + CSS zoom + setSize 同步 + 10 秒确认回退」。
-- 字体：Rinne Sans / Rinne Mono（IBM Plex 子集，按 OFL-1.1 改名）、Space Grotesk、Noto Sans SC。改了 UI 文案要重跑字体子集流水线。
+- 字体与字重契约：Space Grotesk 600 + Rinne Sans 500/600（Figtree）+ Rinne Mono 500（DM Mono）+ Noto Sans SC 300–700。Rinne Sans / Rinne Mono 是子集化后改的名（两款上游都没有保留字体名，改名只为 CSS 族名不变）。改了 UI 文案要重跑字体子集流水线。
 - 桥契约 `docs/UI_BRIDGE.md`、`*BridgeApi.h` 与 `web-preview/` 的 mock 同改。文案三语 zh/en/fr，fr 发布前要抽检。
 
 ## §10 文档、上游与第三方

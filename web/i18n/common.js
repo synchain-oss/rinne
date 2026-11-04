@@ -90,7 +90,7 @@ export default {
             "源码 GPL-3.0-or-later；二进制整体按 GPLv3 分发，其中 JUCE 部分适用 AGPLv3（GPLv3 §13）。不提供任何担保。",
         "about.viewLicense": "查看许可证",
         "about.fonts":
-            "界面字体：Space Grotesk；Rinne Sans 与 Rinne Mono（由 IBM Plex Sans / IBM Plex Mono 子集化，并按 SIL OFL 1.1 改名）；Noto Sans SC。均以 SIL Open Font License 1.1 授权。",
+            "界面字体：Space Grotesk；Rinne Sans 与 Rinne Mono（由 Figtree / DM Mono 子集化并改名）；Noto Sans SC。均以 SIL Open Font License 1.1 授权。",
         "about.tm":
             "基于 JUCE 构建。VST 是 Steinberg Media Technologies GmbH 的注册商标；Audio Units 是 Apple Inc. 的商标。",
         "about.link.source": "源代码",
@@ -206,7 +206,7 @@ export default {
             "Source code: GPL-3.0-or-later. The binary as a whole is distributed under GPLv3; its JUCE portion is covered by AGPLv3 (GPLv3 §13). No warranty.",
         "about.viewLicense": "View licence",
         "about.fonts":
-            "UI fonts: Space Grotesk; Rinne Sans and Rinne Mono (subset from IBM Plex Sans / IBM Plex Mono and renamed under the SIL OFL 1.1); Noto Sans SC — all under the SIL Open Font License 1.1.",
+            "UI fonts: Space Grotesk; Rinne Sans and Rinne Mono (subset from Figtree / DM Mono and renamed); Noto Sans SC — all under the SIL Open Font License 1.1.",
         "about.tm":
             "Built with JUCE. VST is a registered trademark of Steinberg Media Technologies GmbH. Audio Units is a trademark of Apple Inc.",
         "about.link.source": "Source code",
@@ -325,7 +325,7 @@ export default {
             "Source code\u00a0: GPL-3.0-or-later. The binary as a whole is distributed under GPLv3\u00a0; its JUCE portion is covered by AGPLv3 (GPLv3 §13). No warranty.",
         "about.viewLicense": "Voir la licence",
         "about.fonts":
-            "Polices de l’interface\u00a0: Space Grotesk\u00a0; Rinne Sans et Rinne Mono (sous-ensembles d’IBM Plex Sans / IBM Plex Mono, renommés selon la SIL OFL 1.1)\u00a0; Noto Sans SC — toutes sous licence SIL Open Font License 1.1.",
+            "Polices de l’interface\u00a0: Space Grotesk\u00a0; Rinne Sans et Rinne Mono (sous-ensembles de Figtree / DM Mono, renommés)\u00a0; Noto Sans SC — toutes sous licence SIL Open Font License 1.1.",
         "about.tm":
             "Conçu avec JUCE. VST est une marque déposée de Steinberg Media Technologies GmbH. Audio Units est une marque d’Apple Inc.",
         "about.link.source": "Code source",

@@ -25,8 +25,8 @@ print the blob id below. The other sources are pinned to a commit or a package v
 | `webview2.LICENSE.txt` | `LICENSE.txt` in the NuGet package `Microsoft.Web.WebView2` 1.0.2957.106 | package sha256 `4c35a54835b63954159eac1d5b7a60ae617a41dbb5b73bfdb11c4870a891080a` |
 | `webview2.NOTICE.txt` | `NOTICE.txt` in the same package | as above |
 | `catch2.LICENSE.txt` | catchorg/Catch2 tag v3.5.4, `LICENSE.txt` | commit `b5373dadca40b7edc8570cf9470b9b1cb1934d40` |
-| `ibm-plex-sans.OFL.txt` | IBM/plex `LICENSE.txt` (byte-identical to google/fonts `ofl/ibmplexsans/OFL.txt`) | commit `763c36ef9117782905ae010056dfbe8fd2653a25` |
-| `ibm-plex-mono.OFL.txt` | IBM/plex `LICENSE.txt` (byte-identical to google/fonts `ofl/ibmplexmono/OFL.txt`) | commit `763c36ef9117782905ae010056dfbe8fd2653a25` |
+| `figtree.OFL.txt` | google/fonts `ofl/figtree/OFL.txt` | commit `bd8f81ddb5c74d5c8897b36ad88b440266245103` |
+| `dm-mono.OFL.txt` | google/fonts `ofl/dmmono/OFL.txt` | commit `bd8f81ddb5c74d5c8897b36ad88b440266245103` |
 | `space-grotesk.OFL.txt` | floriankarsten/space-grotesk `OFL.txt` (byte-identical to google/fonts `ofl/spacegrotesk/OFL.txt`) | commit `03507d024a01282884232081fc6011c09ff4e849` |
 | `noto-sans-sc.OFL.txt` | google/fonts `ofl/notosanssc/OFL.txt` | commit `bd8f81ddb5c74d5c8897b36ad88b440266245103` |
 

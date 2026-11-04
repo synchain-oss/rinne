@@ -2,7 +2,7 @@
 
 ## Summary (EN)
 
-- **Decision**: own code GPL-3.0-or-later; binaries distributed as a whole under GPLv3, the JUCE parts under AGPLv3 (GPLv3 §13). JUCE is `AGPL-3.0-only`; VST3 SDK 3.7.12 is used under GPLv3 (parts BSD-3-Clause); AudioUnitSDK Apache-2.0; the WebView2 loader is a Microsoft BSD-3-Clause binary; fonts OFL-1.1, IBM Plex renamed.
+- **Decision**: own code GPL-3.0-or-later; binaries distributed as a whole under GPLv3, the JUCE parts under AGPLv3 (GPLv3 §13). JUCE is `AGPL-3.0-only`; VST3 SDK 3.7.12 is used under GPLv3 (parts BSD-3-Clause); AudioUnitSDK Apache-2.0; the WebView2 loader is a Microsoft BSD-3-Clause binary; fonts OFL-1.1, Figtree and DM Mono subset and renamed Rinne Sans / Rinne Mono.
 - **Consequences**: corresponding source is the Rinne tag plus the JUCE tag and commit; no claim of complete source.
 - **Compatibility**: changing the JUCE version is a licensing change.
 
@@ -18,7 +18,7 @@
 - **二进制**整体按 GPLv3 分发，其中 JUCE 部分适用 AGPLv3（GPLv3 §13）；含 GPLv3-only 与 AGPLv3-only 的部分，不能再授权为「或更高版本」。
 - **AudioUnitSDK**：Apache-2.0，只进 `.component`。
 - **WebView2 loader**：微软 BSD-3-Clause 的二进制，静态链接进 Windows 包。微软只发布二进制，按 GPLv3 对「系统库」的定义视为 WebView2 系统组件的一部分，不附任何链接例外；因此不说「完整对应源码都在本仓」。macOS 用系统 WKWebView。
-- **字体**：OFL-1.1。「Plex」是保留字体名，子集化算修改，按 OFL-1.1 §3 改名为 Rinne Sans / Rinne Mono；上游 OFL.txt 随包分发，保留字体名声明只在那里。
+- **字体**：OFL-1.1。Rinne Sans / Rinne Mono 由 Figtree / DM Mono 子集化后改名；两款都没有保留字体名，改名只为让 CSS 族名不随上游变，声明里写明来源。Noto Sans SC 的保留字体名「Source」不用作分发名。上游 OFL.txt 随包分发，保留字体名声明只在那里。
 - **对外口径**：「源码 GPL-3.0-or-later；二进制整体按 GPLv3 分发，其中 JUCE 部分适用 AGPLv3（GPLv3 §13）」。关于面板有「查看许可证」，LICENSE 编进插件、离线可看。面板是按 GPLv3 §5(d) 的稳妥做法，不是义务：自有代码的版权人是 Synchain，JUCE 部分适用该条的但书。
 - **对应源码**（GPLv3 §6(d)）：INSTALL.txt、Release 正文与打包摘要写 Rinne 的 tag 与 commit、JUCE 的 tag 与 40 位 commit、WebView2 SDK 版本、构建步骤。JUCE 源码在上游服务器上，持续可得的义务仍在分发者。
 - **机检**：NOTICES、`LICENSES/`、`third_party/notices/`、`REUSE.toml` 与 `THIRD_PARTY_BY_MODULE` 由 licenses-closure、modules-closure 与 reuse lint 保持闭合。
