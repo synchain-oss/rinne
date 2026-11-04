@@ -11,6 +11,11 @@
 //   __fx.firstRun       首启控制器（只有场景是语言卡、规则页、导览时才有，其余场景为 null，「?」照旧不接线）；
 //   __fx.raw            桥上收到的最近一帧原始 rinne.state / rinne.pair（和 web/output/app.js 的 raw 同一份），首启断言用它求 outputFlowing。
 // defect 参数只给冒烟的坏样例用：故意造出一种问题，检查脚本必须把它抓出来。
+// 位置提示相关的夹具参数（只给冒烟用）：
+//   placeHidden=1   开页前先把全局位 placeHintHidden 设成真，等于「已经关过提示的用户重开窗口」；
+//   delayFirst=<毫秒> 页面的 requestInitialState 晚这么久才真正发出去，首个快照因此晚到，用来看首帧（快照之前）画成什么样；
+//   writeFails=1    模拟本机设置写不进去（桥回 unavailable）；
+//   __fx.placeFrames  从挂页面之前起每一帧（rAF）记下的常驻提示状态 { shown }，抓「先闪一帧再消失」。
 
 import common from "../../../web/i18n/common.js";
 import output from "../../../web/i18n/output.js";
@@ -29,6 +34,7 @@ const q = new URLSearchParams(location.search);
 const lang = ["zh", "en", "fr"].includes(q.get("lang")) ? q.get("lang") : "zh";
 const scenario = q.get("scenario") || "";
 const defect = q.get("defect") || "";
+const delayFirst = Number(q.get("delayFirst")) > 0 ? Number(q.get("delayFirst")) : 0;
 
 installDicts(common, output, guide);
 document.documentElement.lang = lang;
@@ -42,11 +48,17 @@ try {
         role: "output",
         params: { fresh: "1", lang, ...(scenario ? { scenario } : {}) },
     });
+    // 全局位在建桥之前设好：首帧预置（bridge.seed）在 createBridge 时读一次，和真宿主开窗时读一次设置文件同口径
+    if (q.get("placeHidden") === "1") session.core.defaults.set({ placeHintHidden: true });
+    if (q.get("writeFails") === "1") session.core.defaults.set({ placeHintWriteFails: true });
     const real = createBridge({ role: "output", mockBackend: session.mock });
     const bridge = { ...real };
     for (const name of BRIDGE_FUNCTIONS.output) {
         bridge[name] = (...args) => {
             calls.push({ name, args });
+            // 首个快照晚到：requestInitialState 先挂起一阵再真正发出，页面此间只能靠首帧预置画常驻提示
+            if (name === "requestInitialState" && delayFirst > 0)
+                return new Promise((resolve) => setTimeout(resolve, delayFirst)).then(() => real[name](...args));
             return real[name](...args);
         };
     }
@@ -64,6 +76,16 @@ try {
     bridge.on("rinne.state", take("state"));
     bridge.on("rinne.pair", take("pair"));
     session.start();
+
+    // 常驻提示逐帧的显示状态：rAF 回调早于该帧绘制，记下的就是用户那一帧看到的。挂页面之前就开始记
+    const placeFrames = [];
+    const sampleFrame = () => {
+        const node = stage.querySelector(".rn-place");
+        const box = node ? node.getBoundingClientRect() : null;
+        placeFrames.push({ shown: Boolean(box && box.width > 0 && box.height > 0) });
+        if (placeFrames.length < 600) requestAnimationFrame(sampleFrame);
+    };
+    requestAnimationFrame(sampleFrame);
 
     const sc = session.mock.previewScene && session.mock.previewScene.state;
     const page = mountOutputPage({
@@ -85,7 +107,7 @@ try {
             bridge,
             host: shell.top,
             shell: shell.el,
-            inert: [shell.content],
+            inert: [shell.content, page.parts.place.el],
             steps: TOUR_OUT_STEPS,
             onChange: () => shell.refresh(),
         });
@@ -117,7 +139,8 @@ try {
         const t = makeT(view.lang);
         const out = [];
         const add = (text, what) => text && out.push({ text, what });
-        add(t("out.place"), "常驻红字");
+        // 用户关掉了提示：页上不再有这段字（关掉本身是正常状态，不是「没上屏」）
+        if (page.snapshot().state.placeHintHidden !== true) add(t("out.place"), "常驻红字");
         const label = pairLabelKey(view.pair.state, "output");
         if (label) add(t(label), "配对 pill");
         add(t(SUB_KEYS[view.pair.sub]), "副行");
@@ -183,6 +206,7 @@ try {
         calls,
         page,
         raw,
+        placeFrames,
         get firstRun() {
             return firstRun;
         },

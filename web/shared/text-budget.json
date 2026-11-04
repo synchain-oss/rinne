@@ -9,6 +9,16 @@
     },
     "maxWidthPx": 260
   },
+  "about.adv.placeHint": {
+    "fit": {
+      "font": "sans",
+      "lines": 1,
+      "ls": 0,
+      "size": 11.5,
+      "weight": 400
+    },
+    "maxWidthPx": 260
+  },
   "about.adv.resetOnPlay": {
     "fit": {
       "font": "sans",
@@ -2557,7 +2567,17 @@
       "size": 11,
       "weight": 600
     },
-    "maxWidthPx": 424
+    "maxWidthPx": 364
+  },
+  "out.place.ok": {
+    "fit": {
+      "font": "grotesk",
+      "lines": 1,
+      "ls": 0,
+      "size": 10,
+      "weight": 600
+    },
+    "maxWidthPx": 44
   },
   "out.send.bypassed": {
     "fit": {

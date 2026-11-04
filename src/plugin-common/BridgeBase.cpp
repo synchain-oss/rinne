@@ -36,6 +36,7 @@ juce::var buildUiSnapshot(const UiSeed& seed, const UiFlags& flags)
     obj->setProperty("rulesAck", flags.rulesAck);
     obj->setProperty("guideSeen", flags.guideSeen);
     obj->setProperty("diagLog", flags.diagLog);
+    obj->setProperty(Init::PlaceHintHidden, flags.placeHintHidden);
     return juce::var(obj);
 }
 

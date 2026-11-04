@@ -106,6 +106,8 @@ The host lists these controls as parameters; the table below gives their IDs, di
 
 Rinne Output has no knobs. It shows the group, the pairing lamp, the track names, and a sending line such as "SENDING · ST · 48 kHz". While the host has it bypassed it reads "BYPASSED: WRITING SILENCE" and the return is silent. If the host is not processing audio it reads "HOST NOT PROCESSING: PAUSED".
 
+A red reminder under the title says where Rinne Output belongs. Click Got it to hide it: the choice is kept on this computer for every Rinne Output and is not saved in the project. To bring it back, turn on Show placement hint under ADVANCED in About. Notices such as "Plug-in order reversed" appear either way.
+
 It passes the host's audio through untouched, so putting it in a chain does not change the sound of the channel. Plugins in the loop that output NaN or Inf are cleaned on the way into the loop: the invalid values become 0 and are counted on the NaN lamp of Rinne Input.
 
 ## Loop delay D
@@ -172,7 +174,7 @@ Other hosts are untested. The placement rules and the notices in the interface a
 - **Language.** Use the 中, EN and FR buttons.
 - **Rules and tour again.** Click the "?" button at the bottom right.
 - **Zoom.** Pick a zoom level; Rinne applies it and asks you to confirm within 10 s with Save, otherwise it reverts; Cancel reverts too. Under WebKit older than 26.4 the zoom is fixed at 100 %.
-- **About.** Click the version number for licences, ADVANCED settings (Clear the loop when playback starts, Tail mode: Auto, Infinite or 30 s, Record a diagnostics log), Copy diagnostics and View the rules.
+- **About.** Click the version number for licences, ADVANCED settings (Clear the loop when playback starts, Tail mode: Auto, Infinite or 30 s, Record a diagnostics log; Rinne Output also has Show placement hint), Copy diagnostics and View the rules.
 
 Tail mode tells the host how long the tail is, so that it does not suspend the plugin during silence and break the loop. Auto means infinite for VST3 and 30 s for Audio Unit.
 

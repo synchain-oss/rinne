@@ -44,12 +44,16 @@ inline constexpr const char* Version = "version";
 inline constexpr const char* Lang = "lang";
 inline constexpr const char* UiScale = "uiScale";
 inline constexpr const char* Role = "role"; // "input" 或 "output"
+// Output 专属：常驻位置提示是否已被用户关掉（布尔）。同名字段也在状态快照里（UiFlags::placeHintHidden），
+// 页面首帧按它决定提示显不显示，不等第一个快照，免得已关闭的用户每次开窗都先看到一帧提示
+inline constexpr const char* PlaceHintHidden = "placeHintHidden";
 } // namespace Init
 
 // 失败回执里的 reason。名字与 docs/UI_BRIDGE.md 的函数表一致，预览里的 mock 回同样的原因：
 //   setLang 回 bad-lang、not-ready；setUiScale 回 bad-scale、scale-locked、not-ready；
 //   commitUiScale 回 no-pending、scale-locked、not-ready；
-//   setRulesAck 回 bad-version；setGuideSeen、setDiagLog 回 bad-value；setGroup 回 bad-group；
+//   setRulesAck 回 bad-version；setGuideSeen、setDiagLog、setPlaceHintHidden 回 bad-value
+//   （setPlaceHintHidden 写不进本机设置文件另回 unavailable）；setGroup 回 bad-group；
 //   resolveTakeover 回 bad-value、no-pending；openExternal 回 not-allowed；copyDiagnostics 回 not-ready、clipboard。
 // 角色函数共用同一张表：会改状态的角色函数在兜底面板在场时同样回 not-ready
 namespace Reason
@@ -68,7 +72,8 @@ inline constexpr const char* BadGroup = "bad-group";
 inline constexpr const char* NotAllowed = "not-allowed";
 // copyDiagnostics：剪贴板没写进去（写完回读对不上）
 inline constexpr const char* Clipboard = "clipboard";
-// 地址或文件已通过校验，但系统没能打开（没有默认浏览器、临时文件写不进去）
+// 地址或文件已通过校验，但系统没能打开（没有默认浏览器、临时文件写不进去）；
+// setPlaceHintHidden 也用它：参数没问题，但本机设置文件写不进去
 inline constexpr const char* Unavailable = "unavailable";
 } // namespace Reason
 
@@ -284,6 +289,7 @@ struct UiFlags
     int rulesAck = 0; // 已确认的规则页版本，0 表示没确认过
     bool guideSeen = false; // 本角色的引导是否已看
     bool diagLog = false; // 诊断日志开关
+    bool placeHintHidden = false; // Output 的常驻位置提示是否已被用户关掉（本机全局，缺省显示）
 };
 
 // 返回 (键, 值) 列表，键取 Init::*，顺序与宿主装配首帧预置的顺序一致。

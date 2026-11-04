@@ -9,7 +9,8 @@
 //   - 首启引导「不再显示」：Input 与 Output 各存一份，两端讲的是两个界面，共用一个位会让只装过一端的用户
 //     永远看不到另一端的引导；
 //   - 缩放默认：缩放确认「保持」后落的百分比，0 表示没存过；按角色分键，两端的档位表不同，共用一个键会互相污染；
-//   - 诊断日志开关。
+//   - 诊断日志开关；
+//   - Output 的常驻位置提示是否已被用户关掉：全局一份，老文件没有这个键就是「显示」。
 //
 // 落盘位置：用户应用数据目录下的 Synchain/Rinne/ui-defaults.settings（macOS 在 Application Support 下）。
 //
@@ -81,7 +82,12 @@ void setUiScalePercentOutput(int percent);
 bool diagLogEnabled();
 void setDiagLogEnabled(bool enabled);
 
-// 状态快照要的几个标志（语言是否选过、规则确认版本、本角色引导是否已看、诊断日志开关）一次读回：
+// Output 的常驻位置提示是否被用户关掉；缺键、读不出来都是假（显示）。
+// 写入回报有没有真的落盘：设置文件打不开或写不进去回假，调用方据此告诉页面「没存上」，提示不能在页面上先消失
+bool placeHintHiddenGlobal();
+bool setPlaceHintHiddenGlobal(bool hidden);
+
+// 状态快照要的几个标志（语言是否选过、规则确认版本、本角色引导是否已看、诊断日志开关、位置提示是否已关）一次读回：
 // 只开一次文件、拿一次锁。每个字段的校验与上面逐个读的函数完全相同。role 取 "input"；其余值一律当 Output
 bridge::UiFlags readUiFlags(const juce::String& role);
 

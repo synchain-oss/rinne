@@ -74,6 +74,7 @@ The bridge between the web UI and the native plugin: function names, event names
 | `group` | `A` 到 `H`，没有空闲组时为 `null`。 |
 | `groupOrigin` | `auto`、`manual` 或 `project`；`auto` 时页面显示「自动」徽标。 |
 | `diagLog` | 诊断日志开关（本机设置，不进工程）。 |
+| `placeHintHidden` | Output 的常驻位置提示是否已被用户关掉（本机设置，不进工程；缺省 `false`，老设置文件没有这个键就是显示）。Input 的快照也带它，Input 不读。别的 Output 窗口改了它，这边最迟 1 s（1 Hz 兜底）跟上，与 `diagLog` 同一机制。 |
 | `sampleRate` | 当前采样率。 |
 
 ### rinne.pair 的字段
@@ -201,13 +202,15 @@ The bridge between the web UI and the native plugin: function names, event names
 
 ### 全局位
 
-语言、规则确认版本、两个角色各自的引导已看、两个角色各自的缩放档位、诊断日志开关存在按用户的全局位里，不进工程。预览里存在 `localStorage["rinne.uiDefaults"]`，同源的两个页面共享；每个实例的已关闭提示存 `sessionStorage`。
+语言、规则确认版本、两个角色各自的引导已看、两个角色各自的缩放档位、诊断日志开关、Output 的位置提示是否隐藏存在按用户的全局位里，不进工程。预览里存在 `localStorage["rinne.uiDefaults"]`，同源的两个页面共享；每个实例的已关闭提示存 `sessionStorage`。
 
 ### 预览专用（不属于契约）
 
 web-preview 的 mock 后端另有 `previewScene`：当前场景的 `id`、`lang`、`title` 和设计稿给的 `state` 描述。覆盖层（语言卡、规则页、tour、预设菜单、关于、缩放确认）是界面自己的状态，原生侧不会推，页面实现可以读 `previewScene.state.overlay` 在预览里直接打开它们。真桥上没有这个字段。预览地址的查询参数：`?role=input|output`、`?scenario=<场景 ID>`、`?lang=zh|en|fr`、`?scale=<档位>`、`?fresh=1`（先清空全局位）。
 
 预览里要走到缩放锁定态：在 `localStorage["rinne.uiDefaults"]` 的 JSON 里加一项 `"scaleLocked": true`（预览专用的全局位，真桥没有这一项；`?fresh=1` 会连它一起清掉）。之后 mock 的 `setUiScale` 与 `commitUiScale` 回 `{ ok: false, reason: "scale-locked" }`，丢掉没确认的预览，并让窗口档位回到 1。
+
+预览里要走到「位置提示的设置写不进去」态：在同一个 JSON 里加一项 `"placeHintWriteFails": true`（同样是预览专用的全局位，真桥没有这一项；`?fresh=1` 会连它一起清掉）。之后 mock 的 `setPlaceHintHidden` 回 `{ ok: false, reason: "unavailable" }`，不写。
 
 预览里要走到兜底面板在场态：在同一个 JSON 里加一项 `"fallbackShown": true`（同样是预览专用的全局位，真桥没有这一项；`?fresh=1` 会连它一起清掉）。之后 mock 的 `setLang`、`setUiScale`、`commitUiScale` 在参数校验之前就回 `{ ok: false, reason: "not-ready" }`，什么都不改；`requestInitialState` 只回 `{ ok: true }`，不发首帧。
 
@@ -320,7 +323,7 @@ Input 页面把 `peer.color` 当作 `#rrggbb` 字符串（宿主不给时为 `nu
 
 ## output：Rinne Output
 
-Output 用共用的十二个函数加 `repairPair`、`setTailMode`，以及三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
+Output 用共用的十二个函数加 `repairPair`、`setTailMode`、`setPlaceHintHidden`，以及三个事件，没有参数，不接收 `rinne.params`、`rinne.meters`、`rinne.presets`。
 
 ### 专用函数
 
@@ -330,6 +333,7 @@ Output 用共用的十二个函数加 `repairPair`、`setTailMode`，以及三�
 |---|---|---|---|
 | `repairPair` | 无 | `{ ok, group }` | `conflict` 时的一键修复，按钮文案「重新配对」：按智能默认重选组；不在冲突态回 `{ ok: false, reason: "not-conflict" }`，冲突里没有可去的组回 `{ ok: false, reason: "no-free-group" }`。要去的组被一个休眠实例占着时先不动，回 `{ ok: false, reason: "needs-confirm" }`，`rinne.state` 随后带 `takeover: true` 与 `takeoverGroup`，用户经 `resolveTakeover` 确认或取消。 |
 | `setTailMode` | `mode`：`auto`、`infinite`、`30s` | `{ ok, value }` | tail 模式（`cfg.tailMode`，随工程走），在关于面板的高级设置里；其余取值回 `{ ok: false, reason: "bad-value" }`，不改。改值后工程标脏。 |
+| `setPlaceHintHidden` | `hidden`：布尔 | `{ ok, value }` | 常驻位置提示是否隐藏，`value` 回显新值。本机设置，写全局位，所有 Output 共用，不进工程：不标脏，也不让实例定型。参数不是布尔回 `{ ok: false, reason: "bad-value" }`，不写；设置文件写不进去回 `{ ok: false, reason: "unavailable" }`，页面据此让提示留着。点提示上的「知道了」写 `true`，关于面板高级设置里的「显示位置提示」开关写 `false`。 |
 
 ### rinne.state 的 Output 字段
 
@@ -341,6 +345,10 @@ Output 用共用的十二个函数加 `repairPair`、`setTailMode`，以及三�
 | `build` | 可缺省。`{ sha, fmt, arch }`，关于面板的构建行（提交短散列、插件格式、平台）；缺省时只显示版本号。三项各自拿不到时不发。 |
 | `cfg` | 非参数的工程状态，Output 只有 `tailMode`（`auto`、`infinite`、`30s`，默认 `auto`）。 |
 | `takeoverGroup` | 可缺省，没有待接管的组时不发。`takeover` 为真时等待接管的组（`A` 到 `H`）；确认条里的组号读它，缺省时读 `group`。一键修复要接管的是别的组时才和 `group` 不同。 |
+
+### 首帧预置（Output）
+
+窗口开出来时，原生侧把 `placeHintHidden`（布尔）放进 `window.__JUCE__.initialisationData`（JUCE 把每个键存成数组，值在第 0 项；前端经 `createBridge` 返回对象上的 `seed` 同步读到，预览的 mock 给同形的 `initialisationData`）。页面首帧据此决定常驻位置提示显不显示，不等第一个 `rinne.state`：已经关掉提示的用户重开窗口，提示不会先闪一帧再消失；没关过的用户提示照常首帧就在。键名和 `rinne.state` 里的同名字段是同一个常量（`Init::PlaceHintHidden`），值每次开窗现读设置文件。首帧之后以 `rinne.state` 的 `placeHintHidden` 为准。
 
 ### rinne.error 的 Output 取值
 

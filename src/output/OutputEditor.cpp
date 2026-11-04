@@ -74,6 +74,9 @@ void OutputEditor::registerFunctions(OutputEditor* self, juce::WebBrowserCompone
                                 [self](const Args& a, Completion c) { self->handleOpenExternal(a, std::move(c)); })
             .withNativeFunction(juce::Identifier(api::kFnSetDiagLog),
                                 [self](const Args& a, Completion c) { self->handleSetDiagLog(a, std::move(c)); })
+            .withNativeFunction(
+                juce::Identifier(api::kFnSetPlaceHintHidden),
+                [self](const Args& a, Completion c) { self->handleSetPlaceHintHidden(a, std::move(c)); })
             .withNativeFunction(juce::Identifier(api::kFnResolveTakeover),
                                 [self](const Args& a, Completion c) { self->handleResolveTakeover(a, std::move(c)); })
             .withNativeFunction(juce::Identifier(api::kFnShowLicense),
@@ -82,6 +85,10 @@ void OutputEditor::registerFunctions(OutputEditor* self, juce::WebBrowserCompone
                                 [self](const Args& a, Completion c) { self->handleRepairPair(a, std::move(c)); })
             .withNativeFunction(juce::Identifier(api::kFnSetTailMode),
                                 [self](const Args& a, Completion c) { self->handleSetTailMode(a, std::move(c)); });
+
+    // 首帧同步预置：位置提示是否已关（现读设置文件，每次开窗读一次）
+    for (const auto& seedPair : OutputBridge::firstFrameSeedPairs())
+        options = options.withInitialisationData(seedPair.first, seedPair.second);
 }
 
 OutputBridge::UiContext OutputEditor::uiContext() const
@@ -209,6 +216,18 @@ void OutputEditor::handleSetDiagLog(const Args& args, Completion complete)
         return;
     }
     complete(bridge_.setDiagLog(args));
+    sendFrames(bridge_.poll(uiContext()));
+}
+
+void OutputEditor::handleSetPlaceHintHidden(const Args& args, Completion complete)
+{
+    if (panelShown())
+    {
+        logDiag("bridge request ignored while the fallback panel is shown (setPlaceHintHidden)");
+        complete(bridge::respondNotReady());
+        return;
+    }
+    complete(bridge_.setPlaceHintHidden(args));
     sendFrames(bridge_.poll(uiContext()));
 }
 

@@ -144,13 +144,32 @@ try {
         }
     }
 
+    // 红字被用户关掉（全局位）：版式上移之后，剩下的文字档位不变（A / B 档照判），红字块里的字（含「知道了」）不再被量到
+    for (const lang of LANGS) {
+        for (const id of ["out-connected", "out-conflict"]) {
+            const tag = `${lang}/${id}/红字关着`;
+            await openOutput(page, server, box, lang, id, "&placeHidden=1");
+            const items = await measureOutputContrast(page);
+            run.eq(
+                items.filter((i) => i.sel.startsWith("rn-place")).map((i) => i.text),
+                [],
+                `${tag}：关着时不应量到红字块里的字`,
+            );
+            run.check(
+                items.some((i) => i.tier === "A" && i.sel.startsWith("rn-paircard__sub")),
+                `${tag}：配对卡副行仍应按 A 档量到（档位不变，防空转）`,
+            );
+            judge(items, tag);
+        }
+    }
+
     run.eq(firstRunFrames, 7 * LANGS.length, "首启画面：6 个场景加规则页放行后一个，每种语言各量一遍");
     run.eq(frames.length, scenes.length + 1, "每个场景一个画面，规则页多一个放行后的画面（防新增场景漏测）");
 
     // 防空转：各档都量到了足够多的文字，A 档里必须有常驻红字与副行
     run.check(counts.A > 100, `A 档应量到足够多的文字（防空转），实得 ${counts.A}`);
     run.check(counts.B > 40, `B 档应量到足够多的文字（防空转），实得 ${counts.B}`);
-    for (const need of ["A rn-place__text", "A rn-paircard__sub", "A rn-track__name"]) {
+    for (const need of ["A rn-place__text", "A sc-btn.rn-place__ok", "A rn-paircard__sub", "A rn-track__name"]) {
         run.check(bySel.has(need), `A 档里应量到 ${need}（分档生效），已量到：${[...bySel.keys()].join("、")}`);
     }
     for (const tier of ["A", "B"]) {

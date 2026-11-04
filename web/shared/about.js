@@ -15,8 +15,9 @@
 // 原始文字不上屏也不传给页面：它可能带路径、用户名或其他语言，面板里不该出现。
 //
 // 高级设置：起播清空环路与 tail 模式随工程走（桥函数 setResetOnPlay、setTailMode，只影响本实例），
-// 诊断日志开关是本机设置（setDiagLog，写全局位，不进工程）。三项各自是否出现由 features 决定：
-// 起播清空只有 Input 有；tail 行当前只有 Input 的桥提供函数。
+// 诊断日志开关是本机设置（setDiagLog，写全局位，不进工程）。位置提示开关同样是本机设置（setPlaceHintHidden，
+// 写全局位，所有 Output 共用），开 = 显示，只有 Output 有。各行是否出现由 features 决定：
+// 起播清空只有 Input 有；tail 行当前只有 Input 的桥提供函数；placeHint 行只有 Output 传。
 // 行下面那句备注点名了 tail 模式，所以和 tail 行共用同一个开关：tail 行不渲染时备注也不渲染，免得指向看不见的控件。
 // tail 三项是 radiogroup，键盘口径与组选择一致：roving tabindex（选中项是唯一的 Tab 停靠点，没有选中项时第一项），
 // 方向键（左上 / 右下，首尾循环）只移动焦点，空格 / 回车才选中。
@@ -76,8 +77,9 @@ const ROLE_NAME_KEY = Object.freeze({ input: "in.brand.title", output: "out.bran
  * @param {"input"|"output"} o.role
  * @param {HTMLElement} o.host 外壳的 top 层
  * @param {HTMLElement[]} [o.inert] 打开时设为 inert 的节点（通常是外壳的 content 层）
- * @param {object} o.bridge 要有 copyDiagnostics、openExternal、showLicense、setDiagLog，按 features 还要 setResetOnPlay、setTailMode
- * @param {{resetOnPlay?:boolean, tail?:boolean}} [o.features]
+ * @param {object} o.bridge 要有 copyDiagnostics、openExternal、showLicense、setDiagLog，按 features 还要 setResetOnPlay、setTailMode、setPlaceHintHidden
+ * @param {{resetOnPlay?:boolean, tail?:boolean, placeHint?:boolean}} [o.features]
+ * @param {(hidden:boolean)=>void} [o.onPlaceHint] 位置提示开关写成功之后：参数是桥回的新显隐（true = 已隐藏）
  * @param {()=>void} [o.onViewRules] 点「查看使用规则」
  * @param {()=>void} [o.onCopied] 复制成功
  * @param {(reason:string)=>void} [o.onCopyFail] 复制失败；参数是已按当前语言取好的失败原因短语，不是原始原因码
@@ -88,11 +90,11 @@ export function createAbout(o) {
     const { role, bridge } = o;
     const geo = GEOMETRY[role];
     if (!geo) throw new RangeError(`createAbout：未知角色 ${role}`);
-    const features = { resetOnPlay: role === "input", tail: role === "input", ...(o.features || {}) };
+    const features = { resetOnPlay: role === "input", tail: role === "input", placeHint: false, ...(o.features || {}) };
     const timers = o.timers || globalThis;
     const isIn = role === "input";
 
-    let view = { t: (k) => k, lang: "zh", build: {}, cfg: {}, diagLog: false };
+    let view = { t: (k) => k, lang: "zh", build: {}, cfg: {}, diagLog: false, placeHintHidden: false };
     let copyState = "open"; // open、copied、copyFail
     let copyFailCode = ""; // 桥给的原因码，上屏时按当前语言换成短语
     let copiedTimer = 0;
@@ -208,6 +210,22 @@ export function createAbout(o) {
         if (r && r.ok) view.diagLog = r.value;
         applyAdvanced();
     });
+    // 位置提示：开 = 显示，所以写进桥的是反的（hidden = !on）。写失败（回执不是 ok）开关留在原位
+    const placeRow = features.placeHint
+        ? switchRow("placeHint", async (on) => {
+              let r = null;
+              try {
+                  r = await bridge.setPlaceHintHidden(!on);
+              } catch {
+                  r = null;
+              }
+              if (r && r.ok === true && typeof r.value === "boolean") {
+                  view.placeHintHidden = r.value;
+                  if (typeof o.onPlaceHint === "function") o.onPlaceHint(r.value);
+              }
+              applyAdvanced();
+          })
+        : null;
 
     const tailLabel = el("span", { class: "rn-about__rowLabel" });
     const tailItems = TAIL_MODES.map((m) =>
@@ -273,6 +291,7 @@ export function createAbout(o) {
             resetRow && resetRow.root,
             tailRow,
             diagRow.root,
+            placeRow && placeRow.root,
             advNote,
         ),
     );
@@ -384,6 +403,11 @@ export function createAbout(o) {
         diagRow.label.textContent = t("about.adv.diagLog");
         diagRow.label.setAttribute("title", t("about.adv.diagLogTip"));
         diagRow.set(view.diagLog === true, t);
+        if (placeRow) {
+            placeRow.label.textContent = t("about.adv.placeHint");
+            placeRow.label.setAttribute("title", t("about.adv.placeHintTip"));
+            placeRow.set(view.placeHintHidden !== true, t); // 开 = 显示
+        }
         // 备注按这个角色实际有哪些行选词条（Output 没有起播清空），并跟着 tail 行：没有 tail 行就不写这句
         advNote.hidden = !tailRow;
         advNote.textContent = tailRow ? t(isIn ? "about.adv.note" : "about.adv.noteOut") : "";
@@ -432,7 +456,7 @@ export function createAbout(o) {
 
     return {
         el: modal.panel,
-        /** @param {{t:(k:string,v?:object)=>string, lang:string, build?:object, cfg?:object, diagLog?:boolean}} p */
+        /** @param {{t:(k:string,v?:object)=>string, lang:string, build?:object, cfg?:object, diagLog?:boolean, placeHintHidden?:boolean}} p */
         update(p) {
             view = { ...view, ...p, build: p.build || view.build, cfg: p.cfg || view.cfg };
             applyText();

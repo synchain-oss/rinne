@@ -47,6 +47,7 @@ private:
     void handleCopyDiagnostics(const Args& args, Completion complete);
     void handleOpenExternal(const Args& args, Completion complete);
     void handleSetDiagLog(const Args& args, Completion complete);
+    void handleSetPlaceHintHidden(const Args& args, Completion complete);
     void handleResolveTakeover(const Args& args, Completion complete);
     void handleShowLicense(const Args& args, Completion complete);
     void handleRepairPair(const Args& args, Completion complete);

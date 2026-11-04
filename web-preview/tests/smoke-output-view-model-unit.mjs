@@ -63,6 +63,15 @@ run.eq(vm.readPair({ seq: 1, state: "madeUp" }, null), null, "readPair：未知�
     run.eq(next && next.version, "0.9.0", "readState：缺省的字段沿用上一帧，不回落成空");
 }
 {
+    // 位置提示是否隐藏：只认布尔 true，其余一律当显示（安全信息宁可多显示）
+    const hid = (v) => vm.readState({ seq: 1, placeHintHidden: v }, null).placeHintHidden;
+    run.eq(hid(true), true, "readState：placeHintHidden 为 true 才隐藏");
+    run.eq(hid(false), false, "readState：placeHintHidden 为 false 显示");
+    for (const bad of ["true", 1, "yes", null, {}, []])
+        run.eq(hid(bad), false, `readState：placeHintHidden=${JSON.stringify(bad)} 不算隐藏`);
+    run.eq(vm.defaultState().placeHintHidden, false, "defaultState：位置提示默认显示");
+}
+{
     const first = vm.readPair({ seq: 3, state: "connected" }, null);
     run.eq(vm.readPair({ seq: 3, state: "stale" }, first), null, "readPair：seq 相等丢弃");
     run.eq(vm.readPair({ seq: 2, state: "stale" }, first), null, "readPair：seq 更小丢弃");
@@ -97,6 +106,7 @@ run.eq(vm.readPair({ seq: 1, state: "madeUp" }, null), null, "readPair：未知�
     run.eq(s.takeover, false, "readState：takeover 只认布尔 true（字符串 yes 不算）");
     run.eq(s.uiScale, 1, "readState：负的缩放回落 1");
     run.eq(s.sampleRate, 0, "readState：字符串采样率不收");
+    run.eq(s.placeHintHidden, false, "readState：缺 placeHintHidden 就是显示（老宿主没有这个字段）");
     run.eq(
         s.send,
         { channels: "ST", sampleRate: 0, bypassed: false, hostPaused: false },
@@ -436,6 +446,11 @@ for (const lang of ["zh", "en", "fr"]) {
     for (const k of Object.values(vm.HINT_KEYS)) check(k);
     check(vm.IDLE_KEY);
     check("out.place");
+    check("out.place.ok");
+    check("out.place.dismissLabel");
+    check("out.place.dismissTip");
+    check("about.adv.placeHint");
+    check("about.adv.placeHintTip");
     check("out.pair.eyebrow");
     check("out.pair.thisTrack");
     check("out.pair.inputTrack");

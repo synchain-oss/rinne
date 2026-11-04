@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Rinne Output 的 mock 后端：十二个共用函数加两个 Output 专用函数（repairPair、setTailMode），三个事件。
+// Rinne Output 的 mock 后端：十二个共用函数加三个 Output 专用函数（repairPair、setTailMode、setPlaceHintHidden），三个事件。
 // Output 只做分组与配对，没有参数；随工程走的非参数设置只有 tail 模式（cfg.tailMode）。
+// 常驻位置提示的显隐（setPlaceHintHidden）是本机全局设置，存全局位 placeHintHidden，不进工程；
+// 首帧预置像真宿主一样放在 initialisationData 里（键 placeHintHidden，值是单元素数组），页面经 bridge.seed 同步读到。
 // 名表与 docs/UI_BRIDGE.md、src/output/OutputBridgeApi.h、web/shared/bridge.js 逐名相等，由 check-bridge-parity 对拍。
 // 载荷形状见 docs/UI_BRIDGE.md；这里只造够页面开发用的数据。
 //
@@ -37,6 +39,7 @@ export const FUNCTIONS = [
     "showLicense",
     "repairPair",
     "setTailMode",
+    "setPlaceHintHidden",
 ];
 
 export const EVENTS = ["rinne.state", "rinne.pair", "rinne.error"];
@@ -209,6 +212,7 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             group: model.group,
             groupOrigin: model.groupOrigin,
             diagLog: core.ui.diagLog,
+            placeHintHidden: core.ui.placeHintHidden,
             sampleRate: model.sampleRate,
             send: { ...model.send },
             notices: model.notices.map((n) => ({ ...n })),
@@ -228,7 +232,13 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
         };
     });
 
-    const mock = { addEventListener: core.addEventListener };
+    const mock = {
+        addEventListener: core.addEventListener,
+        /** 与真宿主的 window.__JUCE__.initialisationData 同形（键 -> 值数组）；createBridge 建桥时读一次，之后不再变。 */
+        get initialisationData() {
+            return { placeHintHidden: [core.ui.placeHintHidden] };
+        },
+    };
     const fns = {
         ...common,
         repairPair() {
@@ -247,6 +257,14 @@ export function createOutputBackend({ storage, timers, opts } = {}) {
             model.cfg.tailMode = mode;
             core.scheduleEcho();
             return { ok: true, value: mode };
+        },
+        // 本机全局设置，不进工程、不标脏。placeHintWriteFails 是预览专用的全局位（真桥没有）：为真时模拟设置文件写不进去
+        setPlaceHintHidden(hidden) {
+            if (typeof hidden !== "boolean") return { ok: false, reason: "bad-value" };
+            if (core.ui.placeHintWriteFails) return { ok: false, reason: "unavailable" };
+            core.defaults.set({ placeHintHidden: hidden });
+            core.scheduleEcho();
+            return { ok: true, value: hidden };
         },
     };
     for (const name of FUNCTIONS) mock[name] = fns[name];

@@ -13,7 +13,13 @@
 //                 是别的组时才有），缺省读 group；
 //   查看说明       消息位的动作按钮 → openExternal(用户指南)，链接钉当前版本的 tag；
 //   语言           setLang；成功后立即换语言，以后续帧里的 lang 为准；
-//   缩放、关于     共享的状态机与面板；关于面板的 tail 行经 setTailMode 改 cfg.tailMode（随工程走）。
+//   缩放、关于     共享的状态机与面板；关于面板的 tail 行经 setTailMode 改 cfg.tailMode（随工程走）；
+//   位置提示       常驻红字块右侧的「知道了」→ setPlaceHintHidden(true)，回执 ok 才让提示消失（写不进本机设置就留着），
+//                 关于面板高级设置里的开关 → setPlaceHintHidden(false) 让它回来。显隐是本机全局设置，不进工程。
+//                 首帧按宿主预置的 bridge.seed.placeHintHidden 决定，不等第一个快照，已关闭的用户开窗不会先闪一帧；
+//                 之后以快照里的 placeHintHidden 为准（别的 Output 窗口改了，约一秒内这边跟着变）。
+//                 关掉后外壳的 data-place 变 off，版式上移（output.css）；它只管这一条常驻提示，
+//                 错序、跨轨之类的消息位提示与它无关，照常显示。
 // 页面不依赖具体桥：只用 createBridge 返回的对象，所以预览（mock）、真宿主与「没有桥」的纯浏览器三种情形走同一份代码。
 // 首帧前禁写：有桥时，rinne.state 与 rinne.pair 两路首帧都到之前，400 ms 兜底揭幕只为把外壳显示出来（内容是默认状态的
 // 占位），组胶囊、重新配对、接管确认与缩放这几处写入都不发：它们都基于默认值，点了会把默认值写进宿主（缩放的回退目标是
@@ -86,7 +92,9 @@ export function mountOutputPage(o) {
     const hooks = o.hooks || {};
     const role = "output";
 
-    let state = defaultState();
+    // 位置提示的首帧值来自宿主的同步预置（真桥读 initialisationData，预览的 mock 给同形的），只认布尔 true
+    const seed = bridge && bridge.seed && typeof bridge.seed === "object" ? bridge.seed : {};
+    let state = { ...defaultState(), placeHintHidden: seed.placeHintHidden === true };
     let pair = defaultPair();
     let gotState = false;
     let gotPair = false;
@@ -114,7 +122,7 @@ export function mountOutputPage(o) {
     const group = createGroupPills({ role, onSelect: (letter) => void pickGroup(letter) });
     const card = createPairCard();
     const send = createSendLine();
-    const place = createPlaceBlock();
+    const place = createPlaceBlock({ onDismiss: () => void dismissPlace() });
     const msgline = createMsgline({ role, onAction: (name) => void runAction(name) });
     const toast = createToast({ host: shell.layer, role });
     const scaleUi = createScaleUi({
@@ -141,10 +149,11 @@ export function mountOutputPage(o) {
         onHelp: () => (typeof hooks.onHelp === "function" ? hooks.onHelp() : undefined),
     });
     const footerScale = footer.el.querySelector("select");
+    // 叠层打开时常驻提示（在 layer 层）里的「知道了」按钮也不能被 Tab 到，和内容层一样 inert
     const scaleConfirm = createScaleConfirm({
         role,
         host: shell.top,
-        inert: [shell.content],
+        inert: [shell.content, place.el],
         onKeep: () => {
             void scaleUi.keep();
             closeStaticConfirm();
@@ -157,10 +166,12 @@ export function mountOutputPage(o) {
     const about = createAbout({
         role,
         host: shell.top,
-        inert: [shell.content],
+        inert: [shell.content, place.el],
         bridge,
-        // Output 没有起播清空；tail 行经 setTailMode 改本实例的 tail 模式，备注 about.adv.noteOut 跟着 tail 行出现
-        features: { resetOnPlay: false, tail: true },
+        // Output 没有起播清空；tail 行经 setTailMode 改本实例的 tail 模式，备注 about.adv.noteOut 跟着 tail 行出现；
+        // placeHint 行是位置提示的显隐开关（本机设置，只有 Output 有）
+        features: { resetOnPlay: false, tail: true, placeHint: true },
+        onPlaceHint: (hidden) => setPlaceHintHidden(hidden),
         onViewRules: () => (typeof hooks.onViewRules === "function" ? hooks.onViewRules() : undefined),
         onCopied: () => toast.show({ key: "toast.diagCopied", t }),
         onCopyFail: (reason) => toast.show({ key: "toast.copyFail", vals: { reason }, t }),
@@ -215,6 +226,7 @@ export function mountOutputPage(o) {
             view,
             state.uiScale,
             state.diagLog,
+            state.placeHintHidden,
             state.build,
             options,
             locked,
@@ -242,7 +254,9 @@ export function mountOutputPage(o) {
         });
         card.update({ view, t });
         send.update({ send: view.send, t });
-        place.update({ t });
+        place.update({ t, hidden: state.placeHintHidden });
+        // 版式切换：提示关掉后组、配对卡、发送行、消息位上移（坐标在 output.css）
+        shell.el.setAttribute("data-place", state.placeHintHidden ? "off" : "on");
         msgline.update({
             messages: view.messages,
             confirm: view.confirm
@@ -268,7 +282,15 @@ export function mountOutputPage(o) {
         });
         // 首帧前整个下拉也置灰。页脚自己的置灰只给旧 WebKit 的锁定（会把提示位换成锁定说明），这里不借它，直接设在下拉上
         footerScale.disabled = locked || noWrite;
-        if (about.isOpen()) about.update({ t, lang, build: buildInfo(), cfg: { ...cfg }, diagLog: state.diagLog });
+        if (about.isOpen())
+            about.update({
+                t,
+                lang,
+                build: buildInfo(),
+                cfg: { ...cfg },
+                diagLog: state.diagLog,
+                placeHintHidden: state.placeHintHidden,
+            });
         if (scaleUi.state().confirming) scaleConfirm.update({ ...scaleUi.state(), t });
         applyShellState();
     }
@@ -347,6 +369,32 @@ export function mountOutputPage(o) {
         }
     }
 
+    /** 本地先对上显隐（回执 ok 之后），之后仍以快照为准。 */
+    function setPlaceHintHidden(hidden) {
+        if (state.placeHintHidden === hidden) return;
+        state = { ...state, placeHintHidden: hidden };
+        render(false);
+    }
+
+    /**
+     * 点「知道了」：桥回 ok（本机设置已写进去）才让提示消失；回执不是 ok、桥没接上、写不进设置文件都让它留着。
+     * 键盘焦点在这颗按钮上时，它消失后焦点回到内容层的第一站：它是 Tab 序的最后一站（layer 在 content 之后），
+     * 不挪的话焦点会掉到页面外。
+     */
+    async function dismissPlace() {
+        const hadFocus = place.el.contains(doc.activeElement);
+        try {
+            const res = await bridge.setPlaceHintHidden(true);
+            if (!res || res.ok !== true) return;
+        } catch {
+            return;
+        }
+        setPlaceHintHidden(true);
+        if (!hadFocus) return;
+        const stop = shell.content.querySelector('[tabindex="0"], button:not([disabled]), select:not([disabled])');
+        if (stop) stop.focus({ preventScroll: true });
+    }
+
     async function pickLang(code) {
         try {
             const res = await bridge.setLang(code);
@@ -392,7 +440,14 @@ export function mountOutputPage(o) {
     }
 
     function openAbout() {
-        void about.open({ t, lang, build: buildInfo(), cfg: { ...cfg }, diagLog: state.diagLog });
+        void about.open({
+            t,
+            lang,
+            build: buildInfo(),
+            cfg: { ...cfg },
+            diagLog: state.diagLog,
+            placeHintHidden: state.placeHintHidden,
+        });
         applyShellState();
     }
 

@@ -29,6 +29,8 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include "BridgeBase.h"
 #include "OutputProcessor.h"
@@ -96,10 +98,17 @@ public:
     juce::var copyDiagnostics(const juce::Array<juce::var>& args, const UiContext& ui);
     juce::var openExternal(const juce::Array<juce::var>& args);
     juce::var setDiagLog(const juce::Array<juce::var>& args);
+    // 常驻位置提示的显隐：本机全局设置，不进工程、不标脏、不定型
+    juce::var setPlaceHintHidden(const juce::Array<juce::var>& args);
     juce::var resolveTakeover(const juce::Array<juce::var>& args);
     juce::var showLicense();
     juce::var repairPair();
     juce::var setTailMode(const juce::Array<juce::var>& args);
+
+    // ---- 首帧预置 ----
+    // Output 专属的首帧同步预置（键取 Init::*，现读设置文件）：编辑器装配 WebView 时逐个交给 withInitialisationData。
+    // 键值与 rinne.state 里的同名字段同源，页面首帧据此决定位置提示显不显示，不等第一个快照
+    static std::vector<std::pair<juce::String, juce::var>> firstFrameSeedPairs();
 
     // ---- 事件 ----
     // rinne.state 的 Output 字段，补进 WebViewHost 的共用快照（含读设置文件的 inputGuideSeen）

@@ -67,6 +67,7 @@ export function defaultState() {
         group: null,
         groupOrigin: "manual",
         diagLog: false,
+        placeHintHidden: false,
         sampleRate: 0,
         send: { channels: "ST", sampleRate: 0, bypassed: false, hostPaused: false },
         notices: [],
@@ -119,6 +120,8 @@ export function readState(raw, prev) {
         group: typeof raw.group === "string" && GROUP_LETTERS.includes(raw.group) ? raw.group : null,
         groupOrigin: ORIGINS.has(raw.groupOrigin) ? raw.groupOrigin : "manual",
         diagLog: raw.diagLog === true,
+        // 位置提示是否已被用户关掉（本机全局设置）。缺字段、非布尔一律按「显示」：这条是安全提示，拿不准就显示
+        placeHintHidden: raw.placeHintHidden === true,
         sampleRate,
         send: {
             channels: channelKind(send.channels) === "mono" ? "MONO" : "ST",

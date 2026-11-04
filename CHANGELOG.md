@@ -9,6 +9,12 @@ All notable user-facing changes to Rinne are recorded here. The format follows
 
 ### Added
 
+- The permanent placement reminder on Rinne Output can now be dismissed. A "Got it" button on the red reminder hides it;
+  the choice is a machine-wide setting, so every Rinne Output window, now and in later sessions, follows it (an open
+  window within about a second), and it is not part of the project: it does not mark the project as changed. When the
+  reminder is hidden, the rows below it move up evenly inside the same window size, and notices such as "Plug-in order
+  reversed" still appear. A new "Show placement hint" switch under ADVANCED in About (Rinne Output only) brings the
+  reminder back. The French reminder text is shorter to make room for the button.
 - Export mismatch counting. In an offline render, each block that can make the export differ from live playback counts
   one event: the host calls with a block longer than declared, the main read head has to be zero-filled, the peer
   reports an over-long block, or the loop resynchronises (play start, first alignment and binding changes do not count).

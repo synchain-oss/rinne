@@ -69,10 +69,17 @@ async function measure(page, tag, allow = null) {
     return probe;
 }
 
-/** 行数断言：红字 ≤ 2、副行 ≤ 2、发送行与页脚提示 1、消息位文字 ≤ 3。 */
-async function checkLines(page, tag) {
-    const place = await lineCount(page, ".rn-place__text");
-    run.check(place >= 1 && place <= 2, `${tag}：常驻红字应在 2 行以内，实得 ${place} 行`);
+/** 行数断言：红字 ≤ 2、副行 ≤ 2、发送行与页脚提示 1、消息位文字 ≤ 3。placeHidden：红字被用户关掉了，此时断言它确实不在，不量它的行数。 */
+async function checkLines(page, tag, placeHidden = false) {
+    if (placeHidden) {
+        const shown = await page.eval(
+            `(() => { const e = document.querySelector(".rn-place"); const b = e && e.getBoundingClientRect(); return Boolean(b && b.width > 0 && b.height > 0); })()`,
+        );
+        run.eq(shown, false, `${tag}：红字被关掉时不应上屏`);
+    } else {
+        const place = await lineCount(page, ".rn-place__text");
+        run.check(place >= 1 && place <= 2, `${tag}：常驻红字应在 2 行以内，实得 ${place} 行`);
+    }
     const sub = await lineCount(page, '[data-part="pair.sub"]');
     run.check(sub >= 1 && sub <= 2, `${tag}：配对卡副行应在 2 行以内，实得 ${sub} 行`);
     const send = await lineCount(page, '[data-gb="output.send"]');
@@ -106,6 +113,20 @@ try {
             await checkLines(page, tag);
         }
     }
+
+    // ---- 红字被用户关掉（全局位）：全部场景 × 三语再量一遍，版式上移之后各件仍不越界、不互压、没有裸键 ----
+    let hiddenPages = 0;
+    for (const lang of LANGS) {
+        for (const frame of frames) {
+            const tag = `${frameTag(lang, frame)}/红字关着`;
+            await openOutputFrame(page, server, box, lang, frame, "&placeHidden=1");
+            run.eq(await overlayFailures(page, frame), [], `${tag}：首启叠层应摆出来`);
+            await measure(page, tag);
+            await checkLines(page, tag, true);
+            hiddenPages++;
+        }
+    }
+    run.eq(hiddenPages, frames.length * LANGS.length, "红字关着：每个画面 × 每种语言都量到");
 
     // ---- 逐条消息 × 三语（同一张页反复改模型，省得重开） ----
     for (const lang of LANGS) {

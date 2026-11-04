@@ -16,7 +16,8 @@
 //
 // 定型（markUserAction）：只由界面上真实的用户点击或拖动触发，一次性，不可撤销；页面自己发起的调用不算。
 //   算定型：setGroup；resolveTakeover（accept = true）；repairPair；setTailMode；commitUiScale。
-//   不算：  requestInitialState；setLang、setRulesAck、setGuideSeen、setDiagLog（写本机的全局设置，不进工程）；
+//   不算：  requestInitialState；setLang、setRulesAck、setGuideSeen、setDiagLog、setPlaceHintHidden
+//           （这几个写本机的全局设置，不进工程）；
 //           setUiScale（10 秒内可能回退，等 commitUiScale 才算）；resolveTakeover（accept = false）；
 //           copyDiagnostics、openExternal、showLicense；任何认领。
 //
