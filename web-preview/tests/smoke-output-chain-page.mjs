@@ -48,6 +48,16 @@ const SEND = '[data-gb="output.send"]';
 const BAND = '[data-gb="output.band"]';
 const PLACE_OFF = "&placeHidden=1";
 
+// 判据写成纯函数，正例与坏样例调同一个：判据删掉或写错，坏样例就跟着变红
+/** 连线的线型与颜色是否等于期望（want 来自 LINE_WANT，rgb 是 token 的数值）。 */
+const lineOk = (ln, want, rgb) => ln.style === want.style && JSON.stringify(ln.rgb) === JSON.stringify(rgb);
+/** 发送行是否写的是空态词条（文字与 data-state 都要对）。 */
+const sendNoneOk = (got, noneText) => got.text === noneText && got.st === "none";
+/** 消息位高度是否等于期望。 */
+const bandOk = (h, want) => h === want;
+/** 两个徽标的容器是否正好跨在两个节点之间的空档上（左右各差不超过 1 px）。 */
+const spansGap = (end, input, self) => Math.abs(end.x - input.r) <= 1 && Math.abs(end.r - self.x) <= 1;
+
 /** 没匹配到元素时的占位（hidden），省得对 null 取字段。 */
 const GONE = Object.freeze({ x: 0, y: 0, w: 0, h: 0, r: 0, b: 0, hidden: true });
 const rectOr = async (page, sel) => (await rectOf(page, sel)) || GONE;
@@ -166,6 +176,14 @@ try {
                 Math.abs(ln.left - input.r) <= 1 && Math.abs(ln.right - self.x) <= 1,
                 `${tag}/未找到：连线从加宽后的左节点右缘起（线 ${ln.left}–${ln.right}，空档 ${input.r}–${self.x}）`,
             );
+            // 徽标容器与连线读同一组宽度变量：这个状态下徽标不显示，但容器也要跟着让开，以后显示时才居中
+            const ends = await page.eval(
+                `[...document.querySelectorAll(${JSON.stringify(TRACKS + " .rn-track__end")})].map((e) => { const b = e.getBoundingClientRect(); return { x: b.left, r: b.right }; })`,
+            );
+            run.check(
+                ends.length > 0 && ends.every((e) => spansGap(e, input, self)),
+                `${tag}/未找到：徽标容器跨在加宽后的空档上（${JSON.stringify(ends)}，空档 ${input.r}–${self.x}）`,
+            );
             const chain = await rectOf(page, `[data-part="track.input"] .rn-track__chain`);
             run.check(
                 chain &&
@@ -191,8 +209,10 @@ try {
             const want = LINE_WANT[PAIR_COLORS[state]];
             const ln = await lineOf(page);
             const rgb = await tokenRgb(page, want.token);
-            run.eq(ln.style, want.style, `${tag}/${state}（${PAIR_COLORS[state]}）：连线线型`);
-            run.eq(ln.rgb, rgb, `${tag}/${state}（${PAIR_COLORS[state]}）：连线颜色应是 ${want.token}`);
+            run.check(
+                lineOk(ln, want, rgb),
+                `${tag}/${state}（${PAIR_COLORS[state]}）：连线应是 ${want.style} ${want.token}，实得 ${ln.style} ${ln.rgb}`,
+            );
             run.check(
                 ln.alpha >= 0.7 && ln.width >= 1,
                 `${tag}/${state}：连线应看得见（透明度 ${ln.alpha}，线宽 ${ln.width}）`,
@@ -254,7 +274,10 @@ try {
                 const got = await page.eval(
                     `(() => { const e = document.querySelector(${JSON.stringify(SEND)}); return { text: e.textContent.trim(), st: e.getAttribute("data-state") }; })()`,
                 );
-                run.eq(got, { text: noneText, st: "none" }, `${where}/${state}：发送行应写空态文案，不是破折号`);
+                run.check(
+                    sendNoneOk(got, noneText),
+                    `${where}/${state}：发送行应写空态文案，不是破折号，实得 ${JSON.stringify(got)}`,
+                );
             }
             await setModel(page, { state: "connected" });
             const ok = await page.eval(`document.querySelector(${JSON.stringify(SEND)}).textContent`);
@@ -285,11 +308,11 @@ try {
             const where = `${tag}${hint ? "/提示关着" : ""}`;
             await openOutput(page, server, box, lang, "out-connected", hint);
             const idle = await rectOf(page, BAND);
-            run.eq(idle.h, want, `${where}：消息位高度（空闲）`);
+            run.check(bandOk(idle.h, want), `${where}：消息位高度（空闲）应是 ${want}，实得 ${idle.h}`);
             await setModel(page, { notices: [], state: "conflict" });
             const conflict = await rectOf(page, BAND);
             const foot = await rectOf(page, '[data-gb="output.footer"]');
-            run.eq(conflict.h, want, `${where}：消息位高度（有消息）`);
+            run.check(bandOk(conflict.h, want), `${where}：消息位高度（有消息）应是 ${want}，实得 ${conflict.h}`);
             run.check(conflict.b <= foot.y, `${where}：消息位不压页脚（${conflict.b} / ${foot.y}）`);
             // 「+n」与动作按钮同一排（冲突 + 两条灰 / 琥珀通知，冲突带「修复」按钮）
             await setModel(page, {
@@ -387,8 +410,26 @@ try {
         const ln = await lineOf(page);
         const green = await tokenRgb(page, "--sem-green");
         run.check(
-            ln.style !== "solid" && JSON.stringify(ln.rgb) !== JSON.stringify(green),
-            `坏样例：连线被改成灰虚线，量尺应看得出（线型 ${ln.style}，颜色 ${ln.rgb}）`,
+            !lineOk(ln, LINE_WANT.green, green),
+            `坏样例：连线被改成灰虚线，判据应判不对（线型 ${ln.style}，颜色 ${ln.rgb}）`,
+        );
+        // 只改颜色、线型仍是实线：判据要连颜色一起看
+        await page.eval(
+            `(() => { const s = document.createElement("style"); s.textContent = '.rn-paircard[data-state="connected"] .rn-paircard__tracks::before{border-top:1.6px solid rgba(var(--sem-amber),.9) !important}'; document.head.append(s); })()`,
+        );
+        const amberSolid = await lineOf(page);
+        run.check(
+            !lineOk(amberSolid, LINE_WANT.green, green),
+            `坏样例：连线线型对、颜色错，判据应判不对（${amberSolid.style} ${amberSolid.rgb}）`,
+        );
+        // 颜色对、线型错（绿虚线）：判据要连线型一起看
+        await page.eval(
+            `(() => { const s = document.createElement("style"); s.textContent = '.rn-paircard[data-state="connected"] .rn-paircard__tracks::before{border-top:1.6px dashed rgba(var(--sem-green),.9) !important}'; document.head.append(s); })()`,
+        );
+        const greenDashed = await lineOf(page);
+        run.check(
+            !lineOk(greenDashed, LINE_WANT.green, green),
+            `坏样例：连线颜色对、线型错，判据应判不对（${greenDashed.style} ${greenDashed.rgb}）`,
         );
     }
     await openOutput(page, server, box, "zh", "out-connected");
@@ -405,15 +446,42 @@ try {
     }
     await openOutput(page, server, box, "zh", "out-searching");
     {
-        // 发送行只剩破折号
+        // 徽标容器没跟着左节点加宽（回到写死 140 的旧写法）：判据应判不对
+        const inputW = await rectOf(page, '[data-part="track.input"]');
+        const selfW = await rectOf(page, '[data-part="track.this"]');
+        await page.eval(
+            `(() => { const s = document.createElement("style"); s.id = "bad-end"; s.textContent = '.rn-track__end{left:140px !important}'; document.head.append(s); })()`,
+        );
+        const stuck = await page.eval(
+            `[...document.querySelectorAll(${JSON.stringify(TRACKS + " .rn-track__end")})].map((e) => { const b = e.getBoundingClientRect(); return { x: b.left, r: b.right }; })`,
+        );
+        run.check(
+            stuck.length > 0 && !stuck.every((e) => spansGap(e, inputW, selfW)),
+            `坏样例：徽标容器停在 140，判据应判不对（${JSON.stringify(stuck)}，空档 ${inputW.r}–${selfW.x}）`,
+        );
+        await page.eval(`document.getElementById("bad-end").remove()`);
+        // 发送行只剩破折号（data-state 仍是 none）：判据要看文字，不能只看状态
+        const noneZh = OUT_DICT.zh["out.send.none"];
+        const sendNow = `(() => { const e = document.querySelector(${JSON.stringify(SEND)}); return { text: e.textContent.trim(), st: e.getAttribute("data-state") }; })()`;
+        run.check(sendNoneOk(await page.eval(sendNow), noneZh), "坏样例的前提：未找到时发送行本来写的是空态词条");
         await page.eval(`document.querySelector(${JSON.stringify(SEND)}).textContent = "—"`);
-        const text = await page.eval(`document.querySelector(${JSON.stringify(SEND)}).textContent.trim()`);
-        run.check(text === "—" && text !== OUT_DICT.zh["out.send.none"], "坏样例：发送行只剩破折号，应与空态词条不同");
+        const dash = await page.eval(sendNow);
+        run.check(!sendNoneOk(dash, noneZh), `坏样例：发送行只剩破折号，判据应判不对（${JSON.stringify(dash)}）`);
+        // 文字对、状态错：判据要连 data-state 一起看
+        await page.eval(
+            `(() => { const e = document.querySelector(${JSON.stringify(SEND)}); e.textContent = ${JSON.stringify(noneZh)}; e.setAttribute("data-state", "ok"); })()`,
+        );
+        const wrongState = await page.eval(sendNow);
+        run.check(
+            !sendNoneOk(wrongState, noneZh),
+            `坏样例：发送行文字对、状态不是 none，判据应判不对（${JSON.stringify(wrongState)}）`,
+        );
+        run.check(bandOk((await rectOf(page, BAND)).h, 42), "坏样例的前提：提示开着时消息位本来是 42 高");
         await page.eval(
             `(() => { const s = document.createElement("style"); s.textContent = '.rn-msgline--block{height:58px !important}'; document.head.append(s); })()`,
         );
         const band = await rectOf(page, BAND);
-        run.check(band.h === 58, `坏样例：消息位被改成 58 高，量尺应看得出（${band.h}）`);
+        run.check(!bandOk(band.h, 42), `坏样例：消息位被改成 58 高，判据应判不对（${band.h}）`);
         await page.eval(
             `(() => { const s = document.createElement("style"); s.textContent = '.rn-paircard__eyebrow{font-family: var(--ff-mono) !important}'; document.head.append(s); })()`,
         );

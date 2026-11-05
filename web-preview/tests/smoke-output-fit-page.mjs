@@ -9,7 +9,7 @@
 // 首启的 6 个场景（语言卡、规则页、导览 4 步）：夹具接首启控制器摆成静态画面，叠层压在整页上；叠层与下面的页面不是同一层（设计如此，只比同一层），
 //   规则页另摆一个「放行后」（滚到底）的画面；每个首启画面先断言叠层真的摆出来了（种类、导览步号、规则页放行状态），再量上面四件事；
 //   裸键扫描认 rules.、tour.、hint. 前缀（共用的那一份认不出）。
-// 场景之外再造最坏组合：14 条消息逐条上屏（三语）、超长轨道名、多条消息同时在场（「+n」）、单声道与采样率最宽的写法。
+// 场景之外再造最坏组合：14 条消息逐条上屏（三语；词条表里每一条 band.out.* 都要有逐条用例，接管确认条走场景，缺了就红）、超长轨道名、多条消息同时在场（「+n」）、单声道与采样率最宽的写法。
 // 末尾是坏样例：夹具的 ?defect=overflow / place3 / rawkey 必须被上面各项抓出来（量尺本身可信）；首启另有：
 //   普通页面上没有叠层要报、第 N 步按第 M 步查要报、导览说明框里两段字互压要报、首启词条的裸键要扫出来、
 //   首启画面带上危险态（配对冲突）或环路在流动（已连接）要报（夹具喂首启控制器的运行态写死为假，与真页面的判断分叉时要发现），
@@ -19,6 +19,8 @@
 //
 // 用法：node web-preview/tests/smoke-output-fit-page.mjs [仓库根]
 
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
@@ -49,6 +51,7 @@ if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 const box = await loadDesign(ROOT);
 const scenes = await loadOutputScenes(ROOT);
 const frames = outputFrames(scenes);
+const OUT_DICT = (await import(pathToFileURL(path.join(ROOT, "web/i18n/output.js")).href)).default;
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser();
 
@@ -129,6 +132,21 @@ try {
     run.eq(hiddenPages, frames.length * LANGS.length, "红字关着：每个画面 × 每种语言都量到");
 
     // ---- 逐条消息 × 三语（同一张页反复改模型，省得重开） ----
+    // 消息位只剩 2 行（42 / 44 高、按钮横排），错序、跨轨、冲突这类安全相关的提示能不能放下全靠这里实测：
+    // 词条表里每一条 band.out.* 都要在下面逐条上屏（各带自己的动作按钮），接管确认条在场景 out-takeover-confirm 里量
+    {
+        const want = Object.keys(OUT_DICT.zh)
+            .filter((k) => k.startsWith("band.out.") && k !== "band.out.takeover")
+            .sort();
+        const have = Object.keys(MESSAGE_CASES)
+            .map((id) => `band.out.${id}`)
+            .sort();
+        run.eq(have, want, "每一条 band.out.* 消息都有逐条量行数的用例");
+        run.check(
+            frames.some((f) => f.scene.id === "out-takeover-confirm"),
+            "接管确认条的场景在量行数的场景里",
+        );
+    }
     for (const lang of LANGS) {
         await openOutput(page, server, box, lang, "");
         for (const [id, [notices, state, peer]] of Object.entries(MESSAGE_CASES)) {

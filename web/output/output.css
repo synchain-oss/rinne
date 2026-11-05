@@ -258,7 +258,11 @@ body {
 }
 
 /* 两个节点与中间的连线。DOM 里本轨在前、Input 所在轨在后；row-reverse 让 Input 在左、本轨在右 */
+/* 两个节点的宽度只在这里定：节点、连线的起止与徽标容器都读这几个变量，改一处不会对不齐 */
 .rn-paircard__tracks {
+    --rn-node-w: 140px;
+    --rn-node-in: var(--rn-node-w);
+    --rn-node-self: var(--rn-node-w);
     position: absolute;
     left: var(--sp-10);
     right: var(--sp-10);
@@ -274,8 +278,8 @@ body {
 .rn-paircard__tracks::before {
     content: "";
     position: absolute;
-    left: 140px;
-    right: 140px;
+    left: var(--rn-node-in);
+    right: var(--rn-node-self);
     top: var(--rn-line);
     border-top: 1.6px solid rgba(var(--sem-gray), 0.7);
 }
@@ -320,7 +324,7 @@ body {
     align-content: center;
     align-items: center;
     gap: var(--sp-2) var(--sp-5);
-    width: 140px;
+    width: var(--rn-node-w);
     min-width: 0;
     padding: 0 var(--sp-9);
     border-radius: var(--r-sm);
@@ -378,8 +382,8 @@ body {
    声道徽标不占流（竖向以连线为中心），核验徽标从线下 7 px 起排，只有核验徽标时也不会压到线上 */
 .rn-track__end {
     position: absolute;
-    left: 140px;
-    right: 140px;
+    left: var(--rn-node-in);
+    right: var(--rn-node-self);
     top: var(--rn-line);
     display: flex;
     flex-direction: column;
@@ -402,13 +406,13 @@ body {
     letter-spacing: 0;
 }
 
-/* 未找到 Input：左节点放插入链示意，加宽 */
-.rn-paircard__tracks[data-state="chain"] .rn-track[data-state="chain"] {
-    width: 156px;
+/* 未找到 Input：左节点放插入链示意，加宽；连线与徽标容器读同一个变量，跟着让开 */
+.rn-paircard__tracks[data-state="chain"] {
+    --rn-node-in: 156px;
 }
 
-.rn-paircard__tracks[data-state="chain"]::before {
-    left: 156px;
+.rn-paircard__tracks[data-state="chain"] .rn-track[data-state="chain"] {
+    width: var(--rn-node-in);
 }
 
 .rn-track[data-state="chain"] .rn-track__label {
