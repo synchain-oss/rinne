@@ -45,8 +45,8 @@ checked against the actual build logs before the first tag.
 | Unicode data tables | generated tables in HarfBuzz, SheenBidi and JUCE | `Unicode-3.0` | both plugins, all formats | `third_party/notices/unicode.license.txt` |
 | WebView2 loader | `WEBVIEW2_VERSION` in CMake (1.0.2957.106) | `BSD-3-Clause` | Windows only | `third_party/notices/webview2.LICENSE.txt`, `third_party/notices/webview2.NOTICE.txt` |
 | Space Grotesk | 2.000, subset | `OFL-1.1` | both plugins (embedded web UI) | `third_party/notices/space-grotesk.OFL.txt` |
-| Rinne Sans | IBM Plex Sans 3.201, subset and renamed | `OFL-1.1` | both plugins (embedded web UI) | `third_party/notices/ibm-plex-sans.OFL.txt` |
-| Rinne Mono | IBM Plex Mono 2.3, subset and renamed | `OFL-1.1` | both plugins (embedded web UI) | `third_party/notices/ibm-plex-mono.OFL.txt` |
+| Rinne Sans | Figtree 2.002, subset and renamed | `OFL-1.1` | both plugins (embedded web UI) | `third_party/notices/figtree.OFL.txt` |
+| Rinne Mono | DM Mono 1.000, subset and renamed | `OFL-1.1` | both plugins (embedded web UI) | `third_party/notices/dm-mono.OFL.txt` |
 | Noto Sans SC | 2.004, subset | `OFL-1.1` | both plugins (embedded web UI) | `third_party/notices/noto-sans-sc.OFL.txt` |
 
 The rows are derived from the JUCE modules and packages that the build links. `scripts/lib/rules.mjs`
@@ -151,10 +151,11 @@ Not linked into the plugins and not distributed with them.
 
 - The embedded web UI uses four font families under the SIL Open Font License 1.1. They are subset from the upstream
   fonts and compiled into both plugins.
-- **Rinne Sans** and **Rinne Mono** are IBM Plex Sans and IBM Plex Mono. "Plex" is a Reserved Font Name and
-  subsetting counts as a modification, so under OFL-1.1 §3 the subset files carry a different name: the font names in
-  the `name` table (name IDs 1, 3, 4, 6, 16 and 17), the file names and the CSS family names say Rinne Sans / Rinne
-  Mono. The copyright and licence entries (name IDs 0, 13 and 14) are kept unchanged.
+- **Rinne Sans** is derived from Figtree (two files: weight 500 for body text, weight 600 for emphasis) and **Rinne
+  Mono** from DM Mono Medium. Neither family has a Reserved Font Name; the subsets are renamed only so that the CSS
+  family names do not depend on the upstream fonts. The font names in the `name` table (name IDs 1, 3, 4, 6, 16 and
+  17), the file names and the CSS family names say Rinne Sans / Rinne Mono, and other `name` entries that still name
+  the upstream family are dropped. The copyright and licence entries (name IDs 0, 13 and 14) are kept unchanged.
 - **Noto Sans SC** has the Reserved Font Name "Source", which the subset name does not use. **Space Grotesk** has no
   Reserved Font Name.
 - Copyright lines, from the first line of each upstream `OFL.txt` (the Reserved Font Name statement is only there,
@@ -163,24 +164,25 @@ Not linked into the plugins and not distributed with them.
   | Family | Copyright line |
   | --- | --- |
   | Space Grotesk | `Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)` |
-  | IBM Plex Sans (Rinne Sans) | `Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"` |
-  | IBM Plex Mono (Rinne Mono) | `Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"` |
+  | Figtree (Rinne Sans) | `Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)` |
+  | DM Mono (Rinne Mono) | `Copyright 2020 The DM Mono Project Authors (https://www.github.com/googlefonts/dm-mono)` |
   | Noto Sans SC | `Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'` |
 
 - The font files are built by `scripts/fetch_fonts.py` from the upstream files in google/fonts at commit
   `bd8f81ddb5c74d5c8897b36ad88b440266245103` (the script checks each source file's SHA-256). Changes made to the
   upstream fonts: subsetting to the characters the interface uses plus common Chinese characters and the Latin-1 and
-  Latin Extended-A blocks; fixing the variable axes of Space Grotesk (weight 600) and IBM Plex Sans (weight 400, width
-  100) and narrowing the weight axis of Noto Sans SC to 300–700; renaming IBM Plex Sans and IBM Plex Mono as above;
-  mapping U+202F (narrow no-break space) to the thin-space or no-break-space glyph in the fonts that lack it.
+  Latin Extended-A blocks; fixing the variable axes of Space Grotesk (weight 600) and Figtree (weight 500 and, in a
+  second file, weight 600) and narrowing the weight axis of Noto Sans SC to 300–700; renaming Figtree and DM Mono as
+  above; mapping U+202F (narrow no-break space) to the thin-space or no-break-space glyph in the fonts that lack it.
 - The copyright line in each subset file's `name` table (name ID 0) is recorded in `REUSE.toml`, one block per file
   (`check-font-names.py` compares them):
 
   | File | Name ID 0 |
   | --- | --- |
   | `web/fonts/SpaceGrotesk.woff2` | `Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)` |
-  | `web/fonts/RinneSans.woff2` | `Copyright 2019 IBM Corp. All rights reserved.` |
-  | `web/fonts/RinneMono.woff2` | `Copyright 2017 IBM Corp. All rights reserved.` |
+  | `web/fonts/RinneSans.woff2` | `Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)` |
+  | `web/fonts/RinneSansSemiBold.woff2` | `Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)` |
+  | `web/fonts/RinneMono.woff2` | `Copyright 2020 The DM Mono Project Authors (https://www.github.com/googlefonts/dm-mono)` |
   | `web/fonts/NotoSansSC.woff2` | `(c) 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.` |
 
 <!-- /section:fonts -->

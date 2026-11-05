@@ -17,9 +17,10 @@
    ============================================================================= */
 
 /* ---- 本地字体：子集 WOFF2，随插件离线打包（生成脚本见 scripts/fetch_fonts.py 与 web/fonts/README.md）。
-       font-weight 的声明区间比实际内嵌的字重宽：拉丁字体每族只内嵌一个字重，Noto Sans SC 内嵌 300 到 700 的
-       可变字重；声明区间是为了让区间内的字重请求落到内嵌字形，而不是整族回退。配合 body 上的
-       font-synthesis:none，缺字重时宁可走字体栈，也不合成伪粗体。 ---- */
+       font-weight 的声明区间比实际内嵌的字重宽：Space Grotesk 只内嵌 600，Rinne Mono 只内嵌 500（DM Mono Medium），
+       Rinne Sans 内嵌两个字重（Figtree 500 与 600），Noto Sans SC 内嵌 300 到 700 的可变字重；声明区间是为了让
+       区间内的字重请求落到内嵌字形，而不是整族回退。Rinne Sans 两个文件的区间首尾相接：正文的 300 到 500 落到 500，
+       强调的 600 到 700 落到 600。配合 body 上的 font-synthesis:none，缺字重时宁可走字体栈，也不合成伪粗体。 ---- */
 @font-face {
     font-family: "Space Grotesk";
     src: url("../fonts/SpaceGrotesk.woff2") format("woff2");
@@ -29,7 +30,13 @@
 @font-face {
     font-family: "Rinne Sans";
     src: url("../fonts/RinneSans.woff2") format("woff2");
-    font-weight: 300 600;
+    font-weight: 300 500;
+    font-display: swap;
+}
+@font-face {
+    font-family: "Rinne Sans";
+    src: url("../fonts/RinneSansSemiBold.woff2") format("woff2");
+    font-weight: 600 700;
     font-display: swap;
 }
 @font-face {

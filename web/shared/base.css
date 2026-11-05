@@ -37,8 +37,8 @@ body {
      它不是开窗占位（占位是原生侧的色标数组和 index.html 的 head 内联，是浅色渐变）。
      两个角色的边界写在 tokens.css 的对应条目处。 */
     background: var(--page-backdrop);
-    /* 排版精修：抗锯齿走灰阶（更清透，配玻璃拟态）；禁止伪粗、伪斜合成。每个拉丁字体族只内嵌单一字重，
-     缺字重时宁可字体栈回退也不合成，避免 8.5 到 10px 的 mono 小字发糊。 */
+    /* 排版精修：抗锯齿走灰阶（更清透，配玻璃拟态）；禁止伪粗、伪斜合成。Space Grotesk 与 Rinne Mono 各内嵌一个字重，
+     Rinne Sans 内嵌 500 与 600 两个，缺字重时宁可字体栈回退也不合成，避免 8.5 到 10px 的 mono 小字发糊。 */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;

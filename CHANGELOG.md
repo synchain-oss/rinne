@@ -24,6 +24,14 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   acknowledged and comes back on the next new event. The count is in the status snapshot; the editor is not wired to it
   yet.
 
+### Changed
+
+- New Latin interface fonts in both plug-ins. Rinne Sans is now Figtree at weight 500, with weight 600 for emphasis,
+  and Rinne Mono is DM Mono at weight 500, replacing IBM Plex Sans and IBM Plex Mono at weight 400, which read too thin
+  and stiff. Text widths are nearly unchanged and the window layout does not move. Chinese text still uses Noto Sans SC,
+  and titles and large numbers still use Space Grotesk. The About panel and the third-party notices name the new
+  sources; both fonts are under the SIL Open Font License 1.1.
+
 ### Compatibility
 
 - Changing the loop delay D now crossfades two read heads linearly over 40 ms, replacing the old head's 5 ms fade-out and

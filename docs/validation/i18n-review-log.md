@@ -257,3 +257,11 @@
 | `out.place.dismissTip` | 按钮的悬停提示 | 隐藏这条提示。需要时可在「关于」的高级设置里打开「显示位置提示」。 | Hides this hint. You can turn “Show placement hint” back on in About, under Advanced. | Masque ce rappel. Vous pouvez réactiver « Afficher le rappel de placement » dans À propos, sous Avancé. | 引用的开关名与 `about.adv.placeHint` 逐字相同；「À propos」「Avancé」与「关于」「高级设置」在界面里的译法一致 |
 | `about.adv.placeHint` | 「关于」高级设置里的开关（只有 Output），开 = 显示 | 显示位置提示 | Show placement hint | Afficher le rappel de placement | 一行内（预算 260 px） |
 | `about.adv.placeHintTip` | 上一行的悬停提示 | 在窗口顶部常驻显示这个插件该放在哪的提示；点提示上的「知道了」会把它关掉，这里可以再打开。这是本机设置，所有 Output 共用。 | Keeps the reminder about where this plug-in goes at the top of the window. “Got it” on the reminder hides it; turn it back on here. This is a setting for this computer, shared by every Output. | Garde en haut de la fenêtre le rappel de l’emplacement de ce plug-in. « Compris » sur le rappel le masque ; réactivez-le ici. Réglage propre à cet ordinateur, commun à tous les Output. | 与 `about.adv.noteOut` 里「réglage propre à cet ordinateur」同一个说法 |
+
+## 追加：关于页的字体来源句（改动的 fr，待抽检）
+
+界面拉丁字体从 IBM Plex 换成 Figtree / DM Mono 之后，「关于」里写字体来源的一句三语同改，去掉了「按 SIL OFL 1.1 改名」的说法（两款新字体都没有保留字体名，改名不是许可要求）。改动的 fr 登记在 `web/i18n/fr-review/common.json`，状态「待抽检」。
+
+| key | 位置 | 中文 | English | Français | 说明 |
+|---|---|---|---|---|---|
+| `about.fonts`（改） | 「关于」面板的字体说明 | 界面字体：Space Grotesk；Rinne Sans 与 Rinne Mono（由 Figtree / DM Mono 子集化并改名）；Noto Sans SC。均以 SIL Open Font License 1.1 授权。 | UI fonts: Space Grotesk; Rinne Sans and Rinne Mono (subset from Figtree / DM Mono and renamed); Noto Sans SC — all under the SIL Open Font License 1.1. | Polices de l’interface : Space Grotesk ; Rinne Sans et Rinne Mono (sous-ensembles de Figtree / DM Mono, renommés) ; Noto Sans SC — toutes sous licence SIL Open Font License 1.1. | 句式沿用原译，只换字体名并删去「selon la SIL OFL 1.1」；法语标点前仍是不换行空格 |
