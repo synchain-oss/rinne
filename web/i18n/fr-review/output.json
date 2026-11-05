@@ -1,6 +1,6 @@
 {
   "page": "output",
-  "note": "fr 已逐条复核，并经维护者抽检通过；改动与理由见 docs/validation/i18n-review-log.md。entries 里只留「位置提示可关掉」之后新增或改动、待抽检的条目，抽检通过后删掉。",
+  "note": "fr 已逐条复核，并经维护者抽检通过；改动与理由见 docs/validation/i18n-review-log.md。entries 里只留「位置提示可关掉」与「信号链路版式」之后新增或改动、待抽检的条目，抽检通过后删掉。",
   "entries": {
     "out.place": {
       "fr": "Placez-le après le dernier plug-in de la boucle, au-dessus de la séparation du fader (le plus simple : dernier slot pré-fader).",
@@ -16,6 +16,10 @@
     },
     "out.place.dismissTip": {
       "fr": "Masque ce rappel. Vous pouvez réactiver « Afficher le rappel de placement » dans À propos, sous Avancé.",
+      "status": "待抽检"
+    },
+    "out.send.none": {
+      "fr": "HORS BOUCLE",
       "status": "待抽检"
     }
   }

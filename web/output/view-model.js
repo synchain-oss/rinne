@@ -243,7 +243,7 @@ export const SEND_KEYS = Object.freeze({
     none: "out.send.none",
 });
 
-/** 没有接入环路的状态：发送行写一个破折号。 */
+/** 没有接入环路的状态：发送行写「未接入环路」（不画孤零零的一个破折号，那像是画错了）。 */
 const NOT_IN_LOOP = new Set([
     "searching",
     "conflict",
@@ -263,7 +263,7 @@ export function srLabel(hz) {
 /**
  * 发送状态行：{ kind: ok|bypassed|idle|none, ch: ST|MONO, sr }。
  * 旁路最先判（宿主旁路了 Output，写入静音）；宿主没在调用处理，或配对卡在等音频，写「暂停写入」；
- * 没接入环路的状态写破折号；其余是发送中。
+ * 没接入环路的状态写「未接入环路」；其余是发送中。
  */
 export function sendView(state, pair) {
     const s = state.send;

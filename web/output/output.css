@@ -1,12 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
-/* Rinne Output 页面自己的版式：各件在 460×364 设计盒里的坐标、配对卡、轨道行、发送状态行与常驻红字块。
-   共享件的外观（外壳、页眉、组胶囊、消息位、页脚、模态、轻提示）全在 web/shared/rinne.css 里，这里不重复。
-   颜色一律用 tokens.css 里已有的 token，不写裸色值；坐标是设计稿 v2.5 的数：
-   14 页眉 38 + 4 + 红字块 36 + 4 + 组 26 + 4 + 配对卡 118 + 4 + 发送行 14 + 4 + 消息位 58 + 4 + 页脚 26 + 10 = 364。
-   红字块两行高（2 × 15 + 6）：三语都必须在两行内，冒烟量行数；窗口高度是宿主侧定死的，红字不能再长一行。
-   红字块右侧有一颗「知道了」按钮，文字区因此是 364 宽（text-budget.json 的 out.place 同值）。
-   用户点了「知道了」之后外壳带 data-place="off"，红字块不画，下面五道缝从 4 摊到 12，见文末「位置提示关掉后」。 */
+/* Rinne Output 页面自己的版式（信号链路）：各件在 460×364 设计盒里的坐标、配对卡、轨道节点与连线、发送状态行与位置提示。
+   配对卡画成一条链：左边是 Input 所在轨的节点，右边是本轨的节点，中间一根连线；状态胶囊骑在链的正上方，声道徽标骑在线上，
+   核验徽标在线下。连线的颜色与虚实就是配对状态（绿实线、琥珀实线、红虚线、灰虚线）。副行与发送状态行居中压在链下。
+   链的左右顺序与插入链一致（Input 在链首、Output 在链尾）；DOM 顺序不动（本轨在前，读屏顺序不变），用 row-reverse 换位。
+   共享件的外观（外壳、页眉、组胶囊、消息位、页脚、模态、轻提示）全在 web/shared/rinne.css 里，这里只改本页用到的几处。
+   颜色一律用 tokens.css 里已有的 token，不写裸色值；坐标（提示开着时）：
+   14 页眉 38 + 5 + 提示 40 + 5 + 组 26 + 5 + 配对卡 140 + 5 + 消息位 42 + 8 + 页脚 26 + 10 = 364，
+   发送状态行不另占一行：它压在配对卡的底部（卡内 122 起、12 高）。
+   位置提示两行高（2 × 15 + 10）：三语都必须在两行内，冒烟量行数；窗口高度是宿主侧定死的，提示不能再长一行。
+   提示右侧有一颗「知道了」按钮；用户点了以后外壳带 data-place="off"，提示不画，让出的 45 归配对卡（见文末「位置提示关掉后」）。 */
 
 html,
 body {
@@ -23,7 +26,7 @@ body {
     flex: none;
 }
 
-/* 首个快照到齐之前不画内容层，免得默认值闪一帧；红字块在 layer 层，不受影响 */
+/* 首个快照到齐之前不画内容层，免得默认值闪一帧；位置提示在 layer 层，不受影响 */
 .rn-shell__content[data-booting] {
     visibility: hidden;
 }
@@ -45,25 +48,45 @@ body {
     top: 22px;
 }
 
+.rn-out--place {
+    left: 18px;
+    top: 57px;
+}
+
+/* 组这一行：小标、胶囊组、「自动」徽标三列，胶囊组在正中。两侧列等宽（1fr），徽标出现或消失时胶囊组不动 */
 .rn-out--group {
     left: 18px;
-    top: 96px;
+    top: 102px;
     width: 424px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: var(--sp-8);
+}
+
+.rn-out--group .rn-group__label {
+    justify-self: end;
+}
+
+.rn-out--group .rn-group__auto {
+    justify-self: start;
 }
 
 .rn-out--pair {
     left: 18px;
-    top: 126px;
+    top: 133px;
 }
 
+/* 发送状态行压在配对卡底部、居中 */
 .rn-out--send {
     left: 18px;
-    top: 248px;
+    top: 255px;
+    width: 424px;
 }
 
 .rn-out--band {
     left: 18px;
-    top: 266px;
+    top: 278px;
 }
 
 .rn-out--foot {
@@ -72,21 +95,16 @@ body {
     width: 424px;
 }
 
-.rn-out--place {
-    left: 10px;
-    top: 56px;
-}
-
-/* ------------------------------------------------------------ 常驻红字（O-04） */
+/* ------------------------------------------------------------ 位置提示（O-04） */
 .rn-place {
     box-sizing: border-box;
-    width: 440px;
-    height: 36px;
-    /* 右内边距收到 4：按钮贴近右缘，文字区才有 364（438 - 8 - 4 - 6 - 56） */
-    padding: var(--sp-2) var(--sp-4) var(--sp-2) var(--sp-8);
-    border-radius: var(--r-banner);
     display: flex;
     align-items: center;
+    gap: var(--sp-8);
+    width: 424px;
+    height: 40px;
+    padding: 0 var(--sp-10);
+    border-radius: var(--r-banner);
     background: var(--slate-bg);
     border: 1px solid var(--slate-border);
 }
@@ -94,40 +112,87 @@ body {
 .rn-place__text {
     flex: 1 1 0;
     min-width: 0;
-    font-family: var(--ff-grotesk);
+    font-family: var(--ff-sans);
     font-weight: 600;
     font-size: var(--fs-110);
     line-height: 15px;
     color: var(--sem-red-ink);
 }
 
-/* 「知道了」：56 × 22 的小药丸，三语同宽（fr 的 Compris 最长，约 41 宽，两侧各留 5 的内边距）。
+/* 中文这句只比一行长几个字：收窄到分句处换行，免得第二行只剩孤字 */
+:lang(zh) .rn-place__text {
+    flex: 0 1 290px;
+    margin-right: auto;
+}
+
+/* 法语这句最长，小半号才留得在两行内 */
+:lang(fr) .rn-place__text {
+    font-size: var(--fs-105);
+}
+
+/* 「知道了」：20 高的小药丸，宽度随文字（两侧各 10 的内边距）。
    聚焦环用外壳统一的 :focus-visible；柔光照由 data-glow 交给共享的 glow.js。
    字色取一级文字色而不是红字的墨色：它是普通操作，不是安全信息，对比度仍按这个块的 A 档量。 */
 .rn-place__ok {
     box-sizing: border-box;
     flex: none;
-    width: 56px;
-    height: 22px;
-    margin-left: var(--sp-6);
-    padding: 0 var(--sp-5);
+    overflow: visible;
+    height: 20px;
+    padding: 0 var(--sp-10);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-family: var(--ff-grotesk);
+    font-family: var(--ff-sans);
     font-weight: 600;
-    font-size: var(--fs-100);
-    line-height: 1;
+    font-size: var(--fs-105);
+    line-height: 18px;
     color: var(--txt-1);
-    background: rgba(var(--wh), 0.5);
-    border: 1px solid rgba(var(--txt-1-rgb), 0.3);
+    background: rgba(var(--wh), 0.55);
+    border-color: rgba(var(--sem-red), 0.42);
 }
 
-/* ------------------------------------------------------------ 配对卡（O-06） */
+/* 纵向透明扩展区：钮 20 高，上下各补 2，命中高 24（绝对定位相对内边距框，边框 1 px，所以写 -3） */
+.rn-place__ok::before {
+    content: "";
+    position: absolute;
+    top: -3px;
+    right: 0;
+    bottom: -3px;
+    left: 0;
+}
+
+/* ------------------------------------------------------------ 组（O-05）：文字标签用 Sans，居中 */
+.rn-group__label {
+    font-family: var(--ff-sans);
+    font-weight: 600;
+    font-size: var(--fs-100);
+    letter-spacing: 0.04em;
+}
+
+.rn-group__pill {
+    min-width: 28px;
+    font-family: var(--ff-sans);
+    font-weight: 600;
+    font-size: var(--fs-115);
+    letter-spacing: 0;
+    color: var(--txt-2);
+}
+
+.rn-group__auto {
+    font-family: var(--ff-sans);
+    font-weight: 600;
+    font-size: var(--fs-95);
+    letter-spacing: 0.04em;
+}
+
+/* ------------------------------------------------------------ 配对卡（O-06）：一条链 */
 .rn-paircard {
+    position: relative;
     box-sizing: border-box;
     width: 424px;
-    height: 118px;
+    height: 140px;
+    /* 连线的竖向位置：节点高度的约 42%（52 高的节点取 22；位置提示关掉后卡长高，见文末） */
+    --rn-line: 22px;
     border-radius: var(--r-lg);
     background: var(--card-bg);
     border: 1px solid var(--card-border);
@@ -136,67 +201,139 @@ body {
     backdrop-filter: var(--glass-blur);
 }
 
+/* 状态块只是定位用的透明层：胶囊在第一排正中，小标在卡的左上角 */
 .rn-paircard__head {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 70px;
+    position: static;
 }
 
 .rn-paircard__top {
     position: absolute;
-    left: var(--sp-9);
-    top: var(--sp-9);
-    width: 404px;
-    height: 22px;
+    left: var(--sp-12);
+    right: var(--sp-12);
+    top: var(--sp-7);
     display: flex;
+    justify-content: center;
     align-items: center;
-    justify-content: space-between;
+    height: 22px;
 }
 
+.rn-paircard__eyebrow {
+    position: absolute;
+    left: 0;
+    top: var(--sp-5);
+    font-family: var(--ff-sans);
+    font-weight: 600;
+    font-size: var(--fs-90);
+    line-height: 12px;
+    letter-spacing: 0.1em;
+}
+
+.rn-pair {
+    box-sizing: border-box;
+    gap: var(--sp-6);
+    height: 22px;
+    max-width: 240px;
+    padding: 0 var(--sp-11);
+    font-family: var(--ff-sans);
+    font-weight: 600;
+    font-size: var(--fs-100);
+    letter-spacing: 0.02em;
+}
+
+/* 副行：链下居中，一行时在两行高的格子里垂直居中 */
 .rn-paircard__sub {
     position: absolute;
-    left: var(--sp-9);
-    top: 35px;
-    width: 404px;
-    height: 30px;
-    overflow: hidden;
-    font-size: var(--fs-110);
-    line-height: 15px;
-    color: var(--txt-1);
-    text-wrap: pretty;
-}
-
-.rn-paircard__tracks {
-    position: absolute;
-    left: var(--sp-9);
-    top: 71px;
-    width: 404px;
-    height: 38px;
-    display: flex;
-    flex-direction: column;
-}
-
-.rn-track {
+    left: var(--sp-12);
+    right: var(--sp-12);
+    top: 91px;
+    height: 28px;
     display: flex;
     align-items: center;
-    gap: var(--sp-7);
-    height: 19px;
-    min-width: 0;
+    justify-content: center;
+    font-size: var(--fs-110);
+    line-height: 14px;
+    color: var(--txt-1);
+    text-align: center;
+    text-wrap: balance;
 }
 
-.rn-track__label {
-    flex: none;
-    width: 96px;
-    font-family: var(--ff-mono);
-    font-size: var(--fs-90);
-    letter-spacing: var(--mono-ls-ui);
-    color: var(--txt-3);
-    white-space: nowrap;
+/* 两个节点与中间的连线。DOM 里本轨在前、Input 所在轨在后；row-reverse 让 Input 在左、本轨在右 */
+/* 两个节点的宽度只在这里定：节点、连线的起止与徽标容器都读这几个变量，改一处不会对不齐 */
+.rn-paircard__tracks {
+    --rn-node-w: 140px;
+    --rn-node-in: var(--rn-node-w);
+    --rn-node-self: var(--rn-node-w);
+    position: absolute;
+    left: var(--sp-10);
+    right: var(--sp-10);
+    top: 35px;
+    height: 52px;
+    display: flex;
+    flex-direction: row-reverse;
+    justify-content: space-between;
+    align-items: stretch;
+}
+
+/* 连线：两个节点之间。默认灰实线；颜色与虚实跟配对状态走 */
+.rn-paircard__tracks::before {
+    content: "";
+    position: absolute;
+    left: var(--rn-node-in);
+    right: var(--rn-node-self);
+    top: var(--rn-line);
+    border-top: 1.6px solid rgba(var(--sem-gray), 0.7);
+}
+
+/* 通了：绿实线 */
+.rn-paircard[data-state="connected"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="connectedStill"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="connectedUnverified"] .rn-paircard__tracks::before {
+    border-top-color: rgba(var(--sem-green), 0.85);
+}
+
+/* 通了但要留意：琥珀实线 */
+.rn-paircard[data-state="stale"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="crossProcess"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="crossTrack"] .rn-paircard__tracks::before {
+    border-top-color: rgba(var(--sem-amber), 0.95);
+}
+
+/* 断了或不能用：红虚线 */
+.rn-paircard[data-state="ipcUnavailable"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="abiMismatch"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="srMismatch"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="conflict"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="unassigned"] .rn-paircard__tracks::before {
+    border-top: 1.6px dashed rgba(var(--sem-red), 0.8);
+}
+
+/* 还没接上或被旁路：灰虚线 */
+.rn-paircard[data-state="searching"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="waitingAudio"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="validator"] .rn-paircard__tracks::before,
+.rn-paircard[data-state="bypassed"] .rn-paircard__tracks::before {
+    border-top-style: dashed;
+}
+
+/* 节点：两张小玻璃。点在小标左边，名字独占一行，名字最多折两行，再长才省略（全名在 title 里） */
+.rn-track {
+    box-sizing: border-box;
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    align-content: center;
+    align-items: center;
+    gap: var(--sp-2) var(--sp-5);
+    width: var(--rn-node-w);
+    min-width: 0;
+    padding: 0 var(--sp-9);
+    border-radius: var(--r-sm);
+    background: rgba(var(--wh), 0.18);
+    border: 1px solid rgba(var(--wh), 0.34);
 }
 
 .rn-track__dot {
+    order: 0;
     flex: none;
     width: var(--sp-8);
     height: var(--sp-8);
@@ -212,13 +349,28 @@ body {
     border: 1px solid rgba(var(--txt-1-rgb), 0.35);
 }
 
-.rn-track__name {
-    flex: 0 1 auto;
+.rn-track__label {
+    order: 1;
+    flex: 1 1 0;
     min-width: 0;
+    font-size: var(--fs-95);
+    line-height: 12px;
+    color: var(--txt-3);
+    white-space: nowrap;
+}
+
+.rn-track__name {
+    order: 2;
+    flex: none;
+    width: 100%;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
     font-size: var(--fs-110);
+    line-height: 14px;
     color: var(--txt-1);
 }
 
@@ -226,18 +378,51 @@ body {
     color: var(--txt-3);
 }
 
+/* 声道徽标骑在连线上、核验徽标在线下：两个徽标都相对 .rn-paircard__tracks 定位，水平居中在两个节点之间。
+   声道徽标不占流（竖向以连线为中心），核验徽标从线下 7 px 起排，只有核验徽标时也不会压到线上 */
 .rn-track__end {
+    position: absolute;
+    left: var(--rn-node-in);
+    right: var(--rn-node-self);
+    top: var(--rn-line);
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: var(--sp-6);
-    flex: none;
-    margin-left: auto;
-    padding-left: var(--sp-6);
+    padding: 0;
+    margin: 0;
 }
 
-/* 插入链示意比行高多出 6 px（紧凑版 25 高）：上下各让出 3 px，不撑开行 */
+.rn-track__end .rn-ch {
+    position: absolute;
+    top: 0;
+    transform: translateY(-50%);
+    background: var(--light-solid);
+}
+
+.rn-verify {
+    margin-top: var(--sp-7);
+    font-family: var(--ff-sans);
+    font-size: var(--fs-100);
+    letter-spacing: 0;
+}
+
+/* 未找到 Input：左节点放插入链示意，加宽；连线与徽标容器读同一个变量，跟着让开 */
+.rn-paircard__tracks[data-state="chain"] {
+    --rn-node-in: 156px;
+}
+
+.rn-paircard__tracks[data-state="chain"] .rn-track[data-state="chain"] {
+    width: var(--rn-node-in);
+}
+
+.rn-track[data-state="chain"] .rn-track__label {
+    flex: none;
+    width: 100%;
+}
+
 .rn-track__chain {
-    margin: -3px 0;
+    order: 2;
+    margin: 0;
 }
 
 /* ------------------------------------------------------------ 发送状态行（O-07） */
@@ -245,29 +430,65 @@ body {
     box-sizing: border-box;
     display: flex;
     align-items: center;
-    width: 424px;
-    height: 14px;
-    padding-left: var(--sp-2);
+    justify-content: center;
+    height: 12px;
     font-family: var(--ff-mono);
-    font-size: var(--fs-95);
-    letter-spacing: var(--mono-ls-tag);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls-ui);
     white-space: nowrap;
     color: var(--txt-2);
 }
 
 .rn-send[data-state="none"] {
-    color: var(--txt-3);
+    color: var(--txt-4);
 }
 
 .rn-send[data-tone="gray"] {
     color: var(--sem-gray-ink);
 }
 
-/* ------------------------------------------------------------ 消息位 */
-/* 设计稿里红色消息用标题字体 Space Grotesk 600，琥珀与中性仍是正文字体；共享消息位目前没有红色这一档，先在本页补上 */
+/* ------------------------------------------------------------ 消息位：42 高，按钮横排 */
+.rn-msgline--block {
+    height: 42px;
+}
+
+.rn-msgline--block .rn-banner__text {
+    max-width: none;
+    -webkit-line-clamp: 2;
+}
+
+.rn-msgline--block .rn-banner__right {
+    flex-direction: row;
+    align-items: center;
+    width: auto;
+    gap: var(--sp-6);
+}
+
+.rn-msgline .sc-banner {
+    padding: var(--sp-5) var(--sp-10);
+    font-size: var(--fs-115);
+    line-height: 15px;
+}
+
+.rn-msgline--block .rn-banner--confirm {
+    padding: var(--sp-5) var(--sp-10);
+    line-height: 15px;
+}
+
+/* 红色消息文字用 Rinne Sans 600，不再用标题字体；琥珀与中性仍是正文字重 */
 .rn-msgline .rn-banner.sc-banner--red .rn-banner__text {
-    font-family: var(--ff-grotesk);
     font-weight: 600;
+}
+
+/* 空闲灰字也居中，和链同一条中轴 */
+.rn-banner--idle {
+    justify-content: center;
+    padding: 0 var(--sp-14);
+    text-align: center;
+}
+
+.rn-banner__idle {
+    line-height: 15px;
 }
 
 /* ------------------------------------------------------------ 页脚提示 */
@@ -294,22 +515,43 @@ body {
 }
 
 /* ------------------------------------------------------------ 位置提示关掉后（外壳 data-place="off"） */
-/* 红字块不画，它的 36 px 加一道 4 px 的缝共 40 px 摊给剩下的五道缝（页眉与组、组与配对卡、配对卡与发送行、发送行与消息位、
-   消息位与页脚），每道从 4 变 12，各件之间仍然均匀；页脚和页眉不动，设计盒仍是 460 x 364：
-   14 页眉 38 + 12 + 组 26 + 12 + 配对卡 118 + 12 + 发送行 14 + 12 + 消息位 58 + 12 + 页脚 26 + 10 = 364。
-   只有这四件的 top 变，宽高和左缘都不动。 */
+/* 提示不画，它的 40 加一道 5 的缝共 45 归配对卡与上下的缝：组下移一点（页眉与组 10、组与卡 10），卡长高到 172，
+   链上下多留白，消息位长到 44（提示开着时 42），页脚不动，设计盒仍是 460 x 364：
+   14 页眉 38 + 10 + 组 26 + 10 + 配对卡 172 + 8 + 消息位 44 + 6 + 页脚 26 + 10 = 364。
+   发送状态行仍压在卡的底部（卡内 153 起）。 */
 .rn-shell[data-place="off"] .rn-out--group {
-    top: 64px;
+    top: 62px;
 }
 
 .rn-shell[data-place="off"] .rn-out--pair {
-    top: 102px;
+    top: 98px;
+}
+
+.rn-shell[data-place="off"] .rn-paircard {
+    height: 172px;
+    --rn-line: 25px;
+}
+
+.rn-shell[data-place="off"] .rn-paircard__top {
+    top: var(--sp-12);
+}
+
+.rn-shell[data-place="off"] .rn-paircard__tracks {
+    top: 44px;
+    height: 60px;
+}
+
+.rn-shell[data-place="off"] .rn-paircard__sub {
+    top: 108px;
+    height: 34px;
+    font-size: var(--fs-115);
+    line-height: 15px;
 }
 
 .rn-shell[data-place="off"] .rn-out--send {
-    top: 232px;
+    top: 251px;
 }
 
-.rn-shell[data-place="off"] .rn-out--band {
-    top: 258px;
+.rn-shell[data-place="off"] .rn-msgline--block {
+    height: 44px;
 }

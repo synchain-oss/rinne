@@ -31,6 +31,17 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   and stiff. Text widths are nearly unchanged and the window layout does not move. Chinese text still uses Noto Sans SC,
   and titles and large numbers still use Space Grotesk. The About panel and the third-party notices name the new
   sources; both fonts are under the SIL Open Font License 1.1.
+- Rinne Output has a new "signal chain" layout. The pairing card now reads left to right as the Rinne Input track, a
+  connecting line, and this track, and the whole window is symmetric about its centre axis. The line shows the pairing
+  state at a glance: solid green when connected, solid amber when connected but worth a look (stale, crossed process or
+  crossed track), dashed red when broken or unusable, dashed gray when still searching or bypassed. A track name wraps
+  to two lines before it is shortened, with the full name kept in its tooltip. The group buttons no longer shift
+  sideways when the "AUTO" badge appears or disappears. The send line shows "NOT IN THE LOOP" (and its Chinese and
+  French equivalents) instead of a lone dash while this track is not connected to a loop. Labels use Rinne Sans, and
+  Rinne Mono is kept for the send row, the version, the zoom level, the channel badge, the insert chain and small header
+  text. The placement hint is Rinne Sans at weight 600 and its "Got it" button is shorter and sized to its label; the
+  notice slot is 44 px high (42 px while the hint is shown) with its buttons side by side. Step 3 of the tour now
+  highlights only the status row. The window size and every setting are unchanged.
 
 ### Compatibility
 

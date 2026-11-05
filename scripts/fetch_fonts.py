@@ -73,8 +73,6 @@ OUTPUTS = [
 ]
 LATIN_OUTPUTS = [o[0] for o in OUTPUTS if o[4] == "latin"]
 CJK_OUTPUT = [o[0] for o in OUTPUTS if o[4] == "all"][0]
-# 改了名的输出 -> 上游族名：check-font-names.py 按它断言 name 表里没有残留上游族名
-RENAMED = {o[0]: o[3][3] for o in OUTPUTS if o[3] and o[3][3]}
 
 # OFL-1.1 要求每份拷贝都带版权声明与许可证：上游子集的 name 表里可能缺 13，改名时一并补齐
 OFL_LICENSE_DESC = (

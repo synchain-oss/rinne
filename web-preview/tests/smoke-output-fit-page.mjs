@@ -5,11 +5,11 @@
 //   ① 所有可见文字不越出所在件、不越出外壳、不被 overflow 裁掉（含 line-clamp 截断）、互相不压住；data-gb 件不越出外壳；
 //   ② 登记的「必须上屏」文字（红字、状态灯、副行、消息、页脚提示、发送行、轨道名）确实上屏，防止量了个空；
 //   ③ 界面上没有裸词条键、没替换的占位符、null / undefined（文字与 title、aria-label 都查）；
-//   ④ 行数：常驻红字 ≤ 2 行（设计盒里只留了两行的位置）、副行 ≤ 2 行、发送行与页脚提示 1 行、消息位文字 ≤ 3 行。
+//   ④ 行数：常驻红字 ≤ 2 行（设计盒里只留了两行的位置）、副行 ≤ 2 行、发送行与页脚提示 1 行、消息位文字 ≤ 2 行（消息位 42 高，放不下第三行）。
 // 首启的 6 个场景（语言卡、规则页、导览 4 步）：夹具接首启控制器摆成静态画面，叠层压在整页上；叠层与下面的页面不是同一层（设计如此，只比同一层），
 //   规则页另摆一个「放行后」（滚到底）的画面；每个首启画面先断言叠层真的摆出来了（种类、导览步号、规则页放行状态），再量上面四件事；
 //   裸键扫描认 rules.、tour.、hint. 前缀（共用的那一份认不出）。
-// 场景之外再造最坏组合：14 条消息逐条上屏（三语）、超长轨道名、多条消息同时在场（「+n」）、单声道与采样率最宽的写法。
+// 场景之外再造最坏组合：14 条消息逐条上屏（三语；词条表里每一条 band.out.* 都要有逐条用例，接管确认条走场景，缺了就红）、超长轨道名、多条消息同时在场（「+n」）、单声道与采样率最宽的写法。
 // 末尾是坏样例：夹具的 ?defect=overflow / place3 / rawkey 必须被上面各项抓出来（量尺本身可信）；首启另有：
 //   普通页面上没有叠层要报、第 N 步按第 M 步查要报、导览说明框里两段字互压要报、首启词条的裸键要扫出来、
 //   首启画面带上危险态（配对冲突）或环路在流动（已连接）要报（夹具喂首启控制器的运行态写死为假，与真页面的判断分叉时要发现），
@@ -19,6 +19,8 @@
 //
 // 用法：node web-preview/tests/smoke-output-fit-page.mjs [仓库根]
 
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRun, repoRoot } from "./lib/harness.mjs";
 import { findBrowser, launchBrowser } from "./lib/browser.mjs";
 import { startStaticServer } from "./lib/static-server.mjs";
@@ -49,6 +51,7 @@ if (!findBrowser()) run.skip("没有 Chromium 系浏览器");
 const box = await loadDesign(ROOT);
 const scenes = await loadOutputScenes(ROOT);
 const frames = outputFrames(scenes);
+const OUT_DICT = (await import(pathToFileURL(path.join(ROOT, "web/i18n/output.js")).href)).default;
 const server = await startStaticServer(ROOT);
 const browser = await launchBrowser();
 
@@ -69,7 +72,7 @@ async function measure(page, tag, allow = null) {
     return probe;
 }
 
-/** 行数断言：红字 ≤ 2、副行 ≤ 2、发送行与页脚提示 1、消息位文字 ≤ 3。placeHidden：红字被用户关掉了，此时断言它确实不在，不量它的行数。 */
+/** 行数断言：红字 ≤ 2、副行 ≤ 2、发送行与页脚提示 1、消息位文字 ≤ 2。placeHidden：红字被用户关掉了，此时断言它确实不在，不量它的行数。 */
 async function checkLines(page, tag, placeHidden = false) {
     if (placeHidden) {
         const shown = await page.eval(
@@ -90,7 +93,7 @@ async function checkLines(page, tag, placeHidden = false) {
         page,
         '[data-gb="output.band"] .rn-banner__text, [data-gb="output.band"] .rn-banner__idle',
     );
-    run.check(band >= 1 && band <= 3, `${tag}：消息位文字应在 3 行以内，实得 ${band} 行`);
+    run.check(band >= 1 && band <= 2, `${tag}：消息位文字应在 2 行以内，实得 ${band} 行`);
 }
 
 try {
@@ -129,6 +132,21 @@ try {
     run.eq(hiddenPages, frames.length * LANGS.length, "红字关着：每个画面 × 每种语言都量到");
 
     // ---- 逐条消息 × 三语（同一张页反复改模型，省得重开） ----
+    // 消息位只剩 2 行（42 / 44 高、按钮横排），错序、跨轨、冲突这类安全相关的提示能不能放下全靠这里实测：
+    // 词条表里每一条 band.out.* 都要在下面逐条上屏（各带自己的动作按钮），接管确认条在场景 out-takeover-confirm 里量
+    {
+        const want = Object.keys(OUT_DICT.zh)
+            .filter((k) => k.startsWith("band.out.") && k !== "band.out.takeover")
+            .sort();
+        const have = Object.keys(MESSAGE_CASES)
+            .map((id) => `band.out.${id}`)
+            .sort();
+        run.eq(have, want, "每一条 band.out.* 消息都有逐条量行数的用例");
+        run.check(
+            frames.some((f) => f.scene.id === "out-takeover-confirm"),
+            "接管确认条的场景在量行数的场景里",
+        );
+    }
     for (const lang of LANGS) {
         await openOutput(page, server, box, lang, "");
         for (const [id, [notices, state, peer]] of Object.entries(MESSAGE_CASES)) {
@@ -147,7 +165,7 @@ try {
         }
 
         // ---- 最坏组合 ----
-        // 超长轨道名（宿主给的轨道名不受控）：两行都省略，不撑破配对卡
+        // 超长轨道名（宿主给的轨道名不受控）：每个节点里的名字最多折两行，再长才省略，不撑破节点与配对卡
         const long = "Chœurs doublés – refrain 2 (bus stéréo) – prise alternative très longue 浓缩人声总线 final mix";
         await setModel(page, {
             state: "crossTrack",
@@ -161,22 +179,32 @@ try {
             pages++;
             texts += probe.texts;
             await checkLines(page, tag);
+            // 先量节点：名字框在自己的节点里、节点在配对卡里；行数最多 2，去掉行数上限后确实还要更多行（说明省略号真的在截断）
             const cut = await page.eval(
-                `[...document.querySelectorAll(".rn-track__name")].filter((e) => !e.hidden).map((e) => ({ ellipsis: getComputedStyle(e).textOverflow === "ellipsis", truncated: e.scrollWidth > e.clientWidth, inCard: e.getBoundingClientRect().right <= e.closest('[data-gb="output.pair"]').getBoundingClientRect().right }))`,
+                `[...document.querySelectorAll(".rn-track__name")].filter((e) => !e.hidden).map((e) => {
+                    const node = e.closest(".rn-track").getBoundingClientRect();
+                    const card = e.closest('[data-gb="output.pair"]').getBoundingClientRect();
+                    const r = e.getBoundingClientRect();
+                    const cs = getComputedStyle(e);
+                    const linesOf = () => { const tops = new Set(); const rg = document.createRange(); rg.selectNodeContents(e); const bottom = e.getBoundingClientRect().bottom; for (const x of rg.getClientRects()) if (x.width > 0 && x.top < bottom - 1) tops.add(Math.round(x.top / 3)); return tops.size; };
+                    const shown = linesOf();
+                    const prev = e.style.webkitLineClamp;
+                    e.style.webkitLineClamp = "none";
+                    const full = linesOf();
+                    e.style.webkitLineClamp = prev;
+                    return { clamp: cs.webkitLineClamp, ellipsis: cs.textOverflow === "ellipsis", shown, more: full > 2, inNode: r.left >= node.left && r.right <= node.right && r.top >= node.top && r.bottom <= node.bottom, inCard: node.left >= card.left && node.right <= card.right && node.top >= card.top && node.bottom <= card.bottom };
+                })`,
             );
             run.eq(
                 cut,
-                [1, 2].map(() => ({ ellipsis: true, truncated: true, inCard: true })),
-                `${tag}：两行轨道名都应被省略号截断且不越出配对卡`,
+                [1, 2].map(() => ({ clamp: "2", ellipsis: true, shown: 2, more: true, inNode: true, inCard: true })),
+                `${tag}：两个节点里的名字都应折成 2 行、省略号截断，且名字在节点里、节点在配对卡里`,
             );
-            // 省略号截断后真正看得见的那一段不能压住右边的核验徽标与声道徽标（量尺按整段文字比，这里按可见框比）
-            const gap = await page.eval(
-                `(() => { const row = document.querySelector('[data-part="track.input"]'); const n = row.querySelector(".rn-track__name").getBoundingClientRect(); const end = row.querySelector(".rn-track__end").getBoundingClientRect(); return { endShown: end.width > 0, gap: end.left - n.right }; })()`,
+            // 声道徽标骑在连线上、核验徽标在线下，都在两个节点之间的空档里（不压节点）
+            const between = await page.eval(
+                `(() => { const tracks = document.querySelector('[data-part="pair.tracks"]'); const nodes = [...tracks.querySelectorAll(".rn-track")].map((e) => e.getBoundingClientRect()); const left = Math.min(...nodes.map((n) => n.left)) ; const gapL = nodes.find((n) => n.left === left).right; const gapR = Math.max(...nodes.map((n) => n.left)); const out = {}; for (const [k, s] of [["verify", ".rn-verify"], ["channel", ".rn-ch"]]) { const e = tracks.querySelector(s + ":not([hidden])"); const b = e && e.getBoundingClientRect(); out[k] = Boolean(b && b.width > 0 && b.left >= gapL - 0.5 && b.right <= gapR + 0.5); } return out; })()`,
             );
-            run.check(
-                gap.endShown && gap.gap >= -0.5,
-                `${tag}：轨道名的可见框不得压住右边的徽标，实得 ${JSON.stringify(gap)}`,
-            );
+            run.eq(between, { verify: true, channel: true }, `${tag}：核验徽标与声道徽标应落在两个节点之间的空档里`);
             const titled = await page.eval(
                 `[...document.querySelectorAll(".rn-track__name")].filter((e) => !e.hidden).map((e) => e.getAttribute("title") || "")`,
             );
