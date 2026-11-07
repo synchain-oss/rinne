@@ -1,6 +1,6 @@
 # 测试套件与场景一览
 
-本文说明仓里各个测试套件测什么、在本机怎么跑，以及环路场景 S01–S25 各自对应哪个文件。REAPER 本机宿主烟测另见 [REAPER.md](REAPER.md)。
+本文说明仓里各个测试套件测什么、在本机怎么跑，以及环路场景 S01–S26 各自对应哪个文件。REAPER 本机宿主烟测另见 [REAPER.md](REAPER.md)。
 
 ## 套件
 
@@ -38,7 +38,7 @@ build/tests/Release/rinne_host_tests.exe "[s03b],[s05b]"
 
 场景文件头都写同一套内容：测什么、做法、断言（判据与取值理由）、以及标 ⛔ 的删除式验证点。⛔ 点的意思是：把对应的实现改坏，这个场景必须变红。改场景判据之前先读文件头，别把判据放宽到让改坏的实现也能过。
 
-## 场景 S01–S25
+## 场景 S01–S26
 
 文件都在 `tests/loop_rig/scenarios/`；「插件级」一栏是 `tests/host/plugin_host/` 里的复验文件，空着表示只有 loop_rig 一层。
 
@@ -46,7 +46,7 @@ build/tests/Release/rinne_host_tests.exe "[s03b],[s05b]"
 |---|---|---|---|
 | S01 | 冲激回声：回声峰位恰为 k·D，幅度与独立的参考模型相符 | `s01_impulse_echo.cpp` | |
 | S02 | 块长不变性：参数恒定时，宿主怎么切块，闭合的环路输出都逐位相同 | `s02_block_invariance.cpp` | |
-| S03 | 起播沿：起播之后的输出与预滚多久、怎么切块、实时还是离线无关，从起播点 + 5 ms 起逐位相同；宿主短暂报停不算停走带 | `s03_play_edge.cpp` | `test_plugin_s03b_s05b.cpp`（S03b） |
+| S03 | 起播沿：起播之后的输出与预滚多久、怎么切块、实时还是离线无关，从起播点 + 5 ms 起逐位相同（各路沿前都有声，都不是安静的起播沿；一次安静一次不安静时沿后 25 ms 内的声音的第一个回声不同，见 S26）；宿主短暂报停不算停走带 | `s03_play_edge.cpp` | `test_plugin_s03b_s05b.cpp`（S03b） |
 | S04 | null test：回送关掉的几种条件下，Input 输出与输入逐位相同，Output 对宿主缓冲逐位直通 | `s04_null_test.cpp` | |
 | S05 | Output 停调：不同长度的停调（一块、30 ms、120 ms、2 s）、固定与随机块长，恢复后的读头重建、降级窗口与补零的账 | `s05_output_stall.cpp` | |
 | S05b | 停调与起播沿：停调恢复之后再起播，起播沿之后的输出与停调与否无关 | `s05b_stall_edge.cpp` | `test_plugin_s03b_s05b.cpp` |
@@ -70,5 +70,6 @@ build/tests/Release/rinne_host_tests.exe "[s03b],[s05b]"
 | S23 | 停用复燃：两端一起挂起超过 250 ms 清空本地延迟线，不超过则旧内容照常回来（loop_rig 钉引擎一侧，插件级钉壳的 250 ms 阈值） | `s23_suspend_clear.cpp` | `test_plugin_s23_s24.cpp` |
 | S24 | 单端切片：只有一端把块再切小，输出逐位不变（loop_rig）；工程重载后新 Input 还原 state、不读重载之前环里的内容（插件级） | `s24_single_end_slicing.cpp` | `test_plugin_s23_s24.cpp` |
 | S25 | 环内 NaN 策略与 FADE_IN 入口无阶跃 | `s25_loop_nan_fade_in.cpp` | |
+| S26 | 安静的起播沿：宿主在静音的开头不调插件、或调了但报不在走带（实时导出还带挂起清空），起播沿落在声音所在那一块的块首时，第一个回声照常满幅，与沿在导出第一块时从沿所在块起逐位相同；沿前 DSP 里的 DC 尾巴不进沿后的新流 | `s26_first_echo_after_start.cpp` | |
 
 场景之外，`tests/loop_rig/rig/` 是试验台本身（引擎宿主、调度表、环段、场景注册），它有自己的框架用例与实时线程分配检查。

@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "loop/LoopTiming.h"
@@ -90,6 +91,7 @@ public:
     {
         pulled_ = position;
         lineValidFrom_ = position;
+        lastNonZero_ = kNoFrame;
         for (Tail& tail : tails_)
         {
             tail.start = 0;
@@ -104,6 +106,7 @@ public:
     {
         pulled_ = position;
         lineValidFrom_ = position;
+        lastNonZero_ = kNoFrame;
     }
 
     // 已经拉进来的帧数（绝对位置）
@@ -131,9 +134,18 @@ public:
             const auto at = static_cast<std::size_t>(p & mask_);
             left_[at] = l;
             right_[at] = r;
+            // -0.0 等于 0，不算；NaN 不等于 0，算非零（起播沿的「安静」判据宁可判不安静）
+            if (l != 0.0f || r != 0.0f)
+            {
+                lastNonZero_ = p;
+            }
         }
         pulled_ = to;
     }
+
+    // 有效区间里 [from, pulled) 的帧是不是全为 0（读不到的位置按 0 计）。起播沿的「安静」判据用它看已经拉进来的部分。
+    // 只比两个整数：拉进来时记下了最后一个非零帧的位置，清空与换段时作废。
+    bool silentFrom(i64 from) const noexcept { return lastNonZero_ < std::max(from, lineValidFrom_); }
 
     // 有效区间的下界被抬高：环里比 intent − 一圈更早的帧可能被覆盖了，从这个位置起算
     void raiseValidFrom(i64 from) noexcept { lineValidFrom_ = std::max(lineValidFrom_, from); }
@@ -243,6 +255,9 @@ private:
         i64 count = 0;
     };
 
+    // 「没有非零帧」：比任何位置都小
+    static constexpr i64 kNoFrame = std::numeric_limits<i64>::min();
+
     std::vector<float> left_;
     std::vector<float> right_;
     Tail tails_[kTailSlots];
@@ -251,6 +266,7 @@ private:
     double sampleRate_ = 0.0;
     i64 pulled_ = 0;
     i64 lineValidFrom_ = 0;
+    i64 lastNonZero_ = kNoFrame; // 拉进来的最后一个非零帧的绝对位置
 };
 
 } // namespace rinne::loop

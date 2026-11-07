@@ -287,14 +287,26 @@ SyncOutcome StreamSync::process(const SyncInputs& in, LocalLine& line, TapSet& t
     // 淡出读到多少就要看宿主上一块切得多长，复位点前后的输出就随切块变了。
     // 全部按样本定位，所以「导出与播放从 s0 + T 起逐位一致」与宿主怎么切块无关。
     // T 取 min(5 ms, D_eff)：D 比 5 ms 还短时淡出不能超过一个环路延迟。
+    //
+    // 安静的起播沿（in.quietPlayEdge，由 LoopSession 判定）：读头在淡出窗口里只会读出 0、没有末值保持、写头之前
+    // 20 ms 是数字静音。这时没有旧回送可淡，沿后 T 帧里也就没有要排除的旧回送：T 取 0，读头直接释放（输出与淡出
+    // 逐位相同，都是 0），DSP 在 s0 复位，新读头从 W 起读、不带 onset（validFrom 与 onset 由 LoopSession 定）。
+    // 在 s0 复位让 [s0, s0 + T) 的回送恰为 0：DSP 里残留的 DC 尾巴不会写进沿后的新流、再被新读头读回来。
     if (in.playEdge && in.resetOnPlay)
     {
-        const std::int64_t T = playFadeSamples(in.delayEffective);
+        const std::int64_t T = in.quietPlayEdge ? 0 : playFadeSamples(in.delayEffective);
         ++resyncCount_;
         outcome.resynced = true;
         outcome.reason = SyncReason::kPlay;
-        startFade(line, taps, R, T, in.dataEnd, outcome);
-        outcome.fadeReason = SyncReason::kPlay;
+        if (in.quietPlayEdge)
+        {
+            taps.clear();
+        }
+        else
+        {
+            startFade(line, taps, R, T, in.dataEnd, outcome);
+            outcome.fadeReason = SyncReason::kPlay;
+        }
 
         offset_ = W - R;
         misaligned_ = 0;

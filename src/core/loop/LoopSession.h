@@ -211,6 +211,10 @@ private:
     void holdStrandedTaps(i64 blockStart) noexcept;
     // 读头整体作废时（两端停用之后的清空、写头倒退）：上一块最后一个回送样本按末值保持 5 ms 线性衰减。
     void holdLastReturn() noexcept;
+    // 起播沿安不安静：没有旧回送要淡出（没有末值保持、没有读头在淡出或交叉淡化、每个读头从沿上要读的位置起到 W
+    // 全是 0），而且 W 之前 20 ms 全是 0。读不到的帧按 0 计，-0.0 算 0，NaN 不算 0。只在已经配着的块上判（见调用处）。
+    // 本块还没拉的 [pulled, W) 只读地看环，最多 kMaxQuietPeek 帧，不分配、不加锁。
+    bool quietPlayEdge(const ipc::RingSegment& ring, i64 blockStart, i64 writeHead, i64 peerMaxBlock) const noexcept;
     // 建一个新读头（onset 走 20 ms）。槽满时收掉包络最小的那个（它的末值接成 5 ms 衰减的保持，不阶跃），
     // 返回槽下标；没有槽时返回 -1。blockStart 是本块的读位起点。
     int newTap(i64 blockStart, i64 validFrom, i64 delay, std::int64_t onset) noexcept;
