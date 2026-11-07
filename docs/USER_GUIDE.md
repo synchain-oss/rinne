@@ -112,7 +112,7 @@ It passes the host's audio through untouched, so putting it in a chain does not 
 
 ## Loop delay D
 
-D is a fixed number of samples. The loop is designed not to depend on buffer size or export mode, and both plugins report no latency to the host, so the host does not compensate for the loop.
+D is a fixed number of samples. The loop delay does not change with buffer size or export mode (measured in Cubase Pro 15 on Windows and, for the Audio Unit build, in LUNA on macOS; see [host compatibility](DAW_COMPATIBILITY.md)), and both plugins report no latency to the host, so the host does not compensate for the loop.
 
 - **Minimum.** D cannot be lower than the larger of the host’s declared maximum block and the largest block seen in this session. The MIN mark shows it; it changes with your buffer settings, and Cubase’s ASIO-Guard can raise it. If you ask for less, Rinne runs at the minimum and shows "Actual".
 - **Total.** The loop time is D plus the latency of every plugin in the loop (the interface says "Total = D + in-loop plug-in latency").
@@ -152,17 +152,17 @@ Steady self-oscillation at a moderate loop gain is held at the limiter ceiling; 
 - **Clean start.** By default the loop is cleared when playback starts ("Clear the loop when playback starts" under ADVANCED in About), so every playback or export begins from an empty loop.
 - **Fade-in at the start.** An export that starts within about 0.5 s after the project loads or the pair connects has a faded-in return at its start, unlike later realtime playback. This is the price of the fade-in rule above. Wait a second after loading or re-pairing before you export.
 - **Export notices.** If the host breaks its own limits, the notice bar says "Last export may differ" with the cause: oversized blocks, D below the block size, the Output host broke its limit, or the loop resynced. Raise D and export again.
-- **Freeze and Render in Place.** How a host’s Freeze or Render in Place treats the paired plugins has not been tested. Listen to the result, and compare it with a normal export.
+- **Freeze and Render in Place.** In Cubase Pro 15 on Windows both were tested: the rendered echoes matched a normal export, and Cubase leaves the silent parts out of a frozen file, so it is shorter than the timeline. In other hosts, how Freeze or Render in Place treats the paired plugins has not been tested. Listen to the result, and compare it with a normal export.
 
 ## Host setup
 
 ### Cubase
 
-Put Rinne Input in the first insert slot. Rinne Output goes above the fader divider of the same channel (the last pre-fader slot is simplest). ASIO-Guard can raise the minimum D; the MIN mark shows by how much. Cubase has not been through the written acceptance test yet; see [host compatibility](DAW_COMPATIBILITY.md) for the current status.
+Put Rinne Input in the first insert slot. Rinne Output goes above the fader divider of the same channel (the last pre-fader slot is simplest). ASIO-Guard can raise the minimum D; the MIN mark shows by how much. Cubase Pro 15 on Windows has passed the written acceptance test on preview builds, and a Cubase insert effect between the two ends is part of the loop; see [host compatibility](DAW_COMPATIBILITY.md) for the details.
 
 ### LUNA
 
-VST3 scanning is off by default in LUNA, so switch it on if you want the VST3 build, or use the Audio Unit build, which is beta. LUNA has not been tested yet.
+VST3 scanning is off by default in LUNA, so switch it on if you want the VST3 build. LUNA lists VST3 plugins only from the system folder, so install with `install-macos.sh --system` (run `uninstall-macos.sh` first if you installed the default way); [INSTALL](INSTALL.md#macos) has the steps. Or use the Audio Unit build, which is beta and needs no `--system`. LUNA has a first partial test record for the Audio Unit builds, with one finding still open: see [host compatibility](DAW_COMPATIBILITY.md).
 
 ### Other hosts
 

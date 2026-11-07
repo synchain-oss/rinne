@@ -23,7 +23,7 @@ Rinne 读作 "RIN-neh"（两个音节），取自日文「輪廻」，与中文�
 ## 它做什么
 
 <!-- entity:begin -->
-回环（Synchain Rinne）是一对开源（GPL-3.0-or-later）音频插件——Rinne Input 与 Rinne Output——把一条混音通道插入链上两者之间的那一段变成反馈环路。Rinne Input 放在插入链第一格，承载全部调节；Rinne Output 放在你想纳入环路的最后一个插件之后、推子分隔线之上，只负责配对。两者之间的插件输出，会在你设定的环路延迟 D 之后送回 Rinne Input（D 不小于宿主的最大块长），环内插件自身的延迟另计。按设计，环路延迟不依赖缓冲大小和导出方式。反馈量从 0 开始，限制器与失控保护默认开启，紧急切断（Panic）随时切断回送。Windows 10/11（x64）上为 VST3 格式；macOS 11 及以上（Apple Silicon）上为 VST3 与 Audio Unit 格式（Audio Unit 为 beta）。目前为预发布：已通过 CI 检查，尚未在真实宿主上完成验收。Rinne 本身不发起任何网络连接，无需账号。
+回环（Synchain Rinne）是一对开源（GPL-3.0-or-later）音频插件——Rinne Input 与 Rinne Output——把一条混音通道插入链上两者之间的那一段变成反馈环路。Rinne Input 放在插入链第一格，承载全部调节；Rinne Output 放在你想纳入环路的最后一个插件之后、推子分隔线之上，只负责配对。两者之间的插件输出，会在你设定的环路延迟 D 之后送回 Rinne Input（D 不小于宿主的最大块长），环内插件自身的延迟另计。环路延迟不随缓冲大小和导出方式变化，这已在 Windows 上的 Cubase Pro 15 实测，Audio Unit 版本也在 macOS 上的 LUNA 实测（测试记录见 docs/validation）。反馈量从 0 开始，限制器与失控保护默认开启，紧急切断（Panic）随时切断回送。Windows 10/11（x64）上为 VST3 格式；macOS 11 及以上（Apple Silicon）上为 VST3 与 Audio Unit 格式（Audio Unit 为 beta）。目前为预发布：Windows 上的 Cubase Pro 15 在预览构建上通过了验收矩阵；macOS 上的 LUNA 有第一份部分测试记录，仍有一个发现未解决；其他宿主尚未测试。Rinne 本身不发起任何网络连接，无需账号。
 <!-- entity:end -->
 
 环路里的延迟、失真、均衡或混响，每一圈都会再被听到一次。环路延迟是固定的样本数，两个插件也都不向宿主上报插件延迟。回送路径上有一条安全链，对信号限幅、清理。
@@ -63,8 +63,8 @@ One mixer channel - inserts (Cubase shown)
 <!-- BEGIN gen:daw-tiers:zh -->
 | 宿主 | 版本 | 平台 | 格式 | 等级 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Cubase Pro | 15 | Windows | VST3 | Tier 3 | 部分验证 | 只有 CI 证据（构建、测试、pluginval）。还没有真机验收记录。 |
-| LUNA | 3.x | macOS | VST3 / AU | Tier 3 | 部分验证 | 只有 CI 证据（构建、测试、auval、pluginval）。还没有真机验收记录。Audio Unit 版本是 beta。 |
+| Cubase Pro | 15 | Windows | VST3 | Tier 2 | 部分验证 | 两个预览构建上的真机记录。七项验收全部通过（2026-11-03），环内的 Cubase 自带插入效果器把它的延迟叠加到环路延迟上（2026-11-07）。升到 Tier 1 要在发布构建上重做同一套矩阵。 |
+| LUNA | 3.x | macOS | VST3 / AU | Tier 3 | 部分验证 | 第一份真机记录，预览构建，只测了 Audio Unit 版本。环路周期、64 / 512 / 2048 三档缓冲、实时对离线导出、保存重开都通过。有一个发现未解决：开播后第一个回声比应有电平低 13 到 21 dB。没有测：VST3 版本（LUNA 只列系统级的 VST3）、Bounce、卸载重装、Freeze。发现修复并复测之前停在 Tier 3。Audio Unit 版本是 beta。 |
 | Cubase Pro | 14 | Windows | VST3 | — | 待实测 | 尚未在真机上测试。 |
 | Cubase Artist | 15 | Windows | VST3 | — | 待实测 | 尚未在真机上测试。 |
 | Cubase Elements | 15 | Windows | VST3 | — | 待实测 | 尚未在真机上测试。 |
@@ -90,7 +90,7 @@ One mixer channel - inserts (Cubase shown)
 | Rosetta hosts | any | macOS | VST3 / AU | 不支持 | 不支持 | 不支持：宿主必须原生运行。 |
 <!-- END gen:daw-tiers:zh -->
 
-只有 [docs/validation/](docs/validation/TEMPLATE.md) 里有书面测试记录，等级才会上调。目前仓库里还没有真实宿主的测试记录：最先测试的两个宿主，Windows 上的 Cubase Pro 15 和 macOS 上的 LUNA，停在 Tier 3（只有 CI 证据），其余宿主都还在等第一次测试，macOS 的 Audio Unit 版本是 beta。等级定义和各宿主的说明见 [DAW_COMPATIBILITY](docs/DAW_COMPATIBILITY.md)（英文）。
+只有 [docs/validation/](docs/validation/TEMPLATE.md) 里有书面测试记录，等级才会上调。Windows 上的 Cubase Pro 15 有两个预览构建的记录，处于 Tier 2；macOS 上的 LUNA 有第一份 Audio Unit 版本的记录，仍有一个发现未解决，修复并复测之前停在 Tier 3。其余宿主都还在等第一次测试，macOS 的 Audio Unit 版本是 beta。等级定义和各宿主的说明见 [DAW_COMPATIBILITY](docs/DAW_COMPATIBILITY.md)（英文）。
 
 ## 安装
 
@@ -107,7 +107,7 @@ Unblock-File .\Rinne-v<X.Y.Z>-win64.zip
 xattr -dr com.apple.quarantine ~/Downloads/Rinne
 ```
 
-如果 macOS 提示无法验证插件，不要点「移到废纸篓」。逐步说明（含升级和卸载）见 [INSTALL](docs/INSTALL.md)。
+如果 macOS 提示无法验证插件，不要点「移到废纸篓」。LUNA 只列系统级文件夹里的 VST3，要在 LUNA 里用 VST3 版本，请运行 `install-macos.sh --system`；只用 Audio Unit 版本不需要。逐步说明（含升级和卸载）见 [INSTALL](docs/INSTALL.md)。
 
 ## 快速上手
 
@@ -155,6 +155,7 @@ JUCE 按提交钉版，由你传入，不会自动下载。Windows 与 macOS 的
 - 回送还在淡入时（载入或配对后约前 0.5 秒）开始的导出，开头是淡入的（KI-5）。
 - 中等环路增益下的稳态自激会被压在上限，不会被停掉；请用紧急切断（KI-6）。
 - macOS 版只有 Apple Silicon，未签名、未公证；不支持 Intel Mac、Rosetta 下的宿主和 GarageBand，Logic Pro 未测试（KI-10、KI-11）。
+- LUNA 只列系统级文件夹里的 VST3；要在 LUNA 里用 VST3 版本，请用 `--system` 安装（KI-14）。
 
 ## 文档
 

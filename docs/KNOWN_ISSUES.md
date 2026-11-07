@@ -81,3 +81,9 @@
 **EN** With WebKit older than 26.4 the zoom cannot be changed and stays at 100 %. The interface says "WebKit older than 26.4: zoom fixed at 100%".
 
 **中文** WebKit 低于 26.4 时无法改变缩放，固定为 100%。界面会写「WebKit 低于 26.4，缩放固定为 100%」。
+
+## KI-14: LUNA lists VST3 plugins only from the system folder
+
+**EN** LUNA does not list VST3 plugins installed in your user Library (`~/Library/Audio/Plug-Ins/VST3`, where `install-macos.sh` puts them by default); only those in `/Library/Audio/Plug-Ins/VST3` appear. Audio Units are found in either place. To use the VST3 builds in LUNA, run `uninstall-macos.sh` first (so the same plugin is not registered in two places), then `install-macos.sh --system`, which asks for an administrator password. Using only the Audio Unit builds needs no change. [INSTALL](INSTALL.md#macos) has the steps.
+
+**中文** LUNA 不会列出装在用户资源库（`~/Library/Audio/Plug-Ins/VST3`，`install-macos.sh` 默认装到这里）里的 VST3 插件，只列 `/Library/Audio/Plug-Ins/VST3` 里的。Audio Unit 在两处都能被找到。要在 LUNA 里用 VST3 版本，先运行 `uninstall-macos.sh`（免得同一个插件在两处各登记一次），再运行 `install-macos.sh --system`，它会要管理员密码。只用 Audio Unit 版本不需要改。步骤见 [INSTALL](INSTALL.md#macos)。

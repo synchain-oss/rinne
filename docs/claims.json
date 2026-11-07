@@ -6,25 +6,32 @@
       "strong": ["does not change with", "not to depend on buffer size", "不受缓冲大小", "不随[^。\\n]{0,20}变化"],
       "hedge": ["designed so", "designed not to", "按设计"],
       "hedgeWhilePending": true,
-      "evidence": [],
-      "pending": ["validation:docs/validation/*-cubase-pro-15-win.md"]
+      "evidence": [
+        "validation:docs/validation/2026-11-03-cubase-pro-15-win.md",
+        "validation:docs/validation/2026-11-07-luna-3-macos.md"
+      ],
+      "pending": [],
+      "note": "Cubase Pro 15 on Windows, buffers 64 to 2048 and ASIO-Guard Off / Normal / High: every echo interval equals D, deviation 0 samples; the Audio Unit pair in LUNA 3 shows the same at buffer sizes 64, 512 and 2048"
     },
     {
       "id": "render-matches-playback",
       "strong": ["matches playback", "与播放一致"],
       "hedge": ["designed so", "按设计"],
       "hedgeWhilePending": true,
-      "evidence": [],
-      "pending": ["validation:docs/validation/*-cubase-pro-15-win.md"]
+      "evidence": [
+        "validation:docs/validation/2026-11-03-cubase-pro-15-win.md",
+        "validation:docs/validation/2026-11-07-luna-3-macos.md"
+      ],
+      "pending": [],
+      "note": "Cubase Pro 15 on Windows: the offline export and the real-time export null to a residual peak of -162.56 dBFS, lag 0, same length; in LUNA 3 the two exports are bit-identical"
     },
     {
       "id": "builtins-in-loop",
       "strong": ["including the host['’]s own insert effects", "包括宿主自带的插入效果器"],
       "hedge": ["between Rinne Input and Rinne Output", "Input 与 Output 之间插入槽里的插件"],
-      "hedgeWhilePending": false,
-      "hedgeExemptReason": "真机实测前沿用现有用户指南与硬规则的措辞，文案在实测后统一修订",
-      "evidence": [],
-      "pending": ["validation:docs/validation/*-cubase-pro-15-win.md"]
+      "evidence": ["validation:docs/validation/2026-11-07-cubase-pro-15-win.md"],
+      "pending": [],
+      "note": "Cubase Pro 15 on Windows: a Cubase MonoDelay (10 ms) between the two ends is inside the loop and its delay adds to D (echo interval 5280 = 4800 + 480, deviation 0 samples)"
     },
     {
       "id": "safe-defaults",
@@ -53,7 +60,8 @@
       "hedge": ["host testing pending", "not yet tested", "awaiting", "尚未[^，。\\n]{0,10}(?:测试|验证)"],
       "hedgeWhilePending": true,
       "evidence": [],
-      "pending": ["validation:docs/validation/*-luna-macos.md"]
+      "pending": ["validation:docs/validation/*-luna-macos.md"],
+      "note": "pending on purpose: the first LUNA record (docs/validation/2026-11-07-luna-3-macos.md) covers the Audio Unit builds only and leaves one finding open, so it does not back an unhedged statement that Rinne works in LUNA; the record that does is added with the retest, and this entry moves with it"
     },
     {
       "id": "min-macos",
@@ -61,7 +69,8 @@
       "hedge": ["built for macOS 11\\+", "not yet tested", "尚未[^，。\\n]{0,10}(?:测试|验证)"],
       "hedgeWhilePending": true,
       "evidence": [],
-      "pending": ["validation:docs/validation/*-luna-macos.md"]
+      "pending": ["validation:docs/validation/*-luna-macos.md"],
+      "note": "pending on purpose: the only real-host record on macOS (docs/validation/2026-11-07-luna-3-macos.md) was made on macOS 15.6.1; nothing has been run on a real host on macOS 11 to 14, the range the build targets"
     },
     {
       "id": "host-audio-untouched",
