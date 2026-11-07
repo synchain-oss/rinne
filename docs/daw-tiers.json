@@ -22,22 +22,26 @@
       "versions": "15",
       "os": "windows",
       "formats": ["VST3"],
-      "tier": 3,
+      "tier": 2,
       "targetTier": 1,
       "status": "partial",
-      "evidence": ["ci:build-win"],
+      "evidence": [
+        "ci:build-win",
+        "validation:docs/validation/2026-11-03-cubase-pro-15-win.md",
+        "validation:docs/validation/2026-11-07-cubase-pro-15-win.md"
+      ],
       "checks": {
-        "realtime": false,
-        "offline": false,
-        "freeze": false,
-        "reopen": false,
-        "buffers": false,
-        "asioGuard": false,
-        "loopPeriod": false
+        "realtime": true,
+        "offline": true,
+        "freeze": true,
+        "reopen": true,
+        "buffers": true,
+        "asioGuard": true,
+        "loopPeriod": true
       },
       "notes": {
-        "en": "CI evidence only (build, tests, pluginval). No acceptance record from a real host yet.",
-        "zh": "只有 CI 证据（构建、测试、pluginval）。还没有真机验收记录。"
+        "en": "Real-host records on two preview builds. All seven acceptance items passed (2026-11-03), and a Cubase insert effect inside the loop adds its delay to the loop delay (2026-11-07). Tier 1 needs the same matrix on a release build.",
+        "zh": "两个预览构建上的真机记录。七项验收全部通过（2026-11-03），环内的 Cubase 自带插入效果器把它的延迟叠加到环路延迟上（2026-11-07）。升到 Tier 1 要在发布构建上重做同一套矩阵。"
       }
     },
     {
@@ -48,19 +52,19 @@
       "tier": 3,
       "targetTier": 2,
       "status": "partial",
-      "evidence": ["ci:build-mac"],
+      "evidence": ["ci:build-mac", "validation:docs/validation/2026-11-07-luna-3-macos.md"],
       "checks": {
         "realtime": false,
-        "offline": false,
+        "offline": true,
         "freeze": false,
-        "reopen": false,
+        "reopen": true,
         "buffers": false,
         "asioGuard": false,
-        "loopPeriod": false
+        "loopPeriod": true
       },
       "notes": {
-        "en": "CI evidence only (build, tests, auval, pluginval). No acceptance record from a real host yet. The Audio Unit build is beta.",
-        "zh": "只有 CI 证据（构建、测试、auval、pluginval）。还没有真机验收记录。Audio Unit 版本是 beta。"
+        "en": "First real-host record, on a preview build and the Audio Unit builds only. Loop period, buffer sizes 64, 512 and 2048, real-time against offline export, and save and reopen passed. One finding is open: the first echo after playback starts is 13 to 21 dB too quiet. Not run: the VST3 builds (LUNA lists only system-wide VST3 plug-ins), Bounce, uninstall and reinstall, Freeze. Stays at Tier 3 until the finding is fixed and retested. The Audio Unit build is beta.",
+        "zh": "第一份真机记录，预览构建，只测了 Audio Unit 版本。环路周期、64 / 512 / 2048 三档缓冲、实时对离线导出、保存重开都通过。有一个发现未解决：开播后第一个回声比应有电平低 13 到 21 dB。没有测：VST3 版本（LUNA 只列系统级的 VST3）、Bounce、卸载重装、Freeze。发现修复并复测之前停在 Tier 3。Audio Unit 版本是 beta。"
       }
     },
     {
