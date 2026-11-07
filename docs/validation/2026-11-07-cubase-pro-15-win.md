@@ -27,7 +27,7 @@
 
 - 缓冲 256，ASIO-Guard 为 Normal。
 - Rinne Input：反馈量 50 %、混合 50 %，D 设为 4800 样本（100 ms），其余默认。
-- 测试信号：`echo-in.wav`（8 秒，1.5 秒处一个单冲激）。
+- 测试信号：`echo-in.wav`（9 秒，432000 帧，1.5 秒处即第 72000 个样本一个单冲激）。
 - 链：第 1 格 Rinne Input，第 2 格 Cubase 自带的 MonoDelay（Delay 10 ms，Mix 100 %；按测试步骤 Sync 关、Feedback 0），第 3 格 Rinne Output，都在推子分隔线之上；回送在导出里照常出现，说明两端仍然配对。
 - 导出：Audio Mixdown，离线，文件名 `cb-builtin.wav`。
 
