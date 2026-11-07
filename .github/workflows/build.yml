@@ -731,10 +731,11 @@ jobs:
         run: bash tests/sanitizer-canary/run.sh tsan
 
   # 页面冒烟。web-preview/tests/run-all.mjs 随 web 预览到位之前不存在，此时打印 SKIP 注记并通过；到位之后它就是门禁本身。
+  # 51 个冒烟在 ubuntu runner 上已经要 30 分钟出头（单个上限 300 秒由 run-all 自己管），这里给到 45 分钟留余量。
   web-smoke:
     name: web-smoke
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
