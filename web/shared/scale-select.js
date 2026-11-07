@@ -19,6 +19,8 @@
 //     Enter 与 Space 走按钮原生的 click，同样是展开。
 //   · 浮层里 ↑ ↓ 逐项移焦点（超屏档也能停，读屏读得到它的注记），Home、End 到两端，
 //     Enter 或 Space 选中，Esc 收起并把焦点还给触发钮（这一下 Esc 不再冒泡到页面级的 Esc 处理），Tab 离开即收起。
+//     浮层开着而焦点退回了触发钮（Shift+Tab）时，触发钮上的 Esc 同样收起、不冒泡。
+//   · 浮层开着时换档位表：焦点回到原来那一档；那一档没了就退回触发钮；表空了就收起，焦点同样退回触发钮。
 //   · 带 Ctrl、Cmd、Alt 的组合键一律放行，不吞：那是宿主与系统的地盘。
 //   · 点的正是当前档就只收起，不发预览（与原生下拉同值不派发 change 一致）。
 //   · 触发钮被置灰（首帧前、旧 WebKit 锁定）时打不开；已经开着时置灰会把它收起。
@@ -264,6 +266,15 @@ export function createScaleSelect(o) {
     trigger.addEventListener("click", () => setOpen(!isOpen(), "trigger"));
     trigger.addEventListener("keydown", (e) => {
         if (isModified(e)) return;
+        if (e.key === "Escape") {
+            // 浮层开着而焦点在触发钮上（从档位项 Shift+Tab 退回来；触发钮在下拉内，focusout 不会收起）：
+            // 这一下 Esc 同样只归浮层，收起、不冒泡。浮层收着时照常冒泡给页面
+            if (!isOpen()) return;
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen(false, "trigger");
+            return;
+        }
         if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
         e.preventDefault();
         if (!isOpen()) setOpen(true);
@@ -352,7 +363,10 @@ export function createScaleSelect(o) {
             if (nextSig === sig) return;
             sig = nextSig;
             const open = isOpen();
-            const focusedFactor = open
+            // 重建会把所有档位项换掉：焦点原来在浮层里的，要么回到同一档，要么退回触发钮，不能掉到 body 上
+            // （掉到 body 时浮层还开着，Esc 与方向键都没人接）
+            const hadFocus = open && panel.contains(doc.activeElement);
+            const focusedFactor = hadFocus
                 ? (items.find((x) => x.el === doc.activeElement) || { opt: {} }).opt.factor
                 : undefined;
             options = next;
@@ -360,12 +374,13 @@ export function createScaleSelect(o) {
             render();
             if (open) {
                 if (items.length === 0) {
-                    setOpen(false);
+                    setOpen(false, hadFocus ? "trigger" : undefined);
                     return;
                 }
                 place();
                 const i = items.findIndex((x) => x.opt.factor === focusedFactor);
                 if (i >= 0) focusItem(i);
+                else if (hadFocus) trigger.focus({ preventScroll: true });
             }
         },
         /** 状态回推：当前档。 */

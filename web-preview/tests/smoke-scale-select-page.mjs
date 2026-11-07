@@ -416,6 +416,22 @@ try {
         );
         await press(page, "Escape");
         run.eq(await page.eval("window.__esc"), 1, `${tag}：（防空转）浮层收起后 Esc 照常冒泡`);
+        // 浮层开着而焦点退回触发钮（Shift+Tab；触发钮在下拉内，focusout 不收）：触发钮上的 Esc 同样收起、不冒泡
+        await page.eval("window.__esc = 0");
+        await open();
+        await press(page, "Tab", 8);
+        await page.eval("new Promise((r) => setTimeout(r, 60))");
+        r = await page.eval(READ(role));
+        run.eq([r.open, r.focus], ["1", "trigger"], `${tag}：（准备）Shift+Tab 退回触发钮，浮层仍开着`);
+        await press(page, "Escape");
+        r = await page.eval(READ(role));
+        run.eq(
+            [r.open, r.focus, await page.eval("window.__esc")],
+            ["0", "trigger", 0],
+            `${tag}：焦点在触发钮上按 Esc 也收起浮层、不冒泡到页面`,
+        );
+        await press(page, "Escape");
+        run.eq(await page.eval("window.__esc"), 1, `${tag}：（防空转）收起后触发钮上的 Esc 照常冒泡`);
 
         // ---- Tab 离开即收起
         await open();
@@ -954,6 +970,28 @@ try {
             /^\d+px$/.test(await page.eval(`document.querySelector(${JSON.stringify(panelSel)}).style.maxHeight`)),
             `${tag}：开着时换档位表：重新定位并压高`,
         );
+        // 开着时换档位表、焦点所在那一档没了：焦点退回触发钮（不掉到 body），浮层仍开，Esc 照常收起
+        await page.eval(
+            `window.__fx.api.footerUpdate({ scaleOptions: ${JSON.stringify(many.filter((x) => x.factor !== 0.5))}, scale: 1 })`,
+        );
+        r = await page.eval(READ(role));
+        run.eq(
+            [r.open, r.opts.length, r.focus],
+            ["1", many.length - 1, "trigger"],
+            `${tag}：开着时换档位表、焦点那一档没了：浮层仍开，焦点退回触发钮`,
+        );
+        await press(page, "Escape");
+        run.eq((await page.eval(READ(role))).open, "0", `${tag}：焦点退回触发钮后 Esc 收起浮层`);
+        // 焦点在档位项上时档位表被清空：浮层收起，焦点同样退回触发钮
+        await page.eval(`window.__fx.api.footerUpdate({ scaleOptions: ${JSON.stringify(many)}, scale: 1 })`);
+        await clickTrigger();
+        r = await page.eval(READ(role));
+        run.eq([r.open, r.focus], ["1", "option:1"], `${tag}：（准备）展开，焦点在当前档`);
+        await page.eval(`window.__fx.api.footerUpdate({ scaleOptions: [], scale: 1 })`);
+        r = await page.eval(READ(role));
+        run.eq([r.open, r.focus], ["0", "trigger"], `${tag}：焦点在档位项上时档位表清空：收起，焦点退回触发钮`);
+        await page.eval(`window.__fx.api.footerUpdate({ scaleOptions: ${JSON.stringify(many)}, scale: 1 })`);
+        await clickTrigger();
         // 档位表被清空：浮层收起，读数没有可显示的档位时写破折号，再点也打不开
         // 焦点放在触发钮上（它在下拉内，focusout 不会替它收起）：清空是否收起只能靠 setOptions 自己
         await page.eval(`document.querySelector(${JSON.stringify(trigSel)}).focus()`);
