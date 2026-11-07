@@ -517,6 +517,7 @@ TEST_CASE("环路 起播沿：复位点给的是绝对样本号")
     TransportInfo transport;
     transport.isPlaying = false;
     s.feed(64, transport); // 还没走带
+    writeFrames(*ring, 64); // 对端在沿前写下非零的帧：沿前不安静，走 5 ms 淡出的路径（安静的沿另有用例）
 
     transport.isPlaying = true;
     const BlockResult edge = s.feed(64, transport); // 起播沿：块首 R = 64

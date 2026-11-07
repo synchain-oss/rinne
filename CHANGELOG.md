@@ -98,6 +98,14 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   now point to these records. LUNA lists VST3 plug-ins only from the system folder, not from the user Library where the
   installer puts them by default: to use the VST3 builds in LUNA, run `uninstall-macos.sh` and then
   `install-macos.sh --system`; the Audio Unit builds are not affected (KNOWN_ISSUES KI-14, INSTALL).
+- A play start with nothing to fade no longer holds back the first echo. When nothing of the old return is left at the
+  play edge (no last-value hold, no read head fading out or crossfading, and every frame a read head would still read,
+  as well as the 20 ms before the write head, is digital silence; -0.0 counts as silence, NaN does not), and the block
+  is not the first one after pairing, a writer change or a segment change, the 5 ms fade-out, the 5 ms the new read
+  head used to skip after the edge and its 20 ms onset are all dropped: the return chain resets at the edge itself and
+  the new read head starts at the write head. Every other play start behaves exactly as before. An export and live
+  playback now match bit for bit from the play edge when both edges are quiet, and from the edge plus 5 ms when neither
+  is; when only one of them is quiet, the first echo of a sound that starts within 25 ms of the edge differs.
 
 ### Fixed
 
@@ -106,3 +114,8 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   when both ends resume after being stopped. The stream carries on sample for sample; after a long stop only the
   existing suspend flush applies. A real change of segment (another group, or claiming again after losing the slot)
   still rebuilds the read heads and fades in. The Output's writer no longer restarts its stall count on these events.
+- The first echo after playback starts is no longer 13 to 21 dB too quiet, or missing, in hosts that skip the plug-ins
+  during a silent lead-in or report it as not playing (seen in LUNA 3.1 with the Audio Unit builds). There the first
+  playing block is the one that holds the sound, so the play start fell just before it, and the new read head's 5 ms
+  skip and 20 ms onset cut into the first echo of anything in the following 25 ms. Such a quiet play start now keeps
+  the first echo at full level (see Compatibility).
