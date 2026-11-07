@@ -107,10 +107,10 @@ try {
             help && help.tag === "BUTTON" && help.label.length > 0,
             `${tag}：「?」应是带名称的 button，实得 ${JSON.stringify(help)}`,
         );
-        const scale = await q(`${gb("footer.scale")} select`);
+        const scale = await q(`${gb("footer.scale")} button.rn-footer__scale`);
         run.check(
-            scale && scale.tag === "SELECT" && scale.label.length > 0,
-            `${tag}：缩放下拉应是带名称的 select，实得 ${JSON.stringify(scale)}`,
+            scale && scale.tag === "BUTTON" && scale.label.length > 0,
+            `${tag}：缩放下拉的触发钮应是带名称的 button，实得 ${JSON.stringify(scale)}`,
         );
         const ver = await q(gb("footer.version"));
         run.check(

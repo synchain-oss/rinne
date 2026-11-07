@@ -551,37 +551,6 @@ input::placeholder {
     color: var(--txt-1);
 }
 
-/* ------------------------------------------------------------- 下拉 select */
-/* 去原生外观，内嵌 chevron data-URI。 */
-.sc-select {
-    font-family: var(--ff-mono);
-    font-size: var(--fs-90);
-    letter-spacing: var(--mono-ls-ui);
-    line-height: 1.2;
-    color: var(--txt-2);
-    background-color: rgba(var(--wh), 0.34);
-    border: 1px solid rgba(var(--wh), 0.5);
-    border-radius: var(--r-micro);
-    padding: var(--sp-3) var(--sp-20) var(--sp-3) var(--sp-7);
-    cursor: pointer;
-    outline: none;
-    -webkit-appearance: none;
-    -moz-appearance: none;
-    appearance: none;
-    background-image: var(--chevron);
-    background-repeat: no-repeat;
-    background-position: right 6px center;
-}
-
-.sc-select:hover {
-    background-color: rgba(var(--wh), 0.5);
-}
-
-.sc-select:focus-visible {
-    border-color: rgba(var(--acc), 0.85);
-    background-color: rgba(var(--wh), 0.68);
-}
-
 /* --------------------------------------------------------------- 原生滑杆 */
 input[type="range"] {
     accent-color: var(--acc-slider);

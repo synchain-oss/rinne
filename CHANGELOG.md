@@ -42,6 +42,14 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   text. The placement hint is Rinne Sans at weight 600 and its "Got it" button is shorter and sized to its label; the
   notice slot is 44 px high (42 px while the hint is shown) with its buttons side by side. Step 3 of the tour now
   highlights only the status row. The window size and every setting are unchanged.
+- The zoom menu in the footer of both plug-ins is now drawn by the plug-in instead of the system. Clicking the zoom level
+  opens a light panel above it, in the same style as the preset panel, instead of the white native list; the current
+  level carries a check mark, and levels that do not fit the current screen are greyed out, labelled "Exceeds current
+  screen" (and its Chinese and French equivalents), and ignore clicks. The arrow keys on the zoom button only open the
+  panel and never change the zoom; inside the panel Up, Down, Home, End, Enter and Esc work, Esc returns focus to the
+  button, and clicking outside or tabbing away closes it. Choosing the current level only closes the panel. Picking a
+  new level still applies it at once and shows the 10-second keep-or-revert prompt. The panel never leaves the window at
+  any zoom level and scrolls inside itself when it cannot fit.
 
 ### Compatibility
 

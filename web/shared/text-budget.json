@@ -1209,6 +1209,16 @@
     },
     "maxWidthPx": 470
   },
+  "common.scale.overflow": {
+    "fit": {
+      "font": "sans",
+      "lines": 1,
+      "ls": 0,
+      "size": 10,
+      "weight": 400
+    },
+    "maxWidthPx": 120
+  },
   "common.verify.diff": {
     "fit": {
       "font": "mono",

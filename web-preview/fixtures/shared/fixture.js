@@ -542,6 +542,10 @@ function applyDefect() {
             n.removeAttribute("aria-label");
             n.removeAttribute("title");
         });
+        // 缩放触发钮上还有读数文字，光去掉 aria-label 它仍有名字；把读数也清掉才算「没有名称」
+        document.querySelectorAll(".rn-footer__scaleLabel").forEach((n) => {
+            n.textContent = "";
+        });
     }
     if (defect === "longmsg") {
         // Input 一行槽里塞进远超一行的文字：不折行的话它必须越出槽

@@ -148,7 +148,7 @@ export function mountOutputPage(o) {
         onAbout: () => openAbout(),
         onHelp: () => (typeof hooks.onHelp === "function" ? hooks.onHelp() : undefined),
     });
-    const footerScale = footer.el.querySelector("select");
+    const footerScale = footer.el.querySelector(".rn-footer__scale");
     // 叠层打开时常驻提示（在 layer 层）里的「知道了」按钮也不能被 Tab 到，和内容层一样 inert
     const scaleConfirm = createScaleConfirm({
         role,
@@ -543,6 +543,7 @@ export function mountOutputPage(o) {
             retryTimer = 0;
             groupToast = null;
             msgline.destroy();
+            footer.destroy();
             fit.destroy();
         },
     };

@@ -249,12 +249,13 @@ try {
 
         // ---- 页脚：缩放 ----
         await openScene(page, server, design, role, "zh", scene("window"));
-        const sel = `${gb("footer.scale")} select`;
-        const nOpt = await count(page, `${sel} option`);
+        const sel = gb("footer.scale");
+        const nOpt = await count(page, `${sel} [role="option"]`);
         run.eq(nOpt, role === "input" ? 7 : 10, `${role}：缩放下拉的档位数`);
+        // 与用户一样：点开触发钮，再点浮层里的那一档（逐项的开合、键盘与越界另在 smoke-scale-select-page）
         const pickScale = (v) =>
             page.eval(
-                `(() => { const s = document.querySelector(${JSON.stringify(sel)}); s.value = ${JSON.stringify(String(v))}; s.dispatchEvent(new Event("change", { bubbles: true })); })()`,
+                `(() => { const w = document.querySelector(${JSON.stringify(sel)}); w.querySelector("button.rn-footer__scale").click(); w.querySelector('[role="option"][data-scale="' + ${JSON.stringify(String(v))} + '"]').click(); })()`,
             );
         const dlg = gb("scale.confirm");
         const shown = () =>
@@ -328,51 +329,56 @@ try {
         await clickPart(page, gb("footer.help"));
         run.eq((await calls(page, "help")).length, 1, `${role}：点「?」应回调`);
         await openScene(page, server, design, role, "zh", scene("window"), "&locked=1");
-        run.eq(await page.eval(`document.querySelector('${sel}').disabled`), true, `${role}：锁定态下拉禁用`);
+        run.eq(
+            await page.eval(`document.querySelector('${sel} button.rn-footer__scale').disabled`),
+            true,
+            `${role}：锁定态下拉禁用`,
+        );
+        run.eq(await attr(page, sel, "data-state"), "macLocked", `${role}：锁定态缩放根节点的 data-state`);
         run.eq(await attr(page, gb("footer.hint"), "data-state"), "locked", `${role}：锁定态页脚提示`);
         // 超屏档位置灰
         await openScene(page, server, design, role, "zh", scene("window"), "&screen=1000x700");
         const greyed = await page.eval(
-            `[...document.querySelectorAll('${sel} option')].filter((o) => o.disabled).map((o) => ({ v: o.value, title: o.title }))`,
+            `[...document.querySelectorAll('${sel} [role="option"][aria-disabled="true"]')].map((o) => ({ v: o.getAttribute("data-scale"), title: o.querySelector(".rn-scale__note").textContent }))`,
         );
         run.check(
             greyed.length >= 1 && greyed.every((g) => g.title.length > 0),
             `${role}：1000×700 屏上应有置灰档位，且都带提示，实得 ${JSON.stringify(greyed)}`,
         );
-        // 下拉选项的签名：页面每秒重发好几次同样的状态，选项没变就不能重建（正打开的下拉会被换掉）
+        // 下拉选项的签名：页面每秒重发好几次同样的状态，选项没变就不能重建（用户正开着的浮层里，焦点和高亮会丢）
         const rebuild = await page.eval(`(() => {
             const api = window.__fx.api;
-            const sel = document.querySelector('${sel}');
-            const nodes = () => [...sel.options];
+            const wrap = document.querySelector('${sel}');
+            const nodes = () => [...wrap.querySelectorAll('[role="option"]')];
+            const cur = () => wrap.querySelector('[role="option"][data-current="1"]').getAttribute("data-scale");
             const first = nodes();
-            const zhTitles = first.filter((o) => o.disabled).map((o) => o.title);
+            const zhNotes = first.filter((o) => o.getAttribute("aria-disabled") === "true").map((o) => o.querySelector(".rn-scale__note").textContent);
             api.footerUpdate({});
             api.footerUpdate({});
             api.render();
             const again = nodes();
             const kept = again.length === first.length && again.every((n, i) => n === first[i]);
-            // 只换选中档位：选项不重建，选中值要跟上
-            const other = first.find((o) => !o.disabled && o.value !== sel.value);
-            api.footerUpdate({ scale: Number(other.value) });
+            // 只换选中档位：选项不重建，当前档的标记与触发钮上的读数要跟上
+            const other = first.find((o) => o.getAttribute("aria-disabled") !== "true" && o.getAttribute("data-current") !== "1");
+            api.footerUpdate({ scale: Number(other.getAttribute("data-scale")) });
             const afterScale = nodes();
             const keptOnScale = afterScale.length === first.length && afterScale.every((n, i) => n === first[i]);
-            const selectedFollows = sel.value === other.value;
-            // 换语言：置灰说明的文字变了，签名变了，必须重建
+            const selectedFollows =
+                cur() === other.getAttribute("data-scale") &&
+                wrap.querySelector("button.rn-footer__scale").textContent.trim() === other.querySelector(".rn-scale__num").textContent.trim();
+            // 换语言：超屏注记要换成英文
             api.footerUpdate({ t: api.makeT("en") });
-            const enNodes = nodes();
-            const rebuilt = enNodes.length === first.length && enNodes.every((n, i) => n !== first[i]);
-            const enTitles = enNodes.filter((o) => o.disabled).map((o) => o.title);
-            return { kept, keptOnScale, selectedFollows, rebuilt, zhTitles, enTitles };
+            const enNotes = nodes().filter((o) => o.getAttribute("aria-disabled") === "true").map((o) => o.querySelector(".rn-scale__note").textContent);
+            return { kept, keptOnScale, selectedFollows, zhNotes, enNotes };
         })()`);
         run.eq(rebuild.kept, true, `${role}：页脚重复 update（同样的状态）不重建下拉选项`);
         run.eq(rebuild.keptOnScale, true, `${role}：只换选中档位不重建下拉选项`);
-        run.eq(rebuild.selectedFollows, true, `${role}：只换选中档位时选中值要跟上`);
-        run.eq(rebuild.rebuilt, true, `${role}：置灰说明换了语言（签名变了）要重建下拉选项`);
+        run.eq(rebuild.selectedFollows, true, `${role}：只换选中档位时当前档标记与触发钮读数要跟上`);
         run.check(
-            rebuild.zhTitles.length > 0 &&
-                rebuild.enTitles.length === rebuild.zhTitles.length &&
-                rebuild.enTitles.every((x, i) => x !== rebuild.zhTitles[i]),
-            `${role}：重建后置灰说明是英文，实得 ${JSON.stringify(rebuild.enTitles)} 对 ${JSON.stringify(rebuild.zhTitles)}`,
+            rebuild.zhNotes.length > 0 &&
+                rebuild.enNotes.length === rebuild.zhNotes.length &&
+                rebuild.enNotes.every((x, i) => x !== rebuild.zhNotes[i]),
+            `${role}：换语言后超屏注记是英文，实得 ${JSON.stringify(rebuild.enNotes)} 对 ${JSON.stringify(rebuild.zhNotes)}`,
         );
 
         // ============================================================ 关于面板

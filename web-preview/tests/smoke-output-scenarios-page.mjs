@@ -425,17 +425,19 @@ try {
 
     // 缩放：选档 → 缩放确认出现 → 保存调 commitUiScale；再选档 → 取消回到选档前
     await openOutput(page, server, box, "zh", "out-connected");
+    // 与用户一样：点开触发钮，再点浮层里的那一档；返回点到的档位（没有这一档返回 null）
     const pickScale = (v) =>
         page.eval(
-            `(() => { const s = document.querySelector('${gb("footer.scale")} select'); s.value = ${JSON.stringify(v)}; s.dispatchEvent(new Event("change", { bubbles: true })); return s.value; })()`,
+            `(() => { const w = document.querySelector('${gb("footer.scale")}'); w.querySelector("button.rn-footer__scale").click(); const o = w.querySelector('[role="option"][data-scale="' + ${JSON.stringify(v)} + '"]'); if (!o) return null; o.click(); return o.getAttribute("data-scale"); })()`,
         );
-    run.eq(await pickScale("1.5"), "1.5", "缩放下拉里有 150% 档");
+    // 夹具页的屏幕就是 460×364 的视口：放得下的只有 33%、50%、75%，其余档位灰显、点了不生效（那一半在 smoke-scale-select-page 验）
+    run.eq(await pickScale("0.5"), "0.5", "缩放下拉里有 50% 档");
     await awaitState(
         () => readPage(page),
         (p) => p.scaleConfirm,
         "选档后出现缩放确认",
     );
-    run.eq(await callsOf(page, "setUiScale"), [[1.5]], "选档应调 setUiScale(1.5)");
+    run.eq(await callsOf(page, "setUiScale"), [[0.5]], "选档应调 setUiScale(0.5)");
     run.eq((await readPage(page)).shell, "modal", "缩放确认打开：外壳是模态态");
     await click(page, `${gb("scale.confirm")} [data-part="confirm.keep"]`);
     run.eq((await callsOf(page, "commitUiScale")).length, 1, "点「保存」应调 commitUiScale");
@@ -444,7 +446,7 @@ try {
         (p) => !p.scaleConfirm,
         "保存后缩放确认收起",
     );
-    await pickScale("2");
+    await pickScale("0.75");
     await awaitState(
         () => readPage(page),
         (p) => p.scaleConfirm,
@@ -458,8 +460,8 @@ try {
     );
     run.eq(
         (await callsOf(page, "setUiScale")).map((a) => a[0]),
-        [1.5, 2, 1.5],
-        "取消回到选档前的档位（上一次保存的 1.5）",
+        [0.5, 0.75, 0.5],
+        "取消回到选档前的档位（上一次保存的 0.5）",
     );
 
     // 关于面板：点版本按钮打开，内容层 inert，关闭后焦点回到版本按钮；复制诊断弹提示
@@ -730,7 +732,7 @@ try {
                 const $ = (s) => host.querySelector(s);
                 const pill = (g) => $('[data-gb="output.group"] [role="radio"][data-group="' + g + '"]');
                 const action = () => $('[data-gb="output.band"] [data-part="band.action"]');
-                const scaleSel = () => $('[data-gb="output.footer.scale"] select');
+                const scaleSel = () => $('[data-gb="output.footer.scale"]');
                 const scaleConfirmShown = () => { const c = $('[data-gb="output.scale.confirm"]'); return Boolean(c && !c.closest("[hidden]")); };
                 const count = (name) => calls.filter((n) => n === name).length;
                 return { host, handlers, p, $, pill, action, scaleSel, scaleConfirmShown, count, done: () => { p.destroy(); host.remove(); } };
@@ -742,18 +744,23 @@ try {
             await sleep(650);
             out.revealed = A.p.isRevealed();
             out.disabled = [...A.host.querySelectorAll('[data-gb="output.group"] [role="radio"]')].filter((n) => n.getAttribute("aria-disabled") === "true").length;
-            const sel = A.scaleSel();
-            const enabledOptions = () => [...sel.options].filter((n) => !n.disabled).length;
-            out.scaleBefore = { disabled: sel.disabled, shown: sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].textContent : null, enabled: enabledOptions() };
+            const wrap = A.scaleSel();
+            const trig = wrap.querySelector("button.rn-footer__scale");
+            const enabledOptions = () => [...wrap.querySelectorAll('[role="option"]')].filter((n) => n.getAttribute("aria-disabled") !== "true").length;
+            const shownValue = () => trig.textContent.trim();
+            const openState = () => wrap.getAttribute("data-state");
+            // 置灰的触发钮打不开（真点击不派发，再从脚本里点一次也不开），浮层里没有可选的档位
+            trig.click();
+            out.scaleBefore = { disabled: trig.disabled, shown: shownValue(), enabled: enabledOptions(), state: openState() };
             A.pill("C").click();
             A.$('[data-gb="output.lang"] [data-lang="en"]').click();
-            // 下拉置灰之外再验页面自己这一道：即使来了一次选档（合成的 change），首帧前也不进缩放预览
-            const probe = document.createElement("option");
-            probe.value = "1.5";
-            sel.append(probe);
-            sel.value = "1.5";
-            sel.dispatchEvent(new Event("change"));
-            probe.remove();
+            // 下拉置灰之外再验页面自己这一道：把页脚硬改成「可用、带一个 150% 档」再点这一档（等于置灰失效时来了一次选档），
+            // 首帧前也不进缩放预览
+            A.p.parts.footer.update({ hint: null, scaleOptions: [{ factor: 1.5, label: "150%", disabled: false, titleKey: null }], scale: 1, locked: false, version: "—", t: (k) => k });
+            trig.click();
+            const forced = wrap.querySelector('[role="option"][data-scale="1.5"]');
+            if (forced) forced.click();
+            out.forced = Boolean(forced);
             await sleep(30);
             out.before = { setGroup: A.count("setGroup"), setLang: A.count("setLang"), asked: A.count("requestInitialState"), setUiScale: A.count("setUiScale"), commitUiScale: A.count("commitUiScale"), scaleConfirm: A.scaleConfirmShown() };
             A.handlers["rinne.state"](state());
@@ -766,12 +773,10 @@ try {
             A.pill("C").click();
             await sleep(30);
             out.after = A.count("setGroup");
-            out.scaleAfter = { disabled: sel.disabled, value: sel.value, enabled: enabledOptions() };
-            const pick = [...sel.options].find((n) => !n.disabled && n.value !== sel.value);
-            if (pick) {
-                sel.value = pick.value;
-                sel.dispatchEvent(new Event("change"));
-            }
+            out.scaleAfter = { disabled: trig.disabled, value: shownValue(), enabled: enabledOptions() };
+            trig.click();
+            const pick = [...wrap.querySelectorAll('[role="option"]')].find((n) => n.getAttribute("aria-disabled") !== "true" && n.getAttribute("data-current") !== "1");
+            if (pick) pick.click();
             await sleep(30);
             out.scalePicked = { setUiScale: A.count("setUiScale"), scaleConfirm: A.scaleConfirmShown() };
             A.done();
@@ -809,19 +814,20 @@ try {
         run.eq(r.disabled, 8, "首帧慢：兜底揭幕后两路首帧到齐前组胶囊整排禁用");
         run.eq(
             r.scaleBefore,
-            { disabled: true, shown: "—", enabled: 0 },
-            "首帧慢：缩放下拉置灰，读数是「—」（不显示默认的 100%），没有可选的档位",
+            { disabled: true, shown: "—", enabled: 0, state: "collapsed" },
+            "首帧慢：缩放下拉置灰、打不开，读数是「—」（不显示默认的 100%），没有可选的档位",
         );
         run.eq(
             r.before,
             { setGroup: 0, setLang: 1, asked: 1, setUiScale: 0, commitUiScale: 0, scaleConfirm: false },
             "首帧慢：点组胶囊不发 setGroup、选档不发 setUiScale / commitUiScale 也不出缩放确认条，语言照常发 setLang（回执成功不重试）",
         );
+        run.eq(r.forced, true, "首帧慢（防空转）：硬改出的 150% 档确实点到了");
         run.eq(r.stateOnly, 0, "首帧慢：只到了 rinne.state 仍不发 setGroup");
         run.eq([r.disabledAfter, r.after], [false, 1], "首帧慢：两路首帧到齐后组胶囊解禁，点 C 发 setGroup");
         run.eq(
             [r.scaleAfter.disabled, r.scaleAfter.value, r.scaleAfter.enabled > 1],
-            [false, "1", true],
+            [false, "100%", true],
             "首帧慢：两路首帧到齐后缩放下拉可用，读数是快照里的档位",
         );
         run.eq(r.scalePicked, { setUiScale: 1, scaleConfirm: true }, "首帧慢：就绪后选档发 setUiScale 并出缩放确认条");

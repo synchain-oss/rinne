@@ -233,7 +233,8 @@ try {
     await openOutput(page, server, box, "zh", "out-connected");
     {
         const before = await measureOutputContrast(page);
-        run.check(before.skipped.length > 0, "前提：普通画面里缩放下拉的选项被记账（记账通道是通的）");
+        // 缩放下拉改成自绘浮层后，收起的浮层不画出来、不进量尺，不再有原生下拉选项被记账；记账通道是否通，由下面往页面里摆放的正例对照来证明
+        run.eq(unexpectedSkips(before.skipped), [], "前提：普通画面里没有意外被跳过的字（收起的缩放浮层不进量尺）");
         await page.eval(
             `(() => {
                 const host = document.querySelector('[data-part="track.this.name"]').parentElement;
