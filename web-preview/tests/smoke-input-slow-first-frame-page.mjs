@@ -471,7 +471,11 @@ try {
             if (opt) opt.click();
             return { opened, hasOpt: !!opt, greyed: !!opt && opt.getAttribute("aria-disabled") === "true" };
         });
-        run.eq(forced, { opened: true, hasOpt: true, greyed: true }, "A：强行解禁后能打开，但里面唯一的「—」是灰的（防空转）");
+        run.eq(
+            forced,
+            { opened: true, hasOpt: true, greyed: true },
+            "A：强行解禁后能打开，但里面唯一的「—」是灰的（防空转）",
+        );
         await sleep(page, 300);
         run.eq(
             (await rec.calls()).filter((c) => c[0] === "setUiScale" || c[0] === "commitUiScale"),
@@ -555,7 +559,10 @@ try {
             const trig = doc.querySelector(".rn-footer__scale");
             if (!trig || trig.disabled) return { ok: false, why: "没有下拉或被置灰" };
             const opt = [...doc.querySelectorAll(".rn-scale__opt")].find(
-                (o) => o.getAttribute("aria-disabled") !== "true" && Number(o.getAttribute("data-scale")) > 0 && Number(o.getAttribute("data-scale")) !== 1,
+                (o) =>
+                    o.getAttribute("aria-disabled") !== "true" &&
+                    Number(o.getAttribute("data-scale")) > 0 &&
+                    Number(o.getAttribute("data-scale")) !== 1,
             );
             if (!opt) return { ok: false, why: "没有可选的非 100% 档" };
             trig.click();

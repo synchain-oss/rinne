@@ -161,7 +161,8 @@ function layoutProblems(g, { expectNoScroll }) {
     const edge = g.align === "start" ? Math.abs(p.l - g.trig.l) : Math.abs(p.r - g.trig.r);
     if (edge > tol) bad.push(`浮层没有贴齐触发钮的${g.align === "start" ? "左" : "右"}缘（差 ${edge.toFixed(1)}）`);
     const gap = g.placement === "up" ? g.trig.t - p.b : p.t - g.trig.b;
-    if (Math.abs(gap - 9 * k) > tol) bad.push(`浮层与触发钮的间距应为 9 个 CSS 像素（${(9 * k).toFixed(1)}），实得 ${gap.toFixed(1)}`);
+    if (Math.abs(gap - 9 * k) > tol)
+        bad.push(`浮层与触发钮的间距应为 9 个 CSS 像素（${(9 * k).toFixed(1)}），实得 ${gap.toFixed(1)}`);
     for (const r of g.rows) {
         if (r.inView && r.hit !== true) bad.push(`档位 ${r.f} 的中心被别的件压住（命中 ${r.hit}）`);
         if (!r.inView && !g.scrollable) bad.push(`档位 ${r.f} 不在浮层可视范围内，浮层又不能滚动`);
@@ -260,7 +261,8 @@ try {
             `${tag}：只有超屏档带 aria-disabled=true`,
         );
         run.check(
-            r.opts.filter((o) => o.over === "1").every((o) => o.note !== "") && r.opts.every((o) => (o.note === "") === o.noteHidden),
+            r.opts.filter((o) => o.over === "1").every((o) => o.note !== "") &&
+                r.opts.every((o) => (o.note === "") === o.noteHidden),
             `${tag}：超屏档都有注记并显示，别的档没有注记、那一格隐藏`,
         );
         // 切语言：注记跟着换（词条函数经 setT 换掉）
@@ -272,7 +274,11 @@ try {
             const zhNotes = await notes();
             const enText = await page.eval(`window.__fx.api.makeT("en")("common.scale.overflow")`);
             await page.eval(`window.__fx.api.footerUpdate({ t: window.__fx.api.makeT("en") })`);
-            run.eq(await notes(), overF.map(() => enText), `${tag}：切到英文后注记换成英文词条`);
+            run.eq(
+                await notes(),
+                overF.map(() => enText),
+                `${tag}：切到英文后注记换成英文词条`,
+            );
             run.check(zhNotes.length === overF.length && zhNotes[0] !== enText, `${tag}：（防空转）中英文注记不同`);
             await page.eval(`window.__fx.api.footerUpdate({})`);
             run.eq(await notes(), zhNotes, `${tag}：切回中文后注记换回来`);
@@ -289,11 +295,18 @@ try {
             ["1", "expanded", "true", true],
             `${tag}：点触发钮展开（data-state 变 expanded）`,
         );
-        run.check(r.chev !== "none" && r.trigBorder !== closedBorder, `${tag}：展开时箭头旋转、触发钮描边换成强调色（${r.chev}；${closedBorder} → ${r.trigBorder}）`);
+        run.check(
+            r.chev !== "none" && r.trigBorder !== closedBorder,
+            `${tag}：展开时箭头旋转、触发钮描边换成强调色（${r.chev}；${closedBorder} → ${r.trigBorder}）`,
+        );
         run.eq(r.focus, "option:1", `${tag}：展开时焦点落在当前档`);
         await mouse(page, c.x, c.y);
         r = await page.eval(READ(role));
-        run.eq([r.open, r.state, r.shown, r.focus], ["0", "collapsed", false, "trigger"], `${tag}：再点触发钮收起，焦点回触发钮`);
+        run.eq(
+            [r.open, r.state, r.shown, r.focus],
+            ["0", "collapsed", false, "trigger"],
+            `${tag}：再点触发钮收起，焦点回触发钮`,
+        );
 
         // ---- 点外面收起（点在标题栏空白处）；点浮层里的空隙不收起
         await mouse(page, c.x, c.y);
@@ -308,7 +321,11 @@ try {
             await page.eval(`document.querySelector(${JSON.stringify(trigSel)}).focus()`);
             await press(page, k);
             r = await page.eval(READ(role));
-            run.eq([r.open, r.focus, r.label], ["1", "option:1", "100%"], `${tag}：触发钮上按 ${k} 只展开（焦点落当前档、读数不变）`);
+            run.eq(
+                [r.open, r.focus, r.label],
+                ["1", "option:1", "100%"],
+                `${tag}：触发钮上按 ${k} 只展开（焦点落当前档、读数不变）`,
+            );
             run.eq((await calls(page, "setUiScale")).length, 0, `${tag}：触发钮上按 ${k} 不换档`);
             await press(page, "Escape");
             run.eq((await page.eval(READ(role))).open, "0", `${tag}：（准备）收起`);
@@ -392,7 +409,11 @@ try {
         await open();
         await press(page, "Escape");
         r = await page.eval(READ(role));
-        run.eq([r.open, r.focus, await page.eval("window.__esc")], ["0", "trigger", 0], `${tag}：浮层里 Esc 收起、焦点回触发钮、Esc 不冒泡到页面`);
+        run.eq(
+            [r.open, r.focus, await page.eval("window.__esc")],
+            ["0", "trigger", 0],
+            `${tag}：浮层里 Esc 收起、焦点回触发钮、Esc 不冒泡到页面`,
+        );
         await press(page, "Escape");
         run.eq(await page.eval("window.__esc"), 1, `${tag}：（防空转）浮层收起后 Esc 照常冒泡`);
 
@@ -423,7 +444,17 @@ try {
         await press(page, "Escape");
         run.eq(
             got,
-            { triggerArrowDown: true, ArrowDown: true, ArrowUp: true, Home: true, End: true, Space: true, Enter: true, Escape: true, Tab: false },
+            {
+                triggerArrowDown: true,
+                ArrowDown: true,
+                ArrowUp: true,
+                Home: true,
+                End: true,
+                Space: true,
+                Enter: true,
+                Escape: true,
+                Tab: false,
+            },
             `${tag}：处理过的键默认动作被拦，Tab 不拦`,
         );
 
@@ -434,25 +465,35 @@ try {
         // 从当前档（100%）走到 pick：按顺序逐项移动
         const steps = presets.indexOf(pick) - presets.indexOf(1);
         for (let i = 0; i < Math.abs(steps); i++) await press(page, steps > 0 ? "ArrowDown" : "ArrowUp");
-        run.eq((await page.eval(READ(role))).focus, "option:" + pick, `${tag}：（准备）焦点走到 ${Math.round(pick * 100)}%`);
+        run.eq(
+            (await page.eval(READ(role))).focus,
+            "option:" + pick,
+            `${tag}：（准备）焦点走到 ${Math.round(pick * 100)}%`,
+        );
         // Input 用 Enter、Output 用 Space 选档（两种键各验一遍；Space 的原生激活落在 keyup，浮层里要自己接，不能把刚收起的浮层又点开）
         await press(page, role === "input" ? "Enter" : "Space");
-        await page.waitFor(`window.__fx.calls.some((x) => x.name === "setUiScale")`, { label: `${tag}：选档应调 setUiScale` });
+        await page.waitFor(`window.__fx.calls.some((x) => x.name === "setUiScale")`, {
+            label: `${tag}：选档应调 setUiScale`,
+        });
         run.eq(await calls(page, "setUiScale"), [[pick]], `${tag}：选新档调一次 setUiScale(${pick})`);
         r = await page.eval(READ(role));
         run.eq([r.open, r.focus.startsWith("option")], ["0", false], `${tag}：选档后浮层收起`);
         run.eq(await confirmShown(), true, `${tag}：选新档后出确认框（10 秒防呆照旧）`);
-        const cd = await page.eval(
-            `document.querySelector('[data-gb="${role}.scale.confirm"]').textContent`,
-        );
+        const cd = await page.eval(`document.querySelector('[data-gb="${role}.scale.confirm"]').textContent`);
         // 读到的数可能因机器忙已经走掉几秒，只要落在 1…10 就说明起点是 10 秒（起点被改成 30 会判红）
         const secs = Number((cd.match(/(\d+)\s*秒/) || [])[1]);
         run.check(secs >= 1 && secs <= 10, `${tag}：确认框里在倒数，起点不超过 10 秒，实得 ${JSON.stringify(cd)}`);
-        await page.eval(`document.querySelector('[data-gb="${role}.scale.confirm"] [data-part="confirm.cancel"]').click()`);
+        await page.eval(
+            `document.querySelector('[data-gb="${role}.scale.confirm"] [data-part="confirm.cancel"]').click()`,
+        );
         await page.waitFor(`window.__fx.calls.filter((x) => x.name === "setUiScale").length === 2`, {
             label: `${tag}：取消应把档位调回去`,
         });
-        run.eq((await calls(page, "setUiScale")).map((a) => a[0]), [pick, 1], `${tag}：取消回到选档前的 100%`);
+        run.eq(
+            (await calls(page, "setUiScale")).map((a) => a[0]),
+            [pick, 1],
+            `${tag}：取消回到选档前的 100%`,
+        );
         run.eq(await confirmShown(), false, `${tag}：取消后确认框收起`);
 
         // ---- 对比度（浮层是不透明实底，直接按 computed 颜色算）
@@ -469,19 +510,30 @@ try {
         run.check(cr.length >= presets.length, `${tag}：对比度量到了每一项（防空转），实得 ${cr.length}`);
         const worst = cr.reduce((a, b) => (b.ratio < a.ratio ? b : a));
         run.check(worst.ratio >= 4.5, `${tag}：浮层里文字对比度应 ≥ 4.5，最差 ${JSON.stringify(worst)}`);
-        run.check(cr.every((x) => x.alpha === 1), `${tag}：浮层底色应不透明（算对比度的前提）`);
+        run.check(
+            cr.every((x) => x.alpha === 1),
+            `${tag}：浮层底色应不透明（算对比度的前提）`,
+        );
         {
             const hover = async (f) => {
                 const p = await rect(f);
                 await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y });
                 await page.eval("new Promise((r) => setTimeout(r, 80))");
-                return page.eval(`(() => { const cs = getComputedStyle(document.querySelector(${JSON.stringify(optSel(f))})); return [cs.backgroundColor, cs.cursor]; })()`);
+                return page.eval(
+                    `(() => { const cs = getComputedStyle(document.querySelector(${JSON.stringify(optSel(f))})); return [cs.backgroundColor, cs.cursor]; })()`,
+                );
             };
             const okPick = okF.find((f) => f !== 1);
             const hOk = await hover(okPick);
-            run.check(hOk[0] !== "rgba(0, 0, 0, 0)" && hOk[1] === "pointer", `${tag}：悬停在可选档上有底色、光标是手形，实得 ${JSON.stringify(hOk)}`);
+            run.check(
+                hOk[0] !== "rgba(0, 0, 0, 0)" && hOk[1] === "pointer",
+                `${tag}：悬停在可选档上有底色、光标是手形，实得 ${JSON.stringify(hOk)}`,
+            );
             const hOver = await hover(overF[0]);
-            run.check(hOver[0] === "rgba(0, 0, 0, 0)" && hOver[1] === "not-allowed", `${tag}：悬停在超屏档上没有底色、光标是禁止，实得 ${JSON.stringify(hOver)}`);
+            run.check(
+                hOver[0] === "rgba(0, 0, 0, 0)" && hOver[1] === "not-allowed",
+                `${tag}：悬停在超屏档上没有底色、光标是禁止，实得 ${JSON.stringify(hOver)}`,
+            );
         }
         await press(page, "Escape");
 
@@ -490,7 +542,11 @@ try {
         run.eq((await page.eval(READ(role))).open, "1", `${tag}：（准备）展开`);
         await page.eval(`window.__fx.api.footerUpdate({ locked: true })`);
         r = await page.eval(READ(role));
-        run.eq([r.open, r.state, r.disabled], ["0", "macLocked", true], `${tag}：展开时被锁定会收起，data-state 为 macLocked`);
+        run.eq(
+            [r.open, r.state, r.disabled],
+            ["0", "macLocked", true],
+            `${tag}：展开时被锁定会收起，data-state 为 macLocked`,
+        );
         run.check(Number(r.trigOpacity) < 1, `${tag}：锁定时触发钮置灰（opacity ${r.trigOpacity}）`);
         await open();
         await page.eval(`document.querySelector(${JSON.stringify(trigSel)}).focus()`);
@@ -524,8 +580,16 @@ try {
         await openScene(page, server, design, role, "zh", WIN);
         await page.eval(`window.__fx.api.footerUpdate({ locked: true })`); // 页面每秒会重发状态：这一次带上锁定后的选项表
         const r = await page.eval(READ(role));
-        run.eq(r.opts.map((o) => o.f), ["1"], `${tag}：只剩 100% 一档`);
-        run.eq([r.state, r.disabled, r.label], ["macLocked", true, "100%"], `${tag}：data-state 为 macLocked，触发钮置灰，读数 100%`);
+        run.eq(
+            r.opts.map((o) => o.f),
+            ["1"],
+            `${tag}：只剩 100% 一档`,
+        );
+        run.eq(
+            [r.state, r.disabled, r.label],
+            ["macLocked", true, "100%"],
+            `${tag}：data-state 为 macLocked，触发钮置灰，读数 100%`,
+        );
         const c = await page.eval(
             `(() => { const b = document.querySelector(${JSON.stringify(wrapSel(role) + " button.rn-footer__scale")}).getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; })()`,
         );
@@ -553,23 +617,50 @@ try {
                 const where = `${role}/${lang}/${z} 倍`;
                 const zoom = await inFrame(page, (doc) => Number(doc.querySelector(".rn-shell").style.zoom || "1"));
                 run.check(Math.abs(zoom - z) < 0.01, `${where}：外壳应缩放到这一档，实得 ${zoom}`);
-                await inFrame(page, (doc, win, sel) => doc.querySelector(sel + " button.rn-footer__scale").click(), wrapSel(role));
+                await inFrame(
+                    page,
+                    (doc, win, sel) => doc.querySelector(sel + " button.rn-footer__scale").click(),
+                    wrapSel(role),
+                );
                 const g = await inFrame(page, layoutProbe, wrapSel(role));
                 run.eq(layoutProblems(g, { expectNoScroll: true }), [], `${where}：展开的浮层版面`);
                 layoutSeen[role]++;
                 if (lang === "fr" && z === design[role].presets[design[role].presets.length - 1]) {
-                    const notes = await inFrame(page, (doc, win, sel) => [...doc.querySelectorAll(sel + " .rn-scale__note")].filter((n) => !n.hidden).map((n) => n.textContent), wrapSel(role));
-                    run.check(notes.length >= 1, `${where}：真页面上应有超屏注记（防空转），实得 ${JSON.stringify(notes)}`);
+                    const notes = await inFrame(
+                        page,
+                        (doc, win, sel) =>
+                            [...doc.querySelectorAll(sel + " .rn-scale__note")]
+                                .filter((n) => !n.hidden)
+                                .map((n) => n.textContent),
+                        wrapSel(role),
+                    );
+                    run.check(
+                        notes.length >= 1,
+                        `${where}：真页面上应有超屏注记（防空转），实得 ${JSON.stringify(notes)}`,
+                    );
                 }
             }
         }
         if (role === "output") {
             // 坏样例：把浮层推到外壳之外，版面判据必须判红
             await openShell(page, server, role, SCENARIO[role], "zh", 1);
-            await inFrame(page, (doc, win, sel) => doc.querySelector(sel + " button.rn-footer__scale").click(), wrapSel(role));
-            await inFrame(page, (doc, win, sel) => { doc.querySelector(sel + " .rn-scale__panel").style.right = "-260px"; }, wrapSel(role));
+            await inFrame(
+                page,
+                (doc, win, sel) => doc.querySelector(sel + " button.rn-footer__scale").click(),
+                wrapSel(role),
+            );
+            await inFrame(
+                page,
+                (doc, win, sel) => {
+                    doc.querySelector(sel + " .rn-scale__panel").style.right = "-260px";
+                },
+                wrapSel(role),
+            );
             const gBad = await inFrame(page, layoutProbe, wrapSel(role));
-            run.check(layoutProblems(gBad, { expectNoScroll: true }).some((x) => x.includes("越出")), "坏样例：浮层推出外壳，版面判据应判红");
+            run.check(
+                layoutProblems(gBad, { expectNoScroll: true }).some((x) => x.includes("越出")),
+                "坏样例：浮层推出外壳，版面判据应判红",
+            );
         }
         run.check(page.errors.length === 0, `${role} 版面：页面不应有错误：${page.errors.slice(0, 3).join("；")}`);
         await page.close();
@@ -589,16 +680,24 @@ try {
         const t = await centerOf(page, ".rn-footer__scale");
         await mouse(page, t.x, t.y);
         run.eq(
-            await inFrame(page, (doc) => doc.querySelector('[data-gb="input.footer.scale"]').getAttribute("data-state")),
+            await inFrame(page, (doc) =>
+                doc.querySelector('[data-gb="input.footer.scale"]').getAttribute("data-state"),
+            ),
             "expanded",
             "Input 真页面：点触发钮展开，data-state 为 expanded",
         );
         run.eq((await rec.calls()).length, 0, "Input 真页面：展开不调桥");
-        const cur = await inFrame(page, (doc) => doc.querySelector('[data-gb="input.footer.scale"] [data-current="1"]').getAttribute("data-scale"));
+        const cur = await inFrame(page, (doc) =>
+            doc.querySelector('[data-gb="input.footer.scale"] [data-current="1"]').getAttribute("data-scale"),
+        );
         const want = design.input.presets.find((f) => String(f) !== cur && f <= 1);
         const o = await centerOf(page, `[data-gb="input.footer.scale"] [role="option"][data-scale="${want}"]`);
         await mouse(page, o.x, o.y);
-        run.eq((await rec.calls()).filter((x) => x[0] === "setUiScale"), [["setUiScale", want]], "Input 真页面：点一档，桥收到 setUiScale");
+        run.eq(
+            (await rec.calls()).filter((x) => x[0] === "setUiScale"),
+            [["setUiScale", want]],
+            "Input 真页面：点一档，桥收到 setUiScale",
+        );
         run.eq(
             await inFrame(page, (doc) => doc.querySelector('[data-gb="input.footer.scale"]').getAttribute("data-open")),
             "0",
@@ -614,32 +713,102 @@ try {
 
     // ================================================================ ④ 放不下时
     // ---- 定位几何（纯函数，不进浏览器）：往哪边开、压不压高度
-    const { choosePlacement, measuredZoom } = await import(pathToFileURL(join(ROOT, "web/shared/scale-select.js")).href);
+    const { choosePlacement, measuredZoom } = await import(
+        pathToFileURL(join(ROOT, "web/shared/scale-select.js")).href
+    );
     {
         const T = (top, bottom) => ({ top, bottom });
         const C = (top, bottom) => ({ top, bottom });
         const cases = [
-            ["放得下就用默认方向（向上）", ["up", T(300, 322), C(0, 364), 200, 1], { placement: "up", maxHeight: null }],
-            ["默认向上放不下、向下放得下：翻到下面", ["up", T(60, 82), C(0, 364), 200, 1], { placement: "down", maxHeight: null }],
-            ["默认向下放得下：保持向下", ["down", T(60, 82), C(0, 364), 200, 1], { placement: "down", maxHeight: null }],
-            ["默认向下放不下、向上放得下：翻到上面", ["down", T(300, 322), C(0, 364), 200, 1], { placement: "up", maxHeight: null }],
-            ["两边都放不下：取更宽的上边，高度压到那边的空间", ["up", T(100, 122), C(0, 200), 200, 1], { placement: "up", maxHeight: 87 }],
-            ["两边都放不下：取更宽的下边，高度压到那边的空间", ["up", T(40, 62), C(0, 200), 200, 1], { placement: "down", maxHeight: 125 }],
+            [
+                "放得下就用默认方向（向上）",
+                ["up", T(300, 322), C(0, 364), 200, 1],
+                { placement: "up", maxHeight: null },
+            ],
+            [
+                "默认向上放不下、向下放得下：翻到下面",
+                ["up", T(60, 82), C(0, 364), 200, 1],
+                { placement: "down", maxHeight: null },
+            ],
+            [
+                "默认向下放得下：保持向下",
+                ["down", T(60, 82), C(0, 364), 200, 1],
+                { placement: "down", maxHeight: null },
+            ],
+            [
+                "默认向下放不下、向上放得下：翻到上面",
+                ["down", T(300, 322), C(0, 364), 200, 1],
+                { placement: "up", maxHeight: null },
+            ],
+            [
+                "两边都放不下：取更宽的上边，高度压到那边的空间",
+                ["up", T(100, 122), C(0, 200), 200, 1],
+                { placement: "up", maxHeight: 87 },
+            ],
+            [
+                "两边都放不下：取更宽的下边，高度压到那边的空间",
+                ["up", T(40, 62), C(0, 200), 200, 1],
+                { placement: "down", maxHeight: 125 },
+            ],
             ["压高不低于下限 72", ["up", T(30, 52), C(0, 90), 200, 1], { placement: "down", maxHeight: 72 }],
-            ["两边一样宽且都放不下：保持默认方向（向上）", ["up", T(100, 122), C(0, 222), 200, 1], { placement: "up", maxHeight: 87 }],
-            ["两边一样宽且都放不下：保持默认方向（向下）", ["down", T(100, 122), C(0, 222), 200, 1], { placement: "down", maxHeight: 87 }],
-            ["倍率 2：空间折成 CSS 像素再比", ["up", T(200, 222), C(0, 364), 100, 2], { placement: "up", maxHeight: 87 }],
+            [
+                "两边一样宽且都放不下：保持默认方向（向上）",
+                ["up", T(100, 122), C(0, 222), 200, 1],
+                { placement: "up", maxHeight: 87 },
+            ],
+            [
+                "两边一样宽且都放不下：保持默认方向（向下）",
+                ["down", T(100, 122), C(0, 222), 200, 1],
+                { placement: "down", maxHeight: 87 },
+            ],
+            [
+                "倍率 2：空间折成 CSS 像素再比",
+                ["up", T(200, 222), C(0, 364), 100, 2],
+                { placement: "up", maxHeight: 87 },
+            ],
             ["同一几何倍率 1 就放得下", ["up", T(200, 222), C(0, 364), 100, 1], { placement: "up", maxHeight: null }],
-            ["非法倍率（NaN）按 1 处理", ["up", T(200, 222), C(0, 364), 100, NaN], { placement: "up", maxHeight: null }],
-            ["非法倍率（负数）按 1 处理", ["up", T(200, 222), C(0, 364), 100, -1], { placement: "up", maxHeight: null }],
-            ["非法的默认方向按向上（两边都放得下才分得出）", ["sideways", T(150, 172), C(0, 364), 100, 1], { placement: "up", maxHeight: null }],
-            ["自然高度不是数时按 0 处理（放得下）", ["up", T(300, 322), C(0, 364), NaN, 1], { placement: "up", maxHeight: null }],
-            ["刚好放得下（需要 = 空间）：不压", ["up", T(300, 322), C(0, 364), 287, 1], { placement: "up", maxHeight: null }],
+            [
+                "非法倍率（NaN）按 1 处理",
+                ["up", T(200, 222), C(0, 364), 100, NaN],
+                { placement: "up", maxHeight: null },
+            ],
+            [
+                "非法倍率（负数）按 1 处理",
+                ["up", T(200, 222), C(0, 364), 100, -1],
+                { placement: "up", maxHeight: null },
+            ],
+            [
+                "非法的默认方向按向上（两边都放得下才分得出）",
+                ["sideways", T(150, 172), C(0, 364), 100, 1],
+                { placement: "up", maxHeight: null },
+            ],
+            [
+                "自然高度不是数时按 0 处理（放得下）",
+                ["up", T(300, 322), C(0, 364), NaN, 1],
+                { placement: "up", maxHeight: null },
+            ],
+            [
+                "刚好放得下（需要 = 空间）：不压",
+                ["up", T(300, 322), C(0, 364), 287, 1],
+                { placement: "up", maxHeight: null },
+            ],
             ["差一点放不下：压高", ["up", T(300, 322), C(0, 364), 288, 1], { placement: "up", maxHeight: 287 }],
-            ["另一边刚好放得下（需要 = 空间）：翻过去且不压", ["up", T(60, 82), C(0, 364), 269, 1], { placement: "down", maxHeight: null }],
+            [
+                "另一边刚好放得下（需要 = 空间）：翻过去且不压",
+                ["up", T(60, 82), C(0, 364), 269, 1],
+                { placement: "down", maxHeight: null },
+            ],
             ["空间带小数：压高向下取整", ["up", T(100.5, 122), C(0, 200), 200, 1], { placement: "up", maxHeight: 87 }],
-            ["裁切框上沿不在 0：上方空间从裁切框上沿起算", ["up", T(300, 322), C(100, 364), 200, 1], { placement: "up", maxHeight: 187 }],
-            ["裁切框下沿在触发钮之下 300：向下空间从裁切框下沿起算", ["down", T(60, 82), C(0, 300), 200, 1], { placement: "down", maxHeight: null }],
+            [
+                "裁切框上沿不在 0：上方空间从裁切框上沿起算",
+                ["up", T(300, 322), C(100, 364), 200, 1],
+                { placement: "up", maxHeight: 187 },
+            ],
+            [
+                "裁切框下沿在触发钮之下 300：向下空间从裁切框下沿起算",
+                ["down", T(60, 82), C(0, 300), 200, 1],
+                { placement: "down", maxHeight: null },
+            ],
         ];
         for (const [name, args, want] of cases) run.eq(choosePlacement(...args), want, `定位几何：${name}`);
 
@@ -670,7 +839,12 @@ try {
         const many = Array.from({ length: 30 }, (_, i) => {
             const f = (i + 1) / 10;
             const over = i >= 28;
-            return { factor: f, label: Math.round(f * 100) + "%", disabled: over, titleKey: over ? "common.scale.overflow" : null };
+            return {
+                factor: f,
+                label: Math.round(f * 100) + "%",
+                disabled: over,
+                titleKey: over ? "common.scale.overflow" : null,
+            };
         });
 
         // 三十档：默认向上放不下，向下也没有空间：压高并内部滚动
@@ -681,23 +855,39 @@ try {
         run.check(/^\d+px$/.test(mh), `${tag}：三十档放不下时应压 max-height，实得 ${JSON.stringify(mh)}`);
         run.check(g.scrollable, `${tag}：压高后浮层内部可滚动`);
         run.eq(g.placement, "up", `${tag}：向下没有空间时仍向上`);
-        run.check(g.panel.t - g.shell.t >= 0 && g.panel.t - g.shell.t <= 7, `${tag}：压高后浮层占满上方可用空间（顶缘离外壳上沿 ≤ 7px），实得 ${g.panel.t - g.shell.t}`);
-        run.eq(layoutProblems(g, { expectNoScroll: false }), [], `${tag}：压高后浮层仍在外壳与视口内，看得见的档位都点得到`);
+        run.check(
+            g.panel.t - g.shell.t >= 0 && g.panel.t - g.shell.t <= 7,
+            `${tag}：压高后浮层占满上方可用空间（顶缘离外壳上沿 ≤ 7px），实得 ${g.panel.t - g.shell.t}`,
+        );
+        run.eq(
+            layoutProblems(g, { expectNoScroll: false }),
+            [],
+            `${tag}：压高后浮层仍在外壳与视口内，看得见的档位都点得到`,
+        );
         run.eq((await page.eval(READ(role))).focus, "option:1", `${tag}：展开时焦点落在当前档`);
         // 键盘走到两端：焦点项总会被滚进可视范围
         await press(page, "End");
         g = await probeAt(W);
         const lastRow = g.rows[g.rows.length - 1];
         run.check(lastRow.inView && lastRow.hit === true, `${tag}：End 之后最后一项滚进可视范围且点得到`);
-        run.check((await page.eval(`document.querySelector(${JSON.stringify(panelSel)}).scrollTop`)) > 0, `${tag}：End 之后浮层确实滚动了`);
         run.check(
-            await page.eval(`(() => { const p = document.querySelector(${JSON.stringify(panelSel)}); return Math.abs(p.scrollTop + p.clientHeight - p.scrollHeight) <= 1; })()`),
+            (await page.eval(`document.querySelector(${JSON.stringify(panelSel)}).scrollTop`)) > 0,
+            `${tag}：End 之后浮层确实滚动了`,
+        );
+        run.check(
+            await page.eval(
+                `(() => { const p = document.querySelector(${JSON.stringify(panelSel)}); return Math.abs(p.scrollTop + p.clientHeight - p.scrollHeight) <= 1; })()`,
+            ),
             `${tag}：End 之后滚到最底（连同下内边距）`,
         );
         await press(page, "Home");
         g = await probeAt(W);
         run.check(g.rows[0].inView && g.rows[0].hit === true, `${tag}：Home 之后第一项滚回可视范围且点得到`);
-        run.eq(await page.eval(`document.querySelector(${JSON.stringify(panelSel)}).scrollTop`), 0, `${tag}：Home 之后滚回顶部`);
+        run.eq(
+            await page.eval(`document.querySelector(${JSON.stringify(panelSel)}).scrollTop`),
+            0,
+            `${tag}：Home 之后滚回顶部`,
+        );
         // 逐项向下走到底：每一步焦点项都在可视范围内
         let seenHidden = 0;
         for (let i = 0; i < many.length; i++) {
@@ -728,7 +918,10 @@ try {
         await page.eval(`document.querySelector(".rn-shell").style.zoom = "0.5"`);
         await clickTrigger();
         g = await probeAt(W);
-        run.check(g.scrollable && g.panel.t - g.shell.t >= 0 && g.panel.t - g.shell.t <= 3.5, `${tag}：外壳倍率 0.5：压高后浮层占满上方可用空间（≤ 3.5px），实得 ${g.panel.t - g.shell.t}`);
+        run.check(
+            g.scrollable && g.panel.t - g.shell.t >= 0 && g.panel.t - g.shell.t <= 3.5,
+            `${tag}：外壳倍率 0.5：压高后浮层占满上方可用空间（≤ 3.5px），实得 ${g.panel.t - g.shell.t}`,
+        );
         run.eq(layoutProblems(g, { expectNoScroll: false }), [], `${tag}：外壳倍率 0.5：压高后浮层在外壳与视口内`);
         await press(page, "Escape");
         await page.eval(`document.querySelector(".rn-shell").style.zoom = ""`);
@@ -746,7 +939,9 @@ try {
         await page.eval(`document.querySelector(${JSON.stringify(W + ' [role="option"][data-scale="0.5"]')}).focus()`);
         const focusedBefore = (await page.eval(READ(role))).focus;
         run.eq(focusedBefore, "option:0.5", `${tag}：（准备）焦点在 50% 一档`);
-        await page.eval(`window.__keep = document.querySelector(${JSON.stringify(W + ' [role="option"][data-scale="0.5"]')})`);
+        await page.eval(
+            `window.__keep = document.querySelector(${JSON.stringify(W + ' [role="option"][data-scale="0.5"]')})`,
+        );
         await page.eval(`window.__fx.api.footerUpdate({ scale: 1 })`);
         await page.eval(`window.__fx.api.footerUpdate({ scale: 1 })`);
         run.check(await page.eval(`window.__keep.isConnected`), `${tag}：档位表没变就不重建（元素还在文档里）`);
@@ -755,7 +950,10 @@ try {
         r = await page.eval(READ(role));
         run.eq([r.open, r.opts.length], ["1", many.length], `${tag}：开着时换档位表：浮层仍开、档位项重建`);
         run.eq(r.focus, focusedBefore, `${tag}：开着时换档位表：焦点回到原来那一档`);
-        run.check(/^\d+px$/.test(await page.eval(`document.querySelector(${JSON.stringify(panelSel)}).style.maxHeight`)), `${tag}：开着时换档位表：重新定位并压高`);
+        run.check(
+            /^\d+px$/.test(await page.eval(`document.querySelector(${JSON.stringify(panelSel)}).style.maxHeight`)),
+            `${tag}：开着时换档位表：重新定位并压高`,
+        );
         // 档位表被清空：浮层收起，读数没有可显示的档位时写破折号，再点也打不开
         // 焦点放在触发钮上（它在下拉内，focusout 不会替它收起）：清空是否收起只能靠 setOptions 自己
         await page.eval(`document.querySelector(${JSON.stringify(trigSel)}).focus()`);
@@ -768,16 +966,31 @@ try {
         await page.eval(`window.__fx.api.footerUpdate({ scale: 1 })`);
         await page.eval(`window.__fx.api.footerUpdate({ scale: 0.9 })`);
         r = await page.eval(READ(role));
-        run.eq([r.label, r.opts.filter((o) => o.cur === "1").length], ["90%", 0], `${tag}：当前档不在档位表里：读数按百分比写、没有档位打勾`);
+        run.eq(
+            [r.label, r.opts.filter((o) => o.cur === "1").length],
+            ["90%", 0],
+            `${tag}：当前档不在档位表里：读数按百分比写、没有档位打勾`,
+        );
         await page.eval(`window.__fx.api.footerUpdate({ scale: 1 })`);
 
         // 浮层被外力挤窄：行内文字不折行（折行会把 24 高的行撑乱，宁可被截，由版面判据抓住）
         await clickTrigger();
-        await page.eval(`(() => { const p = document.querySelector(${JSON.stringify(panelSel)}); p.style.minWidth = "0"; p.style.width = "40px"; })()`);
+        await page.eval(
+            `(() => { const p = document.querySelector(${JSON.stringify(panelSel)}); p.style.minWidth = "0"; p.style.width = "40px"; })()`,
+        );
         const gs = await probeAt(W);
-        run.check(gs.rows.some((x) => x.clipped || x.noteClipped), `${tag}：（防空转）挤窄到 40px 后确有文字被截`);
-        run.eq(gs.rows.filter((x) => x.wrapped).map((x) => x.f), [], `${tag}：挤窄到 40px 后没有哪一行折行`);
-        await page.eval(`(() => { const p = document.querySelector(${JSON.stringify(panelSel)}); p.style.minWidth = ""; p.style.width = ""; })()`);
+        run.check(
+            gs.rows.some((x) => x.clipped || x.noteClipped),
+            `${tag}：（防空转）挤窄到 40px 后确有文字被截`,
+        );
+        run.eq(
+            gs.rows.filter((x) => x.wrapped).map((x) => x.f),
+            [],
+            `${tag}：挤窄到 40px 后没有哪一行折行`,
+        );
+        await page.eval(
+            `(() => { const p = document.querySelector(${JSON.stringify(panelSel)}); p.style.minWidth = ""; p.style.width = ""; })()`,
+        );
         await press(page, "Escape");
 
         // 翻向与换边：在外壳里临时放几个同款下拉（同一份 CSS、同一个模块），贴着上沿、左缘、右缘
@@ -815,17 +1028,31 @@ try {
             })()`);
             const gp = await probeAt(sel);
             run.eq([gp.placement, gp.align], want, `${tag}：${name} 的展开方向与对齐`);
-            run.eq(layoutProblems(gp, { expectNoScroll: true }), [], `${tag}：${name} 展开后在外壳内、不压触发钮、每项点得到`);
+            run.eq(
+                layoutProblems(gp, { expectNoScroll: true }),
+                [],
+                `${tag}：${name} 展开后在外壳内、不压触发钮、每项点得到`,
+            );
             if (extra.box) {
-                const inBox = await page.eval(`(() => { const c = document.querySelector('[data-probe-box=' + JSON.stringify(${JSON.stringify(name)}) + ']').getBoundingClientRect(); const p = document.querySelector(${JSON.stringify(sel)} + ' .rn-scale__panel').getBoundingClientRect(); return p.left >= c.left - 0.75 && p.right <= c.right + 0.75 && p.top >= c.top - 0.75 && p.bottom <= c.bottom + 0.75; })()`);
+                const inBox = await page.eval(
+                    `(() => { const c = document.querySelector('[data-probe-box=' + JSON.stringify(${JSON.stringify(name)}) + ']').getBoundingClientRect(); const p = document.querySelector(${JSON.stringify(sel)} + ' .rn-scale__panel').getBoundingClientRect(); return p.left >= c.left - 0.75 && p.right <= c.right + 0.75 && p.top >= c.top - 0.75 && p.bottom <= c.bottom + 0.75; })()`,
+                );
                 run.eq(inBox, true, `${tag}：${name} 展开后在容器的裁切框内`);
             }
-            await page.eval(`(() => { const s = window.__probes[${JSON.stringify(name)}]; s.destroy(); document.querySelector(${JSON.stringify(sel)}).remove(); const b = document.querySelector('[data-probe-box=' + JSON.stringify(${JSON.stringify(name)}) + ']'); if (b) b.remove(); })()`);
+            await page.eval(
+                `(() => { const s = window.__probes[${JSON.stringify(name)}]; s.destroy(); document.querySelector(${JSON.stringify(sel)}).remove(); const b = document.querySelector('[data-probe-box=' + JSON.stringify(${JSON.stringify(name)}) + ']'); if (b) b.remove(); })()`,
+            );
         };
         await flip("贴上沿（默认向上放不下）", "position:absolute;top:6px;right:24px;", {}, ["down", "end"]);
         await flip("贴左缘（右缘对齐会越出左边）", "position:absolute;top:6px;left:4px;", {}, ["down", "start"]);
-        await flip("默认向下、贴下沿", "position:absolute;bottom:6px;right:24px;", { placement: "down" }, ["up", "end"]);
-        await flip("左缘对齐、贴右缘（会越出右边）", "position:absolute;bottom:6px;right:4px;", { align: "start" }, ["up", "end"]);
+        await flip("默认向下、贴下沿", "position:absolute;bottom:6px;right:24px;", { placement: "down" }, [
+            "up",
+            "end",
+        ]);
+        await flip("左缘对齐、贴右缘（会越出右边）", "position:absolute;bottom:6px;right:4px;", { align: "start" }, [
+            "up",
+            "end",
+        ]);
         await flip("默认方向放得下就不翻", "position:absolute;bottom:60px;right:24px;", {}, ["up", "end"]);
         // 裁切框取最近的裁切祖先而不是整个视口：外壳里有个 overflow:hidden 的小容器，触发钮贴着容器上沿、左缘
         await flip("容器里贴上沿、左缘（空间按容器算）", "position:absolute;top:4px;left:4px;", {}, ["down", "start"], {
@@ -835,7 +1062,9 @@ try {
 
         // 点外面收起的文档级监听：用合成的 pointerdown 单独验（真鼠标点外面会同时让焦点离开，由 focusout 那一路先收起，分不出是哪条在起作用）
         const synth = (sel) =>
-            page.eval(`document.querySelector(${JSON.stringify(sel)}).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }))`);
+            page.eval(
+                `document.querySelector(${JSON.stringify(sel)}).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }))`,
+            );
         await clickTrigger();
         run.eq((await page.eval(READ(role))).open, "1", `${tag}：（准备）展开`);
         await synth(panelSel);

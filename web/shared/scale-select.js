@@ -67,8 +67,8 @@ export function measuredZoom(node) {
  *   · 两边都放不下就取更宽的一边，maxHeight 等于那一边的空间（不低于 MIN_PANEL_PX）。
  * @returns {{ placement: "up"|"down", maxHeight: number|null }} maxHeight 为 CSS px；null 表示不压
  */
-export function choosePlacement(prefer, trig, clip, naturalPx, zoom) {
-    const k = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+export function choosePlacement(prefer, trig, clip, naturalPx, ratio) {
+    const k = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
     const first = PLACEMENTS.indexOf(prefer) >= 0 ? prefer : "up";
     const other = first === "up" ? "down" : "up";
     const room = {
@@ -88,7 +88,9 @@ function clipBox(node) {
     let box = { top: 0, bottom: win.innerHeight, left: 0, right: win.innerWidth };
     for (let n = node.parentElement; n; n = n.parentElement) {
         const cs = win.getComputedStyle(n);
-        const clips = /(hidden|auto|scroll|clip)/.test(cs.overflowY || "") || /(hidden|auto|scroll|clip)/.test(cs.overflowX || "");
+        const clips =
+            /(hidden|auto|scroll|clip)/.test(cs.overflowY || "") ||
+            /(hidden|auto|scroll|clip)/.test(cs.overflowX || "");
         if (!clips) continue;
         const r = n.getBoundingClientRect();
         box = {
@@ -161,7 +163,11 @@ export function createScaleSelect(o) {
 
     function buildItems() {
         items = options.map((opt) => {
-            const chk = el("span", { class: "rn-scale__chk", aria: { hidden: "true" } }, icon("check", 12, "currentColor"));
+            const chk = el(
+                "span",
+                { class: "rn-scale__chk", aria: { hidden: "true" } },
+                icon("check", 12, "currentColor"),
+            );
             const num = el("span", { class: "rn-scale__num", text: opt.label });
             const note = el("span", { class: "rn-scale__note" });
             const b = el(
@@ -346,7 +352,9 @@ export function createScaleSelect(o) {
             if (nextSig === sig) return;
             sig = nextSig;
             const open = isOpen();
-            const focusedFactor = open ? (items.find((x) => x.el === doc.activeElement) || { opt: {} }).opt.factor : undefined;
+            const focusedFactor = open
+                ? (items.find((x) => x.el === doc.activeElement) || { opt: {} }).opt.factor
+                : undefined;
             options = next;
             buildItems();
             render();
