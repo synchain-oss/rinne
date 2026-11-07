@@ -809,7 +809,7 @@ function boot() {
         presetMenu.renderPending(t);
         panic.update({ cut: false, overScrim: overlayOn(), t });
         // 缩放：宿主的档位还不知道，下拉里只有一项「—」且置灰（选档要记下选档前的档位，快照没到时那是编出来的）。
-        // 下拉是共享页脚的节点，页脚的 update 在 locked 为假时会把它重新打开，所以每次 update 之后再关一次；
+        // 触发钮是共享页脚的节点，页脚的 update 在 locked 为假时会把它重新打开，所以每次 update 之后再关一次；
         // 就绪后 renderFooter 的 update 用真实的选项表，下拉随之重建、重新可用
         footer.update({
             hint: null,

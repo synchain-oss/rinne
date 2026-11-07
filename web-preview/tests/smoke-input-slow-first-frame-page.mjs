@@ -165,9 +165,12 @@ function pendingProbe(doc) {
     const FREE = '[data-gb="input.lang"], [data-gb="input.footer"], .rn-brand, [data-gb="input.panic"]';
     const CTRL = 'button, [role="slider"], [role="switch"], [role="tab"], [role="radio"], select, input';
     const locked = all(CTRL).filter((e) => content.contains(e) && !e.closest(FREE));
-    // 缩放下拉在页脚里但等待期是置灰的（单独断言），不算「照常可用」的那一批
+    // 缩放下拉在页脚里但等待期是置灰的（单独断言），不算「照常可用」的那一批；浮层里的档位项只在展开时才看得见，也不算
     const free = all(CTRL).filter(
-        (e) => (e.closest(FREE) || e.closest('[data-gb="input.panic"]')) && !e.classList.contains("rn-footer__scale"),
+        (e) =>
+            (e.closest(FREE) || e.closest('[data-gb="input.panic"]')) &&
+            !e.classList.contains("rn-footer__scale") &&
+            !e.closest(".rn-scale__panel"),
     );
     const eyebrows = all(".in-card .sc-eyebrow").map((e) => e.textContent.trim());
     return {
@@ -191,12 +194,12 @@ function pendingProbe(doc) {
         panicLabel: (q('[data-gb="input.panic"]') || { textContent: "" }).textContent.trim(),
         version: (q('[data-gb="input.footer.version"]') || { textContent: "" }).textContent.trim(),
         scale: (() => {
-            const sel = q(".rn-footer__scale");
-            if (!sel) return null;
+            const trig = q(".rn-footer__scale");
+            if (!trig) return null;
             return {
-                disabled: sel.disabled,
-                options: [...sel.options].map((o) => o.textContent.trim()),
-                selected: sel.selectedOptions.length ? sel.selectedOptions[0].textContent.trim() : null,
+                disabled: trig.disabled,
+                options: all(".rn-scale__opt").map((o) => o.querySelector(".rn-scale__num").textContent.trim()),
+                selected: trig.textContent.trim(),
             };
         })(),
         // 不在五张卡里、也要整块 inert 的几处：预设槽、消息位（没有控件时也得是 inert，以后往里放东西不会漏）
@@ -294,7 +297,8 @@ function readyProbe(doc) {
         mix: text("mix.readout"),
         dly: text("dly.readout"),
         knobState: (q('[data-gb="input.fb.knob"]') || { getAttribute: () => null }).getAttribute("data-state"),
-        disabledAny: [...content.querySelectorAll('[aria-disabled="true"]')].length,
+        // 缩放浮层里放不下屏幕的档位也带 aria-disabled，那是屏幕决定的灰显，不属于「首帧前的置灰」
+        disabledAny: [...content.querySelectorAll('[aria-disabled="true"]:not(.rn-scale__opt)')].length,
         lang: doc.documentElement.lang,
     };
 }
@@ -446,19 +450,28 @@ try {
         await click(page, closeBtn.x, closeBtn.y);
 
         // ③ 缩放：宿主的档位还不知道，选档要记下的回退目标是编的，所以等待期缩放不可用。
-        // 下拉置灰、里面只有「—」（pendingProbe 已断言）；再把一个真实档位塞进去、强行打开并发出 change，
-        // 下面几层也要挡住：桥不应收到 setUiScale、不应出现缩放确认条
+        // 下拉置灰、里面只有「—」（pendingProbe 已断言）；先真点触发钮，置灰的触发钮打不开；
+        // 再强行把它解禁、点开，唯一的一项「—」本身也是灰的，点它不生效。桥不应收到 setUiScale、不应出现缩放确认条
+        // （桥那一层对 setUiScale 的拦截由 smoke-input-bridge-gate 单独验证）
         await rec.clear();
-        await inFrame(page, (doc, win) => {
-            const sel = doc.querySelector(".rn-footer__scale");
-            const opt = doc.createElement("option");
-            opt.value = "1.5";
-            opt.textContent = "150%";
-            sel.append(opt);
-            sel.disabled = false;
-            sel.value = "1.5";
-            sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+        const tb = await centerOf(page, ".rn-footer__scale");
+        await click(page, tb.x, tb.y);
+        run.eq(
+            await inFrame(page, (doc) => doc.querySelector('[data-gb="input.footer.scale"]').getAttribute("data-open")),
+            "0",
+            "A：快照没到时点缩放触发钮，浮层不应打开",
+        );
+        const forced = await inFrame(page, (doc) => {
+            const trig = doc.querySelector(".rn-footer__scale");
+            trig.disabled = false;
+            trig.click();
+            const wrap = doc.querySelector('[data-gb="input.footer.scale"]');
+            const opt = doc.querySelector(".rn-scale__opt");
+            const opened = wrap.getAttribute("data-open") === "1";
+            if (opt) opt.click();
+            return { opened, hasOpt: !!opt, greyed: !!opt && opt.getAttribute("aria-disabled") === "true" };
         });
+        run.eq(forced, { opened: true, hasOpt: true, greyed: true }, "A：强行解禁后能打开，但里面唯一的「—」是灰的（防空转）");
         await sleep(page, 300);
         run.eq(
             (await rec.calls()).filter((c) => c[0] === "setUiScale" || c[0] === "commitUiScale"),
@@ -539,13 +552,15 @@ try {
         // 放行之后缩放可用：下拉恢复成真实的档位表，选档真调 setUiScale
         await rec.clear();
         const picked = await inFrame(page, (doc, win) => {
-            const sel = doc.querySelector(".rn-footer__scale");
-            if (!sel || sel.disabled) return { ok: false, why: "没有下拉或被置灰" };
-            const opt = [...sel.options].find((o) => !o.disabled && Number(o.value) > 0 && Number(o.value) !== 1);
+            const trig = doc.querySelector(".rn-footer__scale");
+            if (!trig || trig.disabled) return { ok: false, why: "没有下拉或被置灰" };
+            const opt = [...doc.querySelectorAll(".rn-scale__opt")].find(
+                (o) => o.getAttribute("aria-disabled") !== "true" && Number(o.getAttribute("data-scale")) > 0 && Number(o.getAttribute("data-scale")) !== 1,
+            );
             if (!opt) return { ok: false, why: "没有可选的非 100% 档" };
-            sel.value = opt.value;
-            sel.dispatchEvent(new win.Event("change", { bubbles: true }));
-            return { ok: true, factor: Number(opt.value) };
+            trig.click();
+            opt.click();
+            return { ok: true, factor: Number(opt.getAttribute("data-scale")) };
         });
         run.check(picked.ok, `A：快照到齐后缩放下拉应可用：${picked.why || ""}`);
         if (picked.ok) {

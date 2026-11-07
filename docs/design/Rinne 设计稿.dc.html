@@ -867,6 +867,22 @@ function ScaleSel(win, value, st, locked) {
   const list = locked ? ['100%'] : (win === 'input' ? SCALES_IN : SCALES_OUT);
   return Sel({ gb: win + '.footer.scale', state: locked ? 'macLocked' : (st || 'collapsed'), st, options: list.map(x => ({ v: x, mock: x, field: 'scale.option' })), value: locked ? '100%' : value, h: 22, fs: 9 });
 }
+/** 缩放下拉的展开态（I-23 / O-10）：触发钮加向上展开的浮层。浮层是浅色实底，与预设面板（I-04）同族：#ECE6F0、同一圈描边与投影、24 高的行；
+ *  当前档左侧画勾；overFrom 起的档位放不下屏幕，灰显不隐藏，右侧带 common.scale.overflow 注记。 */
+function ScaleOpen(win, value, overFrom) {
+  const list = win === 'input' ? SCALES_IN : SCALES_OUT;
+  const rows = list.map(x => {
+    const cur = x === value, over = overFrom != null && parseInt(x, 10) >= overFrom;
+    return h('div', { key: x, role: 'option', 'aria-selected': cur ? 'true' : 'false', 'data-current': cur ? '1' : '0', 'data-over': over ? '1' : '0', style: { display: 'flex', alignItems: 'center', gap: 6, height: 24, padding: '0 8px 0 6px', boxSizing: 'border-box', borderRadius: 8, color: over ? '#65656f' : C.t1, whiteSpace: 'nowrap' } },
+      h('span', { style: { width: 14, display: 'flex', justifyContent: 'center', flex: 'none', visibility: cur ? 'visible' : 'hidden' } }, Ic('check', 12, C.t1)),
+      mk('scale.option', x, { flex: 1, fontFamily: FM, fontSize: 11, letterSpacing: '.04em' }),
+      over ? t('common.scale.overflow', { s: { fontFamily: FS, fontSize: 10, color: C.t2 } }) : null);
+  });
+  const panel = h('div', { role: 'listbox', style: { position: 'absolute', right: 0, bottom: 31, width: 'max-content', minWidth: 96, boxSizing: 'border-box', padding: 6, borderRadius: 13, background: C.lightSolid, border: '1px solid ' + C.slateBorder, boxShadow: C.shLg, color: C.t1, zIndex: 30 } }, ...rows);
+  const trig = h('span', { style: { position: 'relative', display: 'inline-flex', alignItems: 'center', height: 22, boxSizing: 'border-box', padding: '0 20px 0 7px', fontFamily: FM, fontSize: 9, letterSpacing: '.04em', lineHeight: 1.2, color: C.t2, background: 'rgba(255,255,255,.68)', border: '1px solid rgba(181,172,201,.85)', borderRadius: 8 } },
+    mk('scale.option', value), Ic('chev', 10, C.t2, { position: 'absolute', right: 5, top: '50%', marginTop: -5, transform: 'rotate(180deg)' }));
+  return h('div', { 'data-gb': win + '.footer.scale', 'data-state': 'expanded', style: { position: 'absolute', right: 0, bottom: 0, display: 'inline-flex' } }, panel, trig);
+}
 function FooterHint(win, hint) {
   const key = hint === 'locked' ? 'common.scale.lockedLegacy' : (win === 'input' ? 'in.hint.' : 'out.hint.') + hint;
   return h('div', { 'data-gb': win === 'input' ? 'input.footer.hint' : 'output.footer.hint', 'data-state': hint, style: { minWidth: 0, maxWidth: win === 'input' ? 470 : 240, overflow: 'hidden' } },
@@ -1575,11 +1591,12 @@ function catFooter() {
     Sec('I-22 页脚提示', ['unpaired', 'zero', 'cut', 'drag', 'ready', 'locked'].map(hc)),
     Sec('I-23 缩放下拉 / I-25 版本号 / I-26「?」', [
       Cell('input.footer.scale', 'collapsed', ScaleSel('input', '100%'), { pad: 12 }), Cell('input.footer.scale', 'hover', ScaleSel('input', '100%', 'hover'), { pad: 12 }), Cell('input.footer.scale', 'focus', ScaleSel('input', '100%', 'focus'), { pad: 12 }), Cell('input.footer.scale', 'macLocked（只剩 100%）', ScaleSel('input', '100%', null, true), { pad: 12 }),
-      Cell('旁注', '展开列表由系统绘制；超屏档位置灰', row({ gap: 8 }, mk('scale.option', '150%', { fontFamily: FM, fontSize: 9, color: C.t3, opacity: .5 }), t('common.scale.overflow', { s: { color: C.t3 } })), { pad: 12, note: 'Input 7 档 50/65/80/100/125/150/200%；Output 10 档 33…300%；置灰档 title：common.scale.overflow' }),
+      Cell('input.footer.scale', 'expanded', Frame(200, 216, ScaleOpen('input', '100%', 125)), { pad: 12, note: '向上展开的自绘浮层，浅色实底；7 档 50/65/80/100/125/150/200%；当前档画勾；放不下屏幕的档位灰显、不隐藏，右侧注记 common.scale.overflow（本帧按 1000×700 屏幕示意：125% 起灰显）；展开时触发钮底色同 focus' }),
       Cell('input.footer.version', 'normal / hover / focus', row({ gap: 10 }, VersionBtn('input', '0.9.0'), VersionBtn('input', '0.9.0', 'hover'), VersionBtn('input', '0.9.0', 'focus'), VersionBtn('input', '0.10.12-rc.12')), { pad: 12 }),
       Cell('input.footer.help', 'normal / hover / focus / disabled', row({ gap: 10 }, HelpBtn('input'), HelpBtn('input', 'hover'), HelpBtn('input', 'focus'), HelpBtn('input', 'disabled')), { pad: 12 }),
       Cell('input.footer', '整行', Frame(760, 26, InFooter(M(s, { hint: 'ready' }), { x: 0, y: 0 })), { pad: 12, s: { width: 784 } })]),
-    Sec('O-10 Output 页脚', ['unpaired', 'connected', 'conflict', 'locked'].map(oc))
+    Sec('O-10 Output 页脚', [...['unpaired', 'connected', 'conflict', 'locked'].map(oc),
+      Cell('output.footer.scale', 'expanded', Frame(200, 288, ScaleOpen('output', '100%', 175)), { pad: 12, note: '10 档 33…300%；本帧按 1000×700 屏幕示意：175% 起灰显；浮层在 364 高的设计盒里放得下，不需要内部滚动' })])
   ];
 }
 function catSubmark() {

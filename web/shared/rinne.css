@@ -710,21 +710,173 @@
     gap: var(--sp-8);
 }
 
+/* 缩放下拉：触发钮加自绘浮层（scale-select.js）。收起态沿用设计稿页脚帧里原生下拉的那一版外观；
+   浮层与 Input 的预设面板（.in-pm）同族：浅色实底、同一圈描边与投影、24 高的行、同一套悬停与聚焦。
+   深色玻璃只给模态、轻提示、导览说明框、规则页和切断类条用，页脚下拉不属于其中。
+   data 属性由 scale-select.js 写：根节点 data-open="0|1"、data-placement="up|down"、data-align="start|end"，
+   档位项 data-current="0|1"、data-over="0|1"（超屏：灰显不隐藏）。 */
 .rn-footer__scaleWrap {
+    position: relative;
     display: inline-flex;
     flex: none;
 }
 
 .rn-footer__scale {
-    height: 22px;
+    position: relative;
     box-sizing: border-box;
-    padding-top: 0;
-    padding-bottom: 0;
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    margin: 0;
+    padding: 0 var(--sp-20) 0 var(--sp-7);
+    font-family: var(--ff-mono);
+    font-size: var(--fs-90);
+    letter-spacing: var(--mono-ls-ui);
+    font-variant-numeric: tabular-nums lining-nums;
+    line-height: 1.2;
+    color: var(--txt-2);
+    background-color: rgba(var(--wh), 0.34);
+    border: 1px solid rgba(var(--wh), 0.5);
+    border-radius: var(--r-micro);
+    cursor: pointer;
+    outline: none;
+}
+
+.rn-footer__scale:hover {
+    background-color: rgba(var(--wh), 0.5);
+}
+
+.rn-footer__scale:focus-visible,
+.rn-scale[data-open="1"] .rn-footer__scale {
+    border-color: rgba(var(--acc), 0.85);
+    background-color: rgba(var(--wh), 0.68);
 }
 
 .rn-footer__scale:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+}
+
+.rn-footer__scaleChev {
+    position: absolute;
+    top: 50%;
+    right: var(--sp-5);
+    display: flex;
+    margin-top: -5px;
+    pointer-events: none;
+    color: var(--txt-2);
+}
+
+.rn-scale[data-open="1"] .rn-footer__scaleChev {
+    transform: rotate(180deg);
+}
+
+.rn-scale__panel {
+    position: absolute;
+    z-index: 30;
+    right: 0;
+    bottom: calc(100% + var(--sp-9));
+    box-sizing: border-box;
+    min-width: 96px;
+    width: max-content;
+    overflow-y: auto;
+    padding: var(--sp-6);
+    border-radius: var(--r-md);
+    background: var(--light-solid);
+    border: 1px solid var(--slate-border);
+    box-shadow: var(--sh-lg);
+    color: var(--txt-1);
+}
+
+.rn-scale[data-placement="down"] .rn-scale__panel {
+    bottom: auto;
+    top: calc(100% + var(--sp-9));
+}
+
+.rn-scale[data-align="start"] .rn-scale__panel {
+    right: auto;
+    left: 0;
+}
+
+.rn-scale[data-open="0"] .rn-scale__panel {
+    display: none;
+}
+
+.rn-scale__panel::-webkit-scrollbar {
+    width: 6px;
+}
+
+.rn-scale__panel::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: rgba(var(--txt-1-rgb), 0.22);
+}
+
+/* 命中区 24 高，与预设面板的行一致；数字是实时读数，mono 加等宽数字 */
+.rn-scale__opt {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-6);
+    width: 100%;
+    height: 24px;
+    margin: 0;
+    padding: 0 var(--sp-8) 0 var(--sp-6);
+    border: 0;
+    border-radius: var(--r-micro);
+    background: transparent;
+    cursor: pointer;
+    outline: none;
+    text-align: left;
+    white-space: nowrap;
+    font-family: var(--ff-mono);
+    font-size: var(--fs-110);
+    letter-spacing: var(--mono-ls-ui);
+    font-variant-numeric: tabular-nums lining-nums;
+    color: var(--txt-1);
+}
+
+.rn-scale__opt:hover {
+    background: var(--slate-bg);
+}
+
+.rn-scale__opt:focus-visible {
+    outline: 2px solid var(--acc-strong);
+    outline-offset: -2px;
+}
+
+.rn-scale__chk {
+    display: flex;
+    justify-content: center;
+    flex: none;
+    width: 14px;
+    visibility: hidden;
+}
+
+.rn-scale__opt[data-current="1"] .rn-scale__chk {
+    visibility: visible;
+}
+
+.rn-scale__num {
+    flex: 1;
+    min-width: 0;
+}
+
+.rn-scale__note {
+    flex: none;
+    font-family: var(--ff-sans);
+    font-size: var(--fs-100);
+    letter-spacing: 0;
+    color: var(--txt-2);
+}
+
+/* 超屏档：灰显、不隐藏，点了不生效。字色取正文色下限 --txt-min：在浅色实底上仍 ≥ 4.5:1，灰得出来又不违反对比度底线 */
+.rn-scale__opt[data-over="1"] {
+    cursor: not-allowed;
+    color: var(--txt-min);
+}
+
+.rn-scale__opt[data-over="1"]:hover {
+    background: transparent;
 }
 
 .rn-footer__version {

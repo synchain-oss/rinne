@@ -4,6 +4,11 @@
       "repo": "synchain-oss/scvb",
       "ref": "feature/macos-au",
       "sha": "b81142fe16646acdbef3cdfced269bac3e6d30fa"
+    },
+    "scvb-dev": {
+      "repo": "synchain-oss/scvb",
+      "ref": "dev",
+      "sha": "d86cff96fa5b59a101437fa1502e65f2c89c82fc"
     }
   },
   "files": [
@@ -96,6 +101,13 @@
       "source": "scvb-macos-au",
       "from": "web/input/app.js",
       "fromBlob": "cae1e1c4f3ca555c2cde131631b99b0327259a34",
+      "mode": "forked"
+    },
+    {
+      "path": "web/shared/scale-select.js",
+      "source": "scvb-dev",
+      "from": "web/shared/scale-select.js",
+      "fromBlob": "44dbb9f24e2e9467f902e7ffb967dd960561946d",
       "mode": "forked"
     },
     {

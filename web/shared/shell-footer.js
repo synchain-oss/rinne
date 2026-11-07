@@ -5,7 +5,9 @@
 // 尺寸：Input 页脚 760×26，提示最宽 470；Output 页脚 424×26，提示最宽 240。提示单行、超出省略号。
 // 提示文字归页面（in.hint.*、out.hint.*），本组件只管版式与省略；旧 WebKit 把缩放锁在 100% 时，
 // 提示位换成 common.scale.lockedLegacy，下拉只剩 100% 一项，根节点 data-state 为 macLocked。
-// 缩放下拉的选项与置灰判据来自 scale-ui.js 的状态机（createScaleUi.options），本组件不重算。
+// 缩放下拉是触发钮加自绘浮层（scale-select.js），不用原生 select：原生列表由系统自绘，样式碰不到。
+// 选项与置灰判据来自 scale-ui.js 的状态机（createScaleUi.options），本组件不重算。
+// 缩放根节点 data-state：collapsed（收起）、expanded（展开）、macLocked（旧 WebKit 锁在 100%，打不开）。
 //
 // 版本按钮点开关于面板；「?」按钮重看使用规则与引导。两个按钮的 data-gb 沿用设计稿锚点。
 // 首启链要在页面的提示之上再盖一层（恢复的实例显示 hint.firstUseRestored）：setHintOverride(fn) 收页面给的提示与 t、
@@ -13,6 +15,7 @@
 
 import { el } from "./dom.js";
 import { icon } from "./icons.js";
+import { createScaleSelect } from "./scale-select.js";
 
 const HINT_MAX = Object.freeze({ input: 470, output: 240 });
 
@@ -37,20 +40,35 @@ export function createFooter(o) {
         },
         hintText,
     );
-    const select = el("select", {
-        class: "sc-select rn-footer__scale",
-        on: {
-            change: () => {
-                const f = Number(select.value);
-                if (Number.isFinite(f) && f > 0) onScale(f);
-            },
-        },
-    });
+    const scaleLabel = el("span", { class: "rn-footer__scaleLabel" });
+    const trigger = el(
+        "button",
+        { type: "button", class: "rn-footer__scale" },
+        scaleLabel,
+        el("span", { class: "rn-footer__scaleChev", aria: { hidden: "true" } }, icon("chev", 10)),
+    );
+    const panel = el("div", { class: "rn-scale__panel" });
     const scaleWrap = el(
         "span",
-        { class: "rn-footer__scaleWrap", data: { gb: `${role}.footer.scale`, state: "collapsed" } },
-        select,
+        { class: "rn-footer__scaleWrap rn-scale", data: { gb: `${role}.footer.scale`, state: "collapsed" } },
+        trigger,
+        panel,
     );
+    let lockedNow = false;
+    /** 缩放根节点的 data-state：锁定优先于展开，展开优先于收起。 */
+    function syncScaleState() {
+        scaleWrap.setAttribute("data-state", lockedNow ? "macLocked" : scaleSel.isOpen() ? "expanded" : "collapsed");
+    }
+    const scaleSel = createScaleSelect({
+        wrap: scaleWrap,
+        trigger,
+        label: scaleLabel,
+        panel,
+        onPick: (f) => {
+            if (Number.isFinite(f) && f > 0) onScale(f);
+        },
+        onOpenChange: () => syncScaleState(),
+    });
     const version = el("button", {
         type: "button",
         class: "rn-footer__version",
@@ -88,9 +106,6 @@ export function createFooter(o) {
         hintText.setAttribute("title", h ? h.text : "");
     }
 
-    /** 下拉选项的签名：页面每秒会重发好几次同样的状态，选项没变就不重建（用户正打开下拉或用键盘选档时重建会让弹出层关掉、高亮跳回）。 */
-    let optionsSig = "";
-
     return {
         el: root,
         /**
@@ -103,29 +118,18 @@ export function createFooter(o) {
             const { t } = p;
             const locked = p.locked === true;
             applyHint(p);
-            // 下拉：档位、标签、置灰与置灰说明（已按当前语言取好）、锁定都没变就不重建，只在签名变了时整表重写
-            const titleOf = (opt) => (opt.disabled && opt.titleKey ? t(opt.titleKey) : "");
-            const sig = JSON.stringify([
-                p.scaleOptions.map((opt) => [opt.factor, opt.label, opt.disabled, titleOf(opt)]),
-                locked,
-            ]);
-            if (sig !== optionsSig) {
-                optionsSig = sig;
-                select.textContent = "";
-                for (const opt of p.scaleOptions) {
-                    const node = el("option", { value: String(opt.factor), text: opt.label });
-                    if (opt.disabled) {
-                        node.disabled = true;
-                        if (opt.titleKey) node.setAttribute("title", titleOf(opt));
-                    }
-                    select.append(node);
-                }
-            }
-            // 选中项始终跟页面给的档位（用户选了但页面没接受时要弹回去）；值相同就不写，免得打扰打开着的下拉
-            if (select.value !== String(p.scale)) select.value = String(p.scale);
-            select.setAttribute("aria-label", t("common.scale.label"));
-            select.disabled = locked;
-            scaleWrap.setAttribute("data-state", locked ? "macLocked" : "collapsed");
+            // 下拉：词条、选项表、当前档都交给 scale-select；选项表没变就不重建（页面每秒会重发好几次同样的状态，
+            // 用户正开着浮层或用键盘选档时重建会让焦点丢掉）。当前档始终跟页面给的值：用户选了而页面没接受时，触发钮仍显示原档位
+            scaleSel.setT(t);
+            scaleSel.setOptions(p.scaleOptions);
+            scaleSel.setValue(p.scale);
+            const name = t("common.scale.label");
+            trigger.setAttribute("aria-label", `${name} ${scaleSel.labelText()}`);
+            panel.setAttribute("aria-label", name);
+            trigger.disabled = locked;
+            if (locked) scaleSel.setOpen(false);
+            lockedNow = locked;
+            syncScaleState();
             version.textContent = t("common.footer.version", { v: p.version });
             version.setAttribute("title", t("common.footer.aboutTip"));
             help.setAttribute("title", t("common.footer.helpTip"));
@@ -137,6 +141,8 @@ export function createFooter(o) {
             if (lastP) applyHint(lastP);
         },
         /** 缩放下拉当前显示的档位（测试与页面回读用）。 */
-        scaleValue: () => Number(select.value),
+        scaleValue: () => scaleSel.value(),
+        /** 摘掉文档级监听（页面卸载时）。 */
+        destroy: () => scaleSel.destroy(),
     };
 }
