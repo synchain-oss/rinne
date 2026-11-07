@@ -112,6 +112,16 @@ Unlock first, then open your DAW. Requirements: macOS 11 or later on an Apple Si
 
 If macOS says it cannot verify the plug-in, do not click "Move to Trash": click "Done", run step 4 and try again.
 
+LUNA and the VST3 builds: LUNA lists VST3 plug-ins only from the system folder `/Library/Audio/Plug-Ins/VST3`, not from
+your user Library, where step 4 puts them. Run the uninstaller first, so the same plug-in is not registered in two
+places, then install system-wide; the installer asks for an administrator password. The Audio Unit builds are found
+in either place, so using only those in LUNA needs none of this.
+
+```sh
+bash ~/Downloads/Rinne/uninstall-macos.sh
+bash ~/Downloads/Rinne/install-macos.sh --system
+```
+
 <!-- END install:mac:en -->
 
 **中文**
@@ -150,6 +160,15 @@ Intel Mac 与 GarageBand。
 5. 打开 DAW，重新扫描插件。LUNA 默认没有启用 VST3 扫描。
 
 如果 macOS 提示无法验证插件，不要点「移到废纸篓」：点「完成」，执行第 4 步后重试。
+
+LUNA 与 VST3 版本：LUNA 只列系统级文件夹 `/Library/Audio/Plug-Ins/VST3` 里的 VST3 插件，不列用户资源库里的（第 4 步装到的就是用户
+资源库）。先运行卸载脚本，免得同一个插件在两处各登记一次，再装到系统级；安装脚本会要管理员密码。Audio Unit 版本在两处都能被
+找到，所以在 LUNA 里只用 Audio Unit 版本的话，这些都不需要。
+
+```sh
+bash ~/Downloads/Rinne/uninstall-macos.sh
+bash ~/Downloads/Rinne/install-macos.sh --system
+```
 
 <!-- END install:mac:zh -->
 
