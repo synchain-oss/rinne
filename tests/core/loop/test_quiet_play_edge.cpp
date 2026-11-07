@@ -12,7 +12,7 @@
 //   - 写头之前 20 ms 有一个非零帧就不安静，20 ms 之外的不算；
 //   - 读头在沿上要读的帧（W − D 起）有一个非零帧就不安静，W − D 之前的不算；
 //   - 挂起清空时末值不为 0（末值保持在走）就不安静，末值为 0 时安静；
-//   - 第一次配上的那一块照旧走 5 ms 的路径；
+//   - 第一次配上的那一块照旧走 5 ms 的路径；换写方、写方格式变了的那一块也照旧；
 //   - NaN 不算 0（已经拉进来的部分与本块还没拉的部分各一条），-0.0 算 0；
 //   - 本块还没拉的帧超过只读扫描的上界（32768 帧）就判不安静；
 //   - 同一输入两种切法：判定、复位点与回送逐位相同。
@@ -23,6 +23,7 @@
 //   ⛔ 去掉「读头在沿上要读的帧」一条 → 「读头要读的帧有声」变红；
 //   ⛔ 去掉「末值保持在走」一条 → 「挂起清空时末值不为 0」变红；
 //   ⛔ 第一次配上的那一块也判 → 「第一次配上的那一块」变红；
+//   ⛔ 换写方或写方格式变了的那一块也判 → 「换写方、写方格式变了」变红；
 //   ⛔ 拉环时不记非零帧 / 只读扫描不看环 → 两条 NaN 用例各自变红；
 //   ⛔ 去掉扫描上界 → 「超过扫描上界」变红。
 
@@ -94,6 +95,8 @@ struct EdgeSetup
     std::int64_t declared = 256;
     bool flushBeforeEdge = false; // 沿那一块之前请求挂起清空（两端停用超过 250 ms）
     std::int64_t extraBeforeEdge = 0; // 沿那一块之前 Output 多写的帧（帧值同样由 frameAt 给）
+    std::uint64_t writerAtEdge = 0; // 非 0：沿那一块之前换成这个写方
+    bool epochAtEdge = false; // 沿那一块之前写方的采样率改走又改回（epoch 变了、采样率仍一致）
 };
 
 struct EdgeRun
@@ -135,6 +138,15 @@ EdgeRun runEdge(const EdgeSetup& setup, FrameAt&& frameAt)
             {
                 writeWith(*ring, setup.extraBeforeEdge, frameAt);
                 written += setup.extraBeforeEdge;
+            }
+            if (setup.writerAtEdge != 0)
+            {
+                ipc::LoopRing::publishWriter(*ring, setup.writerAtEdge, static_cast<std::uint32_t>(kSr), 2);
+            }
+            if (setup.epochAtEdge)
+            {
+                ipc::LoopRing::publishWriter(*ring, 1, 44100, 2);
+                ipc::LoopRing::publishWriter(*ring, 1, static_cast<std::uint32_t>(kSr), 2);
             }
             if (setup.flushBeforeEdge)
             {
@@ -310,6 +322,32 @@ TEST_CASE("安静的起播沿：第一次配上的那一块照旧走 5 ms 的路
     const EdgeRun run = runEdge(setup, [](std::int64_t) { return 0.0f; });
     checkNotQuiet(run);
     CHECK(run.edgeStart == 0);
+}
+
+TEST_CASE("安静的起播沿：换写方、写方格式变了的那一块照旧走 5 ms 的路径", "[loop][quiet-edge]")
+{
+    // 沿前全是 0、沿后 100 样本一个冲激：其余条件下这是安静的沿（对照），换写方或 epoch 变了就照旧。
+    EdgeSetup setup;
+    setup.blocks = fixedBlocks(256, 40);
+    setup.stopCycles = 8;
+    static constexpr std::int64_t W = 8 * 256;
+    const auto input = [](std::int64_t p) { return p == W + 100 ? 0.5f : 0.0f; };
+
+    const EdgeRun control = runEdge(setup, input);
+    checkQuiet(control);
+    CHECK(echoOf(control, 100) == 0.5f);
+
+    EdgeSetup writer = setup;
+    writer.writerAtEdge = 2;
+    const EdgeRun newWriter = runEdge(writer, input);
+    checkNotQuiet(newWriter);
+    CHECK(echoOf(newWriter, 100) == 0.0f);
+
+    EdgeSetup epoch = setup;
+    epoch.epochAtEdge = true;
+    const EdgeRun newEpoch = runEdge(epoch, input);
+    checkNotQuiet(newEpoch);
+    CHECK(echoOf(newEpoch, 100) == 0.0f);
 }
 
 TEST_CASE("安静的起播沿：NaN 不算 0，-0.0 算 0", "[loop][quiet-edge]")

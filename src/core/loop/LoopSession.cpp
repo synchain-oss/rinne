@@ -835,10 +835,11 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
 
     // 安静的起播沿（口径见 quietPlayEdge）：只在上一块就配着的块上判。
     // 第一次配上的那一块照旧（T = 5 ms、W + T 起读、20 ms onset）：那一块有首配的 500 ms 淡入，
-    // 从首个有效读样本起算，起点不因这条规则移动。换段、域重置的那一块也照旧。
+    // 从首个有效读样本起算，起点不因这条规则移动。换段、域重置、换写方、写方格式变了的那一块也照旧：
+    // 换写方与换段一样要从首个有效读样本起淡入，起播沿不改它们的口径。
     const i64 peerMaxBlock = peerMaxBlock_ > 0 ? peerMaxBlock_ : ctx.peerMaxBlock;
     const bool quietEdge = playEdge && ctx.params.resetOnPlay && paired && wasPaired && !domainReset && !ringSwitched &&
-                           quietPlayEdge(*ctx.ring, R0, writeHead, peerMaxBlock);
+                           !writerChanged && !formatChanged && quietPlayEdge(*ctx.ring, R0, writeHead, peerMaxBlock);
 
     // 判据。R 只有一份：判据那一半持有它，这里把同一个值传进去。
     SyncInputs in;
