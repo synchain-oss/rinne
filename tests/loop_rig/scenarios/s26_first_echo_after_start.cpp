@@ -188,9 +188,9 @@ DcTailRun runDcTail()
     transport.nonrealtime = {true};
     host->setTransportScript(transport);
 
-    const auto early = static_cast<std::uint64_t>(10000); // 走带时的冲激：回声在环里转几圈
+    static constexpr std::uint64_t early = 10000; // 走带时的冲激：回声在环里转几圈
     const auto late = static_cast<std::uint64_t>(run.impulseAt);
-    Recorder rec(*host, [early, late](std::uint64_t start, float* left, float* right, int n) {
+    Recorder rec(*host, [late](std::uint64_t start, float* left, float* right, int n) {
         for (int i = 0; i < n; ++i)
         {
             const std::uint64_t at = start + static_cast<std::uint64_t>(i);

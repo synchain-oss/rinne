@@ -243,21 +243,21 @@ TEST_CASE("安静的起播沿：写头之前 20 ms 有声就不安静，20 ms �
     EdgeSetup setup;
     setup.blocks = fixedBlocks(256, 40);
     setup.stopCycles = 8;
-    const std::int64_t W = 8 * 256;
+    static constexpr std::int64_t W = 8 * 256;
 
     const EdgeRun inside =
-        runEdge(setup, [W](std::int64_t p) { return p == W - 700 ? 0.25f : (p == W + 100 ? 0.5f : 0.0f); });
+        runEdge(setup, [](std::int64_t p) { return p == W - 700 ? 0.25f : (p == W + 100 ? 0.5f : 0.0f); });
     REQUIRE(inside.delay == 480);
     checkNotQuiet(inside);
     CHECK(echoOf(inside, 100) == 0.0f); // 旧口径：沿后 T 帧之内写下的冲激被跳过
 
     const EdgeRun outside =
-        runEdge(setup, [W](std::int64_t p) { return p == W - 961 ? 0.25f : (p == W + 100 ? 0.5f : 0.0f); });
+        runEdge(setup, [](std::int64_t p) { return p == W - 961 ? 0.25f : (p == W + 100 ? 0.5f : 0.0f); });
     checkQuiet(outside);
     CHECK(echoOf(outside, 100) == 0.5f);
 
     // 本块还没拉的部分（对端上一块 [W − 256, W)）里有声也一样不安静
-    const EdgeRun unpulled = runEdge(setup, [W](std::int64_t p) { return p == W - 100 ? 0.25f : 0.0f; });
+    const EdgeRun unpulled = runEdge(setup, [](std::int64_t p) { return p == W - 100 ? 0.25f : 0.0f; });
     checkNotQuiet(unpulled);
 }
 
@@ -268,15 +268,15 @@ TEST_CASE("安静的起播沿：读头在沿上要读的帧有声就不安静，
     setup.blocks = fixedBlocks(256, 60);
     setup.stopCycles = 24;
     setup.delayMs = 100.0f;
-    const std::int64_t W = 24 * 256;
+    static constexpr std::int64_t W = 24 * 256;
 
-    const EdgeRun inside = runEdge(setup, [W](std::int64_t p) { return p == W - 4000 ? 0.25f : 0.0f; });
+    const EdgeRun inside = runEdge(setup, [](std::int64_t p) { return p == W - 4000 ? 0.25f : 0.0f; });
     REQUIRE(inside.delay == 4800);
     checkNotQuiet(inside);
 
     // W − 4801：读头在沿前最后一个样本上读到它（回送在沿前一个样本是 0.25），沿上起要读的帧全是 0：安静。
     // 释放读头与淡出逐位相同（沿上都只出 0）。
-    const EdgeRun justBefore = runEdge(setup, [W](std::int64_t p) { return p == W - 4801 ? 0.25f : 0.0f; });
+    const EdgeRun justBefore = runEdge(setup, [](std::int64_t p) { return p == W - 4801 ? 0.25f : 0.0f; });
     checkQuiet(justBefore);
     CHECK(justBefore.out[static_cast<std::size_t>(W - 1)] == 0.25f);
     CHECK(justBefore.out[static_cast<std::size_t>(W)] == 0.0f);
@@ -317,17 +317,17 @@ TEST_CASE("安静的起播沿：NaN 不算 0，-0.0 算 0", "[loop][quiet-edge]"
     EdgeSetup setup;
     setup.blocks = fixedBlocks(256, 40);
     setup.stopCycles = 8;
-    const std::int64_t W = 8 * 256;
+    static constexpr std::int64_t W = 8 * 256;
     const float nan = std::numeric_limits<float>::quiet_NaN();
 
     // 已经拉进来的部分（W − 700 在对端上一块之前）
-    const EdgeRun pulled = runEdge(setup, [W, nan](std::int64_t p) { return p == W - 700 ? nan : 0.0f; });
+    const EdgeRun pulled = runEdge(setup, [nan](std::int64_t p) { return p == W - 700 ? nan : 0.0f; });
     checkNotQuiet(pulled);
     // 本块还没拉的部分（W − 100 在对端上一块 [W − 256, W) 里）
-    const EdgeRun unpulled = runEdge(setup, [W, nan](std::int64_t p) { return p == W - 100 ? nan : 0.0f; });
+    const EdgeRun unpulled = runEdge(setup, [nan](std::int64_t p) { return p == W - 100 ? nan : 0.0f; });
     checkNotQuiet(unpulled);
     // 全是 -0.0：安静，沿后的冲激满幅回来
-    const EdgeRun negZero = runEdge(setup, [W](std::int64_t p) { return p == W + 100 ? 0.5f : -0.0f; });
+    const EdgeRun negZero = runEdge(setup, [](std::int64_t p) { return p == W + 100 ? 0.5f : -0.0f; });
     checkQuiet(negZero);
     CHECK(echoOf(negZero, 100) == 0.5f);
 }
@@ -361,10 +361,10 @@ TEST_CASE("安静的起播沿：同一输入两种切法，判定、复位点与
     b.blocks = pre;
     b.blocks.insert(b.blocks.end(), post.begin(), post.end());
     b.stopCycles = pre.size();
-    const std::int64_t W = 6144;
+    static constexpr std::int64_t W = 6144;
 
-    const auto quietInput = [W](std::int64_t p) { return p == W + 100 ? 0.5f : (p < W - 4801 ? 0.25f : 0.0f); };
-    const auto noisyInput = [W](std::int64_t p) { return p == W - 500 || p == W + 300 ? 0.5f : 0.0f; };
+    const auto quietInput = [](std::int64_t p) { return p == W + 100 ? 0.5f : (p < W - 4801 ? 0.25f : 0.0f); };
+    const auto noisyInput = [](std::int64_t p) { return p == W - 500 || p == W + 300 ? 0.5f : 0.0f; };
 
     const EdgeRun qa = runEdge(a, quietInput);
     const EdgeRun qb = runEdge(b, quietInput);
