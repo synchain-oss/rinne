@@ -53,6 +53,17 @@ constexpr std::int64_t kNoUpperBound = std::numeric_limits<std::int64_t>::max();
 // 取 max(8192, 对端声明的最大块长)，截在 [8192, 32768]。
 constexpr std::int64_t kMinPullGuard = 8192;
 constexpr std::int64_t kMaxPullGuard = 32768;
+// 起播沿判「安静」时只读地看环里本块还没拉的帧，最多这么多（一个最大支持块长）。正确摆放时还没拉的只有对端上一块，
+// 不超过它声明的最大块长；超过这个上界就判不安静（照旧淡出、排除、onset），扫描不会无界。
+constexpr std::int64_t kMaxQuietPeek = static_cast<std::int64_t>(ipc::kMaxSupportedBlock);
+
+// 拉环的下界：比 W 早 (一圈 − 护栏) 帧以上的位置可能正被写方的下一段覆盖，不读。
+i64 ringPullFloor(i64 writeHead, i64 peerMaxBlock) noexcept
+{
+    const i64 lap = static_cast<i64>(ipc::kRingFrames);
+    const i64 guard = std::clamp<i64>(std::max<i64>(kMinPullGuard, peerMaxBlock), kMinPullGuard, kMaxPullGuard);
+    return writeHead - (lap - guard);
+}
 } // namespace
 
 bool LoopSession::prepare(double sampleRate) noexcept
@@ -250,6 +261,65 @@ void LoopSession::holdStrandedTaps(i64 blockStart) noexcept
         hold_.start(tap.lastLeft, tap.lastRight, sync_.fadeOutSamples());
         tap.lastAt = -1;
     }
+}
+
+// 起播沿安不安静。起播沿要淡出旧回送（5 ms，不能阶跃），这段淡出就是沿后新流 [W, W + T) 里的内容，与新的干声
+// 混在一起（中间链任意，减不掉），所以新读头只能从 W + T 起读、再走 20 ms onset。沿上没有旧回送时这段里只有
+// 新的干声，排除它就把沿后头几毫秒的声音的第一个回声吃掉了（宿主在静音的开头不调插件、或调了但报不在走带时，
+// 第一个在走的块就是声音所在的那一块，起播沿正好落在声音前面）。安静的沿上 T 取 0（见 StreamSync::process）。
+//
+// 安静 = 下面全部成立：
+//   - 没有末值保持（值为 0 的保持本来就不启动）；没有读头在淡出、没有改 D 的交叉淡化（它们读的是尾巴或另一个 D，
+//     不逐个核了，一律照旧淡出）；
+//   - 每个活跃读头从沿上要读的位置 blockStart + off − D 起、以及 W − onset 起，到 W 为止的帧全是 0。
+//     前一条保证读头释放与淡出逐位相同（都只出 0）；后一条保证新读头从 W 起、不带 onset 不会在流中间切进来
+//     （沿前 20 ms 是数字静音，新流就是从静音开始的，回声与干声一样从那里开始）。
+// 读不到的帧（已清空、被覆盖作废、撕裂）按 0 计；-0.0 算 0；NaN 不算 0。
+// 已经拉进来的部分看本地延迟线记下的最后一个非零帧；本块还没拉的 [pulled, W) 只读地看环（与 pullRing 同一个下界，
+// 撕裂的帧按 0 计，pullRing 也会把它们清成 0），最多 kMaxQuietPeek 帧，超过就判不安静。
+// 判据只看样本位置与帧内容，与宿主怎么切块无关。
+bool LoopSession::quietPlayEdge(const ipc::RingSegment& ring, i64 blockStart, i64 writeHead,
+                                i64 peerMaxBlock) const noexcept
+{
+    if (hold_.active() || taps_.crossfadeActive())
+    {
+        return false;
+    }
+    i64 from = writeHead - sync_.onsetSamples();
+    for (int slot = 0; slot < kMaxTaps; ++slot)
+    {
+        const Tap& tap = taps_.at(slot);
+        if (!tap.active)
+        {
+            continue;
+        }
+        if (tap.env.fadingOut() || tap.xfade != XfadeRole::kNone)
+        {
+            return false;
+        }
+        from = std::min(from, blockStart + tap.offset - tap.delay);
+    }
+    if (!line_.silentFrom(from))
+    {
+        return false;
+    }
+    const i64 lo = std::max({from, line_.pulled(), ringPullFloor(writeHead, peerMaxBlock)});
+    if (writeHead <= lo)
+    {
+        return true;
+    }
+    if (writeHead - lo > kMaxQuietPeek)
+    {
+        return false;
+    }
+    i64 lastNonZero = lo - 1;
+    const ipc::RingPull peek = ipc::LoopRing::pull(ring, lo, writeHead, [&](i64 p, float l, float r) {
+        if (l != 0.0f || r != 0.0f)
+        {
+            lastNonZero = p;
+        }
+    });
+    return lastNonZero < std::max(lo, peek.validFrom);
 }
 
 // 建一个新的读头：validFrom 是环上「从哪一帧起才有数据」，包络走 onset。
@@ -453,15 +523,12 @@ std::int64_t LoopSession::fadeOutUnsupportedBlock(const BlockContext& ctx) noexc
 // 环里的帧先落在暂存里（定长，prepare 里分配），再一次搬进延迟线：延迟线的 pull 是按区间搬的。
 void LoopSession::pullRing(const ipc::RingSegment& ring, i64 writeHead, i64 peerMaxBlock) noexcept
 {
-    const i64 lap = static_cast<i64>(ipc::kRingFrames);
-    const i64 guard = std::clamp<i64>(std::max<i64>(kMinPullGuard, peerMaxBlock), kMinPullGuard, kMaxPullGuard);
-
     i64 from = line_.pulled();
     if (writeHead <= from)
     {
         return;
     }
-    const i64 earliest = writeHead - (lap - guard);
+    const i64 earliest = ringPullFloor(writeHead, peerMaxBlock);
     if (earliest > from)
     {
         const auto dropped = static_cast<std::uint64_t>(earliest - from);
@@ -766,6 +833,16 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     const bool pullThisBlock = ctx.ring != nullptr && (paired || (wasPaired && sameRing && !rateMismatch));
     const i64 dataEnd = pullThisBlock && !ringSwitched ? std::max(line_.pulled(), writeHead) : line_.pulled();
 
+    // 安静的起播沿（口径见 quietPlayEdge）：只在上一块就配着的块上判。
+    // 第一次配上的那一块照旧（T = 5 ms、W + T 起读、20 ms onset）：那一块有首配的 500 ms 淡入，
+    // 从首个有效读样本起算，起点不因这条规则移动。换段、域重置、换写方、写方格式变了的那一块也照旧：
+    // 换写方与换段一样要从首个有效读样本起淡入，起播沿不改它们的口径。
+    const i64 peerMaxBlock = peerMaxBlock_ > 0 ? peerMaxBlock_ : ctx.peerMaxBlock;
+    // paired 只在 ctx.ring 非空时为真；这里仍把 ctx.ring != nullptr 写进条件，下面解引用它不依赖上面的赋值顺序。
+    const bool quietEdge = playEdge && ctx.params.resetOnPlay && paired && wasPaired && !domainReset && !ringSwitched &&
+                           !writerChanged && !formatChanged && ctx.ring != nullptr &&
+                           quietPlayEdge(*ctx.ring, R0, writeHead, peerMaxBlock);
+
     // 判据。R 只有一份：判据那一半持有它，这里把同一个值传进去。
     SyncInputs in;
     in.paired = paired;
@@ -773,13 +850,14 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     in.formatChanged = formatChanged;
     in.playEdge = playEdge;
     in.resetOnPlay = ctx.params.resetOnPlay;
+    in.quietPlayEdge = quietEdge;
     in.resetRequested = ctx.resetRequested;
     in.domainReset = domainReset;
     in.ringSwitched = ringSwitched;
     in.inactive = !paired;
     in.writeHead = writeHead;
     in.dataEnd = dataEnd;
-    in.peerMaxBlock = peerMaxBlock_ > 0 ? peerMaxBlock_ : ctx.peerMaxBlock;
+    in.peerMaxBlock = peerMaxBlock;
     in.processed = R0;
     in.declaredBlock = ctx.declaredBlock;
     in.delayEffective = delay;
@@ -814,7 +892,8 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
 
     // 建新读头：环上「从哪一帧起才有数据」。
     //
-    // 起播沿：validFrom = W + T（T = min(5 ms, D_eff)），沿后的那 T 帧没有回送。
+    // 起播沿：validFrom = W + T（T = min(5 ms, D_eff)），沿后的那 T 帧没有回送（里面混着旧回送的淡出）。
+    // 安静的起播沿：validFrom = W、不带 onset（沿上没有旧回送，沿前 20 ms 是数字静音，见 quietPlayEdge）。
     // 换写方、换段：validFrom = max(W, intent)，旧写方公告过但没发布的那一段不读；换段时新段 W 之前的帧
     // （拉进来的位置与旧段相接，但那是另一条流）也不读。
     // 其他（第一次配上、重同步）：validFrom = W，新数据从下一帧起。
@@ -824,8 +903,9 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
         const bool needFreshTap = outcome.resynced || taps_.count() == 0;
         if (needFreshTap)
         {
+            const bool playResync = outcome.resynced && outcome.reason == SyncReason::kPlay;
             i64 validFrom = writeHead;
-            if (outcome.resynced && outcome.reason == SyncReason::kPlay)
+            if (playResync && !quietEdge)
             {
                 validFrom = writeHead + sync_.playFadeSamples(delay);
             }
@@ -834,7 +914,7 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
             {
                 validFrom = std::max(writeHead, writeIntent);
             }
-            newTap(R0, validFrom, delay, sync_.onsetSamples());
+            newTap(R0, validFrom, delay, playResync && quietEdge ? 0 : sync_.onsetSamples());
         }
         else
         {

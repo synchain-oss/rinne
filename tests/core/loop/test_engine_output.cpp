@@ -1264,10 +1264,29 @@ TEST_CASE("引擎 闭环：起播复位按样本定位，从 s0 起与宿主怎�
     CHECK(sameBits(a.data(), b.data(), a.size()));
     CHECK(sameBits(a.data(), c.data(), a.size()));
 
-    // 起播沿之后的 T = 5 ms（240 样本）里写下的数据不回来：s0 + D 起的 240 个样本只有干声。
-    Loop loop(256);
-    const auto out = loop.run(params, 256, 8192, [=](int t) { return t == kEdge + 100 ? 0.5f : 0.0f; }, transportAt);
+    // 沿前不安静（沿前一直有声，旧回送要淡出）：起播沿之后的 T = 5 ms（240 样本）里写下的数据不回来，
+    // s0 + D 起的 240 个样本只有干声。
+    // ⛔ 删除式验证点：不安静的沿也免掉排除窗口 → 本段变红。
+    Loop noisy(256);
+    const auto out = noisy.run(
+        params, 256, 8192, [=](int t) { return t < kEdge ? source(t) : (t == kEdge + 100 ? 0.5f : 0.0f); },
+        transportAt);
     CHECK(out[kEdge + 100 + 480] == 0.0f); // 沿后 T 帧之内写下的冲激被跳过
+
+    // 安静的起播沿（沿前一直是数字静音）：T 取 0，沿后 T 帧之内写下的冲激照常回来，
+    // 与起播沿早就过去（沿在 1024，冲激时早已稳态）时从 s0 起逐位相同。
+    // 回声的大小还带着首配 500 ms 淡入的进度（淡入不因起播沿置满），所以比对照而不比绝对值。
+    const auto impulse = [=](int t) { return t == kEdge + 100 ? 0.5f : 0.0f; };
+    Loop quiet(256);
+    const auto q = quiet.run(params, 256, 8192, impulse, transportAt);
+    Loop early(256);
+    const auto e = early.run(params, 256, 8192, impulse, [](int at) {
+        TransportInfo t;
+        t.isPlaying = at >= 1024;
+        return t;
+    });
+    CHECK(q[kEdge + 100 + 480] > 0.0f);
+    CHECK(sameBits(q.data() + kEdge, e.data() + kEdge, q.size() - static_cast<std::size_t>(kEdge)));
 }
 
 TEST_CASE("引擎 闭环：错序判据——Input 在前判为正确，Output 在前连续 3 块后判为错序，Output 端镜像同一结论",

@@ -23,6 +23,8 @@
 //   - reset() → 只记诊断，不动任何音频状态。
 //   - 起播（reset_on_play，默认开）：在 s0 用 T = min(5 ms, D_eff) 淡出旧回送（读预拷贝的尾巴，不做阶跃），
 //     本地延迟线在沿上复位（沿后 T 帧之前的帧不再读），DSP 的复位点是绝对样本号 s0 + T。
+//     安静的起播沿（LoopSession 判定：没有旧回送要淡出、写头之前 20 ms 是数字静音）T 取 0：读头直接释放、
+//     DSP 在 s0 复位，新读头从 W 起读、不带 onset。
 //     全部按样本定位，所以复位点与宿主怎么切块无关。
 //   - 宿主违约（n > N_prep）→ 取不到的样本补 0，D_min 立即抬升。
 //
@@ -72,6 +74,9 @@ struct SyncInputs
     bool formatChanged = false; // 写方改了采样率（epoch 变了）
     bool playEdge = false; // 起播沿（上一块没走、这一块走了）
     bool resetOnPlay = true; // 起播复位开关
+    // 起播沿是安静的（LoopSession 判定，口径见 LoopSession::quietPlayEdge）：没有旧回送可淡，T 取 0。
+    // 只在 playEdge 为真的那一块有意义。
+    bool quietPlayEdge = false;
     bool resetRequested = false; // 宿主调用了 reset()：只记诊断
     bool domainReset = false; // 写头倒退（换段遗漏一类）：本地延迟线已从 W 起重来，重新锚定偏移
     // 换了段（换组、重新映射）而两边都配着：重建读头。旧读头只读旧段已经拉进来的数据（dataEnd 由调用方给成
@@ -97,7 +102,8 @@ struct SyncOutcome
     // DSP 的复位点落在本块里：引擎在 resetAtSample 那个样本上复位 DSP（本地延迟线已在沿上复位过）。
     bool resetDsp = false;
     // 起播沿的复位点（绝对样本号，与 R 同一坐标）。起播沿那一块就给出（预告），复位点所在的那一块
-    // 再给一次并置 resetDsp。都没有时是 -1。口径见 ADR-0002：导出与播放从 s0 + T 起逐位一致，T = min(5 ms, D_eff)。
+    // 再给一次并置 resetDsp。都没有时是 -1。口径见 ADR-0002：导出与播放从 s0 + T 起逐位一致，T = min(5 ms, D_eff)；
+    // 安静的起播沿 T = 0，复位点就是 s0（沿所在的那一块就置 resetDsp）。
     std::int64_t resetAtSample = -1;
     bool lineCleared = false; // 本地延迟线被清空
     bool enteredTolerant = false; // 本次转入容忍模式
