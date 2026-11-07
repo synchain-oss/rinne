@@ -95,9 +95,9 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   as well as the 20 ms before the write head, is digital silence; -0.0 counts as silence, NaN does not), and the block
   is not the first one after pairing, a writer change or a segment change, the 5 ms fade-out, the 5 ms the new read
   head used to skip after the edge and its 20 ms onset are all dropped: the return chain resets at the edge itself and
-  the new read head starts at the write head. Every other play start behaves exactly as before. An export and live playback now match bit for bit from the
-  play edge when both edges are quiet, and from the edge plus 5 ms when neither is; when only one of them is quiet, the
-  first echo of a sound that starts within 25 ms of the edge differs.
+  the new read head starts at the write head. Every other play start behaves exactly as before. An export and live
+  playback now match bit for bit from the play edge when both edges are quiet, and from the edge plus 5 ms when neither
+  is; when only one of them is quiet, the first echo of a sound that starts within 25 ms of the edge differs.
 
 ### Fixed
 

@@ -838,8 +838,10 @@ BlockResult LoopSession::process(const BlockContext& ctx) noexcept
     // 从首个有效读样本起算，起点不因这条规则移动。换段、域重置、换写方、写方格式变了的那一块也照旧：
     // 换写方与换段一样要从首个有效读样本起淡入，起播沿不改它们的口径。
     const i64 peerMaxBlock = peerMaxBlock_ > 0 ? peerMaxBlock_ : ctx.peerMaxBlock;
+    // paired 只在 ctx.ring 非空时为真；这里仍把 ctx.ring != nullptr 写进条件，下面解引用它不依赖上面的赋值顺序。
     const bool quietEdge = playEdge && ctx.params.resetOnPlay && paired && wasPaired && !domainReset && !ringSwitched &&
-                           !writerChanged && !formatChanged && quietPlayEdge(*ctx.ring, R0, writeHead, peerMaxBlock);
+                           !writerChanged && !formatChanged && ctx.ring != nullptr &&
+                           quietPlayEdge(*ctx.ring, R0, writeHead, peerMaxBlock);
 
     // 判据。R 只有一份：判据那一半持有它，这里把同一个值传进去。
     SyncInputs in;
