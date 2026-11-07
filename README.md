@@ -107,7 +107,7 @@ Unblock-File .\Rinne-v<X.Y.Z>-win64.zip
 xattr -dr com.apple.quarantine ~/Downloads/Rinne
 ```
 
-If macOS says it cannot verify the plugin, do not click "Move to Trash". LUNA lists VST3 plugins only from the system folder, so for the VST3 builds there run `install-macos.sh --system`; the Audio Unit builds do not need it. Step by step, with upgrade and uninstall: [INSTALL](docs/INSTALL.md).
+If macOS says it cannot verify the plugin, do not click "Move to Trash". LUNA lists VST3 plugins only from the system folder, so for the VST3 builds there run `uninstall-macos.sh` first, then `install-macos.sh --system`; the Audio Unit builds do not need it. Step by step, with upgrade and uninstall: [INSTALL](docs/INSTALL.md).
 
 ## Quick start
 
@@ -155,7 +155,7 @@ JUCE is pinned by commit and passed in, not downloaded. The full steps for Windo
 - An export that starts while the return is still fading in (about the first 0.5 s after load or pairing) begins with the fade-in (KI-5).
 - Steady self-oscillation at moderate loop gain is held at the ceiling, not stopped; use Panic (KI-6).
 - The macOS builds are Apple Silicon only, unsigned and unnotarized; Intel Macs, Rosetta hosts and GarageBand are not supported, and Logic Pro is not tested (KI-10, KI-11).
-- LUNA lists VST3 plugins only from the system folder; install with `--system` to use the VST3 builds there (KI-14).
+- LUNA lists VST3 plugins only from the system folder; uninstall the per-user copy, then install with `--system` to use the VST3 builds there (KI-14).
 
 ## Documentation
 

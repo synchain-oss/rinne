@@ -107,7 +107,7 @@ Unblock-File .\Rinne-v<X.Y.Z>-win64.zip
 xattr -dr com.apple.quarantine ~/Downloads/Rinne
 ```
 
-如果 macOS 提示无法验证插件，不要点「移到废纸篓」。LUNA 只列系统级文件夹里的 VST3，要在 LUNA 里用 VST3 版本，请运行 `install-macos.sh --system`；只用 Audio Unit 版本不需要。逐步说明（含升级和卸载）见 [INSTALL](docs/INSTALL.md)。
+如果 macOS 提示无法验证插件，不要点「移到废纸篓」。LUNA 只列系统级文件夹里的 VST3，要在 LUNA 里用 VST3 版本，请先运行 `uninstall-macos.sh`，再运行 `install-macos.sh --system`；只用 Audio Unit 版本不需要。逐步说明（含升级和卸载）见 [INSTALL](docs/INSTALL.md)。
 
 ## 快速上手
 
@@ -155,7 +155,7 @@ JUCE 按提交钉版，由你传入，不会自动下载。Windows 与 macOS 的
 - 回送还在淡入时（载入或配对后约前 0.5 秒）开始的导出，开头是淡入的（KI-5）。
 - 中等环路增益下的稳态自激会被压在上限，不会被停掉；请用紧急切断（KI-6）。
 - macOS 版只有 Apple Silicon，未签名、未公证；不支持 Intel Mac、Rosetta 下的宿主和 GarageBand，Logic Pro 未测试（KI-10、KI-11）。
-- LUNA 只列系统级文件夹里的 VST3；要在 LUNA 里用 VST3 版本，请用 `--system` 安装（KI-14）。
+- LUNA 只列系统级文件夹里的 VST3；要在 LUNA 里用 VST3 版本，请先卸载装给当前用户的那份，再用 `--system` 安装（KI-14）。
 
 ## 文档
 
