@@ -4,7 +4,7 @@
 
 Rinne builds for Windows (x64, VST3) and macOS (Apple Silicon, VST3 and Audio Unit). This page says what has been checked in which host, and how far. It is deliberately conservative: a host only moves up a tier when a written test record in [docs/validation/](validation/TEMPLATE.md) backs it, and a host nobody has opened is listed as waiting for its first test, not as working.
 
-Today there is no record of a real-host acceptance test in the repository. The two hosts being tested first, Cubase Pro 15 on Windows and LUNA on macOS, therefore stand at Tier 3. The macOS Audio Unit builds are beta.
+Two hosts have a written real-host record so far. Cubase Pro 15 on Windows stands at Tier 2: all seven acceptance items passed on a preview build, and Tier 1 waits for the same matrix on a release build. LUNA on macOS has a first record for the Audio Unit builds that leaves one finding open, so it stays at Tier 3 until that is fixed and retested. Every other host is still waiting for its first test. The macOS Audio Unit builds are beta.
 
 ## Tier definitions
 
@@ -12,19 +12,19 @@ Today there is no record of a real-host acceptance test in the repository. The t
 |---|---|---|
 | Tier 1 | Fully verified | The release build passed the whole acceptance matrix below on a real host, and the measured loop period equals D |
 | Tier 2 | Partly verified | A written record on a real host, covering only the items it lists |
-| Tier 3 | Not verified on a real host | CI evidence only: build, tests, and the plugin validators (pluginval on both systems, auval for the Audio Units) |
+| Tier 3 | Not verified on a real host, or real-host verification still open | CI evidence only: build, tests, and the plugin validators (pluginval on both systems, auval for the Audio Units); a host whose real-host record still has an open finding also stays here |
 | Out of scope | Not provided | The format or platform is not built, or the host is known to be unsuitable |
 | Awaiting test | No tier yet | Nothing has been looked at in this host |
 
-The acceptance matrix has seven items: realtime playback, offline export, Freeze, save and reopen, buffer sizes (64, 256, 1024 and 2048), ASIO-Guard on and off, and the loop period measured against D. Each record in `docs/validation/` states which items passed.
+The acceptance matrix has seven items: realtime playback, offline export, Freeze, save and reopen, buffer sizes (64, 256, 1024 and 2048), ASIO-Guard on and off, and the loop period measured against D. Each record in `docs/validation/` states which items passed. A record that leaves a finding open on an item it covers does not lift the host: the row stays where it is until the finding is fixed and the item is checked again.
 
 ## Current matrix
 
 <!-- BEGIN gen:daw-tiers:en -->
 | Host | Version | Platform | Formats | Tier | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Cubase Pro | 15 | Windows | VST3 | Tier 3 | Partial | CI evidence only (build, tests, pluginval). No acceptance record from a real host yet. |
-| LUNA | 3.x | macOS | VST3 / AU | Tier 3 | Partial | CI evidence only (build, tests, auval, pluginval). No acceptance record from a real host yet. The Audio Unit build is beta. |
+| Cubase Pro | 15 | Windows | VST3 | Tier 2 | Partial | Real-host records on two preview builds. All seven acceptance items passed (2026-11-03), and a Cubase insert effect inside the loop adds its delay to the loop delay (2026-11-07). Tier 1 needs the same matrix on a release build. |
+| LUNA | 3.x | macOS | VST3 / AU | Tier 3 | Partial | First real-host record, on a preview build and the Audio Unit builds only. Loop period, buffer sizes 64, 512 and 2048, real-time against offline export, and save and reopen passed. One finding is open: the first echo after playback starts is 13 to 21 dB too quiet. Not run: the VST3 builds (LUNA lists only system-wide VST3 plug-ins), Bounce, uninstall and reinstall, Freeze. Stays at Tier 3 until the finding is fixed and retested. The Audio Unit build is beta. |
 | Cubase Pro | 14 | Windows | VST3 | — | Awaiting test | Not tested on a real host yet. |
 | Cubase Artist | 15 | Windows | VST3 | — | Awaiting test | Not tested on a real host yet. |
 | Cubase Elements | 15 | Windows | VST3 | — | Awaiting test | Not tested on a real host yet. |
@@ -62,19 +62,22 @@ The table is generated from `docs/daw-tiers.json`; do not edit it by hand.
 
 ### Cubase Pro 15 (Windows, VST3)
 
-Target: Tier 1. Current: Tier 3.
+Target: Tier 1. Current: Tier 2.
 
 - Put Rinne Input in the first insert slot and Rinne Output above the fader divider of the same channel (the last pre-fader slot is simplest).
 - ASIO-Guard can raise the minimum loop delay D; the MIN mark in Rinne Input shows the value in force.
-- Not yet checked in the acceptance matrix: all seven items.
+- [Record of 2026-11-03](validation/2026-11-03-cubase-pro-15-win.md), preview build 0.9.0-preview.1 (commit 968685ef): all seven acceptance items passed. Every echo interval equalled D at buffer sizes 64 to 2048 and with ASIO-Guard Off, Normal and High, and the realtime and the offline export agreed (residual peak −162.56 dBFS).
+- [Record of 2026-11-07](validation/2026-11-07-cubase-pro-15-win.md), preview build 0.9.0-preview.2 (commit 51bec023): a Cubase insert effect between the two ends (MonoDelay, 10 ms) is inside the loop, and its delay adds to D.
+- Not covered: 44.1 and 96 kHz, mono tracks, several projects open at once, and in-loop plug-ins other than that one effect. Tier 1 needs the matrix repeated on a release build.
 
 ### LUNA 3.x (macOS, VST3 and Audio Unit)
 
 Target: Tier 2. Current: Tier 3.
 
-- VST3 scanning is off by default in LUNA; switch it on to use the VST3 build, or use the Audio Unit build.
-- The Audio Unit build is beta: it passes auval and pluginval in CI and instantiates in an out-of-process host, but it has not been run inside LUNA.
-- Not yet checked in the acceptance matrix: all seven items.
+- LUNA lists VST3 plug-ins only from the system folder `/Library/Audio/Plug-Ins/VST3`, not from the one in your user Library, and VST3 scanning is off by default (switch it on). The installer's default puts the plug-ins in your user Library, so for the VST3 build run `uninstall-macos.sh` first (so the same plug-in is not registered in two places), then `bash install-macos.sh --system`, which asks for an administrator password. The Audio Unit build is found in either place and does not need `--system`. Steps: [INSTALL](INSTALL.md#macos).
+- The Audio Unit build is beta. [First record](validation/2026-11-07-luna-3-macos.md), 2026-11-07, preview build 0.9.0-preview.2 (commit 51bec023), LUNA 3.1.0.4581 on macOS 15.6.1: loop period, buffer sizes 64, 512 and 2048, realtime against offline export, and save and reopen passed.
+- One finding is open: the first echo after playback starts is 13 to 21 dB too quiet (it was not seen in Cubase). The host stays at Tier 3 until it is fixed and the check repeated.
+- Not run: the VST3 builds, Bounce, uninstall and reinstall, Freeze, and buffer sizes 256 and 1024.
 
 ### REAPER 7
 

@@ -90,6 +90,14 @@ All notable user-facing changes to Rinne are recorded here. The format follows
   dry signal passes through bit for bit; previously, with Mix above 50 %, the dry signal stayed attenuated after the
   bypass (silent at 100 %). Un-bypassing ramps the dry gain back to the Mix value over 30 ms. A Mix value that is NaN is
   now treated as 0: the dry signal is unchanged and the return is 0 (it used to give the return its maximum gain).
+- Host compatibility now rests on written real-host records. Cubase Pro 15 on Windows has records from two preview
+  builds (all seven acceptance items passed; a Cubase insert effect between the two ends is inside the loop and adds its
+  delay to D) and moves from Tier 3 to Tier 2. LUNA 3 on macOS has a first, partial record for the Audio Unit builds
+  with one finding still open (the first echo after playback starts is 13 to 21 dB too quiet) and stays at Tier 3. The
+  statements that the loop delay does not change with buffer size or export mode, and that an export matches playback,
+  now point to these records. LUNA lists VST3 plug-ins only from the system folder, not from the user Library where the
+  installer puts them by default: to use the VST3 builds in LUNA, run `uninstall-macos.sh` and then
+  `install-macos.sh --system`; the Audio Unit builds are not affected (KNOWN_ISSUES KI-14, INSTALL).
 
 ### Fixed
 

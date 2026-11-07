@@ -23,7 +23,7 @@ Windows x64 VST3 · macOS arm64 VST3/AU
 ## What it does
 
 <!-- entity:begin -->
-Synchain Rinne is an open-source (GPL-3.0-or-later) pair of audio plugins, Rinne Input and Rinne Output, that turns the stretch of one mixer channel's insert chain between them into a feedback loop. Rinne Input goes in the first insert slot and holds every control. Rinne Output goes after the last plugin you want in the loop, above the fader divider, and only handles pairing. What the plugins between them output is sent back into Rinne Input after a loop delay D that you set (never shorter than the host's maximum block size), plus the latency of any plugins inside the loop. The loop delay is designed not to depend on buffer size or export mode. Feedback starts at zero, the limiter and runaway protection are on by default, and Panic cuts the return. Windows 10/11 (x64): VST3. macOS 11 or later (Apple Silicon): VST3 and Audio Unit (beta). Pre-release: checked in CI, not yet accepted on a real host. Rinne itself makes no network connections and needs no account.
+Synchain Rinne is an open-source (GPL-3.0-or-later) pair of audio plugins, Rinne Input and Rinne Output, that turns the stretch of one mixer channel's insert chain between them into a feedback loop. Rinne Input goes in the first insert slot and holds every control. Rinne Output goes after the last plugin you want in the loop, above the fader divider, and only handles pairing. What the plugins between them output is sent back into Rinne Input after a loop delay D that you set (never shorter than the host's maximum block size), plus the latency of any plugins inside the loop. The loop delay does not change with buffer size or export mode; this was measured in Cubase Pro 15 on Windows and, for the Audio Unit build, in LUNA on macOS (test records in docs/validation). Feedback starts at zero, the limiter and runaway protection are on by default, and Panic cuts the return. Windows 10/11 (x64): VST3. macOS 11 or later (Apple Silicon): VST3 and Audio Unit (beta). Pre-release: Cubase Pro 15 on Windows has passed the acceptance matrix on a preview build, LUNA on macOS has a first partial test record with one finding still open, and every other host is untested. Rinne itself makes no network connections and needs no account.
 <!-- entity:end -->
 
 A delay, a distortion, an EQ or a reverb inside the loop is heard again on every trip. The loop delay is a fixed number of samples, and both plugins report no plugin latency to the host. A safety chain on the return path limits and cleans the signal.
@@ -63,8 +63,8 @@ Rinne Output goes after the last plugin you want in the loop. Keep it above the 
 <!-- BEGIN gen:daw-tiers:en -->
 | Host | Version | Platform | Formats | Tier | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Cubase Pro | 15 | Windows | VST3 | Tier 3 | Partial | CI evidence only (build, tests, pluginval). No acceptance record from a real host yet. |
-| LUNA | 3.x | macOS | VST3 / AU | Tier 3 | Partial | CI evidence only (build, tests, auval, pluginval). No acceptance record from a real host yet. The Audio Unit build is beta. |
+| Cubase Pro | 15 | Windows | VST3 | Tier 2 | Partial | Real-host records on two preview builds. All seven acceptance items passed (2026-11-03), and a Cubase insert effect inside the loop adds its delay to the loop delay (2026-11-07). Tier 1 needs the same matrix on a release build. |
+| LUNA | 3.x | macOS | VST3 / AU | Tier 3 | Partial | First real-host record, on a preview build and the Audio Unit builds only. Loop period, buffer sizes 64, 512 and 2048, real-time against offline export, and save and reopen passed. One finding is open: the first echo after playback starts is 13 to 21 dB too quiet. Not run: the VST3 builds (LUNA lists only system-wide VST3 plug-ins), Bounce, uninstall and reinstall, Freeze. Stays at Tier 3 until the finding is fixed and retested. The Audio Unit build is beta. |
 | Cubase Pro | 14 | Windows | VST3 | — | Awaiting test | Not tested on a real host yet. |
 | Cubase Artist | 15 | Windows | VST3 | — | Awaiting test | Not tested on a real host yet. |
 | Cubase Elements | 15 | Windows | VST3 | — | Awaiting test | Not tested on a real host yet. |
@@ -90,7 +90,7 @@ Rinne Output goes after the last plugin you want in the loop. Keep it above the 
 | Rosetta hosts | any | macOS | VST3 / AU | Out of scope | Out of scope | Not supported: the host has to run natively. |
 <!-- END gen:daw-tiers:en -->
 
-Tiers go up only with a written test record in [docs/validation/](docs/validation/TEMPLATE.md). Today no record of a real-host test is in the repository: the two hosts being tested first, Cubase Pro 15 on Windows and LUNA on macOS, stand at Tier 3 (CI evidence only), every other host is still waiting for its first test, and the macOS Audio Unit builds are beta. Definitions and per-host notes: [DAW_COMPATIBILITY](docs/DAW_COMPATIBILITY.md).
+Tiers go up only with a written test record in [docs/validation/](docs/validation/TEMPLATE.md). Cubase Pro 15 on Windows has records from two preview builds and stands at Tier 2; LUNA on macOS has a first record for the Audio Unit builds with one finding still open and stays at Tier 3 until it is fixed and retested. Every other host is still waiting for its first test, and the macOS Audio Unit builds are beta. Definitions and per-host notes: [DAW_COMPATIBILITY](docs/DAW_COMPATIBILITY.md).
 
 ## Install
 
@@ -107,7 +107,7 @@ Unblock-File .\Rinne-v<X.Y.Z>-win64.zip
 xattr -dr com.apple.quarantine ~/Downloads/Rinne
 ```
 
-If macOS says it cannot verify the plugin, do not click "Move to Trash". Step by step, with upgrade and uninstall: [INSTALL](docs/INSTALL.md).
+If macOS says it cannot verify the plugin, do not click "Move to Trash". LUNA lists VST3 plugins only from the system folder, so for the VST3 builds there run `uninstall-macos.sh` first, then `install-macos.sh --system`; the Audio Unit builds do not need it. Step by step, with upgrade and uninstall: [INSTALL](docs/INSTALL.md).
 
 ## Quick start
 
@@ -155,6 +155,7 @@ JUCE is pinned by commit and passed in, not downloaded. The full steps for Windo
 - An export that starts while the return is still fading in (about the first 0.5 s after load or pairing) begins with the fade-in (KI-5).
 - Steady self-oscillation at moderate loop gain is held at the ceiling, not stopped; use Panic (KI-6).
 - The macOS builds are Apple Silicon only, unsigned and unnotarized; Intel Macs, Rosetta hosts and GarageBand are not supported, and Logic Pro is not tested (KI-10, KI-11).
+- LUNA lists VST3 plugins only from the system folder; uninstall the per-user copy, then install with `--system` to use the VST3 builds there (KI-14).
 
 ## Documentation
 
