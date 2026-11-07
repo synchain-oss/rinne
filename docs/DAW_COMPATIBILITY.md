@@ -12,7 +12,7 @@ Two hosts have a written real-host record so far. Cubase Pro 15 on Windows stand
 |---|---|---|
 | Tier 1 | Fully verified | The release build passed the whole acceptance matrix below on a real host, and the measured loop period equals D |
 | Tier 2 | Partly verified | A written record on a real host, covering only the items it lists |
-| Tier 3 | Not verified on a real host | CI evidence only: build, tests, and the plugin validators (pluginval on both systems, auval for the Audio Units) |
+| Tier 3 | Not verified on a real host | CI evidence only: build, tests, and the plugin validators (pluginval on both systems, auval for the Audio Units); a host whose real-host record still has an open finding also stays here |
 | Out of scope | Not provided | The format or platform is not built, or the host is known to be unsuitable |
 | Awaiting test | No tier yet | Nothing has been looked at in this host |
 
